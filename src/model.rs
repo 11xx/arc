@@ -933,6 +933,24 @@ pub enum Payload {
         #[serde(default)]
         supersedes: Vec<String>,
     },
+    /// A disposition recorded after integration against a review finding
+    /// that was open when the change shipped.
+    ///
+    /// It sits beside the finding's dispositions, never among them, so the
+    /// finding state the change shipped with stays as it shipped. It is not
+    /// a verdict and discharges no review debt.
+    PostIntegrationDispositionRecorded {
+        finding_id: String,
+        status: DispositionStatus,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        commit: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        evidence: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        evidence_event_id: Option<String>,
+        #[serde(default)]
+        supersedes: Vec<String>,
+    },
     VerificationRunStarted {
         revision: String,
         mode: VerificationRunMode,
@@ -1834,7 +1852,10 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         }
         Payload::AuditVerdictRecorded { .. }
         | Payload::AuditFindingAdded { .. }
-        | Payload::AuditDispositionRecorded { .. } => AppendPermission::IntegratedOnlyFact,
+        | Payload::AuditDispositionRecorded { .. }
+        | Payload::PostIntegrationDispositionRecorded { .. } => {
+            AppendPermission::IntegratedOnlyFact
+        }
         Payload::ChangeOpened { .. }
         | Payload::ChangeClosed { .. }
         | Payload::ChangeIntegrated { .. }
@@ -2360,7 +2381,11 @@ mod tests {
 
     #[test]
     fn dispositions_without_evidence_event_id_still_deserialize() {
-        for event_type in ["disposition-recorded", "audit-disposition-recorded"] {
+        for event_type in [
+            "disposition-recorded",
+            "audit-disposition-recorded",
+            "post-integration-disposition-recorded",
+        ] {
             let event: Event = serde_json::from_value(serde_json::json!({
                 "schema_version": 1,
                 "event_id": "01J00000000000000000000000",
@@ -2382,6 +2407,9 @@ mod tests {
                     evidence_event_id: None,
                     ..
                 } | Payload::AuditDispositionRecorded {
+                    evidence_event_id: None,
+                    ..
+                } | Payload::PostIntegrationDispositionRecorded {
                     evidence_event_id: None,
                     ..
                 }

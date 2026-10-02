@@ -642,7 +642,7 @@ pub fn markdown(
     if !state.findings.is_empty() {
         let _ = writeln!(w, "\n## Findings\n");
         for f in state.findings.values() {
-            let status = f
+            let shipped = f
                 .effective_status()
                 .map(|s| format!("{s:?}").to_lowercase())
                 .unwrap_or_else(|| {
@@ -652,6 +652,10 @@ pub fn markdown(
                         "open".into()
                     }
                 });
+            let status = match f.after_integration_status() {
+                Some(after) => format!("{shipped} at ship; {after} after integration"),
+                None => shipped,
+            };
             let _ = writeln!(
                 w,
                 "- `{}` [{}{:?}] {} — {}",
@@ -685,6 +689,18 @@ pub fn markdown(
                     d.evidence_event_id
                         .as_deref()
                         .map(|id| format!(" (evidence event `{id}`)"))
+                        .unwrap_or_default()
+                );
+            }
+            for d in &f.after_integration {
+                let _ = writeln!(
+                    w,
+                    "  - after integration: {:?} by {}{}",
+                    d.status,
+                    d.actor,
+                    d.commit
+                        .as_deref()
+                        .map(|c| format!(" (commit `{c}`)"))
                         .unwrap_or_default()
                 );
             }
@@ -1828,6 +1844,15 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             ..
         } => (
             "audit-disposition-recorded",
+            disposition_summary(finding_id, status, evidence_event_id.as_deref()),
+        ),
+        Payload::PostIntegrationDispositionRecorded {
+            finding_id,
+            status,
+            evidence_event_id,
+            ..
+        } => (
+            "post-integration-disposition-recorded",
             disposition_summary(finding_id, status, evidence_event_id.as_deref()),
         ),
         Payload::VerdictRecorded {
