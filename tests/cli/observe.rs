@@ -86,14 +86,23 @@ fn events_since_replays_only_the_suffix() {
     assert!(ids.iter().all(|id| id > &cursor));
 }
 
+/// A child killed and reaped when dropped, so a failing assertion leaves no
+/// follower running.
+struct Killed(Child);
+
+impl Drop for Killed {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 #[test]
 fn events_follow_emits_a_later_snapshot_once() {
     let repo = Repo::new();
     let (_, worktree, _) = change_with_patchset(&repo, "events-follow");
-    // Create a second patchset after the watcher begins; filtering excludes
-    // the first patchset replay so the output must contain exactly one line.
     repo.commit(&worktree, "later.txt", "later\n", "test: later snapshot");
-    let mut child = spawn_arc(
+    let mut follower = Killed(spawn_arc(
         &repo,
         &repo.root,
         &[
@@ -104,45 +113,35 @@ fn events_follow_emits_a_later_snapshot_once() {
             "--type",
             "patchset-added",
         ],
-    );
-    let child_output = child.stdout.take().unwrap();
-    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    let reader_thread = thread::spawn(move || {
-        let mut reader = BufReader::new(child_output);
-        let mut first_line = String::new();
-        let result = reader.read_line(&mut first_line);
-        let _ = sender.send((reader, first_line, result));
-    });
-    let (mut reader, first_line, first_read) = match receiver.recv_timeout(Duration::from_secs(2)) {
-        Ok(result) => result,
-        Err(_) => {
-            child.kill().unwrap();
-            child.wait().unwrap();
-            reader_thread.join().unwrap();
-            panic!("events --follow did not flush its initial replay");
+    ));
+    let lines = follower.0.stdout.take().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(lines).lines() {
+            if sender.send(line.unwrap()).is_err() {
+                break;
+            }
         }
+    });
+    let next_patchset = || -> serde_json::Value {
+        let line = receiver
+            .recv_timeout(HANG_BOUND)
+            .expect("events --follow emits each patchset before the hang bound");
+        let event: serde_json::Value = serde_json::from_str(&line).unwrap();
+        event["patchset_id"].clone()
     };
-    reader_thread.join().unwrap();
-    assert!(first_read.unwrap() > 0);
-    let first: serde_json::Value = serde_json::from_str(first_line.trim()).unwrap();
-    assert_eq!(first["patchset_id"], "ps-01");
 
-    // The second snapshot is created only after follow mode has flushed its
-    // replay, so a delayed startup cannot make this test pass accidentally.
+    // Each snapshot is taken only after the line before it was read, so a
+    // delayed follower cannot make the order pass by accident, and the line
+    // after ps-02 is the later ps-03 only when ps-02 was emitted once.
+    assert_eq!(next_patchset(), "ps-01", "replay");
     stdout(repo.arc(&worktree).args(["snapshot", "events-follow"]));
-    thread::sleep(Duration::from_millis(250));
-    child.kill().unwrap();
-    child.wait().unwrap();
-    let mut later = String::new();
-    reader.read_to_string(&mut later).unwrap();
-
-    let events = std::iter::once(first_line.as_str())
-        .chain(later.lines())
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(events.len(), 2, "replay plus the later snapshot");
-    assert_eq!(events[0]["patchset_id"], "ps-01");
-    assert_eq!(events[1]["patchset_id"], "ps-02");
+    assert_eq!(next_patchset(), "ps-02", "the later snapshot");
+    repo.commit(&worktree, "fence.txt", "fence\n", "test: fence snapshot");
+    stdout(repo.arc(&worktree).args(["snapshot", "events-follow"]));
+    assert_eq!(next_patchset(), "ps-03", "the snapshot after it");
+    drop(follower);
+    reader.join().unwrap();
 }
 
 #[test]
@@ -1013,19 +1012,18 @@ fn watch_integrated_returns_after_real_integration() {
         .args(["review", "watch-integrated", "--verdict", "approved"])
         .assert()
         .success();
+    // No `--timeout`: the watcher waits as long as integration takes, and
+    // only a watcher that never sees it reaches the harness's hang bound.
     let mut child = spawn_arc(
         &repo,
         &repo.root,
-        &[
-            "watch",
-            "watch-integrated",
-            "--until",
-            "integrated",
-            "--timeout",
-            "2",
-        ],
+        &["watch", "watch-integrated", "--until", "integrated"],
     );
     thread::sleep(Duration::from_millis(50));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "watch returned before the change was integrated"
+    );
     repo.arc(&repo.root)
         .args(["integrate", "watch-integrated"])
         .assert()
