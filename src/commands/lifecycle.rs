@@ -131,6 +131,7 @@ pub fn begin(
 
     let change_id = ids::new_change_id(slug);
     let title = title.unwrap_or_else(|| slug.replace('-', " "));
+    let base_from_target = base.is_none();
     let mut no_worktree_advice: Option<(String, String)> = None;
 
     let (branch_name, base_rev, worktree_path) = if let Some(adopted) = adopt {
@@ -228,6 +229,9 @@ pub fn begin(
         };
         (branch_name, base_rev, wt)
     };
+    let stale_target = base_from_target
+        .then(|| stale_target_warning(&ctx.cwd, &change_id, &target_branch, &target_head))
+        .flatten();
 
     /// Warn that creating this worktree adds to a filesystem running out of
     /// space, when the project declared a floor. A full disk does not announce
@@ -417,7 +421,74 @@ pub fn begin(
         println!("{reason}");
         println!("next: `{command}`");
     }
+    if let Some(warning) = stale_target {
+        eprint!("{warning}");
+    }
     Ok(())
+}
+
+/// The warning for a change based on a target that lacks commits its
+/// configured upstream holds. arc makes no network call: the upstream is the
+/// ref the last fetch left, so this compares local refs only. A target level
+/// with or ahead of its upstream, or tracking none, gets no warning, and a
+/// failed read is a silent omission, since the warning is advice and never
+/// blocks the change it reports on.
+///
+/// Strictly behind, the fix is a fast-forward: a merge in the checkout that
+/// holds the target, or a fetch from the repository into a target nobody has
+/// checked out, both of which refuse anything but a fast-forward. Diverged,
+/// no fast-forward exists and reconciling is the operator's call.
+fn stale_target_warning(
+    cwd: &Path,
+    change_id: &str,
+    target: &str,
+    target_head: &str,
+) -> Option<String> {
+    let (upstream, upstream_ref) = gitio::branch_upstream(cwd, target).ok()??;
+    let upstream_head = gitio::rev_parse(cwd, &upstream_ref).ok()?;
+    let (target_only, upstream_only) = gitio::divergence(cwd, target_head, &upstream_head).ok()?;
+    if upstream_only == 0 {
+        return None;
+    }
+    let commits = |count: usize| match count {
+        1 => "1 commit".to_string(),
+        count => format!("{count} commits"),
+    };
+    let target_at = format!("{target} at {}", render::short_sha(target_head));
+    let upstream_at = format!("{upstream} at {}", render::short_sha(&upstream_head));
+    let based = format!("change {change_id} is based on the local target");
+    let (standing, fix) = if target_only > 0 {
+        (
+            format!(
+                "has diverged from its upstream {upstream_at} ({} ahead, {} behind)",
+                commits(target_only),
+                commits(upstream_only)
+            ),
+            format!("no fast-forward exists: reconcile {target} with {upstream}"),
+        )
+    } else {
+        let fast_forward = match gitio::worktree_for_branch(cwd, target).ok()? {
+            Some(checkout) => format!(
+                "git -C {} merge --ff-only {}",
+                shell_quote(&checkout.display().to_string()),
+                shell_quote(&upstream)
+            ),
+            None => format!(
+                "git fetch . {}",
+                shell_quote(&format!("{upstream}:{target}"))
+            ),
+        };
+        (
+            format!(
+                "is {} behind its upstream {upstream_at}",
+                commits(upstream_only)
+            ),
+            format!("fast-forward the target: `{fast_forward}`"),
+        )
+    };
+    Some(format!(
+        "warning: target {target_at} {standing}; {based}\n  {fix}\n  then replay the change onto it: `arc rebase {change_id}`\n"
+    ))
 }
 
 /// Replay a fork's own commits onto the change that promotes it, in the

@@ -3250,3 +3250,153 @@ fn query_debt_orders_by_kind_then_by_age() {
         "{rows:?}"
     );
 }
+
+/// A primary checkout whose `master` tracks `origin/master` in a bare remote
+/// that another clone has moved one commit ahead, fetched: the
+/// remote-tracking ref holds the new commit and local `master` does not.
+/// Returns the local and upstream heads.
+fn repo_behind_its_upstream() -> (Repo, String, String) {
+    let repo = Repo::new();
+    let remote = repo.home.join("origin.git");
+    let remote = remote.to_str().unwrap();
+    git(
+        &repo.home,
+        &["clone", "-q", "--bare", repo.root.to_str().unwrap(), remote],
+    );
+    git(&repo.root, &["remote", "add", "origin", remote]);
+    git(&repo.root, &["fetch", "-q", "origin"]);
+    git(
+        &repo.root,
+        &["branch", "-q", "--set-upstream-to=origin/master", "master"],
+    );
+    let elsewhere = repo.home.join("elsewhere");
+    git(
+        &repo.home,
+        &["clone", "-q", remote, elsewhere.to_str().unwrap()],
+    );
+    git(&elsewhere, &["config", "user.name", "Tester"]);
+    git(
+        &elsewhere,
+        &["config", "user.email", "tester@example.invalid"],
+    );
+    git(&elsewhere, &["config", "commit.gpgsign", "false"]);
+    repo.commit(
+        &elsewhere,
+        "upstream.txt",
+        "upstream\n",
+        "feat: upstream work",
+    );
+    git(&elsewhere, &["push", "-q", "origin", "master"]);
+    git(&repo.root, &["fetch", "-q", "origin"]);
+    let local = repo.head(&repo.root);
+    let upstream = git_out(&repo.root, &["rev-parse", "origin/master"]);
+    assert_ne!(local, upstream);
+    (repo, local, upstream)
+}
+
+/// `arc begin` from the primary checkout, returning its stdout and stderr.
+fn begin_output(repo: &Repo, args: &[&str]) -> (String, String) {
+    let out = repo
+        .arc(&repo.root)
+        .arg("begin")
+        .args(args)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "{stderr}");
+    (String::from_utf8_lossy(&out.stdout).into_owned(), stderr)
+}
+
+/// A fetch moves the remote-tracking ref and leaves the local target where
+/// it was. The change still starts from the local target, and the warning
+/// names both revisions and the fast-forward that brings the target level.
+#[test]
+fn begin_warns_when_the_target_is_behind_its_upstream() {
+    let (repo, local, upstream) = repo_behind_its_upstream();
+    let (out, err) = begin_output(&repo, &["behind-upstream"]);
+    let change_id = opened_change_id(&out);
+    assert!(
+        err.contains(&format!(
+            "warning: target master at {} is 1 commit behind its upstream origin/master at {}; change {change_id} is based on the local target",
+            &local[..12],
+            &upstream[..12]
+        )),
+        "{err}"
+    );
+    let checkout = fs::canonicalize(&repo.root).unwrap();
+    let fast_forward = format!(
+        "git -C '{}' merge --ff-only 'origin/master'",
+        checkout.display()
+    );
+    assert!(err.contains(&format!("`{fast_forward}`")), "{err}");
+    assert!(err.contains(&format!("`arc rebase {change_id}`")), "{err}");
+    assert_eq!(
+        git_out(&repo.root, &["rev-parse", "arc/behind-upstream"]),
+        local
+    );
+
+    git(&repo.root, &["merge", "-q", "--ff-only", "origin/master"]);
+    assert_eq!(repo.head(&repo.root), upstream);
+}
+
+/// A target nobody has checked out is fast-forwarded by fetching from the
+/// repository itself, which refuses anything but a fast-forward.
+#[test]
+fn begin_names_a_fetch_for_a_stale_target_without_a_checkout() {
+    let (repo, _, upstream) = repo_behind_its_upstream();
+    git(&repo.root, &["switch", "-q", "-c", "side"]);
+    let (_, err) = begin_output(&repo, &["unchecked-target", "--target", "master"]);
+    assert!(
+        err.contains("fast-forward the target: `git fetch . 'origin/master:master'`"),
+        "{err}"
+    );
+
+    git(&repo.root, &["fetch", "-q", ".", "origin/master:master"]);
+    assert_eq!(git_out(&repo.root, &["rev-parse", "master"]), upstream);
+}
+
+/// A target with commits of its own that its upstream lacks has no
+/// fast-forward, and the warning says so instead of naming one.
+#[test]
+fn begin_warns_when_the_target_has_diverged_from_its_upstream() {
+    let (repo, _, _) = repo_behind_its_upstream();
+    repo.commit(&repo.root, "local.txt", "local\n", "feat: local work");
+    let (_, err) = begin_output(&repo, &["diverged-target"]);
+    assert!(
+        err.contains("has diverged from its upstream origin/master at"),
+        "{err}"
+    );
+    assert!(err.contains("(1 commit ahead, 1 commit behind)"), "{err}");
+    assert!(
+        err.contains("no fast-forward exists: reconcile master with origin/master"),
+        "{err}"
+    );
+    assert!(!err.contains("--ff-only"), "{err}");
+}
+
+/// A target level with its upstream, or one that tracks none, gets no
+/// warning.
+#[test]
+fn begin_is_silent_when_the_target_is_level_with_its_upstream() {
+    let (repo, _, _) = repo_behind_its_upstream();
+    git(&repo.root, &["merge", "-q", "--ff-only", "origin/master"]);
+    let (_, err) = begin_output(&repo, &["level-target"]);
+    assert!(!err.contains("warning: target"), "{err}");
+
+    let untracked = Repo::new();
+    let (_, err) = begin_output(&untracked, &["untracked-target"]);
+    assert!(!err.contains("warning: target"), "{err}");
+}
+
+/// An explicit base is the operator's choice of starting point, so the
+/// target's standing against its upstream is not what the change starts from.
+#[test]
+fn begin_with_an_explicit_base_does_not_warn_about_the_target() {
+    let (repo, local, _) = repo_behind_its_upstream();
+    let (_, err) = begin_output(&repo, &["explicit-base", "--base", "master"]);
+    assert!(!err.contains("warning: target"), "{err}");
+    assert_eq!(
+        git_out(&repo.root, &["rev-parse", "arc/explicit-base"]),
+        local
+    );
+}
