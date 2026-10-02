@@ -39,8 +39,10 @@ SAY WHO YOU ARE (before the first write)
   The ledger's append guard reads `require_declared_actor` from the invoking
   checkout once per command that can record, including for repository-wide
   events with no change target, and that command refuses a policy it cannot
-  parse. `status`, `show`, `check`, `explain`, `findings`, and `log` record
-  nothing and never parse it for that guard. The debt advisory reads the
+  parse. `status`, `show`, `check` (with or without `--tag`), `explain`,
+  `findings`, `log`, `list`, `query`, `blocker-status`, `is-blocked`, and
+  `inbox` record nothing and never parse it for that guard, and a derived
+  handoff reads its change facts the same way. The debt advisory reads the
   same file for its thresholds, and an unreadable one sets none. Integration
   also checks the change target's policy before merging.
 

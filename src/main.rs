@@ -3538,12 +3538,14 @@ fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::BlockerStatus { change } => {
-            let change = infer(change.as_deref())?;
+            let change = infer_report(change.as_deref())?;
             commands::blocker_status_cmd(&ctx, &change)?;
             Ok(0)
         }
         Cmd::IsBlocked { change } => {
-            match infer(change.as_deref()).and_then(|change| commands::is_blocked(&ctx, &change)) {
+            match infer_report(change.as_deref())
+                .and_then(|change| commands::is_blocked(&ctx, &change))
+            {
                 Ok(code) => Ok(code),
                 Err(error) => {
                     eprintln!("error: {error:#}");
