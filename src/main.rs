@@ -1223,13 +1223,14 @@ enum Cmd {
         /// minor, or note) and `summary` (string), and optional `blocking`
         /// (bool, default false), `body` (string), and `anchor`. An anchor is
         /// an object with a required `path` and optional `side` (base or head,
-        /// default head), `line_start`, `line_end`, and `context`; its other
-        /// fields are ignored. An unknown finding field that looks like a
-        /// misspelling of one the finding omits (`blocker` for `blocking`,
-        /// `title` for `summary`, `path` for `anchor`, or one edit away)
-        /// refuses the batch; any other is ignored with a warning, except
-        /// `id`, ignored silently because IDs are assigned by arc. An approval
-        /// cannot carry a blocking finding
+        /// default head), `line_start`, `line_end`, and `context`. An unknown
+        /// field of a finding or anchor that looks like a misspelling of one
+        /// it omits (`blocker` for `blocking`, `title` for `summary`, `path`
+        /// for `anchor`, `line` for `line_start`, `lines` for `line_start` and
+        /// `line_end`, or one edit away) refuses the batch; any other is
+        /// ignored with a warning, except a finding's `id`, ignored silently
+        /// because IDs are assigned by arc. An approval cannot carry a
+        /// blocking finding
         #[arg(long)]
         findings_json: Option<String>,
         /// What this verdict does to the verdicts already standing on the
