@@ -446,7 +446,7 @@ fn opens_block(word: &str) -> bool {
 /// and the nesting; they did not choose the column the file wraps at, so the
 /// prefix survives and the text after it is still wrapped.
 fn line_marker(line: &str) -> Option<&str> {
-    let indent = indent_of(line);
+    let indent = lead(line).len();
     let rest = &line[indent..];
     let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
     let token = if ["- ", "* ", "+ "]
@@ -506,6 +506,9 @@ fn as_list_item(body: &str) -> String {
         Block::Prose {
             marker: Some(_),
             ..
+        } | Block::Fenced {
+            marker: Some(_),
+            ..
         }
     );
     // A bare body becomes one item: everything sits under the text of the
@@ -516,7 +519,7 @@ fn as_list_item(body: &str) -> String {
     for block in &blocks {
         match block {
             Block::Blank => lines.push(String::new()),
-            Block::Fenced(fenced) => lines.extend(fenced.iter().map(|line| {
+            Block::Fenced { lines: fenced, .. } => lines.extend(fenced.iter().map(|line| {
                 if line.is_empty() {
                     String::new()
                 } else {
@@ -553,8 +556,13 @@ fn as_list_item(body: &str) -> String {
 enum Block<'a> {
     /// A paragraph break; runs of blank lines collapse to one.
     Blank,
-    /// A fenced code block, fences included, kept line for line.
-    Fenced(Vec<&'a str>),
+    /// A fenced code block, fences included, kept line for line, and the
+    /// list marker its opening line begins with when the fence is the first
+    /// block of the item that line opens.
+    Fenced {
+        marker: Option<&'a str>,
+        lines: Vec<&'a str>,
+    },
     /// A paragraph or list item: the marker that opens it, if any, the
     /// indentation of its first line, and every word of its lines in order.
     Prose {
@@ -574,12 +582,12 @@ struct Fence {
 }
 
 impl Fence {
-    /// The fence `line` opens in a block whose text starts at `container`: a
-    /// run of three or more backticks or tildes indented at most three
-    /// columns past it. A backtick run followed by another backtick on the
-    /// line is inline code and opens nothing.
-    fn opened_by(line: &str, container: usize) -> Option<Self> {
-        let (indent, mark, run, after) = fence_run(line)?;
+    /// The fence the text of `line` from byte `from` opens in a block whose
+    /// text starts at `container`: a run of three or more backticks or
+    /// tildes indented at most three columns past it. A backtick run followed
+    /// by another backtick on the line is inline code and opens nothing.
+    fn opened_by(line: &str, from: usize, container: usize) -> Option<Self> {
+        let (indent, mark, run, after) = fence_run(line, from)?;
         (run >= 3
             && (container..container + 4).contains(&indent)
             && !(mark == '`' && after.contains('`')))
@@ -594,7 +602,7 @@ impl Fence {
     /// least as long, nothing after it but whitespace, and indented at most
     /// three columns past the container; deeper, the line is content.
     fn closed_by(&self, line: &str) -> bool {
-        fence_run(line).is_some_and(|(indent, mark, run, after)| {
+        fence_run(line, 0).is_some_and(|(indent, mark, run, after)| {
             mark == self.mark
                 && run >= self.run
                 && after.trim().is_empty()
@@ -610,43 +618,73 @@ impl Fence {
     }
 }
 
+/// The whitespace `line` begins with.
+fn lead(line: &str) -> &str {
+    &line[..line.len() - line.trim_start().len()]
+}
+
+/// The column `line`'s text starts at.
 fn indent_of(line: &str) -> usize {
-    line.len() - line.trim_start().len()
+    column_after(lead(line), 0)
 }
 
-/// The column the text of the list item `line` opens with `marker` starts
-/// at: past the marker and the one to four spaces after it. An empty item,
-/// or one whose text sits five or more spaces out, starts one column past.
-fn text_column(line: &str, marker: &str) -> usize {
-    let token_end = marker.len() - 1;
-    let rest = &line[token_end..];
-    let text = rest.trim_start_matches(' ');
-    let spaces = rest.len() - text.len();
-    let gap = if spaces <= 4 && !text.is_empty() {
-        spaces
-    } else {
-        1
-    };
-    token_end + gap
+/// The column `text` ends at when it starts at column `start`. Markdown
+/// reads indentation with a tab stop every four columns: a tab advances to
+/// the next stop, any other character one column.
+fn column_after(text: &str, start: usize) -> usize {
+    text.chars().fold(start, |column, c| match c {
+        '\t' => column + 4 - column % 4,
+        _ => column + 1,
+    })
 }
 
-/// A line's indentation, the backtick or tilde that begins its text, the
-/// length of that character's run, and the text after the run.
-fn fence_run(line: &str) -> Option<(usize, char, usize, &str)> {
-    let text = line.trim_start();
+/// The list items `line` opens, from the one `marker` opens inward: the
+/// column each one's text starts at, outermost first, and the byte the
+/// innermost one's text begins at. An item's text starts past its marker
+/// and the one to four columns of whitespace after it, and a marker there
+/// opens an item nested in it. An empty item, or one whose text sits five
+/// or more columns out, starts one column past its marker and opens none.
+fn opened_items(line: &str, marker: &str) -> (Vec<usize>, usize) {
+    let mut columns = Vec::new();
+    let mut end = marker.len();
+    loop {
+        let token_end = end - 1;
+        let marker_end = column_after(&line[..token_end], 0);
+        let text = line[token_end..].trim_start_matches([' ', '\t']);
+        let start = line.len() - text.len();
+        let gap = column_after(&line[token_end..start], marker_end) - marker_end;
+        if text.is_empty() || gap > 4 {
+            columns.push(marker_end + 1);
+            return (columns, end);
+        }
+        columns.push(marker_end + gap);
+        match line_marker(text) {
+            Some(nested) => end = start + nested.len(),
+            None => return (columns, start),
+        }
+    }
+}
+
+/// The column the text of `line` from byte `from` starts at, the backtick
+/// or tilde that begins that text, the length of that character's run, and
+/// the text after the run.
+fn fence_run(line: &str, from: usize) -> Option<(usize, char, usize, &str)> {
+    let text = line[from..].trim_start();
     let mark = text
         .chars()
         .next()
         .filter(|mark| matches!(mark, '`' | '~'))?;
     let after = text.trim_start_matches(mark);
-    Some((indent_of(line), mark, text.len() - after.len(), after))
+    let column = column_after(&line[..line.len() - text.len()], 0);
+    Some((column, mark, text.len() - after.len(), after))
 }
 
 /// Split a body into paragraphs, list items, and fenced blocks. A line joins
 /// the paragraph or item above it unless a blank line, a fence, or a list
-/// marker of its own separates them. A fence left open runs to the end of
-/// the block holding it, every line its content; blank lines after the last
-/// block are dropped.
+/// marker of its own separates them. A fence opens on a line of its own or
+/// after the markers of the items its line opens, as the first block of the
+/// innermost. A fence left open runs to the end of the block holding it,
+/// every line its content; blank lines after the last block are dropped.
 fn body_blocks(body: &str) -> Vec<Block<'_>> {
     let mut blocks: Vec<Block<'_>> = Vec::new();
     let mut fence: Option<Fence> = None;
@@ -659,8 +697,8 @@ fn body_blocks(body: &str) -> Vec<Block<'_>> {
             fence = None;
         }
         if let Some(open) = &fence {
-            if let Some(Block::Fenced(fenced)) = blocks.last_mut() {
-                fenced.push(line);
+            if let Some(Block::Fenced { lines, .. }) = blocks.last_mut() {
+                lines.push(line);
             }
             if open.closed_by(line) {
                 fence = None;
@@ -673,36 +711,45 @@ fn body_blocks(body: &str) -> Vec<Block<'_>> {
             }
             continue;
         }
-        let container = items
-            .iter()
-            .rev()
-            .find(|&&column| column <= indent)
-            .copied()
-            .unwrap_or(0);
-        if let Some(open) = Fence::opened_by(line, container) {
-            items.retain(|&column| column <= indent);
-            fence = Some(open);
-            blocks.push(Block::Fenced(vec![line]));
-            continue;
-        }
         let marker = line_marker(line).filter(|marker| match blocks.last() {
             Some(Block::Prose { marker: above, .. }) => interrupts(marker, *above),
             _ => true,
         });
+        // The column the block holding the rest of the line starts at, and
+        // the byte that rest begins at: past the markers of the items the
+        // line opens, or the whole line within the items open above it.
+        let (container, from) = match marker {
+            Some(marker) => {
+                let (opened, from) = opened_items(line, marker);
+                items.retain(|&column| column <= indent);
+                items.extend(opened);
+                (items[items.len() - 1], from)
+            }
+            None => {
+                let container = items.iter().rev().find(|&&column| column <= indent);
+                (container.copied().unwrap_or(0), 0)
+            }
+        };
+        if let Some(open) = Fence::opened_by(line, from, container) {
+            items.retain(|&column| column <= container);
+            fence = Some(open);
+            blocks.push(Block::Fenced {
+                marker,
+                lines: vec![line],
+            });
+            continue;
+        }
         if marker.is_none() {
             if let Some(Block::Prose { words, .. }) = blocks.last_mut() {
                 words.extend(trimmed.split_whitespace());
                 continue;
             }
-        }
-        items.retain(|&column| column <= indent);
-        if let Some(marker) = marker {
-            items.push(text_column(line, marker));
+            items.retain(|&column| column <= indent);
         }
         let text = marker.map_or(trimmed, |marker| &line[marker.len()..]);
         blocks.push(Block::Prose {
             marker,
-            indent: &line[..indent],
+            indent: lead(line),
             words: text.split_whitespace().collect(),
         });
     }
@@ -1292,6 +1339,76 @@ mod tests {
         );
         // Four columns into its container, a run opens nothing.
         assert_eq!(as_list_item("Text\n    ```\nmore"), "- Text ``` more");
+    }
+
+    #[test]
+    fn indentation_counts_columns_with_a_tab_stop_every_four() {
+        // Behind a tab, a run sits four columns into the body: content, not
+        // a closing fence, so the lines after it keep their own.
+        for lead in ["\t", " \t", "  \t", "\t "] {
+            assert_eq!(
+                as_list_item(&format!(
+                    "Example:\n ```\n{lead}```\nline one\nline two\n ```\nAfter."
+                )),
+                format!(
+                    "- Example:\n   ```\n  {lead}```\n  line one\n  line two\n   ```\n  After."
+                ),
+                "{lead:?}"
+            );
+        }
+        // Nor does a tab-indented run open a fence in the body.
+        assert_eq!(as_list_item("Text\n\t```\nmore"), "- Text ``` more");
+        // Inside an item, a tab reaches its text: the fence opens and closes
+        // there, and a tab-indented line stays in it.
+        assert_eq!(
+            as_list_item("- a\n  - b\n\t```\n\tcode\n\t   ```\n  after\n  this"),
+            "- a\n  - b\n\t```\n\tcode\n\t   ```\n  after this"
+        );
+        assert_eq!(
+            as_list_item("- a\n  - b\n    ```\n\tcode\n\tmore\n    ```\n  after"),
+            "- a\n  - b\n    ```\n\tcode\n\tmore\n    ```\n  after"
+        );
+        // A tab after the marker moves the item's text to column four.
+        assert_eq!(
+            as_list_item("- \tfoo\n      ```\n      code\n      ```\n    after"),
+            "- foo\n      ```\n      code\n      ```\n    after"
+        );
+    }
+
+    #[test]
+    fn a_fence_opens_after_the_markers_of_its_line() {
+        // The fence is the item's first block, its lines kept to the closer.
+        assert_eq!(
+            as_list_item("- ```\n  code\n    indented\n  ```\nafter"),
+            "- ```\n  code\n    indented\n  ```\nafter"
+        );
+        assert_eq!(
+            as_list_item("Example:\n1. ```\n   code\n   ```\nAfter."),
+            "- Example:\n  1. ```\n     code\n     ```\n  After."
+        );
+        // Under nested markers it counts from the innermost item's text.
+        assert_eq!(
+            as_list_item("- - ~~~\n    code\n    ~~~\n  more\n  words"),
+            "- - ~~~\n    code\n    ~~~\n  more words"
+        );
+        assert_eq!(
+            as_list_item("- \t```\n\tcode\n\t```\nafter"),
+            "- \t```\n\tcode\n\t```\nafter"
+        );
+        // Left open, it runs to the end of the body or of its item.
+        assert_eq!(
+            as_list_item("- ```\n  code\n  more"),
+            "- ```\n  code\n  more"
+        );
+        assert_eq!(
+            as_list_item("- ```\n  code\nafter\nthe item"),
+            "- ```\n  code\nafter the item"
+        );
+        // A number that opens no item opens no fence after it either.
+        assert_eq!(
+            as_list_item("Shipped in\n2. ```\nmore"),
+            "- Shipped in 2. ``` more"
+        );
     }
 
     #[test]
