@@ -217,6 +217,17 @@ impl From<KeptKindArg> for model::KeptKind {
 #[derive(Subcommand)]
 enum Cmd {
     /// Open a change: create (or adopt) its branch and worktree
+    ///
+    /// Without --base, the change derives its base from the local target.
+    /// When that target lacks commits its configured upstream holds, as the
+    /// last fetch left the remote-tracking ref (arc reads local refs only,
+    /// never the network), the change still opens and stderr warns, naming
+    /// both revisions and the fix: for a target strictly behind, the
+    /// fast-forward (`git merge --ff-only` in the checkout holding it, or
+    /// `git fetch . <upstream>:<target>` when none does); for a diverged one,
+    /// that no fast-forward exists; then `arc rebase` onto the moved target.
+    /// A target level with or ahead of its upstream, or tracking none, gets
+    /// no warning.
     Begin {
         /// Kebab-case slug naming the outcome (also the ID prefix)
         slug: String,
@@ -229,7 +240,8 @@ enum Cmd {
         /// Integration target branch (defaults to the current branch)
         #[arg(long)]
         target: Option<String>,
-        /// Base revision (defaults to the target head)
+        /// Base revision (defaults to the target head). An explicit base
+        /// skips the comparison of the target with its upstream
         #[arg(long)]
         base: Option<String>,
         /// Branch name (defaults to arc/<slug>)

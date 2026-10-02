@@ -434,6 +434,10 @@ RUN A CHANGE
     --from-journal <file>            Open it from a journal item, consuming it.
     --blocked-by <change> --tag <t>  Declare a chain up front, at planning time.
     --no-worktree                    Take over this checkout, if it can be taken.
+    --base <rev>                     Start from <rev>, not the target head.
+                                     Without it, a target behind its upstream
+                                     (as the last fetch left it) is a warning
+                                     naming both revisions and the fix.
   arc claim / stage / release-claim  Advisory liveness while implementing.
     --takeover                       Displace a claim that may be taken over:
                                      a stale one on a change, an expired one
