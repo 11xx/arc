@@ -13148,7 +13148,7 @@ pub fn require_open_actionable(ctx: &Ctx, reference: &str) -> Result<String> {
     if !dir.join(filename).is_file() {
         return Err(missing_artifact(&location, &dir.display().to_string()));
     }
-    let events = read_events(&dir)?;
+    let events = read_events(dir)?;
     if is_consumed(&events, filename) {
         bail!("{filename} is already consumed (see the journal)");
     }
