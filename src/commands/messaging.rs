@@ -197,15 +197,21 @@ pub(crate) fn collect_debts(
     } else {
         // Debt belongs to the repository, not to one change's target. This
         // project-wide advisory uses the invoking checkout's local policy.
-        let policy = crate::policy::load(&crate::gitio::toplevel(&ctx.cwd)?)?;
-        policy
-            .policy
-            .debt_count_threshold
-            .is_some_and(|threshold| entries.len() > threshold)
-            || policy
+        // An unreadable policy declares no threshold: an advisory never fails
+        // the report it is attached to, and every write refuses that policy.
+        let policy = crate::gitio::toplevel(&ctx.cwd)
+            .ok()
+            .and_then(|top| crate::policy::load(&top).ok());
+        policy.is_some_and(|policy| {
+            policy
                 .policy
-                .debt_age_threshold_seconds
-                .is_some_and(|threshold| oldest_age_seconds > threshold)
+                .debt_count_threshold
+                .is_some_and(|threshold| entries.len() > threshold)
+                || policy
+                    .policy
+                    .debt_age_threshold_seconds
+                    .is_some_and(|threshold| oldest_age_seconds > threshold)
+        })
     };
     Ok(DebtSummary {
         by_kind: crate::inbox::debt_kind_counts(entries.iter().map(|entry| entry.missing)),

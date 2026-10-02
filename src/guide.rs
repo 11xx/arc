@@ -37,9 +37,12 @@ SAY WHO YOU ARE (before the first write)
   Either is assumed rather than declared, so it cannot be the independent
   party to an approval.
   The ledger's append guard reads `require_declared_actor` from the invoking
-  checkout once per command, including for repository-wide events with no
-  change target. Integration also checks the change target's policy before
-  merging.
+  checkout once per command that can record, including for repository-wide
+  events with no change target, and that command refuses a policy it cannot
+  parse. `status`, `show`, `check`, `explain`, `findings`, and `log` record
+  nothing and never parse it for that guard. The debt advisory reads the
+  same file for its thresholds, and an unreadable one sets none. Integration
+  also checks the change target's policy before merging.
 
   Claude Code's Remote Control supplies `CLAUDE_CODE_BRIDGE_SESSION_ID` to
   connected tool shells. For a resolved Claude harness, `arc env` derives
