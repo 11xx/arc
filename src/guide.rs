@@ -624,7 +624,8 @@ RUN A CHANGE
   newest patchset's when the closure recorded none. `status`, `show`, and
   `check` read neither its branch nor its target, so deleting the branch or
   moving the target after closure leaves the head its verdict and gate
-  evidence are read against where it was.
+  evidence are read against where it was. A replay with `--at` to the
+  closure or any later event judges the same head.
 
   The decision is one function of facts observed under the target and change
   locks: a plan naming the target revision, the approved head, the tree the

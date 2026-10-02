@@ -978,8 +978,9 @@ pub fn build_at(
 }
 
 /// Build a report from a state replayed to a past event. Live Git facts are
-/// not consulted: the derived latest-patchset head is taken as the head that
-/// was current then, and rebase state is not simulated. Used by `--at`.
+/// not consulted: an open state is judged at its latest patchset's head, a
+/// closed one at the head its closure recorded, and rebase state is not
+/// simulated. Used by `--at`.
 /// A report derived from the ledger alone, for callers with no working tree.
 ///
 /// `repo` is any path inside the repository. It is not a working tree and is
@@ -998,9 +999,12 @@ pub fn build_as_of(
     repo: Option<&Path>,
     fork: Option<String>,
 ) -> Result<StatusReport> {
-    let current_head = state
-        .latest_patchset()
-        .map(|patchset| patchset.head.clone());
+    let current_head = match state.closed_head() {
+        Some(head) => Some(head.to_string()),
+        None => state
+            .latest_patchset()
+            .map(|patchset| patchset.head.clone()),
+    };
     build_report(
         state,
         gates,
