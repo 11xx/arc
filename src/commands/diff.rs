@@ -192,7 +192,7 @@ fn render_findings(ctx: &Ctx, state: &ChangeState, patchset_id: &str, head: &str
     let findings = state
         .findings
         .values()
-        .filter(|finding| finding.effective_status().is_none())
+        .filter(|finding| !finding.currently_released())
         .collect::<Vec<_>>();
     if findings.is_empty() {
         return;

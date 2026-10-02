@@ -1413,6 +1413,25 @@ fn review_lists_every_finding_that_shipped_unresolved_with_its_later_history() {
     );
 }
 
+#[test]
+fn diff_findings_keep_a_finding_its_dispositions_leave_unresolved() {
+    let repo = repo_forbidding_self_approval();
+    let worktree = self_approved_change(&repo, "diff-unresolved");
+    let change = "diff-unresolved";
+    let still_open = file_minor_finding(&repo, &worktree, change, "marked still-open");
+    let resolved = file_minor_finding(&repo, &worktree, change, "resolved before integration");
+    for (finding, status) in [(&still_open, "still-open"), (&resolved, "resolved")] {
+        repo.arc(&repo.root)
+            .args(["resolve", change, finding, "--status", status])
+            .assert()
+            .success();
+    }
+
+    let diff = stdout(repo.arc(&repo.root).args(["diff", change, "--findings"]));
+    assert!(diff.contains("marked still-open"), "{diff}");
+    assert!(!diff.contains("resolved before integration"), "{diff}");
+}
+
 /// The rule IDs `arc findings --format sarif` reports, which are finding IDs.
 fn sarif_rule_ids(repo: &Repo, change: &str, audit: bool) -> Vec<String> {
     let mut args = vec!["findings", change, "--format", "sarif"];
