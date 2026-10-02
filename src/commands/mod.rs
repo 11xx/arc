@@ -270,6 +270,12 @@ impl Ctx {
         Store::discover(&self.cwd)
     }
 
+    /// The store for a command that records nothing, opened without parsing
+    /// the invoking checkout's append policy.
+    pub(crate) fn store_for_reading(&self) -> Result<Store> {
+        Store::discover_for_reading(&self.cwd)
+    }
+
     pub(crate) fn resolve_model(&self) -> ModelAttribution {
         self.model_attribution
             .get_or_init(|| {
@@ -345,6 +351,7 @@ impl Ctx {
     /// comes from the store the command is about to write to, so one
     /// invocation is judged by one reading of the policy.
     pub(crate) fn ensure_declared_actor(&self, store: &Store) -> Result<()> {
+        store.refuse_read_only()?;
         if self.actor_source.declared() || self.on_behalf_of.is_some() {
             return Ok(());
         }

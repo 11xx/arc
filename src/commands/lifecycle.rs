@@ -1170,7 +1170,7 @@ pub fn status_cmd(
     fields: Option<&str>,
     at: Option<&str>,
 ) -> Result<()> {
-    let store = ctx.store()?;
+    let store = ctx.store_for_reading()?;
     let change_id = store.resolve_change(reference)?;
     let output = match at {
         Some(at) => {
@@ -1364,7 +1364,7 @@ fn show(
     role: ExecutionRole,
     at: Option<&str>,
 ) -> Result<()> {
-    let store = ctx.store()?;
+    let store = ctx.store_for_reading()?;
     let change_id = store.resolve_change(reference)?;
     let st = match at {
         Some(at) => super::reduce_at(&store, &change_id, at)?,
