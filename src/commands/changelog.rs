@@ -446,7 +446,7 @@ fn opens_block(word: &str) -> bool {
 /// and the nesting; they did not choose the column the file wraps at, so the
 /// prefix survives and the text after it is still wrapped.
 fn line_marker(line: &str) -> Option<&str> {
-    let indent = indent_of(line);
+    let indent = lead(line).len();
     let rest = &line[indent..];
     let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
     let token = if ["- ", "* ", "+ "]
@@ -610,28 +610,42 @@ impl Fence {
     }
 }
 
+/// The whitespace `line` begins with.
+fn lead(line: &str) -> &str {
+    &line[..line.len() - line.trim_start().len()]
+}
+
+/// The column `line`'s text starts at.
 fn indent_of(line: &str) -> usize {
-    line.len() - line.trim_start().len()
+    column_after(lead(line), 0)
+}
+
+/// The column `text` ends at when it starts at column `start`. Markdown
+/// reads indentation with a tab stop every four columns: a tab advances to
+/// the next stop, any other character one column.
+fn column_after(text: &str, start: usize) -> usize {
+    text.chars().fold(start, |column, c| match c {
+        '\t' => column + 4 - column % 4,
+        _ => column + 1,
+    })
 }
 
 /// The column the text of the list item `line` opens with `marker` starts
-/// at: past the marker and the one to four spaces after it. An empty item,
-/// or one whose text sits five or more spaces out, starts one column past.
+/// at: past the marker and the one to four columns of whitespace after it.
+/// An empty item, or one whose text sits five or more columns out, starts
+/// one column past.
 fn text_column(line: &str, marker: &str) -> usize {
     let token_end = marker.len() - 1;
+    let marker_end = column_after(&line[..token_end], 0);
     let rest = &line[token_end..];
-    let text = rest.trim_start_matches(' ');
-    let spaces = rest.len() - text.len();
-    let gap = if spaces <= 4 && !text.is_empty() {
-        spaces
-    } else {
-        1
-    };
-    token_end + gap
+    let text = rest.trim_start_matches([' ', '\t']);
+    let gap = column_after(&rest[..rest.len() - text.len()], marker_end) - marker_end;
+    marker_end + if gap <= 4 && !text.is_empty() { gap } else { 1 }
 }
 
-/// A line's indentation, the backtick or tilde that begins its text, the
-/// length of that character's run, and the text after the run.
+/// The column a line's text starts at, the backtick or tilde that begins
+/// that text, the length of that character's run, and the text after the
+/// run.
 fn fence_run(line: &str) -> Option<(usize, char, usize, &str)> {
     let text = line.trim_start();
     let mark = text
@@ -702,7 +716,7 @@ fn body_blocks(body: &str) -> Vec<Block<'_>> {
         let text = marker.map_or(trimmed, |marker| &line[marker.len()..]);
         blocks.push(Block::Prose {
             marker,
-            indent: &line[..indent],
+            indent: lead(line),
             words: text.split_whitespace().collect(),
         });
     }
@@ -1292,6 +1306,40 @@ mod tests {
         );
         // Four columns into its container, a run opens nothing.
         assert_eq!(as_list_item("Text\n    ```\nmore"), "- Text ``` more");
+    }
+
+    #[test]
+    fn indentation_counts_columns_with_a_tab_stop_every_four() {
+        // Behind a tab, a run sits four columns into the body: content, not
+        // a closing fence, so the lines after it keep their own.
+        for lead in ["\t", " \t", "  \t", "\t "] {
+            assert_eq!(
+                as_list_item(&format!(
+                    "Example:\n ```\n{lead}```\nline one\nline two\n ```\nAfter."
+                )),
+                format!(
+                    "- Example:\n   ```\n  {lead}```\n  line one\n  line two\n   ```\n  After."
+                ),
+                "{lead:?}"
+            );
+        }
+        // Nor does a tab-indented run open a fence in the body.
+        assert_eq!(as_list_item("Text\n\t```\nmore"), "- Text ``` more");
+        // Inside an item, a tab reaches its text: the fence opens and closes
+        // there, and a tab-indented line stays in it.
+        assert_eq!(
+            as_list_item("- a\n  - b\n\t```\n\tcode\n\t   ```\n  after\n  this"),
+            "- a\n  - b\n\t```\n\tcode\n\t   ```\n  after this"
+        );
+        assert_eq!(
+            as_list_item("- a\n  - b\n    ```\n\tcode\n\tmore\n    ```\n  after"),
+            "- a\n  - b\n    ```\n\tcode\n\tmore\n    ```\n  after"
+        );
+        // A tab after the marker moves the item's text to column four.
+        assert_eq!(
+            as_list_item("- \tfoo\n      ```\n      code\n      ```\n    after"),
+            "- foo\n      ```\n      code\n      ```\n    after"
+        );
     }
 
     #[test]
