@@ -1157,6 +1157,7 @@ enum Cmd {
         evidence_event: Option<String>,
     },
     /// Read review state, or record a verdict with an optional findings batch
+    #[command(group(clap::ArgGroup::new("snapshot_attribution").args(["contributors", "solo"]).requires("snapshot")))]
     Review {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1169,9 +1170,12 @@ enum Cmd {
         json: bool,
         #[command(flatten)]
         body: BodyOpts,
-        /// Snapshot the clean change worktree before recording the verdict
+        /// Snapshot the clean change worktree before recording the verdict;
+        /// --contributors or --solo attribute that patchset
         #[arg(long)]
         snapshot: bool,
+        #[command(flatten)]
+        attribution: AttributionOpts,
         /// Patchset under review, by id or by the revision it recorded.
         /// Defaults to the latest — which is what the verdict then claims,
         /// whatever the reviewer actually read
@@ -3748,6 +3752,7 @@ fn run(cli: Cli) -> Result<i32> {
             json,
             body,
             snapshot,
+            attribution,
             patchset,
             cause,
             findings_json,
@@ -3771,6 +3776,8 @@ fn run(cli: Cli) -> Result<i32> {
                         causes: cause,
                         findings_json,
                         snapshot_first: snapshot,
+                        contributors: attribution.contributors,
+                        solo: attribution.solo,
                         provisional,
                         route_version,
                     },
