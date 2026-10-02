@@ -976,6 +976,114 @@ fn done_over_a_foreign_claim_accepts_the_attribution_its_refusal_names() {
 }
 
 #[test]
+fn review_snapshot_over_a_foreign_claim_accepts_the_attribution_its_refusal_names() {
+    let repo = Repo::new();
+    let (change_id, worktree, claim_id) = claimed_work(&repo, "claimed-review", false);
+    let before = event_count(&repo, &change_id);
+
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "claude-lead")
+        .args([
+            "review",
+            "claimed-review",
+            "--snapshot",
+            "--verdict",
+            "approved",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(&claim_id))
+        .stderr(predicates::str::contains("`arc review --snapshot`"));
+    assert_eq!(event_count(&repo, &change_id), before);
+
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "claude-lead")
+        .args([
+            "review",
+            "claimed-review",
+            "--snapshot",
+            "--contributors",
+            "codex-luna",
+            "--verdict",
+            "approved",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("patchset: ps-01"));
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "claimed-review"]));
+    assert_eq!(
+        status["latest_patchset"]["contributors"],
+        serde_json::json!(["codex-luna"]),
+        "{status}"
+    );
+    assert_eq!(status["has_valid_approval"], true, "{status}");
+}
+
+#[test]
+fn review_attribution_without_snapshot_is_refused_before_anything_is_recorded() {
+    let repo = Repo::new();
+    let (change_id, worktree, _) = claimed_work(&repo, "claimed-unsnapped", false);
+    let before = event_count(&repo, &change_id);
+
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "claude-lead")
+        .args([
+            "review",
+            "claimed-unsnapped",
+            "--solo",
+            "--verdict",
+            "approved",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--snapshot"));
+    assert_eq!(event_count(&repo, &change_id), before);
+}
+
+#[test]
+fn squash_over_a_foreign_claim_refuses_before_the_branch_moves() {
+    let repo = Repo::new();
+    let (change_id, worktree, claim_id) = claimed_work(&repo, "claimed-squash", false);
+    repo.commit(&worktree, "more.txt", "more\n", "feat: more claimed work");
+    let head = git_out(&worktree, &["rev-parse", "HEAD"]);
+    let before = event_count(&repo, &change_id);
+
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "claude-lead")
+        .args(["squash", "claimed-squash", "-m", "feat: claimed work"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(&claim_id))
+        .stderr(predicates::str::contains("`arc squash`"));
+    assert_eq!(git_out(&worktree, &["rev-parse", "HEAD"]), head);
+    assert_eq!(event_count(&repo, &change_id), before);
+
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "claude-lead")
+        .args([
+            "squash",
+            "claimed-squash",
+            "-m",
+            "feat: claimed work",
+            "--contributors",
+            "codex-luna",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("patchset: ps-01"));
+    assert_eq!(
+        git_out(&worktree, &["rev-list", "--count", "master..HEAD"]).trim(),
+        "1"
+    );
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "claimed-squash"]));
+    assert_eq!(
+        status["latest_patchset"]["contributors"],
+        serde_json::json!(["codex-luna"]),
+        "{status}"
+    );
+}
+
+#[test]
 fn a_reviewer_matching_a_declared_contributor_is_reported_by_name() {
     let repo = repo_with_self_approval_policy();
     let (_, worktree, _) = claimed_work(&repo, "claimed-self", true);
