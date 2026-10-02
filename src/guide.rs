@@ -1334,9 +1334,10 @@ RULES THAT CHANGE WHAT YOU DO
     of that file. Both render on a row and neither becomes the other: work with
     no artifact still takes a lane.
   - An artifact claim expires by its lease alone. A change's stages are
-    budgeted and a stage over budget reads `stale`; an artifact has no stages
-    to budget, so `expired` is when it becomes reclaimable, and `--takeover`
-    is what displaces it.
+    budgeted and a stage over budget reads `stale`; an artifact's claim takes
+    `arc stage <file>` progress in the same vocabulary but no stage carries a
+    budget, so `expired` is when it becomes reclaimable, and `--takeover` is
+    what displaces it.
   - A claim that is not yet reclaimable is displaced only by `--takeover
     --because <reason>`, and the reason is recorded on the displaced claim,
     printed wherever it is rendered, and verified by nobody. The evidence a
@@ -1378,9 +1379,9 @@ RULES THAT CHANGE WHAT YOU DO
     4 MiB of a recording file as its window. It names the reader and the read
     bound, or the cause and reason when lookup or reading cannot finish.
   - `arc watch <file.md> --until stalled` arms the wait over an artifact
-    claim, which has no stages and stalls when its lease runs out, and
-    `arc rescue <file.md> [--take]` reports where the work stopped and takes
-    it over. An artifact answers only `stalled`; the rest of the
+    claim, whose stages carry no budget, so it stalls when its lease runs out,
+    and `arc rescue <file.md> [--take]` reports where the work stopped and
+    takes it over. An artifact answers only `stalled`; the rest of the
     vocabulary asks about patchsets and verdicts.
   - `arc watch <change> --until` accepts `snapshot`, `stalled`, `reviewed`,
     `approved`, `gates-green`, `ready`, `blocked`, `brief-recorded`,
