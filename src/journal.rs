@@ -3862,7 +3862,7 @@ fn derived_state(ctx: &Ctx, now: DateTime<Utc>) -> Result<String> {
 /// wherever a session stops, including outside every recorded worktree, so
 /// failing to find one is an answer rather than an error.
 fn infer_change_state(cwd: &Path) -> Option<ChangeState> {
-    let store = Store::discover(cwd).ok()?;
+    let store = Store::discover_for_reading(cwd).ok()?;
     let change_id = crate::context::infer_change(&store, cwd).ok().flatten()?;
     let events = store.load_events(&change_id).ok()?;
     state::reduce_following(&events, &store.rewrites().ok()?).ok()
