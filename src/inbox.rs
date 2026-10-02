@@ -339,7 +339,7 @@ impl Inbox {
             // that is next. The pending obligation stays visible through the
             // status approval_waived_by_debt flag and the debt row, which
             // absorb_debt records whether or not this change is still open.
-            let ready_under_waiver = report.ready_to_integrate && report.approval_waived_by_debt;
+            let ready_under_waiver = report.integrate_ready() && report.approval_waived_by_debt;
             if needs_review(state) && !ready_under_waiver {
                 let actor = if state.latest_patchset().is_none() {
                     "implementer"
@@ -357,7 +357,7 @@ impl Inbox {
                 self.changes_requested.push(row("implementer"));
                 classified = true;
             }
-            if report.ready_to_integrate {
+            if report.integrate_ready() {
                 self.ready_to_integrate.push(row("lead"));
                 classified = true;
             }

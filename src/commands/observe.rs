@@ -694,7 +694,7 @@ fn watch_reached(
             }),
         WatchUntil::Ready => ctx
             .report(store, &state)?
-            .integrate_ready
+            .integrate_ready()
             .then_some(WatchReached {
                 event_id: None,
                 provisional: None,
