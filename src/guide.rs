@@ -1658,6 +1658,7 @@ SCHEMAS
     `arc-journal-catchup/8`          arc journal catchup --json
     `arc-resume/8`                   arc resume --json
     `arc-explain/1`                  arc explain --json
+    `arc-watch/1`                    arc watch --json, stdin of arc watch --exec
     `arc-integration-plan/1`         arc integrate --dry-run --json
     `arc-brief/2`                    arc brief --json
     `arc-journal-artifact/2`         arc journal show --json

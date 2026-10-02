@@ -122,6 +122,12 @@ pub fn events(ctx: &Ctx, args: EventsArgs<'_>) -> Result<()> {
     }
 }
 
+/// Every document `arc watch --json` prints and `--exec` reads on stdin:
+/// reached, timed out, or reached on a journal artifact. A tagged `--all`
+/// watch nests its members under `changes`, and only the document carries the
+/// schema.
+const WATCH_SCHEMA: &str = "arc-watch/1";
+
 /// Which members of a watched set must reach a condition before `watch` returns.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum WatchQuorum {
@@ -312,6 +318,7 @@ fn watch_artifact(
         return Ok(2);
     };
     let value = serde_json::json!({
+        "schema": WATCH_SCHEMA,
         "event_type": "watch-reached",
         "condition": WatchUntil::Stalled.label(),
         "file": file,
@@ -366,6 +373,7 @@ fn report_timeout(until: &[WatchUntil], json: bool) -> Result<()> {
         println!(
             "{}",
             serde_json::to_string(&serde_json::json!({
+                "schema": WATCH_SCHEMA,
                 "event_type": "watch-timeout",
                 "condition": until_labels(until),
             }))?
@@ -461,12 +469,14 @@ fn watch_hook_payload(
         // Each member carries its own change, condition, and satisfying
         // event, so there is nothing for a top-level placeholder to say.
         WatchSelection::Tagged(_, WatchQuorum::All) => serde_json::json!({
+            "schema": WATCH_SCHEMA,
             "changes": hits.iter().map(watch_hit_object).collect::<Vec<_>>(),
             "condition": until_labels(until),
             "event_type": "watch-reached",
         }),
         _ => {
             let mut value = watch_hit_object(&hits[0]);
+            value["schema"] = WATCH_SCHEMA.into();
             value["event_type"] = "watch-reached".into();
             value
         }
