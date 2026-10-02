@@ -1114,9 +1114,25 @@ pub fn advisories(report: &StatusReport) {
 
 /// Detailed refusal text for `check` and `integrate`. Exit codes remain the
 /// machine contract; this text tells a human or executor how to recover.
+/// The headline names every blocker, and each blocker's detail precedes the
+/// next step, so a reader who keeps any one line of it still learns why.
 pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "Cannot integrate {}", state.change_id);
+    let titles = report
+        .blockers
+        .iter()
+        .map(|blocker| blocker_title(*blocker))
+        .collect::<Vec<_>>();
+    if titles.is_empty() {
+        let _ = writeln!(out, "Cannot integrate {}", state.change_id);
+    } else {
+        let _ = writeln!(
+            out,
+            "Cannot integrate {}: {}",
+            state.change_id,
+            titles.join("; ")
+        );
+    }
     let _ = writeln!(out);
 
     for (index, blocker) in report.blockers.iter().enumerate() {

@@ -2151,9 +2151,10 @@ pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Resul
             // A fork's branch cannot integrate from anywhere, so declaring an
             // obligation for it would record review owed on work that can
             // never ship. The refusal is a precondition failure rather than a
-            // merge that needs a reviewer later; every other failure still
-            // leaves the declaration on the ledger, which is why it happens
-            // before the merge at all — but never under `--dry-run`, which
+            // merge that needs a reviewer later. The declaration precedes the
+            // merge because the decision reads it as the waiver, so every
+            // other failure leaves it on the ledger, where a retry with the
+            // same reason reuses it — but never under `--dry-run`, which
             // promises to write nothing.
             let on_fork = {
                 let store = ctx.store()?;

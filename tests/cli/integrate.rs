@@ -1028,3 +1028,89 @@ fn expected_basis_names_what_moved() {
         .failure()
         .stderr(predicates::str::contains("the expected basis describes"));
 }
+
+/// A change whose only reviewer left a comment-only verdict: green, and
+/// refused for want of an approval.
+fn comment_only_change(repo: &Repo, slug: &str) -> PathBuf {
+    stdout(repo.arc(&repo.root).args(["begin", slug]));
+    let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+    repo.commit(&worktree, "work.txt", "work\n", "feat: work");
+    stdout(repo.arc(&worktree).args(["snapshot", slug]));
+    repo.arc(&worktree)
+        .args(["verify", slug, "--gate", "smoke"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "Reviewer")
+        .args(["review", slug, "--verdict", "comment-only"])
+        .assert()
+        .success();
+    worktree
+}
+
+/// A refusal says why on its first line, and every blocker precedes the next
+/// step: a reader who keeps only the headline, or filters for the next step,
+/// still learns what stands in the way.
+#[test]
+fn a_refused_integration_leads_with_its_blocker() {
+    let repo = repo_with_gates();
+    comment_only_change(&repo, "refused");
+
+    let out = repo
+        .arc(&repo.root)
+        .args(["integrate", "refused"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    let refusal = String::from_utf8_lossy(&out.stderr);
+    let headline = refusal.lines().next().unwrap_or_default();
+    assert!(
+        headline.starts_with("Cannot integrate refused-"),
+        "{refusal}"
+    );
+    assert!(
+        headline.ends_with(": missing or stale approval"),
+        "{refusal}"
+    );
+    let blocker = refusal.find("Blocker 1: missing or stale approval");
+    let next_step = refusal.find("Next step:");
+    assert!(
+        blocker.is_some() && next_step.is_some() && blocker < next_step,
+        "{refusal}"
+    );
+}
+
+/// `check` reports what blocks before anything that never blocks, however
+/// many lines the advisories run to.
+#[test]
+fn check_prints_its_blockers_before_its_advisories() {
+    let repo = repo_with_gates();
+    stdout(repo.arc(&repo.root).args(["begin", "owed"]));
+    let owed = repo.home.join(".worktrees").join("repo-owed");
+    repo.commit(&owed, "work.txt", "owed\n", "feat: owed");
+    stdout(repo.arc(&owed).args(["snapshot", "owed"]));
+    repo.arc(&owed)
+        .args(["verify", "owed", "--gate", "smoke"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", "owed", "--debt", "nobody read it"])
+        .assert()
+        .success();
+    let worktree = comment_only_change(&repo, "touching");
+
+    let out = repo
+        .arc(&worktree)
+        .args(["check", "touching"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    let report = String::from_utf8_lossy(&out.stdout);
+    assert!(report.starts_with("Cannot integrate touching-"), "{report}");
+    let blocker = report.find("Blocker 1: missing or stale approval");
+    let advisory = report.find("debt-touched:");
+    assert!(
+        blocker.is_some() && advisory.is_some() && blocker < advisory,
+        "{report}"
+    );
+}
