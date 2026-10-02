@@ -859,7 +859,7 @@ fn ordinary_refusing_verdicts_keep_their_action_out_of_debt_guidance() {
             "{status}"
         );
         let review = json_stdout(repo.arc(&repo.root).args(["review", slug, "--json"]));
-        assert_eq!(review["schema"], "arc-review/4");
+        assert_eq!(review["schema"], "arc-review/5");
         assert!(review.get("review_options").is_none(), "{review}");
         repo.arc(&repo.root).args(["check", slug]).assert().code(3);
     }
@@ -1183,6 +1183,7 @@ fn a_finding_left_open_at_ship_takes_a_disposition_after_integration() {
             repo.arc(&repo.root)
                 .args(["findings", "shipped-finding", "--format", "json"]),
         );
+    assert_eq!(json["schema"], "arc-findings/3");
     let finding = &json["findings"][0];
     assert_eq!(finding["dispositions"].as_array().unwrap().len(), 0);
     assert_eq!(finding["after_integration"][0]["status"], "resolved");
@@ -3792,7 +3793,7 @@ fn review_options_route_the_lead_without_writing() {
         "{status}"
     );
     let review = json_stdout(repo.arc(&repo.root).args(["review", "ordinary", "--json"]));
-    assert_eq!(review["schema"], "arc-review/4");
+    assert_eq!(review["schema"], "arc-review/5");
     assert_eq!(
         review["review_options"], status["review_options"],
         "{review}"

@@ -1669,8 +1669,8 @@ SCHEMAS
     `arc-journal-artifact/2`         arc journal show --json
     `arc-journal-inventory/6`        arc journal inventory --json
     `arc-rescue/5`                   arc rescue --json
-    `arc-review/4`                   arc review --json
-    `arc-findings/2`                 arc findings --format json
+    `arc-review/5`                   arc review --json
+    `arc-findings/3`                 arc findings --format json
     `arc-blocker-status/1`           arc blocker-status --json
     `arc-metadata/1`                 arc metadata --json
     `arc-chain/4`                    arc chain --json
