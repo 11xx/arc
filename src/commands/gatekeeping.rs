@@ -1290,7 +1290,15 @@ pub fn done(
 /// are the only place a stopped rebase can be continued from. A conflict stops
 /// the rebase and leaves it in progress, because the partial resolution is a
 /// person's work and aborting would discard it.
-pub fn rebase(ctx: &Ctx, reference: &str, verify_requested: bool) -> Result<i32> {
+pub fn rebase(
+    ctx: &Ctx,
+    reference: &str,
+    verify_requested: bool,
+    contributors: Option<Vec<String>>,
+    solo: bool,
+) -> Result<i32> {
+    let declared =
+        super::review::contributor_declaration(ctx, contributors.clone(), solo)?.is_some();
     let store = ctx.store()?;
     let (change_id, st) = ctx.load_state(&store, reference)?;
     if st.is_closed() {
@@ -1334,6 +1342,9 @@ pub fn rebase(ctx: &Ctx, reference: &str, verify_requested: bool) -> Result<i32>
         }
         return Ok(0);
     }
+    // The replayed head is recorded as a patchset, so a claim that would
+    // refuse that recording refuses the rebase while the branch is untouched.
+    super::review::ensure_attribution_over_claim(ctx, &st, declared, chrono::Utc::now())?;
 
     match gitio::rebase(&wt, &st.target_branch)? {
         gitio::RebaseOutcome::Stopped => {
@@ -1375,8 +1386,8 @@ pub fn rebase(ctx: &Ctx, reference: &str, verify_requested: bool) -> Result<i32>
                 verify_requested,
                 Vec::new(),
                 false,
-                None,
-                false,
+                contributors,
+                solo,
                 Vec::new(),
                 None,
             )?;
@@ -2340,7 +2351,7 @@ fn queue_step(ctx: &Ctx, store: &Store, change_id: &str, cleanup: bool) -> Resul
 
     let mut report = ctx.report(store, &st)?;
     if report.needs_rebase {
-        let code = rebase(ctx, change_id, false)?;
+        let code = rebase(ctx, change_id, false, None, false)?;
         if code != 0 {
             return Ok(QueueStep::Stopped {
                 code,
