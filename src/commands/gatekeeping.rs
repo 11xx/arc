@@ -3571,7 +3571,7 @@ fn advise_plan_promotions(store: &Store, st: &crate::state::ChangeState) {
 }
 
 fn check(ctx: &Ctx, reference: &str, explain: bool, json: bool) -> Result<i32> {
-    let store = ctx.store()?;
+    let store = ctx.store_for_reading()?;
     let (change_id, st) = ctx.load_state(&store, reference)?;
     let mut report = ctx.report(&store, &st)?;
     let code = status::check_exit_code(&report);

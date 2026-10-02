@@ -951,6 +951,61 @@ fn a_closed_change_reports_the_declarations_it_closed_under() {
         .success();
 }
 
+/// The target checkout's own broken policy cannot fail a closed change's
+/// report run from that checkout, because reporting never parses the append
+/// policy. Recording anything there still parses it, and refuses.
+#[test]
+fn a_closed_change_reports_from_a_target_whose_policy_is_broken() {
+    let repo = repo_with_gates();
+    let (change_id, worktree) = approved_change(&repo, "shipped-policy", "policy.txt", "p\n");
+    repo.arc(&worktree)
+        .args([
+            "debt",
+            "shipped-policy",
+            "--reason",
+            "no second actor reachable",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", "shipped-policy"])
+        .assert()
+        .success();
+    fs::write(repo.root.join(".arc/policy.toml"), "[policy\n").unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "test: break the policy"]);
+
+    let status = json_stdout(repo.arc(&repo.root).args(["status", &change_id, "--json"]));
+    assert_eq!(status["state"], "closed", "{status}");
+    assert_eq!(status["gates"][0]["green_at_head"], true, "{status}");
+    repo.arc(&repo.root)
+        .args(["show", "shipped-policy"])
+        .assert()
+        .success();
+    let check = json_stdout_any_status(repo.arc(&repo.root).args(["check", &change_id, "--json"]));
+    assert_eq!(check["ready"], false, "{check}");
+    assert_eq!(check["blockers"][0]["blocker"], "closed", "{check}");
+    let advisories = check["advisories"].to_string();
+    assert!(advisories.contains("debt-summary"), "{check}");
+    for report in ["explain", "findings", "log"] {
+        repo.arc(&repo.root)
+            .args([report, "shipped-policy"])
+            .assert()
+            .success();
+    }
+
+    let refused = repo
+        .arc(&repo.root)
+        .args(["begin", "after-broken-policy", "--no-worktree"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("policy.toml"), "{stderr}");
+    let listed = stdout(repo.arc(&worktree).args(["list"]));
+    assert!(!listed.contains("after-broken-policy"), "{listed}");
+}
+
 /// Replaying a closed change answers for the head its closure recorded, as
 /// the live report does: an asserted integration that shipped an earlier
 /// patchset is judged at that patchset's head, not at a later one.
