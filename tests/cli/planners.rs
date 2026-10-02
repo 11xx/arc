@@ -222,7 +222,11 @@ fn planned_by_help_and_refusal_name_the_accepted_fields() {
         repo.arc(&repo.root).args(["journal", "plan", "--help"]),
     ));
     for rule in [
-        "whose only fields are `actor`, `harness`, `session`, and `model`, each a nonempty string, with at least one present",
+        concat!(
+            "whose only fields are `actor`, `harness`, `session`, and `model`, each a nonempty ",
+            "string or null. An absent or null field records nothing, and at least one field ",
+            "must be a string",
+        ),
         "Effort is not a field: it rides in `model` as `<model>#<effort>`",
     ] {
         assert!(help.contains(rule), "missing {rule:?} in: {help}");
@@ -259,4 +263,35 @@ fn planned_by_help_and_refusal_name_the_accepted_fields() {
         body.contains(r#"planned-by: {"harness":"test","model":"model-a#high"}"#),
         "{body}"
     );
+
+    let path = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "plan",
+        "null-coordinate",
+        "--title",
+        "Plan",
+        "--planned-by",
+        r#"{"actor":null,"model":"model-a"}"#,
+    ]));
+    let body = fs::read_to_string(path.trim()).unwrap();
+    assert!(
+        body.contains(r#"planned-by: {"model":"model-a"}"#),
+        "{body}"
+    );
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "plan",
+            "all-null",
+            "--title",
+            "Plan",
+            "--planned-by",
+            r#"{"actor":null,"model":null}"#,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "planner metadata must name at least one coordinate",
+        ));
 }

@@ -487,8 +487,9 @@ pub struct KindWrite {
     pub spool: bool,
     /// Planner identity for a plan artifact; repeat once per planner. Each
     /// value is a one-line JSON object whose only fields are `actor`,
-    /// `harness`, `session`, and `model`, each a nonempty string, with at
-    /// least one present. Effort is not a field: it rides in `model` as
+    /// `harness`, `session`, and `model`, each a nonempty string or null. An
+    /// absent or null field records nothing, and at least one field must be
+    /// a string. Effort is not a field: it rides in `model` as
     /// `<model>#<effort>`. Values join the body's `planned-by:` headers;
     /// omitted, a plan records those headers, or else the invoking identity
     #[arg(
