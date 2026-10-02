@@ -51,12 +51,20 @@ pub fn declare_debt(
     };
     ensure_append_allowed(&st, &payload)?;
     let event = ctx.event(&store, &change_id, payload);
-    store.append_event(&event)?;
+    // One judgment is one obligation: an `arc integrate --debt` retried after
+    // a refusal answers with the debt its first attempt recorded.
+    let (verb, event_id) = match st.debt.as_ref().filter(|debt| debt.restated_by(&event)) {
+        Some(existing) => ("already declared", existing.event_id.as_str()),
+        None => {
+            store.append_event(&event)?;
+            ("declared", event.event_id.as_str())
+        }
+    };
     match &patchset_id {
-        Some(id) => println!("debt declared for {id} ({}): {reason}", missing.as_str()),
-        None => println!("debt declared ({}): {reason}", missing.as_str()),
+        Some(id) => println!("debt {verb} for {id} ({}): {reason}", missing.as_str()),
+        None => println!("debt {verb} ({}): {reason}", missing.as_str()),
     }
-    println!("event: {}", event.event_id);
+    println!("event: {event_id}");
     Ok(())
 }
 

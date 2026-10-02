@@ -1485,7 +1485,8 @@ enum Cmd {
         /// It never overrules a reviewer who read this patchset and asked for
         /// changes: that is a verdict, not a missing one. The obligation
         /// survives closure and `arc query --debt` finds it; discharge it
-        /// with `arc audit`.
+        /// with `arc audit`. A refused integration keeps the debt it
+        /// declared, and a retry with the same reason reuses it.
         #[arg(long = "debt", value_name = "REASON")]
         debt: Option<String>,
         /// What kind of deficit the debt records. Omitted, arc derives it from
@@ -1498,7 +1499,9 @@ enum Cmd {
     Debt {
         /// Change that owes the review
         change: String,
-        /// What review is owed, and why it could not run
+        /// What review is owed, and why it could not run. The debt already
+        /// in force, declared again unchanged, is reused rather than recorded
+        /// twice
         #[arg(long)]
         reason: String,
         /// What kind of deficit this records. Omitted, arc derives it from the
