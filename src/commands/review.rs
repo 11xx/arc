@@ -1209,22 +1209,62 @@ fn resolve_patchset_id(st: &ChangeState, patchset: Option<String>) -> Result<Opt
     }
 }
 
-/// The fields `FindingInput` reads, in the order `--help` names them.
-const FINDING_FIELDS: [&str; 5] = ["blocking", "severity", "summary", "body", "anchor"];
+/// The fields one level of a findings batch reads, the folded names taken
+/// for them beyond a one-edit typo, and the unknown fields accepted without a
+/// warning.
+struct InputFields {
+    /// The level as messages name it: "a finding reads …".
+    reads: &'static str,
+    /// In the order `--help` names them.
+    fields: &'static [&'static str],
+    /// An alias may repeat to stand for several fields.
+    aliases: &'static [(&'static str, &'static str)],
+    silent: &'static [&'static str],
+}
 
-/// Folded field names taken for a finding field beyond a one-edit typo.
-const FINDING_FIELD_ALIASES: [(&str, &str); 10] = [
-    ("block", "blocking"),
-    ("blocked", "blocking"),
-    ("blocker", "blocking"),
-    ("blockers", "blocking"),
-    ("blocks", "blocking"),
-    ("isblocking", "blocking"),
-    ("severitylevel", "severity"),
-    ("title", "summary"),
-    ("file", "anchor"),
-    ("path", "anchor"),
-];
+/// `FindingInput`. A supplied `id` is silent: arc assigns finding IDs and
+/// ignores one.
+const FINDING_FIELDS: InputFields = InputFields {
+    reads: "a finding",
+    fields: &["blocking", "severity", "summary", "body", "anchor"],
+    aliases: &[
+        ("block", "blocking"),
+        ("blocked", "blocking"),
+        ("blocker", "blocking"),
+        ("blockers", "blocking"),
+        ("blocks", "blocking"),
+        ("isblocking", "blocking"),
+        ("severitylevel", "severity"),
+        ("title", "summary"),
+        ("file", "anchor"),
+        ("path", "anchor"),
+    ],
+    silent: &["id"],
+};
+
+/// `AnchorInput`.
+const ANCHOR_FIELDS: InputFields = InputFields {
+    reads: "an anchor",
+    fields: &["path", "side", "line_start", "line_end", "context"],
+    aliases: &[
+        ("file", "path"),
+        ("filename", "path"),
+        ("filepath", "path"),
+        ("line", "line_start"),
+        ("start", "line_start"),
+        ("from", "line_start"),
+        ("begin", "line_start"),
+        ("startline", "line_start"),
+        ("firstline", "line_start"),
+        ("end", "line_end"),
+        ("to", "line_end"),
+        ("endline", "line_end"),
+        ("lastline", "line_end"),
+        ("lines", "line_start"),
+        ("lines", "line_end"),
+    ],
+    silent: &[],
+};
 
 /// Read a findings batch from a file or stdin.
 pub(crate) fn read_finding_inputs(src: &str) -> Result<Vec<FindingInput>> {
@@ -1242,66 +1282,104 @@ pub(crate) fn read_finding_inputs(src: &str) -> Result<Vec<FindingInput>> {
         .context("malformed findings JSON; `arc review --help` states the shape")
 }
 
-/// Refuses a finding whose unknown field looks like a misspelling of a field
-/// it omits, because the omitted field would be recorded at its default — a
-/// misspelled `blocking` records a non-blocking finding. Returns a warning for
-/// each finding carrying any other unknown field. `id` is accepted silently:
-/// arc assigns finding IDs and ignores a supplied one.
+/// The unknown-field warnings for each finding and its anchor, or the
+/// refusal `unknown_fields` gives.
 fn unknown_finding_fields(text: &str) -> Result<Vec<String>> {
     let Ok(serde_json::Value::Array(findings)) = serde_json::from_str(text) else {
         return Ok(Vec::new());
     };
-    let accepted = FINDING_FIELDS.join(", ");
     let mut warnings = Vec::new();
     for (position, finding) in (1..).zip(&findings) {
         let Some(finding) = finding.as_object() else {
             continue;
         };
-        let mut unknown = Vec::new();
-        for key in finding.keys() {
-            if key == "id" || FINDING_FIELDS.contains(&key.as_str()) {
-                continue;
-            }
-            if let Some(field) = misspelled_field(key).filter(|field| !finding.contains_key(*field))
-            {
-                bail!(
-                    "finding {position} has unknown field `{key}`, which looks like a misspelling of `{field}`; rename or remove it (a finding reads {accepted})"
-                );
-            }
-            unknown.push(format!("`{key}`"));
-        }
-        if !unknown.is_empty() {
-            let noun = if unknown.len() == 1 {
-                "field"
-            } else {
-                "fields"
-            };
-            warnings.push(format!(
-                "finding {position} has unknown {noun} {}, which arc ignores (a finding reads {accepted})",
-                unknown.join(", ")
-            ));
+        warnings.extend(unknown_fields(
+            finding,
+            &FINDING_FIELDS,
+            &format!("finding {position}"),
+        )?);
+        if let Some(anchor) = finding.get("anchor").and_then(|anchor| anchor.as_object()) {
+            warnings.extend(unknown_fields(
+                anchor,
+                &ANCHOR_FIELDS,
+                &format!("the anchor of finding {position}"),
+            )?);
         }
     }
     Ok(warnings)
 }
 
-/// The finding field `key` names once case, `_`, and `-` are disregarded,
-/// through an alias or within one edit.
-fn misspelled_field(key: &str) -> Option<&'static str> {
-    let folded: String = key
-        .chars()
-        .filter(|c| !matches!(c, '_' | '-'))
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
-    FINDING_FIELD_ALIASES
+/// Refuses `object` when an unknown field looks like a misspelling of a field
+/// it omits, because the omitted field would be recorded at its default — a
+/// misspelled `blocking` records a non-blocking finding, a misspelled
+/// `line_start` an anchor without a line. Returns a warning naming any other
+/// unknown fields.
+fn unknown_fields(
+    object: &serde_json::Map<String, serde_json::Value>,
+    level: &InputFields,
+    label: &str,
+) -> Result<Option<String>> {
+    let accepted = level.fields.join(", ");
+    let reads = level.reads;
+    let mut unknown = Vec::new();
+    for key in object.keys() {
+        if level.fields.contains(&key.as_str()) || level.silent.contains(&key.as_str()) {
+            continue;
+        }
+        let omitted: Vec<String> = misspelled_fields(key, level)
+            .into_iter()
+            .filter(|field| !object.contains_key(*field))
+            .map(|field| format!("`{field}`"))
+            .collect();
+        if !omitted.is_empty() {
+            bail!(
+                "{label} has unknown field `{key}`, which looks like a misspelling of {}; rename or remove it ({reads} reads {accepted})",
+                omitted.join(" and ")
+            );
+        }
+        unknown.push(format!("`{key}`"));
+    }
+    if unknown.is_empty() {
+        return Ok(None);
+    }
+    let noun = if unknown.len() == 1 {
+        "field"
+    } else {
+        "fields"
+    };
+    Ok(Some(format!(
+        "{label} has unknown {noun} {}, which arc ignores ({reads} reads {accepted})",
+        unknown.join(", ")
+    )))
+}
+
+/// The fields of `level` that `key` names once case, `_`, and `-` are
+/// disregarded: every one its alias stands for, or else the first within one
+/// edit.
+fn misspelled_fields(key: &str, level: &InputFields) -> Vec<&'static str> {
+    let fold = |name: &str| -> String {
+        name.chars()
+            .filter(|c| !matches!(c, '_' | '-'))
+            .map(|c| c.to_ascii_lowercase())
+            .collect()
+    };
+    let folded = fold(key);
+    let aliased: Vec<&'static str> = level
+        .aliases
         .iter()
-        .find(|(alias, _)| *alias == folded)
+        .filter(|(alias, _)| *alias == folded)
         .map(|(_, field)| *field)
-        .or_else(|| {
-            FINDING_FIELDS
-                .into_iter()
-                .find(|field| within_one_edit(&folded, field))
-        })
+        .collect();
+    if !aliased.is_empty() {
+        return aliased;
+    }
+    level
+        .fields
+        .iter()
+        .copied()
+        .find(|field| within_one_edit(&folded, &fold(field)))
+        .into_iter()
+        .collect()
 }
 
 /// Whether `a` becomes `b` by at most one insertion, deletion, substitution,
@@ -1347,7 +1425,7 @@ pub(crate) fn parse_inline_findings(src: Option<&str>) -> Result<Vec<InlineFindi
 
 #[cfg(test)]
 mod tests {
-    use super::misspelled_field;
+    use super::{misspelled_fields, ANCHOR_FIELDS, FINDING_FIELDS};
 
     #[test]
     fn a_misspelled_finding_field_is_named_and_an_unrelated_one_is_not() {
@@ -1364,10 +1442,34 @@ mod tests {
             ("path", "anchor"),
             ("anchors", "anchor"),
         ] {
-            assert_eq!(misspelled_field(key), Some(field), "{key}");
+            assert_eq!(misspelled_fields(key, &FINDING_FIELDS), [field], "{key}");
         }
         for key in ["tool", "code", "author", "rule", "finding_id", "url"] {
-            assert_eq!(misspelled_field(key), None, "{key}");
+            assert!(misspelled_fields(key, &FINDING_FIELDS).is_empty(), "{key}");
+        }
+    }
+
+    #[test]
+    fn a_misspelled_anchor_field_is_named_and_an_unrelated_one_is_not() {
+        for (key, fields) in [
+            ("line", &["line_start"][..]),
+            ("start", &["line_start"]),
+            ("from", &["line_start"]),
+            ("lineStart", &["line_start"]),
+            ("start_line", &["line_start"]),
+            ("end", &["line_end"]),
+            ("to", &["line_end"]),
+            ("line-end", &["line_end"]),
+            ("lines", &["line_start", "line_end"]),
+            ("file", &["path"]),
+            ("paths", &["path"]),
+            ("sides", &["side"]),
+            ("contxt", &["context"]),
+        ] {
+            assert_eq!(misspelled_fields(key, &ANCHOR_FIELDS), fields, "{key}");
+        }
+        for key in ["note", "commit", "url", "column", "rule"] {
+            assert!(misspelled_fields(key, &ANCHOR_FIELDS).is_empty(), "{key}");
         }
     }
 }
