@@ -975,6 +975,43 @@ fn done_over_a_foreign_claim_accepts_the_attribution_its_refusal_names() {
     );
 }
 
+/// `done` moves its caller's claim to `verifying` only after the attribution
+/// it was given is accepted, so a declaration it refuses changes nothing.
+#[test]
+fn done_refuses_blank_contributors_before_moving_the_claim_stage() {
+    let repo = Repo::new();
+    let change_id = opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", "blank-done"])));
+    let worktree = repo.home.join(".worktrees").join("repo-blank-done");
+    repo.arc(&worktree)
+        .args(["claim", "blank-done"])
+        .assert()
+        .success();
+    repo.commit(&worktree, "work.txt", "work\n", "feat: work");
+    let observed = || {
+        let status = json_stdout(
+            repo.arc(&repo.root)
+                .args(["status", "blank-done", "--json"]),
+        );
+        let claim = &status["claim"];
+        (
+            event_count(&repo, &change_id),
+            claim["stage"].clone(),
+            claim["stage_started_at"].clone(),
+        )
+    };
+    let before = observed();
+    assert_eq!(before.1, "launch", "{before:?}");
+
+    repo.arc(&worktree)
+        .args(["done", "blank-done", "--contributors", " "])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "--contributors must name nonempty actors",
+        ));
+    assert_eq!(observed(), before);
+}
+
 #[test]
 fn review_snapshot_over_a_foreign_claim_accepts_the_attribution_its_refusal_names() {
     let repo = Repo::new();
