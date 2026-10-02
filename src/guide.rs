@@ -1517,8 +1517,8 @@ EXIT CODES
     `arc check` exits 3 when no valid approval covers the current head.
     `arc check` exits 4 while a hold is active.
     `arc check` exits 5 when a required gate is not green at the head.
-    `arc check` exits 6 for a closed change, a missing branch, a target branch
-      that cannot be resolved, or malformed state.
+    `arc check` exits 6 for a closed change, a missing branch, or a target
+      branch that cannot be resolved.
     `arc check` exits 7 while a prerequisite change is unresolved.
     `arc check` exits 11 when the target moved with conflicting changes and
       the branch needs rebasing.
