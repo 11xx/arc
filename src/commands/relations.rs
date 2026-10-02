@@ -490,49 +490,14 @@ pub(crate) fn repository_path(cwd: &Path, raw: &str) -> Result<Option<String>> {
 }
 
 /// The journal artifact a path names, when the path is a file directly in
-/// a journal's hot directory or its cold archive under an artifact name. An
-/// artifact of this project's journal is named by its file name; one of
-/// another project's journal by the qualified `<journal-dir>::<file>`, the
-/// hot directory as it resolves on disk.
+/// a journal's hot directory or its cold archive under an artifact name,
+/// spelled as [`crate::journal::reference_for_path`] spells it.
 fn journal_artifact(ctx: &Ctx, raw: &str) -> Option<ReadArtifact> {
-    let path = Path::new(raw);
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        ctx.cwd.join(path)
-    };
-    let name = absolute.file_name()?.to_str()?.to_string();
-    crate::journal::parse_artifact_name(&name)?;
-    let canonical = |dir: &Path| std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-    let parent = canonical(absolute.parent()?);
-    let own = crate::journal::resolve_dir(&ctx.cwd)
-        .ok()
-        .map(|hot| canonical(&hot));
-    let hot = match &own {
-        Some(own) if *own == parent || canonical(&crate::journal::archive_dir(own)) == parent => {
-            return Some(ReadArtifact {
-                body_digest: crate::journal::artifact_digest(ctx, &name).ok(),
-                file: name,
-            });
-        }
-        _ => archived_from(&parent).unwrap_or(parent),
-    };
-    let reference = format!(
-        "{}{}{name}",
-        hot.to_str()?,
-        crate::journal::REFERENCE_SEPARATOR
-    );
-    crate::journal::locate_artifact(ctx, &reference).ok()?;
+    let reference = crate::journal::reference_for_path(&ctx.cwd, raw)?;
     Some(ReadArtifact {
         body_digest: crate::journal::artifact_digest(ctx, &reference).ok(),
         file: reference,
     })
-}
-
-/// The hot journal a cold archive directory belongs to, when `dir` is one.
-fn archived_from(dir: &Path) -> Option<PathBuf> {
-    let hot = PathBuf::from(dir.to_str()?.strip_suffix("-archive")?);
-    (crate::journal::archive_dir(&hot) == dir && hot.is_dir()).then_some(hot)
 }
 
 pub struct DeclareArgs {
