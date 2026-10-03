@@ -838,9 +838,9 @@ RUN A CHANGE
   adoption requires an explicit base. `begin` removes its
   unrecorded owner token when its identity matches; cleanup failures are reported.
   The registered checkout must still hold the change branch. An ignored
-  directory identified as a build artifact by a valid CACHEDIR.TAG or a
-  configured `integration.disposable` rule's path and marker does not keep
-  the checkout. Tracked edits, untracked files and all other ignored content
+  directory identified as a build artifact by a valid CACHEDIR.TAG, a
+  built-in recognizer, or a configured `integration.disposable` rule's path
+  and marker does not keep the checkout. Tracked edits, untracked files and all other ignored content
   keep it. Recognition grants no checkout removal authority. An
   outbox containing only the spool's regular `.gitignore` with `*` and a
   trailing newline is disposable metadata only when its Git administrative
@@ -1896,15 +1896,32 @@ FILES
   key. User configuration accepts style only.
   `integration.cleanup` governs post-integration branch and worktree cleanup;
   `integrate --no-cleanup` overrides it for every selected change. Ignored
-  directories identified as build artifacts by a valid CACHEDIR.TAG or an
-  `integration.disposable` rule's path and marker do not keep a checkout;
-  tracked edits, untracked files and all other ignored content do.
+  directories identified as build artifacts by a valid CACHEDIR.TAG, a
+  built-in recognizer, or an `integration.disposable` rule's path and marker
+  do not keep a checkout; tracked edits, untracked files and all other ignored
+  content do. Every recognizer names a file its tool writes inside the
+  directory; a directory name alone identifies nothing.
   A CACHEDIR.TAG must be a regular file beginning with the exact bytes
-  `Signature: 8a477f597d28d172789f06886806bc55`. This recognizer always applies
-  at any depth, independently of configured rules and checkout ownership.
+  `Signature: 8a477f597d28d172789f06886806bc55`, which Cargo, Meson, uv,
+  pytest and other tools write. The built-in recognizers, each a regular
+  file that must begin with the bytes shown:
+
+    any directory      CMakeCache.txt      `# This is the CMakeCache file.`
+    any directory      .ninja_log          `# ninja log v`
+    **/dist-newstyle   cache/plan.json     `{"cabal-version":`
+    any directory      pyvenv.cfg          `home = `
+    **/*.egg-info      PKG-INFO            `Metadata-Version: `
+    **/node_modules    .package-lock.json, .modules.yaml or .yarn-integrity
+    **/__pycache__     only .pyc files, each opening with a magic number
+                       whose last two bytes are a carriage return and a
+                       line feed
+
+  CACHEDIR.TAG and the built-in recognizers always apply at any depth,
+  independently of configured rules and checkout ownership. A configured rule
+  covers an artifact they do not:
 
     [integration]
-    disposable = [{ path = "**/dist-newstyle", marker = "cache/plan.json" }]
+    disposable = [{ path = "**/generated", marker = ".generator-stamp" }]
 
   `integration.disposable` is an array of rules with required string `path`
   and `marker`, and optional string `signature`. Operator defaults, project

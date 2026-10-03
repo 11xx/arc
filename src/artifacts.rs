@@ -1,5 +1,7 @@
-//! Recognizes ignored build-artifact directories from their contents and resolved
-//! rules. Recognition is independent of checkout ownership, change state, and
+//! Recognizes ignored build-artifact directories from their contents: a valid
+//! CACHEDIR.TAG, a built-in recognizer, or a resolved rule. Every recognizer
+//! names a file its tool writes inside the directory, never a directory name
+//! alone. Recognition is independent of checkout ownership, change state, and
 //! who created the checkout; it grants no authority to remove a checkout.
 
 use serde::Deserialize;
@@ -8,6 +10,67 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 const CACHE_SIGNATURE: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
+
+/// A recognizer every checkout gets: the file its tool writes at a fixed place
+/// inside the directory, and the bytes that file begins with where the tool's
+/// format fixes them.
+struct Builtin {
+    tool: &'static str,
+    path: &'static str,
+    marker: &'static str,
+    signature: Option<&'static [u8]>,
+}
+
+const BUILTIN: &[Builtin] = &[
+    Builtin {
+        tool: "CMake",
+        path: "**",
+        marker: "CMakeCache.txt",
+        signature: Some(b"# This is the CMakeCache file."),
+    },
+    Builtin {
+        tool: "Ninja",
+        path: "**",
+        marker: ".ninja_log",
+        signature: Some(b"# ninja log v"),
+    },
+    Builtin {
+        tool: "Cabal",
+        path: "**/dist-newstyle",
+        marker: "cache/plan.json",
+        signature: Some(b"{\"cabal-version\":"),
+    },
+    Builtin {
+        tool: "Python virtual environment",
+        path: "**",
+        marker: "pyvenv.cfg",
+        signature: Some(b"home = "),
+    },
+    Builtin {
+        tool: "Python package metadata",
+        path: "**/*.egg-info",
+        marker: "PKG-INFO",
+        signature: Some(b"Metadata-Version: "),
+    },
+    Builtin {
+        tool: "npm",
+        path: "**/node_modules",
+        marker: ".package-lock.json",
+        signature: None,
+    },
+    Builtin {
+        tool: "pnpm",
+        path: "**/node_modules",
+        marker: ".modules.yaml",
+        signature: None,
+    },
+    Builtin {
+        tool: "Yarn",
+        path: "**/node_modules",
+        marker: ".yarn-integrity",
+        signature: None,
+    },
+];
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -41,6 +104,13 @@ pub fn recognize(root: &Path, entries: &[String], rules: &[Rule]) -> Vec<Artifac
             let identified_by = if marker_matches(&directory, "CACHEDIR.TAG", Some(CACHE_SIGNATURE))
             {
                 "CACHEDIR.TAG".to_string()
+            } else if let Some(builtin) = BUILTIN.iter().find(|builtin| {
+                path_matches(builtin.path, path)
+                    && marker_matches(&directory, builtin.marker, builtin.signature)
+            }) {
+                format!("{}: {}", builtin.tool, builtin.marker)
+            } else if python_bytecode_cache(&directory, path) {
+                "Python bytecode: __pycache__".to_string()
             } else {
                 let (index, rule) = rules.iter().enumerate().find(|(_, rule)| {
                     path_matches(&rule.path, path)
@@ -58,6 +128,37 @@ pub fn recognize(root: &Path, entries: &[String], rules: &[Rule]) -> Vec<Artifac
             })
         })
         .collect()
+}
+
+/// CPython's `__pycache__` holds only `.pyc` files, each opening with a magic
+/// number whose last two bytes are `\r\n`. Any other entry keeps the directory.
+fn python_bytecode_cache(directory: &Path, path: &str) -> bool {
+    if path.rsplit('/').next() != Some("__pycache__") {
+        return false;
+    }
+    let Ok(entries) = fs::read_dir(directory) else {
+        return false;
+    };
+    let mut found = false;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let is_pyc = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.ends_with(".pyc"));
+        if !is_pyc || !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            return false;
+        }
+        let mut magic = [0; 4];
+        let read = fs::File::open(entry.path()).and_then(|mut file| file.read_exact(&mut magic));
+        if read.is_err() || magic[2..] != *b"\r\n" {
+            return false;
+        }
+        found = true;
+    }
+    found
 }
 
 fn real_directory(root: &Path, relative: &str) -> Option<PathBuf> {
@@ -247,5 +348,116 @@ mod tests {
         std::os::unix::fs::symlink("cache", root.join("target/link")).unwrap();
         rule.marker = "link/tag".into();
         assert!(recognize(root, &entries, &[rule]).is_empty());
+    }
+
+    #[test]
+    fn builtin_recognizers_need_their_tools_marker() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path();
+        let cases: [(&str, &str, &[u8]); 8] = [
+            (
+                "build",
+                "CMakeCache.txt",
+                b"# This is the CMakeCache file.\n# For build in directory",
+            ),
+            ("out", ".ninja_log", b"# ninja log v7\n1\t15\t"),
+            (
+                "pkg/dist-newstyle",
+                "cache/plan.json",
+                b"{\"cabal-version\":\"3.16.1.0\"}",
+            ),
+            (
+                ".venv",
+                "pyvenv.cfg",
+                b"home = /usr/bin\ninclude-system-site-packages = false\n",
+            ),
+            (
+                "src/pkg.egg-info",
+                "PKG-INFO",
+                b"Metadata-Version: 2.4\nName: pkg\n",
+            ),
+            (
+                "node_modules",
+                ".package-lock.json",
+                b"{\n  \"name\": \"app\"",
+            ),
+            (
+                "web/node_modules",
+                ".modules.yaml",
+                b"{\n  \"hoistedDependencies\": {}",
+            ),
+            (
+                "ui/node_modules",
+                ".yarn-integrity",
+                b"{\n  \"systemParams\": \"linux-x64\"",
+            ),
+        ];
+        for (directory, marker, content) in cases {
+            let marker_path = root.join(directory).join(marker);
+            fs::create_dir_all(marker_path.parent().unwrap()).unwrap();
+            fs::write(&marker_path, content).unwrap();
+            let entry = vec![format!("!! {directory}/")];
+            let found = recognize(root, &entry, &[]);
+            assert_eq!(found.len(), 1, "{directory}");
+            assert!(found[0].identified_by.ends_with(marker), "{found:?}");
+            // A name without its tool's file is never an artifact.
+            fs::remove_file(&marker_path).unwrap();
+            assert!(recognize(root, &entry, &[]).is_empty(), "{directory}");
+        }
+        for (directory, marker) in [
+            ("build", "CMakeCache.txt"),
+            ("out", ".ninja_log"),
+            ("pkg/dist-newstyle", "cache/plan.json"),
+            (".venv", "pyvenv.cfg"),
+            ("src/pkg.egg-info", "PKG-INFO"),
+        ] {
+            fs::write(
+                root.join(directory).join(marker),
+                b"notes the tool never wrote",
+            )
+            .unwrap();
+            let entry = vec![format!("!! {directory}/")];
+            assert!(recognize(root, &entry, &[]).is_empty(), "{directory}");
+        }
+        fs::create_dir_all(root.join("dist-newstyles/cache")).unwrap();
+        fs::write(
+            root.join("dist-newstyles/cache/plan.json"),
+            b"{\"cabal-version\":\"3.16.1.0\"}",
+        )
+        .unwrap();
+        assert!(recognize(root, &["!! dist-newstyles/".into()], &[]).is_empty());
+    }
+
+    #[test]
+    fn python_bytecode_cache_holds_only_compiled_modules() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path();
+        let cache = root.join("pkg/__pycache__");
+        fs::create_dir_all(&cache).unwrap();
+        let entry = vec!["!! pkg/__pycache__/".to_string()];
+        assert!(recognize(root, &entry, &[]).is_empty(), "empty cache");
+        fs::write(cache.join("m.cpython-314.pyc"), b"\x2b\x0e\r\n\0\0\0\0").unwrap();
+        fs::write(
+            cache.join("m.cpython-314.opt-1.pyc"),
+            b"\x2b\x0e\r\n\0\0\0\0",
+        )
+        .unwrap();
+        let found = recognize(root, &entry, &[]);
+        assert_eq!(found[0].identified_by, "Python bytecode: __pycache__");
+        fs::write(cache.join("notes.txt"), b"kept").unwrap();
+        assert!(recognize(root, &entry, &[]).is_empty(), "foreign file");
+        fs::remove_file(cache.join("notes.txt")).unwrap();
+        fs::write(cache.join("bad.cpython-314.pyc"), b"not bytecode").unwrap();
+        assert!(recognize(root, &entry, &[]).is_empty(), "wrong magic");
+        fs::remove_file(cache.join("bad.cpython-314.pyc")).unwrap();
+        std::os::unix::fs::symlink("m.cpython-314.pyc", cache.join("l.cpython-314.pyc")).unwrap();
+        assert!(recognize(root, &entry, &[]).is_empty(), "symlinked module");
+        fs::remove_file(cache.join("l.cpython-314.pyc")).unwrap();
+        fs::create_dir_all(root.join("pkg/cache")).unwrap();
+        fs::write(root.join("pkg/cache/m.cpython-314.pyc"), b"\x2b\x0e\r\n").unwrap();
+        assert!(
+            recognize(root, &["!! pkg/cache/".into()], &[]).is_empty(),
+            "name"
+        );
     }
 }
