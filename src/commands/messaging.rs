@@ -648,7 +648,7 @@ pub(crate) fn render_deferred(deferred: &[crate::inbox::DeferredRow]) {
 }
 
 pub fn inbox(ctx: &Ctx, assigned_to: Option<String>, json: bool) -> Result<()> {
-    let mut inbox = collect_inbox(ctx, &ctx.store_for_reading()?, assigned_to.as_deref())?;
+    let mut inbox = collect_inbox(ctx, &ctx.store()?, assigned_to.as_deref())?;
     if let Ok(unowned) = crate::context::unowned_surface(ctx) {
         inbox.absorb_unowned(unowned);
     }

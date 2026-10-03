@@ -104,8 +104,30 @@ pub use workspace::{
     WorkspaceView,
 };
 
+/// The commands that record nothing, in every form and flag. An invocation of
+/// one reads the ledger through a handle that never parses the invoking
+/// checkout's append policy and refuses every append, and the guide prints its
+/// list from here.
+pub(crate) const READ_ONLY_COMMANDS: &[&str] = &[
+    "status",
+    "show",
+    "check",
+    "explain",
+    "findings",
+    "log",
+    "list",
+    "query",
+    "blocker-status",
+    "is-blocked",
+    "messages",
+    "inbox",
+    "catchup",
+];
+
 pub struct Ctx {
     pub cwd: PathBuf,
+    /// The invocation is one of `READ_ONLY_COMMANDS`.
+    pub reads_only: bool,
     pub actor: String,
     /// Where `actor` came from. A fallback identity is announced the first
     /// time an event would carry it, because an operator cannot correct an
@@ -285,14 +307,15 @@ fn event_id_after(previous: &str) -> Result<String> {
 }
 
 impl Ctx {
+    /// The ledger handle every path of this invocation reads and appends
+    /// through. A read-only command's handle never parses the invoking
+    /// checkout's append policy and refuses every append.
     pub(crate) fn store(&self) -> Result<Store> {
-        Store::discover(&self.cwd)
-    }
-
-    /// The store for a command that records nothing, opened without parsing
-    /// the invoking checkout's append policy.
-    pub(crate) fn store_for_reading(&self) -> Result<Store> {
-        Store::discover_for_reading(&self.cwd)
+        if self.reads_only {
+            Store::discover_for_reading(&self.cwd)
+        } else {
+            Store::discover(&self.cwd)
+        }
     }
 
     pub(crate) fn resolve_model(&self) -> ModelAttribution {
@@ -318,6 +341,7 @@ impl Ctx {
     pub(crate) fn with_cwd(&self, cwd: PathBuf) -> Ctx {
         Ctx {
             cwd,
+            reads_only: self.reads_only,
             actor: self.actor.clone(),
             actor_source: self.actor_source,
             operator: self.operator.clone(),
