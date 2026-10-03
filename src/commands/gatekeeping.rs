@@ -2461,6 +2461,8 @@ fn queue_step(
             })
         }
     };
+    ctx.ensure_declared_actor(store)?;
+    ctx.ensure_target_declares_actor(&st)?;
     let policy = crate::policy::load_at(&ctx.cwd, &target_head)?;
     let style = crate::style::resolved_style_with_policy(&policy, flags.clone())?;
     integration_history_with_policy(ctx, &st, &target_head, &policy)?;
@@ -2597,8 +2599,7 @@ fn queue_dry_run(
         !super::dependency_integrated_with_projection(id, &states, projected_closures)
     });
     if unresolved_targets.contains(&st.target_branch) {
-        let report =
-            ctx.report_for_integration(store, &st, &st.target_branch, integration::Shape::NoFf)?;
+        let report = ctx.report_for_queue(store, &st, None)?;
         if let Some(blocker) = report.blockers().iter().find(|blocker| {
             matches!(
                 blocker,
@@ -2609,8 +2610,20 @@ fn queue_dry_run(
                     | status::Blocker::BlockedByChanges
                     | status::Blocker::BlockingFindings
                     | status::Blocker::HoldActive
+                    | status::Blocker::NoValidApproval
+                    | status::Blocker::AcceptanceProbesNotGreen
             )
         }) {
+            eprint!("{}", render::blocker_explanation(&st, &report));
+            if *blocker == status::Blocker::NoValidApproval {
+                if let Some(verdict) = &report.verdict {
+                    eprintln!(
+                        "recorded review verdict: {}",
+                        serde_json::to_string(&verdict.verdict)?
+                    );
+                }
+                eprintln!("resolve review authorization with arc review {change_id} --verdict approved; a refusing verdict requires a superseding review");
+            }
             return Ok(QueueStep::Stopped {
                 code: blocker.exit_code(),
                 reason: blocker.as_str().into(),
@@ -2637,8 +2650,7 @@ fn queue_dry_run(
     integration_history_with_policy(ctx, &st, target, &policy)?;
     // Topology and constraints follow the projected destination; review,
     // findings, holds and iteration remain facts of the observed ledger.
-    let report =
-        ctx.report_for_integration(store, &st, &st.target_branch, integration::Shape::NoFf)?;
+    let report = ctx.report_for_queue(store, &st, Some(target))?;
     let mut advancing = None;
     let mut conflicts = report.needs_rebase;
     let mut unresolved = true;

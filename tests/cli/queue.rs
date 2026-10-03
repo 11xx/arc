@@ -405,3 +405,132 @@ fn a_queue_refuses_a_debt_reason_and_records_none() {
         "{status}"
     );
 }
+
+#[test]
+fn queue_actor_refusal_precedes_gate_preparation() {
+    for destination_only in [false, true] {
+        let repo = repo_with_gates();
+        let (first, _) = approved(&repo, "actor-first", "first.txt", "first\n");
+        let (second, _) = approved(&repo, "actor-second", "second.txt", "second\n");
+        repo.commit(
+            &repo.root,
+            ".arc/policy.toml",
+            "[policy]\nrequire_declared_actor = true\n",
+            "test: require actor",
+        );
+        if destination_only {
+            git(&repo.root, &["checkout", "-b", "invoking", "HEAD~1"]);
+        }
+        let before = events(&repo, &first);
+        let shown_before = json_stdout(repo.arc(&repo.root).args(["show", &first, "--json"]));
+        let refs = git_out(
+            &repo.root,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/arc",
+            ],
+        );
+        let assertion = repo
+            .arc(&repo.root)
+            .env_remove("ARC_ACTOR")
+            .args(["integrate", "--shape", "no-ff", &first, &second])
+            .assert()
+            .failure();
+        let out = String::from_utf8_lossy(&assertion.get_output().stdout);
+        assert!(out.contains("declared actor"), "{out}");
+        assert_eq!(events(&repo, &first), before);
+        assert_eq!(
+            git_out(
+                &repo.root,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname) %(objectname)",
+                    "refs/arc"
+                ]
+            ),
+            refs
+        );
+        let shown = json_stdout(repo.arc(&repo.root).args(["show", &first, "--json"]));
+        assert_eq!(shown, shown_before);
+    }
+}
+
+#[test]
+fn queue_approval_uses_projected_policy() {
+    let repo = repo_with_gates();
+    repo.commit(
+        &repo.root,
+        ".arc/policy.toml",
+        "[policy]\nforbid_self_approval = true\n",
+        "test: require independence",
+    );
+    let first = opened_change_id(&stdout(
+        repo.arc(&repo.root).args(["begin", "policy-first"]),
+    ));
+    let first_tree = repo.home.join(".worktrees/repo-policy-first");
+    repo.commit(
+        &first_tree,
+        ".arc/policy.toml",
+        "[policy]\nforbid_self_approval = false\n",
+        "test: allow self approval",
+    );
+    stdout(repo.arc(&first_tree).args(["snapshot", &first]));
+    stdout(
+        repo.arc(&first_tree)
+            .args(["review", &first, "--verdict", "approved"])
+            .env("ARC_ACTOR", "reviewer"),
+    );
+    let second = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "policy-second",
+        "--base",
+        "arc/policy-first",
+    ])));
+    let second_tree = repo.home.join(".worktrees/repo-policy-second");
+    repo.commit(&second_tree, "second.txt", "second\n", "test: second");
+    stdout(repo.arc(&second_tree).args(["snapshot", &second]));
+    stdout(
+        repo.arc(&second_tree)
+            .args(["review", &second, "--verdict", "approved"]),
+    );
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &first, &second, "--dry-run"]),
+    );
+    assert!(out.contains(&format!("would land: {second}")), "{out}");
+    stdout(repo.arc(&repo.root).args(["integrate", &first, &second]));
+}
+
+#[test]
+fn queue_unresolved_projection_retains_review_veto() {
+    let repo = repo_with_gates();
+    let (first, _) = approved(&repo, "veto-first", "first.txt", "first\n");
+    let (second, second_tree) = snapshotted(&repo, "veto-second", "second.txt", "second\n");
+    stdout(repo.arc(&second_tree).args([
+        "review",
+        &second,
+        "--verdict",
+        "changes-requested",
+        "--cause",
+        "executor",
+    ]));
+    repo.commit(&repo.root, "target.txt", "target\n", "test: diverge");
+    let assertion = repo
+        .arc(&repo.root)
+        .args([
+            "integrate",
+            &first,
+            &second,
+            "--shape",
+            "no-ff",
+            "--dry-run",
+        ])
+        .assert()
+        .code(3);
+    let out = String::from_utf8_lossy(&assertion.get_output().stdout);
+    let err = String::from_utf8_lossy(&assertion.get_output().stderr);
+    assert!(out.contains(&format!("stopped: {second}")), "{out}");
+    assert!(err.contains("changes-requested"), "{err}");
+    assert!(!out.contains(&format!("would land: {second}")), "{out}");
+}

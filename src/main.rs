@@ -1687,7 +1687,8 @@ enum Cmd {
     /// Configuration disagreement refuses before merging. A queue's
     /// summary includes style and history refusals and all unattempted members.
     /// Known history, style, divergence and lifecycle constraints refuse before
-    /// queue replay or gate preparation. Destination names select local branch
+    /// queue replay or gate preparation, including invoking-store and destination
+    /// declared-actor requirements. Destination names select local branch
     /// refs even when a tag has the same name.
     /// Ready-to-send reuse requires matching patchset, destination branch and
     /// revision, contribution history and authorization. Its event and state
@@ -1747,9 +1748,11 @@ enum Cmd {
         no_cleanup: bool,
         /// Report what would happen without merging, closing, or writing.
         /// Queues stop at known blockers before projection; future gates,
-        /// replay and checkout guards are conditional. Style and history resolve
-        /// against each member's projected destination. After a divergent merge or
-        /// replay, later destination ancestry, merged policy, style, history and
+        /// replay and checkout guards are conditional. Style, history, approval,
+        /// danger and provenance resolve against each member's projected destination.
+        /// Exact-patchset review vetoes stop even an unresolved projection.
+        /// After a divergent merge or replay, later destination ancestry,
+        /// merged policy, style, history and
         /// authorization remain conditional. Prerequisites follow
         /// supersession successors through projected closures, rejecting missing
         /// successors and cycles

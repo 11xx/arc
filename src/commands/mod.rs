@@ -644,10 +644,45 @@ impl Ctx {
     ) -> Result<StatusReport> {
         let mut selected = state.clone();
         selected.target_branch = target.to_string();
-        let states = store.readable_states()?;
         let declarations = crate::declarations::for_change(&self.cwd, &selected)?;
+        self.integration_report_with_declarations(store, &selected, shape, declarations)
+    }
+
+    /// Queue authorization uses destination declarations at the projected revision.
+    /// An unresolved destination retains review facts without policy constraints.
+    pub(crate) fn report_for_queue(
+        &self,
+        store: &Store,
+        state: &ChangeState,
+        target_revision: Option<&str>,
+    ) -> Result<StatusReport> {
+        let declarations = match target_revision {
+            Some(revision) => crate::declarations::for_change_at(&self.cwd, state, Some(revision))?,
+            None => crate::declarations::Declarations {
+                gates: crate::gates::GatesFile::default(),
+                policy: crate::policy::PolicyFile::default(),
+                notes: Vec::new(),
+                target_unreadable: false,
+            },
+        };
+        self.integration_report_with_declarations(
+            store,
+            state,
+            crate::integration::Shape::NoFf,
+            declarations,
+        )
+    }
+
+    fn integration_report_with_declarations(
+        &self,
+        store: &Store,
+        state: &ChangeState,
+        shape: crate::integration::Shape,
+        declarations: crate::declarations::Declarations,
+    ) -> Result<StatusReport> {
+        let states = store.readable_states()?;
         let mut report = status::build_at_with_shape(
-            &selected,
+            state,
             &self.cwd,
             &declarations.gates,
             &declarations.policy,

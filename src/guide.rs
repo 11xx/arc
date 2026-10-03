@@ -714,12 +714,15 @@ RUN A CHANGE
   destination, known holds, review blockers and iteration stop projection
   before advancing the destination.
   Prerequisites planned earlier are treated as conditionally closed. Each
-  member resolves style and counts history against its projected destination.
+  member resolves style, history, approval, danger and provenance against its
+  projected destination.
   A divergent merge or replay makes later destination ancestry, merged policy,
   style, history and authorization conditional; stale revisions cannot justify
-  a refusal. Queue execution checks known history, style, divergence and
-  lifecycle constraints before replay or gate preparation, and revalidates
-  authorization under the target and change locks. Future gates, replay and
+  a refusal. Exact-patchset review vetoes stop projection even when the
+  destination is unresolved. Queue execution checks invoking-store and destination actor
+  requirements, known history, style, divergence and lifecycle constraints
+  before replay or gate preparation, and revalidates authorization under the
+  target and change locks. Future gates, replay and
   checkout guards remain conditional.
   `--into`, `--message`, and `--debt` are single-change options: each member
   lands into its recorded target, and a debt reason binds to one patchset.
