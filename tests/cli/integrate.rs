@@ -1079,13 +1079,30 @@ fn every_read_only_command_reads_past_a_broken_policy() {
     git(&repo.root, &["add", ".arc/policy.toml"]);
     git(&repo.root, &["commit", "-m", "test: break the policy"]);
 
+    let mut failures = Vec::new();
+    for args in [
+        vec!["stats", "--json"],
+        vec!["diff", &change_id, "--integrated"],
+        vec!["resume", &change_id, "--json"],
+        vec!["prompt", &change_id],
+    ] {
+        let out = repo.arc(&repo.root).args(&args).output().unwrap();
+        if !out.status.success() {
+            failures.push(format!(
+                "{args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+
     let guide = stdout(&mut repo.arc(&repo.root));
     let listed: std::collections::BTreeSet<String> = guide
         .lines()
         .skip_while(|line| !line.ends_with("These commands record nothing, in any form or flag:"))
         .skip(1)
         .take_while(|line| line.starts_with("    "))
-        .flat_map(|line| line.split_whitespace().map(str::to_string))
+        .flat_map(|line| line.trim().split("  ").map(str::to_string))
         .collect();
     assert!(listed.contains("status"), "{guide}");
 
@@ -1123,6 +1140,71 @@ fn every_read_only_command_reads_past_a_broken_policy() {
         (vec!["catchup"], 0),
         (vec!["catchup", "--json"], 0),
     ];
+    let manual_dir = repo.home.join("manual");
+    let manual_dir = manual_dir.to_str().unwrap();
+    // Missing subjects exercise read errors without claiming a successful lookup.
+    let extra_forms = vec![
+        vec!["stats", "--json"],
+        vec!["stats", "--by-model", "--json"],
+        vec!["stats", "--provenance", "--json"],
+        vec!["diff", id, "--integrated"],
+        vec!["resume", id, "--json"],
+        vec!["prompt", id],
+        vec!["chain", "series", "--json"],
+        vec!["events", "--change", id],
+        vec!["watch", id, "--until", "integrated", "--json"],
+        vec!["export", id, "--output", "-"],
+        vec!["replica", "id", "--json"],
+        vec!["replica", "status", "--json"],
+        vec!["replica", "export", "--output", "-"],
+        vec!["env"],
+        vec!["completions", "bash"],
+        vec!["mangen", manual_dir],
+        vec!["fork", "list", "--json"],
+        vec!["fork", "thread", "missing"],
+        vec!["history", "resolve", &merged],
+        vec!["candidate", "show", "missing", "--json"],
+        vec!["candidate", "list", "--json"],
+        vec!["pass", "list", "--json"],
+        vec!["run", "list", "--json"],
+        vec!["policy", "path"],
+        vec!["config"],
+        vec!["config", "--check-writable", "--json"],
+        vec!["sandbox", "diff", manual_dir, "--json"],
+        vec!["doctor", "--json"],
+        vec!["hooks", "status"],
+        vec!["instructions", "git"],
+        vec!["workspace", "list", "--json"],
+        vec!["workspace", "inbox", "--json"],
+        vec!["workspace", "inventory", "--json"],
+        vec!["workspace", "backlog", "--json"],
+        vec!["workspace", "report", "--json"],
+        vec!["restack", id, "--advise"],
+        vec!["journal", "dir"],
+        vec!["journal", "doctor", "--json"],
+        vec![
+            "journal",
+            "source",
+            "--harness",
+            "test",
+            "--session",
+            "session-a",
+        ],
+        vec!["journal", "scaffolds", "--json"],
+        vec!["journal", "questions", "--json"],
+        vec!["journal", "events"],
+        vec!["journal", "catchup", "--json"],
+        vec!["journal", "memories", "--json"],
+        vec!["journal", "open", "--json"],
+        vec!["journal", "list", "--json"],
+        vec!["journal", "inventory", "--json"],
+        vec!["journal", "show", "missing.md", "--json"],
+        vec!["journal", "latest", "missing", "--json"],
+        vec!["journal", "discussion", "missing.md", "--json"],
+        vec!["journal", "stamp"],
+        vec!["journal", "lane", "list", "--json"],
+        vec!["journal", "export", "missing.md", "--output", "-"],
+    ];
     let exercised: std::collections::BTreeSet<String> = forms
         .iter()
         .map(|(args, _)| {
@@ -1131,7 +1213,35 @@ fn every_read_only_command_reads_past_a_broken_policy() {
                 .map_or_else(|| args[0].to_string(), |name| name.to_string())
         })
         .collect();
+    let mut exercised = exercised;
+    for args in &extra_forms {
+        let path = if listed.contains(args[0]) {
+            args[0].to_string()
+        } else if args[..2] == ["journal", "lane"] {
+            args[..3].join(" ")
+        } else {
+            args[..2].join(" ")
+        };
+        exercised.insert(path);
+    }
+    // Policy inspection must parse the file whose contents it reports.
+    exercised.insert("policy show".into());
     assert_eq!(exercised, listed, "every listed command has a form here");
+    let policy = repo
+        .arc(&repo.root)
+        .args(["policy", "show"])
+        .output()
+        .unwrap();
+    assert!(!policy.status.success());
+    assert!(String::from_utf8_lossy(&policy.stderr).contains("policy.toml"));
+    for args in extra_forms {
+        let out = repo.arc(&repo.root).args(&args).output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!stderr.contains("policy.toml"), "{args:?}\n{stderr}");
+        if !args.starts_with(&["history", "resolve"]) {
+            assert_ne!(out.status.code(), Some(2), "{args:?}\n{stderr}");
+        }
+    }
 
     for (args, code) in forms {
         let out = repo.arc(&repo.root).args(&args).output().unwrap();

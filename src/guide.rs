@@ -42,9 +42,11 @@ SAY WHO YOU ARE (before the first write)
   parse. These commands record nothing, in any form or flag:
 {READ_ONLY_COMMANDS}
   They read the ledger through a handle that never parses that policy and
-  refuses any append, and a derived handoff reads its change facts the same
-  way. The debt advisory reads the same file for its thresholds, and an
-  unreadable one sets none. Integration also checks the change target's
+  refuses any append. Entries name complete leaf paths. Output files,
+  generated manuals, hook commands and writability probes retain their
+  declared effects. Policy inspection parses the policy it reports.
+  A derived handoff reads its change facts the same way. The debt advisory
+  reads the same file for its thresholds, and an unreadable one sets none. Integration also checks the change target's
   policy before merging.
 
   Claude Code's Remote Control supplies `CLAUDE_CODE_BRIDGE_SESSION_ID` to

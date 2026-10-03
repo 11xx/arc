@@ -463,6 +463,7 @@ enum Cmd {
     /// often provenance is recorded
     /// Aggregate reads name unreadable changes with their errors on stderr
     /// and retain readable changes; a selected unreadable change fails
+    /// Records no events; ledger reads do not require a parseable append policy.
     Stats {
         /// Report a single change
         #[arg(long, id = "change_flag", conflicts_with_all = ["tag", "all"])]
@@ -511,6 +512,7 @@ enum Cmd {
         json: bool,
     },
     /// Render a recorded patchset using Git's native diff output
+    /// Records no events; ledger reads do not require a parseable append policy.
     Diff {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -753,6 +755,7 @@ enum Cmd {
     /// Show a tagged program in dependency order (arc-chain/4 schema)
     /// Aggregate reads name unreadable changes with their errors on stderr
     /// and retain readable changes; a selected unreadable change fails
+    /// Records no events; ledger reads do not require a parseable append policy.
     Chain {
         /// The tag naming the program to render
         tag: String,
@@ -847,6 +850,7 @@ enum Cmd {
         change: Option<String>,
     },
     /// Replay raw ledger events as NDJSON, optionally following new events
+    /// Records no events; ledger reads do not require a parseable append policy.
     Events {
         /// Continue emitting matching events appended after the replay
         #[arg(long)]
@@ -875,6 +879,7 @@ enum Cmd {
     /// Wait for a change, or a tagged series, to reach a ledger-derived condition
     /// Aggregate reads name unreadable changes with their errors on stderr
     /// and retain readable changes; a selected unreadable change fails
+    /// Records no events; ledger reads do not require a parseable append policy.
     Watch {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -938,6 +943,7 @@ enum Cmd {
         json: bool,
     },
     /// Export one change as a deterministic, versioned JSON bundle
+    /// Records no events; ledger reads do not require a parseable append policy.
     Export {
         /// Change to export as a versioned bundle
         change: String,
@@ -1507,19 +1513,23 @@ enum Cmd {
     /// ARC_MODEL is always unset for write-time resolution; declare a model
     /// by hand with ARC_MODEL or --model. Missing boundaries and incomplete
     /// head coverage are reported.
+    /// Records no events; ledger reads do not require a parseable append policy.
     Env,
     /// Print a shell completion script to stdout
+    /// Records no events; ledger reads do not require a parseable append policy.
     Completions {
         /// Target shell
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
     /// Render the man page (arc.1) into a directory
+    /// Records no events; ledger reads do not require a parseable append policy.
     Mangen {
         /// Output directory (created if absent)
         out_dir: std::path::PathBuf,
     },
     /// Resume one change with its brief, live state, and journal context
+    /// Records no events; ledger reads do not require a parseable append policy.
     Resume {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1555,6 +1565,7 @@ enum Cmd {
         take: bool,
     },
     /// Print one stable statusline summary for the current change
+    /// Records no events; ledger reads do not require a parseable append policy.
     Prompt {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1771,6 +1782,7 @@ enum Cmd {
         cmd: ForgeCmd,
     },
     /// Show the resolved configuration and store location as JSON
+    /// Records no events; ledger reads do not require a parseable append policy.
     Config {
         /// Probe every local path required to write the ledger
         #[arg(long)]
@@ -1790,6 +1802,7 @@ enum Cmd {
     /// Exits 0 when the ledger is clean or carries only advice, and 1 when it
     /// reports a problem. A ledger that cannot be read at all also exits 1,
     /// with the error on stderr and no report; a usage error exits 2.
+    /// Records no events; ledger reads do not require a parseable append policy.
     Doctor {
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
@@ -1816,6 +1829,7 @@ enum Cmd {
     /// Advise (never execute) rebases for open dependents of a change
     /// Aggregate reads name unreadable changes with their errors on stderr
     /// and retain readable changes; a selected unreadable change fails
+    /// Records no events; ledger reads do not require a parseable append policy.
     Restack {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1866,6 +1880,7 @@ enum Cmd {
 #[derive(Subcommand)]
 enum ReplicaCmd {
     /// Print this store's repository ID for an explicit pairing record
+    /// Records no events; ledger reads do not require a parseable append policy.
     Id {
         /// Emit the machine-readable JSON view
         #[arg(long)]
@@ -1885,6 +1900,7 @@ enum ReplicaCmd {
         repository_id: String,
     },
     /// Export this replica's known identity and authority events
+    /// Records no events; ledger reads do not require a parseable append policy.
     Export {
         /// Output file ('-' for stdout)
         #[arg(long)]
@@ -1900,6 +1916,7 @@ enum ReplicaCmd {
         dry_run: bool,
     },
     /// Show this store's replica, peers, and current authority
+    /// Records no events; ledger reads do not require a parseable append policy.
     Status {
         /// Emit the machine-readable JSON view
         #[arg(long)]
@@ -1972,6 +1989,7 @@ enum ForkCmd {
     /// List every fork this repository knows about
     /// Unreadable change promotions are named with their errors on stderr;
     /// readable promotions remain in the output
+    /// Records no events; ledger reads do not require a parseable append policy.
     List {
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
@@ -1982,6 +2000,7 @@ enum ForkCmd {
     /// The marker records the harness, session, model, and actor that made
     /// the fork. A field the marker does not carry prints as absent, and a
     /// resume line appears only for a harness whose resume form is stable.
+    /// Records no events; ledger reads do not require a parseable append policy.
     Thread {
         /// The fork slug — the part of the branch name after fork/
         slug: String,
@@ -1991,6 +2010,7 @@ enum ForkCmd {
 #[derive(Subcommand)]
 enum InstructionsCmd {
     /// Git contribution trailers and commit provenance, with no arc state
+    /// Records no events; ledger reads do not require a parseable append policy.
     Git {
         /// Report malformed role values and keys outside the convention in a
         /// commit message file ('-' for stdin); never rewrites it
@@ -2002,8 +2022,10 @@ enum InstructionsCmd {
 #[derive(Subcommand)]
 enum PolicyCmd {
     /// Show effective policy, gate environment probes, and each declaring file
+    /// Records no events; ledger reads do not require a parseable append policy.
     Show,
     /// Print the operator policy file path for this repository
+    /// Records no events; ledger reads do not require a parseable append policy.
     Path,
     /// Replace the operator policy file with TOML from a file or stdin
     Write {
@@ -2047,6 +2069,7 @@ enum WorkspaceCmd {
     /// Per-repo open-change rows across the data_root
     /// Unreadable changes are named with their errors on stderr; readable
     /// changes remain in the output
+    /// Records no events; ledger reads do not require a parseable append policy.
     List {
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
@@ -2055,6 +2078,7 @@ enum WorkspaceCmd {
     /// The inbox rollup for every registered project
     /// Unreadable changes are named with their errors on stderr; readable
     /// changes remain in the output
+    /// Records no events; ledger reads do not require a parseable append policy.
     Inbox {
         /// Report only projects whose canonical anchor is beneath this path
         #[arg(long, value_name = "PATH", conflicts_with_all = ["here", "global"])]
@@ -2074,6 +2098,7 @@ enum WorkspaceCmd {
     /// `--under`/`--here`/`--global` scope, reports the same collection
     /// manifest, exits 16 on a partial collection, and is versioned
     /// `arc-workspace-inventory/2`.
+    /// Records no events; ledger reads do not require a parseable append policy.
     Inventory {
         /// Read the hot journal directory, the cold archive, or both
         #[arg(long, value_enum, default_value_t = commands::StorageSelection::Hot)]
@@ -2097,6 +2122,7 @@ enum WorkspaceCmd {
     /// the projects it did read, names each failure, and exits 16
     /// Change observations name unreadable changes with their errors on
     /// stderr and retain readable changes
+    /// Records no events; ledger reads do not require a parseable append policy.
     Backlog {
         /// Count only journal items filed at or after this journal stamp
         /// (20260101T000000Z) or RFC 3339 timestamp, so the tiers read as
@@ -2144,6 +2170,7 @@ enum WorkspaceCmd {
     #[command(after_help = commands::report_rules_help())]
     /// Change observations name unreadable changes with their errors on
     /// stderr and retain readable changes
+    /// Records no events; ledger reads do not require a parseable append policy.
     Report {
         /// Report only projects whose canonical anchor is beneath this path
         #[arg(long, value_name = "PATH", conflicts_with_all = ["here", "global"])]
@@ -2177,6 +2204,7 @@ enum SandboxCmd {
     },
     /// Report what a sandbox's ledger events, journal events, and Git refs
     /// differ by from the project it was cloned from
+    /// Records no events; ledger reads do not require a parseable append policy.
     Diff {
         /// Prefix holding the sandbox
         prefix: String,
@@ -2208,6 +2236,7 @@ enum HooksCmd {
     /// Remove arc-authored hook scripts (leaves foreign hooks untouched)
     Uninstall,
     /// Report which hooks are installed and whether arc manages them
+    /// Records no events; ledger reads do not require a parseable append policy.
     Status,
 }
 
@@ -2322,6 +2351,7 @@ enum HistoryCmd {
     },
     /// Show where a recorded revision ended up through active maps.
     /// Withdrawn maps are ignored; exits 2 when no recorded rewrite moved it
+    /// Records no events; ledger reads do not require a parseable append policy.
     Resolve {
         /// A revision a rewrite may have moved; the surviving one is printed
         revision: String,
@@ -2448,6 +2478,7 @@ enum CandidateCmd {
     /// evaluations, selections naming it (promoted, superseded, or not
     /// promoted), promotion refs no `candidate-promoted` event records, and
     /// every registration sharing its tree. `--json` emits `arc-candidate/1`
+    /// Records no events; ledger reads do not require a parseable append policy.
     Show {
         /// Candidate id
         id: String,
@@ -2458,6 +2489,7 @@ enum CandidateCmd {
     /// List registrations as `show` renders them, grouping every tree more
     /// than one registration names under `shared_trees`. `--json` emits
     /// `arc-candidate/1`
+    /// Records no events; ledger reads do not require a parseable append policy.
     List {
         /// Only candidates answering this change's brief
         #[arg(long)]
@@ -2781,6 +2813,7 @@ enum PassCmd {
         reason: String,
     },
     /// List every recorded review pass, newest first
+    /// Records no events; ledger reads do not require a parseable append policy.
     List {
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
@@ -2847,6 +2880,7 @@ enum RunCmd {
     },
     /// List every dispatched run grouped by subject, with rounds numbered and
     /// deferrals still open
+    /// Records no events; ledger reads do not require a parseable append policy.
     List {
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
@@ -2922,6 +2956,16 @@ fn nested_subcommand_path(typed: Option<&str>) -> Option<&'static str> {
     }
 }
 
+fn command_path(matches: &clap::ArgMatches) -> String {
+    let mut names = Vec::new();
+    let mut current = matches;
+    while let Some((name, child)) = current.subcommand() {
+        names.push(name);
+        current = child;
+    }
+    names.join(" ")
+}
+
 /// Identity flags such as `--actor` and `--harness` are global and read the
 /// environment, so every command records who is acting without being told. A
 /// command that also filters on one of those names gets a single argument for
@@ -2929,13 +2973,11 @@ fn nested_subcommand_path(typed: Option<&str>) -> Option<&'static str> {
 /// explicit: a read narrows only on a value the caller typed, never on the
 /// ambient identity.
 ///
-/// Whether the command is read-only is answered here, from the subcommand's
-/// own name, so the table the guide prints is the one dispatch obeys.
+/// Whether the command is read-only is answered here, from the complete
+/// subcommand path, so the table the guide prints is the one dispatch obeys.
 fn parse_cli() -> Result<(Cli, bool), clap::Error> {
     let matches = Cli::command().try_get_matches()?;
-    let reads_only = matches
-        .subcommand_name()
-        .is_some_and(|name| commands::READ_ONLY_COMMANDS.contains(&name));
+    let reads_only = commands::READ_ONLY_COMMANDS.contains(&command_path(&matches).as_str());
     let mut cli = Cli::from_arg_matches(&matches)?;
     if let Some(Cmd::Query { actor, harness, .. }) = cli.cmd.as_mut() {
         let query = matches.subcommand_matches("query");
@@ -4698,22 +4740,154 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
 mod tests {
     use super::*;
 
-    /// A read-only entry names one real command with no subcommands of its
-    /// own: a misspelled entry promises what nothing obeys, and a command group
-    /// would carry its writing subcommands into the read-only table.
+    /// Every leaf has one classification; mixed read/write commands belong
+    /// to the writing list because at least one form can change state.
     #[test]
-    fn every_read_only_command_is_a_leaf_command() {
-        // The full command tree is built on a stack the size a main thread
-        // gets; a test thread's default is too small for it.
+    fn every_leaf_command_has_an_io_classification() {
+        const WRITING_COMMANDS: &[&str] = &[
+            "begin",
+            "brief",
+            "changelog",
+            "message",
+            "take",
+            "metadata",
+            "iterating",
+            "import",
+            "claim",
+            "release-claim",
+            "stage",
+            "squash",
+            "snapshot",
+            "keep",
+            "comment",
+            "finding",
+            "reply",
+            "resolve",
+            "review",
+            "external verdict",
+            "verify",
+            "done",
+            "rebase",
+            "rescue",
+            "hold",
+            "release-hold",
+            "integrate",
+            "debt",
+            "audit",
+            "close",
+            "replica init",
+            "replica pair",
+            "replica import",
+            "replica authority offer",
+            "replica authority reclaim",
+            "replica authority confirm-return",
+            "fork begin",
+            "fork adopt",
+            "fork retire",
+            "history withdraw",
+            "history rewrite",
+            "rewrite sign",
+            "rewrite trailers",
+            "candidate register",
+            "candidate judge",
+            "candidate retire",
+            "candidate verify",
+            "candidate select",
+            "candidate promote",
+            "context read",
+            "context declare",
+            "context capture",
+            "pass open",
+            "pass complete",
+            "pass abandon",
+            "run dispatch",
+            "run end",
+            "policy write",
+            "forge declare",
+            "forge link",
+            "forge checks",
+            "forge pr-state",
+            "sandbox clone",
+            "sandbox discard",
+            "hooks install",
+            "hooks uninstall",
+            "hook-run",
+            "fr",
+            "journal spool",
+            "journal note",
+            "journal feature-request",
+            "journal todo",
+            "journal handoff",
+            "journal plan",
+            "journal conclusion",
+            "journal decision",
+            "journal incident",
+            "journal memory",
+            "journal later",
+            "journal review",
+            "journal log",
+            "journal source-attach",
+            "journal position",
+            "journal verified",
+            "journal question",
+            "journal checkpoint",
+            "journal answer",
+            "journal suggest",
+            "journal delivered",
+            "journal correct",
+            "journal retract",
+            "journal reattribute",
+            "journal rebind",
+            "journal lane open",
+            "journal lane renew",
+            "journal lane close",
+            "journal consume",
+            "journal transition",
+            "journal archive",
+            "journal unarchive",
+            "journal import",
+        ];
+        fn leaves(command: &clap::Command, prefix: &str, out: &mut Vec<String>) {
+            for child in command.get_subcommands() {
+                let path = if prefix.is_empty() {
+                    child.get_name().to_string()
+                } else {
+                    format!("{prefix} {}", child.get_name())
+                };
+                if child.has_subcommands() {
+                    leaves(child, &path, out);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
         std::thread::Builder::new()
             .stack_size(16 << 20)
             .spawn(|| {
-                let cli = Cli::command();
-                for name in commands::READ_ONLY_COMMANDS {
-                    let command = cli
-                        .find_subcommand(name)
-                        .unwrap_or_else(|| panic!("{name} is not an arc command"));
-                    assert!(!command.has_subcommands(), "{name} has subcommands");
+                let mut paths = Vec::new();
+                leaves(&Cli::command(), "", &mut paths);
+                let read = commands::READ_ONLY_COMMANDS;
+                let unclassified: Vec<_> = paths
+                    .iter()
+                    .filter(|path| {
+                        !read.contains(&path.as_str()) && !WRITING_COMMANDS.contains(&path.as_str())
+                    })
+                    .collect();
+                assert!(
+                    unclassified.is_empty(),
+                    "unclassified leaves: {unclassified:?}"
+                );
+                for name in read.iter().chain(WRITING_COMMANDS) {
+                    assert_eq!(
+                        paths.iter().filter(|path| path.as_str() == *name).count(),
+                        1,
+                        "{name} must name one leaf"
+                    );
+                    assert_ne!(
+                        read.contains(name),
+                        WRITING_COMMANDS.contains(name),
+                        "{name} must have exactly one classification"
+                    );
                 }
             })
             .unwrap()

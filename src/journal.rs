@@ -294,6 +294,7 @@ pub enum LaneCmd {
         note: Option<String>,
     },
     /// List current live and stale lanes
+    /// Records no events; ledger reads do not require a parseable append policy.
     List {
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
@@ -513,6 +514,7 @@ pub enum JournalCmd {
     /// for a Git repository; then a default-root journal whose
     /// `bindings.jsonl` records this directory, or the one this directory's
     /// slug names. A prefix covering repositories shadows their Git journals
+    /// Records no events; ledger reads do not require a parseable append policy.
     Dir {
         /// Print the cold sibling archive directory
         #[arg(long)]
@@ -526,6 +528,7 @@ pub enum JournalCmd {
     /// Exits 0 when the journal is clean or carries only advice, and 1 when it
     /// reports a problem. A journal that cannot be read at all also exits 1,
     /// with the error on stderr and no report; a usage error exits 2.
+    /// Records no events; ledger reads do not require a parseable append policy.
     Doctor {
         /// Emit structured JSON instead of text
         #[arg(long)]
@@ -654,6 +657,7 @@ pub enum JournalCmd {
     /// events behind it. This is what makes a repeated scan of the same
     /// endings cheap — an item already filed, discharged, or judged to need
     /// no action answers for itself instead of being distilled again
+    /// Records no events; ledger reads do not require a parseable append policy.
     Source {
         /// The recording's harness, as the source reference recorded it
         #[arg(long)]
@@ -780,6 +784,7 @@ pub enum JournalCmd {
     /// using it. A journal artifact is append-only, so choosing between
     /// `--scaffold`, a kind's default, and `--no-scaffold` blind makes a
     /// wrong guess permanent
+    /// Records no events; ledger reads do not require a parseable append policy.
     Scaffolds {
         /// Print this scaffold's body instead of listing the names
         #[arg(long, value_name = "NAME")]
@@ -794,6 +799,7 @@ pub enum JournalCmd {
     /// placement, the options to offer, and which branches were already
     /// argued — and `answer` is where the reply comes back. `--json` carries
     /// the same, for building the prompt without parsing text
+    /// Records no events; ledger reads do not require a parseable append policy.
     Questions {
         /// Emit structured JSON instead of text
         #[arg(long)]
@@ -954,12 +960,14 @@ pub enum JournalCmd {
         dry_run: bool,
     },
     /// Dump the journal event log as newline-delimited JSON
+    /// Records no events; ledger reads do not require a parseable append policy.
     Events {
         /// Cap the number of events (oldest first)
         #[arg(long)]
         limit: Option<usize>,
     },
     /// Newest-first listing of artifacts plus the journal tail (read-only)
+    /// Records no events; ledger reads do not require a parseable append policy.
     Catchup {
         /// Cap the artifact list and journal tail (default 20)
         #[arg(long)]
@@ -972,12 +980,14 @@ pub enum JournalCmd {
         archived: bool,
     },
     /// List live shared project memories newest first
+    /// Records no events; ledger reads do not require a parseable append policy.
     Memories {
         /// Emit structured JSON instead of text
         #[arg(long)]
         json: bool,
     },
     /// List actionable artifacts in primary, later, and feature-request tiers
+    /// Records no events; ledger reads do not require a parseable append policy.
     Open {
         /// Restrict to one actionable kind; lower-priority tiers stay separate
         #[arg(long, value_parser = parse_journal_kind_filter)]
@@ -987,6 +997,7 @@ pub enum JournalCmd {
         json: bool,
     },
     /// List live artifacts (hot journal dir) newest first, optionally filtered by kind (read-only)
+    /// Records no events; ledger reads do not require a parseable append policy.
     List {
         /// Restrict to one kind
         #[arg(long, value_parser = parse_journal_kind_filter)]
@@ -997,6 +1008,7 @@ pub enum JournalCmd {
     },
     /// Project one observation of journal artifacts and their orthogonal
     /// lifecycle facts. Hot storage is the default; `--archived` is explicit.
+    /// Records no events; ledger reads do not require a parseable append policy.
     Inventory {
         /// Inspect one exact artifact instead of the selected actionable set.
         file: Option<String>,
@@ -1011,6 +1023,7 @@ pub enum JournalCmd {
         json: bool,
     },
     /// Print one artifact's raw Markdown body to stdout (read-only)
+    /// Records no events; ledger reads do not require a parseable append policy.
     Show {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
@@ -1026,6 +1039,7 @@ pub enum JournalCmd {
     /// one timestamp second a transition's terminal successor is preferred,
     /// and otherwise the order the event log recorded the artifacts in
     /// decides; a numeric filename suffix is never an ordering of its own.
+    /// Records no events; ledger reads do not require a parseable append policy.
     Latest {
         /// Kebab-case topic slug, matched exactly
         topic: String,
@@ -1044,6 +1058,7 @@ pub enum JournalCmd {
     /// branch nobody explored is visible before the question is answered.
     /// Resolve a discussion with `journal consume --outcome done --decision
     /// <file>`
+    /// Records no events; ledger reads do not require a parseable append policy.
     Discussion {
         /// Discussion artifact filename inside the journal dir (a name, not a path)
         filename: String,
@@ -1059,6 +1074,7 @@ pub enum JournalCmd {
         from: String,
     },
     /// Print the current UTC timestamp in the journal house format (read-only)
+    /// Records no events; ledger reads do not require a parseable append policy.
     Stamp,
     /// Manage advisory session work lanes
     Lane {
@@ -1160,6 +1176,7 @@ pub enum JournalCmd {
     /// replica. The bundle carries each artifact body, the events recorded
     /// about it, its body digest, the exporting replica, and every artifact
     /// the selection references by filename. Exports arc-journal-bundle/2
+    /// Records no events; ledger reads do not require a parseable append policy.
     Export {
         /// Artifact filenames inside the journal dir (names, not paths); the
         /// dependency closure of what they reference travels with them

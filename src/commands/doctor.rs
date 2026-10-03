@@ -121,7 +121,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     // reported as the problem it is, not surface as a fatal error inside
     // whatever happened to read it first — which is what doctor exists to
     // prevent for every other kind of event.
-    let store = Store::discover(&ctx.cwd)?;
+    let store = ctx.store()?;
     inspect_repository_events(&store, &mut problems);
     inspect_dangling_revisions(&ctx.cwd, &store, &states, &mut problems, &mut advice)?;
     inspect_refs(ctx, &states, &known_patchsets, &mut advice)?;
