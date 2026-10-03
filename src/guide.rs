@@ -74,8 +74,12 @@ SAY WHO YOU ARE (before the first write)
   each it does not; the model is a comment and ARC_MODEL is always unset. Pi re-sets its
   live recording file, model, and reasoning level for each tool call, so those
   answer while `PI_SESSION_ID` is the acting session, and a Claude subagent
-  shares its parent's session id, so while the session has an unfinished
-  subagent recording no model is named and the line says why.
+  shares its parent's session id. An unfinished child recording leaves the
+  invoking shell's owner ambiguous even if the parent's recording is newer,
+  so no model is named. Completed children permit the parent's recorded model.
+  Headless Claude runs use the same store evidence: a missing recording and
+  a recording without a model selection each receive an explicit diagnostic.
+  Launch configuration does not establish an observed acting model.
   OpenCode v2 (`opencode2`) is recognized without one — by
   `OPENCODE_TERMINAL` or its process ancestry — and prints the harness
   export, unsets the session and model, and leaves the session as a comment to

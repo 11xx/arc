@@ -28,7 +28,7 @@ fn corroborated(harness: &str) -> String {
 /// `arc env`'s line for a session id the harness's own store does not hold.
 fn uncorroborated(harness: &str) -> String {
     format!(
-        "unset ARC_SESSION_LINK\n# session uncorroborated: the {harness} session store resolved no recording for this id\n"
+        "# export ARC_MODEL=<model[#effort]>  # unavailable: no recording for this session in the configured store\nunset ARC_SESSION_LINK\n# session uncorroborated: the {harness} session store resolved no recording for this id\n"
     )
 }
 
@@ -1340,9 +1340,9 @@ fn env_withholds_the_model_while_a_subagent_recording_is_live() {
             concat!(
                 "export ARC_HARNESS='claude' ARC_SESSION='{session}'\n",
                 "unset ARC_MODEL\n",
-                "# export ARC_MODEL=<model[#effort]>  # unavailable: a subagent recording ",
-                "is newer than the session's last turn, so the session's model need not ",
-                "be the acting one\n",
+                "# export ARC_MODEL=<model[#effort]>  # unavailable: an unfinished subagent ",
+                "shares this session id; the store does not identify whether this shell ",
+                "belongs to the session or its subagent\n",
                 "{}"
             ),
             corroborated("claude"),
@@ -1365,6 +1365,38 @@ fn env_withholds_the_model_while_a_subagent_recording_is_live() {
             "export ARC_HARNESS='claude' ARC_SESSION='{session}'\nunset ARC_MODEL\n# model: claude-parent\n{}",
             corroborated("claude")
         )));
+}
+
+#[test]
+fn env_reports_shell_ambiguity_even_when_the_parent_recording_is_newer() {
+    let repo = Repo::new();
+    let session = "4074d881-1111-2222-3333-444444444444";
+    claude_with_subagent(&repo, session, "aef42352478f33196", false);
+    let path = repo
+        .home
+        .join(".claude/projects/-test-repo")
+        .join(format!("{session}.jsonl"));
+    let mut rows = fs::read_to_string(&path).unwrap();
+    rows.push_str(&format!(
+        "{}\n",
+        serde_json::json!({
+            "type":"assistant", "sessionId":session, "uuid":"parent-later",
+            "timestamp":"2026-01-01T10:00:05Z",
+            "message":{"role":"assistant", "model":"claude-parent", "content":"working"}
+        })
+    ));
+    fs::write(path, rows).unwrap();
+    let output = stdout(
+        repo.arc(&repo.root)
+            .arg("env")
+            .env("CLAUDE_CODE_SESSION_ID", session),
+    );
+    assert!(
+        output.contains("an unfinished subagent shares this session id"),
+        "{output}"
+    );
+    assert!(!output.contains("# model:"), "{output}");
+    assert!(!output.contains("newer than"), "{output}");
 }
 
 /// Every identity field `arc env` cannot establish is unset, so evaluating

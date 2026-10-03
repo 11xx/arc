@@ -360,7 +360,11 @@ fn resolved(harness: &str, session: &str) -> DetectedIdentity {
             (Some(model), observation, None)
         }
         session_store::SessionIdentity::Unnamed(reason) => (None, None, Some(reason.line())),
-        session_store::SessionIdentity::NoRecording => (None, None, None),
+        session_store::SessionIdentity::NoRecording => (
+            None,
+            None,
+            Some("no recording for this session in the configured store"),
+        ),
         session_store::SessionIdentity::Unresolved => (
             None,
             None,

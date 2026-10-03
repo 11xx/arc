@@ -550,3 +550,29 @@ fn snapshot_and_verification_share_one_invocations_model_observation() {
         );
     }
 }
+
+#[test]
+fn env_explains_headless_startup_evidence_and_resolves_a_recorded_model() {
+    let repo = Repo::new();
+    let absent = stdout(acting(&repo).arg("env"));
+    assert!(
+        absent.contains("unavailable: no recording for this session in the configured store"),
+        "{absent}"
+    );
+    recording(&repo, &[prompt("u1", "2026-01-01T10:00:00Z")]);
+    let pending = stdout(acting(&repo).arg("env"));
+    assert!(
+        pending.contains("unavailable: the recording names no model for this session"),
+        "{pending}"
+    );
+    recording(
+        &repo,
+        &[
+            prompt("u1", "2026-01-01T10:00:00Z"),
+            assistant("a1", "2026-01-01T10:00:01Z", "medium"),
+        ],
+    );
+    let ready = stdout(acting(&repo).arg("env"));
+    assert!(ready.contains("# model: m#medium"), "{ready}");
+    assert!(!ready.contains("unavailable:"), "{ready}");
+}

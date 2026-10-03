@@ -1508,8 +1508,12 @@ enum Cmd {
     /// `PI_SESSION_FILE`, `PI_MODEL`, and `PI_REASONING_LEVEL` for every tool
     /// call, so those answer in preference to the recording while
     /// `PI_SESSION_ID` is the acting session, and a Claude subagent shares
-    /// its parent's session id, so while the session has an unfinished
-    /// subagent recording no model is named and the line says why. Not every
+    /// its parent's session id. An unfinished child recording leaves the
+    /// invoking shell's owner ambiguous even if the parent's recording is newer,
+    /// so no model is named. Completed children permit the parent's recorded model.
+    /// Headless Claude runs use the same store evidence: a missing recording and
+    /// a recording without a model selection each receive an explicit diagnostic.
+    /// Launch configuration does not establish an observed acting model. Not every
     /// harness exports a session variable, and a harness that
     /// does may not in every mode. OpenCode v2 exports none and is recognized
     /// by `OPENCODE_TERMINAL` or its process ancestry, printing the harness

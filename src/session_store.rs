@@ -194,7 +194,7 @@ impl ModelUnavailable {
             ModelUnavailable::OutsideRead => "recording head not read; an earlier model selection may be outside the read",
             ModelUnavailable::NotRecorded => "the recording names no model for this session",
             ModelUnavailable::SubagentActivity => {
-                "a subagent recording is newer than the session's last turn, so the session's model need not be the acting one"
+                "an unfinished subagent shares this session id; the store does not identify whether this shell belongs to the session or its subagent"
             }
         }
     }
