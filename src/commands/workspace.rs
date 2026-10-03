@@ -3729,9 +3729,10 @@ mod report {
             assert!(debt.patchset_id.is_none());
             assert_eq!(debt.declared_at, "2026-09-26T00:00:00Z");
             assert_eq!(debt.declared_by, "lead");
+            let serialized = serde_json::to_value(debt).unwrap();
             assert_eq!(
-                serde_json::to_value(debt).unwrap()["patchset_id"],
-                serde_json::Value::Null
+                serialized.get("patchset_id"),
+                Some(&serde_json::Value::Null)
             );
         }
 
