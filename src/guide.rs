@@ -110,9 +110,11 @@ FROM A WORKSPACE ROOT (outside a project)
                        counted once with all its inbox predicates; questions
                        retain who may settle them. Two or more open changes
                        whose in-force briefs share a plan and slice, or a body
-                       digest, are one `shared-plan-slice` fact. `--help`
-                       lists every attention rule. Versioned
-                       `arc-workspace-report/3`.
+                       digest, are one `shared-plan-slice` fact. Review-owed
+                       rows carry the effective `kind`, declared `reason`,
+                       nullable `patchset_id`, `declared_at`, and `declared_by`.
+                       `--help` lists every attention rule. Versioned
+                       `arc-workspace-report/4`.
   cd <anchor>          Enter one project named by the report, then orient there.
 
 ORIENT INSIDE A PROJECT (start here, in this order)
@@ -1752,8 +1754,8 @@ SCHEMAS
     `arc-forks/2`                    arc fork list --json
     `arc-doctor/5`                   arc doctor --json
     `arc-workspace/1`                arc workspace list|inbox --json
-    `arc-workspace-backlog/19`       arc workspace backlog --json
-    `arc-workspace-report/3`         arc workspace report --json
+    `arc-workspace-backlog/20`       arc workspace backlog --json
+    `arc-workspace-report/4`         arc workspace report --json
     `arc-workspace-inventory/2`      arc workspace inventory --json
     `arc-writability/1`              arc config --check-writable --json
     `arc-sandbox-clone/1`            arc sandbox clone --json

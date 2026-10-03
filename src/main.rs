@@ -2079,7 +2079,8 @@ enum WorkspaceCmd {
         json: bool,
     },
     /// Ledger and journal backlog across every project, ranked by what is
-    /// blocked on a decision rather than on work. A partial collection keeps
+    /// blocked on a decision rather than on work. Debt rows carry their
+    /// verbatim `reason` and optional `patchset_id`. A partial collection keeps
     /// the projects it did read, names each failure, and exits 16
     /// Change observations name unreadable changes with their errors on
     /// stderr and retain readable changes
@@ -2115,8 +2116,11 @@ enum WorkspaceCmd {
         json: bool,
     },
     /// The backlog classified by named rules: each artifact's status, the
-    /// section it belongs to, and the facts that deserve attention, versioned
-    /// `arc-workspace-report/3`. With `--previous`, tallies carry their
+    /// section it belongs to, and the facts that deserve attention. Review-owed
+    /// rows carry the effective `kind`, declared `reason`, nullable
+    /// `patchset_id`, `declared_at`, and `declared_by`. Versioned
+    /// `arc-workspace-report/4`.
+    /// With `--previous`, tallies carry their
     /// earlier values when both collections are complete, new rows are marked
     /// when their project was observed both times, and every artifact that left
     /// the backlog is listed with its recorded reason. The baseline must have

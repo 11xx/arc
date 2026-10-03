@@ -165,7 +165,7 @@ fn workspace_backlog_reports_ledger_and_journal_together() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/19");
+    assert_eq!(value["schema"], "arc-workspace-backlog/20");
     assert_eq!(value["scope"]["mode"], "global");
     assert_backlog_summary_matches_rows(&value);
     let project = value["projects"]
@@ -792,7 +792,7 @@ fn workspace_backlog_scopes_reachable_and_missing_anchors_by_path() {
     let mut scoped = repo.arc(&workspace);
     scoped.args(["workspace", "backlog", "--here", "--json"]);
     let value = json_stdout_any_status(&mut scoped);
-    assert_eq!(value["schema"], "arc-workspace-backlog/19");
+    assert_eq!(value["schema"], "arc-workspace-backlog/20");
     assert_eq!(value["scope"]["mode"], "under");
     assert_eq!(
         value["scope"]["under"],
@@ -1045,7 +1045,7 @@ fn workspace_backlog_items() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--items", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/19");
+    assert_eq!(value["schema"], "arc-workspace-backlog/20");
     let project = value["projects"].as_array().unwrap().first().unwrap();
     let items = &project["items"];
     let assert_tier = |actual: &serde_json::Value, expected: &[(&str, &str)]| {
@@ -1883,7 +1883,7 @@ fn workspace_backlog_timestamp_interpretation_is_explicit() {
         "20260601T000000Z",
     ]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/19");
+    assert_eq!(value["schema"], "arc-workspace-backlog/20");
     let selection = &value["selection"];
     assert_eq!(selection["since"], "2026-06-01T00:00:00Z", "{}", selection);
     assert_eq!(selection["journal_counts"], "arrivals");
@@ -2527,7 +2527,7 @@ fn workspace_backlog_ranks_by_a_declared_fact_and_keeps_them_separate() {
     };
 
     let value = report(&[]);
-    assert_eq!(value["schema"], "arc-workspace-backlog/19");
+    assert_eq!(value["schema"], "arc-workspace-backlog/20");
     assert_eq!(value["ordering"]["basis"], "blocking", "{value}");
     assert_eq!(value["ordering"]["direction"], "descending");
 
@@ -2587,7 +2587,7 @@ fn workspace_backlog_keeps_held_only_and_deferred_only_projects() {
         held.arc(&held.root)
             .args(["workspace", "backlog", "--json"]),
     );
-    assert_eq!(value["schema"], "arc-workspace-backlog/19");
+    assert_eq!(value["schema"], "arc-workspace-backlog/20");
     let projects = value["projects"].as_array().unwrap();
     assert_eq!(projects.len(), 1, "{value}");
     let held_rows = projects[0]["changes"]["held"].as_array().unwrap();
@@ -3338,7 +3338,7 @@ fn workspace_report_classifies_and_explains_departures() {
     let mut first = repo.arc(&repo.root);
     first.args(["workspace", "report", "--json"]);
     let first = json_stdout(&mut first);
-    assert_eq!(first["schema"], "arc-workspace-report/3");
+    assert_eq!(first["schema"], "arc-workspace-report/4");
     assert!(first["previous"].is_null());
     let work = first["sections"]["work"].as_array().unwrap();
     let row = work
@@ -3425,10 +3425,61 @@ fn workspace_report_classifies_and_explains_departures() {
         .unwrap();
     assert!(!refused.status.success());
     assert!(
-        String::from_utf8_lossy(&refused.stderr).contains("expected arc-workspace-report/3"),
+        String::from_utf8_lossy(&refused.stderr).contains("expected arc-workspace-report/4"),
         "{}",
         String::from_utf8_lossy(&refused.stderr)
     );
+}
+
+#[test]
+fn workspace_report_debt_rows_carry_the_declaration() {
+    let repo = Repo::new();
+    let (change_id, _, _) = change_with_patchset(&repo, "owed-report");
+    let reason = "review is deferred until a second reader is available";
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "debt-declarer")
+        .args(["integrate", "owed-report", "--debt", reason])
+        .assert()
+        .success();
+
+    let show = json_stdout(repo.arc(&repo.root).args(["show", &change_id, "--json"]));
+    let patchset_id = show["debt"]["patchset_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("debt patchset missing: {show}"))
+        .to_string();
+
+    let backlog = json_stdout(
+        repo.arc(&repo.root)
+            .args(["workspace", "backlog", "--json"]),
+    );
+    assert_eq!(backlog["schema"], "arc-workspace-backlog/20");
+    let backlog_debt = backlog["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|project| project["debt_owed"].as_array().unwrap())
+        .find(|row| row["change_id"] == change_id)
+        .unwrap_or_else(|| panic!("backlog debt row missing: {backlog}"));
+    assert_eq!(backlog_debt["reason"], reason);
+    assert_eq!(backlog_debt["patchset_id"], patchset_id);
+    assert!(
+        backlog_debt["declared_at"].as_str().is_some(),
+        "{backlog_debt}"
+    );
+    assert_eq!(backlog_debt["declared_by"], "debt-declarer");
+
+    let report = json_stdout(repo.arc(&repo.root).args(["workspace", "report", "--json"]));
+    assert_eq!(report["schema"], "arc-workspace-report/4");
+    let debt = report["sections"]["review_owed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["change_id"] == change_id)
+        .unwrap_or_else(|| panic!("report debt row missing: {report}"));
+    assert_eq!(debt["reason"], reason);
+    assert_eq!(debt["patchset_id"], patchset_id);
+    assert_eq!(debt["declared_at"], backlog_debt["declared_at"]);
+    assert_eq!(debt["declared_by"], "debt-declarer");
 }
 
 #[test]
