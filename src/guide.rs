@@ -495,7 +495,8 @@ RUN A CHANGE
   arc verify --gate <name>           Run a declared gate; record the evidence.
   arc verify --command <cmd>         Same, for an ad hoc probe.
   arc verify --against <branch>      Run every required gate on the merge with
-                                     that branch, not on this head.
+                                     that branch, not on this head. Gates
+                                     are declared by that destination.
                                      A textual conflict refuses before any
                                      gate runs or evidence is recorded;
                                      rebase first.
@@ -685,9 +686,13 @@ RUN A CHANGE
   and obtain fresh review or declared debt. `--shape no-ff` creates a merge
   commit with the observed target and approved head as its parents; branch
   merge options, merge.ff and squash defaults cannot change its shape.
+  The selected destination supplies gate, actor, contribution and authorization
+  policy declarations throughout preflight and execution.
   `--message` names that merge commit and requires a resolved no-ff shape.
 
   Several changes, or `--tag`, make `integrate` a queue in dependency order.
+  Dry-run prerequisites follow supersession successors through projected
+  closures with the same missing-change and cycle safeguards as execution.
   Under ff-only it lands the stacked prefix and stops at the first member
   whose target is not an ancestor of its approved head. It never falls back
   to a merge commit. Under no-ff it can replay a branch whose target moved

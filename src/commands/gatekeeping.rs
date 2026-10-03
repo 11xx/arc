@@ -655,6 +655,9 @@ fn verify_against(
     note: Option<String>,
     skip_green: bool,
 ) -> Result<i32> {
+    let mut selected = st.clone();
+    selected.target_branch = target.to_string();
+    let st = &selected;
     let declarations = ctx.declarations(st)?.gates;
     let required = declarations.required_for(&st.profile);
     if required.is_empty() {
@@ -2455,7 +2458,7 @@ fn queue_step(
 
     if shape == integration::Shape::FfOnly && ff_diverged(ctx, &st, &st.target_branch)? {
         return Ok(QueueStep::Stopped {
-            code: refuse_divergence(&st, &st.target_branch),
+            code: refuse_divergence(&st, &st.target_branch, &st.target_branch),
             reason: "target diverged; rebase and fresh review or declared debt required".into(),
         });
     }
@@ -2559,7 +2562,10 @@ fn queue_dry_run(
         println!("dry-run: would skip {change_id} ({})", change_status(&st));
         return Ok(QueueStep::Skipped(change_status(&st).to_string()));
     }
-    st.blocked_by.retain(|id| !projected_closures.contains(id));
+    let states = store.readable_states()?;
+    st.blocked_by.retain(|id| {
+        !super::dependency_integrated_with_projection(id, &states, projected_closures)
+    });
     let actual = gitio::branch_head(&ctx.cwd, &st.target_branch).ok();
     let revision = projected_targets.get(&st.target_branch).or(actual.as_ref());
     let target = revision.map(String::as_str).unwrap_or(&st.target_branch);
@@ -2583,7 +2589,7 @@ fn queue_dry_run(
             if shape == integration::Shape::FfOnly && !integration::ff_eligible(ancestor, contained)
             {
                 return Ok(QueueStep::Stopped {
-                    code: refuse_divergence(&st, &st.target_branch),
+                    code: refuse_divergence(&st, &st.target_branch, &st.target_branch),
                     reason: "target diverged; rebase and fresh review or declared debt required"
                         .into(),
                 });
@@ -2890,12 +2896,16 @@ fn integrate_one(
     // The same store the merge's closure event will be appended to, so the
     // merge and the record are judged by one reading of the policy.
     ctx.ensure_declared_actor(&store)?;
-    ctx.ensure_target_declares_actor(&initial)?;
+    let mut selected = initial.clone();
+    selected.target_branch = target.clone();
+    ctx.ensure_target_declares_actor(&selected)?;
     // Cross-change order is always target, then change. This serializes the
     // target worktree without allowing an integration/metadata lock cycle.
     let target_lock = store.lock_target(&target)?;
     let transition = store.lock_transition(&change_id)?;
     let mut st = store.state(&change_id)?;
+    let recorded_target = st.target_branch.clone();
+    st.target_branch = target.clone();
     let policy = crate::policy::load_at(&ctx.cwd, &target)?;
     selection.validate(&policy)?;
     integration_history_with_policy(ctx, &st, &target, &policy)?;
@@ -2904,7 +2914,7 @@ fn integrate_one(
         return Ok(0);
     }
     if shape == integration::Shape::FfOnly && ff_diverged(ctx, &st, &target)? {
-        let code = refuse_divergence(&st, &target);
+        let code = refuse_divergence(&st, &target, &recorded_target);
         if let Some(prior) = &expect_basis {
             if let Ok(report) = ctx.report_for_integration(&store, &st, &target, shape) {
                 let outcome = integration::decide(
@@ -2922,6 +2932,7 @@ fn integrate_one(
         if let Some(debt) = debt {
             super::audit::declare_debt_locked(ctx, &store, &st, &debt.reason, debt.kind)?;
             st = store.state(&change_id)?;
+            st.target_branch = target.clone();
         }
     }
     // Integration is the last command that reads the change's worktree, and
@@ -2956,7 +2967,7 @@ fn integrate_one(
     let plan = match outcome.decision {
         Decision::Refused(refusal) => {
             let code = match refusal {
-                Refusal::Diverged => Ok(refuse_divergence(&st, &target)),
+                Refusal::Diverged => Ok(refuse_divergence(&st, &target, &recorded_target)),
                 Refusal::NotReady => {
                     eprint!("{}", render::blocker_explanation(&st, &report));
                     Ok(status::check_exit_code(&report))
@@ -3676,11 +3687,13 @@ fn integration_recovery(checkout: &Path, target: &str, cause: anyhow::Error) -> 
     anyhow::anyhow!("{cause}; refs/heads/{target}={revision}; checkout HEAD={head} ({branch}); index tree={index}; checkout status={dirt:?}; checkout={}", checkout.display())
 }
 
-fn refuse_divergence(st: &ChangeState, target: &str) -> i32 {
+fn refuse_divergence(st: &ChangeState, target: &str, recorded_target: &str) -> i32 {
+    let mut diagnostic = st.clone();
+    diagnostic.target_branch = recorded_target.to_string();
     eprintln!(
         "Cannot integrate {}: target {target} is not an ancestor of the approved head. {}",
         st.change_id,
-        integration::divergence_guidance(st, target)
+        integration::divergence_guidance(&diagnostic, target)
     );
     status::Blocker::NeedsRebase.exit_code()
 }
@@ -3796,16 +3809,22 @@ fn integrate_dry_run_json(
     target: &str,
     selection: &IntegrationStyle,
 ) -> Result<i32> {
+    let recorded_target = st.target_branch.clone();
+    let mut selected = st.clone();
+    selected.target_branch = target.to_string();
+    let st = &selected;
     let shape = selection.shape;
     ctx.ensure_declared_actor(store)?;
     ctx.ensure_target_declares_actor(st)?;
     if shape == integration::Shape::FfOnly && ff_diverged(ctx, st, target)? {
-        return Ok(refuse_divergence(st, target));
+        return Ok(refuse_divergence(st, target, &recorded_target));
     }
     let report = ctx.report_for_integration(store, st, target, shape)?;
     let facts = integration_facts(ctx, store, st, &report, target, selection);
     let plan = match integration::decide(facts, None).decision {
-        Decision::Refused(Refusal::Diverged) => return Ok(refuse_divergence(st, target)),
+        Decision::Refused(Refusal::Diverged) => {
+            return Ok(refuse_divergence(st, target, &recorded_target))
+        }
         Decision::Refused(Refusal::NotReady) => {
             eprint!("{}", render::blocker_explanation(st, &report));
             return Ok(status::check_exit_code(&report));
@@ -3840,6 +3859,10 @@ fn integrate_dry_run(
     message: Option<&str>,
     selection: &IntegrationStyle,
 ) -> Result<i32> {
+    let recorded_target = st.target_branch.clone();
+    let mut selected = st.clone();
+    selected.target_branch = target.to_string();
+    let st = &selected;
     let shape = selection.shape;
     // The refusals a real integration makes before touching anything: an
     // undeclared actor, and a target worktree that is missing or dirty. A dry
@@ -3871,7 +3894,7 @@ fn integrate_dry_run(
         return Ok(0);
     }
     if shape == integration::Shape::FfOnly && ff_diverged(ctx, st, target)? {
-        return Ok(refuse_divergence(st, target));
+        return Ok(refuse_divergence(st, target, &recorded_target));
     }
     let checkout = target_checkout(ctx, st, target)?;
     checkout_tracked_dirt(&checkout.path)?;

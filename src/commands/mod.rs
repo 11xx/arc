@@ -783,7 +783,8 @@ fn dependency_change_status(
             recovery: None,
         },
         Some(Closure::Superseded)
-            if resolve_supersession(change_id, states) == SupersessionResolution::Integrated =>
+            if resolve_supersession(change_id, states, &BTreeSet::new())
+                == SupersessionResolution::Integrated =>
         {
             status::DependencyChangeStatus {
                 change_id: change_id.into(),
@@ -810,9 +811,18 @@ fn dependency_change_status(
     }
 }
 
+pub(crate) fn dependency_integrated_with_projection(
+    change_id: &str,
+    states: &BTreeMap<String, ChangeState>,
+    projected: &BTreeSet<String>,
+) -> bool {
+    resolve_supersession(change_id, states, projected) == SupersessionResolution::Integrated
+}
+
 fn resolve_supersession(
     change_id: &str,
     states: &BTreeMap<String, ChangeState>,
+    projected: &BTreeSet<String>,
 ) -> SupersessionResolution {
     let mut current = change_id;
     let mut visited = BTreeSet::new();
@@ -824,6 +834,9 @@ fn resolve_supersession(
         let Some(state) = states.get(current) else {
             return SupersessionResolution::Wedged;
         };
+        if projected.contains(current) {
+            return SupersessionResolution::Integrated;
+        }
         let Some(closure) = &state.closure else {
             return SupersessionResolution::Wedged;
         };
@@ -1187,6 +1200,37 @@ mod tests {
                 created_at: Utc::now(),
             }),
         }
+    }
+
+    #[test]
+    fn projected_prerequisites_follow_successors_but_refuse_missing_and_cycles() {
+        let mut original = change("original", &[], Some(Closure::Superseded));
+        original.closure.as_mut().unwrap().superseded_by = Some("successor".into());
+        let mut states = BTreeMap::from([
+            ("original".into(), original),
+            ("successor".into(), change("successor", &[], None)),
+        ]);
+        let projected = BTreeSet::from(["successor".into()]);
+        assert!(dependency_integrated_with_projection(
+            "original", &states, &projected
+        ));
+        assert!(!dependency_integrated_with_projection(
+            "original",
+            &states,
+            &BTreeSet::new()
+        ));
+        states.remove("successor");
+        assert!(!dependency_integrated_with_projection(
+            "original", &states, &projected
+        ));
+        let mut successor = change("successor", &[], Some(Closure::Superseded));
+        successor.closure.as_mut().unwrap().superseded_by = Some("original".into());
+        states.insert("successor".into(), successor);
+        assert!(!dependency_integrated_with_projection(
+            "original",
+            &states,
+            &BTreeSet::new()
+        ));
     }
 
     #[test]

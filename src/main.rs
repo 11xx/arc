@@ -1471,6 +1471,8 @@ enum Cmd {
         /// merge. With --skip-green, a gate already green at that merged tree
         /// records reuse rather than running a second time.
         ///
+        /// Gate declarations come from this destination, including when it
+        /// differs from the change's recorded target.
         /// A textual conflict, including a modify/delete conflict, refuses
         /// before any gate runs or evidence is recorded; rebase first.
         #[arg(long, value_name = "BRANCH")]
@@ -1688,7 +1690,8 @@ enum Cmd {
         /// Integrate every change carrying all supplied tags, in dependency order
         #[arg(long)]
         tag: Vec<String>,
-        /// Merge into this branch instead of the recorded target
+        /// Integrate into this branch; its gate, actor, contribution and
+        /// authorization declarations govern every integration check
         #[arg(long)]
         into: Option<String>,
         /// Local integration shape: ff-only advances to the approved head
@@ -1720,7 +1723,9 @@ enum Cmd {
         /// Report what would happen without merging, closing, or writing.
         /// Queues stop at known blockers before projection; future gates,
         /// replay and checkout guards are conditional. Style and history resolve
-        /// against each member's projected destination
+        /// against each member's projected destination. Prerequisites follow
+        /// supersession successors through projected closures, rejecting missing
+        /// successors and cycles
         #[arg(long)]
         dry_run: bool,
         /// With --dry-run, print the plan as `arc-integration-plan/1` JSON:

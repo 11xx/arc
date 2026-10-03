@@ -3369,6 +3369,158 @@ exec '{git}' "$@"
     );
 }
 
+fn destination_policy(repo: &Repo, text: &str) {
+    git(&repo.root, &["checkout", "-b", "destination"]);
+    fs::write(repo.root.join(".arc/policy.toml"), text).unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "declare destination policy"]);
+    git(&repo.root, &["checkout", "master"]);
+}
+
+#[test]
+fn into_enforces_destination_declared_actor() {
+    let repo = repo_with_gates();
+    destination_policy(&repo, "[policy]\nrequire_declared_actor=true\n");
+    let destination = git_out(&repo.root, &["rev-parse", "destination"]);
+    let (id, _) = approved_change_based_on(
+        &repo,
+        "destination-actor",
+        "ff.txt",
+        "ff\n",
+        &[],
+        Some(&destination),
+    );
+    let recorded = events(&repo, &id);
+    repo.arc(&repo.root)
+        .args(["integrate", &id, "--into", "destination"])
+        .env_remove("ARC_ACTOR")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("declared actor"));
+    assert_eq!(
+        git_out(&repo.root, &["rev-parse", "destination"]),
+        destination
+    );
+    assert_eq!(events(&repo, &id), recorded);
+}
+
+#[test]
+fn into_uses_destination_contribution_and_basis() {
+    let repo = repo_with_gates();
+    destination_policy(
+        &repo,
+        "[contribution]\nhistory='preserve'\n[policy]\nrequire_declared_actor=true\n",
+    );
+    let destination = git_out(&repo.root, &["rev-parse", "destination"]);
+    let (id, _) = approved_change_based_on(
+        &repo,
+        "destination-send",
+        "ff.txt",
+        "ff\n",
+        &[],
+        Some(&destination),
+    );
+    let plan = json_stdout(repo.arc(&repo.root).args([
+        "integrate",
+        &id,
+        "--into",
+        "destination",
+        "--dry-run",
+        "--json",
+    ]));
+    assert_eq!(
+        plan["authorization"]["policy"]["require_declared_actor"],
+        true
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--into", "destination"]),
+    );
+    assert_eq!(
+        git_out(&repo.root, &["rev-parse", "destination"]),
+        destination
+    );
+    let send = events(&repo, &id)
+        .into_iter()
+        .find(|e| e["event_type"] == "ready-to-send")
+        .unwrap();
+    assert_eq!(
+        send["authorization"]["policy"]["require_declared_actor"],
+        true
+    );
+}
+
+#[test]
+fn queue_projects_supersession_successor_closure() {
+    let repo = repo_with_gates();
+    let (old, _) = approved_change(&repo, "superseded-base", "old.txt", "old\n");
+    let (successor, wt) = approved_change(&repo, "successor-base", "first.txt", "first\n");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["close", &old, "--superseded", &successor]),
+    );
+    let head = repo.head(&wt);
+    let (dependent, _) = approved_change_based_on(
+        &repo,
+        "supersession-dependent",
+        "second.txt",
+        "second\n",
+        &[&old],
+        Some(&head),
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &successor, &dependent, "--dry-run"]),
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &successor, &dependent]),
+    );
+}
+
+#[test]
+fn verify_against_uses_destination_gates_and_integration_basis() {
+    let repo = repo_with_gates();
+    git(&repo.root, &["checkout", "-b", "destination"]);
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.destination]\ncommand='true'\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "declare destination gates"]);
+    let destination = repo.head(&repo.root);
+    git(&repo.root, &["checkout", "master"]);
+    let (id, wt) = approved_change_based_on(
+        &repo,
+        "destination-gates",
+        "ff.txt",
+        "ff\n",
+        &[],
+        Some(&destination),
+    );
+    repo.arc(&repo.root)
+        .args(["integrate", &id, "--into", "destination"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("destination"));
+    stdout(
+        repo.arc(&wt)
+            .args(["verify", &id, "--against", "destination"]),
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--into", "destination"]),
+    );
+    let closure = events(&repo, &id)
+        .into_iter()
+        .find(|e| e["event_type"] == "change-integrated")
+        .unwrap();
+    let gates = closure["authorization"]["gates"].as_object().unwrap();
+    assert!(gates.contains_key("destination"), "{closure}");
+    assert!(!gates.contains_key("smoke"), "{closure}");
+}
+
 #[test]
 fn fast_forward_checkout_failure_preserves_competing_move() {
     use std::os::unix::fs::PermissionsExt;
