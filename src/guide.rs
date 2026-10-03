@@ -662,7 +662,9 @@ RUN A CHANGE
   run under the target and change locks against the policy consumed by
   authorization, retaining the original flags. Each authorization reading
   validates its shape constraints, history and declared actor requirement;
-  configuration disagreement refuses before merging.
+  configuration disagreement refuses before merging. Destination declarations
+  are pinned to the transition's observed revision; their actor requirement
+  and agreement with the authorization readings are required for integration.
   Under ff-only, the observed target must be an ancestor of the
   approved head, or already contain it. A fast-forward updates the target
   ref only if it still equals the observed revision, then updates the index

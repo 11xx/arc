@@ -3547,8 +3547,12 @@ fn authorization_basis(
 
 /// The gate and policy declarations in force for the change, normalized as
 /// an authorization basis records them.
-fn consumed_declarations(ctx: &Ctx, st: &ChangeState) -> Result<integration::Declarations> {
-    let declarations = ctx.declarations(st)?;
+fn consumed_declarations(
+    ctx: &Ctx,
+    st: &ChangeState,
+    target_revision: &str,
+) -> Result<integration::Declarations> {
+    let declarations = crate::declarations::for_change_at(&ctx.cwd, st, Some(target_revision))?;
     ensure_destination_actor(ctx, &declarations.policy)?;
     Ok(normalized_declarations(declarations, st))
 }
@@ -3873,6 +3877,12 @@ fn integration_facts(
     // Read under the target lock, so the merge is checked against the same
     // tree the authorization covers.
     let target_revision = gitio::branch_head(&ctx.cwd, target);
+    let mut selected = st.clone();
+    selected.target_branch = target.to_string();
+    let declarations = target_revision
+        .as_ref()
+        .map_err(|error| anyhow::anyhow!("{error}"))
+        .and_then(|revision| consumed_declarations(ctx, &selected, revision));
     let merge_inputs = match (&target_revision, &approved) {
         (Ok(revision), Some(approved)) => Some((revision.as_str(), approved.head.as_str())),
         _ => None,
@@ -3910,7 +3920,7 @@ fn integration_facts(
         target_is_ancestor,
         target: target.to_string(),
         approval: integration::approval(st, report, &patchset_id),
-        declarations: consumed_declarations(ctx, st).ok(),
+        declarations,
         approved,
         ready: report.integrate_ready(),
         basis,

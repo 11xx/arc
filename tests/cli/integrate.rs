@@ -4233,3 +4233,95 @@ fn no_ff_hook_failures_preserve_work_and_report_recovery() {
         }
     }
 }
+
+#[test]
+fn final_destination_actor_policy_refuses_concurrent_advance() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = repo_with_gates();
+    let counter = repo.home.join("probe-count");
+    let probe = repo.home.join("probe.sh");
+    let enabled = repo.home.join("enable-advance");
+    let armed = repo.home.join("advance-armed");
+    fs::write(&counter, "0").unwrap();
+    fs::write(
+        &probe,
+        format!(
+            r#"count=$(cat '{counter}')
+count=$((count + 1))
+printf '%s' "$count" > '{counter}'
+if [ "$count" = 2 ] && [ -f '{enabled}' ]; then touch '{armed}'; fi
+printf 'stable environment\n'
+"#,
+            counter = counter.display(),
+            enabled = enabled.display(),
+            armed = armed.display()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        format!(
+            "[gates.smoke]\ncommand='test -f README.md'\nenvironment=\"sh '{}'\"\n",
+            probe.display()
+        ),
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "gate environment probe"]);
+    let before = repo.head(&repo.root);
+    let (id, wt) = approved_change(&repo, "final-actor", "ff.txt", "ff\n");
+    repo.commit(
+        &wt,
+        ".arc/policy.toml",
+        "[policy]\nrequire_declared_actor=true\n",
+        "require destination actor",
+    );
+    let advanced = repo.head(&wt);
+    repo.commit(
+        &wt,
+        "after.txt",
+        "approved descendant\n",
+        "approved descendant",
+    );
+    stdout(repo.arc(&wt).args(["snapshot", &id, "--verify"]));
+    approve(&repo, &id);
+    let recorded = events(&repo, &id);
+    fs::write(&counter, "0").unwrap();
+    fs::write(&enabled, "enabled").unwrap();
+    let real_git =
+        String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout).unwrap();
+    let bin = repo.home.join("advance-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let wrapper = bin.join("git");
+    fs::write(
+        &wrapper,
+        format!(
+            r#"#!/bin/sh
+if [ "$1" = worktree ] && [ "$2" = list ] && [ -f '{armed}' ] && [ ! -f '{done}' ]; then
+    touch '{done}'
+    '{git}' read-tree -m -u '{before}' '{advanced}' || exit 1
+    '{git}' update-ref refs/heads/master '{advanced}' '{before}' || exit 1
+fi
+exec '{git}' "$@"
+"#,
+            armed = armed.display(),
+            done = repo.home.join("advanced").display(),
+            git = real_git.trim()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    repo.arc(&repo.root)
+        .args(["integrate", &id])
+        .env_remove("ARC_ACTOR")
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("declared actor"));
+    assert!(repo.home.join("advanced").exists());
+    assert_eq!(repo.head(&repo.root), advanced);
+    assert_eq!(events(&repo, &id), recorded);
+}

@@ -41,17 +41,28 @@ pub struct Declarations {
 /// result says so and carries only what the change's own head declares, for
 /// display: a change is never judged by declarations it could have written.
 pub fn for_change(cwd: &Path, state: &ChangeState) -> Result<Declarations> {
+    for_change_at(cwd, state, None)
+}
+
+/// Read destination declarations at an explicit revision when supplied.
+/// The branch name still identifies the destination in diagnostics.
+pub(crate) fn for_change_at(
+    cwd: &Path,
+    state: &ChangeState,
+    target_revision: Option<&str>,
+) -> Result<Declarations> {
     let toplevel = gitio::toplevel(cwd)?;
     let change_head = if state.is_closed() {
         state.closed_head().map(str::to_string)
     } else {
         gitio::branch_head(cwd, &state.branch).ok()
     };
-    let target_head = match state
-        .closure
-        .as_ref()
-        .and_then(|closure| closure.target_before.clone())
-    {
+    let target_head = match target_revision.map(str::to_string).or_else(|| {
+        state
+            .closure
+            .as_ref()
+            .and_then(|closure| closure.target_before.clone())
+    }) {
         Some(recorded) => Ok(recorded),
         None => gitio::branch_head(cwd, &state.target_branch),
     };

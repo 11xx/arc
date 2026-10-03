@@ -1678,6 +1678,8 @@ enum Cmd {
     /// Style and history constraints are validated under the target and change
     /// locks against each authorization policy reading, retaining the original
     /// flags and enforcing the destination's declared actor requirement.
+    /// Destination declarations are pinned to the transition's observed revision;
+    /// their actor requirement and agreement with authorization are required.
     /// Configuration disagreement refuses before merging. A queue's
     /// summary includes style and history refusals and all unattempted members.
     /// Known history, style, divergence and lifecycle constraints refuse before

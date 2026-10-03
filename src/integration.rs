@@ -113,7 +113,7 @@ pub struct IntegrationFacts {
     /// Readiness under the locks.
     pub ready: bool,
     pub approval: Approval,
-    pub declarations: Option<Declarations>,
+    pub declarations: anyhow::Result<Declarations>,
     pub basis: anyhow::Result<AuthorizationBasis>,
     pub confirmation: anyhow::Result<Confirmation>,
     pub contribution: anyhow::Result<Option<Contribution>>,
@@ -432,6 +432,10 @@ fn decision(facts: IntegrationFacts) -> Decision {
     if confirmed != authorization || !confirmation.ready {
         return Decision::Refused(Refusal::ConfigurationMoved);
     }
+    let declarations = observed!(facts.declarations);
+    if declarations.gates != authorization.gates || declarations.policy != authorization.policy {
+        return Decision::Refused(Refusal::ConfigurationMoved);
+    }
 
     if let Some(contribution) = observed!(facts.contribution) {
         return Decision::ReadyToSend(SendPlan {
@@ -518,7 +522,7 @@ fn moved(prior: &IntegrationPlan, facts: &IntegrationFacts) -> Vec<Moved> {
         }
     }
 
-    if let Some(declarations) = &facts.declarations {
+    if let Ok(declarations) = &facts.declarations {
         let before = &prior.authorization.gates;
         let after = &declarations.gates;
         let changed: Vec<String> = before
@@ -648,7 +652,7 @@ mod tests {
                 verdict_event_id: Some("verdict-1".to_string()),
                 ..Approval::default()
             },
-            declarations: Some(Declarations {
+            declarations: Ok(Declarations {
                 gates: gates(),
                 policy: policy(),
             }),
@@ -926,14 +930,17 @@ mod tests {
         let mut changed_policy = policy();
         changed_policy.forbid_self_approval = true;
         let facts = IntegrationFacts {
-            declarations: Some(Declarations {
+            declarations: Ok(Declarations {
                 gates: changed_gates,
                 policy: changed_policy,
             }),
             ..ready()
         };
         let outcome = decide(facts, Some(&prior()));
-        assert!(matches!(outcome.decision, Decision::Merge(_)));
+        assert!(matches!(
+            outcome.decision,
+            Decision::Refused(Refusal::ConfigurationMoved)
+        ));
         assert_eq!(
             outcome.moved,
             vec![
@@ -973,10 +980,22 @@ mod tests {
     }
 
     #[test]
+    fn final_destination_declaration_failure_refuses_integration() {
+        let facts = IntegrationFacts {
+            declarations: Err(anyhow!("destination policy requires a declared actor")),
+            ..ready()
+        };
+        let Decision::Refused(Refusal::Failed(error)) = decide(facts, None).decision else {
+            panic!("an unobserved destination cannot authorize integration");
+        };
+        assert!(error.to_string().contains("declared actor"));
+    }
+
+    #[test]
     fn an_unobserved_coordinate_is_not_reported_as_moved() {
         let facts = IntegrationFacts {
             target_revision: Err(anyhow!("target branch unreadable")),
-            declarations: None,
+            declarations: Err(anyhow!("destination declarations unreadable")),
             ..ready()
         };
         assert!(decide(facts, Some(&prior())).moved.is_empty());
