@@ -290,6 +290,14 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// Whether a probe declared on a brief based at `base` can discharge at a
+/// patchset whose head is `head`. It cannot when the base and the head are one
+/// revision, or when the brief predates base revisions and there is no
+/// revision to fail at — `verify --probe-phase baseline` refuses that outright.
+pub fn probe_base_dischargeable(base: Option<&str>, head: &str) -> bool {
+    base.is_some_and(|base| !base.is_empty() && base != head)
+}
+
 #[derive(Debug, Serialize)]
 pub struct FindingSummary {
     pub id: String,
@@ -1365,12 +1373,10 @@ fn build_report(
                         };
                         let baseline = evidence(ProbePhase::Baseline, baseline_revision);
                         let final_evidence = evidence(ProbePhase::Final, &patchset.head);
-                        // Either the baseline and the head are one revision,
-                        // or the brief predates base revisions and there is no
-                        // revision to fail at — `verify --probe-phase baseline`
-                        // refuses that outright.
-                        let undischargeable =
-                            baseline_revision.is_empty() || baseline_revision == patchset.head;
+                        let undischargeable = !probe_base_dischargeable(
+                            brief.base_revision.as_deref(),
+                            &patchset.head,
+                        );
                         ProbeStatus {
                             name: probe.name.clone(),
                             command: probe.command.clone(),

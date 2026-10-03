@@ -1323,12 +1323,13 @@ fn check_names_a_probe_that_cannot_discharge() {
 
 /// A change whose probe cannot discharge: brief v1 is based on the head under
 /// review, and the patchset binds it. With `implementer`, that actor claims
-/// the change, writes the work, and snapshots it, as delegated work does.
-/// Returns the change id, its worktree, and the revision the work started
-/// from.
+/// the change, writes the work, and snapshots it with `snapshot_args`, as
+/// delegated work does. Returns the change id, its worktree, and the revision
+/// the work started from.
 fn undischargeable_probe_change(
     repo: &Repo,
     implementer: Option<&str>,
+    snapshot_args: &[&str],
 ) -> (String, PathBuf, String) {
     let as_implementer = |cmd: &mut AssertCommand| {
         if let Some(actor) = implementer {
@@ -1363,6 +1364,7 @@ fn undischargeable_probe_change(
     as_implementer(&mut snapshot);
     snapshot
         .args(["snapshot", "rebase-probe"])
+        .args(snapshot_args)
         .assert()
         .success();
 
@@ -1376,24 +1378,29 @@ fn undischargeable_probe_change(
     (change, worktree, started_from)
 }
 
+/// `check`'s `Next step:` line for the probe, without the code after it.
+fn printed_probe_line(repo: &Repo, worktree: &Path) -> String {
+    let text = stdout_any_status(repo.arc(worktree).args(["check", "rebase-probe"]));
+    text.lines()
+        .find_map(|line| line.strip_prefix("Next step: "))
+        .and_then(|step| step.strip_suffix(" (run_probe:marker)"))
+        .unwrap_or_else(|| panic!("no probe step:\n{text}"))
+        .to_string()
+}
+
 /// The command in `check`'s `Next step:` line for the probe, without the
 /// prose before it or the code after it.
 fn printed_probe_step(repo: &Repo, worktree: &Path) -> String {
-    let text = stdout_any_status(repo.arc(worktree).args(["check", "rebase-probe"]));
-    let step = text
-        .lines()
-        .find_map(|line| line.strip_prefix("Next step: "))
-        .unwrap_or_else(|| panic!("no next step:\n{text}"));
-    step.strip_suffix(" (run_probe:marker)")
-        .and_then(|step| step.split_once(": arc "))
+    let step = printed_probe_line(repo, worktree);
+    step.split_once(": arc ")
         .map(|(_, rest)| format!("arc {rest}"))
         .unwrap_or_else(|| panic!("no command in {step:?}"))
 }
 
 /// The printed recovery with its placeholders filled the way a lead would.
 fn filled_recovery(repo: &Repo, command: &str, started_from: &str) -> String {
-    let body = repo.home.join("contract-v2.md");
-    fs::write(&body, "contract v2\n").unwrap();
+    let body = repo.home.join("contract-next.md");
+    fs::write(&body, "contract, rebased on where the work started\n").unwrap();
     let filled = command
         .replace("<file>", body.to_str().unwrap())
         .replace("<revision the work started from>", started_from)
@@ -1405,15 +1412,31 @@ fn filled_recovery(repo: &Repo, command: &str, started_from: &str) -> String {
     filled
 }
 
-/// After the recovery, the patchset binds brief v2 with the probes carried
-/// over, and following `check` from the baseline phase discharges the probe.
-fn discharge_recovered_probe(repo: &Repo, worktree: &Path, change: &str, started_from: &str) {
+/// The patchset's contributors as status reports them.
+fn patchset_contributors(repo: &Repo, worktree: &Path) -> serde_json::Value {
+    let status = json_stdout(
+        repo.arc(worktree)
+            .args(["status", "rebase-probe", "--json"]),
+    );
+    status["latest_patchset"]["contributors"].clone()
+}
+
+/// After the recovery, the patchset binds `brief_version` with the probes
+/// carried over, and following `check` from the baseline phase discharges the
+/// probe.
+fn discharge_recovered_probe(
+    repo: &Repo,
+    worktree: &Path,
+    change: &str,
+    started_from: &str,
+    brief_version: usize,
+) {
     let status = json_stdout(
         repo.arc(worktree)
             .args(["status", "rebase-probe", "--json"]),
     );
     let probe = &status["probes"][0];
-    assert_eq!(probe["brief_version"], 2, "{status}");
+    assert_eq!(probe["brief_version"], brief_version, "{status}");
     assert_eq!(probe["command"], "test -f 'marker.txt'", "{status}");
     assert_eq!(probe["baseline_revision"], started_from, "{status}");
     assert!(probe.get("undischargeable").is_none(), "{status}");
@@ -1457,20 +1480,20 @@ fn discharge_recovered_probe(repo: &Repo, worktree: &Path, change: &str, started
 #[test]
 fn undischargeable_probe_recovery_runs_as_printed() {
     let repo = Repo::new();
-    let (change, worktree, started_from) = undischargeable_probe_change(&repo, None);
+    let (change, worktree, started_from) = undischargeable_probe_change(&repo, None, &[]);
     let command = printed_probe_step(&repo, &worktree);
     assert!(
         command.starts_with(&format!("arc brief {change} --body-file <file> --base ")),
         "{command}"
     );
     assert!(
-        command.ends_with(&format!(" && arc snapshot {change} --contributors tester")),
+        command.ends_with(&format!(" && arc snapshot {change} --contributors=tester")),
         "{command}"
     );
     repo.arc_shell(&worktree, &filled_recovery(&repo, &command, &started_from))
         .assert()
         .success();
-    discharge_recovered_probe(&repo, &worktree, &change, &started_from);
+    discharge_recovered_probe(&repo, &worktree, &change, &started_from, 2);
 }
 
 /// Delegated work is snapshotted under the implementer's live claim, which
@@ -1479,7 +1502,8 @@ fn undischargeable_probe_recovery_runs_as_printed() {
 #[test]
 fn undischargeable_probe_recovery_runs_under_a_delegated_claim() {
     let repo = Repo::new();
-    let (change, worktree, started_from) = undischargeable_probe_change(&repo, Some("delegate"));
+    let (change, worktree, started_from) =
+        undischargeable_probe_change(&repo, Some("delegate"), &[]);
     repo.arc(&worktree)
         .args(["snapshot", "rebase-probe"])
         .assert()
@@ -1490,23 +1514,66 @@ fn undischargeable_probe_recovery_runs_under_a_delegated_claim() {
     let command = printed_probe_step(&repo, &worktree);
     assert!(
         command.ends_with(&format!(
-            " && arc snapshot {change} --contributors delegate"
+            " && arc snapshot {change} --contributors=delegate"
         )),
         "{command}"
     );
     repo.arc_shell(&worktree, &filled_recovery(&repo, &command, &started_from))
         .assert()
         .success();
-    let status = json_stdout(
-        repo.arc(&worktree)
-            .args(["status", "rebase-probe", "--json"]),
-    );
     assert_eq!(
-        status["latest_patchset"]["contributors"],
-        serde_json::json!(["delegate"]),
-        "{status}"
+        patchset_contributors(&repo, &worktree),
+        serde_json::json!(["delegate"])
     );
-    discharge_recovered_probe(&repo, &worktree, &change, &started_from);
+    discharge_recovered_probe(&repo, &worktree, &change, &started_from, 2);
+}
+
+/// Each contributor is its own `--contributors=` argument, so an identity
+/// that begins with `-` stays a value and one with a space stays one name:
+/// the rebound patchset declares exactly the set the earlier one did.
+#[test]
+fn undischargeable_probe_recovery_keeps_exact_identities() {
+    let repo = Repo::new();
+    let (change, worktree, started_from) =
+        undischargeable_probe_change(&repo, Some("-dash"), &["--contributors=-dash,Jane Doe"]);
+    let recorded = patchset_contributors(&repo, &worktree);
+    assert_eq!(recorded, serde_json::json!(["-dash", "Jane Doe"]));
+    let command = printed_probe_step(&repo, &worktree);
+    assert!(
+        command.ends_with(&format!(
+            " && arc snapshot {change} --contributors=-dash --contributors='Jane Doe'"
+        )),
+        "{command}"
+    );
+    repo.arc_shell(&worktree, &filled_recovery(&repo, &command, &started_from))
+        .assert()
+        .success();
+    assert_eq!(patchset_contributors(&repo, &worktree), recorded);
+    discharge_recovered_probe(&repo, &worktree, &change, &started_from, 2);
+}
+
+/// `--contributors` splits on commas, so an identity holding one has no
+/// exact spelling. The recovery leaves a placeholder and says why, rather
+/// than print a command that would record two contributors in its place.
+#[test]
+fn undischargeable_probe_recovery_names_an_identity_it_cannot_spell() {
+    let repo = Repo::new();
+    let (change, worktree, _) = undischargeable_probe_change(&repo, Some("Doe, Jane"), &[]);
+    let line = printed_probe_line(&repo, &worktree);
+    assert!(
+        line.contains(
+            r#"with <contributors> chosen by hand: "Doe, Jane" has no exact --contributors spelling"#
+        ),
+        "{line}"
+    );
+    let command = printed_probe_step(&repo, &worktree);
+    assert!(
+        command.ends_with(&format!(
+            " && arc snapshot {change} --contributors=<contributors>"
+        )),
+        "{command}"
+    );
+    assert!(!command.contains("Doe"), "{command}");
 }
 
 /// A recovery stopped after its brief leaves the patchset on the
@@ -1515,24 +1582,56 @@ fn undischargeable_probe_recovery_runs_under_a_delegated_claim() {
 #[test]
 fn undischargeable_probe_recovery_resumes_at_the_snapshot() {
     let repo = Repo::new();
-    let (change, worktree, started_from) = undischargeable_probe_change(&repo, Some("delegate"));
+    let (change, worktree, started_from) =
+        undischargeable_probe_change(&repo, Some("delegate"), &[]);
     let command = printed_probe_step(&repo, &worktree);
     let filled = filled_recovery(&repo, &command, &started_from);
     let (brief, _) = filled.split_once(" && ").unwrap();
     repo.arc_shell(&worktree, brief).assert().success();
 
-    let resumed = printed_probe_step(&repo, &worktree);
     assert_eq!(
-        resumed,
-        format!("arc snapshot {change} --contributors delegate")
+        printed_probe_line(&repo, &worktree),
+        format!(
+            "snapshot to bind the patchset to brief v2: arc snapshot {change} --contributors=delegate"
+        )
     );
-    let text = stdout_any_status(repo.arc(&worktree).args(["check", "rebase-probe"]));
-    assert!(
-        text.contains("snapshot to bind the patchset to brief v2: "),
-        "{text}"
-    );
+    let resumed = printed_probe_step(&repo, &worktree);
     repo.arc_shell(&worktree, &resumed).assert().success();
-    discharge_recovered_probe(&repo, &worktree, &change, &started_from);
+    discharge_recovered_probe(&repo, &worktree, &change, &started_from, 2);
+}
+
+/// A later brief that is itself based on the head under review would leave
+/// the probe undischargeable once bound, so it does not shorten the recovery
+/// to a snapshot: `check` prints the whole repair, which binds a third version.
+#[test]
+fn undischargeable_probe_recovery_repairs_a_later_brief_with_the_same_flaw() {
+    let repo = Repo::new();
+    let (change, worktree, started_from) =
+        undischargeable_probe_change(&repo, Some("delegate"), &[]);
+    repo.arc(&worktree)
+        .args([
+            "brief",
+            "rebase-probe",
+            "--body-file",
+            "-",
+            "--cause-note",
+            "restating the contract",
+            "--probes-json",
+            r#"[{"name":"marker","command":"test -f 'marker.txt'"}]"#,
+        ])
+        .write_stdin("contract v2, based on the invoking HEAD\n")
+        .assert()
+        .success();
+
+    let command = printed_probe_step(&repo, &worktree);
+    assert!(
+        command.starts_with(&format!("arc brief {change} --body-file <file> --base ")),
+        "{command}"
+    );
+    repo.arc_shell(&worktree, &filled_recovery(&repo, &command, &started_from))
+        .assert()
+        .success();
+    discharge_recovered_probe(&repo, &worktree, &change, &started_from, 3);
 }
 
 /// A gate and a probe are different objects reached by adjacent flags, so a
