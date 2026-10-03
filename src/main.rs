@@ -951,6 +951,8 @@ enum Cmd {
         since: Option<String>,
     },
     /// Import arc-bundle/6 or /5 into this repository's local store.
+    /// Candidate events stamp store format 7, including evaluations,
+    /// selections, and promotions without a registration in the bundle.
     /// Events without model provenance retain that absence. Repository map
     /// withdrawals apply even to maps already held; invalid withdrawal
     /// targets are refused before anything is written. So is a change history

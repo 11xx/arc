@@ -1324,7 +1324,9 @@ CANDIDATES
   Candidate events, evaluations, selections, and promotions among them, are
   repository events, so every `arc export` carries them
   and `arc import` judges them with the ledger they join before writing
-  anything. An imported registration whose tree this object store lacks stays
+  anything. Every imported candidate event stamps store format 7, including
+  an evaluation, selection, or promotion without its registration.
+  An imported registration whose tree this object store lacks stays
   unpinned. `arc doctor` advises on a pin with no registration and on
   undeclared `[candidates] evaluation_reuse`, and reports a registration a
   root reaches whose pin is gone.

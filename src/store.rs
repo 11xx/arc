@@ -11,6 +11,28 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
+// Candidate payload variants and wire names share one format barrier.
+macro_rules! candidate_format_barrier {
+    ($($variant:ident => $wire:literal),+ $(,)?) => {
+        fn is_candidate_payload(payload: &Payload) -> bool {
+            matches!(payload, $(Payload::$variant { .. })|+)
+        }
+
+        fn is_candidate_event_type(event_type: &str) -> bool {
+            matches!(event_type, $($wire)|+)
+        }
+    };
+}
+
+candidate_format_barrier! {
+    CandidateRegistered => "candidate-registered",
+    CandidateJudged => "candidate-judged",
+    CandidateRetired => "candidate-retired",
+    CandidateVerified => "candidate-verified",
+    CandidateSelected => "candidate-selected",
+    CandidatePromoted => "candidate-promoted",
+}
+
 const LOCK_TIMEOUT: Duration = Duration::from_secs(1);
 // The target lock is legitimately held across a real merge, so waiters get a
 // budget sized to an integration rather than to a state append.
@@ -618,13 +640,8 @@ impl Store {
             // An older reader skips the candidate ledger and would report a
             // registered candidate's pin as unregistered, and skips relations
             // and would explain a change with recorded reads as having none.
-            Payload::CandidateRegistered { .. }
-            | Payload::CandidateJudged { .. }
-            | Payload::CandidateRetired { .. }
-            | Payload::CandidateVerified { .. }
-            | Payload::CandidateSelected { .. }
-            | Payload::CandidatePromoted { .. }
-            | Payload::ContextRead { .. }
+            payload if is_candidate_payload(payload) => Some(7),
+            Payload::ContextRead { .. }
             | Payload::ContextDeclared { .. }
             | Payload::ContextCaptureReported { .. } => Some(7),
             Payload::HistoryRewriteWithdrawn { .. } => Some(7),
@@ -643,8 +660,8 @@ impl Store {
         self.stamp_format(introduced_in)
     }
 
-    /// The same stamp, decided from raw imported JSON, so the import path and
-    /// the typed record path cannot disagree about a wire-format addition.
+    /// Decide the format barrier from imported JSON. Candidate event kinds
+    /// share their classification with typed records.
     fn stamp_format_for_value(&self, value: Option<&serde_json::Value>) -> Result<()> {
         if value
             .and_then(|value| value.get("session_resolution"))
@@ -659,12 +676,10 @@ impl Store {
         {
             Some("external-verdict-recorded") | Some("ready-to-send") => Some(4),
             Some("history-rewritten") => Some(6),
-            Some("candidate-registered")
-            | Some("candidate-judged")
-            | Some("candidate-retired")
-            | Some("context-read")
-            | Some("context-declared")
-            | Some("context-capture-reported") => Some(7),
+            Some(event_type) if is_candidate_event_type(event_type) => Some(7),
+            Some("context-read") | Some("context-declared") | Some("context-capture-reported") => {
+                Some(7)
+            }
             Some("history-rewrite-withdrawn") => Some(7),
             Some("post-integration-disposition-recorded") => Some(7),
             Some("changelog-recorded")
@@ -1258,6 +1273,58 @@ mod tests {
         assert!(store.append_raw_repository_event(event_id, bytes).is_err());
         assert!(!dir.path().join("changes").exists());
         assert!(!dir.path().join("repository").exists());
+    }
+
+    #[test]
+    fn candidate_payloads_stamp_seven_through_typed_and_both_raw_paths() {
+        let fixtures = [
+            serde_json::json!({"event_type": "candidate-registered", "candidate_id": "candidate", "tree": "tree", "brief": {"change_id": "change", "brief_event_id": "version", "digest": "digest"}, "producers": ["producer"]}),
+            serde_json::json!({"event_type": "candidate-judged", "candidate_id": "candidate", "judgement": {"kind": "rejected"}, "reason": "reason"}),
+            serde_json::json!({"event_type": "candidate-retired", "candidate_id": "candidate"}),
+            serde_json::json!({"event_type": "candidate-verified", "candidate_id": "candidate", "tree": "tree", "gate": "test", "command": "true", "result": "pass", "hostname": "host"}),
+            serde_json::json!({"event_type": "candidate-selected", "candidate_id": "candidate", "destination": "change", "head": "head", "target_branch": "main", "target": "target", "tree": "tree", "reuse": "never", "contributors": ["producer"], "selector": "selector", "rationale": "reason"}),
+            serde_json::json!({"event_type": "candidate-promoted", "selection": "selection", "candidate_id": "candidate", "destination": "change", "patchset_id": "patchset", "revision": "revision"}),
+        ];
+        let mut mismatches = Vec::new();
+        for value in fixtures {
+            let payload: Payload = serde_json::from_value(value.clone()).unwrap();
+            let serialized = serde_json::to_value(&payload).unwrap();
+            assert_eq!(serialized["event_type"], value["event_type"]);
+            for path in ["typed", "raw-change", "raw-repository"] {
+                let dir = tempfile::tempdir().unwrap();
+                let config = StoreConfig {
+                    schema_version: 1,
+                    repository_id: "repo".into(),
+                    created_at: chrono::Utc::now(),
+                };
+                fs::write(
+                    dir.path().join("config.json"),
+                    serde_json::to_vec(&config).unwrap(),
+                )
+                .unwrap();
+                let store = test_store(dir.path());
+                let bytes = serde_json::to_vec(&value).unwrap();
+                match path {
+                    "typed" => store.stamp_format_for(&payload).unwrap(),
+                    "raw-change" => {
+                        store.append_raw_event("change", "event", &bytes).unwrap();
+                    }
+                    _ => {
+                        store.append_raw_repository_event("event", &bytes).unwrap();
+                    }
+                }
+                let stored: StoreConfig =
+                    serde_json::from_slice(&fs::read(dir.path().join("config.json")).unwrap())
+                        .unwrap();
+                if stored.schema_version != 7 {
+                    mismatches.push(format!(
+                        "{} {path}: {}",
+                        value["event_type"], stored.schema_version
+                    ));
+                }
+            }
+        }
+        assert!(mismatches.is_empty(), "{}", mismatches.join("; "));
     }
 
     #[test]
