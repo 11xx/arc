@@ -213,13 +213,14 @@ pub fn branch_head(cwd: &Path, branch: &str) -> Result<String> {
 
 pub fn current_branch(cwd: &Path) -> Result<Option<String>> {
     let out = git_command()
-        .args(["symbolic-ref", "--short", "-q", "HEAD"])
+        .args(["symbolic-ref", "-q", "HEAD"])
         .current_dir(cwd)
         .output()?;
     if out.status.success() {
-        Ok(Some(
-            String::from_utf8_lossy(&out.stdout).trim().to_string(),
-        ))
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .strip_prefix("refs/heads/")
+            .map(str::to_string))
     } else {
         Ok(None)
     }
@@ -1308,7 +1309,7 @@ pub fn create_branch(cwd: &Path, branch: &str, base: &str) -> Result<()> {
 }
 
 pub fn checkout(cwd: &Path, branch: &str) -> Result<()> {
-    git(cwd, &["checkout", branch])?;
+    git(cwd, &["switch", "--no-guess", "--", branch])?;
     Ok(())
 }
 

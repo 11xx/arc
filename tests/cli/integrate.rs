@@ -3572,3 +3572,222 @@ exec '{git}' "$@"
     assert!(!repo.root.join("ff.txt").exists());
     assert_eq!(events(&repo, &id), recorded);
 }
+
+#[test]
+fn third_round_destination_tag_cannot_shadow_history() {
+    let repo = repo_with_gates();
+    style_policy(&repo, "[integration]\nhistory='squash'\n");
+    let (id, wt) = approved_change(&repo, "shadow", "one.txt", "one\n");
+    repo.commit(
+        &wt,
+        ".arc/policy.toml",
+        "[integration]\nhistory='preserve'\nshapes=['no-ff']\n",
+        "feat: two",
+    );
+    stdout(repo.arc(&wt).args(["snapshot", &id]));
+    stdout(repo.arc(&wt).args(["verify", &id, "--gate", "smoke"]));
+    stdout(repo.arc(&wt).args(["review", &id, "--verdict", "approved"]));
+    let check = stdout_any_status(repo.arc(&repo.root).args(["check", &id, "--json"]));
+    let target = repo.head(&repo.root);
+    git(&repo.root, &["tag", "master", &repo.head(&wt)]);
+    assert_eq!(
+        check,
+        stdout_any_status(repo.arc(&repo.root).args(["check", &id, "--json"]))
+    );
+    for args in [
+        vec!["integrate", &id],
+        vec!["integrate", &id, "--dry-run"],
+        vec!["integrate", "--tag", "series"],
+        vec!["integrate", "--tag", "series", "--dry-run"],
+    ] {
+        let out = repo.arc(&repo.root).args(args).output().unwrap();
+        assert!(
+            !out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(text.contains("integration history is squash"), "{text}");
+        assert_eq!(repo.head(&repo.root), target);
+    }
+}
+
+#[test]
+fn third_round_queue_history_preflight_preserves_conflicting_checkout() {
+    let repo = repo_with_gates();
+    style_policy(
+        &repo,
+        "[integration]\nhistory='squash'\n[defaults.integration]\nshape='no-ff'\n",
+    );
+    let (id, wt) = approved_change(&repo, "preflight", "README.md", "change\n");
+    repo.commit(&wt, "extra.txt", "extra\n", "feat: extra");
+    stdout(repo.arc(&wt).args(["snapshot", &id]));
+    stdout(repo.arc(&wt).args(["review", &id, "--verdict", "approved"]));
+    repo.commit(&repo.root, "README.md", "target\n", "feat: target");
+    let head = repo.head(&wt);
+    let before = events(&repo, &id);
+    let refs = git_out(&repo.root, &["show-ref"]);
+    let out = stdout_any_status(repo.arc(&repo.root).args(["integrate", "--tag", "series"]));
+    assert!(out.contains("integration history is squash"), "{out}");
+    assert_eq!(repo.head(&wt), head);
+    assert_eq!(events(&repo, &id), before);
+    assert_eq!(git_out(&repo.root, &["show-ref"]), refs);
+    assert!(git_out(&wt, &["status", "--porcelain"]).is_empty());
+    assert!(git_out(&wt, &["rev-parse", "--git-path", "rebase-merge"])
+        .lines()
+        .all(|p| !Path::new(p).exists()));
+}
+
+#[test]
+fn third_round_divergent_queue_projection_is_conditional() {
+    let repo = repo_with_gates();
+    style_policy(
+        &repo,
+        "[integration]\nhistory='squash'\n[defaults.integration]\nshape='no-ff'\n",
+    );
+    let (a, _) = approved_change(&repo, "project-a", "a.txt", "a\n");
+    let (b, wt) = approved_change_blocked_by(&repo, "project-b", "b.txt", "b\n", &[&a]);
+    let (c, _) = approved_change_based_on(
+        &repo,
+        "project-c",
+        "c.txt",
+        "c\n",
+        &[&b],
+        Some(&repo.head(&wt)),
+    );
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &a, &b, &c, "--dry-run"]),
+    );
+    assert!(out.contains(&format!("would land: {c}")), "{out}");
+    assert!(out.contains("conditional"), "{out}");
+    stdout(repo.arc(&repo.root).args(["integrate", &a, &b, &c]));
+}
+
+#[test]
+fn third_round_queue_history_preflight_prevents_gate_synthesis() {
+    let repo = repo_with_gates();
+    style_policy(
+        &repo,
+        "[integration]\nhistory='squash'\n[defaults.integration]\nshape='no-ff'\n",
+    );
+    let (id, wt) = approved_change(&repo, "no-synthesis", "one.txt", "one\n");
+    repo.commit(&wt, "two.txt", "two\n", "feat: two");
+    stdout(repo.arc(&wt).args(["snapshot", &id]));
+    stdout(repo.arc(&wt).args(["review", &id, "--verdict", "approved"]));
+    let before = events(&repo, &id);
+    let refs = git_out(&repo.root, &["show-ref"]);
+    let out = stdout_any_status(repo.arc(&repo.root).args(["integrate", "--tag", "series"]));
+    assert!(out.contains("integration history is squash"), "{out}");
+    assert_eq!(events(&repo, &id), before);
+    assert_eq!(git_out(&repo.root, &["show-ref"]), refs);
+}
+
+#[test]
+fn third_round_queue_merged_policy_checks_are_conditional() {
+    let repo = repo_with_gates();
+    style_policy(
+        &repo,
+        "[integration]\nhistory='squash'\n[defaults.integration]\nshape='no-ff'\n",
+    );
+    let (a, _) = approved_change(&repo, "policy-a", "a.txt", "a\n");
+    let (b, wt) = approved_change_blocked_by(
+        &repo,
+        "policy-b",
+        ".arc/policy.toml",
+        "[integration]\nhistory='preserve'\n[defaults.integration]\nshape='no-ff'\n",
+        &[&a],
+    );
+    let (c, wt) = approved_change_based_on(
+        &repo,
+        "policy-c",
+        "c.txt",
+        "c\n",
+        &[&b],
+        Some(&repo.head(&wt)),
+    );
+    repo.commit(&wt, "extra.txt", "extra\n", "feat: extra");
+    stdout(repo.arc(&wt).args(["snapshot", &c]));
+    stdout(repo.arc(&wt).args(["verify", &c, "--gate", "smoke"]));
+    stdout(repo.arc(&wt).args(["review", &c, "--verdict", "approved"]));
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &a, &b, &c, "--dry-run"]),
+    );
+    assert!(out.contains("merged policy"), "{out}");
+    assert!(out.contains(&format!("would land: {c}")), "{out}");
+    stdout(repo.arc(&repo.root).args(["integrate", &a, &b, &c]));
+}
+
+#[test]
+fn third_round_destination_tag_allows_valid_branch_integration() {
+    for shape in ["ff-only", "no-ff"] {
+        for queue in [false, true] {
+            let repo = repo_with_gates();
+            style_policy(&repo, "[integration]\nhistory='squash'\n");
+            let (id, wt) = approved_change(&repo, "valid-shadow", "one.txt", "one\n");
+            let target = repo.head(&repo.root);
+            let head = repo.head(&wt);
+            git(&repo.root, &["tag", "master", &head]);
+            stdout(repo.arc(&repo.root).args(["check", &id, "--shape", shape]));
+            let plan = json_stdout(repo.arc(&repo.root).args([
+                "integrate",
+                &id,
+                "--shape",
+                shape,
+                "--dry-run",
+                "--json",
+            ]));
+            assert_eq!(plan["target_revision"], target);
+            let selected = if queue {
+                vec!["--tag", "series"]
+            } else {
+                vec![id.as_str()]
+            };
+            let mut args = vec!["integrate", "--shape", shape];
+            args.extend(selected);
+            let mut dry = args.clone();
+            dry.push("--dry-run");
+            stdout(repo.arc(&repo.root).args(dry));
+            stdout(repo.arc(&repo.root).args(args));
+            assert_eq!(
+                git_out(&repo.root, &["symbolic-ref", "HEAD"]),
+                "refs/heads/master"
+            );
+            git(
+                &repo.root,
+                &["merge-base", "--is-ancestor", &head, "refs/heads/master"],
+            );
+        }
+    }
+}
+
+#[test]
+fn third_round_queue_known_lifecycle_blockers_precede_preparation() {
+    for blocker in ["hold", "iterating"] {
+        let repo = repo_with_gates();
+        let (id, wt) = approved_change(&repo, "lifecycle-preflight", "one.txt", "one\n");
+        repo.commit(&wt, "two.txt", "two\n", "feat: two");
+        stdout(repo.arc(&wt).args(["snapshot", &id]));
+        stdout(repo.arc(&wt).args(["review", &id, "--verdict", "approved"]));
+        if blocker == "hold" {
+            stdout(repo.arc(&wt).args(["hold", &id, "--reason", "waiting"]));
+        } else {
+            stdout(repo.arc(&wt).args(["iterating", &id]));
+        }
+        let before = events(&repo, &id);
+        let refs = git_out(&repo.root, &["show-ref"]);
+        let out = repo
+            .arc(&repo.root)
+            .args(["integrate", "--tag", "series", "--shape", "no-ff"])
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        assert_eq!(events(&repo, &id), before);
+        assert_eq!(git_out(&repo.root, &["show-ref"]), refs);
+    }
+}

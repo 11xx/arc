@@ -201,6 +201,12 @@ pub fn resolved_style(cwd: &Path, revision: &str, flags: StyleFlags) -> Result<S
         layers.push((source.clone(), parse(&text, &source, true)?, true));
     }
     if crate::gitio::common_dir(cwd).is_ok() {
+        let branch_head = if crate::gitio::branch_exists(cwd, revision) {
+            Some(crate::gitio::branch_head(cwd, revision)?)
+        } else {
+            None
+        };
+        let revision = branch_head.as_deref().unwrap_or(revision);
         if let Some(text) = crate::gitio::file_at(cwd, revision, ".arc/policy.toml")? {
             let source = format!("project:.arc/policy.toml at {revision}");
             layers.push((source.clone(), parse(&text, &source, false)?, false));

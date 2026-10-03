@@ -664,7 +664,6 @@ fn verify_against(
         bail!("no gates declared for profile {}", st.profile);
     }
     let target_head = gitio::branch_head(&ctx.cwd, target)
-        .or_else(|_| gitio::rev_parse(&ctx.cwd, target))
         .with_context(|| format!("cannot resolve target {target:?}"))?;
     let change_head = gitio::branch_head(&ctx.cwd, &st.branch)?;
     let merged_tree = gitio::merge_outcome(&ctx.cwd, &target_head, &change_head)?
@@ -1385,7 +1384,7 @@ pub fn rebase(
         chrono::Utc::now(),
     )?;
 
-    match gitio::rebase(&wt, &st.target_branch)? {
+    match gitio::rebase(&wt, &target_head)? {
         gitio::RebaseOutcome::Stopped => {
             let conflicts = gitio::unmerged_paths(&wt)?;
             println!(
@@ -2359,6 +2358,7 @@ fn integrate_queue(
     let mut steps: Vec<(String, QueueStep)> = Vec::new();
     let mut stop_code = 0;
     let mut projected_targets = BTreeMap::new();
+    let mut unresolved_targets = std::collections::BTreeSet::new();
     let mut projected_closures = std::collections::BTreeSet::new();
     let mut remaining = order.iter();
     for change_id in remaining.by_ref() {
@@ -2390,6 +2390,7 @@ fn integrate_queue(
                     ..Default::default()
                 },
                 &mut projected_targets,
+                &mut unresolved_targets,
                 &mut projected_closures,
             )
         } else {
@@ -2451,7 +2452,21 @@ fn queue_step(
         println!("{change_id}: {}", change_status(&st));
         return Ok(QueueStep::Skipped(change_status(&st).to_string()));
     }
-    let style = crate::style::resolved_style(&ctx.cwd, &st.target_branch, flags.clone())?;
+    let target_head = match gitio::branch_head(&ctx.cwd, &st.target_branch) {
+        Ok(head) => head,
+        Err(error) => {
+            return Ok(QueueStep::Stopped {
+                code: status::Blocker::TargetUnreadable.exit_code(),
+                reason: format!("target branch unreadable: {error}"),
+            })
+        }
+    };
+    let policy = crate::policy::load_at(&ctx.cwd, &target_head)?;
+    let style = crate::style::resolved_style_with_policy(&policy, flags.clone())?;
+    integration_history_with_policy(ctx, &st, &target_head, &policy)?;
+    if let (Some(contribution), Some(patchset)) = (&policy.contribution, st.latest_patchset()) {
+        contribution_shape(ctx, &st.target_branch, &patchset.head, contribution.history)?;
+    }
     let shape = style.shape();
     let cleanup = style.cleanup();
     println!("{change_id}: integrating into {}", st.target_branch);
@@ -2463,6 +2478,20 @@ fn queue_step(
         });
     }
     let mut report = ctx.report_for_integration(store, &st, &st.target_branch, shape)?;
+    if let Some(blocker) = report.blockers().iter().find(|blocker| {
+        !matches!(
+            blocker,
+            status::Blocker::NeedsRebase
+                | status::Blocker::GatesNotGreen
+                | status::Blocker::MergedTreeUnevaluated
+        )
+    }) {
+        eprint!("{}", render::blocker_explanation(&st, &report));
+        return Ok(QueueStep::Stopped {
+            code: blocker.exit_code(),
+            reason: blocker.as_str().into(),
+        });
+    }
     if shape == integration::Shape::NoFf && report.needs_rebase {
         let code = rebase(ctx, change_id, false, None, false)?;
         if code != 0 {
@@ -2555,6 +2584,7 @@ fn queue_dry_run(
     change_id: &str,
     flags: crate::style::StyleFlags,
     projected_targets: &mut BTreeMap<String, String>,
+    unresolved_targets: &mut std::collections::BTreeSet<String>,
     projected_closures: &mut std::collections::BTreeSet<String>,
 ) -> Result<QueueStep> {
     let mut st = store.state(change_id)?;
@@ -2566,9 +2596,41 @@ fn queue_dry_run(
     st.blocked_by.retain(|id| {
         !super::dependency_integrated_with_projection(id, &states, projected_closures)
     });
-    let actual = gitio::branch_head(&ctx.cwd, &st.target_branch).ok();
-    let revision = projected_targets.get(&st.target_branch).or(actual.as_ref());
-    let target = revision.map(String::as_str).unwrap_or(&st.target_branch);
+    if unresolved_targets.contains(&st.target_branch) {
+        let report =
+            ctx.report_for_integration(store, &st, &st.target_branch, integration::Shape::NoFf)?;
+        if let Some(blocker) = report.blockers().iter().find(|blocker| {
+            matches!(
+                blocker,
+                status::Blocker::Closed
+                    | status::Blocker::BranchMissing
+                    | status::Blocker::ForkBranch
+                    | status::Blocker::Iterating
+                    | status::Blocker::BlockedByChanges
+                    | status::Blocker::BlockingFindings
+                    | status::Blocker::HoldActive
+            )
+        }) {
+            return Ok(QueueStep::Stopped {
+                code: blocker.exit_code(),
+                reason: blocker.as_str().into(),
+            });
+        }
+        println!("dry-run: would integrate {change_id} into {}; destination ancestry, merged policy, style, history and authorization are conditional on earlier merges", st.target_branch);
+        projected_closures.insert(change_id.to_string());
+        return Ok(QueueStep::Planned(st.target_branch));
+    }
+    let actual = match gitio::branch_head(&ctx.cwd, &st.target_branch) {
+        Ok(head) => head,
+        Err(error) => {
+            return Ok(QueueStep::Stopped {
+                code: status::Blocker::TargetUnreadable.exit_code(),
+                reason: format!("target branch unreadable: {error}"),
+            })
+        }
+    };
+    let revision = projected_targets.get(&st.target_branch).unwrap_or(&actual);
+    let target = revision.as_str();
     let policy = crate::policy::load_at(&ctx.cwd, target)?;
     let style = crate::style::resolved_style_with_policy(&policy, flags)?;
     let shape = style.shape();
@@ -2579,12 +2641,13 @@ fn queue_dry_run(
         ctx.report_for_integration(store, &st, &st.target_branch, integration::Shape::NoFf)?;
     let mut advancing = None;
     let mut conflicts = report.needs_rebase;
+    let mut unresolved = true;
     if report.state == "open"
         && !st.iterating
         && report.fork.is_none()
         && policy.contribution.is_none()
     {
-        if let (Some(patchset), Some(revision)) = (st.latest_patchset(), revision) {
+        if let Some(patchset) = st.latest_patchset() {
             let (ancestor, contained) = integration::ancestry(&ctx.cwd, revision, &patchset.head)?;
             if shape == integration::Shape::FfOnly && !integration::ff_eligible(ancestor, contained)
             {
@@ -2595,6 +2658,7 @@ fn queue_dry_run(
                 });
             }
             conflicts = gitio::merge_outcome(&ctx.cwd, revision, &patchset.head)?.conflicts;
+            unresolved = conflicts || (!contained && !ancestor);
             if !contained && (shape == integration::Shape::FfOnly || ancestor && !conflicts) {
                 advancing = Some(patchset.head.clone());
             }
@@ -2638,6 +2702,10 @@ fn queue_dry_run(
     println!("dry-run: would integrate {change_id} into {}; conditional on fresh checkout guards, authorization and required gates", st.target_branch);
     if let Some(head) = advancing {
         projected_targets.insert(st.target_branch.clone(), head);
+    }
+    if unresolved {
+        unresolved_targets.insert(st.target_branch.clone());
+        println!("dry-run: subsequent members of {} have conditional destination ancestry and merged policy", st.target_branch);
     }
     projected_closures.insert(change_id.to_string());
     Ok(QueueStep::Planned(st.target_branch))
@@ -2906,13 +2974,18 @@ fn integrate_one(
     let mut st = store.state(&change_id)?;
     let recorded_target = st.target_branch.clone();
     st.target_branch = target.clone();
-    let policy = crate::policy::load_at(&ctx.cwd, &target)?;
-    selection.validate(&policy)?;
-    integration_history_with_policy(ctx, &st, &target, &policy)?;
     if st.is_closed() && matches!(closed_behavior, ClosedBehavior::SkipTagged) {
         println!("{}: {}", st.change_id, change_status(&st));
         return Ok(0);
     }
+    let Ok(target_head) = gitio::branch_head(&ctx.cwd, &target) else {
+        let report = ctx.report_for_integration(&store, &st, &target, shape)?;
+        eprint!("{}", render::blocker_explanation(&st, &report));
+        return Ok(status::check_exit_code(&report));
+    };
+    let policy = crate::policy::load_at(&ctx.cwd, &target_head)?;
+    selection.validate(&policy)?;
+    integration_history_with_policy(ctx, &st, &target_head, &policy)?;
     if shape == integration::Shape::FfOnly && ff_diverged(ctx, &st, &target)? {
         let code = refuse_divergence(&st, &target, &recorded_target);
         if let Some(prior) = &expect_basis {
@@ -3452,8 +3525,13 @@ fn authorization_basis(
     selected.target_branch = target.to_string();
     let declarations = ctx.declarations(&selected)?;
     selection.validate(&declarations.policy)?;
-    integration_history_with_policy(ctx, st, target, &declarations.policy)
-        .map_err(|_| Refusal::ConfigurationMoved.into_error())?;
+    integration_history_with_policy(
+        ctx,
+        st,
+        &gitio::branch_head(&ctx.cwd, target)?,
+        &declarations.policy,
+    )
+    .map_err(|_| Refusal::ConfigurationMoved.into_error())?;
     let declarations = normalized_declarations(declarations, st);
 
     Ok(crate::model::AuthorizationBasis {
@@ -3525,14 +3603,15 @@ fn integration_history(ctx: &Ctx, st: &ChangeState, target: &str) -> Result<()> 
     if st.is_closed() || !gitio::branch_exists(&ctx.cwd, target) {
         return Ok(());
     }
-    let policy = crate::policy::load_at(&ctx.cwd, target)?;
-    integration_history_with_policy(ctx, st, target, &policy)
+    let target_head = gitio::branch_head(&ctx.cwd, target)?;
+    let policy = crate::policy::load_at(&ctx.cwd, &target_head)?;
+    integration_history_with_policy(ctx, st, &target_head, &policy)
 }
 
 fn integration_history_with_policy(
     ctx: &Ctx,
     st: &ChangeState,
-    target: &str,
+    target_revision: &str,
     policy: &crate::policy::PolicyFile,
 ) -> Result<()> {
     if st.is_closed() {
@@ -3545,15 +3624,14 @@ fn integration_history_with_policy(
     let Some(patchset) = st.latest_patchset() else {
         return Ok(());
     };
-    let target_head = gitio::rev_parse(&ctx.cwd, target)?;
-    let base = gitio::merge_base(&ctx.cwd, &target_head, &patchset.head)?;
+    let base = gitio::merge_base(&ctx.cwd, target_revision, &patchset.head)?;
     let commits = gitio::git(
         &ctx.cwd,
         &["rev-list", "--count", &format!("{base}..{}", patchset.head)],
     )?;
     let count: usize = commits.trim().parse()?;
     if count > 1 {
-        bail!("integration history is squash and the change has {count} commits since {target}; run `arc squash` to integrate one");
+        bail!("integration history is squash and the change has {count} commits since {target_revision}; run `arc squash` to integrate one");
     }
     Ok(())
 }
@@ -4113,7 +4191,7 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
                     &patchset.head[..patchset.head.len().min(8)]
                 );
             }
-            if !gitio::is_ancestor(&ctx.cwd, &rev, &target)? {
+            if !gitio::is_ancestor(&ctx.cwd, &rev, &gitio::branch_head(&ctx.cwd, &target)?)? {
                 bail!("{rev} is not on {target}; nothing there integrated this change");
             }
             // A merge's first parent is the prior target when the merge itself

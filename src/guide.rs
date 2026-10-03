@@ -687,7 +687,9 @@ RUN A CHANGE
   commit with the observed target and approved head as its parents; branch
   merge options, merge.ff and squash defaults cannot change its shape.
   The selected destination supplies gate, actor, contribution and authorization
-  policy declarations throughout preflight and execution.
+  policy declarations throughout preflight and execution. Destination names
+  resolve through local branch refs; same-named tags do not select policy or
+  history revisions.
   `--message` names that merge commit and requires a resolved no-ff shape.
 
   Several changes, or `--tag`, make `integrate` a queue in dependency order.
@@ -701,11 +703,17 @@ RUN A CHANGE
   stopped member's blocker; style or history refusals exit 1. The summary
   names landed revisions, the stopped member and reason, and members never
   attempted, including when style or history constraints refuse. `--dry-run` reports the
-  plan without replaying, running gates, or integrating. Known holds, review
-  blockers and iteration stop projection before advancing the destination.
+  plan without replaying, running gates, or integrating. With a resolved
+  destination, known holds, review blockers and iteration stop projection
+  before advancing the destination.
   Prerequisites planned earlier are treated as conditionally closed. Each
-  member resolves style and counts history against its projected destination;
-  future gates, replay and checkout guards remain conditional.
+  member resolves style and counts history against its projected destination.
+  A divergent merge or replay makes later destination ancestry, merged policy,
+  style, history and authorization conditional; stale revisions cannot justify
+  a refusal. Queue execution checks known history, style, divergence and
+  lifecycle constraints before replay or gate preparation, and revalidates
+  authorization under the target and change locks. Future gates, replay and
+  checkout guards remain conditional.
   `--into`, `--message`, and `--debt` are single-change options: each member
   lands into its recorded target, and a debt reason binds to one patchset.
 

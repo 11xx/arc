@@ -1026,7 +1026,8 @@ enum Cmd {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
         change: Option<String>,
-        /// Integration shape to evaluate; defaults resolve for each selected target
+        /// Integration shape to evaluate; defaults resolve from each selected
+        /// destination's local branch ref, independently of same-named tags
         #[arg(long, value_enum)]
         shape: Option<integration::Shape>,
         /// Check every change carrying all supplied tags
@@ -1471,8 +1472,9 @@ enum Cmd {
         /// merge. With --skip-green, a gate already green at that merged tree
         /// records reuse rather than running a second time.
         ///
-        /// Gate declarations come from this destination, including when it
-        /// differs from the change's recorded target.
+        /// Gate declarations come from this destination's local branch ref,
+        /// including when it differs from the change's recorded target. A
+        /// same-named tag cannot select the destination.
         /// A textual conflict, including a modify/delete conflict, refuses
         /// before any gate runs or evidence is recorded; rebase first.
         #[arg(long, value_name = "BRANCH")]
@@ -1673,6 +1675,9 @@ enum Cmd {
     /// locks against each authorization policy reading, retaining the original
     /// flags. Configuration disagreement refuses before merging. A queue's
     /// summary includes style and history refusals and all unattempted members.
+    /// Known history, style, divergence and lifecycle constraints refuse before
+    /// queue replay or gate preparation. Destination names select local branch
+    /// refs even when a tag has the same name.
     /// Fast-forwards bind the ref update to the observed revision and update
     /// the checkout with read-tree; checkout failure attempts a guarded ref
     /// rollback. Both shapes isolate merge-shaping Git defaults. Transition
@@ -1725,7 +1730,9 @@ enum Cmd {
         /// Report what would happen without merging, closing, or writing.
         /// Queues stop at known blockers before projection; future gates,
         /// replay and checkout guards are conditional. Style and history resolve
-        /// against each member's projected destination. Prerequisites follow
+        /// against each member's projected destination. After a divergent merge or
+        /// replay, later destination ancestry, merged policy, style, history and
+        /// authorization remain conditional. Prerequisites follow
         /// supersession successors through projected closures, rejecting missing
         /// successors and cycles
         #[arg(long)]
