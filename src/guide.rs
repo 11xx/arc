@@ -604,7 +604,10 @@ RUN A CHANGE
   given; `arc snapshot` then binds the patchset to that version, declaring
   the patchset's contributors, which a live claim held by another actor
   requires. `check` prints both with the change, probes, and contributors
-  filled in, and only the snapshot once the later version exists.
+  filled in, and only the snapshot once a later version the probe can
+  discharge at exists. Each contributor is its own `--contributors=`
+  argument; one the flag cannot spell exactly, because it holds a comma or
+  edge whitespace, is left as a placeholder the line names.
 
   `arc rebase` is what `check` names when the target moved with conflicting
   changes. A conflict stops it and leaves the rebase in progress — the partial
