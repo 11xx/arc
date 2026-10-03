@@ -785,8 +785,9 @@ RUN A CHANGE
   The registered checkout must still hold the change branch. Tracked edits
   and untracked or ignored content, including build output, keep it. An
   outbox containing only the spool's regular `.gitignore` with `*` and a
-  trailing newline is disposable metadata; any other outbox content keeps
-  the checkout.
+  trailing newline is disposable metadata only when its Git administrative
+  ownership record identifies that file and records successful promotion.
+  Foreign metadata and any other outbox content keep the checkout.
   The integration checkout is kept. A kept worktree retains its checked-out
   branch; each retained path and branch carries its reason. Cleanup failures
   warn after closure and do not fail integration or stop a queue.

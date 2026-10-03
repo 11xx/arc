@@ -14124,3 +14124,61 @@ fn audit_fix_outbox_foreign_or_unpromoted_content_keeps_checkout() {
         );
     }
 }
+
+#[test]
+fn third_round_foreign_matching_outbox_metadata_keeps_checkout() {
+    for spool in [false, true] {
+        let repo = Repo::new();
+        stdout(repo.arc(&repo.root).args(["begin", "foreign-ignore"]));
+        let wt = repo.home.join(".worktrees/repo-foreign-ignore");
+        repo.commit(&wt, "work.txt", "work\n", "feat: work");
+        stdout(repo.arc(&wt).args(["snapshot", "foreign-ignore"]));
+        stdout(
+            repo.arc(&wt)
+                .args(["review", "foreign-ignore", "--verdict", "approved"]),
+        );
+        fs::create_dir_all(wt.join(".arc/outbox")).unwrap();
+        fs::write(wt.join(".arc/outbox/.gitignore"), "*\n").unwrap();
+        if spool {
+            stdout(
+                repo.arc(&wt)
+                    .args(["journal", "log", "foreign", "--spool", "note"]),
+            );
+        }
+        let out = stdout(
+            repo.arc(&repo.root)
+                .args(["integrate", "foreign-ignore", "--cleanup"]),
+        );
+        assert!(wt.exists(), "{out}");
+        assert_eq!(fs::read(wt.join(".arc/outbox/.gitignore")).unwrap(), b"*\n");
+    }
+}
+
+#[test]
+fn third_round_replaced_owned_outbox_metadata_keeps_checkout() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "replaced-ignore"]));
+    let wt = repo.home.join(".worktrees/repo-replaced-ignore");
+    repo.commit(&wt, "work.txt", "work\n", "feat: work");
+    stdout(repo.arc(&wt).args(["snapshot", "replaced-ignore"]));
+    stdout(
+        repo.arc(&wt)
+            .args(["review", "replaced-ignore", "--verdict", "approved"]),
+    );
+    stdout(
+        repo.arc(&wt)
+            .args(["journal", "log", "owned", "--spool", "note"]),
+    );
+    fs::write(wt.join(".arc/outbox/replacement"), "*\n").unwrap();
+    fs::rename(
+        wt.join(".arc/outbox/replacement"),
+        wt.join(".arc/outbox/.gitignore"),
+    )
+    .unwrap();
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", "replaced-ignore", "--cleanup"]),
+    );
+    assert!(out.contains("promoted 1, kept 0"), "{out}");
+    assert!(wt.exists(), "{out}");
+}

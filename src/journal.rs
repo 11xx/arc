@@ -2083,15 +2083,65 @@ fn outbox_dir(cwd: &Path) -> Result<PathBuf> {
 /// Create the outbox, ignored by the repository that holds it. A spooled write
 /// is in-flight state, not project content, and committing one would file it
 /// into history instead of the journal.
-fn ensure_outbox(dir: &Path) -> Result<()> {
+fn ensure_outbox(dir: &Path, checkout: &Path) -> Result<()> {
     std::fs::create_dir_all(dir)
         .with_context(|| format!("cannot create outbox {}", dir.display()))?;
     let ignore = dir.join(".gitignore");
-    if !ignore.exists() {
-        std::fs::write(&ignore, "*\n")
-            .with_context(|| format!("cannot write {}", ignore.display()))?;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&ignore)
+    {
+        Ok(mut file) => {
+            use std::io::Write;
+            file.write_all(b"*\n")?;
+            use std::os::unix::fs::MetadataExt;
+            let metadata = file.metadata()?;
+            let owner = OutboxOwner {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                emptied: false,
+            };
+            std::fs::write(outbox_owner_path(checkout)?, serde_json::to_vec(&owner)?)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("cannot write {}", ignore.display()))
+        }
     }
     Ok(())
+}
+
+#[derive(Serialize, Deserialize)]
+struct OutboxOwner {
+    device: u64,
+    inode: u64,
+    emptied: bool,
+}
+
+fn outbox_owner_path(checkout: &Path) -> Result<PathBuf> {
+    Ok(
+        PathBuf::from(gitio::git(checkout, &["rev-parse", "--absolute-git-dir"])?)
+            .join("arc-outbox-owner"),
+    )
+}
+
+fn outbox_owner(checkout: &Path) -> Result<Option<OutboxOwner>> {
+    use std::os::unix::fs::MetadataExt;
+    let owner = std::fs::read(outbox_owner_path(checkout)?)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<OutboxOwner>(&bytes).ok());
+    let metadata = std::fs::symlink_metadata(outbox_in(checkout).join(".gitignore")).ok();
+    Ok(owner.filter(|owner| {
+        metadata.is_some_and(|metadata| {
+            metadata.is_file() && metadata.dev() == owner.device && metadata.ino() == owner.inode
+        })
+    }))
+}
+
+/// Cleanup requires ownership and a successful promotion in this checkout.
+pub(crate) fn outbox_emptied_by_arc(checkout: &Path) -> Result<bool> {
+    Ok(outbox_owner(checkout)?.is_some_and(|owner| owner.emptied))
 }
 
 /// Whether a failed write means the journal is out of reach, rather than the
@@ -2121,7 +2171,7 @@ fn spool_write(
     body: Option<&str>,
 ) -> Result<i32> {
     let dir = outbox_dir(&ctx.cwd)?;
-    ensure_outbox(&dir)?;
+    ensure_outbox(&dir, &ctx.cwd)?;
     let name = uniquified(&format!("{stamp}-{kind}-{topic}.json"), |candidate| {
         dir.join(candidate).exists()
     })?;
@@ -2243,6 +2293,19 @@ fn promote_outbox(ctx: &Ctx, paths: &[PathBuf]) -> Result<()> {
             Err(error) => {
                 println!("kept {name}: {error:#}");
                 kept += 1;
+            }
+        }
+    }
+    if promoted > 0 && kept == 0 {
+        if let Some(path) = paths.first() {
+            let checkout = path
+                .parent()
+                .and_then(Path::parent)
+                .and_then(Path::parent)
+                .context("outbox path has no checkout")?;
+            if let Some(mut owner) = outbox_owner(checkout)? {
+                owner.emptied = true;
+                std::fs::write(outbox_owner_path(checkout)?, serde_json::to_vec(&owner)?)?;
             }
         }
     }

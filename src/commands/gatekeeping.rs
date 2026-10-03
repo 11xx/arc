@@ -3302,6 +3302,9 @@ fn cleanup_integrated_change(
 
 /// Only the regular ignore file written by the spool may occupy an unused outbox.
 fn unused_outbox_metadata(checkout: &Path) -> Result<bool> {
+    if !crate::journal::outbox_emptied_by_arc(checkout)? {
+        return Ok(false);
+    }
     let outbox = checkout.join(".arc/outbox");
     let Ok(metadata) = std::fs::symlink_metadata(&outbox) else {
         return Ok(false);
