@@ -621,6 +621,10 @@ RUN A CHANGE
   removes named probes and keeps the others. Unknown withdrawals, duplicate
   declarations, and declaring and withdrawing the same name are refused.
   These flags are mutually exclusive with `--probes-json`.
+  Probe edits without `--body-file` or `--scaffold` require a preceding brief
+  and preserve its body, title, plan reference, slice, captured plan provenance,
+  and mandatory reads. Explicit title, plan, or read inputs replace those
+  fields. A body or scaffold records a replacement contract.
 
   An undischargeable probe is recovered by a later brief version with
   `--base` at the revision the work started from and a cause; `arc snapshot`

@@ -774,6 +774,7 @@ pub fn brief(
         if version.is_some() {
             bail!("--version cannot be used when recording a brief");
         }
+        let records_plan = plan_ref.is_some();
         let journal_lock = plan_ref
             .as_deref()
             .map(|reference| crate::journal::lock_reference_transition(ctx, reference))
@@ -789,6 +790,7 @@ pub fn brief(
         // The body fills the scaffold template's slot, or follows a template
         // that has none; --scaffold with no --body-file records the template
         // alone.
+        let replaces_contract = body_file.is_some() || scaffold.is_some();
         let template = match &scaffold {
             Some(name) => super::scaffold::resolve(ctx, name)?,
             None => String::new(),
@@ -802,6 +804,32 @@ pub fn brief(
         let store = ctx.store()?;
         let (change_id, _transition, state) = locked_state(&store, reference)?;
         let previous = state.latest_brief();
+        let (body, title, plan_ref, plan_slice, plan_source, must_read) = if !replaces_contract {
+            let previous = previous.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "probe-only edits require a preceding brief; supply --body-file or --scaffold"
+                )
+            })?;
+            let inherits_plan = plan_ref.is_none();
+            (
+                previous.body.clone(),
+                title.or_else(|| previous.title.clone()),
+                plan_ref.or_else(|| previous.plan_ref.clone()),
+                plan_slice.or_else(|| previous.plan_slice.clone()),
+                if inherits_plan {
+                    previous.plan_source.clone()
+                } else {
+                    plan_source
+                },
+                if must_read.is_empty() {
+                    previous.must_read.clone()
+                } else {
+                    must_read
+                },
+            )
+        } else {
+            (body, title, plan_ref, plan_slice, plan_source, must_read)
+        };
         let acceptance_probes = match probes_json.as_deref() {
             Some(source) => read_acceptance_probes(source)?,
             None => edit_acceptance_probes(
@@ -854,7 +882,7 @@ pub fn brief(
         store.append_event(&event)?;
         // A plan in another project's journal learns of the brief framed by
         // it there; the brief already exists, so a failure only warns.
-        if let Some(reference) = output_plan_ref.as_deref() {
+        if let Some(reference) = output_plan_ref.as_deref().filter(|_| records_plan) {
             let mut promotion =
                 crate::journal::promotion_from(ctx, &store, &change_id, "brief.plan_ref");
             promotion.slice = output_plan_slice.clone();

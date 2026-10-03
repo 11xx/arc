@@ -902,3 +902,191 @@ fn brief_probe_edits_validate_before_recording_and_json_replaces() {
     );
     assert_eq!(brief["brief"]["acceptance_probes"], serde_json::json!([]));
 }
+
+fn assert_probe_only_edit_preserves_contract(flags: &[&str]) {
+    let repo = Repo::new();
+    repo.commit(
+        &repo.root,
+        "NOTES.md",
+        "Required context\n",
+        "docs: context",
+    );
+    begin(&repo, "probe-contract");
+    let plan_ref = plan(&repo, "probe-plan");
+    stdout(
+        repo.arc(&repo.root)
+            .args([
+                "brief",
+                "probe-contract",
+                "--body-file",
+                "-",
+                "--title",
+                "Contract",
+                "--plan-ref",
+                &plan_ref,
+                "--plan-slice",
+                "implementation",
+                "--must-read",
+                "HEAD:NOTES.md",
+                "--probe",
+                "smoke=false",
+            ])
+            .write_stdin("# Contract\n\nKeep the requirements.\n"),
+    );
+    let before = json_stdout(
+        repo.arc(&repo.root)
+            .args(["brief", "probe-contract", "--json"]),
+    );
+    // The recorded plan provenance and read digest belong to the contract.
+    repo.commit(
+        &repo.root,
+        "NOTES.md",
+        "Different context\n",
+        "docs: revise context",
+    );
+    let output = json_stdout(
+        repo.arc(&repo.root)
+            .args([
+                "brief",
+                "probe-contract",
+                "--cause-note",
+                "maintenance",
+                "--json",
+            ])
+            .args(flags),
+    );
+    let after = json_stdout(
+        repo.arc(&repo.root)
+            .args(["brief", "probe-contract", "--json"]),
+    );
+    for field in [
+        "body",
+        "title",
+        "base_revision",
+        "plan_ref",
+        "plan_slice",
+        "plan_source",
+        "must_read",
+    ] {
+        assert_eq!(after["brief"][field], before["brief"][field], "{field}");
+    }
+    assert!(!after["brief"]["must_read"].as_array().unwrap().is_empty());
+    for field in [
+        "base_revision",
+        "plan_ref",
+        "plan_slice",
+        "plan_source",
+        "must_read",
+    ] {
+        assert_eq!(
+            output["brief"][field], before["brief"][field],
+            "output {field}"
+        );
+    }
+    let expected = if flags[0] == "--withdraw-probe" || flags[0] == "--probes-json" {
+        serde_json::json!([])
+    } else {
+        serde_json::json!([{"name": "smoke", "command": "true"}])
+    };
+    assert_eq!(after["brief"]["acceptance_probes"], expected);
+}
+
+#[test]
+fn brief_probe_only_preserves_contract() {
+    assert_probe_only_edit_preserves_contract(&["--probe", "smoke=true"]);
+}
+
+#[test]
+fn brief_withdraw_probe_only_preserves_contract() {
+    assert_probe_only_edit_preserves_contract(&["--withdraw-probe", "smoke"]);
+}
+
+#[test]
+fn brief_probes_json_only_preserves_contract() {
+    assert_probe_only_edit_preserves_contract(&["--probes-json", "[]"]);
+}
+
+#[test]
+fn brief_probe_only_requires_preceding_contract() {
+    let repo = Repo::new();
+    begin(&repo, "missing-contract");
+    for flags in [
+        vec!["--probe", "smoke=true"],
+        vec!["--probes-json", "[]"],
+        vec!["--withdraw-probe", "smoke"],
+    ] {
+        repo.arc(&repo.root)
+            .args(["brief", "missing-contract"])
+            .args(flags)
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("require a preceding brief"));
+    }
+    repo.arc(&repo.root)
+        .args(["brief", "missing-contract", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no brief recorded"));
+}
+
+#[test]
+fn brief_probe_only_explicit_metadata_replaces_selected_fields() {
+    let repo = Repo::new();
+    repo.commit(&repo.root, "NOTES.md", "Context\n", "docs: context");
+    begin(&repo, "probe-metadata");
+    let first_plan = plan(&repo, "first-probe-plan");
+    let second_plan = plan(&repo, "second-probe-plan");
+    stdout(
+        repo.arc(&repo.root)
+            .args([
+                "brief",
+                "probe-metadata",
+                "--body-file",
+                "-",
+                "--title",
+                "First",
+                "--plan-ref",
+                &first_plan,
+                "--plan-slice",
+                "first",
+                "--must-read",
+                "HEAD:NOTES.md",
+            ])
+            .write_stdin("Contract\n"),
+    );
+    repo.commit(
+        &repo.root,
+        "OTHER.md",
+        "Other context\n",
+        "docs: other context",
+    );
+    stdout(repo.arc(&repo.root).args([
+        "brief",
+        "probe-metadata",
+        "--probe",
+        "smoke=true",
+        "--cause-note",
+        "maintenance",
+        "--title",
+        "Second",
+        "--plan-ref",
+        &second_plan,
+        "--plan-slice",
+        "second",
+        "--must-read",
+        "HEAD:OTHER.md",
+        "--base",
+        "HEAD",
+    ]));
+    let brief = json_stdout(
+        repo.arc(&repo.root)
+            .args(["brief", "probe-metadata", "--json"]),
+    );
+    assert_eq!(brief["brief"]["body"], "Contract\n");
+    assert_eq!(brief["brief"]["title"], "Second");
+    assert_eq!(brief["brief"]["plan_ref"], second_plan);
+    assert_eq!(brief["brief"]["plan_slice"], "second");
+    assert_eq!(brief["brief"]["base_revision"], repo.head(&repo.root));
+    assert_eq!(brief["brief"]["must_read"].as_array().unwrap().len(), 1);
+    assert_eq!(brief["brief"]["must_read"][0]["path"], "OTHER.md");
+}

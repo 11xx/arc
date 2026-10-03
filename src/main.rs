@@ -564,6 +564,11 @@ enum Cmd {
         format: commands::FindingsFormat,
     },
     /// Record or read a change-scoped implementation contract
+    ///
+    /// Probe edits without --body-file or --scaffold require a preceding
+    /// brief and preserve its body and omitted title, plan provenance, and
+    /// mandatory reads. Explicit metadata replaces the corresponding fields.
+    /// A body or scaffold records a replacement contract.
     Brief {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -604,16 +609,19 @@ enum Cmd {
         #[arg(long)]
         plan_slice: Option<String>,
         /// Named acceptance probes bound to this brief: a JSON array inline, a
-        /// path to one, or '-' for stdin. Replaces the complete probe array
+        /// path to one, or '-' for stdin. Replaces the complete probe array;
+        /// without a body or scaffold, preserves the preceding contract
         #[arg(long)]
         probes_json: Option<String>,
         /// Add or update a named acceptance probe (repeatable NAME=COMMAND).
         /// Other probes carry forward from the previous brief. Mutually
-        /// exclusive with --probes-json
+        /// exclusive with --probes-json. Without a body or scaffold, preserves
+        /// the preceding contract
         #[arg(long, conflicts_with = "probes_json")]
         probe: Vec<String>,
         /// Withdraw a named probe (repeatable); other probes carry forward.
-        /// Unknown names are refused. Mutually exclusive with --probes-json
+        /// Unknown names are refused. Mutually exclusive with --probes-json.
+        /// Without a body or scaffold, preserves the preceding contract
         #[arg(long, conflicts_with = "probes_json")]
         withdraw_probe: Vec<String>,
         /// Earlier ledger fact that caused this version (repeatable):
