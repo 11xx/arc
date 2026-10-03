@@ -851,6 +851,11 @@ struct DebtOwed {
     #[serde(skip_serializing_if = "Option::is_none")]
     production: Option<DebtProduction>,
     declared_by: String,
+    /// The declaration's reason, verbatim.
+    reason: String,
+    /// Patchset named by the declaration, when one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    patchset_id: Option<String>,
     on_behalf_of: Option<String>,
     declared_model: Option<String>,
     declared_harness: Option<String>,
@@ -1608,7 +1613,7 @@ fn collect_backlog(
     let partial = collection.failed > 0;
 
     let backlog = Backlog {
-        schema: "arc-workspace-backlog/19",
+        schema: "arc-workspace-backlog/20",
         scope: scope.view(),
         observation: Observation {
             started_at: observed_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -2207,6 +2212,8 @@ fn ledger_queues(root: &Path) -> Result<LedgerQueues> {
                     coverage: debt.coverage.clone(),
                     production: debt.production.clone(),
                     declared_by: debt.actor.clone(),
+                    reason: debt.reason.clone(),
+                    patchset_id: debt.patchset_id.clone(),
                     on_behalf_of: debt.on_behalf_of.clone(),
                     declared_model: debt.model.clone(),
                     declared_harness: debt.harness.clone(),
@@ -2371,7 +2378,7 @@ mod report {
     use serde_json::Value;
     use std::collections::{BTreeMap, BTreeSet};
 
-    pub(crate) const SCHEMA: &str = "arc-workspace-report/3";
+    pub(crate) const SCHEMA: &str = "arc-workspace-report/4";
 
     /// A decision question open longer than this is flagged `stale-question`.
     pub(crate) const STALE_QUESTION_DAYS: u64 = 7;
@@ -2589,6 +2596,10 @@ mod report {
         change_id: String,
         title: String,
         kind: String,
+        reason: String,
+        patchset_id: Option<String>,
+        declared_at: String,
+        declared_by: String,
         age_days: Option<u64>,
         implementer: Option<String>,
     }
@@ -3094,6 +3105,13 @@ mod report {
                     title: debt_titles.get(&change_id).cloned().unwrap_or_default(),
                     change_id,
                     kind: text(debt, "effective_missing"),
+                    reason: text(debt, "reason"),
+                    patchset_id: debt
+                        .get("patchset_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    declared_at: text(debt, "declared_at"),
+                    declared_by: text(debt, "declared_by"),
                     age_days: debt.get("age_days").and_then(Value::as_u64),
                     implementer: debt
                         .pointer("/production/implementer/model")
@@ -3382,7 +3400,7 @@ mod report {
 
         fn backlog(open: Vec<Value>, feature_requests: Vec<Value>) -> Value {
             json!({
-                "schema": "arc-workspace-backlog/19",
+                "schema": "arc-workspace-backlog/20",
                 "observation": {"started_at": "2026-09-26T00:00:00Z", "finished_at": "2026-09-26T00:00:01Z"},
                 "scope": {"mode": "global"},
                 "collection": {"failures": []},
@@ -3691,14 +3709,30 @@ mod report {
                 serde_json::to_value(build(&quiet, None, &BTreeMap::new(), &BTreeMap::new()))
                     .unwrap();
             let mut owing = quiet.clone();
-            owing["projects"][0]["debt_owed"] =
-                json!([{"change_id": "c-1", "effective_missing": "nothing-read", "age_days": 2}]);
+            owing["projects"][0]["debt_owed"] = json!([{
+                "change_id": "c-1",
+                "reason": "a second review is owed",
+                "patchset_id": null,
+                "declared_at": "2026-09-26T00:00:00Z",
+                "declared_by": "lead",
+                "effective_missing": "nothing-read",
+                "age_days": 2
+            }]);
             let report = build(&owing, Some(&previous), &BTreeMap::new(), &BTreeMap::new());
             assert!(report
                 .attention
                 .iter()
                 .any(|entry| entry.rule == "debt-grew" && entry.project == "demo"));
-            assert_eq!(report.sections.review_owed[0].kind, "nothing-read");
+            let debt = &report.sections.review_owed[0];
+            assert_eq!(debt.kind, "nothing-read");
+            assert_eq!(debt.reason, "a second review is owed");
+            assert!(debt.patchset_id.is_none());
+            assert_eq!(debt.declared_at, "2026-09-26T00:00:00Z");
+            assert_eq!(debt.declared_by, "lead");
+            assert_eq!(
+                serde_json::to_value(debt).unwrap()["patchset_id"],
+                serde_json::Value::Null
+            );
         }
 
         #[test]
