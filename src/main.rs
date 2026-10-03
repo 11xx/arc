@@ -1686,9 +1686,11 @@ enum Cmd {
         #[arg(long)]
         message: Option<String>,
         /// Delete the merged branch and remove only an arc-created, clean worktree
-        /// inside the sandbox, excluding the integration checkout. Kept checkouts
-        /// retain checked-out branches. Cleanup failures warn after closure and
-        /// do not fail integration or stop a queue. Overrides integration.cleanup;
+        /// inside the sandbox, excluding the integration checkout. The registered
+        /// checkout must still hold the change branch. Tracked edits and any
+        /// untracked or ignored content, including build output, keep the checkout.
+        /// Kept checkouts retain checked-out branches. Cleanup failures warn after
+        /// closure and do not fail integration or stop a queue. Overrides integration.cleanup;
         /// absent either flag, the resolved style default applies (built-in false).
         #[arg(long, conflicts_with = "no_cleanup")]
         cleanup: bool,

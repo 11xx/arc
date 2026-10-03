@@ -3064,14 +3064,23 @@ fn cleanup_integrated_change(
     if let Some(wt_path) = &st.worktree {
         let path = PathBuf::from(wt_path);
         if path.exists() {
+            let canonical_path = path.canonicalize()?;
             let reason = if !st.worktree_created {
                 Some("not created by arc".to_string())
-            } else if path.canonicalize()? == gitio::toplevel(checkout)?.canonicalize()?
-                || path.canonicalize()? == target.canonicalize()?
+            } else if canonical_path == gitio::toplevel(checkout)?.canonicalize()?
+                || canonical_path == target.canonicalize()?
             {
                 Some("is the integration checkout".to_string())
             } else if let Some(prefix) = ctx.excluded_by_sandbox(&path)? {
                 Some(format!("outside the sandbox at {}", prefix.display()))
+            } else if !gitio::worktree_inventory(target)?.iter().any(|entry| {
+                !entry.prunable
+                    && entry.branch.as_deref() == Some(st.branch.as_str())
+                    && entry.path.canonicalize().ok().as_ref() == Some(&canonical_path)
+            }) {
+                Some("no longer the checkout arc created".to_string())
+            } else if let Some(content) = cleanup_local_content(&path)? {
+                Some(format!("holds local content not in the branch: {content}"))
             } else {
                 match gitio::git(target, &["worktree", "remove", wt_path]) {
                     Ok(_) => {
@@ -3116,6 +3125,45 @@ fn cleanup_integrated_change(
         }
     }
     Ok(())
+}
+
+fn cleanup_local_content(checkout: &Path) -> Result<Option<String>> {
+    let status = gitio::git(
+        checkout,
+        &[
+            "status",
+            "--porcelain",
+            "-z",
+            "--ignored",
+            "--untracked-files=all",
+        ],
+    )?;
+    let mut entries = status.split('\0').filter(|entry| !entry.is_empty());
+    let mut paths = Vec::new();
+    while let Some(entry) = entries.next() {
+        if let Some(path) = entry.get(3..) {
+            paths.push(path.to_string());
+        }
+        if entry
+            .as_bytes()
+            .get(..2)
+            .is_some_and(|tag| tag.contains(&b'R') || tag.contains(&b'C'))
+        {
+            if let Some(source) = entries.next() {
+                paths.push(source.to_string());
+            }
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    let mut summary = paths.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+    if paths.len() > 5 {
+        summary.push_str(", ...");
+    }
+    Ok(Some(summary))
 }
 
 /// Report what `integrate` would do without merging, closing, or writing

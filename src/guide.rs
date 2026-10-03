@@ -749,6 +749,8 @@ RUN A CHANGE
   (built-in false). `integrate --cleanup` enables it; `--no-cleanup` overrides
   a configured true. Cleanup deletes merged branches with Git’s merged-branch
   check and removes only arc-created, clean worktrees inside the sandbox.
+  The registered checkout must still hold the change branch. Tracked edits
+  and any untracked or ignored content, including build output, keep it.
   The integration checkout is kept. A kept worktree retains its checked-out
   branch; each retained path and branch carries its reason. Cleanup failures
   warn after closure and do not fail integration or stop a queue.

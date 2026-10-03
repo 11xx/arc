@@ -2393,6 +2393,62 @@ fn integration_history_folds_operator_and_contribution_alias() {
 }
 
 #[test]
+fn cleanup_safety_ignored_content_keeps_worktree() {
+    let repo = repo_with_gates();
+    repo.commit(
+        &repo.root,
+        ".gitignore",
+        ".env\n",
+        "test: ignore local credentials",
+    );
+    let (id, wt) = approved_change(&repo, "ignored-cleanup", "change.txt", "change\n");
+    fs::write(wt.join(".env"), "local bytes\n").unwrap();
+    let out = stdout(repo.arc(&repo.root).args(["integrate", &id, "--cleanup"]));
+    assert!(wt.exists(), "{out}");
+    assert_eq!(
+        fs::read_to_string(wt.join(".env")).unwrap(),
+        "local bytes\n"
+    );
+    assert!(
+        out.contains("holds local content not in the branch: .env"),
+        "{out}"
+    );
+    assert!(out.contains("kept branch"), "{out}");
+}
+
+#[test]
+fn cleanup_safety_replacement_worktree_is_kept() {
+    let repo = repo_with_gates();
+    let (id, wt) = approved_change(&repo, "replacement-cleanup", "change.txt", "change\n");
+    let moved = repo.home.join("moved-checkout");
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "move",
+            wt.to_str().unwrap(),
+            moved.to_str().unwrap(),
+        ],
+    );
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "operator-checkout",
+            wt.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    let out = stdout(repo.arc(&repo.root).args(["integrate", &id, "--cleanup"]));
+    assert!(wt.exists(), "{out}");
+    assert!(out.contains("no longer the checkout arc created"), "{out}");
+    assert!(moved.exists());
+    assert!(out.contains("kept branch"), "{out}");
+}
+
+#[test]
 fn cleanup_safety_tracked_edits_keep_branch_and_closure() {
     dirty_cleanup("README.md", "tracked edit\n");
 }
@@ -2407,7 +2463,10 @@ fn dirty_cleanup(file: &str, content: &str) {
     let (id, wt) = approved_change(&repo, "dirty-cleanup", "change.txt", "change\n");
     fs::write(wt.join(file), content).unwrap();
     let out = stdout(repo.arc(&repo.root).args(["integrate", &id, "--cleanup"]));
-    assert!(out.contains("Git refused"), "{out}");
+    assert!(
+        out.contains("holds local content not in the branch"),
+        "{out}"
+    );
     assert!(out.contains("kept branch"), "{out}");
     assert!(wt.exists());
     assert!(!git_out(&repo.root, &["branch", "--list", "arc/dirty-cleanup"]).is_empty());
