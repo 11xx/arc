@@ -362,12 +362,23 @@ pub fn markdown(
         w,
         "- Worktree state: head {}; uncommitted edits {}",
         match (
-            report.latest_patchset.as_ref(),
-            report.head_matches_latest_patchset,
+            report.comparison_patchset.as_deref(),
+            report.head_matches_comparison_patchset,
         ) {
-            (None, _) => "has no recorded patchset",
-            (Some(_), true) => "matches newest approved/snapshotted head",
-            (Some(_), false) => "has moved past newest patchset",
+            (Some(id), matches)
+                if report.closure.as_ref().is_some_and(|closure| {
+                    closure.source_patchset_id.as_deref() == Some(id)
+                }) =>
+            {
+                if matches {
+                    format!("matches shipped patchset {id}")
+                } else {
+                    format!("differs from shipped patchset {id}")
+                }
+            }
+            (None, _) => "has no recorded patchset".to_string(),
+            (Some(_), true) => "matches newest approved/snapshotted head".to_string(),
+            (Some(_), false) => "has moved past newest patchset".to_string(),
         },
         match report.worktree_dirty {
             Some(true) => "present",

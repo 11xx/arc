@@ -365,6 +365,8 @@ enum Cmd {
         json: bool,
     },
     /// Render one change (Markdown, or full state with --json)
+    /// Closed head drift compares with the closure's source patchset when
+    /// recorded, otherwise with the newest snapshot
     /// Aggregate reads name unreadable changes with their errors on stderr
     /// and retain readable changes; a selected unreadable change fails
     Show {
@@ -814,7 +816,10 @@ enum Cmd {
         #[arg(long)]
         off: bool,
     },
-    /// Machine-readable status report (the versioned arc-status/27 schema).
+    /// Machine-readable status report (the versioned arc-status/28 schema).
+    /// comparison_patchset names the closure's source patchset when recorded,
+    /// otherwise the newest snapshot; head_matches_comparison_patchset compares
+    /// its head. head_matches_latest_patchset always compares the newest snapshot.
     /// An unreadable selected change fails; unreadable neighboring changes
     /// are named with their errors on stderr and omitted from the dependency
     /// observation. An unreadable prerequisite cannot count as integrated

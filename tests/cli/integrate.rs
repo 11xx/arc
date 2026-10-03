@@ -875,7 +875,7 @@ fn a_closed_change_reports_the_head_it_shipped_after_its_branch_is_deleted() {
 
     let show = stdout(repo.arc(&repo.root).args(["show", "shipped-head"]));
     assert!(
-        show.contains("Worktree state: head matches newest approved/snapshotted head"),
+        show.contains("Worktree state: head matches shipped patchset ps-01"),
         "{show}"
     );
     assert!(show.contains("green at head"), "{show}");
@@ -1251,11 +1251,7 @@ fn every_read_only_command_reads_past_a_broken_policy() {
     }
 }
 
-/// Replaying a closed change answers for the head its closure recorded, as
-/// the live report does: an asserted integration that shipped an earlier
-/// patchset is judged at that patchset's head, not at a later one.
-#[test]
-fn a_replayed_closure_reports_the_head_it_recorded() {
+fn closed_earlier_patchset_fixture() -> (Repo, String) {
     let repo = repo_with_gates();
     stdout(repo.arc(&repo.root).args(["begin", "earlier-shipped"]));
     let worktree = repo.home.join(".worktrees").join("repo-earlier-shipped");
@@ -1288,11 +1284,35 @@ fn a_replayed_closure_reports_the_head_it_recorded() {
         .assert()
         .success();
 
+    (repo, shipped)
+}
+
+#[test]
+fn closed_earlier_patchset_show_names_the_shipped_patchset() {
+    let (repo, _) = closed_earlier_patchset_fixture();
+    let show = stdout(repo.arc(&repo.root).args(["show", "earlier-shipped"]));
+    assert!(
+        show.contains("Worktree state: head matches shipped patchset ps-01"),
+        "{show}"
+    );
+}
+
+/// Replaying a closed change answers for the head its closure recorded, as
+/// the live report does: an asserted integration that shipped an earlier
+/// patchset is judged at that patchset's head, not at a later one.
+#[test]
+fn a_replayed_closure_reports_the_head_it_recorded() {
+    let (repo, shipped) = closed_earlier_patchset_fixture();
+
     let live = json_stdout(
         repo.arc(&repo.root)
             .args(["status", "earlier-shipped", "--json"]),
     );
     assert_eq!(live["current_head"], shipped.as_str(), "{live}");
+    assert_eq!(live["latest_patchset"]["id"], "ps-02", "{live}");
+    assert_eq!(live["head_matches_latest_patchset"], false, "{live}");
+    assert_eq!(live["comparison_patchset"], "ps-01", "{live}");
+    assert_eq!(live["head_matches_comparison_patchset"], true, "{live}");
     let closure = live["closure"]["event_id"].as_str().unwrap().to_string();
     let replayed = json_stdout(repo.arc(&repo.root).args([
         "status",
@@ -1318,6 +1338,15 @@ fn a_replayed_closure_reports_the_head_it_recorded() {
             repo.arc(&repo.root)
                 .args(["show", "earlier-shipped", "--at", &closure]),
         );
+    assert!(
+        live_show.contains("Worktree state: head matches shipped patchset ps-01"),
+        "{live_show}"
+    );
+    assert_eq!(replayed["comparison_patchset"], "ps-01", "{replayed}");
+    assert_eq!(
+        replayed["head_matches_comparison_patchset"], true,
+        "{replayed}"
+    );
     assert_eq!(
         worktree_state(&replayed_show),
         worktree_state(&live_show),

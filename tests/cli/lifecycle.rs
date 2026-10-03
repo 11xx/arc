@@ -363,6 +363,8 @@ fn review_snapshot_approval_is_immediately_valid_for_the_fresh_patchset() {
     let status: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&wt).args(["status", "review-snapshot"]))).unwrap();
     assert_eq!(status["head_matches_latest_patchset"], true);
+    assert_eq!(status["comparison_patchset"], "ps-01");
+    assert_eq!(status["head_matches_comparison_patchset"], true);
     assert_eq!(status["verdict"]["patchset_id"], "ps-01");
     assert_eq!(status["verdict"]["valid_for_current_head"], true);
 }
@@ -1028,7 +1030,7 @@ fn conflicting_target_movement_requires_rebase_before_integration() {
         .code(11);
     let status: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&wt).args(["status", "conflict-r"]))).unwrap();
-    assert_eq!(status["schema"], "arc-status/27");
+    assert_eq!(status["schema"], "arc-status/28");
     assert_eq!(status["needs_rebase"], true);
     assert!(status["blockers"]
         .as_array()
@@ -2126,7 +2128,7 @@ fn status_projection_and_stage_note_file_read_stdin() {
         .args(["status", "projected", "--get", "schema"])
         .assert()
         .success()
-        .stdout("arc-status/27\n");
+        .stdout("arc-status/28\n");
 
     repo.arc(&wt)
         .args([

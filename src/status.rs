@@ -16,7 +16,7 @@ use std::path::Path;
 
 pub use crate::blockers::Blocker;
 
-pub const STATUS_SCHEMA: &str = "arc-status/27";
+pub const STATUS_SCHEMA: &str = "arc-status/28";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 
 #[derive(Debug, Clone, Serialize)]
@@ -591,7 +591,12 @@ pub struct StatusReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub review_subject: Option<ReviewSubject>,
     pub brief: Option<BriefStatus>,
+    /// Literal comparison with the newest snapshot, including after closure.
     pub head_matches_latest_patchset: bool,
+    /// Patchset used to describe head drift: the closure's source patchset
+    /// when recorded, otherwise the newest snapshot.
+    pub comparison_patchset: Option<String>,
+    pub head_matches_comparison_patchset: bool,
     pub worktree_dirty: Option<bool>,
     pub verdict: Option<VerdictStatus>,
     /// External decisions remain distinct from observed local verdicts.
@@ -1078,6 +1083,18 @@ fn build_report(
         (Some(h), Some(p)) => *h == p.head,
         _ => false,
     };
+    let comparison = match state
+        .closure
+        .as_ref()
+        .and_then(|closure| closure.source_patchset_id.as_deref())
+    {
+        Some(id) => state.patchsets.iter().find(|patchset| patchset.id == id),
+        None => state.latest_patchset(),
+    };
+    let comparison_patchset = comparison.map(|patchset| patchset.id.clone());
+    let head_matches_comparison_patchset = comparison
+        .zip(current_head.as_deref())
+        .is_some_and(|(patchset, head)| patchset.head == head);
     // An approval stands on the commit it approved, followed only through
     // rewrites that changed its signature and nothing else. The patchset's own
     // head follows every rewrite, so gate evidence and the review subject keep
@@ -1668,6 +1685,8 @@ fn build_report(
             recorded_at: brief.ts,
         }),
         head_matches_latest_patchset: head_matches,
+        comparison_patchset,
+        head_matches_comparison_patchset,
         worktree_dirty,
         verdict,
         external_verdicts,

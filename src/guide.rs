@@ -667,7 +667,12 @@ RUN A CHANGE
   basis rebuilt; if readiness fails or the basis differs, nothing is written.
 
   A closed change is judged at the head its closure recorded, or at its
-  newest patchset's when the closure recorded none. `status`, `show`, and
+  newest patchset's when the closure recorded none. Head drift compares with
+  the closure's source patchset when recorded, otherwise with the newest
+  snapshot. Status names that patchset in `comparison_patchset` and reports
+  `head_matches_comparison_patchset`; `head_matches_latest_patchset` remains
+  a literal comparison with the newest snapshot. Show names the shipped
+  patchset when the closure records one. `status`, `show`, and
   `check` read neither its branch nor its target, so deleting the branch or
   moving the target after closure leaves the head its verdict and gate
   evidence are read against where it was. A replay with `--at` to the
@@ -1745,7 +1750,7 @@ SCHEMAS
 
   Commitments, derived views:
     `arc-state/3`                    arc show --json
-    `arc-status/27`                  arc status
+    `arc-status/28`                  arc status
     `arc-check/3`                    arc check --json
     `arc-inbox/10`                   arc inbox --json
     `arc-catchup/12`                 arc catchup --json
