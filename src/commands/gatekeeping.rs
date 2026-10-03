@@ -3436,7 +3436,7 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
     } = args;
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
-    let _transition = store.lock_transition(&change_id)?;
+    let transition = store.lock_transition(&change_id)?;
     let st = store.state(&change_id)?;
     if st.is_closed() {
         bail!("change {change_id} is already closed");
@@ -3569,10 +3569,17 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
     };
     let ev = ctx.event(&store, &change_id, payload);
     store.append_event(&ev)?;
-    release_retention_refs(ctx, &change_id, integrated_rev.as_deref())?;
-    crate::journal::auto_log(ctx, &st.slug, &format!("closed change {change_id}"));
+    drop(transition);
     println!("closed: {change_id}");
     println!("event: {}", ev.event_id);
+    if let Err(error) = release_retention_refs(ctx, &change_id, integrated_rev.as_deref()) {
+        eprintln!(
+            "warning: closure recorded; retention cleanup failed: {error:#}. Remaining refs under {} and {} stay pinned",
+            gitio::retention_prefix(&change_id),
+            gitio::tree_retention_prefix(&change_id),
+        );
+    }
+    crate::journal::auto_log(ctx, &st.slug, &format!("closed change {change_id}"));
     advise_plan_promotions(&store, &st);
     Ok(())
 }

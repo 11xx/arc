@@ -1751,6 +1751,11 @@ enum Cmd {
         route_version: Option<String>,
     },
     /// Close a change without arc performing the merge
+    ///
+    /// The change and closure event are printed before retention cleanup.
+    /// A retention cleanup failure, including a ref lock or a hook rejecting
+    /// deletion, warns with the ref prefixes that may still hold pins; the
+    /// recorded closure succeeds.
     Close {
         /// Change to close
         change: String,

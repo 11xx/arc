@@ -3556,3 +3556,104 @@ fn begin_with_an_explicit_base_does_not_warn_about_the_target() {
         local
     );
 }
+
+fn close_retention_deletion_failure(tree: bool, lock: bool) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = Repo::new();
+    let id = opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", "close-pins"])));
+    let wt = repo.home.join(".worktrees/repo-close-pins");
+    let before = repo.head(&repo.root);
+    repo.commit(&wt, "feature.txt", "feature\n", "feat: add feature");
+    stdout(repo.arc(&wt).args(["snapshot", "close-pins"]));
+    let head = repo.head(&wt);
+    let tree_oid = git_out(&wt, &["rev-parse", "HEAD^{tree}"]);
+    let head_pin = format!("refs/arc/keep/{id}/ps-01");
+    let tree_pin = format!("refs/arc/tree/{id}/fixture");
+    git(&repo.root, &["update-ref", &tree_pin, &tree_oid]);
+    git(&repo.root, &["merge", "--ff-only", &head]);
+    let (name, oid) = if tree {
+        (&tree_pin, &tree_oid)
+    } else {
+        (&head_pin, &head)
+    };
+    if lock {
+        fs::write(
+            repo.root.join(".git").join(format!("{name}.lock")),
+            "locked\n",
+        )
+        .unwrap();
+    } else {
+        let hook = repo.root.join(".git/hooks/reference-transaction");
+        fs::write(
+            &hook,
+            format!(
+                r#"#!/bin/sh
+[ "$1" = prepared ] || exit 0
+while read old new ref; do
+    if [ "$ref" = '{name}' ] && [ "$new" = 0000000000000000000000000000000000000000 ]; then
+        echo 'retention deletion rejected' >&2
+        exit 1
+    fi
+done
+"#
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(hook, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let output = repo
+        .arc(&repo.root)
+        .args([
+            "close",
+            "close-pins",
+            "--assert-integrated",
+            &head,
+            "--target-before",
+            &before,
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let out = String::from_utf8(output.stdout).unwrap();
+    let err = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        err.contains("warning: closure recorded; retention cleanup failed:"),
+        "{err}"
+    );
+    assert!(err.contains(name), "{err}");
+    assert!(err.contains(&format!("refs/arc/keep/{id}/")), "{err}");
+    assert!(err.contains(&format!("refs/arc/tree/{id}/")), "{err}");
+    assert_eq!(git_out(&repo.root, &["rev-parse", name]), *oid);
+    let state = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "close-pins", "--json"]),
+    );
+    assert_eq!(state["closure"]["outcome"], "integrated");
+    assert!(out.contains(&format!("closed: {id}")), "{out}");
+    assert!(
+        out.contains(state["closure"]["event_id"].as_str().unwrap()),
+        "{out}"
+    );
+}
+
+#[test]
+fn close_warns_on_retention_head_ref_lock_after_closure() {
+    close_retention_deletion_failure(false, true);
+}
+
+#[test]
+fn close_warns_on_retention_tree_ref_lock_after_closure() {
+    close_retention_deletion_failure(true, true);
+}
+
+#[test]
+fn close_warns_on_retention_head_deletion_hook_after_closure() {
+    close_retention_deletion_failure(false, false);
+}
+
+#[test]
+fn close_warns_on_retention_tree_deletion_hook_after_closure() {
+    close_retention_deletion_failure(true, false);
+}

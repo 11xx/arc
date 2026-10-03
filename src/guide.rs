@@ -721,7 +721,10 @@ RUN A CHANGE
   releasing retention refs. A retention cleanup failure, including a ref lock
   or a hook rejecting deletion, warns with the ref prefixes that may still
   hold pins; the recorded integration succeeds,
-  including as a queue member.
+  including as a queue member. `close` prints the closed change and closure
+  event before retention cleanup; a cleanup failure warns with the remaining
+  ref prefixes and the recorded closure succeeds, including an asserted
+  integration after an external fast-forward merge.
 
   `--no-worktree` creates and switches to the change branch in the invoking
   checkout, recording it as the change's worktree so subsequent commands infer
