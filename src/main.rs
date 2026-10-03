@@ -1769,9 +1769,9 @@ enum Cmd {
         /// The branch it was integrated into (defaults to the target branch)
         #[arg(long, requires = "assert_integrated")]
         into: Option<String>,
-        /// Where the target stood before. Read from a merge commit's first
-        /// parent; a fast-forward has none to read, so name it or the event
-        /// records no base
+        /// Assert where the target stood before, naming an ancestor of the
+        /// asserted revision regardless of its parent count. If omitted, a
+        /// merge head supplies its first parent; other heads record no base
         #[arg(long = "target-before", requires = "assert_integrated")]
         target_before: Option<String>,
         /// Close as abandoned: the work stopped and nothing was merged

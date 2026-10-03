@@ -1132,9 +1132,9 @@ pub enum Payload {
         source_patchset_id: String,
         source_head: String,
         target_branch: String,
-        /// Where the target stood first, read from the asserted revision's
-        /// first parent. Absent when it has none, which is the only case
-        /// where there was no prior target state to name.
+        /// Where the target stood before: an explicitly asserted ancestor,
+        /// or a merge head's first parent when no ancestor was named.
+        /// Absent for other heads when no ancestor was named.
         #[serde(skip_serializing_if = "Option::is_none")]
         target_before: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

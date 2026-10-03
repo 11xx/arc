@@ -1945,20 +1945,6 @@ fn guarded_and_asserted_integrations_have_distinct_event_types_and_targets() {
     .unwrap();
     assert_eq!(event["target_before"], before_ff, "{event}");
 
-    // A merge is its own witness: overriding its first parent would record a
-    // range the merge did not integrate.
-    repo.arc(&repo.root)
-        .args([
-            "close",
-            "asserted",
-            "--assert-integrated",
-            &external,
-            "--target-before",
-            &before_external,
-        ])
-        .assert()
-        .failure();
-
     // An assertion arc did not guard is still checked against Git: it must
     // name a branch that exists, a revision that contains the patchset head,
     // and one that is actually on that branch.
@@ -3656,4 +3642,89 @@ fn close_warns_on_retention_head_deletion_hook_after_closure() {
 #[test]
 fn close_warns_on_retention_tree_deletion_hook_after_closure() {
     close_retention_deletion_failure(true, false);
+}
+
+#[test]
+fn asserted_fast_forward_to_merge_head_records_named_target_before() {
+    let repo = Repo::new();
+    let base = repo.head(&repo.root);
+    stdout(repo.arc(&repo.root).args(["begin", "merge-head"]));
+    let worktree = repo.home.join(".worktrees/repo-merge-head");
+    repo.commit(&worktree, "first.rs", "first\n", "feat: first");
+    git(&worktree, &["checkout", "-b", "side", &base]);
+    repo.commit(&worktree, "side.rs", "side\n", "feat: side");
+    git(&worktree, &["checkout", "arc/merge-head"]);
+    git(&worktree, &["merge", "--no-ff", "--no-edit", "side"]);
+    let head = repo.head(&worktree);
+    stdout(repo.arc(&worktree).args(["snapshot", "merge-head"]));
+    git(&repo.root, &["merge", "--ff-only", &head]);
+    stdout(repo.arc(&repo.root).args([
+        "close",
+        "merge-head",
+        "--assert-integrated",
+        &head,
+        "--target-before",
+        &base,
+    ]));
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "merge-head",
+        "--type",
+        "integration-asserted",
+    ]));
+    let event: serde_json::Value = serde_json::from_str(events.trim()).unwrap();
+    assert_eq!(event["target_before"], base, "{event}");
+}
+
+#[test]
+fn asserted_target_before_refuses_non_ancestor_without_events() {
+    for merge_head in [false, true] {
+        let repo = Repo::new();
+        let base = repo.head(&repo.root);
+        stdout(repo.arc(&repo.root).args(["begin", "named-base"]));
+        let worktree = repo.home.join(".worktrees/repo-named-base");
+        repo.commit(&worktree, "first.rs", "first\n", "feat: first");
+        if merge_head {
+            git(&worktree, &["checkout", "-b", "side", &base]);
+            repo.commit(&worktree, "side.rs", "side\n", "feat: side");
+            git(&worktree, &["checkout", "arc/named-base"]);
+            git(&worktree, &["merge", "--no-ff", "--no-edit", "side"]);
+        }
+        let head = repo.head(&worktree);
+        stdout(repo.arc(&worktree).args(["snapshot", "named-base"]));
+        git(&repo.root, &["merge", "--ff-only", &head]);
+        repo.commit(&repo.root, "later.rs", "later\n", "feat: later");
+        let non_ancestor = repo.head(&repo.root);
+        let before = stdout(
+            repo.arc(&repo.root)
+                .args(["events", "--change", "named-base"]),
+        );
+        let output = repo
+            .arc(&repo.root)
+            .args([
+                "close",
+                "named-base",
+                "--assert-integrated",
+                &head,
+                "--target-before",
+                &non_ancestor,
+            ])
+            .assert()
+            .failure()
+            .get_output()
+            .stderr
+            .clone();
+        let error = String::from_utf8(output).unwrap();
+        assert!(error.contains(&non_ancestor), "{error}");
+        assert!(error.contains(&head), "{error}");
+        assert!(error.contains("not an ancestor"), "{error}");
+        assert_eq!(
+            stdout(
+                repo.arc(&repo.root)
+                    .args(["events", "--change", "named-base"])
+            ),
+            before,
+        );
+    }
 }

@@ -682,6 +682,14 @@ RUN A CHANGE
   the basis it would record. Before merging, readiness is recomputed and the
   basis rebuilt; if readiness fails or the basis differs, nothing is written.
 
+  `close --assert-integrated <rev> --target-before <base>` records the
+  caller's base as asserted when it is an ancestor of the revision, regardless
+  of the revision's parent count. A non-ancestor is refused without recording
+  events. Without the flag, a merge head supplies its first parent; other
+  heads record no base. A merge's first parent describes the prior target
+  when that merge performed the integration. For a fast-forward onto a
+  merge head, name the prior target with `--target-before`.
+
   A closed change is judged at the head its closure recorded, or at its
   newest patchset's when the closure recorded none. Head drift compares with
   the closure's source patchset when recorded, otherwise with the newest

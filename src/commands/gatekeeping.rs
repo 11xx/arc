@@ -3512,24 +3512,20 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
             if !gitio::is_ancestor(&ctx.cwd, &rev, &target)? {
                 bail!("{rev} is not on {target}; nothing there integrated this change");
             }
-            // For a merge, the first parent is where the target stood before,
-            // and Git can be asked. For a fast-forward it is not: the parent
-            // is the previous commit *of this change*, and recording it would
-            // put the change's own work outside the range it integrated.
-            // Nothing in the repository says where the branch pointed, so the
-            // caller supplies it or the event records none — an absent base is
-            // honest, a wrong one is not.
+            // A merge's first parent is the prior target when the merge itself
+            // integrated the change. A fast-forward onto a merge head instead
+            // makes that parent part of the change. An explicit ancestor is
+            // recorded as asserted; only an absent flag permits inference.
             let parents = gitio::commit_parents(&ctx.cwd, &rev)?;
             let target_before = match (target_before, parents.len()) {
-                // A merge records where the target stood, and Git is a better
-                // witness than the caller: letting a flag override it would
-                // record a range the merge did not integrate.
-                (Some(_), 2..) => bail!(
-                    "{rev} is a merge, so where the target stood is its first parent; \
-                     --target-before would record a range it did not integrate"
-                ),
+                (Some(named), _) => {
+                    let base = gitio::rev_parse(&ctx.cwd, &named)?;
+                    if !gitio::is_ancestor(&ctx.cwd, &base, &rev)? {
+                        bail!("--target-before {named} ({base}) is not an ancestor of {rev}");
+                    }
+                    Some(base)
+                }
                 (None, 2..) => parents.into_iter().next(),
-                (Some(named), _) => Some(gitio::rev_parse(&ctx.cwd, &named)?),
                 (None, _) => None,
             };
             (
