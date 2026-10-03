@@ -714,8 +714,9 @@ RUN A CHANGE
   Any other shape keeps the refusal naming the missing target checkout.
 
   Integration prints the integrated revision and closure event before
-  releasing retention refs. A retention cleanup failure warns with the ref
-  prefixes that may still hold pins; the recorded integration succeeds,
+  releasing retention refs. A retention cleanup failure, including a ref lock
+  or a hook rejecting deletion, warns with the ref prefixes that may still
+  hold pins; the recorded integration succeeds,
   including as a queue member.
 
   `--no-worktree` creates and switches to the change branch in the invoking

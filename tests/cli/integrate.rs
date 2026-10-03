@@ -1772,3 +1772,98 @@ fn integrate_warns_on_retention_object_walk_failure_after_closure() {
 fn integrate_warns_on_retention_failure_and_continues_queue() {
     retention_read_failure_after_merge("'for-each-ref '*", true);
 }
+
+fn retention_deletion_failure_after_merge(tree: bool, lock: bool, queue: bool) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = repo_with_gates();
+    let (id, _) = approved_change(&repo, "retention-delete", "feature.txt", "feature\n");
+    if queue {
+        approved_change(&repo, "retention-next", "next.txt", "next\n");
+    }
+    let prefix = if tree {
+        format!("refs/arc/tree/{id}/")
+    } else {
+        format!("refs/arc/keep/{id}/")
+    };
+    let pins = git_out(
+        &repo.root,
+        &["for-each-ref", "--format=%(refname) %(objectname)", &prefix],
+    );
+    let (name, oid) = pins.lines().next().unwrap().split_once(' ').unwrap();
+    if lock {
+        fs::write(
+            repo.root.join(".git").join(format!("{name}.lock")),
+            "locked\n",
+        )
+        .unwrap();
+    } else {
+        let hook = repo.root.join(".git/hooks/reference-transaction");
+        fs::write(
+            &hook,
+            format!(
+                r#"#!/bin/sh
+[ "$1" = prepared ] || exit 0
+while read old new ref; do
+    if [ "$ref" = '{name}' ] && [ "$new" = 0000000000000000000000000000000000000000 ]; then
+        echo 'retention deletion rejected' >&2
+        exit 1
+    fi
+done
+"#
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(hook, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut cmd = repo.arc(&repo.root);
+    cmd.args(["integrate", "retention-delete"]);
+    if queue {
+        cmd.arg("retention-next");
+    }
+    let output = cmd.assert().success().get_output().clone();
+    let out = String::from_utf8(output.stdout).unwrap();
+    let err = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        err.contains("warning: integration recorded; retention cleanup failed:"),
+        "{err}"
+    );
+    assert!(err.contains(name), "{err}");
+    assert!(err.contains(&format!("refs/arc/keep/{id}/")), "{err}");
+    assert!(err.contains(&format!("refs/arc/tree/{id}/")), "{err}");
+    assert_eq!(git_out(&repo.root, &["rev-parse", name]).trim(), oid);
+    let state = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "retention-delete", "--json"]),
+    );
+    assert_eq!(state["closure"]["outcome"], "integrated");
+    assert!(out.contains(state["closure"]["event_id"].as_str().unwrap()));
+    if queue {
+        let next = json_stdout(
+            repo.arc(&repo.root)
+                .args(["status", "retention-next", "--json"]),
+        );
+        assert_eq!(next["closure"]["outcome"], "integrated");
+        assert_eq!(out.matches("integrated: ").count(), 2);
+    }
+}
+
+#[test]
+fn integrate_warns_on_retention_head_ref_lock_after_closure() {
+    retention_deletion_failure_after_merge(false, true, false);
+}
+
+#[test]
+fn integrate_warns_on_retention_tree_ref_lock_after_closure() {
+    retention_deletion_failure_after_merge(true, true, false);
+}
+
+#[test]
+fn integrate_warns_on_retention_head_deletion_hook_and_continues_queue() {
+    retention_deletion_failure_after_merge(false, false, true);
+}
+
+#[test]
+fn integrate_warns_on_retention_tree_deletion_hook_after_closure() {
+    retention_deletion_failure_after_merge(true, false, false);
+}

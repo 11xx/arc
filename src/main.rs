@@ -1644,8 +1644,9 @@ enum Cmd {
     /// holds the target, the merge takes over the change's own checkout if it
     /// still holds the change branch and leaves it on the target.
     /// The integrated revision and closure event are printed before retention
-    /// cleanup. A retention cleanup failure warns with the ref prefixes that
-    /// may still hold pins and does not fail the recorded integration.
+    /// cleanup. A retention cleanup failure, including a ref lock or a hook
+    /// rejecting deletion, warns with the ref prefixes that may still hold
+    /// pins and does not fail the recorded integration.
     #[command(
         after_help = "Arc exits 17 when a paired replica does not hold integration authority; the refusal names the holder or an offer in flight."
     )]

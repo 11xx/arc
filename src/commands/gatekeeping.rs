@@ -3715,7 +3715,7 @@ fn release_retention_refs(ctx: &Ctx, change_id: &str, integrated: Option<&str>) 
             None => false,
         };
         if reachable {
-            let _ = gitio::delete_ref(&ctx.cwd, &name);
+            gitio::delete_ref(&ctx.cwd, &name)?;
         } else {
             println!("kept {name}: head {oid} is not reachable from the integrated commit");
         }
@@ -3733,7 +3733,7 @@ fn release_retention_refs(ctx: &Ctx, change_id: &str, integrated: Option<&str>) 
         };
         for (name, oid) in tree_refs {
             if reachable.contains(&oid) {
-                let _ = gitio::delete_ref(&ctx.cwd, &name);
+                gitio::delete_ref(&ctx.cwd, &name)?;
             }
         }
     }
