@@ -3025,8 +3025,36 @@ fn integrate_one(
         {
             bail!("fast-forward target moved during integration before merge; nothing recorded");
         }
-        if let Err(error) = gitio::git(&wt, &["merge", "--ff-only", "--no-edit", &approved_head]) {
+        let target_ref = format!("refs/heads/{target}");
+        let reflog = format!("arc integrate {}: fast-forward", st.slug);
+        if let Err(error) = gitio::git(
+            &wt,
+            &[
+                "update-ref",
+                "-m",
+                &reflog,
+                &target_ref,
+                &approved_head,
+                &old_target,
+            ],
+        ) {
             return Err(ff_failure(&wt, &target, &approved_head, error));
+        }
+        if let Err(error) = gitio::git(&wt, &["read-tree", "-u", "-m", &old_target, &approved_head])
+        {
+            let rollback = gitio::git(
+                &wt,
+                &["update-ref", &target_ref, &old_target, &approved_head],
+            );
+            let cause = match rollback {
+                Ok(_) => anyhow::anyhow!(
+                    "checkout update failed: {error}; target ref restored to {old_target}"
+                ),
+                Err(rollback) => anyhow::anyhow!(
+                    "checkout update failed: {error}; guarded ref rollback failed: {rollback}"
+                ),
+            };
+            return Err(ff_failure(&wt, &target, &approved_head, cause));
         }
         let head =
             gitio::head(&wt).map_err(|error| ff_failure(&wt, &target, &approved_head, error))?;
@@ -3044,7 +3072,19 @@ fn integrate_one(
     } else {
         if let Err(e) = gitio::git(
             &wt,
-            &["merge", "--no-ff", "--no-edit", "-m", &msg, &approved_head],
+            &[
+                "-c",
+                &format!("branch.{target}.mergeOptions="),
+                "-c",
+                "merge.ff=false",
+                "merge",
+                "--no-ff",
+                "--no-squash",
+                "--no-edit",
+                "-m",
+                &msg,
+                &approved_head,
+            ],
         ) {
             let _ = gitio::git(&wt, &["merge", "--abort"]);
             bail!("merge failed (aborted): {e}");
@@ -3086,17 +3126,24 @@ fn integrate_one(
         }
     }
 
-    if actual_shape == crate::model::IntegrationShape::FastForward
-        && (gitio::head(&wt).ok().as_deref() != Some(approved_head.as_str())
+    if actual_shape == crate::model::IntegrationShape::FastForward {
+        let index_tree = gitio::git(&wt, &["write-tree"])
+            .map_err(|error| ff_failure(&wt, &target, &approved_head, error))?;
+        let approved_tree = gitio::commit_tree(&wt, &approved_head)
+            .map_err(|error| ff_failure(&wt, &target, &approved_head, error))?;
+        if gitio::head(&wt).ok().as_deref() != Some(approved_head.as_str())
             || gitio::branch_head(&wt, &target).ok().as_deref() != Some(approved_head.as_str())
-            || gitio::current_branch(&wt).ok().flatten().as_deref() != Some(target.as_str()))
-    {
-        return Err(ff_failure(
-            &wt,
-            &target,
-            &approved_head,
-            anyhow::anyhow!("fast-forward target moved during integration"),
-        ));
+            || gitio::current_branch(&wt).ok().flatten().as_deref() != Some(target.as_str())
+            || index_tree != approved_tree
+            || gitio::dirt(&wt).map(|dirt| dirt.tracked).unwrap_or(true)
+        {
+            return Err(ff_failure(
+                &wt,
+                &target,
+                &approved_head,
+                anyhow::anyhow!("fast-forward target or checkout moved during integration"),
+            ));
+        }
     }
     let ev = ctx.event(
         &store,
@@ -3112,7 +3159,19 @@ fn integrate_one(
             shape: Some(actual_shape),
         },
     );
-    store.append_event(&ev)?;
+    if let Err(error) = store.append_event(&ev) {
+        let publication = store.event_is_published(&ev);
+        let (publication, next) = match publication {
+            Ok(true) => ("published", "Do not retry integration. The closure is visible but its durability is unconfirmed; restore ledger durability, inspect arc show and perform any remaining retention or checkout cleanup."),
+            Ok(false) => ("absent", "Repair ledger writability, confirm the reported Git state and approved head, then retry integration to record the already-contained closure."),
+            Err(_) => ("unknown", "Restore ledger readability and inspect the exact event before choosing recovery; do not retry integration until publication is known."),
+        };
+        let cause = anyhow::anyhow!(
+            "closure publication failed for event {}: {error:#}; publication state={publication}. {next}",
+            ev.event_id
+        );
+        return Err(integration_recovery(&wt, &target, cause));
+    }
     // Git updates the checkout before the ledger records the closure.
     // Retention and worktree cleanup are post-closure maintenance and may
     // invoke Git hooks or other arc commands, so no state lock spans them.
@@ -3596,6 +3655,14 @@ fn ff_failure(
     approved: &str,
     cause: anyhow::Error,
 ) -> anyhow::Error {
+    integration_recovery(
+        checkout,
+        target,
+        anyhow::anyhow!("{cause}; no integration event was recorded. Preserve local and competing work, inspect git diff and git reflog. If refs/heads/{target} is the intended destination and this checkout still holds {target}, reconcile it with git restore --source=refs/heads/{target} --staged --worktree -- ., then retry arc integrate for approved head {approved}; arc performs no reset"),
+    )
+}
+
+fn integration_recovery(checkout: &Path, target: &str, cause: anyhow::Error) -> anyhow::Error {
     let revision =
         gitio::branch_head(checkout, target).unwrap_or_else(|error| format!("unreadable: {error}"));
     let head = gitio::head(checkout).unwrap_or_else(|error| format!("unreadable: {error}"));
@@ -3606,7 +3673,7 @@ fn ff_failure(
         .unwrap_or_else(|error| format!("unreadable: {error}"));
     let dirt = gitio::git(checkout, &["status", "--porcelain"])
         .unwrap_or_else(|error| format!("unreadable: {error}"));
-    anyhow::anyhow!("{cause}; no integration event was recorded. refs/heads/{target}={revision}; checkout HEAD={head} ({branch}); index tree={index}; checkout status={dirt:?}. Preserve local and competing work, inspect git diff and git reflog in {}. If refs/heads/{target} is the intended destination and this checkout still holds {target}, reconcile it with git restore --source=refs/heads/{target} --staged --worktree -- ., then retry arc integrate for approved head {approved}; arc performs no reset", checkout.display())
+    anyhow::anyhow!("{cause}; refs/heads/{target}={revision}; checkout HEAD={head} ({branch}); index tree={index}; checkout status={dirt:?}; checkout={}", checkout.display())
 }
 
 fn refuse_divergence(st: &ChangeState, target: &str) -> i32 {

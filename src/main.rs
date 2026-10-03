@@ -1671,6 +1671,12 @@ enum Cmd {
     /// locks against each authorization policy reading, retaining the original
     /// flags. Configuration disagreement refuses before merging. A queue's
     /// summary includes style and history refusals and all unattempted members.
+    /// Fast-forwards bind the ref update to the observed revision and update
+    /// the checkout with read-tree; checkout failure attempts a guarded ref
+    /// rollback. Both shapes isolate merge-shaping Git defaults. Transition
+    /// failure reports ref, HEAD, index and checkout state. Closure publication
+    /// failure reports whether the event is published, absent or unreadable;
+    /// inspect publication and durability before retrying.
     #[command(
         after_help = "Arc exits 11 when --shape ff-only encounters a diverged target; run arc rebase <change> --verify and provide fresh review or declared debt. When --into selects a different destination, arc rebase cannot select it: run git rebase <destination> in the change checkout, then arc snapshot <change> --verify and obtain fresh review or debt. Arc exits 17 when a paired replica does not hold integration authority; the refusal names the holder or an offer in flight."
     )]

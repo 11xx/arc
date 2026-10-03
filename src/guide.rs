@@ -663,13 +663,17 @@ RUN A CHANGE
   validates its shape constraints and history; configuration disagreement
   refuses before merging.
   Under ff-only, the observed target must be an ancestor of the
-  approved head, or already contain it. Git merge --ff-only updates the
-  target checkout and advances its ref with expected-old protection. Checkout
-  failures refuse before the ref advances. A failed post-merge check records
-  no integration event and reports the ref, HEAD, index and checkout state;
-  preserve local and competing work, inspect Git diff and reflog, reconcile
-  the checkout with the destination, and retry integration. Arc performs no
-  reset on that path.
+  approved head, or already contain it. A fast-forward updates the target
+  ref only if it still equals the observed revision, then updates the index
+  and checkout with Git read-tree. Inherited merge settings cannot alter the
+  operation. A checkout update failure attempts a guarded ref rollback that
+  refuses to overwrite a competing move. Failed transition checks report the
+  ref, HEAD, index and checkout state for recovery, without a reset.
+  Closure publication failure reports whether the exact event is published,
+  absent, or unreadable. A published event requires durability recovery and
+  inspection, not another integration; an unreadable ledger must be inspected
+  before retrying. An absent event can be retried after ledger repair and
+  checkout reconciliation.
   Divergence observed under the target and change locks exits 11 before debt
   is declared and names `arc rebase <change> --verify`. External Git does not
   honor arc locks: if it diverges after that observation but before the fresh
@@ -679,7 +683,8 @@ RUN A CHANGE
   destination, arc rebase cannot select that destination: run git rebase
   <destination> in the change checkout, then arc snapshot <change> --verify
   and obtain fresh review or declared debt. `--shape no-ff` creates a merge
-  commit with the observed target and approved head as its parents.
+  commit with the observed target and approved head as its parents; branch
+  merge options, merge.ff and squash defaults cannot change its shape.
   `--message` names that merge commit and requires a resolved no-ff shape.
 
   Several changes, or `--tag`, make `integrate` a queue in dependency order.

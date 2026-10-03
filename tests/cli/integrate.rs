@@ -2074,7 +2074,7 @@ fn fast_forward_expected_old_refuses_target_race() {
         &wrapper,
         format!(
             r#"#!/bin/sh
-if [ "$1" = merge ] && [ "$2" = --ff-only ]; then
+if [ "$1" = update-ref ] && [ "$2" = -m ]; then
     '{git}' update-ref refs/heads/master '{racer}' '{before}' || exit 1
 fi
 exec '{git}' "$@"
@@ -3164,4 +3164,259 @@ fn cleanup_safety_unestablished_instance_ownership_is_kept() {
         );
         assert!(out.contains("kept branch"), "{fault}: {out}");
     }
+}
+
+#[test]
+fn fast_forward_ignores_merge_shaping_configuration() {
+    for (key, value) in [
+        ("branch.master.mergeOptions", "-s ours"),
+        ("merge.ff", "false"),
+        ("branch.master.mergeOptions", "--squash"),
+    ] {
+        let repo = repo_with_gates();
+        let before = repo.head(&repo.root);
+        let (id, wt) = approved_change(&repo, "configured-ff", "ff.txt", "ff\n");
+        let approved = repo.head(&wt);
+        git(&repo.root, &["config", key, value]);
+        stdout(repo.arc(&repo.root).args(["integrate", &id]));
+        assert_eq!(repo.head(&repo.root), approved, "{key}={value}");
+        assert_eq!(
+            fs::read_to_string(repo.root.join("ff.txt")).unwrap(),
+            "ff\n"
+        );
+        assert_eq!(
+            git_out(&repo.root, &["write-tree"]),
+            git_out(&wt, &["write-tree"])
+        );
+        let closure = events(&repo, &id)
+            .into_iter()
+            .find(|e| e["event_type"] == "change-integrated")
+            .unwrap();
+        assert_eq!(closure["target_before"], before);
+    }
+}
+
+#[test]
+fn no_ff_ignores_merge_shaping_configuration() {
+    let repo = repo_with_gates();
+    let before = repo.head(&repo.root);
+    let (id, wt) = approved_change(&repo, "configured-merge", "ff.txt", "ff\n");
+    let approved = repo.head(&wt);
+    git(
+        &repo.root,
+        &["config", "branch.master.mergeOptions", "--squash -s ours"],
+    );
+    git(&repo.root, &["config", "merge.ff", "only"]);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--shape", "no-ff"]),
+    );
+    assert_eq!(
+        git_out(&repo.root, &["show", "-s", "--format=%P", "HEAD"]),
+        format!("{before} {approved}")
+    );
+    assert_eq!(
+        fs::read_to_string(repo.root.join("ff.txt")).unwrap(),
+        "ff\n"
+    );
+}
+
+#[test]
+fn fast_forward_same_tree_intermediate_race_refuses() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = repo_with_gates();
+    let before = repo.head(&repo.root);
+    let (id, wt) = approved_change(&repo, "same-tree-race", "ff.txt", "ff\n");
+    let approved = repo.head(&wt);
+    let approved_tree = git_out(&wt, &["rev-parse", "HEAD^{tree}"]);
+    let target_tree = git_out(&repo.root, &["rev-parse", "HEAD^{tree}"]);
+    let intermediate = git_out(
+        &wt,
+        &[
+            "commit-tree",
+            &target_tree,
+            "-p",
+            &before,
+            "-m",
+            "intermediate",
+        ],
+    );
+    let successor = git_out(
+        &wt,
+        &[
+            "commit-tree",
+            &approved_tree,
+            "-p",
+            &intermediate,
+            "-m",
+            "successor",
+        ],
+    );
+    git(&wt, &["reset", "--hard", &successor]);
+    stdout(repo.arc(&wt).args(["snapshot", &id, "--verify"]));
+    approve(&repo, &id);
+    assert_ne!(approved, successor);
+    let recorded = events(&repo, &id);
+    let real_git =
+        String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout).unwrap();
+    let bin = repo.home.join("race-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let wrapper = bin.join("git");
+    fs::write(&wrapper, format!(r#"#!/bin/sh
+if {{ [ "$1" = merge ] && [ "$2" = --ff-only ]; }} || {{ [ "$1" = update-ref ] && [ "$2" = -m ]; }}; then
+    '{git}' update-ref refs/heads/master '{intermediate}' '{before}' || exit 1
+fi
+exec '{git}' "$@"
+"#, git = real_git.trim())).unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    repo.arc(&repo.root)
+        .args(["integrate", &id])
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "no integration event was recorded",
+        ));
+    assert_eq!(repo.head(&repo.root), intermediate);
+    assert_eq!(events(&repo, &id), recorded);
+}
+
+#[test]
+fn fast_forward_closure_publication_failure_reports_recovery() {
+    closure_publication_failure("unknown");
+}
+
+#[test]
+fn fast_forward_closure_fsync_failure_reports_published_event() {
+    closure_publication_failure("published");
+}
+
+#[test]
+fn fast_forward_closure_append_failure_reports_absent_event() {
+    closure_publication_failure("absent");
+}
+
+fn closure_publication_failure(publication: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = repo_with_gates();
+    let (id, wt) = approved_change(&repo, "publication-failure", "ff.txt", "ff\n");
+    let approved = repo.head(&wt);
+    let dir = repo.root.join(".git/arc/changes").join(&id).join("events");
+    let backup = repo.home.join("saved-events");
+    let real_git =
+        String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout).unwrap();
+    let action = match publication {
+        "unknown" => format!(
+            "mv '{}' '{}' && printf blocked > '{}'",
+            dir.display(),
+            backup.display(),
+            dir.display()
+        ),
+        "published" => format!("chmod 300 '{}'", dir.display()),
+        "absent" => format!("chmod 500 '{}'", dir.display()),
+        _ => unreachable!(),
+    };
+    let bin = repo.home.join("publication-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let wrapper = bin.join("git");
+    fs::write(
+        &wrapper,
+        format!(
+            r#"#!/bin/sh
+if {{ [ "$1" = merge ] && [ "$2" = --ff-only ]; }} || [ "$1" = read-tree ]; then
+    '{git}' "$@" || exit $?
+    {action} || exit 1
+    exit 0
+fi
+exec '{git}' "$@"
+"#,
+            git = real_git.trim(),
+            action = action
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    repo.arc(&repo.root)
+        .args(["integrate", &id])
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("closure publication"))
+        .stderr(predicates::str::contains(format!(
+            "refs/heads/master={approved}"
+        )))
+        .stderr(predicates::str::contains(format!(
+            "publication state={publication}"
+        )));
+    assert_eq!(repo.head(&repo.root), approved);
+    if publication == "unknown" {
+        fs::remove_file(&dir).unwrap();
+        fs::rename(&backup, &dir).unwrap();
+    } else {
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    assert_eq!(
+        events(&repo, &id)
+            .iter()
+            .any(|e| e["event_type"] == "change-integrated"),
+        publication == "published"
+    );
+}
+
+#[test]
+fn fast_forward_checkout_failure_preserves_competing_move() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = repo_with_gates();
+    let before = repo.head(&repo.root);
+    let index = git_out(&repo.root, &["write-tree"]);
+    let (id, wt) = approved_change(&repo, "rollback-race", "ff.txt", "ff\n");
+    let approved = repo.head(&wt);
+    let competitor = git_out(
+        &repo.root,
+        &["commit-tree", &index, "-p", &before, "-m", "competing"],
+    );
+    let recorded = events(&repo, &id);
+    let real_git =
+        String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout).unwrap();
+    let bin = repo.home.join("rollback-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let wrapper = bin.join("git");
+    fs::write(
+        &wrapper,
+        format!(
+            r#"#!/bin/sh
+if [ "$1" = read-tree ]; then
+    '{git}' update-ref refs/heads/master '{competitor}' '{approved}' || exit 1
+    exit 1
+fi
+exec '{git}' "$@"
+"#,
+            git = real_git.trim()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    repo.arc(&repo.root)
+        .args(["integrate", &id])
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("guarded ref rollback failed"))
+        .stderr(predicates::str::contains(format!(
+            "refs/heads/master={competitor}"
+        )))
+        .stderr(predicates::str::contains(format!("index tree={index}")));
+    assert_eq!(repo.head(&repo.root), competitor);
+    assert_eq!(git_out(&repo.root, &["write-tree"]), index);
+    assert!(!repo.root.join("ff.txt").exists());
+    assert_eq!(events(&repo, &id), recorded);
 }

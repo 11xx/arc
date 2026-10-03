@@ -596,6 +596,32 @@ impl Store {
             .with_context(|| format!("event {} already exists", event.event_id))
     }
 
+    /// Check the exact event after an append error, including a directory
+    /// fsync failure after publication. An unreadable or different file is
+    /// ambiguous and must not be treated as an absent event.
+    pub fn event_is_published(&self, event: &Event) -> Result<bool> {
+        ids::validate_id_component(&event.change_id)?;
+        ids::validate_id_component(&event.event_id)?;
+        let path = self
+            .events_dir(&event.change_id)
+            .join(format!("{}.json", event.event_id));
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot inspect {}", path.display()))
+            }
+        };
+        let published: serde_json::Value = serde_json::from_slice(&bytes)?;
+        if published != serde_json::to_value(event)? {
+            bail!(
+                "published event {} differs from the attempted closure",
+                event.event_id
+            );
+        }
+        Ok(true)
+    }
+
     /// Record that this store now holds events an older build would skip.
     ///
     /// The format barrier only works if the store says which format it is. A
