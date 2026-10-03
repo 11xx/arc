@@ -49,7 +49,7 @@ impl Checkout {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct StyleFlags {
     pub shape: Option<crate::integration::Shape>,
     pub checkout: Option<Checkout>,
@@ -107,7 +107,7 @@ fn field<'a>(value: &'a toml::Value, key: &str) -> Option<&'a toml::Value> {
 }
 
 fn validate_value(key: &str, value: &toml::Value, origin: &str) -> Result<Value> {
-    let valid = match key {
+    let valid = match key.strip_prefix("defaults.").unwrap_or(key) {
         "change.checkout" => matches!(value.as_str(), Some("in-place" | "worktree")),
         "change.branch_prefix" => value.as_str().is_some(),
         "integration.shape" => matches!(value.as_str(), Some("ff-only" | "no-ff")),
@@ -120,8 +120,13 @@ fn validate_value(key: &str, value: &toml::Value, origin: &str) -> Result<Value>
     Ok(serde_json::to_value(value)?)
 }
 
-fn parse(text: &str, origin: &str, user: bool) -> Result<toml::Value> {
+pub(crate) fn parse(text: &str, origin: &str, user: bool) -> Result<toml::Value> {
     let value: toml::Value = toml::from_str(text).with_context(|| format!("malformed {origin}"))?;
+    for table in ["integration", "contribution"] {
+        if value.get(table).is_some_and(|v| !v.is_table()) {
+            bail!("invalid {origin} key {table}: expected a table");
+        }
+    }
     let defaults = if user {
         Some(&value)
     } else {
@@ -133,12 +138,22 @@ fn parse(text: &str, origin: &str, user: bool) -> Result<toml::Value> {
         }
         for table in ["change", "integration"] {
             if defaults.get(table).is_some_and(|v| !v.is_table()) {
-                bail!("invalid {origin} key {table}: expected a table");
+                let key = if user {
+                    table.to_string()
+                } else {
+                    format!("defaults.{table}")
+                };
+                bail!("invalid {origin} key {key}: expected a table");
             }
         }
         for (key, _) in KEYS {
             if let Some(raw) = field(defaults, key) {
-                validate_value(key, raw, origin)?;
+                let key = if user {
+                    key.to_string()
+                } else {
+                    format!("defaults.{key}")
+                };
+                validate_value(&key, raw, origin)?;
             }
         }
     }
@@ -196,6 +211,21 @@ pub fn resolved_style(cwd: &Path, revision: &str, flags: StyleFlags) -> Result<S
             layers.push((source.clone(), parse(&text, &source, false)?, false));
         }
     }
+    resolve(layers, flags)
+}
+
+/// Resolve style against the policy snapshot consumed by authorization.
+pub(crate) fn resolved_style_with_policy(
+    policy: &crate::policy::PolicyFile,
+    flags: StyleFlags,
+) -> Result<Style> {
+    let path = crate::config::ai_home()?.join("arc/config.toml");
+    let mut layers = Vec::new();
+    if let Some(text) = optional(&path)? {
+        let source = format!("user:{}", path.display());
+        layers.push((source.clone(), parse(&text, &source, true)?, true));
+    }
+    layers.extend(policy.style_layers.iter().cloned());
     resolve(layers, flags)
 }
 

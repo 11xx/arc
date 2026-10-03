@@ -1667,6 +1667,10 @@ enum Cmd {
     /// cleanup. A retention cleanup failure, including a ref lock or a hook
     /// rejecting deletion, warns with the ref prefixes that may still hold
     /// pins and does not fail the recorded integration.
+    /// Style and history constraints are validated under the target and change
+    /// locks against each authorization policy reading, retaining the original
+    /// flags. Configuration disagreement refuses before merging. A queue's
+    /// summary includes style and history refusals and all unattempted members.
     #[command(
         after_help = "Arc exits 11 when --shape ff-only encounters a diverged target; run arc rebase <change> --verify and provide fresh review or declared debt. When --into selects a different destination, arc rebase cannot select it: run git rebase <destination> in the change checkout, then arc snapshot <change> --verify and obtain fresh review or debt. Arc exits 17 when a paired replica does not hold integration authority; the refusal names the holder or an offer in flight."
     )]
@@ -1684,7 +1688,8 @@ enum Cmd {
         /// Local integration shape: ff-only advances to the approved head
         /// and refuses divergence; no-ff creates a merge commit. Resolution: flag,
         /// operator defaults, target project defaults, user config, then ff-only.
-        /// Project and operator allowed shapes intersect; squash history permits one commit.
+        /// Project and operator allowed shapes intersect; squash history permits
+        /// one commit above the member's destination, projected during queue dry runs.
         #[arg(long, value_enum)]
         shape: Option<integration::Shape>,
         /// Merge commit message, requires resolved no-ff shape (defaults to "merge(<slug>): <title>")
@@ -1706,7 +1711,8 @@ enum Cmd {
         no_cleanup: bool,
         /// Report what would happen without merging, closing, or writing.
         /// Queues stop at known blockers before projection; future gates,
-        /// replay and checkout guards are conditional
+        /// replay and checkout guards are conditional. Style and history resolve
+        /// against each member's projected destination
         #[arg(long)]
         dry_run: bool,
         /// With --dry-run, print the plan as `arc-integration-plan/1` JSON:
@@ -1863,7 +1869,8 @@ enum Cmd {
     },
     /// Show resolved paths and style values with sources as arc-config/1 JSON
     /// Style precedence: flag, operator defaults, HEAD project defaults, user, builtin.
-    /// Style inspection parses user configuration and repository policy.
+    /// Style inspection parses user configuration and repository policy;
+    /// malformed style or constraint tables and known keys refuse with file and key.
     /// Records no events; ledger reads do not require a parseable append policy.
     Config {
         /// Probe every local path required to write the ledger
@@ -2111,7 +2118,8 @@ enum PolicyCmd {
     Path,
     /// Replace the operator policy file with TOML from a file or stdin
     /// Style uses [defaults.change] and [defaults.integration]; constraints use
-    /// [integration] shapes and history. Invalid values refuse before writing.
+    /// [integration] shapes and history. Malformed tables and invalid known keys
+    /// refuse with file and key before writing.
     Write {
         /// Read TOML from a file ('-' for stdin)
         #[arg(long, required = true, value_name = "FILE")]

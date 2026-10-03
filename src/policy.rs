@@ -25,6 +25,8 @@ pub struct PolicyFile {
     pub integration_history: History,
     pub candidates: Candidates,
     pub sources: PolicySources,
+    /// Parsed project and operator style inputs from this policy reading.
+    pub(crate) style_layers: Vec<(String, toml::Value, bool)>,
 }
 
 /// How candidate selection treats evidence recorded on another registration.
@@ -312,11 +314,13 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<PolicyFile>
     let operator = operator_path(repo)?;
     let operator = read_optional(&operator)?.map(|text| (operator.display().to_string(), text));
     let mut layers = Vec::new();
+    let mut style_layers = Vec::new();
     for (source, layer) in [(PROJECT_SOURCE, project), (OPERATOR_SOURCE, operator)] {
         let Some((origin, text)) = layer else {
             continue;
         };
-        crate::style::validate_policy(&text, &origin)?;
+        let style = crate::style::parse(&text, &origin, false)?;
+        style_layers.push((format!("{source}:{origin}"), style, false));
         let layer =
             toml::from_str::<PolicyLayer>(&text).with_context(|| format!("malformed {origin}"))?;
         layers.push((source.to_string(), layer));
@@ -502,6 +506,7 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<PolicyFile>
         integration_history,
         candidates,
         sources,
+        style_layers,
     })
 }
 

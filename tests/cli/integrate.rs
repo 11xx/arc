@@ -2886,3 +2886,208 @@ fn fast_forward_debt_checks_divergence_after_waiting_for_target_lock() {
     assert_eq!(repo.head(&repo.root), target);
     assert_eq!(events(&repo, &id), recorded);
 }
+
+#[test]
+fn audit_fix_stacked_squash_queue_dry_run() {
+    for shape in ["ff-only", "no-ff"] {
+        let repo = repo_with_gates();
+        style_policy(
+            &repo,
+            &format!("[integration]\nhistory='squash'\n[defaults.integration]\nshape='{shape}'\n"),
+        );
+        let (first, wt) = approved_change(&repo, "squash-first", "first.txt", "first\n");
+        let head = repo.head(&wt);
+        let (second, _) = approved_change_based_on(
+            &repo,
+            "squash-second",
+            "second.txt",
+            "second\n",
+            &[&first],
+            Some(&head),
+        );
+        let out = stdout(
+            repo.arc(&repo.root)
+                .args(["integrate", &first, &second, "--dry-run"]),
+        );
+        assert!(out.contains(&format!("would land: {second}")), "{out}");
+        assert_eq!(
+            repo.head(&repo.root),
+            git_out(&wt, &["rev-parse", "master"])
+        );
+        stdout(repo.arc(&repo.root).args(["integrate", &first, &second]));
+    }
+}
+
+#[test]
+fn audit_fix_queue_shape_refusal_reports_prefix_and_tail() {
+    for dry in [false, true] {
+        let repo = repo_with_gates();
+        style_policy(&repo, "[integration]\nshapes=['ff-only']\n");
+        let (first, _) = approved_change(
+            &repo,
+            "constraint-first",
+            ".arc/policy.toml",
+            "[integration]\nshapes=['no-ff']\n",
+        );
+        let (second, _) = approved_change_blocked_by(
+            &repo,
+            "constraint-second",
+            "second.txt",
+            "second\n",
+            &[&first],
+        );
+        let (third, _) = approved_change_blocked_by(
+            &repo,
+            "constraint-third",
+            "third.txt",
+            "third\n",
+            &[&second],
+        );
+        let mut cmd = repo.arc(&repo.root);
+        cmd.args(["integrate", &first, &second, &third]);
+        if dry {
+            cmd.arg("--dry-run");
+        }
+        let out = stdout_any_status(&mut cmd);
+        let prefix = if dry { "would land" } else { "landed" };
+        assert!(out.contains(&format!("{prefix}: {first}")), "{out}");
+        assert!(out.contains(&format!("stopped: {second}")), "{out}");
+        assert!(out.contains(&format!("not attempted: {third}")), "{out}");
+        assert!(out.contains("outside allowed values"), "{out}");
+    }
+}
+
+#[test]
+fn audit_fix_malformed_constraint_tables_refuse_config_and_integration() {
+    for (text, key) in [
+        ("[[integration]]\nshapes=['no-ff']\n", "integration"),
+        ("integration=7\n", "integration"),
+        ("contribution=[]\n", "contribution"),
+        ("defaults=[]\n", "defaults"),
+        ("[defaults]\nintegration=[]\n", "defaults.integration"),
+        ("[defaults]\nchange=false\n", "defaults.change"),
+        ("[integration]\nshapes='no-ff'\n", "integration.shapes"),
+        ("[integration]\nhistory=7\n", "integration.history"),
+    ] {
+        let repo = repo_with_gates();
+        let (id, _) = approved_change(&repo, "malformed-style", "work.txt", "work\n");
+        fs::write(repo.root.join(".git/arc/operator-policy.toml"), text).unwrap();
+        for args in [vec!["config"], vec!["integrate", &id, "--dry-run"]] {
+            repo.arc(&repo.root)
+                .args(args)
+                .assert()
+                .failure()
+                .stderr(predicates::str::contains("operator-policy.toml"))
+                .stderr(predicates::str::contains(format!("key {key}")));
+        }
+    }
+}
+
+#[test]
+fn audit_fix_guarded_shape_revalidates_operator_snapshot() {
+    let repo = repo_with_gates();
+    let arm = repo.root.join("arm-policy-change");
+    let policy = repo.root.join(".git/arc/operator-policy.toml");
+    let command = format!("if test -f '{}'; then printf '[integration]\\nshapes=[\"no-ff\"]\\n' > '{}'; fi; printf stable", arm.display(), policy.display());
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        format!(
+            "[gates.smoke]\ncommand = 'test -f README.md'\nenvironment = {}\n",
+            serde_json::to_string(&command).unwrap(),
+        ),
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "declare environment probe"]);
+    let (id, _) = approved_change(&repo, "guarded-style", "work.txt", "work\n");
+    let before = repo.head(&repo.root);
+    fs::write(arm, "armed").unwrap();
+    repo.arc(&repo.root)
+        .args(["integrate", &id])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("configuration changed"));
+    assert_eq!(repo.head(&repo.root), before);
+    assert!(!events(&repo, &id)
+        .iter()
+        .any(|event| event["event_type"] == "change-integrated"));
+}
+
+#[test]
+fn audit_fix_shape_revalidates_after_waiting_for_target_lock() {
+    for policy in [
+        "[integration]\nshapes=['no-ff']\n",
+        "[defaults.integration]\nshape='no-ff'\n",
+    ] {
+        let repo = repo_with_gates();
+        let (id, _) = approved_change(&repo, "locked-style", "work.txt", "work\n");
+        let recorded = events(&repo, &id);
+        let before = repo.head(&repo.root);
+        let lock = hold_target_lock(&repo, "master");
+        let mut child =
+            spawn_arc_keeping_stderr(&repo, &repo.root, &["integrate", &id], "session-a");
+        assert_waiting_on_transition_lock(&mut [&mut child]);
+        fs::write(repo.root.join(".git/arc/operator-policy.toml"), policy).unwrap();
+        lock.unlock().unwrap();
+        assert_eq!(wait_for_exit(&mut child).code(), Some(1));
+        assert!(child_stderr(&mut child).contains("configuration changed"));
+        assert_eq!(repo.head(&repo.root), before);
+        assert_eq!(events(&repo, &id), recorded);
+    }
+}
+
+#[test]
+fn audit_fix_original_shape_flag_overrides_changed_default_under_lock() {
+    let repo = repo_with_gates();
+    let (id, wt) = approved_change(&repo, "locked-flag", "work.txt", "work\n");
+    let head = repo.head(&wt);
+    let lock = hold_target_lock(&repo, "master");
+    let mut child = spawn_arc(&repo, &repo.root, &["integrate", &id, "--shape", "ff-only"]);
+    assert_waiting_on_transition_lock(&mut [&mut child]);
+    fs::write(
+        repo.root.join(".git/arc/operator-policy.toml"),
+        "[defaults.integration]\nshape='no-ff'\n",
+    )
+    .unwrap();
+    lock.unlock().unwrap();
+    assert_eq!(wait_for_exit(&mut child).code(), Some(0));
+    assert_eq!(repo.head(&repo.root), head);
+}
+
+#[test]
+fn audit_fix_queue_history_refusal_reports_prefix_and_tail() {
+    for dry in [false, true] {
+        let repo = repo_with_gates();
+        style_policy(&repo, "[integration]\nhistory='squash'\n");
+        let (first, wt) = approved_change(&repo, "history-first", "first.txt", "first\n");
+        let head = repo.head(&wt);
+        let (second, wt) = approved_change_based_on(
+            &repo,
+            "history-second",
+            "second.txt",
+            "second\n",
+            &[&first],
+            Some(&head),
+        );
+        repo.commit(&wt, "extra.txt", "extra\n", "feat: extra");
+        stdout(repo.arc(&wt).args(["snapshot", &second]));
+        stdout(repo.arc(&wt).args(["verify", &second, "--gate", "smoke"]));
+        stdout(
+            repo.arc(&wt)
+                .args(["review", &second, "--verdict", "approved"]),
+        );
+        let (third, _) =
+            approved_change_blocked_by(&repo, "history-third", "third.txt", "third\n", &[&second]);
+        let mut cmd = repo.arc(&repo.root);
+        cmd.args(["integrate", &first, &second, &third]);
+        if dry {
+            cmd.arg("--dry-run");
+        }
+        let out = stdout_any_status(&mut cmd);
+        let prefix = if dry { "would land" } else { "landed" };
+        assert!(out.contains(&format!("{prefix}: {first}")), "{out}");
+        assert!(out.contains(&format!("stopped: {second}")), "{out}");
+        assert!(out.contains(&format!("not attempted: {third}")), "{out}");
+        assert!(out.contains("integration history is squash"), "{out}");
+    }
+}

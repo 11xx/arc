@@ -2229,6 +2229,11 @@ pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Resul
                     ..Default::default()
                 },
             )?;
+            let flags = crate::style::StyleFlags {
+                shape,
+                cleanup,
+                ..Default::default()
+            };
             let shape = style.shape();
             let cleanup = style.cleanup();
             if shape == integration::Shape::FfOnly && message.is_some() {
@@ -2243,6 +2248,7 @@ pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Resul
                 ClosedBehavior::Refuse,
                 SingleOptions {
                     shape,
+                    style_flags: flags,
                     dry_run,
                     json,
                     expect_basis,
@@ -2370,36 +2376,36 @@ fn integrate_queue(
             ));
             continue;
         }
-        let style = crate::style::resolved_style(
-            &queue_ctx.cwd,
-            &state.target_branch,
-            crate::style::StyleFlags {
-                shape,
-                cleanup,
-                ..Default::default()
-            },
-        )?;
-        let shape = style.shape();
-        integration_history(&queue_ctx, &state, &state.target_branch)?;
-        let step = if dry_run {
+        let result = if dry_run {
             queue_dry_run(
                 &queue_ctx,
                 &store,
                 change_id,
-                shape,
+                crate::style::StyleFlags {
+                    shape,
+                    cleanup,
+                    ..Default::default()
+                },
                 &mut projected_targets,
                 &mut projected_closures,
-            )?
+            )
         } else {
             queue_step(
                 &queue_ctx,
                 &store,
                 change_id,
-                style.cleanup(),
-                shape,
+                crate::style::StyleFlags {
+                    shape,
+                    cleanup,
+                    ..Default::default()
+                },
                 &ctx.cwd,
-            )?
+            )
         };
+        let step = result.unwrap_or_else(|error| QueueStep::Stopped {
+            code: 1,
+            reason: format!("{error:#}"),
+        });
         let stopped = matches!(step, QueueStep::Stopped { .. });
         if let QueueStep::Stopped { code, .. } = &step {
             stop_code = *code;
@@ -2434,8 +2440,7 @@ fn queue_step(
     ctx: &Ctx,
     store: &Store,
     change_id: &str,
-    cleanup: bool,
-    shape: integration::Shape,
+    flags: crate::style::StyleFlags,
     cleanup_checkout: &Path,
 ) -> Result<QueueStep> {
     let st = store.state(change_id)?;
@@ -2443,6 +2448,9 @@ fn queue_step(
         println!("{change_id}: {}", change_status(&st));
         return Ok(QueueStep::Skipped(change_status(&st).to_string()));
     }
+    let style = crate::style::resolved_style(&ctx.cwd, &st.target_branch, flags.clone())?;
+    let shape = style.shape();
+    let cleanup = style.cleanup();
     println!("{change_id}: integrating into {}", st.target_branch);
 
     if shape == integration::Shape::FfOnly && ff_diverged(ctx, &st, &st.target_branch)? {
@@ -2511,6 +2519,7 @@ fn queue_step(
         ClosedBehavior::SkipTagged,
         SingleOptions {
             shape,
+            style_flags: flags,
             cleanup_checkout: Some(cleanup_checkout.to_path_buf()),
             ..SingleOptions::default()
         },
@@ -2541,7 +2550,7 @@ fn queue_dry_run(
     ctx: &Ctx,
     store: &Store,
     change_id: &str,
-    shape: integration::Shape,
+    flags: crate::style::StyleFlags,
     projected_targets: &mut BTreeMap<String, String>,
     projected_closures: &mut std::collections::BTreeSet<String>,
 ) -> Result<QueueStep> {
@@ -2551,18 +2560,23 @@ fn queue_dry_run(
         return Ok(QueueStep::Skipped(change_status(&st).to_string()));
     }
     st.blocked_by.retain(|id| !projected_closures.contains(id));
-    // Topology is evaluated against the projected destination, while review,
+    let actual = gitio::branch_head(&ctx.cwd, &st.target_branch).ok();
+    let revision = projected_targets.get(&st.target_branch).or(actual.as_ref());
+    let target = revision.map(String::as_str).unwrap_or(&st.target_branch);
+    let policy = crate::policy::load_at(&ctx.cwd, target)?;
+    let style = crate::style::resolved_style_with_policy(&policy, flags)?;
+    let shape = style.shape();
+    integration_history_with_policy(ctx, &st, target, &policy)?;
+    // Topology and constraints follow the projected destination; review,
     // findings, holds and iteration remain facts of the observed ledger.
     let report =
         ctx.report_for_integration(store, &st, &st.target_branch, integration::Shape::NoFf)?;
-    let actual = gitio::branch_head(&ctx.cwd, &st.target_branch).ok();
-    let revision = projected_targets.get(&st.target_branch).or(actual.as_ref());
     let mut advancing = None;
     let mut conflicts = report.needs_rebase;
     if report.state == "open"
         && !st.iterating
         && report.fork.is_none()
-        && contribution_policy(ctx, &st)?.is_none()
+        && policy.contribution.is_none()
     {
         if let (Some(patchset), Some(revision)) = (st.latest_patchset(), revision) {
             let (ancestor, contained) = integration::ancestry(&ctx.cwd, revision, &patchset.head)?;
@@ -2575,7 +2589,7 @@ fn queue_dry_run(
                 });
             }
             conflicts = gitio::merge_outcome(&ctx.cwd, revision, &patchset.head)?.conflicts;
-            if !contained && shape == integration::Shape::FfOnly {
+            if !contained && (shape == integration::Shape::FfOnly || ancestor && !conflicts) {
                 advancing = Some(patchset.head.clone());
             }
         }
@@ -2629,11 +2643,30 @@ struct SingleOptions {
     cleanup_checkout: Option<PathBuf>,
     debt: Option<DebtDeclaration>,
     shape: integration::Shape,
+    style_flags: crate::style::StyleFlags,
     dry_run: bool,
     json: bool,
     /// The plan an earlier dry run printed. It never changes the decision;
     /// what moved since is named beside it.
     expect_basis: Option<IntegrationPlan>,
+}
+
+/// The resolved behavior and the flags whose precedence each reading preserves.
+struct IntegrationStyle {
+    shape: integration::Shape,
+    cleanup: bool,
+    flags: crate::style::StyleFlags,
+}
+
+impl IntegrationStyle {
+    fn validate(&self, policy: &crate::policy::PolicyFile) -> Result<()> {
+        let style = crate::style::resolved_style_with_policy(policy, self.flags.clone())
+            .map_err(|_| Refusal::ConfigurationMoved.into_error())?;
+        if style.shape() != self.shape || style.cleanup() != self.cleanup {
+            return Err(Refusal::ConfigurationMoved.into_error());
+        }
+        Ok(())
+    }
 }
 
 /// Read a plan `arc integrate --dry-run --json` printed.
@@ -2809,6 +2842,7 @@ fn integrate_one(
         cleanup_checkout,
         debt,
         shape,
+        style_flags,
         dry_run,
         json,
         expect_basis,
@@ -2832,14 +2866,26 @@ fn integrate_one(
         return Ok(status::Blocker::Iterating.exit_code());
     }
     let target = into.unwrap_or_else(|| initial.target_branch.clone());
-    integration_history(ctx, &initial, &target)?;
+    let selection = IntegrationStyle {
+        shape,
+        cleanup,
+        flags: style_flags,
+    };
     if dry_run {
+        integration_history(ctx, &initial, &target)?;
         // A dry run promises to write nothing, so there is no record for the
         // policy to be about.
         if json {
-            return integrate_dry_run_json(ctx, &store, &initial, &target, shape);
+            return integrate_dry_run_json(ctx, &store, &initial, &target, &selection);
         }
-        return integrate_dry_run(ctx, &store, &initial, &target, message.as_deref(), shape);
+        return integrate_dry_run(
+            ctx,
+            &store,
+            &initial,
+            &target,
+            message.as_deref(),
+            &selection,
+        );
     }
     // The same store the merge's closure event will be appended to, so the
     // merge and the record are judged by one reading of the policy.
@@ -2850,7 +2896,9 @@ fn integrate_one(
     let target_lock = store.lock_target(&target)?;
     let transition = store.lock_transition(&change_id)?;
     let mut st = store.state(&change_id)?;
-    integration_history(ctx, &st, &target)?;
+    let policy = crate::policy::load_at(&ctx.cwd, &target)?;
+    selection.validate(&policy)?;
+    integration_history_with_policy(ctx, &st, &target, &policy)?;
     if st.is_closed() && matches!(closed_behavior, ClosedBehavior::SkipTagged) {
         println!("{}: {}", st.change_id, change_status(&st));
         return Ok(0);
@@ -2860,7 +2908,7 @@ fn integrate_one(
         if let Some(prior) = &expect_basis {
             if let Ok(report) = ctx.report_for_integration(&store, &st, &target, shape) {
                 let outcome = integration::decide(
-                    integration_facts(ctx, &store, &st, &report, &target, shape),
+                    integration_facts(ctx, &store, &st, &report, &target, &selection),
                     Some(prior),
                 );
                 if let Some(moved) = integration::describe_moved(&outcome.moved) {
@@ -2902,7 +2950,7 @@ fn integrate_one(
             );
         }
     }
-    let facts = integration_facts(ctx, &store, &st, &report, &target, shape);
+    let facts = integration_facts(ctx, &store, &st, &report, &target, &selection);
     let outcome = integration::decide(facts, expect_basis.as_ref());
     let moved = integration::describe_moved(&outcome.moved);
     let plan = match outcome.decision {
@@ -3256,6 +3304,8 @@ fn authorization_basis(
     st: &ChangeState,
     report: &crate::status::StatusReport,
     approved_patchset_id: &str,
+    target: &str,
+    selection: &IntegrationStyle,
 ) -> Result<crate::model::AuthorizationBasis> {
     // Either a verdict approved this patchset, or a declared debt stood in for
     // the review nobody performed. One of the two must hold: a merge with
@@ -3321,7 +3371,13 @@ fn authorization_basis(
         }
     }
 
-    let declarations = consumed_declarations(ctx, st)?;
+    let mut selected = st.clone();
+    selected.target_branch = target.to_string();
+    let declarations = ctx.declarations(&selected)?;
+    selection.validate(&declarations.policy)?;
+    integration_history_with_policy(ctx, st, target, &declarations.policy)
+        .map_err(|_| Refusal::ConfigurationMoved.into_error())?;
+    let declarations = normalized_declarations(declarations, st);
 
     Ok(crate::model::AuthorizationBasis {
         verdict_event_id: approval.verdict_event_id,
@@ -3348,7 +3404,13 @@ fn authorization_basis(
 /// The gate and policy declarations in force for the change, normalized as
 /// an authorization basis records them.
 fn consumed_declarations(ctx: &Ctx, st: &ChangeState) -> Result<integration::Declarations> {
-    let declarations = ctx.declarations(st)?;
+    Ok(normalized_declarations(ctx.declarations(st)?, st))
+}
+
+fn normalized_declarations(
+    declarations: crate::declarations::Declarations,
+    st: &ChangeState,
+) -> integration::Declarations {
     let (gates, policy) = (declarations.gates, declarations.policy);
     let gates = gates
         .required_for(&st.profile)
@@ -3365,7 +3427,7 @@ fn consumed_declarations(ctx: &Ctx, st: &ChangeState) -> Result<integration::Dec
             )
         })
         .collect();
-    Ok(integration::Declarations {
+    integration::Declarations {
         gates,
         policy: crate::model::NormalizedPolicy {
             forbid_self_approval: policy.policy.forbid_self_approval,
@@ -3373,7 +3435,7 @@ fn consumed_declarations(ctx: &Ctx, st: &ChangeState) -> Result<integration::Dec
             provenance_git_identity: policy.provenance.git_identity.as_str().to_string(),
             declared_by: policy.sources.as_map(),
         },
-    })
+    }
 }
 
 /// The contribution declaration in force at the change's target, if any.
@@ -3387,6 +3449,18 @@ fn integration_history(ctx: &Ctx, st: &ChangeState, target: &str) -> Result<()> 
         return Ok(());
     }
     let policy = crate::policy::load_at(&ctx.cwd, target)?;
+    integration_history_with_policy(ctx, st, target, &policy)
+}
+
+fn integration_history_with_policy(
+    ctx: &Ctx,
+    st: &ChangeState,
+    target: &str,
+    policy: &crate::policy::PolicyFile,
+) -> Result<()> {
+    if st.is_closed() {
+        return Ok(());
+    }
     if policy.contribution.is_some() || policy.integration_history != crate::policy::History::Squash
     {
         return Ok(());
@@ -3394,7 +3468,7 @@ fn integration_history(ctx: &Ctx, st: &ChangeState, target: &str) -> Result<()> 
     let Some(patchset) = st.latest_patchset() else {
         return Ok(());
     };
-    let target_head = gitio::branch_head(&ctx.cwd, target)?;
+    let target_head = gitio::rev_parse(&ctx.cwd, target)?;
     let base = gitio::merge_base(&ctx.cwd, &target_head, &patchset.head)?;
     let commits = gitio::git(
         &ctx.cwd,
@@ -3548,8 +3622,9 @@ fn integration_facts(
     st: &ChangeState,
     report: &crate::status::StatusReport,
     target: &str,
-    shape: integration::Shape,
+    selection: &IntegrationStyle,
 ) -> IntegrationFacts {
+    let shape = selection.shape;
     let approved = st.latest_patchset().map(|patchset| integration::Approved {
         patchset_id: patchset.id.clone(),
         head: patchset.head.clone(),
@@ -3561,14 +3636,22 @@ fn integration_facts(
     let basis = approved
         .as_ref()
         .context("no patchset recorded")
-        .and_then(|_| authorization_basis(ctx, store, st, report, &patchset_id));
+        .and_then(|_| authorization_basis(ctx, store, st, report, &patchset_id, target, selection));
     // Read after the first basis: agreement between the two is the evidence
     // that the configuration held still across the decision.
     let confirmation = ctx
         .report_for_integration(store, st, target, shape)
         .map(|confirmation| integration::Confirmation {
             ready: confirmation.integrate_ready(),
-            basis: authorization_basis(ctx, store, st, &confirmation, &patchset_id),
+            basis: authorization_basis(
+                ctx,
+                store,
+                st,
+                &confirmation,
+                &patchset_id,
+                target,
+                selection,
+            ),
         });
     let checkout = target_checkout(ctx, st, target);
     let unobserved = || anyhow::anyhow!("the target checkout could not be resolved");
@@ -3640,15 +3723,16 @@ fn integrate_dry_run_json(
     store: &Store,
     st: &ChangeState,
     target: &str,
-    shape: integration::Shape,
+    selection: &IntegrationStyle,
 ) -> Result<i32> {
+    let shape = selection.shape;
     ctx.ensure_declared_actor(store)?;
     ctx.ensure_target_declares_actor(st)?;
     if shape == integration::Shape::FfOnly && ff_diverged(ctx, st, target)? {
         return Ok(refuse_divergence(st, target));
     }
     let report = ctx.report_for_integration(store, st, target, shape)?;
-    let facts = integration_facts(ctx, store, st, &report, target, shape);
+    let facts = integration_facts(ctx, store, st, &report, target, selection);
     let plan = match integration::decide(facts, None).decision {
         Decision::Refused(Refusal::Diverged) => return Ok(refuse_divergence(st, target)),
         Decision::Refused(Refusal::NotReady) => {
@@ -3683,8 +3767,9 @@ fn integrate_dry_run(
     st: &ChangeState,
     target: &str,
     message: Option<&str>,
-    shape: integration::Shape,
+    selection: &IntegrationStyle,
 ) -> Result<i32> {
+    let shape = selection.shape;
     // The refusals a real integration makes before touching anything: an
     // undeclared actor, and a target worktree that is missing or dirty. A dry
     // run that skipped them would report a merge the real path refuses.
@@ -3785,6 +3870,8 @@ fn integrate_dry_run(
             st,
             &report,
             &st.latest_patchset().context("no patchset recorded")?.id,
+            target,
+            selection,
         )?;
         println!("  authorization basis it would record:");
         println!("{}", render::authorization_basis(&basis));

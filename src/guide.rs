@@ -657,7 +657,11 @@ RUN A CHANGE
 
   `integrate --shape ff-only|no-ff` selects the local integration shape.
   Without a flag, operator defaults, target project defaults, user config,
-  and built-in ff-only apply in that order.
+  and built-in ff-only apply in that order. Resolution and history validation
+  run under the target and change locks against the policy consumed by
+  authorization, retaining the original flags. Each authorization reading
+  validates its shape constraints and history; configuration disagreement
+  refuses before merging.
   Under ff-only, the observed target must be an ancestor of the
   approved head, or already contain it. Git merge --ff-only updates the
   target checkout and advances its ref with expected-old protection. Checkout
@@ -684,12 +688,14 @@ RUN A CHANGE
   to a merge commit. Under no-ff it can replay a branch whose target moved
   with conflicts. Both shapes can run gates that lack evidence for the tree
   to ship and stop at a red gate or missing verdict. The exit code is the
-  stopped member's blocker; the summary names landed revisions, the stopped
-  member and reason, and members never attempted. `--dry-run` reports the
+  stopped member's blocker; style or history refusals exit 1. The summary
+  names landed revisions, the stopped member and reason, and members never
+  attempted, including when style or history constraints refuse. `--dry-run` reports the
   plan without replaying, running gates, or integrating. Known holds, review
   blockers and iteration stop projection before advancing the destination.
-  Prerequisites planned earlier are treated as conditionally closed; future
-  gates, replay and checkout guards remain conditional.
+  Prerequisites planned earlier are treated as conditionally closed. Each
+  member resolves style and counts history against its projected destination;
+  future gates, replay and checkout guards remain conditional.
   `--into`, `--message`, and `--debt` are single-change options: each member
   lands into its recorded target, and a debt reason binds to one patchset.
 
@@ -1809,7 +1815,9 @@ FILES
 
   Style precedence is flag, operator defaults, target project defaults, user,
   built-in. Project and operator shape constraints intersect; values outside
-  the intersection refuse. User configuration accepts style only.
+  the intersection refuse. Style and constraint tables must be tables, and
+  known keys must have valid types and values; refusals name the file and
+  key. User configuration accepts style only.
   `integration.cleanup` governs post-integration branch and worktree cleanup;
   `integrate --no-cleanup` overrides it for every selected change.
   Integration history folds with contribution history; squash requires at
