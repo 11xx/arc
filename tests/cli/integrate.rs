@@ -857,6 +857,8 @@ fn cleanup_after_an_already_contained_closure_removes_the_change_checkout() {
     let target = repo.head(&repo.root);
     let (verify_id, verify_wt) = verification_only(&repo, "cleanup-verify", &target, &[&first_id]);
 
+    let state = json_stdout(repo.arc(&repo.root).args(["show", &verify_id, "--json"]));
+    assert_eq!(state["worktree_created"], true);
     repo.arc(&repo.root)
         .args(["integrate", &verify_id, "--cleanup"])
         .assert()
@@ -872,6 +874,11 @@ fn cleanup_after_an_already_contained_closure_removes_the_change_checkout() {
 fn cleanup_after_a_take_over_keeps_the_checkout_and_drops_the_branch() {
     let repo = repo_with_gates();
     let _change = in_place_change(&repo, "stranded-cleanup");
+    let state = json_stdout(
+        repo.arc(&repo.root)
+            .args(["show", "stranded-cleanup", "--json"]),
+    );
+    assert_eq!(state["worktree_created"], false);
 
     repo.arc(&repo.root)
         .args(["integrate", "stranded-cleanup", "--cleanup"])
@@ -2383,4 +2390,141 @@ fn integration_history_folds_operator_and_contribution_alias() {
             .failure()
             .stderr(predicates::str::contains(expected));
     }
+}
+
+#[test]
+fn cleanup_safety_tracked_edits_keep_branch_and_closure() {
+    dirty_cleanup("README.md", "tracked edit\n");
+}
+
+#[test]
+fn cleanup_safety_untracked_content_keeps_branch_and_closure() {
+    dirty_cleanup("untracked.txt", "untracked\n");
+}
+
+fn dirty_cleanup(file: &str, content: &str) {
+    let repo = repo_with_gates();
+    let (id, wt) = approved_change(&repo, "dirty-cleanup", "change.txt", "change\n");
+    fs::write(wt.join(file), content).unwrap();
+    let out = stdout(repo.arc(&repo.root).args(["integrate", &id, "--cleanup"]));
+    assert!(out.contains("Git refused"), "{out}");
+    assert!(out.contains("kept branch"), "{out}");
+    assert!(wt.exists());
+    assert!(!git_out(&repo.root, &["branch", "--list", "arc/dirty-cleanup"]).is_empty());
+    let status = json_stdout(repo.arc(&repo.root).args(["status", &id]));
+    assert_eq!(status["closure"]["outcome"], "integrated");
+}
+
+#[test]
+fn cleanup_safety_adopted_worktree_is_kept() {
+    let repo = repo_with_gates();
+    let wt = repo.home.join("adopted");
+    git(
+        &repo.root,
+        &["worktree", "add", "-b", "adopted", wt.to_str().unwrap()],
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "adopted", "--adopt", "adopted"]),
+    );
+    repo.commit(&wt, "adopted.txt", "adopted\n", "fix: adopted");
+    stdout(repo.arc(&wt).args(["snapshot", "adopted", "--verify"]));
+    stdout(
+        repo.arc(&wt)
+            .args(["review", "adopted", "--verdict", "approved"]),
+    );
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", "adopted", "--cleanup"]),
+    );
+    assert!(out.contains("not created by arc"), "{out}");
+    assert!(out.contains("kept branch"), "{out}");
+    assert!(wt.exists());
+}
+
+#[test]
+fn cleanup_safety_branch_failure_warns_and_queue_continues() {
+    let repo = repo_with_gates();
+    let (first, _) = approved_change(&repo, "locked-first", "first.txt", "first\n");
+    let (second, _) = approved_change_based_on(
+        &repo,
+        "locked-second",
+        "second.txt",
+        "second\n",
+        &[&first],
+        Some("arc/locked-first"),
+    );
+    let lock = repo.root.join(".git/refs/heads/arc/locked-first.lock");
+    fs::write(&lock, "").unwrap();
+    let output = repo
+        .arc(&repo.root)
+        .args(["integrate", "--tag", "series", "--cleanup"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        err.contains("warning: integration recorded; cleanup"),
+        "{err}"
+    );
+    for id in [first, second] {
+        let status = json_stdout(repo.arc(&repo.root).args(["status", &id]));
+        assert_eq!(status["closure"]["outcome"], "integrated");
+    }
+}
+
+#[test]
+fn cleanup_safety_legacy_worktree_is_kept() {
+    let repo = repo_with_gates();
+    let (id, wt) = approved_change(&repo, "legacy-cleanup", "legacy.txt", "legacy\n");
+    let dir = repo.root.join(".git/arc/changes").join(&id).join("events");
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        let mut event: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        if event["event_type"] == "change-opened" {
+            event.as_object_mut().unwrap().remove("worktree_created");
+            fs::write(path, serde_json::to_vec(&event).unwrap()).unwrap();
+        }
+    }
+    let out = stdout(repo.arc(&repo.root).args(["integrate", &id, "--cleanup"]));
+    assert!(out.contains("not created by arc"), "{out}");
+    assert!(wt.exists());
+    let state = json_stdout(repo.arc(&repo.root).args(["show", &id, "--json"]));
+    assert_eq!(state["worktree_created"], false);
+}
+
+#[test]
+fn cleanup_safety_single_branch_failure_warns_after_closure() {
+    let repo = repo_with_gates();
+    let (id, wt) = approved_change(&repo, "locked-single", "single.txt", "single\n");
+    fs::write(repo.root.join(".git/refs/heads/arc/locked-single.lock"), "").unwrap();
+    let output = repo
+        .arc(&repo.root)
+        .args(["integrate", &id, "--cleanup"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        err.contains("warning: integration recorded; cleanup branch"),
+        "{err}"
+    );
+    assert!(!wt.exists());
+    let status = json_stdout(repo.arc(&repo.root).args(["status", &id]));
+    assert_eq!(status["closure"]["outcome"], "integrated");
+}
+
+#[test]
+fn cleanup_safety_outside_sandbox_keeps_worktree_and_branch() {
+    let repo = repo_with_gates();
+    let (id, wt) = approved_change(&repo, "outside-cleanup", "outside.txt", "outside\n");
+    let out = stdout(repo.arc(&repo.root).env("ARC_SANDBOX", &repo.root).args([
+        "integrate",
+        &id,
+        "--cleanup",
+    ]));
+    assert!(out.contains("outside the sandbox"), "{out}");
+    assert!(out.contains("kept branch"), "{out}");
+    assert!(wt.exists());
 }

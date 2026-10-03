@@ -1679,7 +1679,10 @@ enum Cmd {
         /// Merge commit message, requires resolved no-ff shape (defaults to "merge(<slug>): <title>")
         #[arg(long)]
         message: Option<String>,
-        /// Remove the change worktree and branch after a verified merge
+        /// Delete the merged branch and remove only an arc-created, clean worktree
+        /// inside the sandbox, excluding the integration checkout. Kept checkouts
+        /// retain checked-out branches. Cleanup failures warn after closure and
+        /// do not fail integration or stop a queue.
         #[arg(long)]
         cleanup: bool,
         /// Report what would happen without merging, closing, or writing

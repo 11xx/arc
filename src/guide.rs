@@ -738,6 +738,12 @@ RUN A CHANGE
   merges, and leaves the checkout on the target. The dry run says it would.
   Any other shape keeps the refusal naming the missing target checkout.
 
+  `integrate --cleanup` deletes merged branches with Git’s merged-branch
+  check and removes only arc-created, clean worktrees inside the sandbox.
+  The integration checkout is kept. A kept worktree retains its checked-out
+  branch; each retained path and branch carries its reason. Cleanup failures
+  warn after closure and do not fail integration or stop a queue.
+
   Integration prints the integrated revision and closure event before
   releasing retention refs. A retention cleanup failure, including a ref lock
   or a hook rejecting deletion, warns with the ref prefixes that may still

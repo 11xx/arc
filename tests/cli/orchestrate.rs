@@ -544,9 +544,14 @@ fn tagged_integration_cleanup_from_first_selected_worktree_keeps_batch_context_v
         .assert()
         .success();
 
-    assert!(!first_worktree.exists());
+    assert!(first_worktree.exists());
     assert!(!second_worktree.exists());
-    for branch in ["arc/series-cleanup-first", "arc/series-cleanup-second"] {
+    assert!(!git_out(
+        &repo.root,
+        &["branch", "--list", "arc/series-cleanup-first"]
+    )
+    .is_empty());
+    for branch in ["arc/series-cleanup-second"] {
         assert!(git_out(&repo.root, &["branch", "--list", branch]).is_empty());
     }
     for change in [first, second] {

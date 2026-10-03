@@ -1213,6 +1213,7 @@ mod tests {
                     branch: "arc/feat".into(),
                     base: "b".into(),
                     worktree: None,
+                    worktree_created: false,
                     blocked_by: Vec::new(),
                     tags: Vec::new(),
                     journal_ref: None,

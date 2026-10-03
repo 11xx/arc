@@ -2259,6 +2259,7 @@ pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Resul
                     dry_run,
                     json,
                     expect_basis,
+                    cleanup_checkout: None,
                 },
             )
         }
@@ -2386,7 +2387,7 @@ fn integrate_queue(
         let step = if dry_run {
             queue_dry_run(&queue_ctx, &store, change_id, shape, &mut projected_targets)?
         } else {
-            queue_step(&queue_ctx, &store, change_id, cleanup, shape)?
+            queue_step(&queue_ctx, &store, change_id, cleanup, shape, &ctx.cwd)?
         };
         let stopped = matches!(step, QueueStep::Stopped { .. });
         if let QueueStep::Stopped { code, .. } = &step {
@@ -2422,6 +2423,7 @@ fn queue_step(
     change_id: &str,
     cleanup: bool,
     shape: integration::Shape,
+    cleanup_checkout: &Path,
 ) -> Result<QueueStep> {
     let st = store.state(change_id)?;
     if st.is_closed() {
@@ -2496,6 +2498,7 @@ fn queue_step(
         ClosedBehavior::SkipTagged,
         SingleOptions {
             shape,
+            cleanup_checkout: Some(cleanup_checkout.to_path_buf()),
             ..SingleOptions::default()
         },
     )?;
@@ -2575,6 +2578,7 @@ fn queue_dry_run(
 /// What one integration was asked for beyond the merge itself.
 #[derive(Default)]
 struct SingleOptions {
+    cleanup_checkout: Option<PathBuf>,
     shape: integration::Shape,
     dry_run: bool,
     json: bool,
@@ -2753,6 +2757,7 @@ fn integrate_one(
     options: SingleOptions,
 ) -> Result<i32> {
     let SingleOptions {
+        cleanup_checkout,
         shape,
         dry_run,
         json,
@@ -3013,27 +3018,79 @@ fn integrate_one(
     advise_plan_promotions(&store, &st);
 
     if cleanup {
-        // Run cleanup git commands from the target worktree: ctx.cwd may be
-        // inside the change worktree that is about to be removed.
-        if let Some(wt_path) = &st.worktree {
-            let p = PathBuf::from(wt_path);
-            if let Some(prefix) = ctx.excluded_by_sandbox(&p)? {
-                // Removal is the most destructive thing integration does with
-                // a recorded path, so the bound is stated rather than silent.
-                println!(
-                    "kept worktree {wt_path}: it lies outside the sandbox at {}",
-                    prefix.display()
-                );
-            } else if p.exists() && p != wt {
-                gitio::git(&wt, &["worktree", "remove", wt_path])?;
-                println!("removed worktree {wt_path}");
-            }
+        let checkout = cleanup_checkout.as_deref().unwrap_or(&ctx.cwd);
+        if let Err(error) = cleanup_integrated_change(ctx, &st, &wt, checkout) {
+            eprintln!(
+                "warning: integration recorded; cleanup for branch {} failed: {error:#}",
+                st.branch
+            );
+            println!("kept branch {}: cleanup could not complete", st.branch);
         }
-        // -d refuses unless merged: exactly the safety we want.
-        gitio::git(&wt, &["branch", "-d", &st.branch])?;
-        println!("deleted branch {}", st.branch);
     }
     Ok(0)
+}
+
+fn cleanup_integrated_change(
+    ctx: &Ctx,
+    st: &ChangeState,
+    target: &Path,
+    checkout: &Path,
+) -> Result<()> {
+    if let Some(wt_path) = &st.worktree {
+        let path = PathBuf::from(wt_path);
+        if path.exists() {
+            let reason = if !st.worktree_created {
+                Some("not created by arc".to_string())
+            } else if path.canonicalize()? == gitio::toplevel(checkout)?.canonicalize()?
+                || path.canonicalize()? == target.canonicalize()?
+            {
+                Some("is the integration checkout".to_string())
+            } else if let Some(prefix) = ctx.excluded_by_sandbox(&path)? {
+                Some(format!("outside the sandbox at {}", prefix.display()))
+            } else {
+                match gitio::git(target, &["worktree", "remove", wt_path]) {
+                    Ok(_) => {
+                        println!("removed worktree {wt_path}");
+                        None
+                    }
+                    Err(error) => {
+                        let message = format!("{error:#}")
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        eprintln!("warning: integration recorded; cleanup worktree {wt_path} failed: {message}");
+                        Some(format!("Git refused: {message}"))
+                    }
+                }
+            };
+            if let Some(reason) = reason {
+                println!("kept worktree {wt_path}: {reason}");
+            }
+        }
+    }
+    if let Some(path) = gitio::worktree_for_branch(target, &st.branch)? {
+        println!(
+            "kept branch {}: checked out in kept worktree {}",
+            st.branch,
+            path.display()
+        );
+    } else {
+        match gitio::git(target, &["branch", "-d", &st.branch]) {
+            Ok(_) => println!("deleted branch {}", st.branch),
+            Err(error) => {
+                let message = format!("{error:#}")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                eprintln!(
+                    "warning: integration recorded; cleanup branch {} failed: {message}",
+                    st.branch
+                );
+                println!("kept branch {}: Git refused: {message}", st.branch);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Report what `integrate` would do without merging, closing, or writing

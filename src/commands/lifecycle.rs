@@ -301,6 +301,7 @@ pub fn begin(
             branch: branch_name.clone(),
             base: base_rev.clone(),
             worktree: worktree_path.clone(),
+            worktree_created: !adopting && !no_worktree,
             blocked_by,
             tags,
             journal_ref: from_journal.clone(),

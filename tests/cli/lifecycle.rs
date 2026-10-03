@@ -1140,9 +1140,7 @@ fn non_conflicting_target_movement_stays_ready_and_integrates() {
     );
 }
 
-/// integrate --cleanup invoked from INSIDE the change worktree must not
-/// die when that worktree is removed under it (regression: branch
-/// deletion used the vanished cwd).
+/// Cleanup preserves the invoking checkout and its checked-out branch.
 #[test]
 fn integrate_cleanup_from_inside_change_worktree() {
     let repo = Repo::new();
@@ -1160,9 +1158,9 @@ fn integrate_cleanup_from_inside_change_worktree() {
         .assert()
         .success();
 
-    assert!(!wt.exists(), "change worktree should be removed");
+    assert!(wt.exists(), "integration checkout must be kept");
     let branches = git_out(&repo.root, &["branch", "--list", "arc/fix-c"]);
-    assert!(branches.is_empty(), "change branch should be deleted");
+    assert!(!branches.is_empty(), "checked out branch must be kept");
 }
 
 /// Hold blocks integration (exit 4) until released.
