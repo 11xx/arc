@@ -442,28 +442,23 @@ fn opens_block(word: &str) -> bool {
 
 /// The marker a line begins with: its indent, then a `-`, `*`, or `+`
 /// bullet, or a number of one to nine digits closed by `.` or `)`, then a
-/// space. An author who wrote their own list chose the markers, the numbers,
-/// and the nesting; they did not choose the column the file wraps at, so the
-/// prefix survives and the text after it is still wrapped.
+/// space or a tab. An author who wrote their own list chose the markers, the
+/// numbers, and the nesting; they did not choose the column the file wraps
+/// at, so the prefix survives and the text after it is still wrapped.
 fn line_marker(line: &str) -> Option<&str> {
     let indent = lead(line).len();
     let rest = &line[indent..];
     let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-    let token = if ["- ", "* ", "+ "]
-        .iter()
-        .any(|bullet| rest.starts_with(bullet))
-    {
+    let token = if rest.starts_with(['-', '*', '+']) {
         1
-    } else if (1..=9).contains(&digits)
-        && [". ", ") "]
-            .iter()
-            .any(|close| rest[digits..].starts_with(close))
-    {
+    } else if (1..=9).contains(&digits) && rest[digits..].starts_with(['.', ')']) {
         digits + 1
     } else {
         return None;
     };
-    Some(&line[..indent + token + 1])
+    rest[token..]
+        .starts_with([' ', '\t'])
+        .then(|| &line[..indent + token + 1])
 }
 
 /// Whether a line beginning with `marker` opens an item instead of joining
@@ -493,9 +488,13 @@ fn ordinal(marker: &str) -> Option<&str> {
 /// author chose; only the bullet arc would otherwise have added is withheld.
 ///
 /// Each paragraph and list item is refilled to the width as one unit, so an
-/// entry renders the same whatever column its author wrapped it at. A fenced
-/// block keeps its lines exactly, trailing whitespace included; the only
-/// change is the item's indentation in front of each non-empty line.
+/// entry renders the same whatever column its author wrapped it at. Every
+/// line keeps its column within the block that holds it, so Markdown reads
+/// the same items, paragraphs, and fences in the entry as in the body. A
+/// fenced block keeps its lines exactly, trailing whitespace included. In a
+/// bare body, the item's indentation goes in front of each non-empty line,
+/// and each tab in front of the line's text becomes the spaces it stood
+/// for, since how far a tab reaches depends on the column it starts at.
 fn as_list_item(body: &str) -> String {
     let blocks = body_blocks(body);
     let Some(first) = blocks.first() else {
@@ -507,7 +506,7 @@ fn as_list_item(body: &str) -> String {
             marker: Some(_),
             ..
         } | Block::Fenced {
-            marker: Some(_),
+            markers: Some(_),
             ..
         }
     );
@@ -519,23 +518,21 @@ fn as_list_item(body: &str) -> String {
     for block in &blocks {
         match block {
             Block::Blank => lines.push(String::new()),
-            Block::Fenced { lines: fenced, .. } => lines.extend(fenced.iter().map(|line| {
-                if line.is_empty() {
-                    String::new()
-                } else {
-                    format!("{base}{line}")
+            Block::Fenced {
+                markers,
+                lines: fenced,
+            } => lines.extend(fenced.iter().enumerate().map(|(index, line)| {
+                if base.is_empty() || line.is_empty() {
+                    return (*line).to_string();
                 }
-            })),
-            Block::Prose {
-                marker,
-                indent,
-                words,
-            } => {
-                let opener = match marker {
-                    Some(marker) => format!("{base}{marker}"),
-                    None if authored => (*indent).to_string(),
-                    None => base.to_string(),
+                let held = match markers {
+                    Some(markers) if index == 0 => markers.len(),
+                    _ => lead(line).len(),
                 };
+                format!("{base}{}{}", untabbed(&line[..held]), &line[held..])
+            })),
+            Block::Prose { opener, words, .. } => {
+                let opener = format!("{base}{opener}");
                 let continuation = " ".repeat(opener.chars().count());
                 let width = CHANGELOG_LINE_WIDTH.saturating_sub(opener.chars().count());
                 for (index, wrapped) in wrap_words(&words.join(" "), width).into_iter().enumerate()
@@ -557,17 +554,21 @@ enum Block<'a> {
     /// A paragraph break; runs of blank lines collapse to one.
     Blank,
     /// A fenced code block, fences included, kept line for line, and the
-    /// list marker its opening line begins with when the fence is the first
-    /// block of the item that line opens.
+    /// list markers its opening line begins with, through the whitespace in
+    /// front of the fence, when the fence is the first block of the item
+    /// that line opens.
     Fenced {
-        marker: Option<&'a str>,
+        markers: Option<&'a str>,
         lines: Vec<&'a str>,
     },
-    /// A paragraph or list item: the marker that opens it, if any, the
-    /// indentation of its first line, and every word of its lines in order.
+    /// A paragraph or list item: the marker that opens it, if any, what goes
+    /// in front of its words, and every word of its lines in order. An item
+    /// opens with its markers, the whitespace among them written as spaces
+    /// of the same width, out to the column its text starts at; a paragraph
+    /// opens with spaces out to the text of the block holding it.
     Prose {
         marker: Option<&'a str>,
-        indent: &'a str,
+        opener: String,
         words: Vec<&'a str>,
     },
 }
@@ -635,6 +636,20 @@ fn column_after(text: &str, start: usize) -> usize {
     text.chars().fold(start, |column, c| match c {
         '\t' => column + 4 - column % 4,
         _ => column + 1,
+    })
+}
+
+/// `prefix`, read from column 0, with each tab written as the spaces that
+/// reach the same tab stop.
+fn untabbed(prefix: &str) -> String {
+    prefix.chars().fold(String::new(), |mut spaced, c| {
+        if c == '\t' {
+            let column = spaced.chars().count();
+            spaced.push_str(&" ".repeat(4 - column % 4));
+        } else {
+            spaced.push(c);
+        }
+        spaced
     })
 }
 
@@ -734,7 +749,7 @@ fn body_blocks(body: &str) -> Vec<Block<'_>> {
             items.retain(|&column| column <= container);
             fence = Some(open);
             blocks.push(Block::Fenced {
-                marker,
+                markers: marker.map(|_| &line[..from]),
                 lines: vec![line],
             });
             continue;
@@ -746,11 +761,14 @@ fn body_blocks(body: &str) -> Vec<Block<'_>> {
             }
             items.retain(|&column| column <= indent);
         }
-        let text = marker.map_or(trimmed, |marker| &line[marker.len()..]);
+        let opener = match marker {
+            Some(_) => format!("{:<container$}", untabbed(&line[..from]).trim_end()),
+            None => " ".repeat(container),
+        };
         blocks.push(Block::Prose {
             marker,
-            indent: lead(line),
-            words: text.split_whitespace().collect(),
+            opener,
+            words: line[from..].split_whitespace().collect(),
         });
     }
     if matches!(blocks.last(), Some(Block::Blank)) {
@@ -1343,15 +1361,16 @@ mod tests {
 
     #[test]
     fn indentation_counts_columns_with_a_tab_stop_every_four() {
-        // Behind a tab, a run sits four columns into the body: content, not
-        // a closing fence, so the lines after it keep their own.
-        for lead in ["\t", " \t", "  \t", "\t "] {
+        // Behind a tab, a run sits four columns or more into the body:
+        // content, not a closing fence, so the lines after it keep their own.
+        for (lead, column) in [("\t", 4), (" \t", 4), ("  \t", 4), ("\t ", 5)] {
             assert_eq!(
                 as_list_item(&format!(
                     "Example:\n ```\n{lead}```\nline one\nline two\n ```\nAfter."
                 )),
                 format!(
-                    "- Example:\n   ```\n  {lead}```\n  line one\n  line two\n   ```\n  After."
+                    "- Example:\n   ```\n  {}```\n  line one\n  line two\n   ```\n  After.",
+                    " ".repeat(column)
                 ),
                 "{lead:?}"
             );
@@ -1371,7 +1390,65 @@ mod tests {
         // A tab after the marker moves the item's text to column four.
         assert_eq!(
             as_list_item("- \tfoo\n      ```\n      code\n      ```\n    after"),
-            "- foo\n      ```\n      code\n      ```\n    after"
+            "-   foo\n      ```\n      code\n      ```\n    after"
+        );
+    }
+
+    #[test]
+    fn a_tab_after_a_marker_separates_it_from_the_item_text() {
+        // The tab reaches column four, where the item's text and its fence
+        // start; the fence holds the tab-indented lines up to its closer.
+        assert_eq!(
+            as_list_item("-\t```\n\tcode\n\t```\nafter"),
+            "-\t```\n\tcode\n\t```\nafter"
+        );
+        assert_eq!(
+            as_list_item("1.\t~~~\n\tcode\n\t~~~"),
+            "1.\t~~~\n\tcode\n\t~~~"
+        );
+        // Under the entry's own bullet, the tab is written as the spaces it
+        // stood for, so the item's text and its fence keep their column.
+        assert_eq!(
+            as_list_item("Example:\n1.\t~~~\n\tcode\n\t~~~\nAfter."),
+            "- Example:\n  1.  ~~~\n      code\n      ~~~\n  After."
+        );
+        // Prose after the tab is refilled under the column the tab reached.
+        assert_eq!(
+            as_list_item(concat!(
+                "*\tAn item whose text is long enough that the renderer has to ",
+                "wrap it at least once."
+            )),
+            concat!(
+                "*   An item whose text is long enough that the renderer has to wrap it at\n",
+                "    least once."
+            )
+        );
+    }
+
+    #[test]
+    fn rendering_keeps_each_line_at_its_column_within_its_block() {
+        // A tab-indented run four columns into the body stays four columns
+        // into the item the body becomes: content, not a closing fence.
+        assert_eq!(
+            as_list_item("Example:\n```\n\t```\nline\n```\nAfter."),
+            "- Example:\n  ```\n      ```\n  line\n  ```\n  After."
+        );
+        // A tab that reached a nested item's text still reaches it.
+        assert_eq!(
+            as_list_item("Example:\n- a\n  - b\n\t```\n\tcode\n\t```\nAfter."),
+            "- Example:\n  - a\n    - b\n      ```\n      code\n      ```\n  After."
+        );
+        // A paragraph stays in the item that holds it, and so does a fence
+        // after it.
+        assert_eq!(
+            as_list_item("Example:\n- a\n\n   para\n  ```\n  code\n  ```\nAfter."),
+            "- Example:\n  - a\n\n    para\n    ```\n    code\n    ```\n  After."
+        );
+        // An item's text keeps its column, so a fence under it keeps its
+        // place.
+        assert_eq!(
+            as_list_item("-   foo\n      ```\n      code\n      ```"),
+            "-   foo\n      ```\n      code\n      ```"
         );
     }
 
