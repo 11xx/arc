@@ -3757,7 +3757,16 @@ fn ff_diverged(ctx: &Ctx, st: &ChangeState, target: &str) -> Result<bool> {
 fn refuse_initialized_gitlink_changes(checkout: &Path, old: &str, approved: &str) -> Result<()> {
     let diff = gitio::git(
         checkout,
-        &["diff", "--raw", "-z", "--no-renames", old, approved, "--"],
+        &[
+            "diff",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--ignore-submodules=none",
+            old,
+            approved,
+            "--",
+        ],
     )?;
     let mut entries = diff.split('\0').filter(|entry| !entry.is_empty());
     let mut initialized = Vec::new();

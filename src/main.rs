@@ -1691,7 +1691,8 @@ enum Cmd {
     /// rollback. Both shapes isolate merge-shaping Git defaults. Transition
     /// failure, including checkout takeover, reports ref, HEAD, index and checkout
     /// state and preserves local and competing work. Fast-forwards changing
-    /// initialized submodules refuse before Git mutation; use --shape no-ff or
+    /// initialized submodules refuse before Git mutation regardless of Git
+    /// submodule ignore settings; use --shape no-ff or
     /// integrate manually with submodule updates. Closure publication
     /// failure reports whether the event is published, absent or unreadable;
     /// inspect publication and durability before retrying.

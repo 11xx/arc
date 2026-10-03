@@ -672,8 +672,9 @@ RUN A CHANGE
   ref, HEAD, index and checkout state for recovery, without a reset. This
   includes target checkout takeover and every failure after Git mutation.
   Fast-forwards changing initialized submodules refuse before takeover or
-  ref advancement; use --shape no-ff or a manual integration with submodule
-  updates. Recovery checkout restoration includes --recurse-submodules.
+  ref advancement regardless of Git submodule ignore settings; use
+  --shape no-ff or a manual integration with submodule updates. Recovery
+  checkout restoration includes --recurse-submodules.
   Closure publication failure reports whether the exact event is published,
   absent, or unreadable. A published event requires durability recovery and
   inspection, not another integration; an unreadable ledger must be inspected

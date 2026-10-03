@@ -4083,6 +4083,8 @@ fn initialized_gitlink_change_refuses_before_fast_forward() {
     git(&wt, &["commit", "-m", "advance gitlink"]);
     stdout(repo.arc(&wt).args(["snapshot", &id, "--verify"]));
     approve(&repo, &id);
+    git(&repo.root, &["config", "diff.ignoreSubmodules", "all"]);
+    git(&repo.root, &["config", "submodule.sub.ignore", "all"]);
     let recorded = events(&repo, &id);
     for flags in [vec!["--dry-run"], vec!["--dry-run", "--json"]] {
         let mut args = vec!["integrate", &id];
