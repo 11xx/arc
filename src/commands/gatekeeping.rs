@@ -2219,7 +2219,15 @@ pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Resul
             let store = ctx.store()?;
             let (_, state) = ctx.load_state(&store, reference)?;
             let target = into.as_deref().unwrap_or(&state.target_branch);
-            let shape = crate::style::resolved_style(&ctx.cwd, target, shape)?.shape();
+            let shape = crate::style::resolved_style(
+                &ctx.cwd,
+                target,
+                crate::style::StyleFlags {
+                    shape,
+                    ..Default::default()
+                },
+            )?
+            .shape();
             if shape == integration::Shape::FfOnly && message.is_some() {
                 bail!("--message names a merge commit; select --shape no-ff");
             }
@@ -2381,8 +2389,15 @@ fn integrate_queue(
             ));
             continue;
         }
-        let shape =
-            crate::style::resolved_style(&queue_ctx.cwd, &state.target_branch, shape)?.shape();
+        let shape = crate::style::resolved_style(
+            &queue_ctx.cwd,
+            &state.target_branch,
+            crate::style::StyleFlags {
+                shape,
+                ..Default::default()
+            },
+        )?
+        .shape();
         integration_history(&queue_ctx, &state, &state.target_branch)?;
         let step = if dry_run {
             queue_dry_run(&queue_ctx, &store, change_id, shape, &mut projected_targets)?

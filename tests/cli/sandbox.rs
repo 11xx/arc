@@ -59,11 +59,11 @@ fn the_prefix_relocates_every_root_and_doctor_reports_them() {
     let repo = Repo::new();
     let prefix = repo.home.join("boxed");
 
-    let out = stdout(
-        repo.arc(&repo.root)
-            .env("ARC_SANDBOX", &prefix)
-            .args(["begin", "boxed-change"]),
-    );
+    let out = stdout(repo.arc(&repo.root).env("ARC_SANDBOX", &prefix).args([
+        "begin",
+        "boxed-change",
+        "--worktree",
+    ]));
     assert!(out.contains("change: boxed-change-"), "{out}");
     assert!(prefix.join(".worktrees/repo-boxed-change").is_dir());
 
@@ -123,7 +123,7 @@ fn an_exact_root_override_wins_over_the_prefix() {
         repo.arc(&repo.root)
             .env("ARC_SANDBOX", &prefix)
             .env("ARC_WORKTREES_DIR", &worktrees)
-            .args(["begin", "stated"]),
+            .args(["begin", "stated", "--worktree"]),
     );
     assert!(worktrees.join("repo-stated").is_dir());
     assert!(!prefix.join(".worktrees/repo-stated").exists());
@@ -142,11 +142,11 @@ fn a_tilde_path_in_the_configuration_expands_under_the_prefix() {
     )
     .unwrap();
 
-    stdout(
-        repo.arc(&repo.root)
-            .env("ARC_SANDBOX", &prefix)
-            .args(["begin", "tilded"]),
-    );
+    stdout(repo.arc(&repo.root).env("ARC_SANDBOX", &prefix).args([
+        "begin",
+        "tilded",
+        "--worktree",
+    ]));
     assert!(prefix.join("trees/repo-tilded").is_dir());
     assert!(!repo.home.join("trees").exists());
 }
@@ -212,7 +212,7 @@ fn no_write_verb_under_a_prefix_touches_anything_outside_it() {
         .filter(|entry| !entry.starts_with("boxed"))
         .collect::<Vec<_>>();
 
-    stdout(arc(&repo.root).args(["begin", "inside"]));
+    stdout(arc(&repo.root).args(["begin", "inside", "--worktree"]));
     let inside = prefix.join(".worktrees/repo-inside");
     repo.commit(&inside, "inside.txt", "inside\n", "feat: inside");
     stdout(arc(&inside).args(["snapshot", "inside"]));

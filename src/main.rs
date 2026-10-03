@@ -237,7 +237,12 @@ impl From<KeptKindArg> for model::KeptKind {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Open a change: create (or adopt) its branch and worktree
+    /// Open a change: create (or adopt) its branch and record its checkout
+    ///
+    /// New branches use [change] checkout (built-in: in-place), overridden by
+    /// --worktree or --no-worktree. --adopt records the branch's existing
+    /// worktree; it switches this checkout only with explicit --no-worktree
+    /// and never creates a worktree.
     ///
     /// Without --base, the change derives its base from the local target:
     /// its head, or under --adopt the adopted branch's merge base with it.
@@ -268,12 +273,13 @@ enum Cmd {
         /// skips the comparison of the target with its upstream
         #[arg(long)]
         base: Option<String>,
-        /// Branch name (defaults to arc/<slug>)
+        /// Branch name (defaults to [change] branch_prefix followed by the slug; built-in arc/)
         #[arg(long)]
         branch: Option<String>,
-        /// Worktree path (defaults to ~/.worktrees/<repo>-<slug>)
-        #[arg(long)]
-        worktree: Option<String>,
+        /// Force a worktree for a new branch, optionally at this path.
+        /// Without a path, use worktrees_dir/<repo>-<slug>
+        #[arg(long, num_args = 0..=1, conflicts_with = "no_worktree")]
+        worktree: Option<Option<String>>,
         /// Switch this checkout to the change branch, carrying local work.
         /// Create the branch unless --adopt is supplied. Refuse overwrite conflicts,
         /// including ignored files, or a branch checked out elsewhere without
@@ -4689,7 +4695,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             };
             let mut resolved = serde_json::json!({
                 "schema": style::CONFIG_SCHEMA,
-                "style": style::resolved_style(&ctx.cwd, "HEAD", None)?.keys,
+                "style": style::resolved_style(&ctx.cwd, "HEAD", style::StyleFlags::default())?.keys,
                 "sandbox": cfg.sandbox.as_ref().map(|p| p.display().to_string()),
                 "ai_home": cfg.ai_home.display().to_string(),
                 "config_file": cfg.config_path.display().to_string(),

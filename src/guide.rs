@@ -456,14 +456,21 @@ SETTLE A QUESTION (before it is work)
   losing branch — the labels this exists to avoid.
 
 RUN A CHANGE
-  arc begin <slug> --profile <p>     Open a change: branch + worktree + record.
+  arc begin <slug> --profile <p>     Open a change: branch + checkout + record.
     --from-journal <file>            Open it from a journal item, consuming it.
     --blocked-by <change> --tag <t>  Declare a chain up front, at planning time.
-    --no-worktree                    Take over this checkout, if it can be taken.
+    --worktree [<path>]              Force a worktree, at the path or under worktrees_dir.
+    --no-worktree                    Switch this checkout, carrying local work.
+    Checkout follows [change] checkout (built-in in-place), independent of profile.
+    Without --branch, append the slug to [change] branch_prefix (built-in arc/).
     --base <rev>                     Start from <rev>, not the target head.
                                      Without it, a target behind its upstream
                                      (as the last fetch left it) is a warning
                                      naming both revisions and the fix.
+    If commits landed on the target by mistake: keep a branch at the work with
+    `git branch <work-branch>`, then `arc begin <slug> --adopt <work-branch>
+    --base <intended-base> --target <target>`. Repair the target deliberately;
+    do not reset it.
   arc brief --body-file <f>          Record the next contract version.
     --caused-by <kind:ref>           Why it changed. v1 refuses a cause; every
     --cause-note <text>              later version requires one of these.
@@ -753,14 +760,15 @@ RUN A CHANGE
   ref prefixes and the recorded closure succeeds, including an asserted
   integration after an external fast-forward merge.
 
-  `--no-worktree` creates and switches to the change branch in the invoking
+  In-place checkout creates and switches to the change branch in the invoking
   checkout, recording it as the change's worktree so subsequent commands infer
   the change. Tracked edits, staged changes, untracked files, and ignored files
   carry across when Git can preserve them. An overwrite conflict refuses with
   a non-zero exit naming the conflict, without creating a branch or opening a
   change.
   An existing branch requires `--adopt`; a branch checked out elsewhere cannot
-  be switched to in place.
+  be switched to in place. `--adopt` records an existing worktree and creates
+  none; only explicit `--no-worktree` switches to the adopted branch.
 
   Release copy is recorded per change and rendered at release; arc imposes
   no file convention. While an open change has no changelog record, `arc
@@ -873,12 +881,13 @@ END A SESSION (what the next one reads)
   session checks that nothing is left; it is not when filing happens.
 
 PROFILES (--profile, default local)
-  direct   Bounded, reversible, one session and checkout. `--no-worktree` uses
-           a clean target checkout in place; otherwise it remains untouched.
+  direct   Bounded, reversible, one session and checkout. Checkout follows
+           [change] checkout (built-in in-place) and --worktree/--no-worktree.
            Implement, verify, review the diff, commit. No journal topic.
   local    Spans sessions or roles, or needs host-local evidence CI cannot
-           reproduce. Dedicated branch/worktree, verdict or debt per REVIEW
-           COVERAGE AND DEBT, resolved style (built-in fast-forward).
+           reproduce. Dedicated branch, checkout follows [change] checkout
+           (built-in in-place) and --worktree/--no-worktree. Verdict or debt per
+           REVIEW COVERAGE AND DEBT, resolved style (built-in fast-forward).
   forge    A hosted PR adds a remote record, inline discussion, clean runner
            evidence, or branch protection. local underneath; project only public
            integration facts into the PR.

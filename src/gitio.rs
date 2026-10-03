@@ -1342,7 +1342,7 @@ pub fn default_branch(cwd: &Path) -> Option<String> {
     )
     .ok()
     .and_then(|branch| branch.strip_prefix("origin/").map(str::to_string))
-    .filter(|branch| !branch.is_empty() && !is_working_branch(branch));
+    .filter(|branch| !branch.is_empty() && !is_working_branch(cwd, branch));
     if declared.is_some() {
         return declared;
     }
@@ -1355,13 +1355,29 @@ pub fn default_branch(cwd: &Path) -> Option<String> {
         .ok()
         .flatten()
         .filter(|branch| !branch.is_empty())
-        .filter(|branch| !is_working_branch(branch))
+        .filter(|branch| !is_working_branch(cwd, branch))
 }
 
-/// Whether a branch is one arc creates to carry work: a change branch or a
-/// fork. Neither is ever an integration target.
-fn is_working_branch(branch: &str) -> bool {
-    is_fork_branch(branch) || branch.starts_with("arc/")
+/// Forks, conventional change branches, and ledger-recorded branches carry
+/// work rather than an implicit integration target. Unreadable ownership
+/// evidence prevents guessing a target.
+fn is_working_branch(cwd: &Path, branch: &str) -> bool {
+    if is_fork_branch(branch) || branch.starts_with("arc/") {
+        return true;
+    }
+    let recorded = (|| -> Result<bool> {
+        let root = crate::store::Store::resolve_root(cwd)?;
+        let Some(store) = crate::store::Store::open_at(&root)? else {
+            return Ok(false);
+        };
+        for id in store.list_change_ids()? {
+            if store.state(&id)?.branch == branch {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    })();
+    recorded.unwrap_or(true)
 }
 
 pub fn ahead_count(cwd: &Path, base: &str, branch: &str) -> Result<usize> {

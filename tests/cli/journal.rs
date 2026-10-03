@@ -2984,7 +2984,11 @@ fn auto_log_narrates_integrate_when_enabled() {
     let repo = Repo::new();
     let cfg = repo.home.join(".local/ai/arc");
     fs::create_dir_all(&cfg).unwrap();
-    fs::write(cfg.join("config.toml"), "[journal]\nauto_log = true\n").unwrap();
+    fs::write(
+        cfg.join("config.toml"),
+        "[change]\ncheckout='worktree'\n[journal]\nauto_log = true\n",
+    )
+    .unwrap();
 
     let (change_id, worktree, _head) = change_with_patchset(&repo, "feat-x");
     repo.arc(&worktree)

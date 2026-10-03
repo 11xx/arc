@@ -8,7 +8,7 @@ use std::path::Path;
 pub const CONFIG_SCHEMA: &str = "arc-config/1";
 
 const KEYS: [(&str, &str); 4] = [
-    ("change.checkout", "worktree"),
+    ("change.checkout", "in-place"),
     ("change.branch_prefix", "arc/"),
     ("integration.shape", "ff-only"),
     ("integration.cleanup", "false"),
@@ -34,12 +34,50 @@ struct Allowed {
     sources: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Checkout {
+    InPlace,
+    Worktree,
+}
+
+impl Checkout {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::InPlace => "in-place",
+            Self::Worktree => "worktree",
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct StyleFlags {
+    pub shape: Option<crate::integration::Shape>,
+    pub checkout: Option<Checkout>,
+    pub branch_prefix: Option<String>,
+    pub cleanup: Option<bool>,
+}
+
 #[derive(Debug)]
 pub struct Style {
     pub keys: BTreeMap<String, Resolved>,
 }
 
 impl Style {
+    pub fn checkout(&self) -> Checkout {
+        match self.keys["change.checkout"].value.as_str() {
+            Some("in-place") => Checkout::InPlace,
+            Some("worktree") => Checkout::Worktree,
+            _ => unreachable!("resolved change.checkout is validated"),
+        }
+    }
+
+    pub fn branch_prefix(&self) -> &str {
+        self.keys["change.branch_prefix"]
+            .value
+            .as_str()
+            .expect("resolved prefix is a string")
+    }
+
     pub fn shape(&self) -> crate::integration::Shape {
         match self.keys["integration.shape"].value.as_str() {
             Some("no-ff") => crate::integration::Shape::NoFf,
@@ -133,11 +171,7 @@ pub fn validate_policy(text: &str, origin: &str) -> Result<()> {
 
 /// Resolve a target's committed defaults beneath operator policy and flags.
 /// Outside Git, only the user file and built-in values participate.
-pub fn resolved_style(
-    cwd: &Path,
-    revision: &str,
-    shape: Option<crate::integration::Shape>,
-) -> Result<Style> {
+pub fn resolved_style(cwd: &Path, revision: &str, flags: StyleFlags) -> Result<Style> {
     let path = crate::config::ai_home()?.join("arc/config.toml");
     let mut layers = Vec::new();
     if let Some(text) = optional(&path)? {
@@ -155,13 +189,10 @@ pub fn resolved_style(
             layers.push((source.clone(), parse(&text, &source, false)?, false));
         }
     }
-    resolve(layers, shape)
+    resolve(layers, flags)
 }
 
-fn resolve(
-    layers: Vec<(String, toml::Value, bool)>,
-    shape: Option<crate::integration::Shape>,
-) -> Result<Style> {
+fn resolve(layers: Vec<(String, toml::Value, bool)>, flags: StyleFlags) -> Result<Style> {
     let mut keys = BTreeMap::new();
     let mut constraints = Vec::new();
     for (source, value, user) in &layers {
@@ -211,16 +242,23 @@ fn resolve(
                 });
             }
         }
-        if key == "integration.shape" {
-            if let Some(shape) = shape {
-                candidates.push(Candidate {
-                    value: json!(match shape {
-                        crate::integration::Shape::FfOnly => "ff-only",
-                        crate::integration::Shape::NoFf => "no-ff",
-                    }),
-                    source: "flag".into(),
-                });
-            }
+        let flag = match key {
+            "change.checkout" => flags.checkout.map(|v| json!(v.as_str())),
+            "change.branch_prefix" => flags.branch_prefix.as_ref().map(|v| json!(v)),
+            "integration.cleanup" => flags.cleanup.map(|v| json!(v)),
+            "integration.shape" => flags.shape.map(|shape| {
+                json!(match shape {
+                    crate::integration::Shape::FfOnly => "ff-only",
+                    crate::integration::Shape::NoFf => "no-ff",
+                })
+            }),
+            _ => unreachable!("known style key"),
+        };
+        if let Some(value) = flag {
+            candidates.push(Candidate {
+                value,
+                source: "flag".into(),
+            });
         }
         let winner = candidates.pop().unwrap();
         let allowed = if key == "integration.shape" {
@@ -271,8 +309,8 @@ mod tests {
             ("project:target", "[defaults.change]\ncheckout='worktree'\nbranch_prefix='project/'\n[defaults.integration]\nshape='ff-only'\ncleanup=false", false),
             ("operator:policy.toml", "[defaults.change]\ncheckout='in-place'\nbranch_prefix='operator/'\n[defaults.integration]\nshape='no-ff'\ncleanup=true", false),
         ];
-        let builtin = resolve(Vec::new(), None).unwrap();
-        assert_eq!(builtin.keys["change.checkout"].value, "worktree");
+        let builtin = resolve(Vec::new(), StyleFlags::default()).unwrap();
+        assert_eq!(builtin.keys["change.checkout"].value, "in-place");
         assert_eq!(builtin.keys["change.branch_prefix"].value, "arc/");
         assert_eq!(builtin.keys["integration.cleanup"].value, false);
         for n in 1..=3 {
@@ -286,7 +324,7 @@ mod tests {
                     )
                 })
                 .collect();
-            let resolved = resolve(layers, None).unwrap();
+            let resolved = resolve(layers, StyleFlags::default()).unwrap();
             for (key, _) in KEYS {
                 assert_eq!(resolved.keys[key].source, texts[n - 1].0);
                 assert_eq!(resolved.keys[key].overridden.len(), n);
@@ -324,7 +362,10 @@ mod tests {
         let operator = "[integration]\nshapes=['no-ff']";
         let resolved = resolve(
             vec![make("project:p", project), make("operator:o", operator)],
-            Some(crate::integration::Shape::NoFf),
+            StyleFlags {
+                shape: Some(crate::integration::Shape::NoFf),
+                ..Default::default()
+            },
         )
         .unwrap();
         let key = &resolved.keys["integration.shape"];
@@ -337,7 +378,10 @@ mod tests {
         for flag in [None, Some(crate::integration::Shape::FfOnly)] {
             let error = resolve(
                 vec![make("project:p", project), make("operator:o", operator)],
-                flag,
+                StyleFlags {
+                    shape: flag,
+                    ..Default::default()
+                },
             )
             .unwrap_err()
             .to_string();
@@ -355,7 +399,7 @@ mod tests {
                 make("project:p", "[integration]\nshapes=['ff-only']"),
                 make("operator:o", operator),
             ],
-            None,
+            StyleFlags::default(),
         )
         .unwrap_err()
         .to_string();
@@ -364,6 +408,27 @@ mod tests {
                 && error.contains("project:p")
                 && error.contains("operator:o")
         );
+    }
+
+    #[test]
+    fn every_style_flag_overrides_layers() {
+        let style = resolve(
+            vec![("user:config.toml".into(), parse("[change]\ncheckout='worktree'\nbranch_prefix='user/'\n[integration]\ncleanup=false\nshape='ff-only'", "user", true).unwrap(), true)],
+            StyleFlags {
+                checkout: Some(Checkout::InPlace),
+                branch_prefix: Some("flag-".into()),
+                cleanup: Some(true),
+                shape: Some(crate::integration::Shape::NoFf),
+            },
+        ).unwrap();
+        assert_eq!(style.checkout(), Checkout::InPlace);
+        assert_eq!(style.branch_prefix(), "flag-");
+        assert_eq!(style.keys["integration.cleanup"].value, true);
+        assert!(matches!(style.shape(), crate::integration::Shape::NoFf));
+        for (key, _) in KEYS {
+            assert_eq!(style.keys[key].source, "flag");
+            assert_eq!(style.keys[key].overridden.len(), 2);
+        }
     }
 
     #[test]

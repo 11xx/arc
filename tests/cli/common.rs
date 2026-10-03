@@ -29,6 +29,13 @@ impl Repo {
         fs::write(root.join("README.md"), "hello\n").unwrap();
         git(&root, &["add", "."]);
         git(&root, &["commit", "-m", "init"]);
+        let config = home.join(".local/ai/arc");
+        fs::create_dir_all(&config).unwrap();
+        fs::write(
+            config.join("config.toml"),
+            "[change]\ncheckout='worktree'\n",
+        )
+        .unwrap();
         Repo {
             _tmp: tmp,
             root,
@@ -159,11 +166,9 @@ impl Repo {
 pub(crate) fn enable_identity_detection(repo: &Repo) {
     let config_dir = repo.home.join(".local/ai/arc");
     fs::create_dir_all(&config_dir).unwrap();
-    fs::write(
-        config_dir.join("config.toml"),
-        "[identity]\ndetect = true\n",
-    )
-    .unwrap();
+    let path = config_dir.join("config.toml");
+    let existing = fs::read_to_string(&path).unwrap_or_default();
+    fs::write(path, format!("{existing}[identity]\ndetect = true\n")).unwrap();
 }
 
 pub(crate) fn codex_recording(repo: &Repo, session: &str, model: &str) -> PathBuf {

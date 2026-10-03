@@ -49,7 +49,7 @@ fn config_file_under_ai_home() {
     stdout(
         repo.arc(&repo.root)
             .env("AI_HOME", &ai_home)
-            .args(["begin", "cfg-c"]),
+            .args(["begin", "cfg-c", "--worktree"]),
     );
     assert!(repo.home.join("cfg-wts").join("repo-cfg-c").is_dir());
 }

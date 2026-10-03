@@ -528,17 +528,15 @@ fn no_worktree_after_a_closed_change_uses_its_recorded_target() {
 }
 
 #[test]
-fn no_worktree_carries_dirty_target_checkout() {
+fn builtin_checkout_carries_dirty_target_checkout() {
     let repo = Repo::new();
+    fs::write(repo.home.join(".local/ai/arc/config.toml"), "").unwrap();
     fs::write(repo.root.join("README.md"), b"tracked\n\0").unwrap();
     git(&repo.root, &["add", "README.md"]);
     fs::write(repo.root.join("README.md"), b"unstaged\n\0").unwrap();
     fs::write(repo.root.join("scratch.bin"), b"untracked\n\xff").unwrap();
     let before = git_out(&repo.root, &["diff", "--cached"]);
-    stdout(
-        repo.arc(&repo.root)
-            .args(["begin", "dirty-in-place", "--no-worktree"]),
-    );
+    stdout(repo.arc(&repo.root).args(["begin", "dirty-in-place"]));
     assert_eq!(
         git_out(&repo.root, &["branch", "--show-current"]),
         "arc/dirty-in-place"

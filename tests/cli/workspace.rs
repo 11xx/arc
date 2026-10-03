@@ -2422,7 +2422,7 @@ fn workspace_backlog_ranks_by_a_declared_fact_and_keeps_them_separate() {
     // question, and nothing waiting on a person.
     let debt_project = Repo::new();
     shared(&debt_project)
-        .args(["begin", "feat-complete"])
+        .args(["begin", "feat-complete", "--worktree"])
         .assert()
         .success();
     let worktree = shared_home.join(".worktrees/repo-feat-complete");

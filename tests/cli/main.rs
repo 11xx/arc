@@ -4,6 +4,7 @@ mod bundle;
 mod candidate;
 mod chain;
 mod changelog;
+mod checkout_defaults;
 mod claims;
 mod common;
 mod context;

@@ -13,7 +13,7 @@ pub fn begin(
     target: Option<String>,
     base: Option<String>,
     branch: Option<String>,
-    worktree: Option<String>,
+    worktree: Option<Option<String>>,
     no_worktree: bool,
     adopt: Option<String>,
     blocked_by: Vec<String>,
@@ -120,6 +120,21 @@ pub fn begin(
              pass --target explicitly to stack changes deliberately"
         );
     }
+    let checkout = if no_worktree {
+        Some(crate::style::Checkout::InPlace)
+    } else if worktree.is_some() {
+        Some(crate::style::Checkout::Worktree)
+    } else {
+        None
+    };
+    let style = crate::style::resolved_style(
+        &ctx.cwd,
+        &target_branch,
+        crate::style::StyleFlags {
+            checkout,
+            ..Default::default()
+        },
+    )?;
     let target_head = gitio::branch_head(&ctx.cwd, &target_branch)?;
     // Read the promotion source before anything is created: a `--from-fork`
     // naming no fork refuses by name, and the record is the fork as it stood
@@ -159,7 +174,7 @@ pub fn begin(
         };
         (adopted, base_rev, wt)
     } else {
-        let branch_name = branch.unwrap_or_else(|| format!("arc/{slug}"));
+        let branch_name = branch.unwrap_or_else(|| format!("{}{slug}", style.branch_prefix()));
         if let Some(fork) = super::fork::fork_slug_of_branch(&branch_name) {
             bail!("{}", super::fork::promotion_refusal(&fork));
         }
@@ -170,7 +185,7 @@ pub fn begin(
             Some(b) => gitio::rev_parse(&ctx.cwd, &b)?,
             None => target_head.clone(),
         };
-        let wt = if no_worktree {
+        let wt = if style.checkout() == crate::style::Checkout::InPlace {
             let path = gitio::toplevel(&ctx.cwd)?;
             // Git creates the branch only if the checkout succeeds, preserving
             // tracked, untracked, and ignored work or refusing an overwrite atomically.
@@ -187,7 +202,7 @@ pub fn begin(
             Some(path.display().to_string())
         } else {
             gitio::create_branch(&ctx.cwd, &branch_name, &base_rev)?;
-            let path = match worktree {
+            let path = match worktree.flatten() {
                 Some(p) => PathBuf::from(p),
                 None => default_worktree_path(&ctx.cwd, slug)?,
             };
