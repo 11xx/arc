@@ -1075,6 +1075,20 @@ pub fn snapshot_with_verify(
     if all && !gates.is_empty() {
         bail!("--all cannot be combined with --gate");
     }
+    if !gates.is_empty() {
+        let unique = gates.iter().collect::<BTreeSet<_>>();
+        if unique.len() != gates.len() {
+            bail!("--gate values must be unique within one verification run");
+        }
+        let store = ctx.store()?;
+        let (_, st) = ctx.load_state(&store, reference)?;
+        let declarations = ctx.declarations(&st)?.gates;
+        for name in &gates {
+            if !declarations.gates.contains_key(name) {
+                bail!("gate {name:?} not declared in .arc/gates.toml");
+            }
+        }
+    }
     super::review::snapshot(
         ctx,
         reference,

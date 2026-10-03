@@ -466,6 +466,9 @@ RUN A CHANGE
                                      and `delegate-exit:<handle>` are the
                                      expected evidence; any text is accepted.
   arc snapshot                       Record the current head as a patchset.
+    --verify [--gate <name>...]      Run required gates, or selected gates.
+                                     Selected names must be unique and declared;
+                                     invalid names refuse before any write.
     --contributors <a,b> | --solo    Declare who wrote it; required while
                                      another actor holds a live claim.
     --journal-ref <file>             Name a journal artifact that framed the

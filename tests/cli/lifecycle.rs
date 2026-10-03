@@ -209,6 +209,48 @@ fn snapshot_verify_records_patchset_and_selected_or_all_evidence_at_the_same_hea
 }
 
 #[test]
+fn snapshot_verify_rejects_duplicate_gates_without_writing() {
+    assert_snapshot_gate_refusal(&["alpha", "alpha"], "--gate values must be unique");
+}
+
+#[test]
+fn snapshot_verify_rejects_undeclared_gate_without_writing() {
+    assert_snapshot_gate_refusal(&["missing"], "not declared in .arc/gates.toml");
+}
+
+#[test]
+fn snapshot_verify_rejects_undeclared_gate_in_selection_without_writing() {
+    assert_snapshot_gate_refusal(&["alpha", "missing"], "not declared in .arc/gates.toml");
+}
+
+fn assert_snapshot_gate_refusal(selection: &[&str], error: &str) {
+    let repo = Repo::new();
+    commit_composed_gates(&repo);
+    stdout(repo.arc(&repo.root).args(["begin", "invalid-gates"]));
+    let wt = repo.home.join(".worktrees/repo-invalid-gates");
+    repo.commit(&wt, "change.txt", "change\n", "feat: change");
+    stdout(repo.arc(&wt).args(["snapshot", "invalid-gates"]));
+    repo.commit(&wt, "change.txt", "updated\n", "feat: update");
+    let before = stdout(repo.arc(&wt).args(["events", "--change", "invalid-gates"]));
+    let before_show = json_stdout(repo.arc(&wt).args(["show", "invalid-gates", "--json"]));
+    let mut args = vec!["snapshot", "invalid-gates", "--verify"];
+    for &name in selection {
+        args.extend(["--gate", name]);
+    }
+    repo.arc(&wt)
+        .args(args)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(error));
+    let after_show = json_stdout(repo.arc(&wt).args(["show", "invalid-gates", "--json"]));
+    assert_eq!(before_show["patchsets"], after_show["patchsets"]);
+    assert_eq!(
+        before,
+        stdout(repo.arc(&wt).args(["events", "--change", "invalid-gates"]))
+    );
+}
+
+#[test]
 fn snapshot_records_brief_and_resnapshots_same_head_after_renegotiation() {
     let repo = Repo::new();
     stdout(repo.arc(&repo.root).args(["begin", "brief-bound-patchset"]));

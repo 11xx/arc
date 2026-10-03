@@ -1090,7 +1090,8 @@ enum Cmd {
         /// Run verification after recording the patchset
         #[arg(long)]
         verify: bool,
-        /// Gate name from .arc/gates.toml (repeatable with --verify)
+        /// Gate name from .arc/gates.toml (repeatable with --verify). Names must
+        /// be unique and declared; invalid names refuse before any write
         #[arg(long)]
         gate: Vec<String>,
         /// Run every gate declared for the change profile
