@@ -1750,7 +1750,7 @@ SCHEMAS
 
   Commitments, derived views:
     `arc-state/3`                    arc show --json
-    `arc-status/28`                  arc status
+    `arc-status/27`                  arc status
     `arc-check/3`                    arc check --json
     `arc-inbox/10`                   arc inbox --json
     `arc-catchup/12`                 arc catchup --json

@@ -816,7 +816,7 @@ enum Cmd {
         #[arg(long)]
         off: bool,
     },
-    /// Machine-readable status report (the versioned arc-status/28 schema).
+    /// Machine-readable status report (the versioned arc-status/27 schema).
     /// comparison_patchset names the closure's source patchset when recorded,
     /// otherwise the newest snapshot; head_matches_comparison_patchset compares
     /// its head. head_matches_latest_patchset always compares the newest snapshot.

@@ -16,7 +16,7 @@ use std::path::Path;
 
 pub use crate::blockers::Blocker;
 
-pub const STATUS_SCHEMA: &str = "arc-status/28";
+pub const STATUS_SCHEMA: &str = "arc-status/27";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 
 #[derive(Debug, Clone, Serialize)]
