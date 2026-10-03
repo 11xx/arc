@@ -34,6 +34,10 @@ fn fork_begin_creates_worktree_marker_and_refuses_integration() {
     let worktree = fork_worktree(&repo, "demo");
     assert!(worktree.is_dir(), "worktree must exist");
     assert_eq!(
+        fs::read_to_string(worktree.join("README.md")).unwrap(),
+        "hello\n"
+    );
+    assert_eq!(
         git_out(&repo.root, &["worktree", "list", "--porcelain"])
             .lines()
             .filter(|line| line.starts_with("worktree "))
@@ -2378,4 +2382,42 @@ fn diverged_fork_change_keeps_the_fork_refusal() {
             .code(15)
             .stderr(predicates::str::contains("unintegrated by intent"));
     }
+}
+
+#[test]
+fn fork_begin_post_checkout_replacement_keeps_worktrees_without_marker() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = Repo::new();
+    let hook = repo.root.join(".git/hooks/post-checkout");
+    fs::write(
+        &hook,
+        r#"#!/bin/sh
+set -eu
+hook=$(git rev-parse --git-path hooks/post-checkout)
+chmod -x "$hook"
+original=$(pwd)
+moved="${original}-moved"
+git worktree move "$original" "$moved"
+cd "$moved"
+git checkout --detach
+git worktree add "$original" fork/replaced
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = repo
+        .arc(&repo.root)
+        .args(["fork", "begin", "replaced"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("changed administrative identity"));
+    let worktree = fork_worktree(&repo, "replaced");
+    assert!(worktree.exists());
+    assert!(repo
+        .home
+        .join(".worktrees/repo-fork-replaced-moved")
+        .exists());
+    let journal = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    assert!(journal["open"].as_array().unwrap().is_empty(), "{journal}");
 }

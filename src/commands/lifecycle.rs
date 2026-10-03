@@ -149,6 +149,7 @@ pub fn begin(
     let base_from_target = base.is_none();
     let adopting = adopt.is_some();
     let mut worktree_owner_token = None;
+    let mut worktree_admin = None;
 
     let (branch_name, base_rev, worktree_path) = if let Some(adopted) = adopt {
         if !gitio::branch_exists(&ctx.cwd, &adopted) {
@@ -221,7 +222,10 @@ pub fn begin(
             crate::worktree_usage::report_root_free(&path);
             warn_below_worktree_floor(&ctx.cwd, &path);
             gitio::add_worktree(&ctx.cwd, &path, &branch_name)?;
-            worktree_owner_token = Some(gitio::write_worktree_owner(&path, &change_id)?);
+            let admin = gitio::worktree_admin_dir(&path)?;
+            worktree_owner_token = Some(gitio::write_worktree_owner(&admin, &change_id)?);
+            worktree_admin = Some((path.clone(), admin));
+            gitio::populate_worktree(&path)?;
             Some(path.display().to_string())
         };
         (branch_name, base_rev, wt)
@@ -305,6 +309,16 @@ pub fn begin(
             .parse::<u64>()
             .ok()
             .map(|blocks| blocks * 1024)
+    }
+
+    if let Some((path, admin)) = &worktree_admin {
+        if !gitio::worktree_admin_matches(&ctx.cwd, path, admin) {
+            worktree_owner_token = None;
+            eprintln!(
+                "warning: worktree {} changed administrative identity during checkout; keeping all worktrees and recording no creation authority",
+                path.display()
+            );
+        }
     }
 
     let ev = ctx.event(

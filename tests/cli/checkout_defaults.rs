@@ -223,3 +223,16 @@ fn begin_configured_in_place_records_no_creation() {
     let state = json_stdout(repo.arc(&repo.root).args(["show", "configured", "--json"]));
     assert_eq!(state["worktree_created"], false);
 }
+
+#[test]
+fn begin_worktree_populates_an_empty_tree() {
+    let repo = Repo::new();
+    git(&repo.root, &["rm", "README.md"]);
+    git(&repo.root, &["commit", "-m", "test: empty tree"]);
+    let id =
+        crate::common::opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", "empty"])));
+    let worktree = repo.home.join(".worktrees/repo-empty");
+    assert!(git_out(&worktree, &["status", "--porcelain"]).is_empty());
+    let state = json_stdout(repo.arc(&repo.root).args(["show", &id, "--json"]));
+    assert_eq!(state["worktree_created"], true);
+}

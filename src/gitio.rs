@@ -111,17 +111,34 @@ struct WorktreeOwner {
     token: String,
 }
 
+pub fn worktree_admin_dir(checkout: &Path) -> Result<PathBuf> {
+    std::fs::canonicalize(git(checkout, &["rev-parse", "--absolute-git-dir"])?)
+        .context("cannot resolve worktree administrative directory")
+}
+
+/// The registered checkout must resolve to the directory allocated at creation.
+pub fn worktree_admin_matches(cwd: &Path, checkout: &Path, admin: &Path) -> bool {
+    let Ok(checkout) = std::fs::canonicalize(checkout) else {
+        return false;
+    };
+    worktree_inventory(cwd).is_ok_and(|entries| {
+        entries
+            .iter()
+            .any(|entry| !entry.prunable && entry.path == checkout)
+    }) && worktree_admin_dir(&checkout).is_ok_and(|actual| actual == admin)
+}
+
 fn worktree_owner_path(checkout: &Path) -> Result<PathBuf> {
-    Ok(PathBuf::from(git(checkout, &["rev-parse", "--absolute-git-dir"])?).join("arc-owner"))
+    Ok(worktree_admin_dir(checkout)?.join("arc-owner"))
 }
 
 /// Bind an arc-created checkout's administrative directory to its change.
-pub fn write_worktree_owner(checkout: &Path, change_id: &str) -> Result<String> {
+pub fn write_worktree_owner(admin: &Path, change_id: &str) -> Result<String> {
     let owner = WorktreeOwner {
         change_id: change_id.to_string(),
         token: ulid::Ulid::new().to_string(),
     };
-    let path = worktree_owner_path(checkout)?;
+    let path = admin.join("arc-owner");
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1319,6 +1336,7 @@ pub fn add_worktree(cwd: &Path, path: &Path, branch: &str) -> Result<()> {
         &[
             "worktree",
             "add",
+            "--no-checkout",
             path.to_str().context("non-UTF8 worktree path")?,
             branch,
         ],
@@ -1326,8 +1344,8 @@ pub fn add_worktree(cwd: &Path, path: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
-/// Create `branch` at HEAD (or `start`) and check it out in a new worktree,
-/// as one Git call. The `-b` must precede the path: `worktree add <path>
+/// Allocate an empty worktree and create `branch` at `start` in one Git call.
+/// The `-b` must precede the path: `worktree add <path>
 /// <new-branch>` treats the branch as an existing commit-ish and fails with
 /// `invalid reference`, so a branch cannot be minted positionally.
 pub fn add_worktree_new_branch(cwd: &Path, path: &Path, branch: &str, start: &str) -> Result<()> {
@@ -1336,12 +1354,20 @@ pub fn add_worktree_new_branch(cwd: &Path, path: &Path, branch: &str, start: &st
         &[
             "worktree",
             "add",
+            "--no-checkout",
             "-b",
             branch,
             path.to_str().context("non-UTF8 worktree path")?,
             start,
         ],
     )?;
+    Ok(())
+}
+
+/// Populate an allocated worktree; checkout hooks run after its files are written.
+pub fn populate_worktree(path: &Path) -> Result<()> {
+    git(path, &["read-tree", "--reset", "-u", "HEAD"])?;
+    git(path, &["checkout", "--no-overwrite-ignore", "HEAD"])?;
     Ok(())
 }
 

@@ -174,9 +174,16 @@ pub fn begin(ctx: &Ctx, slug: &str, base_branch: Option<&str>) -> Result<i32> {
     // A fork is the longest-lived checkout arc creates, so the space it will
     // occupy is reported before it exists rather than discovered later.
     crate::worktree_usage::report_root_free(&worktree_root);
-    // The branch is created by the worktree add itself: one command, no
-    // window where a branch exists with no checkout.
+    // Git allocates the worktree and its branch together.
     crate::gitio::add_worktree_new_branch(cwd, &worktree, &branch, &base)?;
+    let admin = crate::gitio::worktree_admin_dir(&worktree)?;
+    crate::gitio::populate_worktree(&worktree)?;
+    if !crate::gitio::worktree_admin_matches(cwd, &worktree, &admin) {
+        bail!(
+            "worktree {} changed administrative identity during checkout; keeping all worktrees and recording no fork marker",
+            worktree.display()
+        );
+    }
 
     // The marker is a journal artifact, not a ledger event: a fork is intent,
     // not gated work, and the ledger records only what the gates decided.

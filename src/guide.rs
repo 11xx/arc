@@ -789,7 +789,13 @@ RUN A CHANGE
   a configured true. Cleanup deletes merged branches with Git’s merged-branch
   check and removes only clean worktrees inside the sandbox. Arc removes only
   the checkout instance it created, identified by an owner record in that
-  checkout’s Git administrative directory.
+  checkout’s Git administrative directory. `begin` allocates the worktree
+  without checkout, writes its owner record, and then populates its files.
+  Creation authority requires the registered path to retain that allocated
+  administrative directory after checkout hooks run. A changed identity opens
+  the change without creation authority and keeps all worktrees. `fork begin`
+  also verifies the allocated directory after checkout and refuses its marker
+  on a changed identity, keeping all worktrees.
   The registered checkout must still hold the change branch. Tracked edits
   and untracked or ignored content, including build output, keep it. An
   outbox containing only the spool's regular `.gitignore` with `*` and a

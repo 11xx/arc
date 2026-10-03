@@ -244,6 +244,10 @@ enum Cmd {
     /// worktree; it switches this checkout only with explicit --no-worktree
     /// and never creates a worktree.
     ///
+    /// Worktree ownership binds to the allocated Git administrative directory
+    /// before checkout hooks run. If the registered path changes identity,
+    /// the change opens without creation authority and all worktrees are kept.
+    ///
     /// Without --base, the change derives its base from the local target:
     /// its head, or under --adopt the adopted branch's merge base with it.
     /// When that target lacks commits its configured upstream holds, as the
@@ -2061,6 +2065,10 @@ enum ReplicaAuthorityCmd {
 #[derive(Subcommand)]
 enum ForkCmd {
     /// Create the fork worktree and journal its marker
+    ///
+    /// The registered checkout must retain its allocated Git administrative
+    /// directory after checkout hooks run. A changed identity refuses the
+    /// marker and keeps all worktrees.
     Begin {
         /// Kebab-case slug naming the fork (and the fork/<slug> branch)
         slug: String,

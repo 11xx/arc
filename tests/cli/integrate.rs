@@ -3791,3 +3791,44 @@ fn third_round_queue_known_lifecycle_blockers_precede_preparation() {
         assert_eq!(git_out(&repo.root, &["show-ref"]), refs);
     }
 }
+
+#[test]
+fn cleanup_safety_post_checkout_replacement_is_unowned_and_kept() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = repo_with_gates();
+    let hook = repo.root.join(".git/hooks/post-checkout");
+    fs::write(
+        &hook,
+        r#"#!/bin/sh
+set -eu
+hook=$(git rev-parse --git-path hooks/post-checkout)
+chmod -x "$hook"
+original=$(pwd)
+moved="${original}-moved"
+git worktree move "$original" "$moved"
+cd "$moved"
+git checkout --detach
+git worktree add "$original" arc/hook-replacement
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let (id, wt) = approved_change(&repo, "hook-replacement", "change.txt", "change\n");
+    let admin = PathBuf::from(git_out(&wt, &["rev-parse", "--absolute-git-dir"]));
+    assert!(
+        !admin.join("arc-owner").exists(),
+        "replacement must not receive ownership"
+    );
+    let state = json_stdout(repo.arc(&repo.root).args(["show", &id, "--json"]));
+    assert_eq!(state["worktree_created"], false);
+    let out = stdout(repo.arc(&repo.root).args(["integrate", &id, "--cleanup"]));
+    assert!(wt.exists(), "{out}");
+    let moved = repo.home.join(".worktrees/repo-hook-replacement-moved");
+    assert!(moved.exists());
+    let moved_admin = PathBuf::from(git_out(&moved, &["rev-parse", "--absolute-git-dir"]));
+    let owner: serde_json::Value =
+        serde_json::from_slice(&fs::read(moved_admin.join("arc-owner")).unwrap()).unwrap();
+    assert_eq!(owner["change_id"], id);
+    assert!(state["worktree_owner_token"].is_null());
+    assert!(out.contains("kept"), "{out}");
+}
