@@ -442,28 +442,23 @@ fn opens_block(word: &str) -> bool {
 
 /// The marker a line begins with: its indent, then a `-`, `*`, or `+`
 /// bullet, or a number of one to nine digits closed by `.` or `)`, then a
-/// space. An author who wrote their own list chose the markers, the numbers,
-/// and the nesting; they did not choose the column the file wraps at, so the
-/// prefix survives and the text after it is still wrapped.
+/// space or a tab. An author who wrote their own list chose the markers, the
+/// numbers, and the nesting; they did not choose the column the file wraps
+/// at, so the prefix survives and the text after it is still wrapped.
 fn line_marker(line: &str) -> Option<&str> {
     let indent = lead(line).len();
     let rest = &line[indent..];
     let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-    let token = if ["- ", "* ", "+ "]
-        .iter()
-        .any(|bullet| rest.starts_with(bullet))
-    {
+    let token = if rest.starts_with(['-', '*', '+']) {
         1
-    } else if (1..=9).contains(&digits)
-        && [". ", ") "]
-            .iter()
-            .any(|close| rest[digits..].starts_with(close))
-    {
+    } else if (1..=9).contains(&digits) && rest[digits..].starts_with(['.', ')']) {
         digits + 1
     } else {
         return None;
     };
-    Some(&line[..indent + token + 1])
+    rest[token..]
+        .starts_with([' ', '\t'])
+        .then(|| &line[..indent + token + 1])
 }
 
 /// Whether a line beginning with `marker` opens an item instead of joining
@@ -1372,6 +1367,20 @@ mod tests {
         assert_eq!(
             as_list_item("- \tfoo\n      ```\n      code\n      ```\n    after"),
             "- foo\n      ```\n      code\n      ```\n    after"
+        );
+    }
+
+    #[test]
+    fn a_tab_after_a_marker_separates_it_from_the_item_text() {
+        // The tab reaches column four, where the item's text and its fence
+        // start; the fence holds the tab-indented lines up to its closer.
+        assert_eq!(
+            as_list_item("-\t```\n\tcode\n\t```\nafter"),
+            "-\t```\n\tcode\n\t```\nafter"
+        );
+        assert_eq!(
+            as_list_item("1.\t~~~\n\tcode\n\t~~~"),
+            "1.\t~~~\n\tcode\n\t~~~"
         );
     }
 
