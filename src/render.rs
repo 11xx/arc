@@ -1444,39 +1444,68 @@ pub fn next_step(report: &StatusReport) -> String {
 fn undischargeable_probe_step(report: &StatusReport, probe: &crate::status::ProbeStatus) -> String {
     let change = report.change_id.as_str();
     let bound = probe.brief_version;
-    let snapshot = format!(
-        "arc snapshot {change} --contributors {}",
-        patchset_contributors(report)
-    );
+    let (contributors, note) = match contributor_arguments(report) {
+        Ok(arguments) => (arguments, String::new()),
+        Err(identity) => (
+            "--contributors=<contributors>".to_string(),
+            format!(
+                ", with <contributors> chosen by hand: {identity:?} has no exact --contributors spelling, since the flag splits on commas and trims each name"
+            ),
+        ),
+    };
+    let snapshot = format!("arc snapshot {change} {contributors}");
+    // Binding a later brief discharges nothing unless that brief is one the
+    // probe can fail at.
     let later = report
         .brief
         .as_ref()
-        .map(|brief| brief.version)
-        .filter(|latest| *latest > bound);
+        .filter(|brief| {
+            brief.version > bound
+                && crate::status::probe_base_dischargeable(
+                    brief.base_revision.as_deref(),
+                    &probe.final_revision,
+                )
+        })
+        .map(|brief| brief.version);
     if let Some(latest) = later {
-        return format!("snapshot to bind the patchset to brief v{latest}: {snapshot}");
+        return format!("snapshot to bind the patchset to brief v{latest}{note}: {snapshot}");
     }
     format!(
-        "as lead, record a brief based on the revision the work started from, redeclaring v{bound}'s probes, and snapshot to bind the patchset to it: arc brief {change} --body-file <file> --base <revision the work started from> --cause-note \"<why v{bound} could not discharge its probes>\" --probes-json {} && {snapshot}",
+        "as lead, record a brief based on the revision the work started from, redeclaring v{bound}'s probes, and snapshot to bind the patchset to it{note}: arc brief {change} --body-file <file> --base <revision the work started from> --cause-note \"<why v{bound} could not discharge its probes>\" --probes-json {} && {snapshot}",
         redeclared_probes(report)
     )
 }
 
-/// The latest patchset's effective contributors as a `--contributors` value:
-/// its recorded set when nonempty, otherwise its effective author. A snapshot
-/// that rebinds the same head to a later brief records the same work, so it
-/// declares the same hands, which is also what a live claim held by another
-/// actor requires of it.
-fn patchset_contributors(report: &StatusReport) -> String {
+/// The latest patchset's effective contributors as `--contributors=`
+/// arguments: its recorded set when nonempty, otherwise its effective author.
+/// A snapshot that rebinds the same head to a later brief records the same
+/// work, so it declares the same hands, which is also what a live claim held
+/// by another actor requires of it.
+///
+/// Each identity is its own `--contributors=` argument, so one that begins
+/// with `-` stays a value. The flag splits on commas and trims each name, so
+/// an identity holding a comma or edge whitespace has no exact spelling; the
+/// error is that identity.
+fn contributor_arguments(report: &StatusReport) -> Result<String, String> {
     let Some(patchset) = &report.latest_patchset else {
-        return "<contributors>".to_string();
+        return Ok("--contributors=<contributors>".to_string());
     };
-    let contributors = if patchset.contributors.is_empty() {
+    let identities = if patchset.contributors.is_empty() {
         vec![patchset.effective_author()]
     } else {
         patchset.contributors.iter().map(String::as_str).collect()
     };
-    shell_word(&contributors.join(","))
+    identities
+        .into_iter()
+        .map(|identity| {
+            if identity.is_empty() || identity.contains(',') || identity.trim() != identity {
+                Err(identity.to_string())
+            } else {
+                Ok(format!("--contributors={}", shell_word(identity)))
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|arguments| arguments.join(" "))
 }
 
 /// `value` as one shell word: bare when it holds nothing a shell interprets.
