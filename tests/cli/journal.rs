@@ -13090,10 +13090,10 @@ fn snapshot_promotes_the_spool_left_in_the_change_worktree() {
     );
 }
 
-/// `--cleanup` deletes the change worktree, so integration files whatever is
-/// spooled there before the only copy goes with it.
+/// Integration files spooled writes while cleanup preserves the ignored
+/// outbox metadata and its checkout.
 #[test]
-fn integrate_promotes_the_spool_before_removing_the_worktree() {
+fn integrate_promotes_the_spool_and_keeps_ignored_outbox_metadata() {
     let repo = Repo::new();
     let journal = journal_dir(&repo);
     stdout(repo.arc(&repo.root).args(["begin", "spooled-integrate"]));
@@ -13120,7 +13120,17 @@ fn integrate_promotes_the_spool_before_removing_the_worktree() {
         );
     assert!(integrated.contains("spool: 1 write(s)"), "{integrated}");
     assert!(integrated.contains("promoted 1, kept 0"), "{integrated}");
-    assert!(!wt.exists(), "the worktree is removed");
+    assert!(wt.exists(), "{integrated}");
+    assert!(
+        integrated.contains("holds local content not in the branch"),
+        "{integrated}"
+    );
+    assert!(integrated.contains("kept branch"), "{integrated}");
+    assert_eq!(
+        fs::read_to_string(wt.join(".arc/outbox/.gitignore")).unwrap(),
+        "*\n"
+    );
+    assert!(spool_files_in(&wt.join(".arc/outbox")).is_empty());
 
     let events = journal_events(&journal);
     let logged = events
