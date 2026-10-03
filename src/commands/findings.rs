@@ -19,7 +19,7 @@ pub enum FindingsFormat {
 /// set that includes what nobody knew when it shipped; omitting them would
 /// leave an audit's findings write-only. So both are shown, labelled.
 pub fn findings(ctx: &Ctx, reference: &str, format: FindingsFormat, audit: bool) -> Result<()> {
-    let store = ctx.store_for_reading()?;
+    let store = ctx.store()?;
     let (_, state) = ctx.load_state(&store, reference)?;
     let selected = if audit {
         &state.audit_findings

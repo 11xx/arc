@@ -1042,6 +1042,105 @@ fn reports_over_many_changes_read_past_a_broken_policy() {
     repo.arc(&repo.root).args(["inbox"]).assert().success();
 }
 
+/// The guide's read-only list is the contract: every command on it, in each
+/// form that reads something different, runs from a target checkout whose
+/// committed policy cannot be parsed. A command added to the list without a
+/// form here fails the test, so the list cannot promise what nothing checks.
+#[test]
+fn every_read_only_command_reads_past_a_broken_policy() {
+    let repo = repo_with_gates();
+    let (change_id, worktree) = approved_change(&repo, "read-only", "read.txt", "r\n");
+    repo.arc(&worktree)
+        .args([
+            "message",
+            "read-only",
+            "--type",
+            "status",
+            "--summary",
+            "shipping",
+        ])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["debt", "read-only", "--reason", "no second actor reachable"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", "read-only"])
+        .assert()
+        .success();
+    let merged = repo.head(&repo.root);
+    let closed = json_stdout(repo.arc(&repo.root).args(["status", &change_id, "--json"]));
+    let closure_event = closed["closure"]["event_id"]
+        .as_str()
+        .expect("a closed change names its closure event")
+        .to_string();
+    fs::write(repo.root.join(".arc/policy.toml"), "[policy\n").unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "test: break the policy"]);
+
+    let guide = stdout(&mut repo.arc(&repo.root));
+    let listed: std::collections::BTreeSet<String> = guide
+        .lines()
+        .skip_while(|line| !line.ends_with("These commands record nothing, in any form or flag:"))
+        .skip(1)
+        .take_while(|line| line.starts_with("    "))
+        .flat_map(|line| line.split_whitespace().map(str::to_string))
+        .collect();
+    assert!(listed.contains("status"), "{guide}");
+
+    let id = change_id.as_str();
+    // Each form with the exit code it reports for a change that has shipped:
+    // `check` answers that a closed change is not ready to integrate.
+    let forms: Vec<(Vec<&str>, i32)> = vec![
+        (vec!["status", id, "--json"], 0),
+        (vec!["status", "read-only", "--at", &closure_event], 0),
+        (vec!["--change", id, "status", "read-only"], 0),
+        (vec!["show", "read-only"], 0),
+        (vec!["show", "read-only", "--json"], 0),
+        (vec!["show", "read-only", "--at", &closure_event], 0),
+        (vec!["show", "--tag", "series"], 0),
+        (vec!["check", id, "--json"], 6),
+        (vec!["check", id, "--explain"], 6),
+        (vec!["check", "--tag", "series"], 0),
+        (vec!["explain", "read-only"], 0),
+        (vec!["explain", "read-only", "--json"], 0),
+        (vec!["findings", "read-only"], 0),
+        (vec!["findings", "read-only", "--audit"], 0),
+        (vec!["log", "read-only"], 0),
+        (vec!["log", "read-only", "--reverse"], 0),
+        (vec!["list"], 0),
+        (vec!["list", "--json"], 0),
+        (vec!["query", "--tag", "series"], 0),
+        (vec!["query", "--debt", "--json"], 0),
+        (vec!["query", "--commit", &merged], 0),
+        (vec!["blocker-status", id], 0),
+        (vec!["is-blocked", id], 0),
+        (vec!["messages"], 0),
+        (vec!["messages", "--change", "read-only", "--json"], 0),
+        (vec!["inbox"], 0),
+        (vec!["inbox", "--json"], 0),
+        (vec!["catchup"], 0),
+        (vec!["catchup", "--json"], 0),
+    ];
+    let exercised: std::collections::BTreeSet<String> = forms
+        .iter()
+        .map(|(args, _)| {
+            args.iter()
+                .find(|arg| listed.contains(**arg))
+                .map_or_else(|| args[0].to_string(), |name| name.to_string())
+        })
+        .collect();
+    assert_eq!(exercised, listed, "every listed command has a form here");
+
+    for (args, code) in forms {
+        let out = repo.arc(&repo.root).args(&args).output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(code), "{args:?}\n{stderr}");
+        assert!(!stderr.contains("policy.toml"), "{args:?}\n{stderr}");
+    }
+}
+
 /// Replaying a closed change answers for the head its closure recorded, as
 /// the live report does: an asserted integration that shipped an earlier
 /// patchset is judged at that patchset's head, not at a later one.
