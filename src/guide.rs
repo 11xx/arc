@@ -721,7 +721,9 @@ RUN A CHANGE
   merged such a change. Recording `--none --reason` that the change needs
   no entry answers the advice and projects nothing; the latest record wins.
   The built-in renderer replaces the `## [Unreleased]` block of the target
-  `.arc/changelog.toml` names, `CHANGELOG.md` by default.
+  `.arc/changelog.toml` names, `CHANGELOG.md` by default. Prose is refilled;
+  fenced and indented code retain their lines and container-relative columns.
+  Empty list items retain their markers.
   A project whose file follows another convention selects `renderer =
   "command"` with a `renderer_command` argv. That command runs from the
   repository root without a shell, with the authority of whoever runs `arc

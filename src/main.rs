@@ -688,7 +688,8 @@ enum Cmd {
         /// list item, bulleted or numbered, of an entry is refilled to 75
         /// columns, continuations indented under their marker and never
         /// begun with a word Markdown would read as opening a block, and a
-        /// fenced block keeps its lines. Every line keeps its column within
+        /// fenced or indented code block keeps its lines, and empty list
+        /// items keep their markers. Every line keeps its column within
         /// the list item holding it; where the entry's own bullet indents a
         /// line, a tab in front of its text is written as the spaces it
         /// stood for. The block is judged paragraph by

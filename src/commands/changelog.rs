@@ -442,8 +442,9 @@ fn opens_block(word: &str) -> bool {
 
 /// The marker a line begins with: its indent, then a `-`, `*`, or `+`
 /// bullet, or a number of one to nine digits closed by `.` or `)`, then a
-/// space or a tab. An author who wrote their own list chose the markers, the
-/// numbers, and the nesting; they did not choose the column the file wraps
+/// space, a tab, or the end of the line. An author who wrote their own list
+/// chose the markers, the numbers, and the nesting; they did not choose the
+/// column the file wraps
 /// at, so the prefix survives and the text after it is still wrapped.
 fn line_marker(line: &str) -> Option<&str> {
     let indent = lead(line).len();
@@ -456,6 +457,9 @@ fn line_marker(line: &str) -> Option<&str> {
     } else {
         return None;
     };
+    if rest.len() == token {
+        return Some(line);
+    }
     rest[token..]
         .starts_with([' ', '\t'])
         .then(|| &line[..indent + token + 1])
@@ -491,8 +495,8 @@ fn ordinal(marker: &str) -> Option<&str> {
 /// entry renders the same whatever column its author wrapped it at. Every
 /// line keeps its column within the block that holds it, so Markdown reads
 /// the same items, paragraphs, and fences in the entry as in the body. A
-/// fenced block keeps its lines exactly, trailing whitespace included. In a
-/// bare body, the item's indentation goes in front of each non-empty line,
+/// fenced or indented code block keeps its lines, trailing whitespace
+/// included. In a bare body, the item's indentation goes in front of each non-empty line,
 /// and each tab in front of the line's text becomes the spaces it stood
 /// for, since how far a tab reaches depends on the column it starts at.
 fn as_list_item(body: &str) -> String {
@@ -518,21 +522,29 @@ fn as_list_item(body: &str) -> String {
     for block in &blocks {
         match block {
             Block::Blank => lines.push(String::new()),
-            Block::Fenced {
-                markers,
-                lines: fenced,
-            } => lines.extend(fenced.iter().enumerate().map(|(index, line)| {
-                if base.is_empty() || line.is_empty() {
-                    return (*line).to_string();
-                }
-                let held = match markers {
-                    Some(markers) if index == 0 => markers.len(),
-                    _ => lead(line).len(),
+            Block::Fenced { .. } | Block::Indented { .. } => {
+                let (markers, fenced) = match block {
+                    Block::Fenced { markers, lines } => (*markers, lines),
+                    Block::Indented { lines } => (None, lines),
+                    _ => unreachable!(),
                 };
-                format!("{base}{}{}", untabbed(&line[..held]), &line[held..])
-            })),
+                lines.extend(fenced.iter().enumerate().map(|(index, line)| {
+                    if base.is_empty() || line.is_empty() {
+                        return (*line).to_string();
+                    }
+                    let held = match markers {
+                        Some(markers) if index == 0 => markers.len(),
+                        _ => lead(line).len(),
+                    };
+                    format!("{base}{}{}", untabbed(&line[..held]), &line[held..])
+                }));
+            }
             Block::Prose { opener, words, .. } => {
                 let opener = format!("{base}{opener}");
+                if words.is_empty() {
+                    lines.push(opener.trim_end().to_string());
+                    continue;
+                }
                 let continuation = " ".repeat(opener.chars().count());
                 let width = CHANGELOG_LINE_WIDTH.saturating_sub(opener.chars().count());
                 for (index, wrapped) in wrap_words(&words.join(" "), width).into_iter().enumerate()
@@ -544,7 +556,13 @@ fn as_list_item(body: &str) -> String {
         }
     }
     if !authored {
-        lines[0].replace_range(..base.len(), "- ");
+        if matches!(first, Block::Indented { .. })
+            || matches!(first, Block::Fenced { lines, .. } if !lead(lines[0]).is_empty())
+        {
+            lines.insert(0, "-".to_string());
+        } else {
+            lines[0].replace_range(..base.len(), "- ");
+        }
     }
     lines.join("\n")
 }
@@ -561,6 +579,8 @@ enum Block<'a> {
         markers: Option<&'a str>,
         lines: Vec<&'a str>,
     },
+    /// Indented code, including internal blank lines, kept line for line.
+    Indented { lines: Vec<&'a str> },
     /// A paragraph or list item: the marker that opens it, if any, what goes
     /// in front of its words, and every word of its lines in order. An item
     /// opens with its markers, the whitespace among them written as spaces
@@ -663,7 +683,7 @@ fn opened_items(line: &str, marker: &str) -> (Vec<usize>, usize) {
     let mut columns = Vec::new();
     let mut end = marker.len();
     loop {
-        let token_end = end - 1;
+        let token_end = end - usize::from(line[..end].ends_with([' ', '\t']));
         let marker_end = column_after(&line[..token_end], 0);
         let text = line[token_end..].trim_start_matches([' ', '\t']);
         let start = line.len() - text.len();
@@ -694,15 +714,17 @@ fn fence_run(line: &str, from: usize) -> Option<(usize, char, usize, &str)> {
     Some((column, mark, text.len() - after.len(), after))
 }
 
-/// Split a body into paragraphs, list items, and fenced blocks. A line joins
-/// the paragraph or item above it unless a blank line, a fence, or a list
-/// marker of its own separates them. A fence opens on a line of its own or
+/// Split a body into paragraphs, list items, fenced blocks, and indented
+/// code. A line joins the paragraph or item above it unless a blank line,
+/// a fence, or a list marker of its own separates them. Indented code opens
+/// four columns past its container when the line continues no paragraph. A fence opens on a line of its own or
 /// after the markers of the items its line opens, as the first block of the
 /// innermost. A fence left open runs to the end of the block holding it,
 /// every line its content; blank lines after the last block are dropped.
 fn body_blocks(body: &str) -> Vec<Block<'_>> {
     let mut blocks: Vec<Block<'_>> = Vec::new();
     let mut fence: Option<Fence> = None;
+    let mut indented: Option<usize> = None;
     // The text column of each list item still open, outermost first.
     let mut items: Vec<usize> = Vec::new();
     for line in body.lines() {
@@ -720,10 +742,34 @@ fn body_blocks(body: &str) -> Vec<Block<'_>> {
             }
             continue;
         }
+        if let Some(container) = indented {
+            if trimmed.is_empty() || indent >= container + 4 {
+                if let Some(Block::Indented { lines }) = blocks.last_mut() {
+                    lines.push(line);
+                }
+                continue;
+            }
+            finish_indented(&mut blocks);
+            indented = None;
+        }
         if trimmed.is_empty() {
             if !matches!(blocks.last(), None | Some(Block::Blank)) {
                 blocks.push(Block::Blank);
             }
+            continue;
+        }
+        let container = items
+            .iter()
+            .rev()
+            .find(|&&column| column <= indent)
+            .copied()
+            .unwrap_or(0);
+        let paragraph =
+            matches!(blocks.last(), Some(Block::Prose { words, .. }) if !words.is_empty());
+        if !paragraph && indent >= container + 4 {
+            items.retain(|&column| column <= container);
+            indented = Some(container);
+            blocks.push(Block::Indented { lines: vec![line] });
             continue;
         }
         let marker = line_marker(line).filter(|marker| match blocks.last() {
@@ -756,8 +802,10 @@ fn body_blocks(body: &str) -> Vec<Block<'_>> {
         }
         if marker.is_none() {
             if let Some(Block::Prose { words, .. }) = blocks.last_mut() {
-                words.extend(trimmed.split_whitespace());
-                continue;
+                if !words.is_empty() {
+                    words.extend(trimmed.split_whitespace());
+                    continue;
+                }
             }
             items.retain(|&column| column <= indent);
         }
@@ -771,10 +819,27 @@ fn body_blocks(body: &str) -> Vec<Block<'_>> {
             words: line[from..].split_whitespace().collect(),
         });
     }
+    if indented.is_some() {
+        finish_indented(&mut blocks);
+    }
     if matches!(blocks.last(), Some(Block::Blank)) {
         blocks.pop();
     }
     blocks
+}
+
+/// Blank lines after indented code separate blocks rather than belong to code.
+fn finish_indented(blocks: &mut Vec<Block<'_>>) {
+    if let Some(Block::Indented { lines }) = blocks.last_mut() {
+        let mut trailing = false;
+        while lines.last().is_some_and(|line| line.trim().is_empty()) {
+            lines.pop();
+            trailing = true;
+        }
+        if trailing {
+            blocks.push(Block::Blank);
+        }
+    }
 }
 
 fn render_category<'a>(
@@ -1230,6 +1295,112 @@ fn write_changelog(
 #[cfg(test)]
 mod tests {
     use super::{as_list_item, paragraphs, render_category, ProjectedEntry, RecordedProvenance};
+
+    fn assert_block_render(body: &str, expected: &str, authored: bool) {
+        let rendered = as_list_item(body);
+        assert_eq!(rendered, expected);
+        if std::process::Command::new("cmark-gfm")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let source = if authored {
+            body.to_string()
+        } else {
+            format!(
+                "-\n{}",
+                body.lines()
+                    .map(|line| format!(
+                        "  {}{}",
+                        super::untabbed(super::lead(line)),
+                        &line[super::lead(line).len()..]
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+        };
+        let parse = |markdown: &str| {
+            use std::io::Write;
+            use std::process::{Command, Stdio};
+            let mut child = Command::new("cmark-gfm")
+                .arg("--nobreaks")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(markdown.as_bytes())
+                .unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert!(output.status.success());
+            output.stdout
+        };
+        assert_eq!(parse(&source), parse(&rendered));
+    }
+
+    #[test]
+    fn block_edge_indented_first_fence_keeps_container() {
+        assert_block_render(
+            " ````\n\t```\ncode\n ````",
+            "-\n   ````\n      ```\n  code\n   ````",
+            false,
+        );
+    }
+
+    #[test]
+    fn block_edge_empty_item_keeps_marker() {
+        for marker in ["- ", "-"] {
+            assert_block_render(
+                &format!("{marker}\n  ```\n  code\n  ```"),
+                "-\n  ```\n  code\n  ```",
+                true,
+            );
+            assert_block_render(
+                &format!("Example:\n{marker}\n  ```\n  code\n  ```"),
+                "- Example:\n  -\n    ```\n    code\n    ```",
+                false,
+            );
+        }
+    }
+
+    #[test]
+    fn block_edge_indented_code_keeps_lines() {
+        assert_block_render(
+            "Run:\n\n    cmd one\n    cmd two\n\nAfter.",
+            "- Run:\n\n      cmd one\n      cmd two\n\n  After.",
+            false,
+        );
+        assert_block_render(
+            "    ```\n    cmd one\n\n    cmd two\n\n",
+            "-\n      ```\n      cmd one\n\n      cmd two",
+            false,
+        );
+        assert_block_render(
+            "Run:\n    cmd one\n    cmd two",
+            "- Run: cmd one cmd two",
+            false,
+        );
+        assert_block_render(
+            "-\n      cmd one\n      cmd two",
+            "-\n      cmd one\n      cmd two",
+            true,
+        );
+        assert_block_render(
+            "\tcmd one\n\tcmd two",
+            "-\n      cmd one\n      cmd two",
+            false,
+        );
+        assert_block_render(
+            "- Run:\n\n      cmd one\n      cmd two\n\n  After.",
+            "- Run:\n\n      cmd one\n      cmd two\n\n  After.",
+            true,
+        );
+    }
 
     #[test]
     fn bare_bodies_become_list_items_and_authored_markers_survive() {
