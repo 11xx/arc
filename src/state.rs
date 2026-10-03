@@ -1002,6 +1002,8 @@ pub struct ChangeState {
     pub worktree: Option<String>,
     #[serde(default)]
     pub worktree_created: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_owner_token: Option<String>,
     pub opened_by: String,
     pub opened_on_behalf_of: Option<String>,
     pub opened_harness: Option<String>,
@@ -1487,6 +1489,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 base,
                 worktree,
                 worktree_created,
+                worktree_owner_token,
                 blocked_by,
                 tags,
                 journal_ref,
@@ -1509,6 +1512,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     base: base.clone(),
                     worktree: worktree.clone(),
                     worktree_created: *worktree_created,
+                    worktree_owner_token: worktree_owner_token.clone(),
                     opened_by: ev.actor.clone(),
                     opened_on_behalf_of: ev.on_behalf_of.clone(),
                     opened_harness: ev.harness.clone(),
@@ -3271,6 +3275,7 @@ mod tests {
                 base: "b0".into(),
                 worktree: None,
                 worktree_created: false,
+                worktree_owner_token: None,
                 blocked_by: Vec::new(),
                 tags: Vec::new(),
                 journal_ref: None,

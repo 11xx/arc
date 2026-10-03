@@ -1137,6 +1137,7 @@ mod tests {
             base: "base".into(),
             worktree: None,
             worktree_created: false,
+            worktree_owner_token: None,
             opened_by: "tester".into(),
             opened_on_behalf_of: None,
             opened_harness: Some("test".into()),

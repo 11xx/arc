@@ -602,6 +602,8 @@ pub enum Payload {
         worktree: Option<String>,
         #[serde(default, skip_serializing_if = "is_false")]
         worktree_created: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worktree_owner_token: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         blocked_by: Vec<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -3176,8 +3176,12 @@ fn cleanup_integrated_change(
                 !entry.prunable
                     && entry.branch.as_deref() == Some(st.branch.as_str())
                     && entry.path.canonicalize().ok().as_ref() == Some(&canonical_path)
-            }) {
-                Some("no longer the checkout arc created".to_string())
+            }) || !gitio::worktree_owner_matches(
+                &path,
+                &st.change_id,
+                st.worktree_owner_token.as_deref(),
+            ) {
+                Some("ownership cannot be established".to_string())
             } else if let Some(content) = cleanup_local_content(&path)? {
                 Some(format!("holds local content not in the branch: {content}"))
             } else {

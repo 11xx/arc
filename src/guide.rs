@@ -769,7 +769,9 @@ RUN A CHANGE
   `integration.cleanup` governs branch and worktree cleanup after integration
   (built-in false). `integrate --cleanup` enables it; `--no-cleanup` overrides
   a configured true. Cleanup deletes merged branches with Git’s merged-branch
-  check and removes only arc-created, clean worktrees inside the sandbox.
+  check and removes only clean worktrees inside the sandbox. Arc removes only
+  the checkout instance it created, identified by an owner record in that
+  checkout’s Git administrative directory.
   The registered checkout must still hold the change branch. Tracked edits
   and untracked or ignored content, including build output, keep it. An
   outbox containing only the spool's regular `.gitignore` with `*` and a

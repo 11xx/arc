@@ -148,6 +148,7 @@ pub fn begin(
     let title = title.unwrap_or_else(|| slug.replace('-', " "));
     let base_from_target = base.is_none();
     let adopting = adopt.is_some();
+    let mut worktree_owner_token = None;
 
     let (branch_name, base_rev, worktree_path) = if let Some(adopted) = adopt {
         if !gitio::branch_exists(&ctx.cwd, &adopted) {
@@ -220,6 +221,7 @@ pub fn begin(
             crate::worktree_usage::report_root_free(&path);
             warn_below_worktree_floor(&ctx.cwd, &path);
             gitio::add_worktree(&ctx.cwd, &path, &branch_name)?;
+            worktree_owner_token = Some(gitio::write_worktree_owner(&path, &change_id)?);
             Some(path.display().to_string())
         };
         (branch_name, base_rev, wt)
@@ -316,7 +318,8 @@ pub fn begin(
             branch: branch_name.clone(),
             base: base_rev.clone(),
             worktree: worktree_path.clone(),
-            worktree_created: !adopting && !no_worktree,
+            worktree_created: worktree_owner_token.is_some(),
+            worktree_owner_token,
             blocked_by,
             tags,
             journal_ref: from_journal.clone(),

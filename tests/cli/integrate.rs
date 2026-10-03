@@ -2446,20 +2446,19 @@ fn cleanup_safety_replacement_worktree_is_kept() {
             moved.to_str().unwrap(),
         ],
     );
+    git(&moved, &["checkout", "--detach"]);
     git(
         &repo.root,
         &[
             "worktree",
             "add",
-            "-b",
-            "operator-checkout",
             wt.to_str().unwrap(),
-            "HEAD",
+            "arc/replacement-cleanup",
         ],
     );
     let out = stdout(repo.arc(&repo.root).args(["integrate", &id, "--cleanup"]));
     assert!(wt.exists(), "{out}");
-    assert!(out.contains("no longer the checkout arc created"), "{out}");
+    assert!(out.contains("ownership cannot be established"), "{out}");
     assert!(moved.exists());
     assert!(out.contains("kept branch"), "{out}");
 }
@@ -3089,5 +3088,80 @@ fn audit_fix_queue_history_refusal_reports_prefix_and_tail() {
         assert!(out.contains(&format!("stopped: {second}")), "{out}");
         assert!(out.contains(&format!("not attempted: {third}")), "{out}");
         assert!(out.contains("integration history is squash"), "{out}");
+    }
+}
+
+#[test]
+fn cleanup_default_keeps_operator_in_place_checkout() {
+    let repo = repo_with_gates();
+    fs::write(
+        repo.home.join(".local/ai/arc/config.toml"),
+        "[integration]\ncleanup=true\n",
+    )
+    .unwrap();
+    let wt = repo.home.join("operator-checkout");
+    git(
+        &repo.root,
+        &["worktree", "add", "-b", "operator", wt.to_str().unwrap()],
+    );
+    let id = opened_change_id(&stdout(repo.arc(&wt).args([
+        "begin",
+        "operator-in-place",
+        "--target",
+        "master",
+    ])));
+    repo.commit(&wt, "change.txt", "change\n", "feat: change");
+    stdout(repo.arc(&wt).args(["snapshot", &id]));
+    stdout(repo.arc(&wt).args(["verify", &id, "--gate", "smoke"]));
+    stdout(repo.arc(&wt).args(["review", &id, "--verdict", "approved"]));
+    let out = stdout(repo.arc(&repo.root).args(["integrate", &id]));
+    assert!(wt.exists(), "{out}");
+    assert!(out.contains("not created by arc"), "{out}");
+}
+
+#[test]
+fn cleanup_safety_unestablished_instance_ownership_is_kept() {
+    for fault in ["missing", "token", "change", "malformed", "legacy"] {
+        let repo = repo_with_gates();
+        let (id, wt) = approved_change(&repo, "unowned", "change.txt", "change\n");
+        let admin = PathBuf::from(git_out(&wt, &["rev-parse", "--absolute-git-dir"]));
+        let path = admin.join("arc-owner");
+        match fault {
+            "missing" => fs::remove_file(&path).unwrap(),
+            "malformed" => fs::write(&path, "invalid").unwrap(),
+            "legacy" => {
+                let events = repo.root.join(".git/arc/changes").join(&id).join("events");
+                for entry in fs::read_dir(events).unwrap() {
+                    let path = entry.unwrap().path();
+                    let mut event: serde_json::Value =
+                        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                    if event["event_type"] == "change-opened" {
+                        event
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("worktree_owner_token");
+                        fs::write(path, serde_json::to_vec(&event).unwrap()).unwrap();
+                    }
+                }
+            }
+            _ => {
+                let mut owner: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                let field = if fault == "token" {
+                    "token"
+                } else {
+                    "change_id"
+                };
+                owner[field] = "other".into();
+                fs::write(path, serde_json::to_vec(&owner).unwrap()).unwrap();
+            }
+        }
+        let out = stdout(repo.arc(&repo.root).args(["integrate", &id, "--cleanup"]));
+        assert!(wt.exists(), "{fault}: {out}");
+        assert!(
+            out.contains("ownership cannot be established"),
+            "{fault}: {out}"
+        );
+        assert!(out.contains("kept branch"), "{fault}: {out}");
     }
 }

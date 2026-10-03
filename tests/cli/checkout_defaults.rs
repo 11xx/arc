@@ -1,4 +1,4 @@
-use super::common::{git, git_out, stdout, Repo};
+use super::common::{git, git_out, json_stdout, stdout, Repo};
 use std::fs;
 
 fn user(repo: &Repo, text: &str) {
@@ -69,6 +69,12 @@ fn begin_checkout_defaults_from_each_source() {
             },
             "{source}:{mode}"
         );
+        let state = json_stdout(repo.arc(&repo.root).args(["show", "checkout", "--json"]));
+        assert_eq!(
+            state["worktree_created"],
+            mode == "worktree",
+            "{source}:{mode}"
+        );
         let worktree = repo.home.join(".worktrees/repo-checkout");
         assert_eq!(worktree.exists(), mode == "worktree", "{source}:{mode}");
         if mode == "worktree" {
@@ -94,6 +100,16 @@ fn begin_worktree_override_with_and_without_path() {
         }
         stdout(&mut cmd);
         assert!(path.exists());
+        let state = json_stdout(repo.arc(&repo.root).args(["show", "forced", "--json"]));
+        assert_eq!(state["worktree_created"], true);
+        let admin = git_out(&path, &["rev-parse", "--absolute-git-dir"]);
+        let owner: serde_json::Value = serde_json::from_slice(
+            &fs::read(std::path::Path::new(&admin).join("arc-owner")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(owner["change_id"], state["change_id"]);
+        assert_eq!(owner["token"], state["worktree_owner_token"]);
+        assert!(!owner["token"].as_str().unwrap().is_empty());
         assert_eq!(git_out(&repo.root, &["branch", "--show-current"]), "master");
     }
 }
@@ -136,6 +152,9 @@ fn begin_adopt_keeps_existing_checkout_semantics() {
             if explicit { "existing" } else { "master" }
         );
         assert!(!repo.home.join(".worktrees/repo-adopted").exists());
+        let state = json_stdout(repo.arc(&repo.root).args(["show", "adopted", "--json"]));
+        assert_eq!(state["worktree_created"], false);
+        assert!(state.get("worktree_owner_token").is_none());
     }
 }
 
@@ -194,4 +213,13 @@ fn builtin_checkout_is_independent_of_profile() {
         );
         assert!(!repo.home.join(".worktrees/repo-profile").exists());
     }
+}
+
+#[test]
+fn begin_configured_in_place_records_no_creation() {
+    let repo = Repo::new();
+    user(&repo, "[change]\ncheckout='in-place'\n");
+    stdout(repo.arc(&repo.root).args(["begin", "configured"]));
+    let state = json_stdout(repo.arc(&repo.root).args(["show", "configured", "--json"]));
+    assert_eq!(state["worktree_created"], false);
 }

@@ -1695,8 +1695,10 @@ enum Cmd {
         /// Merge commit message, requires resolved no-ff shape (defaults to "merge(<slug>): <title>")
         #[arg(long)]
         message: Option<String>,
-        /// Delete the merged branch and remove only an arc-created, clean worktree
-        /// inside the sandbox, excluding the integration checkout. The registered
+        /// Delete the merged branch and remove only a clean worktree inside the
+        /// sandbox, excluding the integration checkout. Arc removes only the checkout
+        /// instance it created, identified by an owner record in that checkout’s
+        /// Git administrative directory. The registered
         /// checkout must still hold the change branch. Tracked edits and any
         /// untracked or ignored content, including build output, keep the checkout.
         /// An outbox holding only the spool's regular .gitignore with "*" and a

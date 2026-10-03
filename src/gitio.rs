@@ -105,6 +105,44 @@ pub fn common_dir(cwd: &Path) -> Result<PathBuf> {
     Ok(std::fs::canonicalize(&abs).unwrap_or(abs))
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct WorktreeOwner {
+    change_id: String,
+    token: String,
+}
+
+fn worktree_owner_path(checkout: &Path) -> Result<PathBuf> {
+    Ok(PathBuf::from(git(checkout, &["rev-parse", "--absolute-git-dir"])?).join("arc-owner"))
+}
+
+/// Bind an arc-created checkout's administrative directory to its change.
+pub fn write_worktree_owner(checkout: &Path, change_id: &str) -> Result<String> {
+    let owner = WorktreeOwner {
+        change_id: change_id.to_string(),
+        token: ulid::Ulid::new().to_string(),
+    };
+    let path = worktree_owner_path(checkout)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .with_context(|| format!("cannot create {}", path.display()))?;
+    file.write_all(&serde_json::to_vec(&owner)?)?;
+    Ok(owner.token)
+}
+
+/// Ownership requires the change and token in this checkout's own Git directory.
+pub fn worktree_owner_matches(checkout: &Path, change_id: &str, token: Option<&str>) -> bool {
+    let Some(token) = token else {
+        return false;
+    };
+    let owner = worktree_owner_path(checkout)
+        .ok()
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice::<WorktreeOwner>(&bytes).ok());
+    owner.is_some_and(|owner| owner.change_id == change_id && owner.token == token)
+}
+
 pub fn toplevel(cwd: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(git(cwd, &["rev-parse", "--show-toplevel"])?))
 }
