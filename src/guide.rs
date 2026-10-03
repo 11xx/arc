@@ -669,7 +669,11 @@ RUN A CHANGE
   and checkout with Git read-tree. Inherited merge settings cannot alter the
   operation. A checkout update failure attempts a guarded ref rollback that
   refuses to overwrite a competing move. Failed transition checks report the
-  ref, HEAD, index and checkout state for recovery, without a reset.
+  ref, HEAD, index and checkout state for recovery, without a reset. This
+  includes target checkout takeover and every failure after Git mutation.
+  Fast-forwards changing initialized submodules refuse before takeover or
+  ref advancement; use --shape no-ff or a manual integration with submodule
+  updates. Recovery checkout restoration includes --recurse-submodules.
   Closure publication failure reports whether the exact event is published,
   absent, or unreadable. A published event requires durability recovery and
   inspection, not another integration; an unreadable ledger must be inspected

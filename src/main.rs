@@ -1689,7 +1689,10 @@ enum Cmd {
     /// Fast-forwards bind the ref update to the observed revision and update
     /// the checkout with read-tree; checkout failure attempts a guarded ref
     /// rollback. Both shapes isolate merge-shaping Git defaults. Transition
-    /// failure reports ref, HEAD, index and checkout state. Closure publication
+    /// failure, including checkout takeover, reports ref, HEAD, index and checkout
+    /// state and preserves local and competing work. Fast-forwards changing
+    /// initialized submodules refuse before Git mutation; use --shape no-ff or
+    /// integrate manually with submodule updates. Closure publication
     /// failure reports whether the event is published, absent or unreadable;
     /// inspect publication and durability before retrying.
     #[command(

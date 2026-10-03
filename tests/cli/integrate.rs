@@ -4022,3 +4022,212 @@ printf 'stable environment\n'
     assert_eq!(repo.head(&repo.root), before);
     assert_eq!(events(&repo, &id), recorded);
 }
+
+#[test]
+fn takeover_hook_failures_report_transition_state() {
+    use std::os::unix::fs::PermissionsExt;
+    for action in ["exit 1", "git update-ref refs/heads/master HEAD~1"] {
+        let repo = repo_with_gates();
+        let (id, wt) = approved_change(&repo, "takeover-recovery", "ff.txt", "ff\n");
+        git(&repo.root, &["checkout", "-b", "parking"]);
+        let hook = repo.root.join(".git/hooks/post-checkout");
+        fs::write(&hook, format!("#!/bin/sh\n{action}\n")).unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        let recorded = events(&repo, &id);
+        repo.arc(&repo.root)
+            .args(["integrate", &id])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("refs/heads/master="))
+            .stderr(predicates::str::contains("checkout HEAD="))
+            .stderr(predicates::str::contains("index tree="))
+            .stderr(predicates::str::contains("checkout status="));
+        assert_eq!(git_out(&wt, &["branch", "--show-current"]), "master");
+        assert_eq!(events(&repo, &id), recorded);
+    }
+}
+
+#[test]
+fn initialized_gitlink_change_refuses_before_fast_forward() {
+    let repo = repo_with_gates();
+    let sub = repo.home.join("sub-source");
+    fs::create_dir_all(&sub).unwrap();
+    git(&sub, &["init"]);
+    git(&sub, &["config", "user.name", "Fixture"]);
+    git(&sub, &["config", "user.email", "fixture@example.invalid"]);
+    repo.commit(&sub, "sub.txt", "one\n", "sub one");
+    git(
+        &repo.root,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            sub.to_str().unwrap(),
+            "sub",
+        ],
+    );
+    git(&repo.root, &["commit", "-am", "add submodule"]);
+    let before = repo.head(&repo.root);
+    repo.commit(&sub, "sub.txt", "two\n", "sub two");
+    let second = repo.head(&sub);
+    let (id, wt) = approved_change(&repo, "gitlink-refusal", "ff.txt", "ff\n");
+    git(
+        &wt,
+        &[
+            "update-index",
+            "--cacheinfo",
+            &format!("160000,{second},sub"),
+        ],
+    );
+    git(&wt, &["commit", "-m", "advance gitlink"]);
+    stdout(repo.arc(&wt).args(["snapshot", &id, "--verify"]));
+    approve(&repo, &id);
+    let recorded = events(&repo, &id);
+    for flags in [vec!["--dry-run"], vec!["--dry-run", "--json"]] {
+        let mut args = vec!["integrate", &id];
+        args.extend(flags);
+        repo.arc(&repo.root)
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("initialized submodules"));
+        assert_eq!(repo.head(&repo.root), before);
+        assert_eq!(events(&repo, &id), recorded);
+    }
+    repo.arc(&repo.root)
+        .args(["integrate", &id])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("initialized submodules"))
+        .stderr(predicates::str::contains("sub"))
+        .stderr(predicates::str::contains("--shape no-ff"));
+    assert_eq!(repo.head(&repo.root), before);
+    assert_eq!(events(&repo, &id), recorded);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--shape", "no-ff"]),
+    );
+    assert!(events(&repo, &id)
+        .iter()
+        .any(|event| event["event_type"] == "change-integrated"));
+}
+
+#[test]
+fn fast_forward_mutation_hooks_report_each_boundary() {
+    use std::os::unix::fs::PermissionsExt;
+    for boundary in ["ref", "checkout", "verification", "publication"] {
+        let repo = repo_with_gates();
+        let (id, wt) = approved_change(&repo, "mutation-boundary", "ff.txt", "ff\n");
+        let approved = repo.head(&wt);
+        let before = repo.head(&repo.root);
+        let index = git_out(&repo.root, &["write-tree"]);
+        let recorded = events(&repo, &id);
+        let marker = repo.home.join("advanced");
+        let post_index = repo.root.join(".git/hooks/post-index-change");
+        fs::write(
+            &post_index,
+            format!(
+                "#!/bin/sh\nif [ -f '{}' ]; then printf 'competing edit\\n' > ff.txt; fi\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        if boundary == "verification" {
+            fs::set_permissions(&post_index, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let event_dir = repo.root.join(".git/arc/changes").join(&id).join("events");
+        let backup = repo.home.join("saved-events");
+        let action = match boundary {
+            "ref" => "exit 1".to_string(),
+            "checkout" => "printf 'competing file\\n' > ff.txt".to_string(),
+            "verification" => format!("touch '{}'", marker.display()),
+            "publication" => format!(
+                "mv '{}' '{}' && printf blocked > '{}'",
+                event_dir.display(),
+                backup.display(),
+                event_dir.display()
+            ),
+            _ => unreachable!(),
+        };
+        let phase = if boundary == "ref" {
+            "prepared"
+        } else {
+            "committed"
+        };
+        let hook = repo.root.join(".git/hooks/reference-transaction");
+        fs::write(
+            &hook,
+            format!(
+                r#"#!/bin/sh
+[ "$1" = {phase} ] || exit 0
+while read old new ref; do
+    if [ "$ref" = refs/heads/master ] && [ "$new" = '{approved}' ]; then
+        {action}
+    fi
+done
+"#
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        repo.arc(&repo.root)
+            .args(["integrate", &id])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("refs/heads/master="))
+            .stderr(predicates::str::contains("checkout HEAD="))
+            .stderr(predicates::str::contains("index tree="))
+            .stderr(predicates::str::contains("checkout status="));
+        if boundary == "publication" {
+            fs::remove_file(&event_dir).unwrap();
+            fs::rename(&backup, &event_dir).unwrap();
+        }
+        assert_eq!(events(&repo, &id), recorded, "{boundary}");
+        if matches!(boundary, "ref" | "checkout") {
+            assert_eq!(repo.head(&repo.root), before, "{boundary}");
+            assert_eq!(git_out(&repo.root, &["write-tree"]), index, "{boundary}");
+        } else {
+            assert_eq!(repo.head(&repo.root), approved, "{boundary}");
+        }
+        if matches!(boundary, "checkout" | "verification") {
+            assert!(fs::read_to_string(repo.root.join("ff.txt"))
+                .unwrap()
+                .contains("competing"));
+        }
+    }
+}
+
+#[test]
+fn no_ff_hook_failures_preserve_work_and_report_recovery() {
+    use std::os::unix::fs::PermissionsExt;
+    for (name, action) in [
+        (
+            "pre-merge-commit",
+            "printf 'competing edit\\n' > ff.txt; exit 1",
+        ),
+        ("post-merge", "git update-ref refs/heads/master HEAD~1"),
+    ] {
+        let repo = repo_with_gates();
+        let (id, _) = approved_change(&repo, "merge-hook-recovery", "ff.txt", "ff\n");
+        let recorded = events(&repo, &id);
+        let hook = repo.root.join(".git/hooks").join(name);
+        fs::write(&hook, format!("#!/bin/sh\n{action}\n")).unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--shape", "no-ff"])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("refs/heads/master="))
+            .stderr(predicates::str::contains("checkout HEAD="))
+            .stderr(predicates::str::contains("index tree="))
+            .stderr(predicates::str::contains("checkout status="));
+        assert_eq!(events(&repo, &id), recorded);
+        if name == "pre-merge-commit" {
+            assert_eq!(
+                fs::read_to_string(repo.root.join("ff.txt")).unwrap(),
+                "competing edit\n"
+            );
+        }
+    }
+}

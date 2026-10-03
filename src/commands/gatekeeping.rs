@@ -3087,150 +3087,136 @@ fn integrate_one(
         head: approved_head,
     } = approved;
 
-    report_untouched(&checkout, &untouched);
-    if checkout.switch_from.is_some() {
-        gitio::checkout(&checkout.path, &target).with_context(|| {
-            format!(
-                "cannot check {target} out in {} for the merge",
-                checkout.path.display()
-            )
-        })?;
-        println!("checked out {target} in {}", checkout.path.display());
+    let wt = checkout.path.clone();
+    if actual_shape == crate::model::IntegrationShape::FastForward {
+        refuse_initialized_gitlink_changes(&wt, &old_target, &approved_head)?;
     }
-    let wt = checkout.path;
-    let msg = message.unwrap_or_else(|| format!("merge({}): {}", st.slug, st.title));
-
-    // Already-contained integrations retain the observed target; advancing
-    // fast-forwards land at the approved head without a merge commit.
     let already_contained = actual_shape == crate::model::IntegrationShape::AlreadyContained;
-    let merged = if already_contained {
-        old_target.clone()
-    } else if actual_shape == crate::model::IntegrationShape::FastForward {
+    let merged = (|| -> Result<String> {
+        report_untouched(&checkout, &untouched);
+        if checkout.switch_from.is_some() {
+            gitio::checkout(&checkout.path, &target).with_context(|| {
+                format!(
+                    "cannot check {target} out in {} for the merge",
+                    checkout.path.display()
+                )
+            })?;
+            println!("checked out {target} in {}", checkout.path.display());
+        }
+        let msg = message.unwrap_or_else(|| format!("merge({}): {}", st.slug, st.title));
+
+        // Already-contained integrations retain the observed target; advancing
+        // fast-forwards land at the approved head without a merge commit.
         if gitio::current_branch(&wt)?.as_deref() != Some(target.as_str())
             || gitio::head(&wt)? != old_target
         {
-            bail!("fast-forward target moved during integration before merge; nothing recorded");
+            bail!("target moved during integration before merge; nothing recorded");
         }
-        let target_ref = format!("refs/heads/{target}");
-        let reflog = format!("arc integrate {}: fast-forward", st.slug);
-        if let Err(error) = gitio::git(
-            &wt,
-            &[
-                "update-ref",
-                "-m",
-                &reflog,
-                &target_ref,
-                &approved_head,
-                &old_target,
-            ],
-        ) {
-            return Err(ff_failure(&wt, &target, &approved_head, error));
-        }
-        if let Err(error) = gitio::git(&wt, &["read-tree", "-u", "-m", &old_target, &approved_head])
-        {
-            let rollback = gitio::git(
+        let merged = if already_contained {
+            old_target.clone()
+        } else if actual_shape == crate::model::IntegrationShape::FastForward {
+            let target_ref = format!("refs/heads/{target}");
+            let reflog = format!("arc integrate {}: fast-forward", st.slug);
+            gitio::git(
                 &wt,
-                &["update-ref", &target_ref, &old_target, &approved_head],
-            );
-            let cause = match rollback {
-                Ok(_) => anyhow::anyhow!(
-                    "checkout update failed: {error}; target ref restored to {old_target}"
-                ),
-                Err(rollback) => anyhow::anyhow!(
-                    "checkout update failed: {error}; guarded ref rollback failed: {rollback}"
-                ),
-            };
-            return Err(ff_failure(&wt, &target, &approved_head, cause));
-        }
-        let head =
-            gitio::head(&wt).map_err(|error| ff_failure(&wt, &target, &approved_head, error))?;
-        if head != approved_head
-            || gitio::branch_head(&wt, &target).ok().as_deref() != Some(approved_head.as_str())
-        {
-            return Err(ff_failure(
+                &[
+                    "update-ref",
+                    "-m",
+                    &reflog,
+                    &target_ref,
+                    &approved_head,
+                    &old_target,
+                ],
+            )?;
+            if let Err(error) = gitio::git(&wt, &["read-tree", "-u", "-m", &old_target, &approved_head])
+            {
+                let rollback = gitio::git(
+                    &wt,
+                    &["update-ref", &target_ref, &old_target, &approved_head],
+                );
+                let cause = match rollback {
+                    Ok(_) => anyhow::anyhow!(
+                        "checkout update failed: {error}; target ref restored to {old_target}"
+                    ),
+                    Err(rollback) => anyhow::anyhow!(
+                        "checkout update failed: {error}; guarded ref rollback failed: {rollback}"
+                    ),
+                };
+                return Err(cause);
+            }
+            let head =
+                gitio::head(&wt)?;
+            if head != approved_head
+                || gitio::branch_head(&wt, &target).ok().as_deref() != Some(approved_head.as_str())
+            {
+                return Err(anyhow::anyhow!("fast-forward target moved during integration"));
+            }
+            head
+        } else {
+            if let Err(e) = gitio::git(
                 &wt,
-                &target,
-                &approved_head,
-                anyhow::anyhow!("fast-forward target moved during integration"),
-            ));
-        }
-        head
-    } else {
-        if let Err(e) = gitio::git(
-            &wt,
-            &[
-                "-c",
-                &format!("branch.{target}.mergeOptions="),
-                "-c",
-                "merge.ff=false",
-                "merge",
-                "--no-ff",
-                "--no-squash",
-                "--no-edit",
-                "-m",
-                &msg,
-                &approved_head,
-            ],
-        ) {
-            let _ = gitio::git(&wt, &["merge", "--abort"]);
-            bail!("merge failed (aborted): {e}");
+                &[
+                    "-c",
+                    &format!("branch.{target}.mergeOptions="),
+                    "-c",
+                    "merge.ff=false",
+                    "merge",
+                    "--no-ff",
+                    "--no-squash",
+                    "--no-edit",
+                    "-m",
+                    &msg,
+                    &approved_head,
+                ],
+            ) {
+                bail!("merge failed: {e}");
+            }
+
+            let merged = gitio::head(&wt)?;
+            let parents = gitio::commit_parents(&wt, &merged)?;
+            if parents != vec![old_target.clone(), approved_head.clone()] {
+                bail!(
+                    "merge commit {merged} has unexpected parents {parents:?}; expected [{old_target}, {approved_head}] — target moved during integration, inspect before trusting this merge"
+                );
+            }
+            merged
+        };
+        // The shipped tree must match the tree evaluated by the gates.
+        // Failed transitions retain Git state for operator recovery.
+        if let Some(expected) = &evaluated_tree {
+            let shipped = gitio::commit_tree(&wt, &merged)?;
+            if &shipped != expected {
+                if actual_shape == crate::model::IntegrationShape::FastForward {
+                    return Err(anyhow::anyhow!("fast-forward {merged} carries tree {shipped}, not the evaluated tree {expected}"));
+                }
+
+                bail!(
+                    "merge commit {merged} carries tree {shipped}, not the evaluated tree {expected}; nothing was recorded"
+                );
+            }
         }
 
-        let merged = gitio::head(&wt)?;
-        let parents = gitio::commit_parents(&wt, &merged)?;
-        if parents != vec![old_target.clone(), approved_head.clone()] {
-            bail!(
-                "merge commit {merged} has unexpected parents {parents:?}; \
-                 expected [{old_target}, {approved_head}] — target moved during \
-                 integration, inspect before trusting this merge"
-            );
-        }
-        merged
-    };
-    // Parents say which commits were merged; the tree says what the merge
-    // carries, and only the tree is what any gate ever ran against. A merge
-    // resolving to something else ships content nothing evaluated. A no-ff
-    // merge is undone; a fast-forward is left for operator recovery. An
-    // already-contained head ships the target tree the guard evaluated.
-    if let Some(expected) = &evaluated_tree {
-        let shipped = gitio::commit_tree(&wt, &merged).map_err(|error| {
-            if actual_shape == crate::model::IntegrationShape::FastForward {
-                ff_failure(&wt, &target, &approved_head, error)
-            } else {
-                error
+        if actual_shape == crate::model::IntegrationShape::FastForward {
+            let index_tree = gitio::git(&wt, &["write-tree"])?;
+            let approved_tree = gitio::commit_tree(&wt, &approved_head)?;
+            if gitio::head(&wt).ok().as_deref() != Some(approved_head.as_str())
+                || gitio::branch_head(&wt, &target).ok().as_deref() != Some(approved_head.as_str())
+                || gitio::current_branch(&wt).ok().flatten().as_deref() != Some(target.as_str())
+                || index_tree != approved_tree
+                || gitio::dirt(&wt).map(|dirt| dirt.tracked).unwrap_or(true)
+            {
+                return Err(anyhow::anyhow!("fast-forward target or checkout moved during integration"));
             }
-        })?;
-        if &shipped != expected {
-            if actual_shape == crate::model::IntegrationShape::FastForward {
-                return Err(ff_failure(&wt, &target, &approved_head, anyhow::anyhow!("fast-forward {merged} carries tree {shipped}, not the evaluated tree {expected}")));
-            }
-            let _ = gitio::git(&wt, &["reset", "--hard", &old_target]);
-            bail!(
-                "merge commit {merged} carries tree {shipped}, not the evaluated tree \
-                 {expected}; {target} was reset to {old_target} and nothing was recorded"
-            );
         }
-    }
-
-    if actual_shape == crate::model::IntegrationShape::FastForward {
-        let index_tree = gitio::git(&wt, &["write-tree"])
-            .map_err(|error| ff_failure(&wt, &target, &approved_head, error))?;
-        let approved_tree = gitio::commit_tree(&wt, &approved_head)
-            .map_err(|error| ff_failure(&wt, &target, &approved_head, error))?;
-        if gitio::head(&wt).ok().as_deref() != Some(approved_head.as_str())
-            || gitio::branch_head(&wt, &target).ok().as_deref() != Some(approved_head.as_str())
-            || gitio::current_branch(&wt).ok().flatten().as_deref() != Some(target.as_str())
-            || index_tree != approved_tree
-            || gitio::dirt(&wt).map(|dirt| dirt.tracked).unwrap_or(true)
+        if gitio::head(&wt)? != merged
+            || gitio::branch_head(&wt, &target)? != merged
+            || gitio::current_branch(&wt)?.as_deref() != Some(target.as_str())
         {
-            return Err(ff_failure(
-                &wt,
-                &target,
-                &approved_head,
-                anyhow::anyhow!("fast-forward target or checkout moved during integration"),
-            ));
+            bail!("target or checkout moved during integration verification");
         }
-    }
+        Ok(merged)
+    })()
+    .map_err(|error| transition_failure(&wt, &target, &approved_head, error))?;
     let ev = ctx.event(
         &store,
         &change_id,
@@ -3768,7 +3754,31 @@ fn ff_diverged(ctx: &Ctx, st: &ChangeState, target: &str) -> Result<bool> {
     Ok(!integration::ff_eligible(ancestor, contained))
 }
 
-fn ff_failure(
+fn refuse_initialized_gitlink_changes(checkout: &Path, old: &str, approved: &str) -> Result<()> {
+    let diff = gitio::git(
+        checkout,
+        &["diff", "--raw", "-z", "--no-renames", old, approved, "--"],
+    )?;
+    let mut entries = diff.split('\0').filter(|entry| !entry.is_empty());
+    let mut initialized = Vec::new();
+    while let Some(header) = entries.next() {
+        let path = entries.next().context("gitlink diff omitted its path")?;
+        let modes: Vec<_> = header.split_whitespace().take(2).collect();
+        if modes
+            .iter()
+            .any(|mode| mode.trim_start_matches(':') == "160000")
+            && checkout.join(path).join(".git").exists()
+        {
+            initialized.push(path.to_string());
+        }
+    }
+    if !initialized.is_empty() {
+        bail!("fast-forward changes initialized submodules: {}; use --shape no-ff or integrate manually with submodule updates", initialized.join(", "));
+    }
+    Ok(())
+}
+
+fn transition_failure(
     checkout: &Path,
     target: &str,
     approved: &str,
@@ -3777,7 +3787,7 @@ fn ff_failure(
     integration_recovery(
         checkout,
         target,
-        anyhow::anyhow!("{cause}; no integration event was recorded. Preserve local and competing work, inspect git diff and git reflog. If refs/heads/{target} is the intended destination and this checkout still holds {target}, reconcile it with git restore --source=refs/heads/{target} --staged --worktree -- ., then retry arc integrate for approved head {approved}; arc performs no reset"),
+        anyhow::anyhow!("{cause}; no integration event was recorded. Preserve local and competing work, inspect git diff and git reflog. If refs/heads/{target} is the intended destination and this checkout still holds {target}, reconcile it with git restore --source=refs/heads/{target} --staged --worktree --recurse-submodules -- ., resolve any unfinished merge deliberately, then retry arc integrate for approved head {approved}; arc performs no reset"),
     )
 }
 
@@ -3943,6 +3953,13 @@ fn integrate_dry_run_json(
             IntegrationPlan::of_send(&st.change_id, &send)
         }
         Decision::Merge(plan) => {
+            if plan.shape == crate::model::IntegrationShape::FastForward {
+                refuse_initialized_gitlink_changes(
+                    &plan.checkout.path,
+                    &plan.old_target,
+                    &plan.approved.head,
+                )?;
+            }
             // A conflicting merge records nothing, so there is no basis it
             // would record to print.
             if plan.merge_commit && plan.evaluated_tree.is_none() {
@@ -4029,6 +4046,9 @@ fn integrate_dry_run(
     // plan that named parents for a merge that cannot exist would describe a
     // different integration than the one the guard would perform.
     let (_, already_contained) = integration::ancestry(&ctx.cwd, &target_head, &approved_head)?;
+    if shape == integration::Shape::FfOnly && !already_contained {
+        refuse_initialized_gitlink_changes(&checkout.path, &target_head, &approved_head)?;
+    }
     let msg = message
         .map(str::to_string)
         .unwrap_or_else(|| format!("merge({}): {}", st.slug, st.title));
