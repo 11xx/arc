@@ -254,13 +254,13 @@ fn session_link_stays_out_of_git_messages_trailers_and_changelog() {
         .success();
     let dry_run = stdout(
         repo.arc(&repo.root)
-            .args(["integrate", slug, "--dry-run"])
+            .args(["integrate", "--shape", "no-ff", slug, "--dry-run"])
             .env("ARC_SESSION_LINK", link),
     );
     assert!(dry_run.contains("merge message:"), "{dry_run}");
     assert!(!dry_run.contains(link), "{dry_run}");
     repo.arc(&repo.root)
-        .args(["integrate", slug])
+        .args(["integrate", "--shape", "no-ff", slug])
         .env("ARC_SESSION_LINK", link)
         .assert()
         .success();

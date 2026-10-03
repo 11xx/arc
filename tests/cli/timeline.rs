@@ -124,7 +124,7 @@ fn integrate_dry_run_reports_without_mutating() {
         .code(0);
     let out = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
     assert!(out.contains("would integrate"), "{out}");
-    assert!(out.contains("merge result: clean"), "{out}");
+    assert!(out.contains("fast-forward:"), "{out}");
 
     assert_eq!(
         event_count(&repo, &change_id),

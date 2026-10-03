@@ -96,6 +96,10 @@ fn blocker_chain_transitions_and_suggests_ready_alternatives() {
     );
     assert_eq!(c_status["suggested_alternatives"][0]["slug"], "chain-b");
 
+    git(
+        &repo.home.join(".worktrees/repo-chain-b"),
+        &["rebase", "master"],
+    );
     complete_change(&repo, "chain-b");
     let c_status: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", "chain-c"]))).unwrap();
@@ -501,7 +505,7 @@ fn tagged_integration_unblocks_and_merges_a_chain_in_dependency_order() {
     let second = ready_tagged_change(&repo, "series-second", Some(&first));
 
     repo.arc(&repo.root)
-        .args(["integrate", "--tag", "#series"])
+        .args(["integrate", "--shape", "no-ff", "--tag", "#series"])
         .assert()
         .success();
 
@@ -529,7 +533,14 @@ fn tagged_integration_cleanup_from_first_selected_worktree_keeps_batch_context_v
     let second_worktree = repo.home.join(".worktrees/repo-series-cleanup-second");
 
     repo.arc(&first_worktree)
-        .args(["integrate", "--tag", "#series", "--cleanup"])
+        .args([
+            "integrate",
+            "--shape",
+            "no-ff",
+            "--tag",
+            "#series",
+            "--cleanup",
+        ])
         .assert()
         .success();
 

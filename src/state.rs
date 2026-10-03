@@ -905,6 +905,8 @@ pub struct HoldState {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ClosureState {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shape: Option<crate::model::IntegrationShape>,
     pub outcome: Closure,
     pub integrated_commit: Option<String>,
     pub superseded_by: Option<String>,
@@ -952,6 +954,7 @@ fn integrated_closure(
     target_before: Option<String>,
 ) -> ClosureState {
     ClosureState {
+        shape: None,
         outcome: Closure::Integrated,
         integrated_commit: Some(integrated_commit.to_string()),
         superseded_by: None,
@@ -2120,6 +2123,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 });
                 if let Some(patchset) = closed_patchset {
                     state.closure = Some(ClosureState {
+                        shape: None,
                         outcome: Closure::Abandoned,
                         integrated_commit: None,
                         superseded_by: None,
@@ -2549,6 +2553,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 superseded_by,
             } => {
                 state.closure = Some(ClosureState {
+                    shape: None,
                     outcome: *outcome,
                     integrated_commit: integrated_commit.clone(),
                     superseded_by: superseded_by.clone(),
@@ -2573,7 +2578,8 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 target_branch,
                 target_before,
                 authorization,
-                already_contained: _,
+                already_contained,
+                shape,
             } => {
                 let mut closure = integrated_closure(
                     ev,
@@ -2584,6 +2590,9 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     target_branch,
                     Some(target_before.clone()),
                 );
+                closure.shape = Some(shape.unwrap_or_else(|| {
+                    crate::model::IntegrationShape::from_legacy(*already_contained)
+                }));
                 closure.authorization = authorization.clone();
                 closure.external_reference = authorization
                     .as_ref()
@@ -3264,6 +3273,42 @@ mod tests {
                 from_fork: None,
             },
         )
+    }
+
+    #[test]
+    fn guarded_integration_shapes_reduce_and_legacy_events_derive_shape() {
+        use crate::model::IntegrationShape::{AlreadyContained, FastForward, Merge};
+        for (shape, contained, expected) in [
+            (Some(FastForward), false, FastForward),
+            (Some(Merge), false, Merge),
+            (Some(AlreadyContained), true, AlreadyContained),
+            (None, false, Merge),
+            (None, true, AlreadyContained),
+        ] {
+            let integrated = ev(
+                "fix",
+                Payload::ChangeIntegrated {
+                    integrated_commit: "head".into(),
+                    source_patchset_id: "ps-01".into(),
+                    source_head: "head".into(),
+                    target_branch: "master".into(),
+                    target_before: "base".into(),
+                    authorization: None,
+                    already_contained: contained,
+                    shape,
+                },
+            );
+            let json = serde_json::to_value(&integrated).unwrap();
+            if shape.is_none() {
+                assert!(json.get("shape").is_none());
+            }
+            let parsed = serde_json::from_value(json).unwrap();
+            let state = reduce(&[opened("fix"), parsed]).unwrap();
+            let closure = state.closure.unwrap();
+            assert_eq!(closure.shape, Some(expected));
+            assert_eq!(closure.integration, Some(IntegrationKind::Guarded));
+            assert_eq!(closure.integrated_commit, closure.source_head);
+        }
     }
 
     fn verdict(change: &str, patchset: &str, relation: Option<VerdictRelation>) -> Event {

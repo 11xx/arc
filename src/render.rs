@@ -2173,6 +2173,7 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             integrated_commit,
             target_branch,
             already_contained,
+            shape,
             authorization,
             ..
         } => {
@@ -2183,9 +2184,17 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
                 .unwrap_or_default();
             (
                 "change-integrated",
-                if *already_contained {
+                if shape.unwrap_or_else(|| {
+                    crate::model::IntegrationShape::from_legacy(*already_contained)
+                }) == crate::model::IntegrationShape::AlreadyContained
+                {
                     format!(
                         "{} into {target_branch} (already contained; no merge created){external}",
+                        short_sha(integrated_commit)
+                    )
+                } else if *shape == Some(crate::model::IntegrationShape::FastForward) {
+                    format!(
+                        "{} into {target_branch} (fast-forward){external}",
                         short_sha(integrated_commit)
                     )
                 } else {

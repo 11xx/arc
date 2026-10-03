@@ -2353,3 +2353,29 @@ fn an_owned_repository_reports_no_unowned_surface() {
     assert!(!text.contains("unowned"), "{text}");
     assert!(!text.contains("merged branches with no owner"), "{text}");
 }
+
+#[test]
+fn diverged_fork_change_keeps_the_fork_refusal() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "shape-fork"]));
+    let id = opened_change_id(&stdout(
+        repo.arc(&repo.root).args(["begin", "shape-promoted"]),
+    ));
+    let wt = repo.home.join(".worktrees/repo-shape-promoted");
+    repo.commit(&wt, "feature.txt", "feature\n", "feat: feature");
+    stdout(repo.arc(&wt).args(["snapshot", &id]));
+    let fork_wt = fork_worktree(&repo, "shape-fork");
+    repo.commit(&fork_wt, "fork.txt", "fork\n", "feat: fork");
+    repo.commit(&repo.root, "target.txt", "target\n", "feat: target");
+    rewrite_event(&repo, &id, "change-opened", |event| {
+        event["branch"] = serde_json::json!("fork/shape-fork");
+    });
+    for flags in [vec![], vec!["--dry-run", "--json"]] {
+        repo.arc(&repo.root)
+            .args(["integrate", &id])
+            .args(flags)
+            .assert()
+            .code(15)
+            .stderr(predicates::str::contains("unintegrated by intent"));
+    }
+}

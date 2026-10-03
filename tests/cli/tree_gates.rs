@@ -128,7 +128,7 @@ fn a_clean_merge_breaking_a_gate_is_refused_before_it_can_ship() {
 
     let before = repo.head(&repo.root);
     repo.arc(&repo.root)
-        .args(["integrate", "paired"])
+        .args(["integrate", "--shape", "no-ff", "paired"])
         .assert()
         .code(5);
     assert_eq!(repo.head(&repo.root), before, "the merge must not have run");
@@ -157,7 +157,7 @@ fn evidence_at_the_merged_tree_authorizes_the_merge_that_carries_it() {
     assert_eq!(ready["gates"][0]["evaluated_tree"], merged_tree, "{ready}");
 
     repo.arc(&repo.root)
-        .args(["integrate", "paired"])
+        .args(["integrate", "--shape", "no-ff", "paired"])
         .assert()
         .success();
     // What shipped is the content that was evaluated, not merely a merge of

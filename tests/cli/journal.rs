@@ -12490,7 +12490,7 @@ fn a_plan_with_one_open_promotion_keeps_its_ordinary_row() {
     );
 
     repo.arc(&repo.root)
-        .args(["integrate", "umbrella-two"])
+        .args(["integrate", "--shape", "no-ff", "umbrella-two"])
         .assert()
         .success();
     assert_eq!(open_row(&repo, &plan)["promotion_state"], "closed");
@@ -12531,7 +12531,7 @@ fn integrate_names_the_consume_command_for_the_last_promotion() {
         .stderr(predicates::str::contains("arc journal consume").not());
 
     repo.arc(&repo.root)
-        .args(["integrate", "wave-two"])
+        .args(["integrate", "--shape", "no-ff", "wave-two"])
         .assert()
         .success()
         .stderr(predicates::str::contains("every promotion"))

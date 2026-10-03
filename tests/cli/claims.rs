@@ -1112,13 +1112,13 @@ fn concurrent_integrations_serialize_on_the_target_branch_lock() {
     let mut first = spawn_arc_keeping_stderr(
         &repo,
         &repo.root,
-        &["integrate", "target-race-a"],
+        &["integrate", "--shape", "no-ff", "target-race-a"],
         "integrator-a",
     );
     let mut second = spawn_arc_keeping_stderr(
         &repo,
         &repo.root,
-        &["integrate", "target-race-b"],
+        &["integrate", "--shape", "no-ff", "target-race-b"],
         "integrator-b",
     );
     assert_waiting_on_transition_lock(&mut [&mut first, &mut second]);

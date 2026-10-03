@@ -569,6 +569,25 @@ pub struct ForkProvenance {
     pub tree: String,
 }
 
+/// The topology recorded by a guarded integration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IntegrationShape {
+    FastForward,
+    Merge,
+    AlreadyContained,
+}
+
+impl IntegrationShape {
+    pub fn from_legacy(already_contained: bool) -> Self {
+        if already_contained {
+            Self::AlreadyContained
+        } else {
+            Self::Merge
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event_type", rename_all = "kebab-case")]
 pub enum Payload {
@@ -1091,11 +1110,10 @@ pub enum Payload {
         #[serde(skip_serializing_if = "Option::is_none")]
         superseded_by: Option<String>,
     },
-    /// A merge arc performed under its own guard: the head equalled the
-    /// approved patchset head, gates were green at it, no finding blocked and
-    /// no hold was active, and — when the merge existed at all — the merge
-    /// commit's parents were verified. `already_contained` marks the case
-    /// where the target already held the head and no merge was made.
+    /// An integration arc performed under its own guard, binding the approved
+    /// head, evaluated tree, target revision and authorization. A fast-forward
+    /// lands at the approved head; a merge verifies both parents; an
+    /// already-contained integration leaves the target revision unchanged.
     ChangeIntegrated {
         integrated_commit: String,
         source_patchset_id: String,
@@ -1106,13 +1124,14 @@ pub enum Payload {
         /// decision. Absent only on events written before arc recorded it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         authorization: Option<AuthorizationBasis>,
-        /// The target already contained the approved head when the guard ran,
-        /// so Git created no merge commit: `integrated_commit` is the target
-        /// revision that already held it, and `target_before` equals it. A
-        /// reader must not look for merge parents. False means
-        /// `integrated_commit` is the merge arc made.
+        /// The target already held the approved head, so `target_before`
+        /// equals `integrated_commit`. An advancing fast-forward is false.
         #[serde(default, skip_serializing_if = "is_false")]
         already_contained: bool,
+        /// Absent fields derive from `already_contained`: true means
+        /// already-contained, false means merge.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shape: Option<IntegrationShape>,
     },
     /// An integration somebody performed elsewhere and asserted afterwards.
     /// Deliberately carries no authorization: arc did not guard this merge and

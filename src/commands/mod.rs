@@ -1143,6 +1143,7 @@ mod tests {
             holds: BTreeMap::new(),
             forge: crate::forge::ForgeState::default(),
             closure: closure.map(|outcome| crate::state::ClosureState {
+                shape: None,
                 outcome,
                 integration: None,
                 source_patchset_id: None,

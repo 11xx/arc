@@ -532,7 +532,8 @@ RUN A CHANGE
                                      one left open when the change shipped.
     --evidence-event <id>            Cite the verification run that justifies it.
   arc check                          Integration preflight; exit code names the blocker.
-  arc integrate <c>...               Guarded --no-ff merge once the gates are green.
+  arc integrate <c>...               Guarded integration once the gates are green.
+    --shape ff-only|no-ff            Default ff-only; divergence requires rebase.
     <c> <c> <c>, or --tag <t>        Land a queue, in dependency order.
   arc replica id --json              Read this store's repository ID for pairing.
   arc replica init <name>             Start a logical project and hold authority.
@@ -646,18 +647,26 @@ RUN A CHANGE
   replayed head owes are named after it is recorded; a failure to evaluate
   them is a warning, and the rebase still succeeds.
 
-  Several changes, or `--tag`, make `integrate` a queue: dependency order, and
-  per member the two repairs that need no judgement — replaying a branch its
-  target moved under, and running the gates that have no answer at the tree
-  the merge would ship. It stops at the first member that needs a person: a
-  conflict, a red gate, a missing verdict. The exit code is that member's own
-  blocker, and the closing summary names what landed with its merge revision,
-  what stopped the run and why, and what was never attempted. `--dry-run`
-  reports the same plan without replaying, running, or merging anything.
-  `--into`, `--message`, and `--debt` stay single-change: a queue lands several
-  merges, each into its own recorded target, and none of the three has one
-  thing to name — a debt reason least of all, since it is a judgment about one
-  patchset. A queue is for changes already green or already carrying a verdict.
+  `integrate --shape ff-only|no-ff` selects the local integration shape.
+  The default is ff-only: the observed target must be an ancestor of the
+  approved head, and an expected-old ref update advances it to that head.
+  Divergence exits 11, writes nothing, and names `arc rebase <change> --verify`;
+  the rewritten head requires fresh review or declared debt. Integration
+  performs no automatic rebase under ff-only. `--shape no-ff` creates a merge
+  commit with the observed target and approved head as its parents.
+  `--message` names that merge commit and requires `--shape no-ff`.
+
+  Several changes, or `--tag`, make `integrate` a queue in dependency order.
+  Under ff-only it lands the stacked prefix and stops at the first member
+  whose target is not an ancestor of its approved head. It never falls back
+  to a merge commit. Under no-ff it can replay a branch whose target moved
+  with conflicts. Both shapes can run gates that lack evidence for the tree
+  to ship and stop at a red gate or missing verdict. The exit code is the
+  stopped member's blocker; the summary names landed revisions, the stopped
+  member and reason, and members never attempted. `--dry-run` reports the
+  plan without replaying, running gates, or integrating.
+  `--into`, `--message`, and `--debt` are single-change options: each member
+  lands into its recorded target, and a debt reason binds to one patchset.
 
   A merge runs where the target is checked out, and that checkout blocks it
   only where the merge could change or lose bytes there. Its tracked
@@ -672,7 +681,8 @@ RUN A CHANGE
   created. A successor behind such a change proceeds normally.
 
   A guarded integration records the shipped patchset and head, the target
-  branch and its preceding revision, and its authorization basis: the
+  branch and its preceding revision, its shape (`fast-forward`, `merge`, or
+  `already-contained`), and its authorization basis: the
   approving verdict and its provisional reason when present, an external
   approval when consumed, one passing verification event per required gate,
   each prerequisite's satisfying closure, the empty blocking-finding and hold
@@ -859,7 +869,7 @@ PROFILES (--profile, default local)
            Implement, verify, review the diff, commit. No journal topic.
   local    Spans sessions or roles, or needs host-local evidence CI cannot
            reproduce. Dedicated branch/worktree, verdict or debt per REVIEW
-           COVERAGE AND DEBT, --no-ff merge.
+           COVERAGE AND DEBT, shape per --shape, default fast-forward.
   forge    A hosted PR adds a remote record, inline discussion, clean runner
            evidence, or branch protection. local underneath; project only public
            integration facts into the PR.

@@ -831,7 +831,7 @@ fn green_path_integrates_with_merge_commit() {
 
     // Integrate from the main checkout, which has master checked out.
     repo.arc(&repo.root)
-        .args(["integrate", "feat-x"])
+        .args(["integrate", "--shape", "no-ff", "feat-x"])
         .assert()
         .success();
 
@@ -1131,7 +1131,7 @@ fn non_conflicting_target_movement_stays_ready_and_integrates() {
     assert!(status["gates"].as_array().unwrap().is_empty(), "{status}");
     repo.arc(&wt).args(["check", "clean-r"]).assert().success();
     repo.arc(&repo.root)
-        .args(["integrate", "clean-r"])
+        .args(["integrate", "--shape", "no-ff", "clean-r"])
         .assert()
         .success();
     assert_eq!(

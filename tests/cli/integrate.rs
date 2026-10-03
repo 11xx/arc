@@ -32,7 +32,21 @@ fn approved_change_blocked_by(
     content: &str,
     blocked_by: &[&str],
 ) -> (String, PathBuf) {
+    approved_change_based_on(repo, slug, file, content, blocked_by, None)
+}
+
+fn approved_change_based_on(
+    repo: &Repo,
+    slug: &str,
+    file: &str,
+    content: &str,
+    blocked_by: &[&str],
+    base: Option<&str>,
+) -> (String, PathBuf) {
     let mut args = vec!["begin", slug, "--tag", "series"];
+    if let Some(base) = base {
+        args.extend(["--base", base]);
+    }
     for blocker in blocked_by {
         args.push("--blocked-by");
         args.push(blocker);
@@ -103,7 +117,11 @@ fn a_queue_closes_an_already_contained_slice_and_its_successor_proceeds() {
     let (tail_id, _) =
         approved_change_blocked_by(&repo, "contained-tail", "tail.txt", "tail\n", &[&verify_id]);
 
-    let out = stdout(repo.arc(&repo.root).args(["integrate", "--tag", "series"]));
+    let out =
+        stdout(
+            repo.arc(&repo.root)
+                .args(["integrate", "--shape", "no-ff", "--tag", "series"]),
+        );
     assert!(
         out.contains("queue: 4 changes in dependency order"),
         "{out}"
@@ -130,6 +148,7 @@ fn a_queue_closes_an_already_contained_slice_and_its_successor_proceeds() {
         .find(|event| event["event_type"] == "change-integrated")
         .expect("the verification-only slice records an integration");
     assert_eq!(event["already_contained"], true, "{event}");
+    assert_eq!(event["shape"], "already-contained");
     assert_eq!(event["source_head"], first_head.as_str());
     assert_eq!(event["target_before"], event["integrated_commit"]);
     let merges = git_out(
@@ -178,6 +197,7 @@ fn a_head_equal_to_the_target_closes_at_that_revision() {
         .find(|event| event["event_type"] == "change-integrated")
         .expect("the equal-head slice records an integration");
     assert_eq!(event["already_contained"], true, "{event}");
+    assert_eq!(event["shape"], "already-contained");
     assert_eq!(event["integrated_commit"], target.as_str());
     assert_eq!(event["target_before"], target.as_str());
     let tail_event = events(&repo, &tail_id)
@@ -204,11 +224,11 @@ fn an_already_contained_head_still_owes_merged_tree_evidence() {
     // A target that moved past the approved head needs evidence at the tree a
     // merge would ship; being already contained does not answer that.
     repo.arc(&repo.root)
-        .args(["integrate", &first_id, &mover_id])
+        .args(["integrate", "--shape", "no-ff", &first_id, &mover_id])
         .assert()
         .success();
     repo.arc(&repo.root)
-        .args(["integrate", &verify_id])
+        .args(["integrate", "--shape", "no-ff", &verify_id])
         .assert()
         .code(14)
         .stderr(predicates::str::contains("merged tree"));
@@ -223,7 +243,7 @@ fn an_already_contained_head_still_owes_merged_tree_evidence() {
         .assert()
         .success();
     repo.arc(&repo.root)
-        .args(["integrate", &verify_id])
+        .args(["integrate", "--shape", "no-ff", &verify_id])
         .assert()
         .success();
     let event = events(&repo, &verify_id)
@@ -231,6 +251,7 @@ fn an_already_contained_head_still_owes_merged_tree_evidence() {
         .find(|event| event["event_type"] == "change-integrated")
         .expect("the contained slice records an integration");
     assert_eq!(event["already_contained"], true, "{event}");
+    assert_eq!(event["shape"], "already-contained");
 }
 
 fn events(repo: &Repo, change_id: &str) -> Vec<serde_json::Value> {
@@ -338,7 +359,7 @@ fn unrelated_untracked_and_ignored_files_survive_integration() {
         git_out(&repo.root, &["rev-list", "--parents", "-n", "1", &merged])
             .split_whitespace()
             .count(),
-        3
+        2
     );
 }
 
@@ -470,12 +491,18 @@ fn in_place_change(repo: &Repo, slug: &str) -> String {
 #[test]
 fn a_no_worktree_change_merges_in_its_own_checkout() {
     let repo = repo_with_gates();
+    fs::write(repo.root.join(".gitignore"), "ignored.bin\n").unwrap();
+    git(&repo.root, &["add", ".gitignore"]);
+    git(&repo.root, &["commit", "-m", "test: ignore local output"]);
     let change_id = in_place_change(&repo, "stranded-in-place");
     assert_eq!(
         git_out(&repo.root, &["rev-parse", "--abbrev-ref", "HEAD"]),
         "arc/stranded-in-place"
     );
     let old_master = git_out(&repo.root, &["rev-parse", "master"]);
+    let approved_head = repo.head(&repo.root);
+    fs::write(repo.root.join("untracked.bin"), "untracked bytes\n").unwrap();
+    fs::write(repo.root.join("ignored.bin"), "ignored bytes\n").unwrap();
 
     let plan = stdout(
         repo.arc(&repo.root)
@@ -496,12 +523,21 @@ fn a_no_worktree_change_merges_in_its_own_checkout() {
         "master",
         "the checkout is left on the target, as it stood before begin"
     );
+    assert_eq!(
+        fs::read_to_string(repo.root.join("untracked.bin")).unwrap(),
+        "untracked bytes\n"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.root.join("ignored.bin")).unwrap(),
+        "ignored bytes\n"
+    );
     let merged = repo.head(&repo.root);
+    assert_eq!(merged, approved_head);
     let parents = git_out(&repo.root, &["rev-list", "--parents", "-n", "1", &merged])
         .split_whitespace()
         .map(str::to_string)
         .collect::<Vec<_>>();
-    assert_eq!(parents.len(), 3);
+    assert_eq!(parents.len(), 2);
     assert_eq!(parents[1], old_master);
     let status: serde_json::Value = serde_json::from_str(&stdout(
         repo.arc(&repo.root).args(["status", &change_id, "--json"]),
@@ -748,7 +784,7 @@ fn verify_against_without_declared_gates_still_refuses_and_integrate_lands() {
         .split_whitespace()
         .map(str::to_string)
         .collect::<Vec<_>>();
-    assert_eq!(parents.len(), 3);
+    assert_eq!(parents.len(), 2);
     assert_eq!(parents[1], old_master);
 }
 
@@ -1374,7 +1410,8 @@ fn dry_run_json_prints_the_integration_plan() {
     assert_eq!(plan["target"], "master");
     assert_eq!(plan["target_revision"], target.as_str());
     assert_eq!(plan["approved_head"], head.as_str());
-    assert_eq!(plan["merge_commit"], true);
+    assert_eq!(plan["merge_commit"], false);
+    assert_eq!(plan["shape"], "fast-forward");
     assert!(plan["evaluated_tree"].is_string(), "{plan}");
     assert!(plan["authorization"]["gate_evidence"]["smoke"].is_string());
     assert_eq!(repo.head(&repo.root), target, "a dry run merges nothing");
@@ -1410,10 +1447,14 @@ fn expected_basis_names_what_moved() {
         let path = repo.root.join(format!("../{slug}-plan.json"));
         fs::write(
             &path,
-            stdout(
-                repo.arc(&repo.root)
-                    .args(["integrate", slug, "--dry-run", "--json"]),
-            ),
+            stdout(repo.arc(&repo.root).args([
+                "integrate",
+                "--shape",
+                "no-ff",
+                slug,
+                "--dry-run",
+                "--json",
+            ])),
         )
         .unwrap();
         path
@@ -1423,7 +1464,13 @@ fn expected_basis_names_what_moved() {
     let steady_plan = dry_run("moves-steady");
     let steady = repo
         .arc(&repo.root)
-        .args(["integrate", "moves-steady", "--expect-basis"])
+        .args([
+            "integrate",
+            "--shape",
+            "no-ff",
+            "moves-steady",
+            "--expect-basis",
+        ])
         .arg(&steady_plan)
         .assert()
         .success();
@@ -1445,7 +1492,13 @@ fn expected_basis_names_what_moved() {
     let moved = repo.head(&repo.root);
     let landed = repo
         .arc(&repo.root)
-        .args(["integrate", "moves-ready", "--expect-basis"])
+        .args([
+            "integrate",
+            "--shape",
+            "no-ff",
+            "moves-ready",
+            "--expect-basis",
+        ])
         .arg(&ready_plan)
         .assert()
         .success();
@@ -1464,7 +1517,13 @@ fn expected_basis_names_what_moved() {
     let now = repo.head(&repo.root);
     let refused = repo
         .arc(&repo.root)
-        .args(["integrate", "moves-unready", "--expect-basis"])
+        .args([
+            "integrate",
+            "--shape",
+            "no-ff",
+            "moves-unready",
+            "--expect-basis",
+        ])
         .arg(&unready_plan)
         .assert()
         .code(14);
@@ -1481,7 +1540,13 @@ fn expected_basis_names_what_moved() {
 
     // A plan for another change is refused rather than compared.
     repo.arc(&repo.root)
-        .args(["integrate", "moves-unready", "--expect-basis"])
+        .args([
+            "integrate",
+            "--shape",
+            "no-ff",
+            "moves-unready",
+            "--expect-basis",
+        ])
         .arg(&ready_plan)
         .assert()
         .failure()
@@ -1717,7 +1782,7 @@ exec '{git}' "$@"
     let mut cmd = repo.arc(&repo.root);
     cmd.args(["integrate", "retention-read"]);
     if queue {
-        cmd.arg("retention-next");
+        cmd.args(["--shape", "no-ff", "retention-next"]);
     }
     cmd.env("PATH", path);
     let output = cmd.assert().success().get_output().clone();
@@ -1819,7 +1884,7 @@ done
     let mut cmd = repo.arc(&repo.root);
     cmd.args(["integrate", "retention-delete"]);
     if queue {
-        cmd.arg("retention-next");
+        cmd.args(["--shape", "no-ff", "retention-next"]);
     }
     let output = cmd.assert().success().get_output().clone();
     let out = String::from_utf8(output.stdout).unwrap();
@@ -1866,4 +1931,276 @@ fn integrate_warns_on_retention_head_deletion_hook_and_continues_queue() {
 #[test]
 fn integrate_warns_on_retention_tree_deletion_hook_after_closure() {
     retention_deletion_failure_after_merge(true, false, false);
+}
+
+#[test]
+fn default_fast_forward_records_guarded_shape() {
+    let repo = repo_with_gates();
+    let before = repo.head(&repo.root);
+    let (id, wt) = approved_change(&repo, "ff-shape", "ff.txt", "ff\n");
+    let head = repo.head(&wt);
+    stdout(repo.arc(&repo.root).args(["integrate", &id]));
+    assert_eq!(repo.head(&repo.root), head);
+    let event = events(&repo, &id)
+        .into_iter()
+        .find(|e| e["event_type"] == "change-integrated")
+        .unwrap();
+    assert_eq!(event["shape"], "fast-forward");
+    assert_eq!(event["target_before"], before);
+    assert_eq!(event["integrated_commit"], head);
+    assert_ne!(event["already_contained"], true);
+    assert!(event["authorization"].is_object());
+}
+
+#[test]
+fn default_fast_forward_refuses_divergence_without_writes() {
+    let repo = repo_with_gates();
+    let (id, _) = approved_change(&repo, "ff-diverged", "ff.txt", "ff\n");
+    fs::write(repo.root.join("other.txt"), "target\n").unwrap();
+    git(&repo.root, &["add", "other.txt"]);
+    git(&repo.root, &["commit", "-m", "feat: target"]);
+    let before = repo.head(&repo.root);
+    let recorded = events(&repo, &id);
+    repo.arc(&repo.root)
+        .args(["integrate", &id])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(format!(
+            "arc rebase {id} --verify"
+        )))
+        .stderr(predicates::str::contains("review"));
+    assert_eq!(repo.head(&repo.root), before);
+    assert_eq!(events(&repo, &id), recorded);
+}
+
+#[test]
+fn fast_forward_message_refuses_before_debt_write() {
+    let repo = repo_with_gates();
+    let (id, _) = approved_change(&repo, "ff-message", "ff.txt", "ff\n");
+    let recorded = events(&repo, &id);
+    repo.arc(&repo.root)
+        .args(["integrate", &id, "--message", "merge", "--debt", "owed"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--shape no-ff"));
+    assert_eq!(events(&repo, &id), recorded);
+}
+
+#[test]
+fn explicit_no_ff_records_merge_shape() {
+    let repo = repo_with_gates();
+    let before = repo.head(&repo.root);
+    let (id, wt) = approved_change(&repo, "merge-shape", "merge.txt", "merge\n");
+    let head = repo.head(&wt);
+    let plan = json_stdout(repo.arc(&repo.root).args([
+        "integrate",
+        &id,
+        "--shape",
+        "no-ff",
+        "--dry-run",
+        "--json",
+    ]));
+    assert_eq!(plan["shape"], "merge");
+    assert_eq!(plan["merge_commit"], true);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--shape", "no-ff"]),
+    );
+    let merged = repo.head(&repo.root);
+    assert_ne!(merged, head);
+    assert_eq!(
+        git_out(&repo.root, &["rev-list", "--parents", "-n", "1", &merged]).trim(),
+        format!("{merged} {before} {head}")
+    );
+    let event = events(&repo, &id)
+        .into_iter()
+        .find(|e| e["event_type"] == "change-integrated")
+        .unwrap();
+    assert_eq!(event["shape"], "merge");
+}
+
+#[test]
+fn fast_forward_queue_stops_at_first_non_stacked_member() {
+    let repo = repo_with_gates();
+    let (first, first_wt) = approved_change(&repo, "ff-first", "first.txt", "first\n");
+    let (second, _) =
+        approved_change_blocked_by(&repo, "ff-second", "second.txt", "second\n", &[&first]);
+    let (tail, _) = approved_change_blocked_by(&repo, "ff-tail", "tail.txt", "tail\n", &[&second]);
+    let expected = repo.head(&first_wt);
+    let second_events = events(&repo, &second);
+    let tail_events = events(&repo, &tail);
+    let out = stdout_any_status(
+        repo.arc(&repo.root)
+            .args(["integrate", &first, &second, &tail]),
+    );
+    assert!(out.contains(&format!("landed: {first}")), "{out}");
+    assert!(out.contains(&format!("stopped: {second}")), "{out}");
+    assert!(out.contains(&format!("not attempted: {tail}")), "{out}");
+    assert_eq!(repo.head(&repo.root), expected);
+    assert_eq!(events(&repo, &second), second_events);
+    assert_eq!(events(&repo, &tail), tail_events);
+}
+
+#[test]
+fn fast_forward_expected_old_refuses_target_race() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = repo_with_gates();
+    let (id, wt) = approved_change(&repo, "ff-race", "ff.txt", "ff\n");
+    let before = repo.head(&repo.root);
+    let tree = git_out(&repo.root, &["rev-parse", "master^{tree}"]);
+    let racer = git_out(
+        &repo.root,
+        &["commit-tree", &tree, "-p", &before, "-m", "race"],
+    );
+    let recorded = events(&repo, &id);
+    let real_git =
+        String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout).unwrap();
+    let bin = repo.home.join("race-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let wrapper = bin.join("git");
+    fs::write(
+        &wrapper,
+        format!(
+            r#"#!/bin/sh
+if [ "$1" = update-ref ] && [ "$2" = refs/heads/master ]; then
+    '{git}' update-ref refs/heads/master '{racer}' '{before}' || exit 1
+fi
+exec '{git}' "$@"
+"#,
+            git = real_git.trim()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    repo.arc(&repo.root)
+        .args(["integrate", &id])
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("target moved during integration"));
+    assert_eq!(repo.head(&repo.root), racer);
+    assert_ne!(repo.head(&repo.root), repo.head(&wt));
+    assert_eq!(events(&repo, &id), recorded);
+}
+
+#[test]
+fn fast_forward_checks_target_after_reference_transaction_hook() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = repo_with_gates();
+    let (id, _) = approved_change(&repo, "ff-hook-race", "ff.txt", "ff\n");
+    let before = repo.head(&repo.root);
+    let tree = git_out(&repo.root, &["rev-parse", "master^{tree}"]);
+    let racer = git_out(
+        &repo.root,
+        &["commit-tree", &tree, "-p", &before, "-m", "race"],
+    );
+    let recorded = events(&repo, &id);
+    let hook = repo.root.join(".git/hooks/reference-transaction");
+    fs::write(
+        &hook,
+        format!(
+            r#"#!/bin/sh
+[ "$1" = committed ] || exit 0
+while read old new ref; do
+    if [ "$ref" = refs/heads/master ]; then
+        printf '%s\n' '{racer}' > '{target}'
+    fi
+done
+"#,
+            target = repo.root.join(".git/refs/heads/master").display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(hook, fs::Permissions::from_mode(0o755)).unwrap();
+    repo.arc(&repo.root)
+        .args(["integrate", &id])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("target moved during integration"));
+    assert_eq!(repo.head(&repo.root), racer);
+    assert_eq!(events(&repo, &id), recorded);
+}
+
+#[test]
+fn fast_forward_queue_lands_stacked_prefix() {
+    let repo = repo_with_gates();
+    let (first, first_wt) = approved_change(&repo, "stack-first", "first.txt", "first\n");
+    let first_head = repo.head(&first_wt);
+    let (second, second_wt) = approved_change_based_on(
+        &repo,
+        "stack-second",
+        "second.txt",
+        "second\n",
+        &[&first],
+        Some(&first_head),
+    );
+    let second_head = repo.head(&second_wt);
+    let (third, _) =
+        approved_change_blocked_by(&repo, "stack-third", "third.txt", "third\n", &[&second]);
+    repo.arc(&repo.root)
+        .args(["integrate", &first, &second, &third, "--dry-run"])
+        .assert()
+        .code(11)
+        .stdout(predicates::str::contains(format!("stopped: {third}")));
+    repo.arc(&repo.root)
+        .args(["integrate", &first, &second, &third])
+        .assert()
+        .code(11)
+        .stderr(predicates::str::contains(format!(
+            "arc rebase {third} --verify"
+        )));
+    assert_eq!(repo.head(&repo.root), second_head);
+    for (id, head) in [(&first, &first_head), (&second, &second_head)] {
+        let event = events(&repo, id)
+            .into_iter()
+            .find(|e| e["event_type"] == "change-integrated")
+            .unwrap();
+        assert_eq!(event["shape"], "fast-forward");
+        assert_eq!(event["source_head"], head.as_str());
+        assert_eq!(event["integrated_commit"], head.as_str());
+    }
+}
+
+#[test]
+fn already_contained_plan_and_state_report_shape() {
+    let repo = repo_with_gates();
+    let (id, _) = verification_only(&repo, "shape-contained", "master", &[]);
+    let before = repo.head(&repo.root);
+    let plan = json_stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--dry-run", "--json"]),
+    );
+    assert_eq!(plan["shape"], "already-contained");
+    assert_eq!(plan["merge_commit"], false);
+    stdout(repo.arc(&repo.root).args(["integrate", &id]));
+    let state = json_stdout(repo.arc(&repo.root).args(["show", &id, "--json"]));
+    assert_eq!(state["closure"]["shape"], "already-contained");
+    assert_eq!(state["closure"]["target_before"], before);
+    assert_eq!(state["closure"]["integrated_commit"], before);
+    assert!(stdout(repo.arc(&repo.root).args(["log", &id])).contains("already contained"));
+}
+
+#[test]
+fn fast_forward_unrelated_target_refuses_with_rebase_guidance() {
+    let repo = repo_with_gates();
+    let (id, _) = approved_change(&repo, "ff-unrelated", "ff.txt", "ff\n");
+    let tree = git_out(&repo.root, &["rev-parse", "master^{tree}"]);
+    let root = git_out(&repo.root, &["commit-tree", &tree, "-m", "unrelated root"]);
+    git(&repo.root, &["update-ref", "refs/heads/master", &root]);
+    let recorded = events(&repo, &id);
+    for flags in [vec![], vec!["--dry-run"], vec!["--dry-run", "--json"]] {
+        repo.arc(&repo.root)
+            .args(["integrate", &id])
+            .args(flags)
+            .assert()
+            .code(11)
+            .stderr(predicates::str::contains(format!(
+                "arc rebase {id} --verify"
+            )));
+        assert_eq!(repo.head(&repo.root), root);
+        assert_eq!(events(&repo, &id), recorded);
+    }
 }

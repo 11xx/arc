@@ -61,7 +61,7 @@ fn a_queue_lands_every_change_in_dependency_order_under_one_summary() {
     // the order they were opened in.
     let assertion = repo
         .arc(&repo.root)
-        .args(["integrate", &third, &first, &second])
+        .args(["integrate", "--shape", "no-ff", &third, &first, &second])
         .assert()
         .success();
     let out = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
@@ -108,7 +108,14 @@ fn a_conflicting_replay_stops_the_queue_and_leaves_the_rest_unattempted() {
 
     let assertion = repo
         .arc(&repo.root)
-        .args(["integrate", &first, &blocked, &untouched])
+        .args([
+            "integrate",
+            "--shape",
+            "no-ff",
+            &first,
+            &blocked,
+            &untouched,
+        ])
         .assert()
         .code(11);
     let out = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
@@ -153,7 +160,14 @@ fn a_change_without_a_verdict_stops_the_queue_by_its_own_blocker() {
 
     let assertion = repo
         .arc(&repo.root)
-        .args(["integrate", &first, &unreviewed, &behind])
+        .args([
+            "integrate",
+            "--shape",
+            "no-ff",
+            &first,
+            &unreviewed,
+            &behind,
+        ])
         .assert()
         .code(3);
     let out = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
@@ -180,7 +194,14 @@ fn a_dry_run_reports_the_plan_and_merges_nothing() {
 
     let assertion = repo
         .arc(&repo.root)
-        .args(["integrate", &first, &second, "--dry-run"])
+        .args([
+            "integrate",
+            "--shape",
+            "no-ff",
+            &first,
+            &second,
+            "--dry-run",
+        ])
         .assert()
         .success();
     let out = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
@@ -228,7 +249,7 @@ fn a_gate_already_green_at_the_merged_tree_is_not_rerun_by_the_queue() {
     let unevaluated = gate_runs(&repo, &second);
 
     repo.arc(&repo.root)
-        .args(["integrate", &first, &second])
+        .args(["integrate", "--shape", "no-ff", &first, &second])
         .assert()
         .success();
 

@@ -1640,23 +1640,23 @@ enum Cmd {
         #[arg(long)]
         reason: Option<String>,
     },
-    /// Guarded merge of one change, or of a dependency-ordered queue named
+    /// Guarded integration of one change, or of a dependency-ordered queue named
     /// by several changes or by --tag.
     ///
-    /// The merge runs where the target is checked out. That checkout's tracked
+    /// Integration runs where the target is checked out. That checkout's tracked
     /// modifications refuse, staged or unstaged. Untracked or ignored paths
-    /// the merge does not write are left in place and named in the report; a
-    /// path the merge would write that is already there without being tracked
+    /// integration does not write are left in place and named in the report; a
+    /// path integration would write that is already there without being tracked
     /// is refused by name. A head the target already contains closes at the
     /// target revision that holds it, without a merge commit. When no checkout
-    /// holds the target, the merge takes over the change's own checkout if it
+    /// holds the target, integration takes over the change's own checkout if it
     /// still holds the change branch and leaves it on the target.
     /// The integrated revision and closure event are printed before retention
     /// cleanup. A retention cleanup failure, including a ref lock or a hook
     /// rejecting deletion, warns with the ref prefixes that may still hold
     /// pins and does not fail the recorded integration.
     #[command(
-        after_help = "Arc exits 17 when a paired replica does not hold integration authority; the refusal names the holder or an offer in flight."
+        after_help = "Arc exits 11 when --shape ff-only encounters a diverged target; run arc rebase <change> --verify and provide fresh review or declared debt. Arc exits 17 when a paired replica does not hold integration authority; the refusal names the holder or an offer in flight."
     )]
     Integrate {
         /// Changes to integrate. Several run as a queue, in dependency order,
@@ -1669,7 +1669,11 @@ enum Cmd {
         /// Merge into this branch instead of the recorded target
         #[arg(long)]
         into: Option<String>,
-        /// Merge commit message (defaults to "merge(<slug>): <title>")
+        /// Local integration shape: ff-only advances to the approved head
+        /// and refuses divergence; no-ff creates a merge commit. Default: ff-only
+        #[arg(long, value_enum)]
+        shape: Option<integration::Shape>,
+        /// Merge commit message, requires --shape no-ff (defaults to "merge(<slug>): <title>")
         #[arg(long)]
         message: Option<String>,
         /// Remove the change worktree and branch after a verified merge
@@ -1681,9 +1685,9 @@ enum Cmd {
         /// With --dry-run, print the plan as `arc-integration-plan/1` JSON:
         /// the authorization basis the integration event would record, the
         /// target revision it was decided at, the approved head, and the tree
-        /// the merge would ship. It is decided exactly as the merge is; a
-        /// refusal prints the blocker on stderr and nothing on stdout. One
-        /// change only
+        /// the integration would ship, and its shape. The same decision governs
+        /// the dry run and execution; a refusal prints the blocker on stderr
+        /// and nothing on stdout. One change only
         #[arg(long, requires = "dry_run")]
         json: bool,
         /// Compare the fresh decision with a plan an earlier
@@ -4233,6 +4237,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             dry_run,
             json,
             expect_basis,
+            shape,
             debt,
             debt_kind,
         } => {
@@ -4262,6 +4267,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     dry_run,
                     json,
                     expect_basis,
+                    shape,
                     debt: debt.map(|reason| commands::DebtDeclaration {
                         reason,
                         kind: debt_kind,

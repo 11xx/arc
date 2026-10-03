@@ -24,6 +24,19 @@ use crate::policy::Contribution;
 use crate::state::ChangeState;
 use crate::status::StatusReport;
 
+/// The local integration topology requested by the caller.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum Shape {
+    #[default]
+    FfOnly,
+    NoFf,
+}
+
+/// Resolve the caller's flag against the built-in integration default.
+pub fn integration_shape(flag: Option<Shape>) -> Shape {
+    flag.unwrap_or_default()
+}
+
 pub const PLAN_SCHEMA: &str = "arc-integration-plan/1";
 
 const CONFIGURATION_MOVED: &str = "gate or policy configuration changed while preparing the \
@@ -74,6 +87,10 @@ pub struct Confirmation {
 /// can fail carries its error, which becomes the refusal only when the
 /// decision reaches it.
 pub struct IntegrationFacts {
+    /// The change is open, not iterating, and its branch is not fork work.
+    pub lifecycle_allows_integration: bool,
+    pub shape: Shape,
+    pub target_is_ancestor: anyhow::Result<bool>,
     pub target: String,
     pub approved: Option<Approved>,
     /// Readiness under the locks.
@@ -103,12 +120,12 @@ pub struct IntegrationFacts {
 /// against once it has run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MergePlan {
+    pub shape: crate::model::IntegrationShape,
     pub target: String,
     pub old_target: String,
     pub approved: Approved,
     pub evaluated_tree: Option<String>,
-    /// False when the target already contains the approved head: Git creates
-    /// no merge commit, and the target revision is the integration.
+    /// True only when integration creates a two-parent merge commit.
     pub merge_commit: bool,
     pub authorization: AuthorizationBasis,
     pub checkout: TargetCheckout,
@@ -129,6 +146,7 @@ pub struct SendPlan {
 pub enum Refusal {
     /// The readiness report blocks; it explains why.
     NotReady,
+    Diverged,
     /// Readiness or the basis differed between two readings.
     ConfigurationMoved,
     TrackedDirt {
@@ -146,6 +164,7 @@ pub enum Refusal {
 impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Refusal::Diverged => f.write_str("target is not an ancestor of the approved head"),
             Refusal::NotReady => f.write_str("the change is not ready to integrate"),
             Refusal::ConfigurationMoved => f.write_str(CONFIGURATION_MOVED),
             Refusal::TrackedDirt { checkout } => write!(
@@ -246,6 +265,7 @@ pub struct IntegrationPlan {
     pub approved_patchset_id: String,
     pub approved_head: String,
     pub merge_commit: bool,
+    pub shape: Option<crate::model::IntegrationShape>,
     pub evaluated_tree: Option<String>,
     pub authorization: AuthorizationBasis,
 }
@@ -261,6 +281,7 @@ impl IntegrationPlan {
             approved_patchset_id: plan.approved.patchset_id.clone(),
             approved_head: plan.approved.head.clone(),
             merge_commit: plan.merge_commit,
+            shape: Some(plan.shape),
             evaluated_tree: plan.evaluated_tree.clone(),
             authorization: plan.authorization.clone(),
         }
@@ -276,6 +297,7 @@ impl IntegrationPlan {
             approved_patchset_id: plan.approved.patchset_id.clone(),
             approved_head: plan.approved.head.clone(),
             merge_commit: false,
+            shape: None,
             evaluated_tree: None,
             authorization: plan.authorization.clone(),
         }
@@ -368,6 +390,16 @@ fn decision(facts: IntegrationFacts) -> Decision {
             }
         };
     }
+    if !facts.lifecycle_allows_integration {
+        return Decision::Refused(Refusal::NotReady);
+    }
+    if facts.shape == Shape::FfOnly
+        && matches!(&facts.contribution, Ok(None))
+        && matches!(&facts.already_contained, Ok(false))
+        && matches!(&facts.target_is_ancestor, Ok(false))
+    {
+        return Decision::Refused(Refusal::Diverged);
+    }
     if !facts.ready {
         return Decision::Refused(Refusal::NotReady);
     }
@@ -406,12 +438,30 @@ fn decision(facts: IntegrationFacts) -> Decision {
     }
     let untouched = observed!(facts.untouched);
     let already_contained = observed!(facts.already_contained);
+    if facts.shape == Shape::FfOnly && !already_contained {
+        if !observed!(facts.target_is_ancestor) {
+            return Decision::Refused(Refusal::Diverged);
+        }
+        if evaluated_tree.is_none() {
+            return Decision::Refused(Refusal::Failed(anyhow!(
+                "fast-forward has no evaluated tree"
+            )));
+        }
+    }
+    let shape = if already_contained {
+        crate::model::IntegrationShape::AlreadyContained
+    } else if facts.shape == Shape::FfOnly {
+        crate::model::IntegrationShape::FastForward
+    } else {
+        crate::model::IntegrationShape::Merge
+    };
     Decision::Merge(MergePlan {
+        shape,
         target: facts.target,
         old_target,
         approved,
         evaluated_tree,
-        merge_commit: !already_contained,
+        merge_commit: shape == crate::model::IntegrationShape::Merge,
         authorization,
         checkout,
         untouched,
@@ -569,6 +619,9 @@ mod tests {
     /// `OLD_TARGET`.
     fn ready() -> IntegrationFacts {
         IntegrationFacts {
+            lifecycle_allows_integration: true,
+            shape: Shape::NoFf,
+            target_is_ancestor: Ok(true),
             target: "main".to_string(),
             approved: Some(Approved {
                 patchset_id: "ps-1".to_string(),
@@ -627,6 +680,50 @@ mod tests {
         assert!(plan.merge_commit);
         assert_eq!(plan.authorization, basis());
         assert!(outcome.moved.is_empty());
+    }
+
+    #[test]
+    fn fast_forward_plan_binds_the_observed_target_and_approved_tree() {
+        let facts = IntegrationFacts {
+            shape: Shape::FfOnly,
+            ..ready()
+        };
+        let Decision::Merge(plan) = decide(facts, None).decision else {
+            panic!("expected integration");
+        };
+        assert_eq!(plan.shape, crate::model::IntegrationShape::FastForward);
+        assert!(!plan.merge_commit);
+        assert_eq!(plan.old_target, OLD_TARGET);
+        assert_eq!(plan.approved.head, HEAD);
+        assert_eq!(plan.evaluated_tree.as_deref(), Some(TREE));
+        assert_eq!(plan.authorization, basis());
+        assert_eq!(
+            IntegrationPlan::of_merge("change-1", &plan).shape,
+            Some(crate::model::IntegrationShape::FastForward)
+        );
+    }
+
+    #[test]
+    fn fast_forward_divergence_refuses_even_before_readiness() {
+        let facts = IntegrationFacts {
+            shape: Shape::FfOnly,
+            target_is_ancestor: Ok(false),
+            ready: false,
+            ..ready()
+        };
+        assert!(matches!(refusal(facts), Refusal::Diverged));
+    }
+
+    #[test]
+    fn lifecycle_refusal_precedes_fast_forward_divergence() {
+        let facts = IntegrationFacts {
+            lifecycle_allows_integration: false,
+            shape: Shape::FfOnly,
+            target_is_ancestor: Ok(false),
+            ready: false,
+            ..ready()
+        };
+        assert!(matches!(refusal(facts), Refusal::NotReady));
     }
 
     #[test]
