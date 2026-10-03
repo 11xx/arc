@@ -178,6 +178,9 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          released with `arc release-claim <file.md> --outcome
                          paused|abandoned|expired`. `arc stage <file.md>
                          <stage>` records typed progress against it.
+                         For claim, stage, release-claim, watch, and rescue, a
+                         bare .md filename held only by another known journal
+                         is refused with its owning journal and project.
                          Artifact claims require a declared actor, harness,
                          and session.
   arc journal checkpoint <file.md> --body-file -

@@ -881,6 +881,8 @@ enum Cmd {
     /// and retain readable changes; a selected unreadable change fails
     /// Records no events; ledger reads do not require a parseable append policy.
     Watch {
+        /// A bare `.md` filename held only by another known journal is refused,
+        /// naming its owning journal and project.
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
         change: Option<String>,
@@ -1003,6 +1005,8 @@ enum Cmd {
     /// (--actor/ARC_ACTOR), harness (--harness/ARC_HARNESS), and session
     /// (--session/ARC_SESSION).
     Claim {
+        /// A bare `.md` filename held only by another known journal is refused,
+        /// naming its owning journal and project.
         /// Change to act on, or a journal artifact filename ending in `.md`.
         /// Omitted, the change is inferred from the current branch, then from
         /// the worktree the command runs in
@@ -1029,6 +1033,8 @@ enum Cmd {
     },
     /// Release the advisory executor claim on a change or a journal artifact
     ReleaseClaim {
+        /// A bare `.md` filename held only by another known journal is refused,
+        /// naming its owning journal and project.
         /// Change to act on, or a journal artifact filename ending in `.md`.
         /// Omitted, the change is inferred from the current branch, then from
         /// the worktree the command runs in
@@ -1042,6 +1048,8 @@ enum Cmd {
     /// Record typed executor progress (requires an owned live claim)
     #[command(allow_missing_positional = true)]
     Stage {
+        /// A bare `.md` filename held only by another known journal is refused,
+        /// naming its owning journal and project.
         /// Change to act on, or a journal artifact filename ending in `.md`.
         /// Omitted, the change is inferred from the current branch, then from
         /// the worktree the command runs in
@@ -1546,6 +1554,8 @@ enum Cmd {
     },
     /// Recover work abandoned by another session
     Rescue {
+        /// A bare `.md` filename held only by another known journal is refused,
+        /// naming its owning journal and project.
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
         change: Option<String>,
@@ -3276,8 +3286,11 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
     // Which store a subject positional addresses. Only an explicit name can
     // be an artifact: an omitted subject is inferred from the branch, and a
     // branch names a change.
-    let artifact = |ctx: &Ctx, subject: Option<&str>| -> Option<String> {
-        subject.and_then(|subject| journal::artifact_subject(&ctx.cwd, subject))
+    let artifact = |ctx: &Ctx, subject: Option<&str>| -> Result<Option<String>> {
+        subject
+            .map(|subject| journal::artifact_subject(&ctx.cwd, subject))
+            .transpose()
+            .map(Option::flatten)
     };
 
     match cmd {
@@ -3744,7 +3757,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                      only with --takeover"
                 );
             }
-            match artifact(&ctx, change.as_deref()) {
+            match artifact(&ctx, change.as_deref())? {
                 Some(file) => {
                     if !stage_budget.is_empty() {
                         bail!(
@@ -3766,7 +3779,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 }
             }
         }
-        Cmd::ReleaseClaim { change, outcome } => match artifact(&ctx, change.as_deref()) {
+        Cmd::ReleaseClaim { change, outcome } => match artifact(&ctx, change.as_deref())? {
             Some(file) => {
                 journal::release_artifact_claim(&ctx, &file, outcome.as_deref().unwrap_or("paused"))
             }
@@ -3793,7 +3806,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 (None, None) => None,
                 (note, note_file) => Some(commands::read_body(note, note_file)?),
             };
-            match artifact(&ctx, change.as_deref()) {
+            match artifact(&ctx, change.as_deref())? {
                 Some(file) => {
                     journal::stage_artifact(&ctx, &file, stage.into(), note, blocker, claim)
                 }
@@ -4118,7 +4131,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             transcript,
             tail,
             take,
-        } => match artifact(&ctx, change.as_deref()) {
+        } => match artifact(&ctx, change.as_deref())? {
             Some(file) => {
                 if transcript {
                     bail!(

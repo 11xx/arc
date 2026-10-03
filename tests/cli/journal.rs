@@ -14020,3 +14020,68 @@ fn hex_sha256(bytes: &[u8]) -> String {
     use sha2::Digest;
     hex::encode(sha2::Sha256::digest(bytes))
 }
+
+fn foreign_artifact_subject_refusal(command: &str) {
+    let owner = Repo::new();
+    let hot = filed_artifact(&owner, "todo", "foreign-subject", "queued\n");
+    let cold = filed_artifact(&owner, "note", "cold-subject", "reference\n");
+    owner
+        .arc(&owner.root)
+        .args(["journal", "archive", &cold])
+        .assert()
+        .success();
+    let owner_journal = fs::canonicalize(journal_dir(&owner)).unwrap();
+    let owner_root = fs::canonicalize(&owner.root).unwrap();
+    let sibling = sibling_project(&owner, "subject-caller");
+    let before = fs::read(owner_journal.join("events.jsonl")).unwrap();
+    for file in [&hot, &cold] {
+        let mut args = vec![command, file.as_str()];
+        if command == "stage" {
+            args.push("implementing");
+        }
+        if command == "watch" {
+            args.extend(["--until", "stalled", "--timeout", "1"]);
+        }
+        {
+            let refusal = owner.arc(&sibling).args(&args).assert().failure();
+            let stderr = String::from_utf8_lossy(&refusal.get_output().stderr);
+            assert!(
+                stderr.contains(&format!("no such artifact {file} in ")),
+                "{args:?}: {stderr}"
+            );
+            assert!(
+                stderr.contains(&format!(
+                    "another project's journal holds it: {} (project {})",
+                    owner_journal.display(),
+                    owner_root.display()
+                )),
+                "{args:?}: {stderr}"
+            );
+        }
+    }
+    assert_eq!(
+        before,
+        fs::read(owner_journal.join("events.jsonl")).unwrap()
+    );
+}
+
+#[test]
+fn foreign_artifact_subject_claim_names_owner() {
+    foreign_artifact_subject_refusal("claim");
+}
+#[test]
+fn foreign_artifact_subject_stage_names_owner() {
+    foreign_artifact_subject_refusal("stage");
+}
+#[test]
+fn foreign_artifact_subject_release_claim_names_owner() {
+    foreign_artifact_subject_refusal("release-claim");
+}
+#[test]
+fn foreign_artifact_subject_watch_names_owner() {
+    foreign_artifact_subject_refusal("watch");
+}
+#[test]
+fn foreign_artifact_subject_rescue_names_owner() {
+    foreign_artifact_subject_refusal("rescue");
+}

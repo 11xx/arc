@@ -8360,15 +8360,23 @@ fn ensure_claims_acknowledged(
 
 /// The artifact a subject positional names, when it names one.
 ///
-/// A subject that ends in `.md` and is a file in the journal directory is an
-/// artifact; everything else is a change reference. The two namespaces cannot
-/// collide, because a change ID may not contain a dot.
-pub(crate) fn artifact_subject(cwd: &Path, reference: &str) -> Option<String> {
+/// A bare `.md` filename held by the current journal names an artifact.
+/// A filename held only by other known journals is refused with its owners.
+/// Change IDs cannot contain a dot, so the namespaces cannot collide.
+pub(crate) fn artifact_subject(cwd: &Path, reference: &str) -> Result<Option<String>> {
     if !reference.ends_with(".md") || reference.contains(['/', '\\']) {
-        return None;
+        return Ok(None);
     }
-    let dir = resolve_dir(cwd).ok()?;
-    dir.join(reference).is_file().then(|| reference.to_string())
+    let Ok(dir) = resolve_dir(cwd) else {
+        return Ok(None);
+    };
+    if dir.join(reference).is_file() {
+        return Ok(Some(reference.to_string()));
+    }
+    if !journals_holding(&dir, reference).is_empty() {
+        return Err(missing_write_target(&dir, reference));
+    }
+    Ok(None)
 }
 
 /// The caller's identity, refused unless every half was declared.

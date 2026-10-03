@@ -203,8 +203,10 @@ pub fn watch(ctx: &Ctx, reference: Option<&str>, args: WatchArgs) -> Result<i32>
         exec_command,
         json,
     } = args;
-    if let Some(file) =
-        reference.and_then(|reference| crate::journal::artifact_subject(&ctx.cwd, reference))
+    if let Some(file) = reference
+        .map(|reference| crate::journal::artifact_subject(&ctx.cwd, reference))
+        .transpose()?
+        .flatten()
     {
         return watch_artifact(
             ctx,
