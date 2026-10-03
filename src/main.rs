@@ -1729,7 +1729,7 @@ enum Cmd {
         /// An outbox holding only the spool's regular .gitignore with "*" and a
         /// trailing newline is disposable only when its Git administrative ownership
         /// record identifies the file and records successful promotion. Foreign
-        /// metadata and other outbox content keep the checkout.
+        /// metadata, unrecorded ownership and other outbox content keep the checkout.
         /// Kept checkouts retain checked-out branches. Cleanup failures warn after
         /// closure and do not fail integration or stop a queue. Overrides integration.cleanup;
         /// absent either flag, the resolved style default applies (built-in false).

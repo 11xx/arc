@@ -483,7 +483,8 @@ pub struct KindWrite {
     pub source: SourceArgs,
     /// Write to the repository-local outbox instead of the journal, for a
     /// caller that cannot reach the journal directory. `arc journal spool
-    /// --promote` files it later, keeping this write's identity
+    /// --promote` files it later, keeping this write's identity. Cleanup
+    /// ownership is optional; an unrecorded owner keeps the checkout
     #[arg(long)]
     pub spool: bool,
     /// Planner identity for a plan artifact; repeat once per planner. Each
@@ -535,7 +536,8 @@ pub enum JournalCmd {
         json: bool,
     },
     /// List journal writes parked in the repository-local outbox, for a
-    /// caller that could not reach the journal directory
+    /// caller that could not reach the journal directory. Unrecorded cleanup
+    /// ownership keeps the checkout after promotion
     Spool {
         /// File each spooled write into the journal, oldest first, keeping
         /// the identity it was spooled with and naming this caller as the
@@ -633,7 +635,8 @@ pub enum JournalCmd {
         #[arg(long, value_parser = [NO_ACTION], requires = "item_key")]
         outcome: Option<String>,
         /// Write to the repository-local outbox instead of the journal, for a
-        /// caller that cannot reach the journal directory
+        /// caller that cannot reach the journal directory. Cleanup ownership is
+        /// optional; an unrecorded owner keeps the checkout
         #[arg(long)]
         spool: bool,
     },
@@ -2102,7 +2105,9 @@ fn ensure_outbox(dir: &Path, checkout: &Path) -> Result<()> {
                 inode: metadata.ino(),
                 emptied: false,
             };
-            std::fs::write(outbox_owner_path(checkout)?, serde_json::to_vec(&owner)?)?;
+            // Ownership grants cleanup permission; spooling needs only the outbox.
+            let _ = outbox_owner_path(checkout)
+                .and_then(|path| Ok(std::fs::write(path, serde_json::to_vec(&owner)?)?));
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => {

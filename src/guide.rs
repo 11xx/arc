@@ -1688,8 +1688,10 @@ RULES THAT CHANGE WHAT YOU DO
     and `journal log` take `--spool`, and a write spools by itself when the
     journal cannot be written. It parks in `.arc/outbox/` and prints
     `spooled: <path>`; `arc journal spool --promote` files it later with the
-    identity it was spooled with. `arc config --check-writable` says which of
-    the two will happen before you write.
+    identity it was spooled with. Spooling requires only checkout write access;
+    optional ownership bookkeeping grants cleanup permission, and an
+    unrecorded owner keeps the checkout. `arc config --check-writable` says
+    which of the two will happen before you write.
   - An artifact is named `<timestamp>-<topic>-<kind>.md` at second resolution,
     so two writes of one topic and kind in one second want one name. The second
     takes a numeric suffix — `-2`, `-3` — before the extension, and every write

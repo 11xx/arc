@@ -14182,3 +14182,47 @@ fn third_round_replaced_owned_outbox_metadata_keeps_checkout() {
     assert!(out.contains("promoted 1, kept 0"), "{out}");
     assert!(wt.exists(), "{out}");
 }
+
+#[test]
+fn first_spool_survives_unwritable_linked_git_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "confined-spool"]));
+    let wt = repo.home.join(".worktrees/repo-confined-spool");
+    let admin = PathBuf::from(git_out(&wt, &["rev-parse", "--absolute-git-dir"]));
+    let permissions = fs::metadata(&admin).unwrap().permissions();
+    fs::set_permissions(&admin, fs::Permissions::from_mode(0o555)).unwrap();
+    let output = repo
+        .arc(&wt)
+        .args(["journal", "todo", "confined", "--body-file", "-", "--spool"])
+        .write_stdin("durable deferred work\n")
+        .output()
+        .unwrap();
+    fs::set_permissions(&admin, permissions).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(spool_files_in(&wt.join(".arc/outbox")).len(), 1);
+    assert!(!admin.join("arc-outbox-owner").exists());
+    stdout(repo.arc(&wt).args(["journal", "spool", "--promote"]));
+    assert!(spool_files_in(&wt.join(".arc/outbox")).is_empty());
+    assert!(!admin.join("arc-outbox-owner").exists());
+    repo.commit(&wt, "work.txt", "work\n", "feat: work");
+    stdout(repo.arc(&wt).args(["snapshot", "confined-spool"]));
+    stdout(
+        repo.arc(&wt)
+            .args(["review", "confined-spool", "--verdict", "approved"]),
+    );
+    let integrated =
+        stdout(
+            repo.arc(&repo.root)
+                .args(["integrate", "confined-spool", "--cleanup"]),
+        );
+    assert!(wt.exists(), "{integrated}");
+    assert_eq!(
+        git_out(&wt, &["branch", "--show-current"]),
+        "arc/confined-spool"
+    );
+}
