@@ -532,5 +532,170 @@ fn queue_unresolved_projection_retains_review_veto() {
     let err = String::from_utf8_lossy(&assertion.get_output().stderr);
     assert!(out.contains(&format!("stopped: {second}")), "{out}");
     assert!(err.contains("changes-requested"), "{err}");
+    assert!(err.contains(&format!("arc review {second}")), "{err}");
+    assert!(!err.contains("resolve review authorization"), "{err}");
     assert!(!out.contains(&format!("would land: {second}")), "{out}");
+}
+
+#[test]
+fn queue_refreshes_actor_policy_after_an_earlier_member_lands() {
+    let repo = repo_with_gates();
+    git(&repo.root, &["branch", "secondary"]);
+    let first = opened_change_id(&stdout(
+        repo.arc(&repo.root).args(["begin", "actor-policy"]),
+    ));
+    let first_tree = repo.home.join(".worktrees/repo-actor-policy");
+    repo.commit(
+        &first_tree,
+        ".arc/policy.toml",
+        "[policy]\nrequire_declared_actor = true\n",
+        "test: require declared actor",
+    );
+    stdout(repo.arc(&first_tree).args(["snapshot", &first]));
+    stdout(repo.arc(&first_tree).args(["verify", &first, "--all"]));
+    stdout(
+        repo.arc(&first_tree)
+            .args(["review", &first, "--verdict", "approved"]),
+    );
+
+    let second = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "actor-later",
+        "--target",
+        "secondary",
+    ])));
+    let second_tree = repo.home.join(".worktrees/repo-actor-later");
+    repo.commit(&second_tree, "second.txt", "second\n", "test: second");
+    stdout(repo.arc(&second_tree).args(["snapshot", &second]));
+    stdout(
+        repo.arc(&second_tree)
+            .args(["review", &second, "--verdict", "approved"]),
+    );
+    let secondary_tree = repo.home.join("secondary-checkout");
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            secondary_tree.to_str().unwrap(),
+            "secondary",
+        ],
+    );
+    repo.commit(
+        &secondary_tree,
+        "target.txt",
+        "target\n",
+        "test: diverge secondary",
+    );
+    let before = events(&repo, &second);
+    let refs = git_out(
+        &repo.root,
+        &[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            &format!("refs/arc/keep/{second}"),
+        ],
+    );
+    let objects = git_out(
+        &repo.root,
+        &[
+            "cat-file",
+            "--batch-all-objects",
+            "--batch-check=%(objectname) %(objecttype)",
+        ],
+    );
+    let commits_before = objects
+        .lines()
+        .filter(|line| line.ends_with(" commit"))
+        .count();
+    let assertion = repo
+        .arc(&repo.root)
+        .env_remove("ARC_ACTOR")
+        .args(["integrate", "--shape", "no-ff", &first, &second])
+        .assert()
+        .failure();
+    let out = String::from_utf8_lossy(&assertion.get_output().stdout);
+    assert!(out.contains(&format!("landed: {first}")), "{out}");
+    assert!(out.contains("declared actor"), "{out}");
+    assert_eq!(
+        events(&repo, &second),
+        before,
+        "refusal must precede gate evidence"
+    );
+    assert_eq!(
+        git_out(
+            &repo.root,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                &format!("refs/arc/keep/{second}"),
+            ]
+        ),
+        refs
+    );
+    let objects = git_out(
+        &repo.root,
+        &[
+            "cat-file",
+            "--batch-all-objects",
+            "--batch-check=%(objectname) %(objecttype)",
+        ],
+    );
+    assert_eq!(
+        objects
+            .lines()
+            .filter(|line| line.ends_with(" commit"))
+            .count(),
+        commits_before + 1,
+        "only the first member's landing may create a commit"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.root.join(".arc/policy.toml")).unwrap(),
+        "[policy]\nrequire_declared_actor = true\n"
+    );
+}
+
+#[test]
+fn queue_unresolved_projection_external_veto_requests_external_decision() {
+    let repo = repo_with_gates();
+    let (first, _) = approved(&repo, "external-first", "first.txt", "first\n");
+    let (second, second_tree) = approved(&repo, "external-second", "second.txt", "second\n");
+    stdout(repo.arc(&second_tree).args([
+        "external",
+        "verdict",
+        &second,
+        "--verdict",
+        "changes-requested",
+        "--decided-by",
+        "Reviewer",
+        "--reference",
+        "https://example.invalid/review/1",
+        "--revision",
+        &repo.head(&second_tree),
+    ]));
+    repo.commit(&repo.root, "target.txt", "target\n", "test: diverge");
+    let assertion = repo
+        .arc(&repo.root)
+        .args([
+            "integrate",
+            &first,
+            &second,
+            "--shape",
+            "no-ff",
+            "--dry-run",
+        ])
+        .assert()
+        .code(3);
+    let out = String::from_utf8_lossy(&assertion.get_output().stdout);
+    let err = String::from_utf8_lossy(&assertion.get_output().stderr);
+    assert!(out.contains(&format!("stopped: {second}")), "{out}");
+    assert!(
+        err.contains("external reviewer's requested changes"),
+        "{err}"
+    );
+    assert!(
+        err.contains(&format!("arc external verdict {second}")),
+        "{err}"
+    );
+    assert!(!err.contains(&format!("arc review {second}")), "{err}");
 }

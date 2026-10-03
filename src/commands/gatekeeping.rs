@@ -2531,7 +2531,6 @@ fn integrate_queue(
         } else {
             queue_step(
                 &queue_ctx,
-                &store,
                 change_id,
                 crate::style::StyleFlags {
                     shape,
@@ -2577,11 +2576,13 @@ fn integrate_queue(
 /// One change's turn in the queue.
 fn queue_step(
     ctx: &Ctx,
-    store: &Store,
     change_id: &str,
     flags: crate::style::StyleFlags,
     cleanup_checkout: &Path,
 ) -> Result<QueueStep> {
+    // Preparation and landing read append policy from the same checkout,
+    // freshly for each member so earlier landings govern later writes.
+    let store = ctx.store()?;
     let st = store.state(change_id)?;
     if st.is_closed() {
         println!("{change_id}: {}", change_status(&st));
@@ -2596,7 +2597,7 @@ fn queue_step(
             })
         }
     };
-    ctx.ensure_declared_actor(store)?;
+    ctx.ensure_declared_actor(&store)?;
     ctx.ensure_target_declares_actor(&st)?;
     let policy = crate::policy::load_at(&ctx.cwd, &target_head)?;
     let style = crate::style::resolved_style_with_policy(&policy, flags.clone())?;
@@ -2614,7 +2615,7 @@ fn queue_step(
             reason: "target diverged; rebase and fresh review or declared debt required".into(),
         });
     }
-    let mut report = ctx.report_for_integration(store, &st, &st.target_branch, shape)?;
+    let mut report = ctx.report_for_integration(&store, &st, &st.target_branch, shape)?;
     if let Some(blocker) = report.blockers().iter().find(|blocker| {
         !matches!(
             blocker,
@@ -2638,7 +2639,7 @@ fn queue_step(
             });
         }
         let st = store.state(change_id)?;
-        report = ctx.report_for_integration(store, &st, &st.target_branch, shape)?;
+        report = ctx.report_for_integration(&store, &st, &st.target_branch, shape)?;
     }
 
     // Only where nothing has answered for the content that would ship: a
@@ -2652,9 +2653,9 @@ fn queue_step(
     }) {
         let st = store.state(change_id)?;
         let target = st.target_branch.clone();
-        let code = verify_against(ctx, store, change_id, &st, &target, None, true)?;
+        let code = verify_against(ctx, &store, change_id, &st, &target, None, true)?;
         let st = store.state(change_id)?;
-        report = ctx.report_for_integration(store, &st, &st.target_branch, shape)?;
+        report = ctx.report_for_integration(&store, &st, &st.target_branch, shape)?;
         if code != 0 {
             let failed = report
                 .gates
@@ -2757,7 +2758,6 @@ fn queue_dry_run(
                         serde_json::to_string(&verdict.verdict)?
                     );
                 }
-                eprintln!("resolve review authorization with arc review {change_id} --verdict approved; a refusing verdict requires a superseding review");
             }
             return Ok(QueueStep::Stopped {
                 code: blocker.exit_code(),

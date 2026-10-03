@@ -37,9 +37,10 @@ SAY WHO YOU ARE (before the first write)
   Either is assumed rather than declared, so it cannot be the independent
   party to an approval.
   The ledger's append guard reads `require_declared_actor` from the invoking
-  checkout once per command that can record, including for repository-wide
-  events with no change target, and that command refuses a policy it cannot
-  parse. These commands record nothing, in any form or flag:
+  checkout when opening a store for a command that can record, including for
+  repository-wide events with no change target. Queue integration opens it
+  afresh before each member's preparation and landing. An unparseable append
+  policy refuses the command. These commands record nothing, in any form or flag:
 {READ_ONLY_COMMANDS}
   They read the ledger through a handle that never parses that policy and
   refuses any append. Entries name complete leaf paths. Output files,
@@ -736,9 +737,12 @@ RUN A CHANGE
   A divergent merge or replay makes later destination ancestry, merged policy,
   style, history and authorization conditional; stale revisions cannot justify
   a refusal. Exact-patchset review vetoes stop projection even when the
-  destination is unresolved. Queue execution checks invoking-store and destination actor
-  requirements, known history, style, divergence and lifecycle constraints
-  before replay or gate preparation, and revalidates authorization under the
+  destination is unresolved. Review refusals name the next decision required
+  from the local or external reviewer. Queue execution opens the landing store
+  afresh for each member, so its append policy includes earlier landings.
+  Invoking-store and destination actor requirements, known history, style,
+  divergence and lifecycle constraints are checked before replay or gate
+  preparation, and authorization is revalidated under the
   target and change locks. Future gates, replay and
   checkout guards remain conditional.
   `--into`, `--message`, and `--debt` are single-change options: each member

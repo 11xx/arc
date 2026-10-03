@@ -1699,7 +1699,10 @@ enum Cmd {
     /// summary includes style and history refusals and all unattempted members.
     /// Known history, style, divergence and lifecycle constraints refuse before
     /// queue replay or gate preparation, including invoking-store and destination
-    /// declared-actor requirements. Destination names select local branch
+    /// declared-actor requirements. Each member opens the landing store afresh,
+    /// so earlier landings govern its append policy. Review refusals name the
+    /// required local or external reviewer's next decision.
+    /// Destination names select local branch
     /// refs even when a tag has the same name.
     /// Ready-to-send reuse requires matching patchset, destination branch and
     /// revision, contribution history and authorization. Its event and state
