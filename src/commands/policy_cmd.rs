@@ -13,10 +13,11 @@ pub fn path(ctx: &Ctx) -> Result<i32> {
 }
 
 pub fn write(ctx: &Ctx, text: &str) -> Result<i32> {
-    crate::policy::validate_operator_text(text)?;
-    crate::gates::validate_operator_text(text)?;
     let top = gitio::toplevel(&ctx.cwd)?;
     let path = crate::policy::operator_path(&top)?;
+    crate::policy::validate_operator_text(text)
+        .with_context(|| format!("invalid {}", path.display()))?;
+    crate::gates::validate_operator_text(text)?;
     let parent = path
         .parent()
         .context("operator policy path has no parent")?;

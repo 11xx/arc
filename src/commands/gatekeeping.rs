@@ -2175,7 +2175,6 @@ pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Resul
         expect_basis,
         debt,
     } = args;
-    let shape = integration::integration_shape(shape);
     if references.is_empty() && tags.is_empty() {
         bail!("provide a change or at least one --tag");
     }
@@ -2206,9 +2205,6 @@ pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Resul
             );
         }
     }
-    if shape == integration::Shape::FfOnly && message.is_some() {
-        bail!("--message names a merge commit; select --shape no-ff");
-    }
     let expect_basis = expect_basis
         .map(|path| read_expected_basis(&path))
         .transpose()?;
@@ -2220,6 +2216,13 @@ pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Resul
     }
     match (references, tags.is_empty()) {
         ([reference], true) => {
+            let store = ctx.store()?;
+            let (_, state) = ctx.load_state(&store, reference)?;
+            let target = into.as_deref().unwrap_or(&state.target_branch);
+            let shape = crate::style::resolved_style(&ctx.cwd, target, shape)?.shape();
+            if shape == integration::Shape::FfOnly && message.is_some() {
+                bail!("--message names a merge commit; select --shape no-ff");
+            }
             // A fork's branch cannot integrate from anywhere, so declaring an
             // obligation for it would record review owed on work that can
             // never ship. The refusal is a precondition failure rather than a
@@ -2320,7 +2323,7 @@ fn integrate_queue(
     selection: QueueSelection,
     cleanup: bool,
     dry_run: bool,
-    shape: integration::Shape,
+    shape: Option<integration::Shape>,
 ) -> Result<i32> {
     let queue_ctx = ctx.with_cwd(gitio::primary_worktree(&ctx.cwd)?);
     let store = queue_ctx.store()?;
@@ -2361,6 +2364,25 @@ fn integrate_queue(
     let mut remaining = order.iter();
     for change_id in remaining.by_ref() {
         println!();
+        let state = store.state(change_id)?;
+        if state.is_closed() {
+            if dry_run {
+                println!(
+                    "dry-run: would skip {change_id} ({})",
+                    change_status(&state)
+                );
+            } else {
+                println!("{change_id}: {}", change_status(&state));
+            }
+            steps.push((
+                change_id.clone(),
+                QueueStep::Skipped(change_status(&state).to_string()),
+            ));
+            continue;
+        }
+        let shape =
+            crate::style::resolved_style(&queue_ctx.cwd, &state.target_branch, shape)?.shape();
+        integration_history(&queue_ctx, &state, &state.target_branch)?;
         let step = if dry_run {
             queue_dry_run(&queue_ctx, &store, change_id, shape, &mut projected_targets)?
         } else {
@@ -2755,6 +2777,7 @@ fn integrate_one(
         return Ok(status::Blocker::Iterating.exit_code());
     }
     let target = into.unwrap_or_else(|| initial.target_branch.clone());
+    integration_history(ctx, &initial, &target)?;
     if dry_run {
         // A dry run promises to write nothing, so there is no record for the
         // policy to be about.
@@ -2772,6 +2795,7 @@ fn integrate_one(
     let target_lock = store.lock_target(&target)?;
     let transition = store.lock_transition(&change_id)?;
     let st = store.state(&change_id)?;
+    integration_history(ctx, &st, &target)?;
     if st.is_closed() && matches!(closed_behavior, ClosedBehavior::SkipTagged) {
         println!("{}: {}", st.change_id, change_status(&st));
         return Ok(0);
@@ -3151,6 +3175,32 @@ fn consumed_declarations(ctx: &Ctx, st: &ChangeState) -> Result<integration::Dec
 /// The contribution declaration in force at the change's target, if any.
 fn contribution_policy(ctx: &Ctx, st: &ChangeState) -> Result<Option<crate::policy::Contribution>> {
     Ok(ctx.declarations(st)?.policy.contribution)
+}
+
+/// Local history constraints count the reviewed head above its target.
+fn integration_history(ctx: &Ctx, st: &ChangeState, target: &str) -> Result<()> {
+    if st.is_closed() || !gitio::branch_exists(&ctx.cwd, target) {
+        return Ok(());
+    }
+    let policy = crate::policy::load_at(&ctx.cwd, target)?;
+    if policy.contribution.is_some() || policy.integration_history != crate::policy::History::Squash
+    {
+        return Ok(());
+    }
+    let Some(patchset) = st.latest_patchset() else {
+        return Ok(());
+    };
+    let target_head = gitio::branch_head(&ctx.cwd, target)?;
+    let base = gitio::merge_base(&ctx.cwd, &target_head, &patchset.head)?;
+    let commits = gitio::git(
+        &ctx.cwd,
+        &["rev-list", "--count", &format!("{base}..{}", patchset.head)],
+    )?;
+    let count: usize = commits.trim().parse()?;
+    if count > 1 {
+        bail!("integration history is squash and the change has {count} commits since {target}; run `arc squash` to integrate one");
+    }
+    Ok(())
 }
 
 /// Refuse a head whose history is not the shape the receiver declared: a merge

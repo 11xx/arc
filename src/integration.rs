@@ -32,11 +32,6 @@ pub enum Shape {
     NoFf,
 }
 
-/// Resolve the caller's flag against the built-in integration default.
-pub fn integration_shape(flag: Option<Shape>) -> Shape {
-    flag.unwrap_or_default()
-}
-
 pub const PLAN_SCHEMA: &str = "arc-integration-plan/1";
 
 const CONFIGURATION_MOVED: &str = "gate or policy configuration changed while preparing the \

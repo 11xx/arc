@@ -32,6 +32,7 @@ mod session_store;
 mod state;
 mod status;
 mod store;
+mod style;
 mod trailers;
 mod worktree_usage;
 
@@ -1670,10 +1671,12 @@ enum Cmd {
         #[arg(long)]
         into: Option<String>,
         /// Local integration shape: ff-only advances to the approved head
-        /// and refuses divergence; no-ff creates a merge commit. Default: ff-only
+        /// and refuses divergence; no-ff creates a merge commit. Resolution: flag,
+        /// operator defaults, target project defaults, user config, then ff-only.
+        /// Project and operator allowed shapes intersect; squash history permits one commit.
         #[arg(long, value_enum)]
         shape: Option<integration::Shape>,
-        /// Merge commit message, requires --shape no-ff (defaults to "merge(<slug>): <title>")
+        /// Merge commit message, requires resolved no-ff shape (defaults to "merge(<slug>): <title>")
         #[arg(long)]
         message: Option<String>,
         /// Remove the change worktree and branch after a verified merge
@@ -1832,7 +1835,9 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ForgeCmd,
     },
-    /// Show the resolved configuration and store location as JSON
+    /// Show resolved paths and style values with sources as arc-config/1 JSON
+    /// Style precedence: flag, operator defaults, HEAD project defaults, user, builtin.
+    /// Style inspection parses user configuration and repository policy.
     /// Records no events; ledger reads do not require a parseable append policy.
     Config {
         /// Probe every local path required to write the ledger
@@ -2079,6 +2084,8 @@ enum PolicyCmd {
     /// Records no events; ledger reads do not require a parseable append policy.
     Path,
     /// Replace the operator policy file with TOML from a file or stdin
+    /// Style uses [defaults.change] and [defaults.integration]; constraints use
+    /// [integration] shapes and history. Invalid values refuse before writing.
     Write {
         /// Read TOML from a file ('-' for stdin)
         #[arg(long, required = true, value_name = "FILE")]
@@ -4678,6 +4685,8 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 Err(error) => (None, Some(format!("{error:#}"))),
             };
             let mut resolved = serde_json::json!({
+                "schema": style::CONFIG_SCHEMA,
+                "style": style::resolved_style(&ctx.cwd, "HEAD", None)?.keys,
                 "sandbox": cfg.sandbox.as_ref().map(|p| p.display().to_string()),
                 "ai_home": cfg.ai_home.display().to_string(),
                 "config_file": cfg.config_path.display().to_string(),

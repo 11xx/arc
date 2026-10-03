@@ -45,6 +45,7 @@ SAY WHO YOU ARE (before the first write)
   refuses any append. Entries name complete leaf paths. Output files,
   generated manuals, hook commands and writability probes retain their
   declared effects. Policy inspection parses the policy it reports.
+  `config` parses its style inputs, including repository policy.
   A derived handoff reads its change facts the same way. The debt advisory
   reads the same file for its thresholds, and an unreadable one sets none. Integration also checks the change target's
   policy before merging.
@@ -533,7 +534,7 @@ RUN A CHANGE
     --evidence-event <id>            Cite the verification run that justifies it.
   arc check                          Integration preflight; exit code names the blocker.
   arc integrate <c>...               Guarded integration once the gates are green.
-    --shape ff-only|no-ff            Default ff-only; divergence requires rebase.
+    --shape ff-only|no-ff            Resolved style; built-in ff-only.
     <c> <c> <c>, or --tag <t>        Land a queue, in dependency order.
   arc replica id --json              Read this store's repository ID for pairing.
   arc replica init <name>             Start a logical project and hold authority.
@@ -648,13 +649,15 @@ RUN A CHANGE
   them is a warning, and the rebase still succeeds.
 
   `integrate --shape ff-only|no-ff` selects the local integration shape.
-  The default is ff-only: the observed target must be an ancestor of the
+  Without a flag, operator defaults, target project defaults, user config,
+  and built-in ff-only apply in that order.
+  Under ff-only, the observed target must be an ancestor of the
   approved head, and an expected-old ref update advances it to that head.
   Divergence exits 11, writes nothing, and names `arc rebase <change> --verify`;
   the rewritten head requires fresh review or declared debt. Integration
   performs no automatic rebase under ff-only. `--shape no-ff` creates a merge
   commit with the observed target and approved head as its parents.
-  `--message` names that merge commit and requires `--shape no-ff`.
+  `--message` names that merge commit and requires a resolved no-ff shape.
 
   Several changes, or `--tag`, make `integrate` a queue in dependency order.
   Under ff-only it lands the stacked prefix and stops at the first member
@@ -869,7 +872,7 @@ PROFILES (--profile, default local)
            Implement, verify, review the diff, commit. No journal topic.
   local    Spans sessions or roles, or needs host-local evidence CI cannot
            reproduce. Dedicated branch/worktree, verdict or debt per REVIEW
-           COVERAGE AND DEBT, shape per --shape, default fast-forward.
+           COVERAGE AND DEBT, resolved style (built-in fast-forward).
   forge    A hosted PR adds a remote record, inline discussion, clean runner
            evidence, or branch protection. local underneath; project only public
            integration facts into the PR.
@@ -1741,6 +1744,8 @@ FILES
     [identity] detect = true             an undeclared harness, session, and
                                          model are read from the session store
     [provenance] git_identity = "per-actor" | "shared"
+    [change] checkout = "in-place" | "worktree", branch_prefix = "arc/"
+    [integration] shape = "ff-only" | "no-ff", cleanup = false
 
   Policy is `.arc/policy.toml`, read from the change's target branch, and
   the operator policy at `<git-common-dir>/arc/operator-policy.toml`, outside
@@ -1757,8 +1762,17 @@ FILES
     [danger] source_roots = ["<dir>/"]           every file inside is classified
     [review] checklist = ["<item>"]              printed by `arc show`
     [contribution] history = "squash" | "preserve"
+    [defaults.change] checkout = "worktree", branch_prefix = "arc/"
+    [defaults.integration] shape = "ff-only", cleanup = false
+    [integration] shapes = ["ff-only", "no-ff"], history = "preserve"
     [candidates] evaluation_reuse = "matching-coordinates" | "never"
                                                  no default; `never` wins
+
+  Style precedence is flag, operator defaults, target project defaults, user,
+  built-in. Project and operator shape constraints intersect; values outside
+  the intersection refuse. User configuration accepts style only.
+  Integration history folds with contribution history; squash requires at
+  most one reviewed commit above the target. Integration alone stays local.
 
   Gates are `[gates.<name>]` tables in `.arc/gates.toml` or the operator
   policy:
@@ -1799,6 +1813,7 @@ SCHEMAS
     `arc-resume/8`                   arc resume --json
     `arc-explain/1`                  arc explain --json
     `arc-watch/1`                    arc watch --json, stdin of arc watch --exec
+    `arc-config/1`                   arc config
     `arc-integration-plan/1`         arc integrate --dry-run --json
     `arc-brief/2`                    arc brief --json
     `arc-journal-artifact/2`         arc journal show --json

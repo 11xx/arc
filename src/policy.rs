@@ -22,6 +22,7 @@ pub struct PolicyFile {
     /// merges: its history shape is the receiver's, and `integrate` records a
     /// change as ready to send instead of merging it.
     pub contribution: Option<Contribution>,
+    pub integration_history: History,
     pub candidates: Candidates,
     pub sources: PolicySources,
 }
@@ -214,12 +215,20 @@ fn matches_from(pattern: &[u8], path: &[u8]) -> bool {
 
 #[derive(Debug, Default, Deserialize)]
 struct PolicyLayer {
+    defaults: Option<toml::Value>,
+    integration: Option<IntegrationLayer>,
     policy: Option<PolicyLayerPolicy>,
     review: Option<ReviewLayer>,
     provenance: Option<ProvenanceLayer>,
     danger: Option<DangerLayer>,
     contribution: Option<ContributionLayer>,
     candidates: Option<CandidatesLayer>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct IntegrationLayer {
+    shapes: Option<Vec<String>>,
+    history: Option<History>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -269,6 +278,7 @@ const OPERATOR_SOURCE: &str = "<git-common-dir>/arc/operator-policy.toml";
 
 /// Validate the policy portion of an operator-policy document.
 pub fn validate_operator_text(text: &str) -> Result<()> {
+    crate::style::validate_policy(text, "operator policy")?;
     toml::from_str::<PolicyLayer>(text).context("malformed operator policy TOML")?;
     Ok(())
 }
@@ -306,6 +316,7 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<PolicyFile>
         let Some((origin, text)) = layer else {
             continue;
         };
+        crate::style::validate_policy(&text, &origin)?;
         let layer =
             toml::from_str::<PolicyLayer>(&text).with_context(|| format!("malformed {origin}"))?;
         layers.push((source.to_string(), layer));
@@ -328,9 +339,30 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<PolicyFile>
     let mut source_roots = Vec::new();
     let mut source_roots_seen = BTreeSet::new();
     let mut contribution: Option<Contribution> = None;
+    let mut integration_history = History::Preserve;
     let mut candidates = Candidates::default();
 
     for (source, layer) in layers {
+        if let Some(defaults) = layer.defaults {
+            for table in ["change", "integration"] {
+                if let Some(entries) = defaults.get(table).and_then(toml::Value::as_table) {
+                    for (key, value) in entries {
+                        sources.record(format!("defaults.{table}.{key}={value}"), &source);
+                    }
+                }
+            }
+        }
+        if let Some(raw) = layer.integration {
+            if let Some(shapes) = raw.shapes {
+                sources.record(format!("integration.shapes={shapes:?}"), &source);
+            }
+            if let Some(history) = raw.history {
+                sources.record(format!("integration.history={}", history.as_str()), &source);
+                if history == History::Squash {
+                    integration_history = History::Squash;
+                }
+            }
+        }
         if let Some(raw) = layer.policy {
             if let Some(value) = raw.forbid_self_approval {
                 policy.forbid_self_approval |= value;
@@ -384,6 +416,7 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<PolicyFile>
             );
             let current = contribution.get_or_insert_with(Contribution::default);
             if history == History::Squash {
+                integration_history = History::Squash;
                 current.history = History::Squash;
             }
         }
@@ -427,6 +460,10 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<PolicyFile>
         }
     }
 
+    if let Some(contribution) = &mut contribution {
+        contribution.history = integration_history;
+    }
+
     policy.debt_count_threshold = debt_count_threshold.into_iter().min();
     policy.debt_age_threshold_seconds = debt_age_threshold_seconds.into_iter().min();
     policy.worktree_free_floor_bytes = worktree_free_floor_bytes.into_iter().max();
@@ -462,6 +499,7 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<PolicyFile>
         provenance: ProvenanceBehavior { git_identity },
         danger,
         contribution,
+        integration_history,
         candidates,
         sources,
     })

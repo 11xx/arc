@@ -1204,7 +1204,6 @@ fn every_read_only_command_reads_past_a_broken_policy() {
         vec!["pass", "list", "--json"],
         vec!["run", "list", "--json"],
         vec!["policy", "path"],
-        vec!["config"],
         vec!["config", "--check-writable", "--json"],
         vec!["sandbox", "diff", manual_dir, "--json"],
         vec!["doctor", "--json"],
@@ -1260,8 +1259,9 @@ fn every_read_only_command_reads_past_a_broken_policy() {
         };
         exercised.insert(path);
     }
-    // Policy inspection must parse the file whose contents it reports.
+    // Inspection parses the policy inputs whose contents it reports.
     exercised.insert("policy show".into());
+    exercised.insert("config".into());
     assert_eq!(exercised, listed, "every listed command has a form here");
     let policy = repo
         .arc(&repo.root)
@@ -1270,6 +1270,11 @@ fn every_read_only_command_reads_past_a_broken_policy() {
         .unwrap();
     assert!(!policy.status.success());
     assert!(String::from_utf8_lossy(&policy.stderr).contains("policy.toml"));
+    repo.arc(&repo.root)
+        .arg("config")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("policy.toml"));
     for args in extra_forms {
         let out = repo.arc(&repo.root).args(&args).output().unwrap();
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -2202,5 +2207,180 @@ fn fast_forward_unrelated_target_refuses_with_rebase_guidance() {
             )));
         assert_eq!(repo.head(&repo.root), root);
         assert_eq!(events(&repo, &id), recorded);
+    }
+}
+
+fn style_policy(repo: &Repo, text: &str) {
+    fs::write(repo.root.join(".arc/policy.toml"), text).unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "style policy"]);
+}
+
+#[test]
+fn integration_style_uses_target_defaults_and_flag() {
+    let repo = repo_with_gates();
+    style_policy(&repo, "[defaults.integration]\nshape = 'no-ff'\n");
+    let (id, wt) = approved_change(&repo, "target-style", "style.txt", "style\n");
+    // The change's policy does not supply the target's style.
+    fs::write(
+        wt.join(".arc/policy.toml"),
+        "[defaults.integration]\nshape = 'ff-only'\n",
+    )
+    .unwrap();
+    git(&wt, &["add", ".arc/policy.toml"]);
+    git(&wt, &["commit", "-m", "change policy"]);
+    stdout(repo.arc(&wt).args(["snapshot", &id]));
+    stdout(repo.arc(&wt).args(["verify", &id, "--gate", "smoke"]));
+    stdout(repo.arc(&wt).args(["review", &id, "--verdict", "approved"]));
+    let plan = json_stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--dry-run", "--json"]),
+    );
+    assert_eq!(plan["shape"], "merge");
+    let flag = json_stdout(repo.arc(&repo.root).args([
+        "integrate",
+        &id,
+        "--shape",
+        "ff-only",
+        "--dry-run",
+        "--json",
+    ]));
+    assert_eq!(flag["shape"], "fast-forward");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--message", "style merge"]),
+    );
+    assert_ne!(repo.head(&repo.root), repo.head(&wt));
+}
+
+#[test]
+fn integration_style_queue_resolves_each_target() {
+    let repo = repo_with_gates();
+    style_policy(&repo, "[defaults.integration]\nshape = 'no-ff'\n");
+    git(&repo.root, &["branch", "other"]);
+    style_policy(&repo, "[defaults.integration]\nshape = 'ff-only'\n");
+    let (first, _) = approved_change(&repo, "master-style", "first-style.txt", "first\n");
+    let other = repo.home.join("other-target");
+    git(
+        &repo.root,
+        &["worktree", "add", other.to_str().unwrap(), "other"],
+    );
+    let second = opened_change_id(&stdout(repo.arc(&other).args([
+        "begin",
+        "other-style",
+        "--target",
+        "other",
+    ])));
+    let state = json_stdout(repo.arc(&other).args(["show", &second, "--json"]));
+    let wt = PathBuf::from(state["worktree"].as_str().unwrap());
+    fs::write(wt.join("other-style.txt"), "other\n").unwrap();
+    git(&wt, &["add", "other-style.txt"]);
+    git(&wt, &["commit", "-m", "other"]);
+    stdout(repo.arc(&wt).args(["snapshot", &second]));
+    stdout(repo.arc(&wt).args(["verify", &second, "--gate", "smoke"]));
+    stdout(
+        repo.arc(&wt)
+            .args(["review", &second, "--verdict", "approved"]),
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &first, &second, "--dry-run"]),
+    );
+    stdout(repo.arc(&repo.root).args(["integrate", &first, &second]));
+    for (id, shape) in [(&first, "fast-forward"), (&second, "merge")] {
+        let integrated = events(&repo, id)
+            .into_iter()
+            .find(|e| e["event_type"] == "change-integrated")
+            .unwrap();
+        assert_eq!(integrated["shape"], shape);
+    }
+}
+
+#[test]
+fn integration_style_flag_outside_constraints_refuses() {
+    let repo = repo_with_gates();
+    style_policy(&repo, "[integration]\nshapes = ['ff-only']\n");
+    let (id, _) = approved_change(&repo, "constraint-style", "constraint.txt", "constraint\n");
+    fs::write(
+        repo.root.join(".git/arc/operator-policy.toml"),
+        "[integration]\nshapes = ['ff-only', 'no-ff']\n",
+    )
+    .unwrap();
+    repo.arc(&repo.root)
+        .args(["integrate", &id, "--shape", "no-ff", "--dry-run"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("integration.shape"))
+        .stderr(predicates::str::contains("flag"))
+        .stderr(predicates::str::contains("project:"))
+        .stderr(predicates::str::contains("operator:"));
+}
+
+#[test]
+fn integration_history_squash_refuses_multiple_commits_locally() {
+    let repo = repo_with_gates();
+    style_policy(&repo, "[integration]\nhistory = 'squash'\n");
+    let (id, wt) = approved_change(&repo, "history-style", "history.txt", "one\n");
+    fs::write(wt.join("history.txt"), "two\n").unwrap();
+    git(&wt, &["add", "history.txt"]);
+    git(&wt, &["commit", "-m", "second"]);
+    stdout(repo.arc(&wt).args(["snapshot", &id]));
+    stdout(repo.arc(&wt).args(["verify", &id, "--gate", "smoke"]));
+    stdout(repo.arc(&wt).args(["review", &id, "--verdict", "approved"]));
+    repo.arc(&repo.root)
+        .args(["integrate", &id, "--dry-run"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("integration history is squash"));
+}
+
+#[test]
+fn integration_history_one_commit_remains_local() {
+    let repo = repo_with_gates();
+    style_policy(&repo, "[integration]\nhistory='squash'\n");
+    let (id, wt) = approved_change(&repo, "local-history", "local.txt", "local\n");
+    let head = repo.head(&wt);
+    stdout(repo.arc(&repo.root).args(["integrate", &id]));
+    assert_eq!(repo.head(&repo.root), head);
+    assert!(events(&repo, &id)
+        .iter()
+        .any(|e| e["event_type"] == "change-integrated"));
+}
+
+#[test]
+fn integration_history_folds_operator_and_contribution_alias() {
+    for (project, operator, expected) in [
+        (
+            "[integration]\nhistory='preserve'\n",
+            "[integration]\nhistory='squash'\n",
+            "integration history",
+        ),
+        (
+            "[contribution]\nhistory='preserve'\n",
+            "[integration]\nhistory='squash'\n",
+            "contribution history",
+        ),
+        (
+            "[integration]\nhistory='preserve'\n",
+            "[contribution]\nhistory='squash'\n",
+            "contribution history",
+        ),
+    ] {
+        let repo = repo_with_gates();
+        style_policy(&repo, project);
+        fs::create_dir_all(repo.root.join(".git/arc")).unwrap();
+        fs::write(repo.root.join(".git/arc/operator-policy.toml"), operator).unwrap();
+        let (id, wt) = approved_change(&repo, "fold-history", "fold.txt", "one\n");
+        fs::write(wt.join("fold.txt"), "two\n").unwrap();
+        git(&wt, &["add", "fold.txt"]);
+        git(&wt, &["commit", "-m", "second"]);
+        stdout(repo.arc(&wt).args(["snapshot", &id]));
+        stdout(repo.arc(&wt).args(["verify", &id, "--gate", "smoke"]));
+        stdout(repo.arc(&wt).args(["review", &id, "--verdict", "approved"]));
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--dry-run"])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(expected));
     }
 }
