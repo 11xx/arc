@@ -1677,11 +1677,15 @@ enum Cmd {
     /// pins and does not fail the recorded integration.
     /// Style and history constraints are validated under the target and change
     /// locks against each authorization policy reading, retaining the original
-    /// flags. Configuration disagreement refuses before merging. A queue's
+    /// flags and enforcing the destination's declared actor requirement.
+    /// Configuration disagreement refuses before merging. A queue's
     /// summary includes style and history refusals and all unattempted members.
     /// Known history, style, divergence and lifecycle constraints refuse before
     /// queue replay or gate preparation. Destination names select local branch
     /// refs even when a tag has the same name.
+    /// Ready-to-send reuse requires matching patchset, destination branch and
+    /// revision, contribution history and authorization. Its event and state
+    /// retain those coordinates.
     /// Fast-forwards bind the ref update to the observed revision and update
     /// the checkout with read-tree; checkout failure attempts a guarded ref
     /// rollback. Both shapes isolate merge-shaping Git defaults. Transition

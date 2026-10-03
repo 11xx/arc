@@ -1148,6 +1148,10 @@ pub enum Payload {
         head: String,
         /// The history shape the head was checked against.
         history: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_branch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_revision: Option<String>,
         authorization: AuthorizationBasis,
     },
     IntegrationAsserted {

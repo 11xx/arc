@@ -329,6 +329,13 @@ pub(crate) fn spawn_arc_with_env(
         .unwrap()
 }
 
+pub(crate) fn spawn_arc_without_actor(repo: &Repo, cwd: &Path, args: &[&str]) -> Child {
+    arc_command(repo, cwd, args, "session-a", Stdio::piped())
+        .env_remove("ARC_ACTOR")
+        .spawn()
+        .unwrap()
+}
+
 fn arc_child(repo: &Repo, cwd: &Path, args: &[&str], session: &str, stderr: Stdio) -> Child {
     arc_command(repo, cwd, args, session, stderr)
         .spawn()

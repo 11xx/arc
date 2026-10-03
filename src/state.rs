@@ -430,6 +430,9 @@ pub struct ReadyToSendEntry {
     pub patchset_id: String,
     pub head: String,
     pub history: String,
+    pub target_branch: Option<String>,
+    pub target_revision: Option<String>,
+    pub authorization: crate::model::AuthorizationBasis,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -2094,13 +2097,18 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 patchset_id,
                 head,
                 history,
-                ..
+                target_branch,
+                target_revision,
+                authorization,
             } => {
                 state.ready_to_send = Some(ReadyToSendEntry {
                     event_id: ev.event_id.clone(),
                     patchset_id: patchset_id.clone(),
                     head: head.clone(),
                     history: history.clone(),
+                    target_branch: target_branch.clone(),
+                    target_revision: target_revision.clone(),
+                    authorization: authorization.clone(),
                     created_at: ev.created_at,
                 });
             }

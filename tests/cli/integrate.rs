@@ -3832,3 +3832,193 @@ git worktree add "$original" arc/hook-replacement
     assert!(state["worktree_owner_token"].is_null());
     assert!(out.contains("kept"), "{out}");
 }
+
+#[test]
+fn destination_actor_policy_is_fresh_after_target_lock() {
+    let repo = repo_with_gates();
+    destination_policy(&repo, "[policy]\nrequire_declared_actor=true\n");
+    let strict = git_out(&repo.root, &["rev-parse", "destination"]);
+    let (id, _) =
+        approved_change_based_on(&repo, "fresh-actor", "ff.txt", "ff\n", &[], Some(&strict));
+    git(&repo.root, &["checkout", "destination"]);
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nrequire_declared_actor=false\n",
+    )
+    .unwrap();
+    git(&repo.root, &["commit", "-am", "permissive policy"]);
+    git(&repo.root, &["checkout", "master"]);
+    let recorded = events(&repo, &id);
+    let lock = hold_target_lock(&repo, "destination");
+    let mut child = spawn_arc_without_actor(
+        &repo,
+        &repo.root,
+        &["integrate", &id, "--into", "destination"],
+    );
+    assert_waiting_on_transition_lock(&mut [&mut child]);
+    git(
+        &repo.root,
+        &["update-ref", "refs/heads/destination", &strict],
+    );
+    lock.unlock().unwrap();
+    assert!(!wait_for_exit(&mut child).success());
+    assert_eq!(git_out(&repo.root, &["rev-parse", "destination"]), strict);
+    assert_eq!(events(&repo, &id), recorded);
+}
+
+#[test]
+fn ready_to_send_reuse_requires_destination_and_authorization() {
+    let repo = repo_with_gates();
+    destination_policy(&repo, "[contribution]\nhistory='preserve'\n");
+    let earlier = git_out(&repo.root, &["rev-parse", "destination"]);
+    git(&repo.root, &["checkout", "destination"]);
+    git(
+        &repo.root,
+        &["commit", "--allow-empty", "-m", "destination revision"],
+    );
+    git(&repo.root, &["checkout", "master"]);
+    let destination = git_out(&repo.root, &["rev-parse", "destination"]);
+    git(&repo.root, &["branch", "receiver", &destination]);
+    let (id, wt) = approved_change_based_on(
+        &repo,
+        "send-coordinates",
+        "ff.txt",
+        "ff\n",
+        &[],
+        Some(&destination),
+    );
+    for target in ["destination", "receiver", "receiver"] {
+        stdout(
+            repo.arc(&repo.root)
+                .args(["integrate", &id, "--into", target]),
+        );
+    }
+    let sends: Vec<_> = events(&repo, &id)
+        .into_iter()
+        .filter(|e| e["event_type"] == "ready-to-send")
+        .collect();
+    assert_eq!(sends.len(), 2);
+    assert_eq!(sends[0]["target_branch"], "destination");
+    assert_eq!(sends[1]["target_branch"], "receiver");
+    assert_eq!(sends[1]["target_revision"], destination);
+    let state = json_stdout(repo.arc(&repo.root).args(["show", &id, "--json"]));
+    assert_eq!(state["ready_to_send"]["target_branch"], "receiver");
+    assert_eq!(
+        state["ready_to_send"]["authorization"],
+        sends[1]["authorization"]
+    );
+    git(&repo.root, &["update-ref", "refs/heads/receiver", &earlier]);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--into", "receiver"]),
+    );
+    stdout(repo.arc(&wt).args(["verify", &id, "--against", "receiver"]));
+    stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--into", "receiver"]),
+    );
+    stdout(repo.arc(&wt).args(["snapshot", &id, "--verify"]));
+    approve(&repo, &id);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--into", "receiver"]),
+    );
+    let sends: Vec<_> = events(&repo, &id)
+        .into_iter()
+        .filter(|e| e["event_type"] == "ready-to-send")
+        .collect();
+    assert_eq!(sends.len(), 5);
+    assert_eq!(sends[2]["target_revision"], earlier);
+    assert_ne!(sends[2]["authorization"], sends[3]["authorization"]);
+    assert_ne!(sends[3]["authorization"], sends[4]["authorization"]);
+    let event_path = repo
+        .root
+        .join(".git/arc/changes")
+        .join(&id)
+        .join("events")
+        .join(format!("{}.json", sends[4]["event_id"].as_str().unwrap()));
+    let mut legacy = sends[4].clone();
+    legacy.as_object_mut().unwrap().remove("target_branch");
+    legacy.as_object_mut().unwrap().remove("target_revision");
+    fs::write(&event_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--into", "receiver"]),
+    );
+    let sends: Vec<_> = events(&repo, &id)
+        .into_iter()
+        .filter(|e| e["event_type"] == "ready-to-send")
+        .collect();
+    assert_eq!(sends.len(), 6);
+    let event_path = repo
+        .root
+        .join(".git/arc/changes")
+        .join(&id)
+        .join("events")
+        .join(format!("{}.json", sends[5]["event_id"].as_str().unwrap()));
+    let mut mismatched = sends[5].clone();
+    mismatched["patchset_id"] = "older-patchset".into();
+    fs::write(&event_path, serde_json::to_vec(&mismatched).unwrap()).unwrap();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--into", "receiver"]),
+    );
+    assert_eq!(
+        events(&repo, &id)
+            .iter()
+            .filter(|e| e["event_type"] == "ready-to-send")
+            .count(),
+        7
+    );
+}
+
+#[test]
+fn authorization_confirmation_enforces_fresh_destination_actor_policy() {
+    let repo = repo_with_gates();
+    let counter = repo.home.join("probe-count");
+    let probe = repo.home.join("probe.sh");
+    let enabled = repo.home.join("enable-policy-change");
+    let operator_policy = repo.root.join(".git/arc/operator-policy.toml");
+    fs::write(&counter, "0").unwrap();
+    fs::write(
+        &probe,
+        format!(
+            r#"count=$(cat '{counter}')
+count=$((count + 1))
+printf '%s' "$count" > '{counter}'
+if [ "$count" = 2 ] && [ -f '{enabled}' ]; then
+    printf '[policy]\nrequire_declared_actor=true\n' > '{policy}'
+fi
+printf 'stable environment\n'
+"#,
+            counter = counter.display(),
+            policy = operator_policy.display(),
+            enabled = enabled.display()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        format!(
+            "[gates.smoke]\ncommand='test -f README.md'\nenvironment=\"sh '{}'\"\n",
+            probe.display()
+        ),
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "gate environment probe"]);
+    let (id, _) = approved_change(&repo, "confirmation-actor", "ff.txt", "ff\n");
+    fs::write(&counter, "0").unwrap();
+    fs::write(&enabled, "enabled").unwrap();
+    let recorded = events(&repo, &id);
+    let before = repo.head(&repo.root);
+    repo.arc(&repo.root)
+        .args(["integrate", &id])
+        .env_remove("ARC_ACTOR")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("declared actor"));
+    assert_eq!(fs::read_to_string(&counter).unwrap(), "2");
+    assert_eq!(repo.head(&repo.root), before);
+    assert_eq!(events(&repo, &id), recorded);
+}

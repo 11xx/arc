@@ -2984,6 +2984,7 @@ fn integrate_one(
         return Ok(status::check_exit_code(&report));
     };
     let policy = crate::policy::load_at(&ctx.cwd, &target_head)?;
+    ensure_destination_actor(ctx, &policy)?;
     selection.validate(&policy)?;
     integration_history_with_policy(ctx, &st, &target_head, &policy)?;
     if shape == integration::Shape::FfOnly && ff_diverged(ctx, &st, &target)? {
@@ -3059,6 +3060,7 @@ fn integrate_one(
                 &store,
                 &st,
                 &target,
+                &send.target_revision,
                 send.contribution,
                 &send.approved.patchset_id,
                 &send.approved.head,
@@ -3524,6 +3526,7 @@ fn authorization_basis(
     let mut selected = st.clone();
     selected.target_branch = target.to_string();
     let declarations = ctx.declarations(&selected)?;
+    ensure_destination_actor(ctx, &declarations.policy)?;
     selection.validate(&declarations.policy)?;
     integration_history_with_policy(
         ctx,
@@ -3559,7 +3562,22 @@ fn authorization_basis(
 /// The gate and policy declarations in force for the change, normalized as
 /// an authorization basis records them.
 fn consumed_declarations(ctx: &Ctx, st: &ChangeState) -> Result<integration::Declarations> {
-    Ok(normalized_declarations(ctx.declarations(st)?, st))
+    let declarations = ctx.declarations(st)?;
+    ensure_destination_actor(ctx, &declarations.policy)?;
+    Ok(normalized_declarations(declarations, st))
+}
+
+fn ensure_destination_actor(ctx: &Ctx, policy: &crate::policy::PolicyFile) -> Result<()> {
+    if policy.policy.require_declared_actor
+        && !ctx.actor_source.declared()
+        && ctx.on_behalf_of.is_none()
+    {
+        let sources = policy
+            .sources
+            .sources_for("policy.require_declared_actor=true");
+        bail!("destination policy requires a declared actor (declared by {}); pass --actor or set ARC_ACTOR", sources.join(", "));
+    }
+    Ok(())
 }
 
 fn normalized_declarations(
@@ -3678,17 +3696,24 @@ fn record_ready_to_send(
     store: &Store,
     st: &ChangeState,
     target: &str,
+    target_revision: &str,
     contribution: crate::policy::Contribution,
     patchset_id: &str,
     head: &str,
     authorization: AuthorizationBasis,
 ) -> Result<i32> {
     contribution_shape(ctx, target, head, contribution.history)?;
-    if st
-        .ready_to_send
-        .as_ref()
-        .is_some_and(|ready| ready.head == head)
-    {
+    if gitio::branch_head(&ctx.cwd, target)? != target_revision {
+        bail!("contribution destination moved during authorization; nothing recorded");
+    }
+    if st.ready_to_send.as_ref().is_some_and(|ready| {
+        ready.head == head
+            && ready.patchset_id == patchset_id
+            && ready.target_branch.as_deref() == Some(target)
+            && ready.target_revision.as_deref() == Some(target_revision)
+            && ready.history == contribution.history.as_str()
+            && ready.authorization == authorization
+    }) {
         println!("{}: already ready to send at {head}", st.change_id);
         return Ok(0);
     }
@@ -3696,6 +3721,8 @@ fn record_ready_to_send(
         patchset_id: patchset_id.to_string(),
         head: head.to_string(),
         history: contribution.history.as_str().to_string(),
+        target_branch: Some(target.to_string()),
+        target_revision: Some(target_revision.to_string()),
         authorization,
     };
     let event = ctx.event(store, &st.change_id, payload);

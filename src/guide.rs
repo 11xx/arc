@@ -661,8 +661,8 @@ RUN A CHANGE
   and built-in ff-only apply in that order. Resolution and history validation
   run under the target and change locks against the policy consumed by
   authorization, retaining the original flags. Each authorization reading
-  validates its shape constraints and history; configuration disagreement
-  refuses before merging.
+  validates its shape constraints, history and declared actor requirement;
+  configuration disagreement refuses before merging.
   Under ff-only, the observed target must be an ancestor of the
   approved head, or already contain it. A fast-forward updates the target
   ref only if it still equals the observed revision, then updates the index
@@ -1050,7 +1050,10 @@ REVIEW COVERAGE AND DEBT
   rejection of the head closes the change. A `[contribution] history =
   "squash"|"preserve"` declaration makes `integrate` record the change ready to
   send instead of merging it, refusing merge commits and, under squash, more
-  than one commit; `arc squash <change> -m <message>` makes that one commit as
+  than one commit. The event and projected state retain the effective
+  destination branch, evaluated revision and authorization. Reuse requires
+  matching patchset, destination branch and revision, contribution history
+  and authorization. `arc squash <change> -m <message>` makes that one commit as
   a new patchset with its own gates and verdict, attributed by `--contributors`
   or `--solo` as on `arc snapshot`. Over another actor's live claim an
   unattributed squash refuses before the branch moves, and the change stays
