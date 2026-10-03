@@ -2421,3 +2421,57 @@ git worktree add "$original" fork/replaced
     let journal = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
     assert!(journal["open"].as_array().unwrap().is_empty(), "{journal}");
 }
+
+#[test]
+fn fork_worktree_hook_matches_native_creation() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = Repo::new();
+    let hook = repo.root.join(".git/hooks/post-checkout");
+    fs::write(&hook, "#!/bin/sh\nprintf '%s\\n' \"$@\" > hook-args\n").unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let native = repo.home.join("native");
+    git(
+        &repo.root,
+        &["worktree", "add", "--detach", native.to_str().unwrap()],
+    );
+    let expected = fs::read_to_string(native.join("hook-args")).unwrap();
+    assert_eq!(
+        expected.lines().next().unwrap(),
+        "0".repeat(git_out(&repo.root, &["rev-parse", "HEAD"]).len())
+    );
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "probe"]));
+    assert_eq!(
+        fs::read_to_string(repo.home.join(".worktrees/repo-fork-probe/hook-args")).unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn fork_worktree_population_failure_reports_recovery() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = Repo::new();
+    let hook = repo.root.join(".git/hooks/post-checkout");
+    fs::write(&hook, "#!/bin/sh\necho preserved > local-work\nexit 1\n").unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = repo
+        .arc(&repo.root)
+        .args(["fork", "begin", "probe"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    let worktree = repo.home.join(".worktrees/repo-fork-probe");
+    assert!(error.contains("retained branch fork/probe"), "{error}");
+    assert!(error.contains(worktree.to_str().unwrap()), "{error}");
+    assert!(error.contains("git worktree remove"), "{error}");
+    assert!(error.contains("git branch -D"), "{error}");
+    assert_eq!(
+        fs::read_to_string(worktree.join("local-work")).unwrap(),
+        "preserved\n"
+    );
+    let recovery = error
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("adopt: "))
+        .expect("adopt recovery");
+    stdout(&mut repo.arc_shell(&repo.root, recovery));
+}

@@ -247,6 +247,10 @@ enum Cmd {
     /// Worktree ownership binds to the allocated Git administrative directory
     /// before checkout hooks run. If the registered path changes identity,
     /// the change opens without creation authority and all worktrees are kept.
+    /// Worktree post-checkout receives Git's creation arguments (null old
+    /// revision, HEAD, 1). Population or hook failure retains the branch and
+    /// worktree, removes the unrecorded owner token when its identity matches,
+    /// and reports adoption and discard commands without opening a change.
     ///
     /// Without --base, the change derives its base from the local target:
     /// its head, or under --adopt the adopted branch's merge base with it.
@@ -2079,6 +2083,9 @@ enum ForkCmd {
     /// The registered checkout must retain its allocated Git administrative
     /// directory after checkout hooks run. A changed identity refuses the
     /// marker and keeps all worktrees.
+    /// Post-checkout receives Git's creation arguments (null old revision,
+    /// HEAD, 1). Population or hook failure retains the branch and worktree
+    /// and reports fork adoption and discard commands without recording a marker.
     Begin {
         /// Kebab-case slug naming the fork (and the fork/<slug> branch)
         slug: String,

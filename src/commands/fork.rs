@@ -177,7 +177,10 @@ pub fn begin(ctx: &Ctx, slug: &str, base_branch: Option<&str>) -> Result<i32> {
     // Git allocates the worktree and its branch together.
     crate::gitio::add_worktree_new_branch(cwd, &worktree, &branch, &base)?;
     let admin = crate::gitio::worktree_admin_dir(&worktree)?;
-    crate::gitio::populate_worktree(&worktree)?;
+    crate::gitio::populate_worktree(&worktree).with_context(|| {
+        let adopt = format!("arc fork adopt {}", crate::context::shell_quote(slug));
+        crate::gitio::worktree_population_error(&branch, &worktree, &adopt)
+    })?;
     if !crate::gitio::worktree_admin_matches(cwd, &worktree, &admin) {
         bail!(
             "worktree {} changed administrative identity during checkout; keeping all worktrees and recording no fork marker",

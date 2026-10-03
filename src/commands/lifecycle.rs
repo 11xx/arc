@@ -223,9 +223,22 @@ pub fn begin(
             warn_below_worktree_floor(&ctx.cwd, &path);
             gitio::add_worktree(&ctx.cwd, &path, &branch_name)?;
             let admin = gitio::worktree_admin_dir(&path)?;
-            worktree_owner_token = Some(gitio::write_worktree_owner(&admin, &change_id)?);
+            let owner_token = gitio::write_worktree_owner(&admin, &change_id)?;
+            if let Err(error) = gitio::populate_worktree(&path) {
+                let adopt = format!(
+                    "arc begin {} --adopt {}",
+                    shell_quote(slug),
+                    shell_quote(&branch_name)
+                );
+                let mut recovery = gitio::worktree_population_error(&branch_name, &path, &adopt);
+                if let Err(cleanup) = gitio::remove_worktree_owner(&admin, &change_id, &owner_token)
+                {
+                    recovery.push_str(&format!("\nowner record cleanup failed: {cleanup:#}"));
+                }
+                return Err(error.context(recovery));
+            }
+            worktree_owner_token = Some(owner_token);
             worktree_admin = Some((path.clone(), admin));
-            gitio::populate_worktree(&path)?;
             Some(path.display().to_string())
         };
         (branch_name, base_rev, wt)

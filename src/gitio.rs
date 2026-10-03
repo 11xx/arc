@@ -148,6 +148,29 @@ pub fn write_worktree_owner(admin: &Path, change_id: &str) -> Result<String> {
     Ok(owner.token)
 }
 
+/// Remove only the owner record belonging to an unrecorded allocation.
+pub fn remove_worktree_owner(admin: &Path, change_id: &str, token: &str) -> Result<()> {
+    let path = admin.join("arc-owner");
+    let owner: WorktreeOwner = serde_json::from_slice(&std::fs::read(&path)?)?;
+    if owner.change_id != change_id || owner.token != token {
+        bail!(
+            "owner record {} changed identity; keeping it",
+            path.display()
+        );
+    }
+    std::fs::remove_file(&path).with_context(|| format!("cannot remove {}", path.display()))
+}
+
+/// Population errors preserve the allocation and offer shell-safe recovery commands.
+pub fn worktree_population_error(branch: &str, path: &Path, adopt: &str) -> String {
+    let branch_arg = crate::context::shell_quote(branch);
+    let path_arg = crate::context::shell_quote(&path.display().to_string());
+    format!(
+        "worktree population failed; retained branch {branch} and worktree {}\nadopt: {adopt}\ndiscard: git worktree remove -- {path_arg} && git branch -D -- {branch_arg}",
+        path.display()
+    )
+}
+
 /// Ownership requires the change and token in this checkout's own Git directory.
 pub fn worktree_owner_matches(checkout: &Path, change_id: &str, token: Option<&str>) -> bool {
     let Some(token) = token else {
@@ -1367,7 +1390,26 @@ pub fn add_worktree_new_branch(cwd: &Path, path: &Path, branch: &str, start: &st
 /// Populate an allocated worktree; checkout hooks run after its files are written.
 pub fn populate_worktree(path: &Path) -> Result<()> {
     git(path, &["read-tree", "--reset", "-u", "HEAD"])?;
-    git(path, &["checkout", "--no-overwrite-ignore", "HEAD"])?;
+    let format = git(path, &["rev-parse", "--show-object-format"])?;
+    let null_oid = match format.as_str() {
+        "sha1" => "0".repeat(40),
+        "sha256" => "0".repeat(64),
+        _ => bail!("unsupported Git object format {format:?}"),
+    };
+    let head = git(path, &["rev-parse", "HEAD"])?;
+    git(
+        path,
+        &[
+            "hook",
+            "run",
+            "--ignore-missing",
+            "post-checkout",
+            "--",
+            &null_oid,
+            &head,
+            "1",
+        ],
+    )?;
     Ok(())
 }
 
