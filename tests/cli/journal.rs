@@ -13090,10 +13090,9 @@ fn snapshot_promotes_the_spool_left_in_the_change_worktree() {
     );
 }
 
-/// Integration files spooled writes while cleanup preserves the ignored
-/// outbox metadata and its checkout.
+/// Integration files spooled writes and removes a checkout holding only outbox metadata.
 #[test]
-fn integrate_promotes_the_spool_and_keeps_ignored_outbox_metadata() {
+fn audit_fix_integrate_promotes_spool_and_removes_empty_outbox_checkout() {
     let repo = Repo::new();
     let journal = journal_dir(&repo);
     stdout(repo.arc(&repo.root).args(["begin", "spooled-integrate"]));
@@ -13120,17 +13119,8 @@ fn integrate_promotes_the_spool_and_keeps_ignored_outbox_metadata() {
         );
     assert!(integrated.contains("spool: 1 write(s)"), "{integrated}");
     assert!(integrated.contains("promoted 1, kept 0"), "{integrated}");
-    assert!(wt.exists(), "{integrated}");
-    assert!(
-        integrated.contains("holds local content not in the branch"),
-        "{integrated}"
-    );
-    assert!(integrated.contains("kept branch"), "{integrated}");
-    assert_eq!(
-        fs::read_to_string(wt.join(".arc/outbox/.gitignore")).unwrap(),
-        "*\n"
-    );
-    assert!(spool_files_in(&wt.join(".arc/outbox")).is_empty());
+    assert!(!wt.exists(), "{integrated}");
+    assert!(integrated.contains("deleted branch"), "{integrated}");
 
     let events = journal_events(&journal);
     let logged = events
@@ -14098,4 +14088,39 @@ fn foreign_artifact_subject_watch_names_owner() {
 #[test]
 fn foreign_artifact_subject_rescue_names_owner() {
     foreign_artifact_subject_refusal("rescue");
+}
+
+#[test]
+fn audit_fix_outbox_foreign_or_unpromoted_content_keeps_checkout() {
+    for (name, body) in [
+        ("foreign.txt", "local work"),
+        ("pending.json", "invalid spool"),
+    ] {
+        let repo = Repo::new();
+        stdout(repo.arc(&repo.root).args(["begin", "outbox-content"]));
+        let wt = repo.home.join(".worktrees/repo-outbox-content");
+        repo.commit(&wt, "work.txt", "work\n", "feat: work");
+        stdout(repo.arc(&wt).args(["snapshot", "outbox-content"]));
+        stdout(
+            repo.arc(&wt)
+                .args(["review", "outbox-content", "--verdict", "approved"]),
+        );
+        stdout(
+            repo.arc(&wt)
+                .args(["journal", "log", "spooled", "--spool", "note"]),
+        );
+        fs::write(wt.join(".arc/outbox").join(name), body).unwrap();
+        let out = stdout(
+            repo.arc(&repo.root)
+                .args(["integrate", "outbox-content", "--cleanup"]),
+        );
+        assert!(
+            out.contains("holds local content not in the branch"),
+            "{out}"
+        );
+        assert_eq!(
+            fs::read_to_string(wt.join(".arc/outbox").join(name)).unwrap(),
+            body
+        );
+    }
 }

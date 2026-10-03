@@ -3178,6 +3178,23 @@ fn cleanup_integrated_change(
     Ok(())
 }
 
+/// Only the regular ignore file written by the spool may occupy an unused outbox.
+fn unused_outbox_metadata(checkout: &Path) -> Result<bool> {
+    let outbox = checkout.join(".arc/outbox");
+    let Ok(metadata) = std::fs::symlink_metadata(&outbox) else {
+        return Ok(false);
+    };
+    if !metadata.is_dir() {
+        return Ok(false);
+    }
+    let entries = std::fs::read_dir(&outbox)?.collect::<std::io::Result<Vec<_>>>()?;
+    if entries.len() != 1 || entries[0].file_name() != ".gitignore" {
+        return Ok(false);
+    }
+    let ignore = &entries[0];
+    Ok(ignore.file_type()?.is_file() && std::fs::read(ignore.path())? == b"*\n")
+}
+
 fn cleanup_local_content(checkout: &Path) -> Result<Option<String>> {
     let status = gitio::git(
         checkout,
@@ -3189,11 +3206,17 @@ fn cleanup_local_content(checkout: &Path) -> Result<Option<String>> {
             "--untracked-files=all",
         ],
     )?;
+    let unused_outbox = unused_outbox_metadata(checkout)?;
     let mut entries = status.split('\0').filter(|entry| !entry.is_empty());
     let mut paths = Vec::new();
     while let Some(entry) = entries.next() {
         if let Some(path) = entry.get(3..) {
-            paths.push(path.to_string());
+            let metadata = unused_outbox
+                && matches!(&entry[..2], "??" | "!!")
+                && matches!(path, ".arc/outbox/" | ".arc/outbox/.gitignore");
+            if !metadata {
+                paths.push(path.to_string());
+            }
         }
         if entry
             .as_bytes()
