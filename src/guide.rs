@@ -39,12 +39,13 @@ SAY WHO YOU ARE (before the first write)
   The ledger's append guard reads `require_declared_actor` from the invoking
   checkout once per command that can record, including for repository-wide
   events with no change target, and that command refuses a policy it cannot
-  parse. `status`, `show`, `check` (with or without `--tag`), `explain`,
-  `findings`, `log`, `list`, `query`, `blocker-status`, `is-blocked`, and
-  `inbox` record nothing and never parse it for that guard, and a derived
-  handoff reads its change facts the same way. The debt advisory reads the
-  same file for its thresholds, and an unreadable one sets none. Integration
-  also checks the change target's policy before merging.
+  parse. These commands record nothing, in any form or flag:
+{READ_ONLY_COMMANDS}
+  They read the ledger through a handle that never parses that policy and
+  refuses any append, and a derived handoff reads its change facts the same
+  way. The debt advisory reads the same file for its thresholds, and an
+  unreadable one sets none. Integration also checks the change target's
+  policy before merging.
 
   Claude Code's Remote Control supplies `CLAUDE_CODE_BRIDGE_SESSION_ID` to
   connected tool shells. For a resolved Claude harness, `arc env` derives
@@ -1842,5 +1843,24 @@ WHAT ARC WILL NOT DO
 "#;
 
 pub fn print() {
-    print!("{GUIDE}");
+    print!(
+        "{}",
+        GUIDE.replace("{READ_ONLY_COMMANDS}", &read_only_commands())
+    );
+}
+
+/// The read-only command table as indented guide lines, wrapped at the
+/// guide's width.
+fn read_only_commands() -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for name in crate::commands::READ_ONLY_COMMANDS {
+        match lines.last_mut() {
+            Some(line) if line.len() + 2 + name.len() <= 76 => {
+                line.push_str("  ");
+                line.push_str(name);
+            }
+            _ => lines.push(format!("    {name}")),
+        }
+    }
+    lines.join("\n")
 }

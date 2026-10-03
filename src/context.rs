@@ -832,7 +832,7 @@ fn cwd_is_in_recorded_worktree(state: &ChangeState, cwd: &Path) -> bool {
 /// runs on every catchup and a check that reads trees is a check somebody
 /// turns off.
 pub(crate) fn unowned_surface(ctx: &Ctx) -> Result<crate::inbox::Unowned> {
-    let store = ctx.store_for_reading()?;
+    let store = ctx.store()?;
     let states = store.readable_states()?;
     let forks = crate::commands::fork::list_entries(ctx).unwrap_or_default();
     let Ok(Some(target)) = gitio::primary_worktree_branch(&ctx.cwd) else {
