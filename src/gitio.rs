@@ -166,7 +166,7 @@ pub fn worktree_population_error(branch: &str, path: &Path, adopt: &str) -> Stri
     let branch_arg = crate::context::shell_quote(branch);
     let path_arg = crate::context::shell_quote(&path.display().to_string());
     format!(
-        "worktree population failed; retained branch {branch} and worktree {}\nadopt: {adopt}\ndiscard: git worktree remove -- {path_arg} && git branch -D -- {branch_arg}",
+        "worktree population failed; retained branch {branch} and worktree {}\nadopt: {adopt}\ndiscard: git worktree remove -- {path_arg} && git branch -D -- {branch_arg}\n",
         path.display()
     )
 }

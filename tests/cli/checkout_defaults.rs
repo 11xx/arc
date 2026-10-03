@@ -280,6 +280,14 @@ fn begin_worktree_population_failure_reports_recovery() {
     assert!(error.contains(worktree.to_str().unwrap()), "{error}");
     assert!(error.contains("git worktree remove"), "{error}");
     assert!(error.contains("git branch -D"), "{error}");
+    let discard = error
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("discard: "))
+        .unwrap();
+    assert!(
+        discard.ends_with("git branch -D -- 'arc/probe'"),
+        "{discard}"
+    );
     assert_eq!(
         fs::read_to_string(worktree.join("local-work")).unwrap(),
         "preserved\n"

@@ -233,7 +233,7 @@ pub fn begin(
                 let mut recovery = gitio::worktree_population_error(&branch_name, &path, &adopt);
                 if let Err(cleanup) = gitio::remove_worktree_owner(&admin, &change_id, &owner_token)
                 {
-                    recovery.push_str(&format!("\nowner record cleanup failed: {cleanup:#}"));
+                    recovery.push_str(&format!("owner record cleanup failed: {cleanup:#}\n"));
                 }
                 return Err(error.context(recovery));
             }
