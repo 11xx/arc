@@ -2074,7 +2074,7 @@ fn fast_forward_expected_old_refuses_target_race() {
         &wrapper,
         format!(
             r#"#!/bin/sh
-if [ "$1" = update-ref ] && [ "$2" = refs/heads/master ]; then
+if [ "$1" = merge ] && [ "$2" = --ff-only ]; then
     '{git}' update-ref refs/heads/master '{racer}' '{before}' || exit 1
 fi
 exec '{git}' "$@"
@@ -2092,7 +2092,9 @@ exec '{git}' "$@"
         )
         .assert()
         .failure()
-        .stderr(predicates::str::contains("target moved during integration"));
+        .stderr(predicates::str::contains(
+            "no integration event was recorded",
+        ));
     assert_eq!(repo.head(&repo.root), racer);
     assert_ne!(repo.head(&repo.root), repo.head(&wt));
     assert_eq!(events(&repo, &id), recorded);
@@ -2102,7 +2104,7 @@ exec '{git}' "$@"
 fn fast_forward_checks_target_after_reference_transaction_hook() {
     use std::os::unix::fs::PermissionsExt;
     let repo = repo_with_gates();
-    let (id, _) = approved_change(&repo, "ff-hook-race", "ff.txt", "ff\n");
+    let (id, wt) = approved_change(&repo, "ff-hook-race", "ff.txt", "ff\n");
     let before = repo.head(&repo.root);
     let tree = git_out(&repo.root, &["rev-parse", "master^{tree}"]);
     let racer = git_out(
@@ -2131,8 +2133,22 @@ done
         .args(["integrate", &id])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("target moved during integration"));
+        .stderr(predicates::str::contains("target moved during integration"))
+        .stderr(predicates::str::contains(format!(
+            "refs/heads/master={racer}"
+        )))
+        .stderr(predicates::str::contains(format!("checkout HEAD={racer}")))
+        .stderr(predicates::str::contains(
+            "no integration event was recorded",
+        ))
+        .stderr(predicates::str::contains(
+            "git restore --source=refs/heads/master",
+        ));
     assert_eq!(repo.head(&repo.root), racer);
+    assert_eq!(
+        git_out(&repo.root, &["write-tree"]),
+        git_out(&wt, &["rev-parse", "HEAD^{tree}"])
+    );
     assert_eq!(events(&repo, &id), recorded);
 }
 
@@ -2709,4 +2725,164 @@ fn cleanup_default_flags_conflict() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("cannot be used with"));
+}
+
+#[test]
+fn fast_forward_index_lock_preserves_target_and_checkout() {
+    let repo = repo_with_gates();
+    let (id, _) = approved_change(&repo, "ff-index-lock", "ff.txt", "ff\n");
+    let before = repo.head(&repo.root);
+    let index = fs::read(repo.root.join(".git/index")).unwrap();
+    let recorded = events(&repo, &id);
+    fs::write(repo.root.join(".git/index.lock"), "operator lock").unwrap();
+    repo.arc(&repo.root)
+        .args(["integrate", &id])
+        .assert()
+        .failure();
+    assert_eq!(repo.head(&repo.root), before);
+    assert_eq!(fs::read(repo.root.join(".git/index")).unwrap(), index);
+    assert_eq!(events(&repo, &id), recorded);
+    assert!(!repo.root.join("ff.txt").exists());
+}
+
+#[test]
+fn fast_forward_preflights_agree_on_clean_divergence() {
+    let repo = repo_with_gates();
+    let (id, wt) = approved_change(&repo, "ff-entrypoints", "ff.txt", "ff\n");
+    stdout(
+        repo.arc(&wt)
+            .args(["review", &id, "--verdict", "approved"])
+            .env("ARC_ACTOR", "independent-reviewer")
+            .env("ARC_SESSION", "review-session"),
+    );
+    let (second, _) =
+        approved_change_blocked_by(&repo, "ff-entrypoints-tail", "tail.txt", "tail\n", &[&id]);
+    fs::write(repo.root.join("sibling.txt"), "target\n").unwrap();
+    git(&repo.root, &["add", "sibling.txt"]);
+    git(&repo.root, &["commit", "-m", "feat: sibling"]);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["verify", &id, "--against", "master"]),
+    );
+    let before = repo.head(&repo.root);
+    let recorded = events(&repo, &id);
+    let status = json_stdout(repo.arc(&repo.root).args(["status", &id, "--json"]));
+    assert_eq!(status["ready_to_integrate"], false);
+    assert_eq!(status["needs_rebase"], true);
+    assert_eq!(status["next_action"], "rebase");
+    for args in [
+        vec!["check", &id],
+        vec!["integrate", &id, &second],
+        vec!["integrate", &id, &second, "--dry-run"],
+        vec!["integrate", &id],
+        vec!["integrate", &id, "--dry-run"],
+        vec!["integrate", &id, "--dry-run", "--json"],
+        vec!["integrate", &id, "--debt", "owed"],
+    ] {
+        let output = repo.arc(&repo.root).args(args).output().unwrap();
+        assert_eq!(output.status.code(), Some(11));
+        let messages = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            messages.contains(&format!("arc rebase {id} --verify")),
+            "{messages}"
+        );
+        assert_eq!(repo.head(&repo.root), before);
+        assert_eq!(events(&repo, &id), recorded);
+    }
+    stdout(
+        repo.arc(&repo.root)
+            .args(["check", &id, "--shape", "no-ff"]),
+    );
+}
+
+#[test]
+fn fast_forward_queue_dry_run_stops_before_projecting_held_member() {
+    let repo = repo_with_gates();
+    let (first, _) = approved_change(&repo, "ff-held", "first.txt", "first\n");
+    let (second, _) = approved_change_blocked_by(
+        &repo,
+        "ff-held-sibling",
+        "second.txt",
+        "second\n",
+        &[&first],
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["hold", &first, "--reason", "wait"]),
+    );
+    let out =
+        stdout_any_status(
+            repo.arc(&repo.root)
+                .args(["integrate", &first, &second, "--dry-run"]),
+        );
+    assert!(out.contains(&format!("stopped: {first}")), "{out}");
+    assert!(!out.contains(&format!("would land: {first}")), "{out}");
+    assert!(out.contains(&format!("not attempted: {second}")), "{out}");
+}
+
+#[test]
+fn fast_forward_debt_expected_basis_names_moved_target() {
+    let repo = repo_with_gates();
+    let (id, _) = approved_change(&repo, "ff-debt-basis", "ff.txt", "ff\n");
+    let plan = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--dry-run", "--json"]),
+    );
+    let path = repo.home.join("plan.json");
+    fs::write(&path, plan).unwrap();
+    fs::write(repo.root.join("sibling.txt"), "target\n").unwrap();
+    git(&repo.root, &["add", "sibling.txt"]);
+    git(&repo.root, &["commit", "-m", "feat: sibling"]);
+    let recorded = events(&repo, &id);
+    repo.arc(&repo.root)
+        .args([
+            "integrate",
+            &id,
+            "--debt",
+            "owed",
+            "--expect-basis",
+            path.to_str().unwrap(),
+        ])
+        .assert()
+        .code(11)
+        .stderr(predicates::str::contains("target you checked moved"));
+    assert_eq!(events(&repo, &id), recorded);
+}
+
+#[test]
+fn fast_forward_into_divergence_names_selected_destination() {
+    let repo = repo_with_gates();
+    let (id, _) = approved_change(&repo, "ff-into-guidance", "ff.txt", "ff\n");
+    git(&repo.root, &["checkout", "-b", "release"]);
+    fs::write(repo.root.join("sibling.txt"), "target\n").unwrap();
+    git(&repo.root, &["add", "sibling.txt"]);
+    git(&repo.root, &["commit", "-m", "feat: sibling"]);
+    repo.arc(&repo.root)
+        .args(["integrate", &id, "--into", "release"])
+        .assert()
+        .code(11)
+        .stderr(predicates::str::contains("git rebase release"))
+        .stderr(predicates::str::contains(format!(
+            "arc snapshot {id} --verify"
+        )));
+}
+
+#[test]
+fn fast_forward_debt_checks_divergence_after_waiting_for_target_lock() {
+    let repo = repo_with_gates();
+    let (id, _) = approved_change(&repo, "ff-debt-lock", "ff.txt", "ff\n");
+    let recorded = events(&repo, &id);
+    let lock = hold_target_lock(&repo, "master");
+    let mut child = spawn_arc(&repo, &repo.root, &["integrate", &id, "--debt", "owed"]);
+    assert_waiting_on_transition_lock(&mut [&mut child]);
+    repo.commit(&repo.root, "sibling.txt", "target\n", "feat: sibling");
+    let target = repo.head(&repo.root);
+    lock.unlock().unwrap();
+    assert_eq!(wait_for_exit(&mut child).code(), Some(11));
+    assert_eq!(repo.head(&repo.root), target);
+    assert_eq!(events(&repo, &id), recorded);
 }

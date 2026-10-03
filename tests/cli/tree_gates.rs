@@ -8,6 +8,11 @@ use super::common::*;
 fn paired_change(repo: &Repo) -> (String, PathBuf) {
     fs::create_dir_all(repo.root.join(".arc")).unwrap();
     fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[defaults.integration]\nshape = \"no-ff\"\n",
+    )
+    .unwrap();
+    fs::write(
         repo.root.join(".arc/gates.toml"),
         "[gates.paired]\ncommand = 'test \"$(cat a.txt)\" = \"$(cat b.txt)\"'\n",
     )

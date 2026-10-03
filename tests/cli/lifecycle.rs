@@ -1102,7 +1102,7 @@ fn conflicting_target_movement_requires_rebase_before_integration() {
 }
 
 #[test]
-fn non_conflicting_target_movement_stays_ready_and_integrates() {
+fn non_conflicting_target_movement_requires_explicit_merge_shape() {
     let repo = Repo::new();
     stdout(repo.arc(&repo.root).args(["begin", "clean-r"]));
     let wt = repo.home.join(".worktrees").join("repo-clean-r");
@@ -1117,7 +1117,8 @@ fn non_conflicting_target_movement_stays_ready_and_integrates() {
 
     let status: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&wt).args(["status", "clean-r"]))).unwrap();
-    assert_eq!(status["needs_rebase"], false);
+    assert_eq!(status["needs_rebase"], true);
+    assert_eq!(status["next_action"], "rebase");
     // The merge ships content neither branch committed, and a profile that
     // declares no gates has nothing that could have evaluated it — so there is
     // no obligation to report unmet.
@@ -1127,7 +1128,11 @@ fn non_conflicting_target_movement_stays_ready_and_integrates() {
         "{status}"
     );
     assert!(status["gates"].as_array().unwrap().is_empty(), "{status}");
-    repo.arc(&wt).args(["check", "clean-r"]).assert().success();
+    repo.arc(&wt).args(["check", "clean-r"]).assert().code(11);
+    repo.arc(&wt)
+        .args(["check", "clean-r", "--shape", "no-ff"])
+        .assert()
+        .success();
     repo.arc(&repo.root)
         .args(["integrate", "--shape", "no-ff", "clean-r"])
         .assert()
@@ -2546,7 +2551,7 @@ fn append_policy_has_a_single_authority() {
         "gatekeeping.rs::queue_step::ifst.is_closed(){",
         "gatekeeping.rs::rebase::ifst.is_closed(){",
         "hooks.rs::change_for_branch::ifstate.is_closed(){",
-        "audit.rs::declare_debt::letpatchset_id=ifst.is_closed(){",
+        "audit.rs::declare_debt_locked::letpatchset_id=ifst.is_closed(){",
         "hooks.rs::post_commit::ifstate.is_closed(){",
         "hooks.rs::prepare_commit_msg::ifstate.is_closed(){",
         "lifecycle.rs::begin::ifst.is_closed(){",
