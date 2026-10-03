@@ -551,9 +551,11 @@ fn tagged_integration_cleanup_from_first_selected_worktree_keeps_batch_context_v
         &["branch", "--list", "arc/series-cleanup-first"]
     )
     .is_empty());
-    for branch in ["arc/series-cleanup-second"] {
-        assert!(git_out(&repo.root, &["branch", "--list", branch]).is_empty());
-    }
+    assert!(git_out(
+        &repo.root,
+        &["branch", "--list", "arc/series-cleanup-second"]
+    )
+    .is_empty());
     for change in [first, second] {
         let status: serde_json::Value =
             serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", &change]))).unwrap();
