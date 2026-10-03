@@ -1,4 +1,5 @@
 mod approval;
+mod artifacts;
 mod blockers;
 mod bundle;
 mod candidate;
@@ -1748,8 +1749,10 @@ enum Cmd {
         /// sandbox, excluding the integration checkout. Arc removes only the checkout
         /// instance it created, identified by an owner record in that checkout’s
         /// Git administrative directory. The registered
-        /// checkout must still hold the change branch. Tracked edits and any
-        /// untracked or ignored content, including build output, keep the checkout.
+        /// checkout must still hold the change branch. An ignored directory identified
+        /// as a build artifact by a valid CACHEDIR.TAG or a configured
+        /// integration.disposable rule's path and marker does not keep the checkout.
+        /// Tracked edits, untracked files and all other ignored content keep it.
         /// An outbox holding only the spool's regular .gitignore with "*" and a
         /// trailing newline is disposable only when its Git administrative ownership
         /// record identifies the file and records successful promotion. Foreign

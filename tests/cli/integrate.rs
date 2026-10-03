@@ -4325,3 +4325,209 @@ exec '{git}' "$@"
     assert_eq!(repo.head(&repo.root), advanced);
     assert_eq!(events(&repo, &id), recorded);
 }
+
+fn disposable_cleanup_fixture(rule: bool) -> (Repo, String, PathBuf) {
+    let repo = repo_with_gates();
+    repo.commit(
+        &repo.root,
+        ".gitignore",
+        "target/\ndist-newstyle/\n.env\n",
+        "test: ignore fixture artifacts",
+    );
+    if rule {
+        fs::write(repo.home.join(".local/ai/arc/config.toml"), "[integration]\ncleanup=true\ndisposable=[{path='**/dist-newstyle', marker='cache/plan.json'}]\n").unwrap();
+    }
+    let id = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "artifact-cleanup",
+        "--worktree",
+    ])));
+    let wt = repo.home.join(".worktrees/repo-artifact-cleanup");
+    repo.commit(
+        &wt,
+        "change.txt",
+        "change\n",
+        "test: prepare artifact cleanup",
+    );
+    stdout(repo.arc(&wt).args(["snapshot", &id]));
+    stdout(repo.arc(&wt).args(["verify", &id, "--gate", "smoke"]));
+    stdout(repo.arc(&wt).args(["review", &id, "--verdict", "approved"]));
+    (repo, id, wt)
+}
+
+fn fixture_cache_tag(wt: &Path, tag: &str) {
+    fs::create_dir_all(wt.join("target/debug")).unwrap();
+    fs::write(wt.join("target/debug/build-output"), "artifact").unwrap();
+    fs::write(wt.join("target/CACHEDIR.TAG"), tag).unwrap();
+}
+
+const FIXTURE_CACHE_SIGNATURE: &str = "Signature: 8a477f597d28d172789f06886806bc55\n# cache\n";
+
+#[test]
+fn disposable_cleanup_cache_tag_removes_worktree_and_branch() {
+    let (repo, id, wt) = disposable_cleanup_fixture(false);
+    fixture_cache_tag(&wt, FIXTURE_CACHE_SIGNATURE);
+    let out = stdout(repo.arc(&repo.root).args(["integrate", &id, "--cleanup"]));
+    assert!(!wt.exists(), "{out}");
+    assert!(git_out(&repo.root, &["branch", "--list", "arc/artifact-cleanup"]).is_empty());
+    assert!(out.contains("discarded target/ (CACHEDIR.TAG)"), "{out}");
+    assert!(out.find("discarded target/").unwrap() < out.find("removed worktree").unwrap());
+}
+
+#[test]
+fn disposable_cleanup_missing_tag_keeps_directory() {
+    let (repo, id, wt) = disposable_cleanup_fixture(false);
+    fs::create_dir_all(wt.join("target")).unwrap();
+    fs::write(wt.join("target/output"), "artifact").unwrap();
+    let out = stdout(repo.arc(&repo.root).args(["integrate", &id, "--cleanup"]));
+    assert!(wt.exists(), "{out}");
+    assert!(
+        out.contains("holds local content not in the branch: target/"),
+        "{out}"
+    );
+}
+
+#[test]
+fn disposable_cleanup_wrong_or_symlink_tag_keeps_directory() {
+    for symlink in [false, true] {
+        let (repo, id, wt) = disposable_cleanup_fixture(false);
+        if symlink {
+            fs::create_dir_all(wt.join("target")).unwrap();
+            fs::write(wt.join("target/valid-tag"), FIXTURE_CACHE_SIGNATURE).unwrap();
+            std::os::unix::fs::symlink("valid-tag", wt.join("target/CACHEDIR.TAG")).unwrap();
+        } else {
+            fixture_cache_tag(&wt, "Signature: wrong");
+        }
+        let out = stdout(repo.arc(&repo.root).args(["integrate", &id, "--cleanup"]));
+        assert!(wt.exists(), "{out}");
+        assert!(
+            out.contains("holds local content not in the branch: target/"),
+            "{out}"
+        );
+    }
+}
+
+#[test]
+fn disposable_cleanup_configured_marker_controls_removal() {
+    for marker in [true, false] {
+        let (repo, id, wt) = disposable_cleanup_fixture(true);
+        fs::create_dir_all(wt.join("dist-newstyle/cache")).unwrap();
+        fs::write(wt.join("dist-newstyle/output"), "artifact").unwrap();
+        if marker {
+            fs::write(wt.join("dist-newstyle/cache/plan.json"), "{}").unwrap();
+        }
+        let out = stdout(repo.arc(&repo.root).args(["integrate", &id]));
+        assert_eq!(!wt.exists(), marker, "{out}");
+        if marker {
+            assert!(
+                out.contains("discarded dist-newstyle/ (rule 1: marker cache/plan.json)"),
+                "{out}"
+            );
+        } else {
+            assert!(
+                out.contains("holds local content not in the branch: dist-newstyle/"),
+                "{out}"
+            );
+        }
+    }
+}
+
+fn assert_other_content_keeps_only_its_path(file: &str) {
+    let (repo, id, wt) = disposable_cleanup_fixture(false);
+    fixture_cache_tag(&wt, FIXTURE_CACHE_SIGNATURE);
+    fs::write(wt.join(file), "local").unwrap();
+    let out = stdout(repo.arc(&repo.root).args(["integrate", &id, "--cleanup"]));
+    assert!(wt.exists(), "{out}");
+    let reason = out
+        .lines()
+        .find_map(|line| line.split_once("holds local content not in the branch: "))
+        .unwrap()
+        .1;
+    assert_eq!(reason, file, "{out}");
+    assert!(wt.join("target/CACHEDIR.TAG").exists());
+}
+
+#[test]
+fn disposable_cleanup_untracked_file_keeps_checkout() {
+    assert_other_content_keeps_only_its_path("untracked.txt");
+}
+
+#[test]
+fn disposable_cleanup_ignored_file_keeps_checkout() {
+    assert_other_content_keeps_only_its_path(".env");
+}
+
+#[test]
+fn disposable_config_projects_value_source_and_overridden() {
+    let repo = Repo::new();
+    let builtin = json_stdout(repo.arc(&repo.root).arg("config"));
+    assert_eq!(builtin["schema"], "arc-config/1");
+    assert_eq!(
+        builtin["style"]["integration.disposable"]["value"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        builtin["style"]["integration.disposable"]["source"],
+        "builtin"
+    );
+    assert_eq!(
+        builtin["style"]["integration.disposable"]["overridden"],
+        serde_json::json!([])
+    );
+    fs::write(repo.home.join(".local/ai/arc/config.toml"), "[integration]\ndisposable=[{path='**/dist-newstyle',marker='cache/plan.json',signature='{'}]\n").unwrap();
+    let config = json_stdout(repo.arc(&repo.root).arg("config"));
+    let rule = &config["style"]["integration.disposable"];
+    assert_eq!(
+        rule["value"],
+        serde_json::json!([{"path":"**/dist-newstyle", "marker":"cache/plan.json", "signature":"{"}])
+    );
+    assert!(rule["source"].as_str().unwrap().starts_with("user:"));
+    assert_eq!(rule["overridden"][0]["source"], "builtin");
+    assert_eq!(rule["overridden"][0]["value"], serde_json::json!([]));
+}
+
+#[test]
+fn disposable_cleanup_collapsed_outbox_requires_only_owned_metadata() {
+    for extra in [false, true] {
+        let repo = Repo::new();
+        repo.commit(
+            &repo.root,
+            ".gitignore",
+            ".arc/local-cache\n",
+            "test: ignore local cache",
+        );
+        stdout(
+            repo.arc(&repo.root)
+                .args(["begin", "outbox-cleanup", "--worktree"]),
+        );
+        let wt = repo.home.join(".worktrees/repo-outbox-cleanup");
+        repo.commit(&wt, "work.txt", "work\n", "test: prepare cleanup");
+        stdout(repo.arc(&wt).args(["snapshot", "outbox-cleanup"]));
+        stdout(
+            repo.arc(&wt)
+                .args(["review", "outbox-cleanup", "--verdict", "approved"]),
+        );
+        stdout(
+            repo.arc(&wt)
+                .args(["journal", "log", "fixture", "--spool", "local note"]),
+        );
+        if extra {
+            fs::write(wt.join(".arc/local-cache"), "local content").unwrap();
+        }
+        let out = stdout(
+            repo.arc(&repo.root)
+                .args(["integrate", "outbox-cleanup", "--cleanup"]),
+        );
+        assert_eq!(wt.exists(), extra, "{out}");
+        if extra {
+            assert!(
+                out.contains("holds local content not in the branch: .arc/"),
+                "{out}"
+            );
+            assert_eq!(
+                fs::read_to_string(wt.join(".arc/local-cache")).unwrap(),
+                "local content"
+            );
+        }
+    }
+}

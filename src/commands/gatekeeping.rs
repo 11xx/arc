@@ -3481,21 +3481,36 @@ fn cleanup_integrated_change(
                 st.worktree_owner_token.as_deref(),
             ) {
                 Some("ownership cannot be established".to_string())
-            } else if let Some(content) = cleanup_local_content(&path)? {
-                Some(format!("holds local content not in the branch: {content}"))
             } else {
-                match gitio::git(target, &["worktree", "remove", wt_path]) {
-                    Ok(_) => {
-                        println!("removed worktree {wt_path}");
-                        None
-                    }
-                    Err(error) => {
-                        let message = format!("{error:#}")
-                            .split_whitespace()
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        eprintln!("warning: integration recorded; cleanup worktree {wt_path} failed: {message}");
-                        Some(format!("Git refused: {message}"))
+                let rules = crate::style::resolved_style(
+                    target,
+                    &st.target_branch,
+                    crate::style::StyleFlags::default(),
+                )?
+                .disposable();
+                let (content, artifacts) = cleanup_local_content(&path, &rules)?;
+                if let Some(content) = content {
+                    Some(format!("holds local content not in the branch: {content}"))
+                } else {
+                    match gitio::git(target, &["worktree", "remove", wt_path]) {
+                        Ok(_) => {
+                            for artifact in artifacts {
+                                println!(
+                                    "discarded {} ({})",
+                                    artifact.path, artifact.identified_by
+                                );
+                            }
+                            println!("removed worktree {wt_path}");
+                            None
+                        }
+                        Err(error) => {
+                            let message = format!("{error:#}")
+                                .split_whitespace()
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            eprintln!("warning: integration recorded; cleanup worktree {wt_path} failed: {message}");
+                            Some(format!("Git refused: {message}"))
+                        }
                     }
                 }
             };
@@ -3549,18 +3564,42 @@ fn unused_outbox_metadata(checkout: &Path) -> Result<bool> {
     Ok(ignore.file_type()?.is_file() && std::fs::read(ignore.path())? == b"*\n")
 }
 
-fn cleanup_local_content(checkout: &Path) -> Result<Option<String>> {
+fn cleanup_local_content(
+    checkout: &Path,
+    rules: &[crate::artifacts::Rule],
+) -> Result<(Option<String>, Vec<crate::artifacts::Artifact>)> {
     let status = gitio::git(
         checkout,
         &[
             "status",
             "--porcelain",
             "-z",
-            "--ignored",
+            "--ignored=traditional",
             "--untracked-files=all",
         ],
     )?;
+    let ignored = gitio::git(
+        checkout,
+        &[
+            "status",
+            "--porcelain",
+            "-z",
+            "--ignored=traditional",
+            "--untracked-files=normal",
+        ],
+    )?;
+    let ignored_entries = ignored
+        .split('\0')
+        .filter(|entry| entry.starts_with("!! "))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let artifacts = crate::artifacts::recognize(checkout, &ignored_entries, rules);
     let unused_outbox = unused_outbox_metadata(checkout)?;
+    let collapsed_outbox = unused_outbox
+        && status
+            .split('\0')
+            .filter_map(|entry| entry.strip_prefix("!! .arc/"))
+            .eq(std::iter::once("outbox/.gitignore"));
     let mut entries = status.split('\0').filter(|entry| !entry.is_empty());
     let mut paths = Vec::new();
     while let Some(entry) = entries.next() {
@@ -3568,7 +3607,7 @@ fn cleanup_local_content(checkout: &Path) -> Result<Option<String>> {
             let metadata = unused_outbox
                 && matches!(&entry[..2], "??" | "!!")
                 && matches!(path, ".arc/outbox/" | ".arc/outbox/.gitignore");
-            if !metadata {
+            if !metadata && !entry.starts_with("!! ") {
                 paths.push(path.to_string());
             }
         }
@@ -3582,16 +3621,24 @@ fn cleanup_local_content(checkout: &Path) -> Result<Option<String>> {
             }
         }
     }
+    for entry in ignored_entries {
+        let path = &entry[3..];
+        let metadata = (unused_outbox && matches!(path, ".arc/outbox/" | ".arc/outbox/.gitignore"))
+            || (collapsed_outbox && path == ".arc/");
+        if !metadata && !artifacts.iter().any(|artifact| artifact.path == path) {
+            paths.push(path.to_string());
+        }
+    }
     paths.sort();
     paths.dedup();
     if paths.is_empty() {
-        return Ok(None);
+        return Ok((None, artifacts));
     }
     let mut summary = paths.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
     if paths.len() > 5 {
         summary.push_str(", ...");
     }
-    Ok(Some(summary))
+    Ok((Some(summary), artifacts))
 }
 
 /// Report what `integrate` would do without merging, closing, or writing

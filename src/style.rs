@@ -7,11 +7,12 @@ use std::path::Path;
 
 pub const CONFIG_SCHEMA: &str = "arc-config/1";
 
-const KEYS: [(&str, &str); 4] = [
+const KEYS: [(&str, &str); 5] = [
     ("change.checkout", "in-place"),
     ("change.branch_prefix", "arc/"),
     ("integration.shape", "ff-only"),
     ("integration.cleanup", "false"),
+    ("integration.disposable", "[]"),
 ];
 
 #[derive(Debug, Serialize)]
@@ -85,6 +86,11 @@ impl Style {
             .expect("resolved integration.cleanup is a boolean")
     }
 
+    pub fn disposable(&self) -> Vec<crate::artifacts::Rule> {
+        serde_json::from_value(self.keys["integration.disposable"].value.clone())
+            .expect("resolved integration.disposable rules are validated")
+    }
+
     pub fn shape(&self) -> crate::integration::Shape {
         match self.keys["integration.shape"].value.as_str() {
             Some("no-ff") => crate::integration::Shape::NoFf,
@@ -107,6 +113,37 @@ fn field<'a>(value: &'a toml::Value, key: &str) -> Option<&'a toml::Value> {
 }
 
 fn validate_value(key: &str, value: &toml::Value, origin: &str) -> Result<Value> {
+    if key.strip_prefix("defaults.").unwrap_or(key) == "integration.disposable" {
+        let rules = value
+            .as_array()
+            .with_context(|| format!("invalid {origin} key {key}: expected an array of tables"))?;
+        for (index, raw) in rules.iter().enumerate() {
+            let location = format!("invalid {origin} key {key} rule {}", index + 1);
+            let table = raw
+                .as_table()
+                .with_context(|| format!("{location}: expected a table"))?;
+            for field in table.keys() {
+                if !matches!(field.as_str(), "path" | "marker" | "signature") {
+                    bail!("{location}: unknown field {field}");
+                }
+            }
+            for field in ["path", "marker"] {
+                let text = table
+                    .get(field)
+                    .and_then(toml::Value::as_str)
+                    .with_context(|| {
+                        format!("{location}: {field} is required and must be a string")
+                    })?;
+                if !crate::artifacts::valid_relative_path(text) {
+                    bail!("{location}: {field} must be relative with no empty, . or .. component");
+                }
+            }
+            if table.get("signature").is_some_and(|v| !v.is_str()) {
+                bail!("{location}: signature must be a string");
+            }
+        }
+        return Ok(serde_json::to_value(value)?);
+    }
     let valid = match key.strip_prefix("defaults.").unwrap_or(key) {
         "change.checkout" => matches!(value.as_str(), Some("in-place" | "worktree")),
         "change.branch_prefix" => value.as_str().is_some(),
@@ -265,10 +302,10 @@ fn resolve(layers: Vec<(String, toml::Value, bool)>, flags: StyleFlags) -> Resul
     }
     for (key, default) in KEYS {
         let mut candidates = vec![Candidate {
-            value: if key == "integration.cleanup" {
-                json!(false)
-            } else {
-                json!(default)
+            value: match key {
+                "integration.cleanup" => json!(false),
+                "integration.disposable" => json!([]),
+                _ => json!(default),
             },
             source: "builtin".into(),
         }];
@@ -295,6 +332,7 @@ fn resolve(layers: Vec<(String, toml::Value, bool)>, flags: StyleFlags) -> Resul
                     crate::integration::Shape::NoFf => "no-ff",
                 })
             }),
+            "integration.disposable" => None,
             _ => unreachable!("known style key"),
         };
         if let Some(value) = flag {
@@ -368,7 +406,10 @@ mod tests {
                 })
                 .collect();
             let resolved = resolve(layers, StyleFlags::default()).unwrap();
-            for (key, _) in KEYS {
+            for (key, _) in KEYS
+                .into_iter()
+                .filter(|(key, _)| *key != "integration.disposable")
+            {
                 assert_eq!(resolved.keys[key].source, texts[n - 1].0);
                 assert_eq!(resolved.keys[key].overridden.len(), n);
                 assert_eq!(
@@ -468,7 +509,10 @@ mod tests {
         assert_eq!(style.branch_prefix(), "flag-");
         assert_eq!(style.keys["integration.cleanup"].value, true);
         assert!(matches!(style.shape(), crate::integration::Shape::NoFf));
-        for (key, _) in KEYS {
+        for (key, _) in KEYS
+            .into_iter()
+            .filter(|(key, _)| *key != "integration.disposable")
+        {
             assert_eq!(style.keys[key].source, "flag");
             assert_eq!(style.keys[key].overridden.len(), 2);
         }
@@ -509,6 +553,65 @@ mod tests {
                 error.contains("policy.toml") && error.contains(&format!("integration.{key}")),
                 "{error}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod disposable_tests {
+    use super::*;
+
+    #[test]
+    fn disposable_validation_refuses_invalid_rules() {
+        for raw in [
+            "false",
+            "[1]",
+            "[{marker='tag'}]",
+            "[{path='target'}]",
+            "[{path='target',marker='tag',extra='x'}]",
+            "[{path='../target',marker='tag'}]",
+            "[{path='/target',marker='tag'}]",
+            "[{path='target//x',marker='tag'}]",
+            "[{path='target/.',marker='tag'}]",
+            "[{path='target',marker='../tag'}]",
+            "[{path='target',marker='/tag'}]",
+            "[{path='target',marker='a//tag'}]",
+            "[{path='target',marker='a/./tag'}]",
+            "[{path='target',marker='tag',signature=1}]",
+        ] {
+            let error = validate_user(
+                &format!("[integration]\ndisposable={raw}"),
+                "fixture-config",
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("fixture-config"), "{error}");
+            assert!(error.contains("integration.disposable"), "{error}");
+            if raw.starts_with('[') {
+                assert!(error.contains("rule 1"), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn disposable_layers_replace_whole_arrays() {
+        let texts = [
+            ("user", "[integration]\ndisposable=[{path='user',marker='tag'}]", true),
+            ("project", "[defaults.integration]\ndisposable=[{path='project',marker='tag',signature='prefix'}]", false),
+            ("operator", "[defaults.integration]\ndisposable=[]", false),
+        ];
+        let builtin = resolve(vec![], StyleFlags::default()).unwrap();
+        assert_eq!(builtin.keys["integration.disposable"].value, json!([]));
+        for n in 1..=3 {
+            let layers = texts[..n]
+                .iter()
+                .map(|(s, t, u)| (s.to_string(), parse(t, s, *u).unwrap(), *u))
+                .collect();
+            let style = resolve(layers, StyleFlags::default()).unwrap();
+            let key = &style.keys["integration.disposable"];
+            assert_eq!(key.source, texts[n - 1].0);
+            assert_eq!(key.overridden.len(), n);
+            assert_eq!(key.value.as_array().unwrap().len(), usize::from(n != 3));
         }
     }
 }

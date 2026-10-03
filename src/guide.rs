@@ -837,8 +837,11 @@ RUN A CHANGE
   The retained branch determines the checkout. Fork provenance during
   adoption requires an explicit base. `begin` removes its
   unrecorded owner token when its identity matches; cleanup failures are reported.
-  The registered checkout must still hold the change branch. Tracked edits
-  and untracked or ignored content, including build output, keep it. An
+  The registered checkout must still hold the change branch. An ignored
+  directory identified as a build artifact by a valid CACHEDIR.TAG or a
+  configured `integration.disposable` rule's path and marker does not keep
+  the checkout. Tracked edits, untracked files and all other ignored content
+  keep it. Recognition grants no checkout removal authority. An
   outbox containing only the spool's regular `.gitignore` with `*` and a
   trailing newline is disposable metadata only when its Git administrative
   ownership record identifies that file and records successful promotion.
@@ -1892,7 +1895,29 @@ FILES
   known keys must have valid types and values; refusals name the file and
   key. User configuration accepts style only.
   `integration.cleanup` governs post-integration branch and worktree cleanup;
-  `integrate --no-cleanup` overrides it for every selected change.
+  `integrate --no-cleanup` overrides it for every selected change. Ignored
+  directories identified as build artifacts by a valid CACHEDIR.TAG or an
+  `integration.disposable` rule's path and marker do not keep a checkout;
+  tracked edits, untracked files and all other ignored content do.
+  A CACHEDIR.TAG must be a regular file beginning with the exact bytes
+  `Signature: 8a477f597d28d172789f06886806bc55`. This recognizer always applies
+  at any depth, independently of configured rules and checkout ownership.
+
+    [integration]
+    disposable = [{ path = "**/dist-newstyle", marker = "cache/plan.json" }]
+
+  `integration.disposable` is an array of rules with required string `path`
+  and `marker`, and optional string `signature`. Operator defaults, project
+  defaults and user configuration resolve above the built-in empty array;
+  the highest layer setting it replaces the entire array. There is no flag.
+  `path` matches the worktree-relative directory path: `*` stays within a
+  component, `**` matches zero or more whole components, and other characters
+  are literal. Paths must be relative with no empty, `.` or `..` component.
+  The marker must be a regular file inside a real directory, with no symlink
+  traversal; `signature` requires its content to begin with those exact bytes.
+  Individually reported ignored files are never disposable. Cleanup reports
+  each discarded directory and its recognizer before reporting removal; it
+  deletes no artifacts from a checkout it keeps.
   Integration history folds with contribution history; squash requires at
   most one reviewed commit above the target. Integration alone stays local.
 
