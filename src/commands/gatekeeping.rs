@@ -2873,14 +2873,19 @@ fn integrate_one(
     // invoke Git hooks or other arc commands, so no state lock spans them.
     drop(transition);
     drop(target_lock);
-    release_retention_refs(ctx, &change_id, Some(&merged))?;
-
     if already_contained {
         println!("integrated: {merged} (already contained {approved_head}; no merge created)");
     } else {
         println!("integrated: {merged}");
     }
     println!("event: {}", ev.event_id);
+    if let Err(error) = release_retention_refs(ctx, &change_id, Some(&merged)) {
+        eprintln!(
+            "warning: integration recorded; retention cleanup failed: {error:#}. Remaining refs under {} and {} stay pinned",
+            gitio::retention_prefix(&change_id),
+            gitio::tree_retention_prefix(&change_id),
+        );
+    }
     if let Some(advisory) = crate::status::missing_changelog_advisory(&st) {
         eprintln!("advice: {}", advisory.detail);
     }

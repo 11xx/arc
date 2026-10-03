@@ -1542,3 +1542,94 @@ fn next_step_names_the_review_a_required_review_owes() {
         "{status}"
     );
 }
+
+fn retention_read_failure_after_merge(operation: &str, queue: bool) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = repo_with_gates();
+    let (id, _) = approved_change(&repo, "retention-read", "feature.txt", "feature\n");
+    if queue {
+        approved_change(&repo, "retention-next", "next.txt", "next\n");
+    }
+    let before = repo.head(&repo.root);
+    let pins = git_out(&repo.root, &["for-each-ref", "refs/arc/"]);
+    let real_git =
+        String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout).unwrap();
+    let bin = repo.home.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let wrapper = bin.join("git");
+    fs::write(
+        &wrapper,
+        format!(
+            r#"#!/bin/sh
+if [ "$('{git}' rev-parse master)" != '{before}' ]; then
+    case "$*" in
+        {operation}) echo 'injected retention read failure' >&2; exit 1 ;;
+    esac
+fi
+exec '{git}' "$@"
+"#,
+            git = real_git.trim()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let mut cmd = repo.arc(&repo.root);
+    cmd.args(["integrate", "retention-read"]);
+    if queue {
+        cmd.arg("retention-next");
+    }
+    cmd.env("PATH", path);
+    let output = cmd.assert().success().get_output().clone();
+    let out = String::from_utf8(output.stdout).unwrap();
+    let err = String::from_utf8(output.stderr).unwrap();
+    assert!(out.contains("integrated: "), "{out}");
+    assert!(out.contains("event: "), "{out}");
+    assert!(err.contains("warning:"), "{err}");
+    assert!(err.contains(&format!("refs/arc/keep/{id}/")), "{err}");
+    assert!(err.contains(&format!("refs/arc/tree/{id}/")), "{err}");
+    assert!(err.contains("injected retention read failure"), "{err}");
+    assert_ne!(before, repo.head(&repo.root));
+    let state = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "retention-read", "--json"]),
+    );
+    assert_eq!(state["state"], "closed");
+    assert_eq!(state["closure"]["outcome"], "integrated");
+    assert!(out.contains(state["closure"]["event_id"].as_str().unwrap()));
+    if queue {
+        let next = json_stdout(
+            repo.arc(&repo.root)
+                .args(["status", "retention-next", "--json"]),
+        );
+        assert_eq!(next["closure"]["outcome"], "integrated");
+        assert_eq!(out.matches("integrated: ").count(), 2);
+    }
+    let remaining = git_out(&repo.root, &["for-each-ref", "refs/arc/"]);
+    let retained_prefix = if operation.contains("rev-list") {
+        format!("refs/arc/tree/{id}/")
+    } else {
+        format!("refs/arc/keep/{id}/")
+    };
+    let retained = pins
+        .lines()
+        .find(|line| line.contains(&retained_prefix))
+        .unwrap();
+    assert!(remaining.lines().any(|line| line == retained));
+}
+
+#[test]
+fn integrate_warns_on_retention_listing_failure_after_closure() {
+    retention_read_failure_after_merge("'for-each-ref '*", false);
+}
+
+#[test]
+fn integrate_warns_on_retention_object_walk_failure_after_closure() {
+    retention_read_failure_after_merge("'rev-list --objects '*", false);
+}
+
+#[test]
+fn integrate_warns_on_retention_failure_and_continues_queue() {
+    retention_read_failure_after_merge("'for-each-ref '*", true);
+}
