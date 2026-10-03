@@ -2911,8 +2911,14 @@ fn nested_subcommand_path(typed: Option<&str>) -> Option<&'static str> {
 /// both meanings, because clap allows one argument per name. Filters are
 /// explicit: a read narrows only on a value the caller typed, never on the
 /// ambient identity.
-fn parse_cli() -> Result<Cli, clap::Error> {
+///
+/// Whether the command is read-only is answered here, from the subcommand's
+/// own name, so the table the guide prints is the one dispatch obeys.
+fn parse_cli() -> Result<(Cli, bool), clap::Error> {
     let matches = Cli::command().try_get_matches()?;
+    let reads_only = matches
+        .subcommand_name()
+        .is_some_and(|name| commands::READ_ONLY_COMMANDS.contains(&name));
     let mut cli = Cli::from_arg_matches(&matches)?;
     if let Some(Cmd::Query { actor, harness, .. }) = cli.cmd.as_mut() {
         let query = matches.subcommand_matches("query");
@@ -2922,7 +2928,7 @@ fn parse_cli() -> Result<Cli, clap::Error> {
             }
         }
     }
-    Ok(cli)
+    Ok((cli, reads_only))
 }
 
 /// Name the attached form when the unknown argument was meant as the value of
@@ -3004,8 +3010,8 @@ fn main() {
         signal(SIGPIPE, SIG_DFL);
     }
 
-    let cli = match parse_cli() {
-        Ok(cli) => cli,
+    let (cli, reads_only) = match parse_cli() {
+        Ok(parsed) => parsed,
         Err(mut error) => {
             let kind = error.kind();
             if kind == clap::error::ErrorKind::UnknownArgument {
@@ -3039,7 +3045,7 @@ fn main() {
             std::process::exit(error.exit_code());
         }
     };
-    match run(cli) {
+    match run(cli, reads_only) {
         Ok(code) => std::process::exit(code),
         Err(e) => {
             eprintln!("error: {e:#}");
@@ -3060,7 +3066,7 @@ fn workspace_scope(under: Option<PathBuf>, here: bool) -> Result<commands::Works
     }
 }
 
-fn run(cli: Cli) -> Result<i32> {
+fn run(cli: Cli, reads_only: bool) -> Result<i32> {
     // Export the prefix before anything resolves a path, so the flag and the
     // variable are one input and every command arc runs inherits the sandbox.
     if let Some(prefix) = cli.sandbox.as_deref().filter(|value| !value.is_empty()) {
@@ -3165,6 +3171,7 @@ fn run(cli: Cli) -> Result<i32> {
     }
     let ctx = Ctx {
         cwd,
+        reads_only,
         actor,
         actor_source,
         operator,
@@ -3188,16 +3195,11 @@ fn run(cli: Cli) -> Result<i32> {
     // spellings naming different changes is a mistake, not a precedence
     // question — but a slug, an ID, and a unique prefix of one change are one
     // reference, so they are compared after resolution.
-    //
-    // A command that can record resolves through the store it would append
-    // to, so its own policy refuses it before it starts; a report resolves
-    // through a handle that never parses that policy.
-    type Open = fn(&Path) -> Result<store::Store>;
-    let select_with = |positional: Option<String>, open: Open| -> Result<Option<String>> {
+    let select = |positional: Option<String>| -> Result<Option<String>> {
         let (Some(positional), Some(flag)) = (&positional, &flag_change) else {
             return Ok(positional.or_else(|| flag_change.clone()));
         };
-        let store = open(&ctx.cwd)?;
+        let store = ctx.store()?;
         let (left, right) = (
             store.resolve_change(positional)?,
             store.resolve_change(flag)?,
@@ -3207,15 +3209,11 @@ fn run(cli: Cli) -> Result<i32> {
         }
         Ok(Some(left))
     };
-    let infer_with = |change: Option<&str>, open: Open| -> Result<String> {
-        let selected = select_with(change.map(str::to_string), open)?;
-        let store = open(&ctx.cwd)?;
+    let infer = |change: Option<&str>| -> Result<String> {
+        let selected = select(change.map(str::to_string))?;
+        let store = ctx.store()?;
         context::resolve_change_or_infer(&store, &ctx.cwd, selected.as_deref())
     };
-    let select = |positional| select_with(positional, store::Store::discover);
-    let infer = |change| infer_with(change, store::Store::discover);
-    let select_report = |positional| select_with(positional, store::Store::discover_for_reading);
-    let infer_report = |change| infer_with(change, store::Store::discover_for_reading);
     // Which store a subject positional addresses. Only an explicit name can
     // be an artifact: an omitted subject is inferred from the branch, and a
     // branch names a change.
@@ -3304,17 +3302,17 @@ fn run(cli: Cli) -> Result<i32> {
             at,
         } => {
             let change = if tag.is_empty() {
-                Some(infer_report(change.as_deref())?)
+                Some(infer(change.as_deref())?)
             } else {
                 // With --tag the command refuses a change; the flag has to
                 // reach it to be refused.
-                select_report(change)?
+                select(change)?
             };
             commands::show_selection(&ctx, role, change.as_deref(), tag, json, at.as_deref())?;
             Ok(0)
         }
         Cmd::Explain { change, at, json } => {
-            let change = infer_report(change.as_deref())?;
+            let change = infer(change.as_deref())?;
             explain::explain(&ctx, &change, at.as_deref(), json)?;
             Ok(0)
         }
@@ -3329,7 +3327,7 @@ fn run(cli: Cli) -> Result<i32> {
                      for commits, use git log --oneline"
                 );
             }
-            let change = infer_report(change.as_deref())?;
+            let change = infer(change.as_deref())?;
             commands::log(&ctx, &change, reverse)?;
             Ok(0)
         }
@@ -3395,7 +3393,7 @@ fn run(cli: Cli) -> Result<i32> {
             format,
             audit,
         } => {
-            let change = infer_report(change.as_deref())?;
+            let change = infer(change.as_deref())?;
             commands::findings(&ctx, &change, format, audit)?;
             Ok(0)
         }
@@ -3533,7 +3531,7 @@ fn run(cli: Cli) -> Result<i32> {
             fields,
             at,
         } => {
-            let change = infer_report(change.as_deref())?;
+            let change = infer(change.as_deref())?;
             commands::status_cmd(
                 &ctx,
                 &change,
@@ -3544,14 +3542,12 @@ fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::BlockerStatus { change } => {
-            let change = infer_report(change.as_deref())?;
+            let change = infer(change.as_deref())?;
             commands::blocker_status_cmd(&ctx, &change)?;
             Ok(0)
         }
         Cmd::IsBlocked { change } => {
-            match infer_report(change.as_deref())
-                .and_then(|change| commands::is_blocked(&ctx, &change))
-            {
+            match infer(change.as_deref()).and_then(|change| commands::is_blocked(&ctx, &change)) {
                 Ok(code) => Ok(code),
                 Err(error) => {
                     eprintln!("error: {error:#}");
@@ -3668,11 +3664,11 @@ fn run(cli: Cli) -> Result<i32> {
             json,
         } => {
             let change = if tag.is_empty() {
-                Some(infer_report(change.as_deref())?)
+                Some(infer(change.as_deref())?)
             } else {
                 // With --tag the command refuses a change; the flag has to
                 // reach it to be refused.
-                select_report(change)?
+                select(change)?
             };
             commands::check_selection(&ctx, change.as_deref(), tag, explain, json)
         }
@@ -4678,5 +4674,33 @@ fn run(cli: Cli) -> Result<i32> {
         Cmd::Catchup { limit, json } => commands::catchup(&ctx, limit, json),
         Cmd::Fr { write } => journal::feature_request(&ctx, write),
         Cmd::Journal { cmd } => journal::run(&ctx, cmd),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A read-only entry names one real command with no subcommands of its
+    /// own: a misspelled entry promises what nothing obeys, and a command group
+    /// would carry its writing subcommands into the read-only table.
+    #[test]
+    fn every_read_only_command_is_a_leaf_command() {
+        // The full command tree is built on a stack the size a main thread
+        // gets; a test thread's default is too small for it.
+        std::thread::Builder::new()
+            .stack_size(16 << 20)
+            .spawn(|| {
+                let cli = Cli::command();
+                for name in commands::READ_ONLY_COMMANDS {
+                    let command = cli
+                        .find_subcommand(name)
+                        .unwrap_or_else(|| panic!("{name} is not an arc command"));
+                    assert!(!command.has_subcommands(), "{name} has subcommands");
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }
