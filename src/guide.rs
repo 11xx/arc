@@ -613,10 +613,18 @@ RUN A CHANGE
   or with a base equal to the patchset head, cannot discharge a probe. The pair
   proves discrimination, not relevance.
 
+  A brief version keeps the preceding version's base unless `--base` names
+  another revision; the first version defaults to HEAD. Recording prints the
+  selected base, also carried as `base_revision` in JSON. Probes carry forward
+  unless `--probes-json` supplies a replacement array. Repeatable
+  `--probe NAME=COMMAND` adds or updates named probes; `--withdraw-probe NAME`
+  removes named probes and keeps the others. Unknown withdrawals, duplicate
+  declarations, and declaring and withdrawing the same name are refused.
+  These flags are mutually exclusive with `--probes-json`.
+
   An undischargeable probe is recovered by a later brief version with
-  `--base` at the revision the work started from, a cause, and the probes
-  restated in `--probes-json`, since a version declares only the probes it is
-  given; `arc snapshot` then binds the patchset to that version, declaring
+  `--base` at the revision the work started from and a cause; `arc snapshot`
+  then binds the patchset to that version, declaring
   the patchset's contributors, which a live claim held by another actor
   requires. `check` prints both with the change, probes, and contributors
   filled in, and only the snapshot once a later version the probe can

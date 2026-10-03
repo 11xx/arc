@@ -736,6 +736,8 @@ pub fn brief(
     plan_ref: Option<String>,
     plan_slice: Option<String>,
     probes_json: Option<String>,
+    probes: Vec<String>,
+    withdraw_probes: Vec<String>,
     caused_by: Vec<String>,
     cause_note: Option<String>,
     must_read: Vec<String>,
@@ -747,7 +749,12 @@ pub fn brief(
     if body_file.as_deref() == Some("-") && probes_json.as_deref() == Some("-") {
         bail!("--body-file - and --probes-json - cannot both read stdin");
     }
-    if body_file.is_some() || scaffold.is_some() || probes_json.is_some() {
+    if body_file.is_some()
+        || scaffold.is_some()
+        || probes_json.is_some()
+        || !probes.is_empty()
+        || !withdraw_probes.is_empty()
+    {
         if role != ExecutionRole::Lead {
             eprintln!(
                 "role refusal: {} may not brief (requires lead)",
@@ -782,18 +789,27 @@ pub fn brief(
             None => String::new(),
         };
         let body = super::scaffold::filled(&template, &content);
-        let acceptance_probes = probes_json
-            .as_deref()
-            .map(read_acceptance_probes)
-            .transpose()?
-            .unwrap_or_default();
-        let base_revision = Some(gitio::rev_parse(
-            &ctx.cwd,
-            base.as_deref().unwrap_or("HEAD"),
-        )?);
         let must_read = super::selection::read_requirements(ctx, &must_read)?;
         let store = ctx.store()?;
         let (change_id, _transition, state) = locked_state(&store, reference)?;
+        let previous = state.latest_brief();
+        let acceptance_probes = match probes_json.as_deref() {
+            Some(source) => read_acceptance_probes(source)?,
+            None => edit_acceptance_probes(
+                previous
+                    .map(|brief| brief.acceptance_probes.as_slice())
+                    .unwrap_or_default(),
+                &probes,
+                &withdraw_probes,
+            )?,
+        };
+        let base_revision = Some(gitio::rev_parse(
+            &ctx.cwd,
+            base.as_deref()
+                .or_else(|| previous.and_then(|brief| brief.base_revision.as_deref()))
+                .unwrap_or("HEAD"),
+        )?);
+        let output_base_revision = base_revision.clone();
         warn_on_gate_shaped_probes(ctx, &state, &acceptance_probes)?;
         let next_version = state.briefs.len() + 1;
         let causes = resolve_brief_causes(&state, &caused_by, cause_note.as_deref())?;
@@ -848,6 +864,7 @@ pub fn brief(
                     "brief": {
                         "version": next_version,
                         "event_id": event_id,
+                        "base_revision": output_base_revision,
                         "plan_ref": output_plan_ref,
                         "plan_slice": output_plan_slice,
                         "plan_source": event_plan_source,
@@ -857,6 +874,9 @@ pub fn brief(
             );
         } else {
             println!("brief: v{next_version}");
+            if let Some(base) = output_base_revision {
+                println!("base-revision: {base}");
+            }
             for requirement in &must_read {
                 println!("must-read: {requirement}");
             }
@@ -987,6 +1007,47 @@ fn warn_on_gate_shaped_probes(
 /// `printf 'a  b'` do different things.
 fn same_command(left: &str, right: &str) -> bool {
     left.trim() == right.trim()
+}
+
+fn edit_acceptance_probes(
+    previous: &[AcceptanceProbe],
+    declarations: &[String],
+    withdrawals: &[String],
+) -> Result<Vec<AcceptanceProbe>> {
+    let mut probes = previous.to_vec();
+    let mut names = BTreeSet::new();
+    for declaration in declarations {
+        let (name, command) = declaration
+            .split_once('=')
+            .context("--probe requires NAME=COMMAND")?;
+        crate::ids::validate_slug(name)?;
+        if command.trim().is_empty() {
+            bail!("acceptance probe {name:?} has an empty command");
+        }
+        if !names.insert(name) {
+            bail!("duplicate acceptance probe name {name:?}");
+        }
+        if withdrawals.iter().any(|withdrawn| withdrawn == name) {
+            bail!("acceptance probe {name:?} cannot be declared and withdrawn together");
+        }
+        let declaration = AcceptanceProbe {
+            name: name.to_string(),
+            command: command.to_string(),
+        };
+        if let Some(existing) = probes.iter_mut().find(|probe| probe.name == name) {
+            *existing = declaration;
+        } else {
+            probes.push(declaration);
+        }
+    }
+    for name in withdrawals {
+        let index = probes
+            .iter()
+            .position(|probe| &probe.name == name)
+            .with_context(|| format!("unknown acceptance probe {name:?}"))?;
+        probes.remove(index);
+    }
+    Ok(probes)
 }
 
 fn read_acceptance_probes(source: &str) -> Result<Vec<AcceptanceProbe>> {

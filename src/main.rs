@@ -575,7 +575,8 @@ enum Cmd {
         /// Optional title for a newly recorded brief
         #[arg(long)]
         title: Option<String>,
-        /// Revision whose source and premises this brief was checked against
+        /// Revision whose source and premises this brief was checked against.
+        /// Defaults to the previous brief's base, or HEAD for the first brief
         #[arg(long)]
         base: Option<String>,
         /// Read one derived brief version instead of the latest
@@ -602,9 +603,18 @@ enum Cmd {
         #[arg(long)]
         plan_slice: Option<String>,
         /// Named acceptance probes bound to this brief: a JSON array inline, a
-        /// path to one, or '-' for stdin
+        /// path to one, or '-' for stdin. Replaces the complete probe array
         #[arg(long)]
         probes_json: Option<String>,
+        /// Add or update a named acceptance probe (repeatable NAME=COMMAND).
+        /// Other probes carry forward from the previous brief. Mutually
+        /// exclusive with --probes-json
+        #[arg(long, conflicts_with = "probes_json")]
+        probe: Vec<String>,
+        /// Withdraw a named probe (repeatable); other probes carry forward.
+        /// Unknown names are refused. Mutually exclusive with --probes-json
+        #[arg(long, conflicts_with = "probes_json")]
+        withdraw_probe: Vec<String>,
         /// Earlier ledger fact that caused this version (repeatable):
         /// finding:<id>, verdict:<event> naming a changes-requested verdict,
         /// or blocked-on:<event>, each on this change. v1 refuses a cause;
@@ -3491,6 +3501,8 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             plan_ref,
             plan_slice,
             probes_json,
+            probe,
+            withdraw_probe,
             caused_by,
             cause_note,
             must_read,
@@ -3509,6 +3521,8 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 plan_ref,
                 plan_slice,
                 probes_json,
+                probe,
+                withdraw_probe,
                 caused_by,
                 cause_note,
                 must_read,

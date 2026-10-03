@@ -572,6 +572,8 @@ fn brief_base_is_resolved_at_write_time_and_does_not_follow_head() {
             "-",
             "--cause-note",
             "fixture revision",
+            "--base",
+            "HEAD",
         ])
         .write_stdin("contract at B\n")
         .assert()
@@ -727,4 +729,176 @@ fn brief_closed_change_refuses_new_versions() {
         .assert()
         .success()
         .stdout(format!("base-revision: {base_revision}\nstill readable\n"));
+}
+
+#[test]
+fn brief_revision_preserves_base_and_prints_selected_revision() {
+    let repo = Repo::new();
+    begin(&repo, "preserved-base");
+    let base = repo.head(&repo.root);
+    record(&repo, "preserved-base", "first", None);
+    repo.commit(&repo.root, "later.txt", "later", "feat: advance head");
+    let output = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "brief",
+                "preserved-base",
+                "--body-file",
+                "-",
+                "--cause-note",
+                "revision",
+            ])
+            .write_stdin("second"),
+    );
+    let brief = json_stdout(
+        repo.arc(&repo.root)
+            .args(["brief", "preserved-base", "--json"]),
+    );
+    assert_eq!(brief["brief"]["base_revision"], base);
+    assert!(output.contains(&format!("base-revision: {base}")));
+}
+
+#[test]
+fn brief_probe_flags_carry_forward_and_withdraw_named_probe() {
+    let repo = Repo::new();
+    begin(&repo, "probe-flags");
+    stdout(
+        repo.arc(&repo.root)
+            .args([
+                "brief",
+                "probe-flags",
+                "--body-file",
+                "-",
+                "--probe",
+                "first=test x = x",
+                "--probe",
+                "second=false",
+            ])
+            .write_stdin("first"),
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args([
+                "brief",
+                "probe-flags",
+                "--body-file",
+                "-",
+                "--cause-note",
+                "withdraw",
+                "--withdraw-probe",
+                "second",
+                "--probe",
+                "third=true",
+            ])
+            .write_stdin("second"),
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args([
+                "brief",
+                "probe-flags",
+                "--body-file",
+                "-",
+                "--cause-note",
+                "body revision",
+            ])
+            .write_stdin("third"),
+    );
+    let brief = json_stdout(
+        repo.arc(&repo.root)
+            .args(["brief", "probe-flags", "--json"]),
+    );
+    assert_eq!(
+        brief["brief"]["acceptance_probes"],
+        serde_json::json!([
+            {"name":"first", "command":"test x = x"}, {"name":"third", "command":"true"}
+        ])
+    );
+}
+
+#[test]
+fn brief_probe_edits_validate_before_recording_and_json_replaces() {
+    let repo = Repo::new();
+    begin(&repo, "probe-edits");
+    stdout(
+        repo.arc(&repo.root)
+            .args([
+                "brief",
+                "probe-edits",
+                "--body-file",
+                "-",
+                "--probe",
+                "first=false",
+            ])
+            .write_stdin("first"),
+    );
+    for flags in [
+        vec!["--probe", "missing-equals"],
+        vec!["--probe", "first= "],
+        vec!["--probe", "first=true", "--probe", "first=false"],
+        vec!["--withdraw-probe", "absent"],
+        vec!["--probe", "first=true", "--withdraw-probe", "first"],
+        vec!["--probe", "first=true", "--probes-json", "[]"],
+    ] {
+        repo.arc(&repo.root)
+            .args([
+                "brief",
+                "probe-edits",
+                "--body-file",
+                "-",
+                "--cause-note",
+                "edit",
+            ])
+            .args(flags)
+            .write_stdin("second")
+            .assert()
+            .failure();
+    }
+    stdout(
+        repo.arc(&repo.root)
+            .args([
+                "brief",
+                "probe-edits",
+                "--body-file",
+                "-",
+                "--cause-note",
+                "edit",
+                "--probe",
+                "first=test x = x",
+            ])
+            .write_stdin("second"),
+    );
+    let brief = json_stdout(
+        repo.arc(&repo.root)
+            .args(["brief", "probe-edits", "--json"]),
+    );
+    assert_eq!(
+        brief["brief"]["acceptance_probes"],
+        serde_json::json!([
+            {"name":"first", "command":"test x = x"}
+        ])
+    );
+    repo.arc(&repo.root)
+        .args(["brief", "probe-edits", "--version", "3"])
+        .assert()
+        .failure();
+    stdout(
+        repo.arc(&repo.root)
+            .args([
+                "brief",
+                "probe-edits",
+                "--body-file",
+                "-",
+                "--cause-note",
+                "replacement",
+                "--probes-json",
+                "[]",
+            ])
+            .write_stdin("third"),
+    );
+    let brief = json_stdout(
+        repo.arc(&repo.root)
+            .args(["brief", "probe-edits", "--json"]),
+    );
+    assert_eq!(brief["brief"]["acceptance_probes"], serde_json::json!([]));
 }
