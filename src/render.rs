@@ -1223,9 +1223,8 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
             Blocker::NeedsRebase => {
                 let _ = writeln!(
                     out,
-                    "  - needs rebase: target {} moved with conflicting changes; run `arc rebase \
-                     {}`, then rerun the gates and re-review",
-                    state.target_branch, state.change_id
+                    "  - needs rebase: target {} conflicts or is not an ancestor of the approved head. {}",
+                    state.target_branch, crate::integration::divergence_guidance(state, &state.target_branch)
                 );
             }
             Blocker::MergedTreeUnevaluated => {
@@ -1606,7 +1605,9 @@ fn blocker_title(blocker: Blocker) -> &'static str {
         Blocker::ForkBranch => "change sits on fork work",
         Blocker::Iterating => "change is iterating",
         Blocker::BlockedByChanges => "prerequisite changes unresolved",
-        Blocker::NeedsRebase => "target branch conflicts with change",
+        Blocker::NeedsRebase => {
+            "target branch requires rebase under the selected integration shape"
+        }
         Blocker::MergedTreeUnevaluated => "merged tree has no gate evidence",
         Blocker::BlockingFindings => "open blocking findings",
         Blocker::NoValidApproval => "missing or stale approval",

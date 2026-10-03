@@ -27,10 +27,11 @@ pub fn check_selection(
     tags: Vec<String>,
     explain: bool,
     json: bool,
+    shape: Option<integration::Shape>,
 ) -> Result<i32> {
     match (reference, tags.is_empty()) {
-        (Some(reference), true) => check(ctx, reference, explain, json),
-        (None, false) => check_tagged(ctx, normalize_tags(tags)?),
+        (Some(reference), true) => check(ctx, reference, explain, json, shape),
+        (None, false) => check_tagged(ctx, normalize_tags(tags)?, shape),
         (Some(_), false) => bail!("provide a change or --tag, not both"),
         (None, true) => bail!("provide a change or at least one --tag"),
     }
@@ -1308,7 +1309,7 @@ pub fn done(
             },
         )?;
     }
-    check(ctx, reference, false, false)
+    check(ctx, reference, false, false, None)
 }
 
 /// Replay a change's branch onto its target branch and record the result.
@@ -2233,30 +2234,6 @@ pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Resul
             if shape == integration::Shape::FfOnly && message.is_some() {
                 bail!("--message names a merge commit; select --shape no-ff");
             }
-            // A fork's branch cannot integrate from anywhere, so declaring an
-            // obligation for it would record review owed on work that can
-            // never ship. The refusal is a precondition failure rather than a
-            // merge that needs a reviewer later. The declaration precedes the
-            // merge because the decision reads it as the waiver, so every
-            // other failure leaves it on the ledger, where a retry with the
-            // same reason reuses it — but never under `--dry-run`, which
-            // promises to write nothing.
-            let on_fork = {
-                let store = ctx.store()?;
-                let (_, state) = ctx.load_state(&store, reference)?;
-                super::fork::fork_slug_for_branch(&ctx.cwd, &state.branch)?.is_some()
-            };
-            if shape == integration::Shape::FfOnly && debt.is_some() {
-                let store = ctx.store()?;
-                let (_, state) = ctx.load_state(&store, reference)?;
-                let target = into.as_deref().unwrap_or(&state.target_branch);
-                if ff_diverged(ctx, &state, target)? {
-                    return Ok(refuse_divergence(&state));
-                }
-            }
-            if let Some(debt) = debt.filter(|_| !dry_run && !on_fork) {
-                super::declare_debt(ctx, reference, debt.reason, debt.kind)?;
-            }
             integrate_one(
                 ctx,
                 reference,
@@ -2270,6 +2247,7 @@ pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Resul
                     json,
                     expect_basis,
                     cleanup_checkout: None,
+                    debt: debt.filter(|_| !dry_run),
                 },
             )
         }
@@ -2372,6 +2350,7 @@ fn integrate_queue(
     let mut steps: Vec<(String, QueueStep)> = Vec::new();
     let mut stop_code = 0;
     let mut projected_targets = BTreeMap::new();
+    let mut projected_closures = std::collections::BTreeSet::new();
     let mut remaining = order.iter();
     for change_id in remaining.by_ref() {
         println!();
@@ -2403,7 +2382,14 @@ fn integrate_queue(
         let shape = style.shape();
         integration_history(&queue_ctx, &state, &state.target_branch)?;
         let step = if dry_run {
-            queue_dry_run(&queue_ctx, &store, change_id, shape, &mut projected_targets)?
+            queue_dry_run(
+                &queue_ctx,
+                &store,
+                change_id,
+                shape,
+                &mut projected_targets,
+                &mut projected_closures,
+            )?
         } else {
             queue_step(
                 &queue_ctx,
@@ -2430,7 +2416,9 @@ fn integrate_queue(
     for (change_id, step) in &steps {
         match step {
             QueueStep::Landed(merged) => println!("  landed: {change_id} at {merged}"),
-            QueueStep::Planned(target) => println!("  would land: {change_id} into {target}"),
+            QueueStep::Planned(target) => {
+                println!("  would land: {change_id} into {target} (conditional)")
+            }
             QueueStep::Skipped(reason) => println!("  skipped: {change_id} — {reason}"),
             QueueStep::Stopped { reason, .. } => println!("  stopped: {change_id} — {reason}"),
         }
@@ -2459,11 +2447,11 @@ fn queue_step(
 
     if shape == integration::Shape::FfOnly && ff_diverged(ctx, &st, &st.target_branch)? {
         return Ok(QueueStep::Stopped {
-            code: refuse_divergence(&st),
+            code: refuse_divergence(&st, &st.target_branch),
             reason: "target diverged; rebase and fresh review or declared debt required".into(),
         });
     }
-    let mut report = ctx.report(store, &st)?;
+    let mut report = ctx.report_for_integration(store, &st, &st.target_branch, shape)?;
     if shape == integration::Shape::NoFf && report.needs_rebase {
         let code = rebase(ctx, change_id, false, None, false)?;
         if code != 0 {
@@ -2473,7 +2461,7 @@ fn queue_step(
             });
         }
         let st = store.state(change_id)?;
-        report = ctx.report(store, &st)?;
+        report = ctx.report_for_integration(store, &st, &st.target_branch, shape)?;
     }
 
     // Only where nothing has answered for the content that would ship: a
@@ -2489,7 +2477,7 @@ fn queue_step(
         let target = st.target_branch.clone();
         let code = verify_against(ctx, store, change_id, &st, &target, None, true)?;
         let st = store.state(change_id)?;
-        report = ctx.report(store, &st)?;
+        report = ctx.report_for_integration(store, &st, &st.target_branch, shape)?;
         if code != 0 {
             let failed = report
                 .gates
@@ -2555,48 +2543,83 @@ fn queue_dry_run(
     change_id: &str,
     shape: integration::Shape,
     projected_targets: &mut BTreeMap<String, String>,
+    projected_closures: &mut std::collections::BTreeSet<String>,
 ) -> Result<QueueStep> {
-    let st = store.state(change_id)?;
+    let mut st = store.state(change_id)?;
     if st.is_closed() {
         println!("dry-run: would skip {change_id} ({})", change_status(&st));
         return Ok(QueueStep::Skipped(change_status(&st).to_string()));
     }
-    if shape == integration::Shape::FfOnly
+    st.blocked_by.retain(|id| !projected_closures.contains(id));
+    // Topology is evaluated against the projected destination, while review,
+    // findings, holds and iteration remain facts of the observed ledger.
+    let report =
+        ctx.report_for_integration(store, &st, &st.target_branch, integration::Shape::NoFf)?;
+    let actual = gitio::branch_head(&ctx.cwd, &st.target_branch).ok();
+    let revision = projected_targets.get(&st.target_branch).or(actual.as_ref());
+    let mut advancing = None;
+    let mut conflicts = report.needs_rebase;
+    if report.state == "open"
         && !st.iterating
-        && gitio::branch_exists(&ctx.cwd, &st.target_branch)
-        && super::fork::fork_slug_for_branch(&ctx.cwd, &st.branch)?.is_none()
+        && report.fork.is_none()
         && contribution_policy(ctx, &st)?.is_none()
     {
-        if let Some(patchset) = st.latest_patchset() {
-            let actual = gitio::branch_head(&ctx.cwd, &st.target_branch)?;
-            let revision = projected_targets.get(&st.target_branch).unwrap_or(&actual);
-            let contained = gitio::is_ancestor(&ctx.cwd, &patchset.head, revision)?;
-            if !contained && !gitio::is_ancestor(&ctx.cwd, revision, &patchset.head)? {
+        if let (Some(patchset), Some(revision)) = (st.latest_patchset(), revision) {
+            let (ancestor, contained) = integration::ancestry(&ctx.cwd, revision, &patchset.head)?;
+            if shape == integration::Shape::FfOnly && !integration::ff_eligible(ancestor, contained)
+            {
                 return Ok(QueueStep::Stopped {
-                    code: refuse_divergence(&st),
+                    code: refuse_divergence(&st, &st.target_branch),
                     reason: "target diverged; rebase and fresh review or declared debt required"
                         .into(),
                 });
             }
-            if !contained {
-                projected_targets.insert(st.target_branch.clone(), patchset.head.clone());
+            conflicts = gitio::merge_outcome(&ctx.cwd, revision, &patchset.head)?.conflicts;
+            if !contained && shape == integration::Shape::FfOnly {
+                advancing = Some(patchset.head.clone());
             }
         }
     }
-    let report = ctx.report(store, &st)?;
-    if shape == integration::Shape::NoFf && report.needs_rebase {
+    let known = report
+        .blockers()
+        .iter()
+        .copied()
+        .filter(|blocker| {
+            !matches!(
+                blocker,
+                status::Blocker::NeedsRebase
+                    | status::Blocker::GatesNotGreen
+                    | status::Blocker::MergedTreeUnevaluated
+            )
+        })
+        .collect::<Vec<_>>();
+    if let Some(blocker) = known.first() {
+        eprint!("{}", render::blocker_explanation(&st, &report));
+        return Ok(QueueStep::Stopped {
+            code: blocker.exit_code(),
+            reason: blocker.as_str().into(),
+        });
+    }
+    if shape == integration::Shape::NoFf && conflicts {
         println!(
-            "dry-run: would replay {change_id} onto {} first",
+            "dry-run: would replay {change_id} onto {} first; fresh review or debt is conditional",
             st.target_branch
         );
     }
-    for gate in report.gates.iter().filter(|gate| !gate.green_at_head) {
-        println!("dry-run: would run gate {} for {change_id}", gate.name);
+    for gate in report.gates.iter().filter(|gate| {
+        !gate.green_at_head
+            || advancing.is_some() && projected_targets.contains_key(&st.target_branch)
+    }) {
+        println!(
+            "dry-run: would run gate {} for {change_id}; landing is conditional on success",
+            gate.name
+        );
     }
-    println!(
-        "dry-run: would integrate {change_id} into {}",
-        st.target_branch
-    );
+    println!("dry-run: would integrate {change_id} into {}; conditional on fresh checkout guards, authorization and required gates", st.target_branch);
+    if let Some(head) = advancing {
+        projected_targets.insert(st.target_branch.clone(), head);
+    }
+    projected_closures.insert(change_id.to_string());
     Ok(QueueStep::Planned(st.target_branch))
 }
 
@@ -2604,6 +2627,7 @@ fn queue_dry_run(
 #[derive(Default)]
 struct SingleOptions {
     cleanup_checkout: Option<PathBuf>,
+    debt: Option<DebtDeclaration>,
     shape: integration::Shape,
     dry_run: bool,
     json: bool,
@@ -2783,6 +2807,7 @@ fn integrate_one(
 ) -> Result<i32> {
     let SingleOptions {
         cleanup_checkout,
+        debt,
         shape,
         dry_run,
         json,
@@ -2799,7 +2824,7 @@ fn integrate_one(
         }
     }
     let initial = store.state(&change_id)?;
-    if initial.iterating {
+    if initial.iterating && (dry_run || debt.is_none()) {
         eprintln!(
             "change declares it is iterating; clear it with arc iterating {} --off",
             initial.change_id
@@ -2824,16 +2849,16 @@ fn integrate_one(
     // target worktree without allowing an integration/metadata lock cycle.
     let target_lock = store.lock_target(&target)?;
     let transition = store.lock_transition(&change_id)?;
-    let st = store.state(&change_id)?;
+    let mut st = store.state(&change_id)?;
     integration_history(ctx, &st, &target)?;
     if st.is_closed() && matches!(closed_behavior, ClosedBehavior::SkipTagged) {
         println!("{}: {}", st.change_id, change_status(&st));
         return Ok(0);
     }
     if shape == integration::Shape::FfOnly && ff_diverged(ctx, &st, &target)? {
-        let code = refuse_divergence(&st);
+        let code = refuse_divergence(&st, &target);
         if let Some(prior) = &expect_basis {
-            if let Ok(report) = ctx.report(&store, &st) {
+            if let Ok(report) = ctx.report_for_integration(&store, &st, &target, shape) {
                 let outcome = integration::decide(
                     integration_facts(ctx, &store, &st, &report, &target, shape),
                     Some(prior),
@@ -2845,6 +2870,12 @@ fn integrate_one(
         }
         return Ok(code);
     }
+    if super::fork::fork_slug_for_branch(&ctx.cwd, &st.branch)?.is_none() {
+        if let Some(debt) = debt {
+            super::audit::declare_debt_locked(ctx, &store, &st, &debt.reason, debt.kind)?;
+            st = store.state(&change_id)?;
+        }
+    }
     // Integration is the last command that reads the change's worktree, and
     // `--cleanup` removes it. Whatever an executor spooled there is filed
     // before anything can delete the only copy, and before readiness can turn
@@ -2852,7 +2883,7 @@ fn integrate_one(
     if let Some(worktree) = st.worktree.as_deref() {
         crate::journal::promote_worktree_spool(ctx, Path::new(worktree));
     }
-    let report = ctx.report(&store, &st)?;
+    let report = ctx.report_for_integration(&store, &st, &target, shape)?;
     if let Some(claim) = &st.claim {
         let timing = state::claim_timing_at(claim, chrono::Utc::now());
         let caller = state::ClaimIdentity {
@@ -2877,7 +2908,7 @@ fn integrate_one(
     let plan = match outcome.decision {
         Decision::Refused(refusal) => {
             let code = match refusal {
-                Refusal::Diverged => Ok(refuse_divergence(&st)),
+                Refusal::Diverged => Ok(refuse_divergence(&st, &target)),
                 Refusal::NotReady => {
                     eprint!("{}", render::blocker_explanation(&st, &report));
                     Ok(status::check_exit_code(&report))
@@ -2941,17 +2972,25 @@ fn integrate_one(
     let merged = if already_contained {
         old_target.clone()
     } else if actual_shape == crate::model::IntegrationShape::FastForward {
-        let target_ref = format!("refs/heads/{target}");
-        gitio::git(
-            &wt,
-            &["update-ref", &target_ref, &approved_head, &old_target],
-        )
-        .context("fast-forward refused: target moved during integration; nothing recorded")?;
-        gitio::git(&wt, &["read-tree", "-u", "-m", &old_target, &approved_head])
-            .context("fast-forward checkout update failed; inspect target before retrying")?;
-        let head = gitio::head(&wt)?;
-        if head != approved_head {
-            bail!("fast-forward target moved during integration: expected {approved_head}, found {head}; nothing recorded");
+        if gitio::current_branch(&wt)?.as_deref() != Some(target.as_str())
+            || gitio::head(&wt)? != old_target
+        {
+            bail!("fast-forward target moved during integration before merge; nothing recorded");
+        }
+        if let Err(error) = gitio::git(&wt, &["merge", "--ff-only", "--no-edit", &approved_head]) {
+            return Err(ff_failure(&wt, &target, &approved_head, error));
+        }
+        let head =
+            gitio::head(&wt).map_err(|error| ff_failure(&wt, &target, &approved_head, error))?;
+        if head != approved_head
+            || gitio::branch_head(&wt, &target).ok().as_deref() != Some(approved_head.as_str())
+        {
+            return Err(ff_failure(
+                &wt,
+                &target,
+                &approved_head,
+                anyhow::anyhow!("fast-forward target moved during integration"),
+            ));
         }
         head
     } else {
@@ -2976,14 +3015,20 @@ fn integrate_one(
     };
     // Parents say which commits were merged; the tree says what the merge
     // carries, and only the tree is what any gate ever ran against. A merge
-    // resolving to something else ships content nothing evaluated, so it is
-    // undone rather than recorded. An already-contained head ships the target
-    // tree the guard evaluated.
+    // resolving to something else ships content nothing evaluated. A no-ff
+    // merge is undone; a fast-forward is left for operator recovery. An
+    // already-contained head ships the target tree the guard evaluated.
     if let Some(expected) = &evaluated_tree {
-        let shipped = gitio::commit_tree(&wt, &merged)?;
+        let shipped = gitio::commit_tree(&wt, &merged).map_err(|error| {
+            if actual_shape == crate::model::IntegrationShape::FastForward {
+                ff_failure(&wt, &target, &approved_head, error)
+            } else {
+                error
+            }
+        })?;
         if &shipped != expected {
             if actual_shape == crate::model::IntegrationShape::FastForward {
-                bail!("fast-forward {merged} carries tree {shipped}, not the evaluated tree {expected}; nothing recorded");
+                return Err(ff_failure(&wt, &target, &approved_head, anyhow::anyhow!("fast-forward {merged} carries tree {shipped}, not the evaluated tree {expected}")));
             }
             let _ = gitio::git(&wt, &["reset", "--hard", &old_target]);
             bail!(
@@ -2994,10 +3039,16 @@ fn integrate_one(
     }
 
     if actual_shape == crate::model::IntegrationShape::FastForward
-        && (gitio::head(&wt)? != approved_head
-            || gitio::branch_head(&wt, &target)? != approved_head)
+        && (gitio::head(&wt).ok().as_deref() != Some(approved_head.as_str())
+            || gitio::branch_head(&wt, &target).ok().as_deref() != Some(approved_head.as_str())
+            || gitio::current_branch(&wt).ok().flatten().as_deref() != Some(target.as_str()))
     {
-        bail!("fast-forward target moved during integration; nothing recorded");
+        return Err(ff_failure(
+            &wt,
+            &target,
+            &approved_head,
+            anyhow::anyhow!("fast-forward target moved during integration"),
+        ));
     }
     let ev = ctx.event(
         &store,
@@ -3014,7 +3065,7 @@ fn integrate_one(
         },
     );
     store.append_event(&ev)?;
-    // The merge and closure event are the atomic integration transition.
+    // Git updates the checkout before the ledger records the closure.
     // Retention and worktree cleanup are post-closure maintenance and may
     // invoke Git hooks or other arc commands, so no state lock spans them.
     drop(transition);
@@ -3434,12 +3485,35 @@ fn ff_diverged(ctx: &Ctx, st: &ChangeState, target: &str) -> Result<bool> {
         return Ok(false);
     };
     let revision = gitio::branch_head(&ctx.cwd, target)?;
-    Ok(!gitio::is_ancestor(&ctx.cwd, &patchset.head, &revision)?
-        && !gitio::is_ancestor(&ctx.cwd, &revision, &patchset.head)?)
+    let (ancestor, contained) = integration::ancestry(&ctx.cwd, &revision, &patchset.head)?;
+    Ok(!integration::ff_eligible(ancestor, contained))
 }
 
-fn refuse_divergence(st: &ChangeState) -> i32 {
-    eprintln!("Cannot integrate {}: target is not an ancestor of the approved head; run arc rebase {} --verify. The rewritten head requires fresh review or declared debt; existing review obligations remain owed.", st.change_id, st.change_id);
+fn ff_failure(
+    checkout: &Path,
+    target: &str,
+    approved: &str,
+    cause: anyhow::Error,
+) -> anyhow::Error {
+    let revision =
+        gitio::branch_head(checkout, target).unwrap_or_else(|error| format!("unreadable: {error}"));
+    let head = gitio::head(checkout).unwrap_or_else(|error| format!("unreadable: {error}"));
+    let branch = gitio::current_branch(checkout)
+        .map(|branch| branch.unwrap_or_else(|| "detached".into()))
+        .unwrap_or_else(|error| format!("unreadable: {error}"));
+    let index = gitio::git(checkout, &["write-tree"])
+        .unwrap_or_else(|error| format!("unreadable: {error}"));
+    let dirt = gitio::git(checkout, &["status", "--porcelain"])
+        .unwrap_or_else(|error| format!("unreadable: {error}"));
+    anyhow::anyhow!("{cause}; no integration event was recorded. refs/heads/{target}={revision}; checkout HEAD={head} ({branch}); index tree={index}; checkout status={dirt:?}. Preserve local and competing work, inspect git diff and git reflog in {}. If refs/heads/{target} is the intended destination and this checkout still holds {target}, reconcile it with git restore --source=refs/heads/{target} --staged --worktree -- ., then retry arc integrate for approved head {approved}; arc performs no reset", checkout.display())
+}
+
+fn refuse_divergence(st: &ChangeState, target: &str) -> i32 {
+    eprintln!(
+        "Cannot integrate {}: target {target} is not an ancestor of the approved head. {}",
+        st.change_id,
+        integration::divergence_guidance(st, target)
+    );
     status::Blocker::NeedsRebase.exit_code()
 }
 
@@ -3468,7 +3542,7 @@ fn integration_facts(
     // Read after the first basis: agreement between the two is the evidence
     // that the configuration held still across the decision.
     let confirmation = ctx
-        .report(store, st)
+        .report_for_integration(store, st, target, shape)
         .map(|confirmation| integration::Confirmation {
             ready: confirmation.integrate_ready(),
             basis: authorization_basis(ctx, store, st, &confirmation, &patchset_id),
@@ -3503,13 +3577,13 @@ fn integration_facts(
         Ok(checkout) => gitio::untracked_and_ignored(&checkout.path),
         Err(_) => Err(unobserved()),
     };
-    let already_contained = match merge_inputs {
-        Some((revision, head)) => gitio::is_ancestor(&ctx.cwd, head, revision),
+    let ancestry = match merge_inputs {
+        Some((revision, head)) => integration::ancestry(&ctx.cwd, revision, head),
         None => Err(unmerged()),
     };
-    let target_is_ancestor = match merge_inputs {
-        Some((revision, head)) => gitio::is_ancestor(&ctx.cwd, revision, head),
-        None => Err(unmerged()),
+    let (target_is_ancestor, already_contained) = match ancestry {
+        Ok((ancestor, contained)) => (Ok(ancestor), Ok(contained)),
+        Err(error) => (Err(anyhow::anyhow!("{error}")), Err(error)),
     };
     IntegrationFacts {
         lifecycle_allows_integration: report.state == "open"
@@ -3548,12 +3622,12 @@ fn integrate_dry_run_json(
     ctx.ensure_declared_actor(store)?;
     ctx.ensure_target_declares_actor(st)?;
     if shape == integration::Shape::FfOnly && ff_diverged(ctx, st, target)? {
-        return Ok(refuse_divergence(st));
+        return Ok(refuse_divergence(st, target));
     }
-    let report = ctx.report(store, st)?;
+    let report = ctx.report_for_integration(store, st, target, shape)?;
     let facts = integration_facts(ctx, store, st, &report, target, shape);
     let plan = match integration::decide(facts, None).decision {
-        Decision::Refused(Refusal::Diverged) => return Ok(refuse_divergence(st)),
+        Decision::Refused(Refusal::Diverged) => return Ok(refuse_divergence(st, target)),
         Decision::Refused(Refusal::NotReady) => {
             eprint!("{}", render::blocker_explanation(st, &report));
             return Ok(status::check_exit_code(&report));
@@ -3594,7 +3668,7 @@ fn integrate_dry_run(
     ctx.ensure_declared_actor(store)?;
     ctx.ensure_target_declares_actor(st)?;
     if let Some(contribution) = contribution_policy(ctx, st)? {
-        let report = ctx.report(store, st)?;
+        let report = ctx.report_for_integration(store, st, target, shape)?;
         if !report.integrate_ready() {
             eprint!("{}", render::blocker_explanation(st, &report));
             println!(
@@ -3618,11 +3692,11 @@ fn integrate_dry_run(
         return Ok(0);
     }
     if shape == integration::Shape::FfOnly && ff_diverged(ctx, st, target)? {
-        return Ok(refuse_divergence(st));
+        return Ok(refuse_divergence(st, target));
     }
     let checkout = target_checkout(ctx, st, target)?;
     checkout_tracked_dirt(&checkout.path)?;
-    let report = ctx.report(store, st)?;
+    let report = ctx.report_for_integration(store, st, target, shape)?;
     if !report.integrate_ready() {
         eprint!("{}", render::blocker_explanation(st, &report));
         println!(
@@ -3644,7 +3718,7 @@ fn integrate_dry_run(
     // Git would report the merge up to date and create no merge commit. A
     // plan that named parents for a merge that cannot exist would describe a
     // different integration than the one the guard would perform.
-    let already_contained = gitio::is_ancestor(&ctx.cwd, &approved_head, &target_head)?;
+    let (_, already_contained) = integration::ancestry(&ctx.cwd, &target_head, &approved_head)?;
     let msg = message
         .map(str::to_string)
         .unwrap_or_else(|| format!("merge({}): {}", st.slug, st.title));
@@ -3921,10 +3995,30 @@ fn advise_plan_promotions(store: &Store, st: &crate::state::ChangeState) {
     }
 }
 
-fn check(ctx: &Ctx, reference: &str, explain: bool, json: bool) -> Result<i32> {
+fn check(
+    ctx: &Ctx,
+    reference: &str,
+    explain: bool,
+    json: bool,
+    shape: Option<integration::Shape>,
+) -> Result<i32> {
     let store = ctx.store()?;
     let (change_id, st) = ctx.load_state(&store, reference)?;
-    let mut report = ctx.report(&store, &st)?;
+    let shape =
+        if st.is_closed() || crate::declarations::for_change(&ctx.cwd, &st)?.target_unreadable {
+            shape.unwrap_or_default()
+        } else {
+            crate::style::resolved_style(
+                &ctx.cwd,
+                &st.target_branch,
+                crate::style::StyleFlags {
+                    shape,
+                    ..Default::default()
+                },
+            )?
+            .shape()
+        };
+    let mut report = ctx.report_for_integration(&store, &st, &st.target_branch, shape)?;
     let code = status::check_exit_code(&report);
     let states = store.readable_states()?;
     let debts = super::messaging::collect_debts(ctx, &states)?;
@@ -3990,7 +4084,7 @@ fn check(ctx: &Ctx, reference: &str, explain: bool, json: bool) -> Result<i32> {
     Ok(code)
 }
 
-fn check_tagged(ctx: &Ctx, tags: Vec<String>) -> Result<i32> {
+fn check_tagged(ctx: &Ctx, tags: Vec<String>, shape: Option<integration::Shape>) -> Result<i32> {
     let store = ctx.store()?;
     let states = store.readable_states()?;
     let selected = states
@@ -4006,7 +4100,22 @@ fn check_tagged(ctx: &Ctx, tags: Vec<String>) -> Result<i32> {
             println!("{}: {}", state.change_id, change_status(state));
             continue;
         }
-        let report = ctx.report(&store, state)?;
+        let shape = if state.is_closed()
+            || crate::declarations::for_change(&ctx.cwd, state)?.target_unreadable
+        {
+            shape.unwrap_or_default()
+        } else {
+            crate::style::resolved_style(
+                &ctx.cwd,
+                &state.target_branch,
+                crate::style::StyleFlags {
+                    shape,
+                    ..Default::default()
+                },
+            )?
+            .shape()
+        };
+        let report = ctx.report_for_integration(&store, state, &state.target_branch, shape)?;
         let code = status::check_exit_code(&report);
         println!(
             "{}: {}",

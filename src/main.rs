@@ -844,6 +844,8 @@ enum Cmd {
         off: bool,
     },
     /// Machine-readable status report (the versioned arc-status/27 schema).
+    /// Readiness uses the integration shape resolved for the recorded target.
+    /// Use check --shape to evaluate an explicit alternative.
     /// comparison_patchset names the closure's source patchset when recorded,
     /// otherwise the newest snapshot; head_matches_comparison_patchset compares
     /// its head. head_matches_latest_patchset always compares the newest snapshot.
@@ -1014,7 +1016,7 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ReplicaCmd,
     },
-    /// Integration preflight; exit code identifies the first blocker
+    /// Integration preflight under the resolved target shape or --shape; exit code identifies the first blocker
     ///
     /// Unreadable neighboring changes are named with their errors on stderr;
     /// an unreadable selected change fails and an unreadable prerequisite
@@ -1024,6 +1026,9 @@ enum Cmd {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
         change: Option<String>,
+        /// Integration shape to evaluate; defaults resolve for each selected target
+        #[arg(long, value_enum)]
+        shape: Option<integration::Shape>,
         /// Check every change carrying all supplied tags
         #[arg(long)]
         tag: Vec<String>,
@@ -1663,7 +1668,7 @@ enum Cmd {
     /// rejecting deletion, warns with the ref prefixes that may still hold
     /// pins and does not fail the recorded integration.
     #[command(
-        after_help = "Arc exits 11 when --shape ff-only encounters a diverged target; run arc rebase <change> --verify and provide fresh review or declared debt. Arc exits 17 when a paired replica does not hold integration authority; the refusal names the holder or an offer in flight."
+        after_help = "Arc exits 11 when --shape ff-only encounters a diverged target; run arc rebase <change> --verify and provide fresh review or declared debt. When --into selects a different destination, arc rebase cannot select it: run git rebase <destination> in the change checkout, then arc snapshot <change> --verify and obtain fresh review or debt. Arc exits 17 when a paired replica does not hold integration authority; the refusal names the holder or an offer in flight."
     )]
     Integrate {
         /// Changes to integrate. Several run as a queue, in dependency order,
@@ -1697,7 +1702,9 @@ enum Cmd {
         /// Keep the merged branch and worktree, overriding integration.cleanup
         #[arg(long, conflicts_with = "cleanup")]
         no_cleanup: bool,
-        /// Report what would happen without merging, closing, or writing
+        /// Report what would happen without merging, closing, or writing.
+        /// Queues stop at known blockers before projection; future gates,
+        /// replay and checkout guards are conditional
         #[arg(long)]
         dry_run: bool,
         /// With --dry-run, print the plan as `arc-integration-plan/1` JSON:
@@ -1726,7 +1733,9 @@ enum Cmd {
         /// changes: that is a verdict, not a missing one. The obligation
         /// survives closure and `arc query --debt` finds it; discharge it
         /// with `arc audit`. A refused integration keeps the debt it
-        /// declared, and a retry with the same reason reuses it.
+        /// declared, and a retry with the same reason reuses it. Divergence
+        /// observed under the target and change locks refuses before declaration.
+        /// External Git moving the target after that observation can retain debt
         #[arg(long = "debt", value_name = "REASON")]
         debt: Option<String>,
         /// What kind of deficit the debt records. Omitted, arc derives it from
@@ -3801,6 +3810,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             tag,
             explain,
             json,
+            shape,
         } => {
             let change = if tag.is_empty() {
                 Some(infer(change.as_deref())?)
@@ -3809,7 +3819,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 // reach it to be refused.
                 select(change)?
             };
-            commands::check_selection(&ctx, change.as_deref(), tag, explain, json)
+            commands::check_selection(&ctx, change.as_deref(), tag, explain, json, shape)
         }
         Cmd::Claim {
             change,

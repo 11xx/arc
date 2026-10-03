@@ -24,6 +24,22 @@ pub fn declare_debt(
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
     let st = store.state(&change_id)?;
+    declare_debt_locked(ctx, &store, &st, reason, kind)
+}
+
+/// The caller holds the change transition lock across observation and declaration.
+pub(super) fn declare_debt_locked(
+    ctx: &Ctx,
+    store: &Store,
+    st: &ChangeState,
+    reason: &str,
+    kind: Option<DebtMissing>,
+) -> Result<()> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        bail!("--reason must say what review is owed and why it could not run");
+    }
+    let change_id = &st.change_id;
     // An open change records the deficit for the patchset that is about to
     // ship. This can supply an absent verdict or rescue a self-approval
     // rejected by policy. A closed change has no gate left to satisfy, so its
@@ -49,8 +65,8 @@ pub fn declare_debt(
         coverage,
         production,
     };
-    ensure_append_allowed(&st, &payload)?;
-    let event = ctx.event(&store, &change_id, payload);
+    ensure_append_allowed(st, &payload)?;
+    let event = ctx.event(store, change_id, payload);
     // One judgment is one obligation: an `arc integrate --debt` retried after
     // a refusal answers with the debt its first attempt recorded.
     let (verb, event_id) = match st.debt.as_ref().filter(|debt| debt.restated_by(&event)) {

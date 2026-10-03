@@ -645,8 +645,8 @@ RUN A CHANGE
   argument; one the flag cannot spell exactly, because it holds a comma or
   edge whitespace, is left as a placeholder the line names.
 
-  `arc rebase` is what `check` names when the target moved with conflicting
-  changes. A conflict stops it and leaves the rebase in progress — the partial
+  `arc rebase` is what `check` names when the selected integration shape
+  requires replay onto the target. A conflict stops it and leaves the rebase in progress — the partial
   resolution is yours, and aborting would throw it away — with the conflicting
   files and the commands that finish the replay. Resolve, `git rebase
   --continue`, then `arc snapshot --verify`. Over another actor's live claim
@@ -659,10 +659,22 @@ RUN A CHANGE
   Without a flag, operator defaults, target project defaults, user config,
   and built-in ff-only apply in that order.
   Under ff-only, the observed target must be an ancestor of the
-  approved head, and an expected-old ref update advances it to that head.
-  Divergence exits 11, writes nothing, and names `arc rebase <change> --verify`;
-  the rewritten head requires fresh review or declared debt. Integration
-  performs no automatic rebase under ff-only. `--shape no-ff` creates a merge
+  approved head, or already contain it. Git merge --ff-only updates the
+  target checkout and advances its ref with expected-old protection. Checkout
+  failures refuse before the ref advances. A failed post-merge check records
+  no integration event and reports the ref, HEAD, index and checkout state;
+  preserve local and competing work, inspect Git diff and reflog, reconcile
+  the checkout with the destination, and retry integration. Arc performs no
+  reset on that path.
+  Divergence observed under the target and change locks exits 11 before debt
+  is declared and names `arc rebase <change> --verify`. External Git does not
+  honor arc locks: if it diverges after that observation but before the fresh
+  decision, the refusal retains the declared debt, and records no integration.
+  The rewritten head requires fresh review or declared debt. Integration
+  performs no automatic rebase under ff-only. With --into selecting another
+  destination, arc rebase cannot select that destination: run git rebase
+  <destination> in the change checkout, then arc snapshot <change> --verify
+  and obtain fresh review or declared debt. `--shape no-ff` creates a merge
   commit with the observed target and approved head as its parents.
   `--message` names that merge commit and requires a resolved no-ff shape.
 
@@ -674,7 +686,10 @@ RUN A CHANGE
   to ship and stop at a red gate or missing verdict. The exit code is the
   stopped member's blocker; the summary names landed revisions, the stopped
   member and reason, and members never attempted. `--dry-run` reports the
-  plan without replaying, running gates, or integrating.
+  plan without replaying, running gates, or integrating. Known holds, review
+  blockers and iteration stop projection before advancing the destination.
+  Prerequisites planned earlier are treated as conditionally closed; future
+  gates, replay and checkout guards remain conditional.
   `--into`, `--message`, and `--debt` are single-change options: each member
   lands into its recorded target, and a debt reason binds to one patchset.
 
@@ -1669,7 +1684,9 @@ EXIT CODES
   with the code of the member that stopped it, so one table reads the same
   way whether one change was integrated or twenty.
 
-    `arc check` exits 0 when the change is ready to integrate.
+    `arc check` exits 0 when the change is ready under the integration shape
+      resolved for its target. --shape ff-only|no-ff evaluates an explicit
+      alternative; status uses the resolved default.
     `arc check` exits 2 while a blocking finding is open.
     `arc check` exits 3 when no valid approval covers the current head.
     `arc check` exits 4 while a hold is active.
@@ -1677,8 +1694,8 @@ EXIT CODES
     `arc check` exits 6 for a closed change, a missing branch, or a target
       branch that cannot be resolved.
     `arc check` exits 7 while a prerequisite change is unresolved.
-    `arc check` exits 11 when the target moved with conflicting changes and
-      the branch needs rebasing.
+    `arc check` exits 11 when the target conflicts or ff-only ancestry
+      requires rebasing.
     `arc check` exits 12 when a declared acceptance probe is not
       discriminating.
     `arc check` exits 13 while the change declares it is iterating.

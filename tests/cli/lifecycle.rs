@@ -2543,6 +2543,8 @@ fn append_policy_has_a_single_authority() {
         "claims.rs::ready_candidate::!candidate.is_closed()",
         "fork.rs::open_change_on_branch::.find(|state|!state.is_closed()&&state.branch==branch)",
         "gatekeeping.rs::check_tagged::ifstate.is_closed(){",
+        "gatekeeping.rs::check::ifst.is_closed()||crate::declarations::for_change(&ctx.cwd,&st)?.target_unreadable{",
+        "gatekeeping.rs::check_tagged::letshape=ifstate.is_closed()",
         "gatekeeping.rs::integrate_queue::ifstate.is_closed(){",
         "gatekeeping.rs::integration_history::ifst.is_closed()||!gitio::branch_exists(&ctx.cwd,target){",
         "gatekeeping.rs::close::ifst.is_closed(){",

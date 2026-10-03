@@ -32,6 +32,28 @@ pub enum Shape {
     NoFf,
 }
 
+/// Observe both ancestry directions for one destination revision and reviewed head.
+pub fn ancestry(cwd: &Path, target: &str, approved: &str) -> anyhow::Result<(bool, bool)> {
+    Ok((
+        crate::gitio::is_ancestor(cwd, target, approved)?,
+        crate::gitio::is_ancestor(cwd, approved, target)?,
+    ))
+}
+
+/// An advancing fast-forward or an already-contained head can land without a merge.
+pub fn ff_eligible(target_is_ancestor: bool, already_contained: bool) -> bool {
+    target_is_ancestor || already_contained
+}
+
+pub fn divergence_guidance(st: &ChangeState, target: &str) -> String {
+    let recovery = if target == st.target_branch {
+        format!("run arc rebase {} --verify", st.change_id)
+    } else {
+        format!("arc rebase uses the recorded target {}; it cannot select {target}. In the change checkout, run git rebase {target}, then arc snapshot {} --verify", st.target_branch, st.change_id)
+    };
+    format!("{recovery}. The rewritten head requires fresh review or declared debt; existing review obligations remain owed.")
+}
+
 pub const PLAN_SCHEMA: &str = "arc-integration-plan/1";
 
 const CONFIGURATION_MOVED: &str = "gate or policy configuration changed while preparing the \
@@ -390,8 +412,7 @@ fn decision(facts: IntegrationFacts) -> Decision {
     }
     if facts.shape == Shape::FfOnly
         && matches!(&facts.contribution, Ok(None))
-        && matches!(&facts.already_contained, Ok(false))
-        && matches!(&facts.target_is_ancestor, Ok(false))
+        && matches!((&facts.target_is_ancestor, &facts.already_contained), (Ok(ancestor), Ok(contained)) if !ff_eligible(*ancestor, *contained))
     {
         return Decision::Refused(Refusal::Diverged);
     }
@@ -434,7 +455,7 @@ fn decision(facts: IntegrationFacts) -> Decision {
     let untouched = observed!(facts.untouched);
     let already_contained = observed!(facts.already_contained);
     if facts.shape == Shape::FfOnly && !already_contained {
-        if !observed!(facts.target_is_ancestor) {
+        if !ff_eligible(observed!(facts.target_is_ancestor), already_contained) {
             return Decision::Refused(Refusal::Diverged);
         }
         if evaluated_tree.is_none() {

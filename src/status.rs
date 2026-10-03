@@ -941,6 +941,43 @@ pub fn build_at(
     now: DateTime<Utc>,
     fork: Option<String>,
 ) -> Result<StatusReport> {
+    let shape = if target_unreadable || state.is_closed() {
+        crate::integration::Shape::FfOnly
+    } else {
+        crate::style::resolved_style(
+            cwd,
+            &state.target_branch,
+            crate::style::StyleFlags::default(),
+        )?
+        .shape()
+    };
+    build_at_with_shape(
+        state,
+        cwd,
+        gates,
+        policy,
+        target_unreadable,
+        dependency_status,
+        blocks,
+        now,
+        fork,
+        shape,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_at_with_shape(
+    state: &ChangeState,
+    cwd: &Path,
+    gates: &GatesFile,
+    policy: &PolicyFile,
+    target_unreadable: bool,
+    dependency_status: BlockerStatus,
+    blocks: Vec<String>,
+    now: DateTime<Utc>,
+    fork: Option<String>,
+    shape: crate::integration::Shape,
+) -> Result<StatusReport> {
     // A closed change is judged at the head its ledger recorded: its branch
     // may be deleted or reused, and its target is never merged into again.
     let (current_head, target_head) = if state.is_closed() {
@@ -957,7 +994,19 @@ pub fn build_at(
         (Some(head), Some(target)) => Some(gitio::merge_outcome(cwd, target, head)?),
         _ => None,
     };
-    let needs_rebase = merge.as_ref().is_some_and(|merge| merge.conflicts);
+    let diverged = if shape == crate::integration::Shape::FfOnly && policy.contribution.is_none() {
+        match (state.latest_patchset(), &target_head) {
+            (Some(patchset), Some(target)) => {
+                let (ancestor, contained) =
+                    crate::integration::ancestry(cwd, target, &patchset.head)?;
+                !crate::integration::ff_eligible(ancestor, contained)
+            }
+            _ => false,
+        }
+    } else {
+        false
+    };
+    let needs_rebase = diverged || merge.as_ref().is_some_and(|merge| merge.conflicts);
     let merged_tree = merge.and_then(|merge| merge.tree);
     let worktree_dirty = if state.is_closed() {
         None

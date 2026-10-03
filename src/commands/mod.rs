@@ -635,6 +635,33 @@ impl Ctx {
         self.report_with_states(state, &store.readable_states()?)
     }
 
+    pub(crate) fn report_for_integration(
+        &self,
+        store: &Store,
+        state: &ChangeState,
+        target: &str,
+        shape: crate::integration::Shape,
+    ) -> Result<StatusReport> {
+        let mut selected = state.clone();
+        selected.target_branch = target.to_string();
+        let states = store.readable_states()?;
+        let declarations = crate::declarations::for_change(&self.cwd, &selected)?;
+        let mut report = status::build_at_with_shape(
+            &selected,
+            &self.cwd,
+            &declarations.gates,
+            &declarations.policy,
+            declarations.target_unreadable,
+            dependency_status(state, &states),
+            changes_blocked_by(&state.change_id, &states),
+            chrono::Utc::now(),
+            fork::fork_slug_for_branch(&self.cwd, &state.branch)?,
+            shape,
+        )?;
+        report.declaration_notes = declarations.notes;
+        Ok(report)
+    }
+
     pub(crate) fn report_with_states(
         &self,
         state: &ChangeState,
