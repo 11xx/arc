@@ -2,8 +2,35 @@
 //! version bumped in code without the register being edited leaves it
 //! describing a format nothing writes.
 
+use super::common::{stdout, Repo};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+#[test]
+fn staleness_inbox_help_matches_schema_constant() {
+    let repo = Repo::new();
+    let help = stdout(repo.arc(&repo.root).args(["inbox", "--help"]));
+    let schemas = schema_constants();
+    let (_, schema) = schemas
+        .iter()
+        .find(|(name, _)| name == "INBOX_SCHEMA")
+        .unwrap();
+    assert!(
+        help.contains(schema),
+        "inbox help must name {schema}: {help}"
+    );
+}
+
+#[test]
+fn staleness_guide_names_rebase_snapshot_journal_defaults() {
+    let repo = Repo::new();
+    let guide = stdout(&mut repo.arc(&repo.root));
+    let flat = guide.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("snapshot (`snapshot`, `done`, `rebase`,"),
+        "{flat}"
+    );
+}
 
 /// A floor on the schema constants found, so a scan that stopped matching
 /// fails rather than passing over an empty set.

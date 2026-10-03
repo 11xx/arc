@@ -739,7 +739,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Lead-facing queue rollup: open changes, active claims, and outstanding debt (arc-inbox/8 schema)
+    /// Lead-facing queue rollup: open changes, active claims, and outstanding debt (arc-inbox/10 schema)
     /// Aggregate reads name unreadable changes with their errors on stderr
     /// and retain readable changes; a selected unreadable change fails
     Inbox {
@@ -1441,6 +1441,10 @@ enum Cmd {
         links: LinkOpts,
     },
     /// Replay a change's branch onto its target, then snapshot the new head.
+    /// The snapshot links the artifact the change was opened from (`via: begin`)
+    /// and the plan its brief names (`via: brief`), one link per file; a file
+    /// named by both is linked once as `begin`. An unavailable artifact is
+    /// omitted with a warning on stderr.
     /// Over another actor's live claim, a rebase without --contributors or
     /// --solo refuses before the branch moves. The change stays locked from
     /// that check until the replayed head is recorded, so a command acting on

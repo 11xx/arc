@@ -1481,7 +1481,7 @@ RULES THAT CHANGE WHAT YOU DO
   - A snapshot records the context that framed the work. Each journal link
     names an artifact by filename with the body digest read at record time,
     and a `via` saying where it came from. With no `--journal-ref`, a
-    snapshot (`snapshot`, `done`, and the ones `squash` and `review
+    snapshot (`snapshot`, `done`, `rebase`, and the ones `squash` and `review
     --snapshot` take) links the artifact the change was opened from (`via: begin`,
     whose digest `begin --from-journal` also records on the change) and the
     plan its brief names (`via: brief`), one link per file; a file named by
