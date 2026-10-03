@@ -2528,3 +2528,126 @@ fn cleanup_safety_outside_sandbox_keeps_worktree_and_branch() {
     assert!(out.contains("kept branch"), "{out}");
     assert!(wt.exists());
 }
+
+fn cleanup_default(repo: &Repo, source: &str, enabled: bool) {
+    let user = format!("[change]\ncheckout='worktree'\n[integration]\ncleanup={enabled}\n");
+    let defaults = format!("[defaults.integration]\ncleanup={enabled}\n");
+    match source {
+        "user" => fs::write(repo.home.join(".local/ai/arc/config.toml"), user).unwrap(),
+        "project" => {
+            fs::write(repo.root.join(".arc/policy.toml"), defaults).unwrap();
+            git(&repo.root, &["add", ".arc/policy.toml"]);
+            git(
+                &repo.root,
+                &["commit", "-m", "test: declare cleanup default"],
+            );
+        }
+        "operator" => {
+            fs::create_dir_all(repo.root.join(".git/arc")).unwrap();
+            fs::write(repo.root.join(".git/arc/operator-policy.toml"), defaults).unwrap();
+        }
+        _ => panic!("unknown fixture source"),
+    }
+}
+
+fn assert_cleanup_default(source: &str, enabled: bool, flag: Option<&str>, removed: bool) {
+    let repo = repo_with_gates();
+    cleanup_default(&repo, source, enabled);
+    let (id, wt) = approved_change(&repo, "default-cleanup", "change.txt", "change\n");
+    let mut command = repo.arc(&repo.root);
+    command.args(["integrate", &id]);
+    if let Some(flag) = flag {
+        command.arg(flag);
+    }
+    stdout(&mut command);
+    assert_eq!(!wt.exists(), removed);
+    assert_eq!(
+        git_out(&repo.root, &["branch", "--list", "arc/default-cleanup"]).is_empty(),
+        removed
+    );
+}
+
+#[test]
+fn cleanup_default_user() {
+    assert_cleanup_default("user", true, None, true);
+}
+
+#[test]
+fn cleanup_default_project() {
+    assert_cleanup_default("project", true, None, true);
+}
+
+#[test]
+fn cleanup_default_operator() {
+    assert_cleanup_default("operator", true, None, true);
+}
+
+#[test]
+fn cleanup_default_no_cleanup_overrides_true() {
+    assert_cleanup_default("operator", true, Some("--no-cleanup"), false);
+}
+
+#[test]
+fn cleanup_default_cleanup_overrides_false() {
+    assert_cleanup_default("operator", false, Some("--cleanup"), true);
+}
+
+#[test]
+fn cleanup_default_queue_resolves_each_target() {
+    let repo = repo_with_gates();
+    cleanup_default(&repo, "project", true);
+    git(&repo.root, &["branch", "clean-target"]);
+    cleanup_default(&repo, "project", false);
+    let (keep_id, keep) = approved_change(&repo, "queue-keep", "keep.txt", "keep\n");
+    let target_checkout = repo.home.join("clean-target-checkout");
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            target_checkout.to_str().unwrap(),
+            "clean-target",
+        ],
+    );
+    let clean_id = opened_change_id(&stdout(repo.arc(&target_checkout).args([
+        "begin",
+        "queue-clean",
+        "--target",
+        "clean-target",
+    ])));
+    let state = json_stdout(
+        repo.arc(&target_checkout)
+            .args(["show", &clean_id, "--json"]),
+    );
+    let clean = PathBuf::from(state["worktree"].as_str().unwrap());
+    fs::write(clean.join("clean.txt"), "clean\n").unwrap();
+    git(&clean, &["add", "clean.txt"]);
+    git(&clean, &["commit", "-m", "test: clean target change"]);
+    stdout(repo.arc(&clean).args(["snapshot", &clean_id]));
+    stdout(
+        repo.arc(&clean)
+            .args(["verify", &clean_id, "--gate", "smoke"]),
+    );
+    stdout(
+        repo.arc(&clean)
+            .args(["review", &clean_id, "--verdict", "approved"]),
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &keep_id, &clean_id]),
+    );
+    assert!(!clean.exists());
+    assert!(keep.exists());
+    assert!(git_out(&repo.root, &["branch", "--list", "arc/queue-clean"]).is_empty());
+    assert!(!git_out(&repo.root, &["branch", "--list", "arc/queue-keep"]).is_empty());
+}
+
+#[test]
+fn cleanup_default_flags_conflict() {
+    let repo = repo_with_gates();
+    repo.arc(&repo.root)
+        .args(["integrate", "example", "--cleanup", "--no-cleanup"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cannot be used with"));
+}

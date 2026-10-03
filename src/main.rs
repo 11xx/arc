@@ -1688,9 +1688,13 @@ enum Cmd {
         /// Delete the merged branch and remove only an arc-created, clean worktree
         /// inside the sandbox, excluding the integration checkout. Kept checkouts
         /// retain checked-out branches. Cleanup failures warn after closure and
-        /// do not fail integration or stop a queue.
-        #[arg(long)]
+        /// do not fail integration or stop a queue. Overrides integration.cleanup;
+        /// absent either flag, the resolved style default applies (built-in false).
+        #[arg(long, conflicts_with = "no_cleanup")]
         cleanup: bool,
+        /// Keep the merged branch and worktree, overriding integration.cleanup
+        #[arg(long, conflicts_with = "cleanup")]
+        no_cleanup: bool,
         /// Report what would happen without merging, closing, or writing
         #[arg(long)]
         dry_run: bool,
@@ -4250,6 +4254,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             into,
             message,
             cleanup,
+            no_cleanup,
             dry_run,
             json,
             expect_basis,
@@ -4279,7 +4284,13 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     tags: tag,
                     into,
                     message,
-                    cleanup,
+                    cleanup: if cleanup {
+                        Some(true)
+                    } else if no_cleanup {
+                        Some(false)
+                    } else {
+                        None
+                    },
                     dry_run,
                     json,
                     expect_basis,

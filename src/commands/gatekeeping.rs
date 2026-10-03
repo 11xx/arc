@@ -2154,7 +2154,7 @@ pub struct IntegrateArgs {
     pub tags: Vec<String>,
     pub into: Option<String>,
     pub message: Option<String>,
-    pub cleanup: bool,
+    pub cleanup: Option<bool>,
     pub dry_run: bool,
     /// Print the dry run's plan as `arc-integration-plan` JSON.
     pub json: bool,
@@ -2219,15 +2219,17 @@ pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Resul
             let store = ctx.store()?;
             let (_, state) = ctx.load_state(&store, reference)?;
             let target = into.as_deref().unwrap_or(&state.target_branch);
-            let shape = crate::style::resolved_style(
+            let style = crate::style::resolved_style(
                 &ctx.cwd,
                 target,
                 crate::style::StyleFlags {
                     shape,
+                    cleanup,
                     ..Default::default()
                 },
-            )?
-            .shape();
+            )?;
+            let shape = style.shape();
+            let cleanup = style.cleanup();
             if shape == integration::Shape::FfOnly && message.is_some() {
                 bail!("--message names a merge commit; select --shape no-ff");
             }
@@ -2330,7 +2332,7 @@ enum QueueStep {
 fn integrate_queue(
     ctx: &Ctx,
     selection: QueueSelection,
-    cleanup: bool,
+    cleanup: Option<bool>,
     dry_run: bool,
     shape: Option<integration::Shape>,
 ) -> Result<i32> {
@@ -2389,20 +2391,28 @@ fn integrate_queue(
             ));
             continue;
         }
-        let shape = crate::style::resolved_style(
+        let style = crate::style::resolved_style(
             &queue_ctx.cwd,
             &state.target_branch,
             crate::style::StyleFlags {
                 shape,
+                cleanup,
                 ..Default::default()
             },
-        )?
-        .shape();
+        )?;
+        let shape = style.shape();
         integration_history(&queue_ctx, &state, &state.target_branch)?;
         let step = if dry_run {
             queue_dry_run(&queue_ctx, &store, change_id, shape, &mut projected_targets)?
         } else {
-            queue_step(&queue_ctx, &store, change_id, cleanup, shape, &ctx.cwd)?
+            queue_step(
+                &queue_ctx,
+                &store,
+                change_id,
+                style.cleanup(),
+                shape,
+                &ctx.cwd,
+            )?
         };
         let stopped = matches!(step, QueueStep::Stopped { .. });
         if let QueueStep::Stopped { code, .. } = &step {

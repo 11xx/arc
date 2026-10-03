@@ -78,6 +78,13 @@ impl Style {
             .expect("resolved prefix is a string")
     }
 
+    pub fn cleanup(&self) -> bool {
+        self.keys["integration.cleanup"]
+            .value
+            .as_bool()
+            .expect("resolved integration.cleanup is a boolean")
+    }
+
     pub fn shape(&self) -> crate::integration::Shape {
         match self.keys["integration.shape"].value.as_str() {
             Some("no-ff") => crate::integration::Shape::NoFf,

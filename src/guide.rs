@@ -745,7 +745,9 @@ RUN A CHANGE
   merges, and leaves the checkout on the target. The dry run says it would.
   Any other shape keeps the refusal naming the missing target checkout.
 
-  `integrate --cleanup` deletes merged branches with Git’s merged-branch
+  `integration.cleanup` governs branch and worktree cleanup after integration
+  (built-in false). `integrate --cleanup` enables it; `--no-cleanup` overrides
+  a configured true. Cleanup deletes merged branches with Git’s merged-branch
   check and removes only arc-created, clean worktrees inside the sandbox.
   The integration checkout is kept. A kept worktree retains its checked-out
   branch; each retained path and branch carries its reason. Cleanup failures
@@ -1786,6 +1788,8 @@ FILES
   Style precedence is flag, operator defaults, target project defaults, user,
   built-in. Project and operator shape constraints intersect; values outside
   the intersection refuse. User configuration accepts style only.
+  `integration.cleanup` governs post-integration branch and worktree cleanup;
+  `integrate --no-cleanup` overrides it for every selected change.
   Integration history folds with contribution history; squash requires at
   most one reviewed commit above the target. Integration alone stays local.
 
