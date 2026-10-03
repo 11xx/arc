@@ -756,7 +756,6 @@ fn probe_records_expected_baseline_fail_and_final_pass_against_one_brief() {
         .args(["snapshot", "declared-probe"])
         .assert()
         .success();
-    let before_wrong_revision = event_count(&repo, &change_id);
     repo.arc(&worktree)
         .args([
             "verify",
@@ -767,11 +766,7 @@ fn probe_records_expected_baseline_fail_and_final_pass_against_one_brief() {
             "baseline",
         ])
         .assert()
-        .failure()
-        .stderr(predicates::str::contains(format!(
-            "baseline probe requires HEAD {brief_base}"
-        )));
-    assert_eq!(event_count(&repo, &change_id), before_wrong_revision);
+        .success();
     repo.arc(&worktree)
         .args(["verify", "declared-probe", "--probe", "marker-exists"])
         .assert()
@@ -793,15 +788,15 @@ fn probe_records_expected_baseline_fail_and_final_pass_against_one_brief() {
         .iter()
         .filter(|event| event["probe"]["name"] == "marker-exists")
         .collect::<Vec<_>>();
-    assert_eq!(marker.len(), 2);
+    assert_eq!(marker.len(), 3);
     assert_eq!(marker[0]["probe"]["brief_event_id"], brief_event);
     assert_eq!(marker[0]["probe"]["phase"], "baseline");
     assert_eq!(marker[0]["revision"], brief_base);
     assert_eq!(marker[0]["result"], "fail");
-    assert_eq!(marker[1]["probe"]["brief_event_id"], brief_event);
-    assert_eq!(marker[1]["probe"]["phase"], "final");
-    assert_eq!(marker[1]["revision"], final_revision);
-    assert_eq!(marker[1]["result"], "pass");
+    assert_eq!(marker[2]["probe"]["brief_event_id"], brief_event);
+    assert_eq!(marker[2]["probe"]["phase"], "final");
+    assert_eq!(marker[2]["revision"], final_revision);
+    assert_eq!(marker[2]["result"], "pass");
     assert!(marker.iter().all(|event| event.get("gate").is_none()));
     let unexpected = evidence
         .iter()
@@ -2479,6 +2474,7 @@ fn a_baseline_probe_still_runs_at_the_brief_base_revision() {
         .assert()
         .success();
 
+    let before = git_out(&worktree, &["worktree", "list", "--porcelain"]);
     repo.arc(&worktree)
         .args([
             "verify",
@@ -2489,7 +2485,12 @@ fn a_baseline_probe_still_runs_at_the_brief_base_revision() {
             "baseline",
         ])
         .assert()
-        .success();
+        .success()
+        .stderr(predicates::str::contains("baseline scratch checkout:").not());
+    assert_eq!(
+        git_out(&worktree, &["worktree", "list", "--porcelain"]),
+        before
+    );
 }
 
 /// Attestation is the caller's assertion, so arc takes the revision it is
@@ -3630,4 +3631,214 @@ fn probe_evidence_neither_infers_nor_is_inferred_from() {
         assert_eq!(event["result"], "pass");
         assert!(event.get("falsification_inferred").is_none(), "{event}");
     }
+}
+
+fn scratch_baseline_fixture(command: &str) -> (Repo, PathBuf, String) {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "scratch-baseline"]));
+    let worktree = repo.home.join(".worktrees/repo-scratch-baseline");
+    let base = repo.head(&worktree);
+    repo.arc(&worktree)
+        .args([
+            "brief",
+            "scratch-baseline",
+            "--body-file",
+            "-",
+            "--probe",
+            &format!("check={command}"),
+        ])
+        .write_stdin("Acceptance contract\n")
+        .assert()
+        .success();
+    repo.commit(&worktree, "head-only", "head", "feat: change head");
+    (repo, worktree, base)
+}
+
+#[test]
+fn scratch_baseline_records_expected_failure_at_base_and_cleans_up() {
+    scratch_baseline_result(false);
+}
+
+#[test]
+fn scratch_baseline_records_unexpected_pass_at_base_and_cleans_up() {
+    scratch_baseline_result(true);
+}
+
+fn scratch_baseline_result(pass: bool) {
+    let (repo, worktree, base) = scratch_baseline_fixture(if pass {
+        "test ! -f head-only"
+    } else {
+        "test -f head-only"
+    });
+    let observed = repo.home.join("observed-head");
+    repo.arc(&worktree)
+        .args([
+            "brief",
+            "scratch-baseline",
+            "--cause-note",
+            "Observe execution revision",
+            "--probe",
+            &format!(
+                "check=git rev-parse HEAD > '{}'; {}",
+                observed.display(),
+                if pass {
+                    "test ! -f head-only"
+                } else {
+                    "test -f head-only"
+                }
+            ),
+        ])
+        .assert()
+        .success();
+    let before = git_out(&worktree, &["worktree", "list", "--porcelain"]);
+    repo.arc(&worktree)
+        .args([
+            "verify",
+            "scratch-baseline",
+            "--probe",
+            "check",
+            "--probe-phase",
+            "baseline",
+        ])
+        .assert()
+        .code(if pass { 1 } else { 0 })
+        .stderr(predicates::str::contains("baseline scratch checkout:"));
+    assert_eq!(fs::read_to_string(observed).unwrap().trim(), base);
+    assert_eq!(
+        git_out(&worktree, &["worktree", "list", "--porcelain"]),
+        before
+    );
+    assert_eq!(
+        fs::read_dir(repo.home.join(".worktrees")).unwrap().count(),
+        1
+    );
+    let events = stdout(repo.arc(&worktree).args([
+        "events",
+        "--change",
+        "scratch-baseline",
+        "--type",
+        "verification-recorded",
+    ]));
+    let evidence: serde_json::Value = serde_json::from_str(events.lines().last().unwrap()).unwrap();
+    assert_eq!(evidence["revision"], base);
+    assert_eq!(evidence["result"], if pass { "pass" } else { "fail" });
+}
+
+#[test]
+fn scratch_baseline_unwritable_root_reports_manual_recipe() {
+    let (repo, worktree, base) = scratch_baseline_fixture("false");
+    let blocked = repo.home.join("blocked");
+    fs::write(&blocked, "file").unwrap();
+    repo.arc(&worktree)
+        .env("ARC_WORKTREES_DIR", blocked.join("trees"))
+        .args([
+            "verify",
+            "scratch-baseline",
+            "--probe",
+            "check",
+            "--probe-phase",
+            "baseline",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cannot create"))
+        .stderr(predicates::str::contains("git worktree add --detach"))
+        .stderr(predicates::str::contains(base))
+        .stderr(predicates::str::contains("arc verify"))
+        .stderr(predicates::str::contains("--probe-phase baseline"))
+        .stderr(predicates::str::contains("git worktree remove --force"));
+}
+
+#[test]
+fn scratch_baseline_outside_sandbox_refuses_without_creating_checkout() {
+    let (repo, worktree, _) = scratch_baseline_fixture("false");
+    let outside = repo.root.parent().unwrap().join("outside");
+    let before = git_out(&worktree, &["worktree", "list", "--porcelain"]);
+    repo.arc(&worktree)
+        .env("ARC_WORKTREES_DIR", &outside)
+        .args([
+            "verify",
+            "scratch-baseline",
+            "--probe",
+            "check",
+            "--probe-phase",
+            "baseline",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("outside the sandbox"))
+        .stderr(predicates::str::contains("git worktree add --detach"))
+        .stderr(predicates::str::contains("git worktree remove --force"));
+    assert!(!outside.exists());
+    assert_eq!(
+        git_out(&worktree, &["worktree", "list", "--porcelain"]),
+        before
+    );
+}
+
+#[test]
+fn scratch_baseline_attestation_at_base_creates_no_checkout() {
+    let (repo, worktree, base) = scratch_baseline_fixture("false");
+    let blocked = repo.home.join("blocked");
+    fs::write(&blocked, "file").unwrap();
+    let before = git_out(&worktree, &["worktree", "list", "--porcelain"]);
+    repo.arc(&worktree)
+        .env("ARC_WORKTREES_DIR", blocked.join("trees"))
+        .args([
+            "verify",
+            "scratch-baseline",
+            "--probe",
+            "check",
+            "--probe-phase",
+            "baseline",
+            "--attest",
+            "--result",
+            "fail",
+            "--tested-revision",
+            &base,
+            "--execution-host",
+            "remote",
+            "--runner",
+            "operator",
+        ])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("baseline scratch checkout:").not());
+    assert_eq!(
+        git_out(&worktree, &["worktree", "list", "--porcelain"]),
+        before
+    );
+}
+
+#[test]
+fn baseline_in_detached_manual_checkout_runs_in_place() {
+    let (repo, worktree, base) = scratch_baseline_fixture("false");
+    let manual = repo.home.join("manual");
+    git(
+        &worktree,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            manual.to_str().unwrap(),
+            &base,
+        ],
+    );
+    let before = git_out(&worktree, &["worktree", "list", "--porcelain"]);
+    repo.arc(&manual)
+        .args([
+            "verify",
+            "scratch-baseline",
+            "--probe",
+            "check",
+            "--probe-phase",
+            "baseline",
+        ])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("baseline scratch checkout:").not());
+    assert_eq!(
+        git_out(&worktree, &["worktree", "list", "--porcelain"]),
+        before
+    );
 }

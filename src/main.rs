@@ -1401,7 +1401,11 @@ enum Cmd {
         /// Brief version containing --probe (defaults to latest)
         #[arg(long)]
         brief_version: Option<usize>,
-        /// Acceptance-probe evidence phase (defaults to final)
+        /// Acceptance-probe evidence phase (defaults to final).
+        /// Baseline commands run at the brief's base, in a detached scratch
+        /// checkout under the configured worktrees directory when HEAD differs.
+        /// The scratch checkout is removed after the run. Attested baseline
+        /// evidence requires --tested-revision equal to the base.
         #[arg(long, value_enum)]
         probe_phase: Option<ProbePhase>,
         /// Record externally observed evidence without running the command

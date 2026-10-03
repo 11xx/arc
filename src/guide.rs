@@ -623,6 +623,17 @@ RUN A CHANGE
   or with a base equal to the patchset head, cannot discharge a probe. The pair
   proves discrimination, not relevance.
 
+  Executed baseline probes run at the brief's recorded base. If the invoking
+  checkout's HEAD differs, arc creates a detached scratch checkout under
+  the configured worktrees directory (including ARC_WORKTREES_DIR), reports
+  free space and its path, runs the probe there, and force-removes it after
+  the run. Evidence is recorded through the invoking checkout. At the base,
+  the probe runs in place. Attested baseline evidence requires
+  --tested-revision equal to the base and creates no checkout. A creation
+  refusal prints the reason and commands to create, verify in, and remove
+  a manual checkout. A removal failure warns with the path and cleanup
+  command without changing the recorded result or exit code.
+
   A brief version keeps the preceding version's base unless `--base` names
   another revision; the first version defaults to HEAD. Recording prints the
   selected base, also carried as `base_revision` in JSON. Probes carry forward
@@ -1971,9 +1982,9 @@ WHAT ARC WILL NOT DO
       required gate is green.
     arc never force-removes a checkout it did not create. Worktree removal
       refuses while dirty or untracked content is present, `fork retire
-      --force` is the operator's decision to get past that, and the one
-      forced removal arc performs on its own is the scratch checkout it
-      creates to evaluate a merge.
+      --force` is the operator's decision to get past that. The
+      scratch checkouts arc force-removes are those it creates to evaluate
+      a merge or run a baseline acceptance probe.
     arc never runs `git rebase --abort`.
     arc never installs a Git hook silently.
     arc never makes a network call. Every transport it offers is a file the

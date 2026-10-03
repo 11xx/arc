@@ -267,11 +267,13 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     // refusal, so the identity question is settled before anything executes.
     ctx.ensure_declared_actor(&store)?;
     let (change_id, st) = ctx.load_state(&store, reference)?;
-    // Attested evidence describes a run arc did not perform, and `--against`
-    // gates a synthesized merge in a scratch checkout of its own, so neither
-    // has a recorded worktree to choose. Every other path below executes a
-    // command, and it executes it where the change lives.
-    let redirected = if attest || against.is_some() {
+    // Gates and final probes run where the change lives. Baseline probes
+    // choose between the invoking checkout and a scratch checkout at the base.
+    // Attestation and merge evidence have no recorded worktree to choose.
+    let redirected = if attest
+        || against.is_some()
+        || (probe.is_some() && probe_phase == Some(ProbePhase::Baseline))
+    {
         None
     } else {
         gate_run_ctx(ctx, &st)?
@@ -338,15 +340,13 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
                 format!("brief v{version} does not declare acceptance probe {probe_name:?}")
             })?;
         let phase = probe_phase.unwrap_or(ProbePhase::Final);
+        let mut baseline_base = None;
         if phase == ProbePhase::Baseline {
             let base = brief
                 .base_revision
                 .as_deref()
                 .context("legacy brief has no base revision for baseline probe evidence")?;
-            let head = gitio::head(&run_ctx.cwd)?;
-            if head != base {
-                bail!("baseline probe requires HEAD {base}; current HEAD is {head}");
-            }
+            baseline_base = Some(base);
             if let Some(tested_revision) = &tested_revision {
                 if tested_revision != base {
                     bail!(
@@ -355,10 +355,8 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
                 }
             }
         }
-        // A baseline probe is the one kind of evidence that must NOT be at the
-        // change head: it runs at the brief's base revision, checked above.
-        // Every other phase is counted at the head like a gate, so it earns
-        // the same refusal.
+        // Baseline evidence belongs at the brief's base; final evidence
+        // belongs at the change head.
         if phase_counts_at_head(phase) {
             match &tested_revision {
                 Some(revision) => warn_if_attested_off_head(ctx, &st, revision),
@@ -370,8 +368,16 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             ProbePhase::Final => VerifyResult::Pass,
         };
         let falsification = resolve_falsification(&st, None, &declaration.command, falsified_by)?;
-        let code = record_verification(
-            run_ctx,
+        let scratch = match baseline_base {
+            Some(base) if !attest && gitio::head(&run_ctx.cwd)? != base => Some(
+                create_baseline_checkout(ctx, &st.slug, base, &probe_name, version)?,
+            ),
+            _ => None,
+        };
+        let command_cwd = scratch.as_deref().unwrap_or(&run_ctx.cwd);
+        let result = record_verification_at(
+            ctx,
+            command_cwd,
             &store,
             &change_id,
             VerificationInput {
@@ -393,7 +399,17 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
                 falsification,
                 against_target: None,
             },
-        )?;
+        );
+        if let Some(path) = scratch {
+            if let Err(error) = gitio::remove_worktree(&ctx.cwd, &path, true) {
+                eprintln!(
+                    "warning: cannot remove baseline scratch checkout {}: {error:#}; remove it with: git worktree remove --force {}",
+                    path.display(),
+                    crate::context::shell_quote(&path.display().to_string())
+                );
+            }
+        }
+        let code = result?;
         let observed = if code == 0 {
             VerifyResult::Pass
         } else {
@@ -1680,15 +1696,80 @@ pub(super) fn gate_environments<'a>(
     Ok(identities)
 }
 
+fn create_baseline_checkout(
+    ctx: &Ctx,
+    slug: &str,
+    base: &str,
+    probe: &str,
+    brief_version: usize,
+) -> Result<PathBuf> {
+    let name = format!(
+        "baseline-{slug}-{}-{}",
+        &base[..base.len().min(8)],
+        ulid::Ulid::new()
+    );
+    let path = super::lifecycle::worktree_path_for(&ctx.cwd, &name)?;
+    let quoted_path = crate::context::shell_quote(&path.display().to_string());
+    let creation = (|| -> Result<()> {
+        if let Some(prefix) = ctx.excluded_by_sandbox(&path)? {
+            bail!(
+                "{} lies outside the sandbox at {}",
+                path.display(),
+                prefix.display()
+            );
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("cannot create {}", parent.display()))?;
+        }
+        crate::worktree_usage::report_root_free(&path);
+        gitio::git(
+            &ctx.cwd,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                path.to_str().context("non-UTF8 worktree path")?,
+                base,
+            ],
+        )?;
+        Ok(())
+    })();
+    if let Err(error) = creation {
+        bail!(
+            "cannot create baseline scratch checkout {}: {error:#}
+manual recipe:
+git worktree add --detach {quoted_path} {base}
+(cd {quoted_path} && arc verify {} --probe {} --brief-version {brief_version} --probe-phase baseline)
+git worktree remove --force {quoted_path}",
+            path.display(),
+            crate::context::shell_quote(slug),
+            crate::context::shell_quote(probe)
+        );
+    }
+    eprintln!("baseline scratch checkout: {}", path.display());
+    Ok(path)
+}
+
 fn record_verification(
     ctx: &Ctx,
     store: &Store,
     change_id: &str,
     input: VerificationInput,
 ) -> Result<i32> {
+    record_verification_at(ctx, &ctx.cwd, store, change_id, input)
+}
+
+fn record_verification_at(
+    ctx: &Ctx,
+    command_cwd: &Path,
+    store: &Store,
+    change_id: &str,
+    input: VerificationInput,
+) -> Result<i32> {
     let revision = match &input.tested_revision {
         Some(revision) => revision.clone(),
-        None => gitio::head(&ctx.cwd)?,
+        None => gitio::head(command_cwd)?,
     };
     let hostname = match &input.execution_host {
         Some(hostname) => hostname.clone(),
@@ -1703,13 +1784,13 @@ fn record_verification(
     // cannot know the tree a remote runner used, so attested evidence records
     // no tree rather than the local one, which would be a guess.
     let before = if input.attested_result.is_none() {
-        Some(gitio::worktree_tree(&ctx.cwd)?)
+        Some(gitio::worktree_tree(command_cwd)?)
     } else {
         None
     };
-    let mut completed = execute_verification(input, &ctx.cwd, revision.clone(), hostname)?;
+    let mut completed = execute_verification(input, command_cwd, revision.clone(), hostname)?;
     if !completed.attested {
-        let post = gitio::head(&ctx.cwd)?;
+        let post = gitio::head(command_cwd)?;
         if post != revision {
             eprintln!(
                 "warning: head moved during verification ({revision} -> {post}); \
@@ -1717,12 +1798,12 @@ fn record_verification(
             );
         }
         if let Some(before) = before {
-            let after = gitio::worktree_tree(&ctx.cwd)?;
-            let commit_tree = gitio::commit_tree(&ctx.cwd, &revision).ok();
+            let after = gitio::worktree_tree(command_cwd)?;
+            let commit_tree = gitio::commit_tree(command_cwd, &revision).ok();
             completed.worktree_dirty = commit_tree.map(|tree| tree != before);
             // Which kind of dirt, so the waiver reason is self-evident and the
             // frequency premise is measurable rather than remembered.
-            if let Ok(dirt) = gitio::dirt(&ctx.cwd) {
+            if let Ok(dirt) = gitio::dirt(command_cwd) {
                 completed.worktree_dirty_tracked = Some(dirt.tracked);
                 completed.worktree_dirty_untracked = Some(dirt.untracked);
             }
