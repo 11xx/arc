@@ -152,7 +152,7 @@ pub fn begin(
         };
         let wt = if no_worktree {
             let path = gitio::toplevel(&ctx.cwd)?;
-            gitio::checkout(&ctx.cwd, &adopted)?;
+            gitio::git(&ctx.cwd, &["checkout", "--no-overwrite-ignore", &adopted])?;
             Some(path.display().to_string())
         } else {
             gitio::worktree_for_branch(&ctx.cwd, &adopted)?.map(|p| p.display().to_string())
@@ -173,8 +173,17 @@ pub fn begin(
         let wt = if no_worktree {
             let path = gitio::toplevel(&ctx.cwd)?;
             // Git creates the branch only if the checkout succeeds, preserving
-            // tracked and untracked work or refusing an overwrite atomically.
-            gitio::git(&ctx.cwd, &["checkout", "-b", &branch_name, &base_rev])?;
+            // tracked, untracked, and ignored work or refusing an overwrite atomically.
+            gitio::git(
+                &ctx.cwd,
+                &[
+                    "checkout",
+                    "--no-overwrite-ignore",
+                    "-b",
+                    &branch_name,
+                    &base_rev,
+                ],
+            )?;
             Some(path.display().to_string())
         } else {
             gitio::create_branch(&ctx.cwd, &branch_name, &base_rev)?;

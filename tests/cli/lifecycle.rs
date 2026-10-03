@@ -614,6 +614,53 @@ fn no_worktree_refuses_untracked_overwrite_without_writes() {
 }
 
 #[test]
+fn no_worktree_refuses_ignored_overwrite_from_base_without_writes() {
+    assert_ignored_checkout_refused("--base", "unsafe-ignored-base");
+}
+
+#[test]
+fn no_worktree_refuses_ignored_overwrite_from_adopt_without_writes() {
+    assert_ignored_checkout_refused("--adopt", "unsafe-ignored-adopt");
+}
+
+fn assert_ignored_checkout_refused(selection: &str, slug: &str) {
+    let repo = Repo::new();
+    repo.commit(
+        &repo.root,
+        ".gitignore",
+        "settings.local\n",
+        "test: ignore local settings",
+    );
+    git(&repo.root, &["checkout", "-b", "different"]);
+    fs::write(repo.root.join("settings.local"), "committed\n").unwrap();
+    git(&repo.root, &["add", "-f", "settings.local"]);
+    git(&repo.root, &["commit", "-m", "test: track settings"]);
+    let destination_head = repo.head(&repo.root);
+    git(&repo.root, &["checkout", "master"]);
+    fs::write(repo.root.join("settings.local"), b"local\n\0\xff").unwrap();
+    let head = repo.head(&repo.root);
+    let index = fs::read(repo.root.join(".git/index")).unwrap();
+    repo.arc(&repo.root)
+        .args(["begin", slug, "--no-worktree", selection, "different"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("overwritten"));
+    assert_eq!(git_out(&repo.root, &["branch", "--show-current"]), "master");
+    assert_eq!(repo.head(&repo.root), head);
+    assert_eq!(fs::read(repo.root.join(".git/index")).unwrap(), index);
+    assert_eq!(
+        fs::read(repo.root.join("settings.local")).unwrap(),
+        b"local\n\0\xff"
+    );
+    assert_eq!(
+        git_out(&repo.root, &["rev-parse", "different"]),
+        destination_head
+    );
+    assert!(git_out(&repo.root, &["branch", "--list", &format!("arc/{slug}")]).is_empty());
+    repo.arc(&repo.root).args(["show", slug]).assert().failure();
+}
+
+#[test]
 fn no_worktree_refuses_adopted_branch_checked_out_elsewhere() {
     let repo = Repo::new();
     let elsewhere = repo.home.join("elsewhere");

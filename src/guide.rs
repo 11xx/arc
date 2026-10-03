@@ -720,9 +720,10 @@ RUN A CHANGE
 
   `--no-worktree` creates and switches to the change branch in the invoking
   checkout, recording it as the change's worktree so subsequent commands infer
-  the change. Tracked edits, staged changes, and untracked files carry across
-  when Git can preserve them. An overwrite conflict refuses with a non-zero
-  exit naming the conflict, without creating a branch or opening a change.
+  the change. Tracked edits, staged changes, untracked files, and ignored files
+  carry across when Git can preserve them. An overwrite conflict refuses with
+  a non-zero exit naming the conflict, without creating a branch or opening a
+  change.
   An existing branch requires `--adopt`; a branch checked out elsewhere cannot
   be switched to in place.
 

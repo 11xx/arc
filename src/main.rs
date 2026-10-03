@@ -274,8 +274,9 @@ enum Cmd {
         #[arg(long)]
         worktree: Option<String>,
         /// Switch this checkout to the change branch, carrying local work.
-        /// Create the branch unless --adopt is supplied. Refuse overwrite conflicts
-        /// or a branch checked out elsewhere without opening a change
+        /// Create the branch unless --adopt is supplied. Refuse overwrite conflicts,
+        /// including ignored files, or a branch checked out elsewhere without
+        /// opening a change
         #[arg(long)]
         no_worktree: bool,
         /// Track an existing branch instead of creating one
