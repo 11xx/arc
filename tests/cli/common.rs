@@ -491,13 +491,7 @@ pub(crate) fn child_stderr(child: &mut Child) -> String {
     output
 }
 
-/// Open a change with `--no-worktree` and no checkout of its own.
-///
-/// `--no-worktree` takes over a clean checkout standing on the target, which
-/// is what it is for and what the lifecycle tests cover directly. A test that
-/// opens several changes in one repository wants none of them checked out, so
-/// it holds the tree dirty for the duration — the same decline a caller with
-/// unrelated work in progress gets.
+/// Run a fixture operation with an untracked file in the checkout.
 pub(crate) fn with_uncommitted_worktree<T>(repo: &Repo, f: impl FnOnce() -> T) -> T {
     let path = repo.root.join(".arc-test-uncommitted");
     assert!(!path.exists(), "test fixture path already exists: {path:?}");
@@ -507,13 +501,19 @@ pub(crate) fn with_uncommitted_worktree<T>(repo: &Repo, f: impl FnOnce() -> T) -
     result
 }
 
-pub(crate) fn begin_no_worktree(repo: &Repo, slug: &str, extra: &[&str]) -> String {
-    let out = with_uncommitted_worktree(repo, || {
-        let mut command = repo.arc(&repo.root);
-        command.args(["begin", slug, "--no-worktree"]);
-        command.args(extra);
-        stdout(&mut command)
-    });
+/// Open a ledger-only change by adopting a branch with no checkout.
+pub(crate) fn begin_without_checkout(repo: &Repo, slug: &str, extra: &[&str]) -> String {
+    let branch = format!("arc/{slug}");
+    let base = extra
+        .windows(2)
+        .find(|pair| pair[0] == "--base")
+        .map(|pair| pair[1])
+        .unwrap_or("HEAD");
+    git(&repo.root, &["branch", &branch, base]);
+    let mut command = repo.arc(&repo.root);
+    command.args(["begin", slug, "--adopt", &branch]);
+    command.args(extra);
+    let out = stdout(&mut command);
     out.lines()
         .find_map(|line| line.strip_prefix("change: "))
         .unwrap()
@@ -524,7 +524,7 @@ pub(crate) fn begin_change(repo: &Repo, slug: &str, blocked_by: Option<&str>) ->
     let extra = blocked_by
         .map(|blocker| vec!["--blocked-by", blocker])
         .unwrap_or_default();
-    begin_no_worktree(repo, slug, &extra)
+    begin_without_checkout(repo, slug, &extra)
 }
 
 #[track_caller]

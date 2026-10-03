@@ -91,7 +91,7 @@ fn ending_a_run_twice_names_the_existing_ending() {
 #[test]
 fn ending_unknown_or_non_dispatch_ids_has_a_distinct_refusal() {
     let repo = Repo::new();
-    let change_id = begin_no_worktree(&repo, "not-a-run", &[]);
+    let change_id = begin_without_checkout(&repo, "not-a-run", &[]);
     let non_dispatch_id = first_change_event_id(&repo, &change_id);
 
     let non_dispatch = repo

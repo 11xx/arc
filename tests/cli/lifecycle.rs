@@ -526,91 +526,134 @@ fn no_worktree_after_a_closed_change_uses_its_recorded_target() {
 }
 
 #[test]
-fn no_worktree_leaves_dirty_target_checkout_and_preserves_the_next_command() {
+fn no_worktree_carries_dirty_target_checkout() {
     let repo = Repo::new();
-    let tracked_before = b"uncommitted tracked bytes\n\0";
-    let untracked_before = b"uncommitted untracked bytes\n\xff";
-    fs::write(repo.root.join("README.md"), tracked_before).unwrap();
-    fs::write(repo.root.join("scratch.bin"), untracked_before).unwrap();
-
-    let output = repo
-        .arc(&repo.root)
-        .args(["begin", "dirty-in-place", "--no-worktree"])
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
-    let output = String::from_utf8_lossy(&output.stdout);
-
-    assert_eq!(git_out(&repo.root, &["branch", "--show-current"]), "master");
+    fs::write(repo.root.join("README.md"), b"tracked\n\0").unwrap();
+    git(&repo.root, &["add", "README.md"]);
+    fs::write(repo.root.join("README.md"), b"unstaged\n\0").unwrap();
+    fs::write(repo.root.join("scratch.bin"), b"untracked\n\xff").unwrap();
+    let before = git_out(&repo.root, &["diff", "--cached"]);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "dirty-in-place", "--no-worktree"]),
+    );
+    assert_eq!(
+        git_out(&repo.root, &["branch", "--show-current"]),
+        "arc/dirty-in-place"
+    );
+    assert_eq!(git_out(&repo.root, &["diff", "--cached"]), before);
     assert_eq!(
         fs::read(repo.root.join("README.md")).unwrap(),
-        tracked_before
+        b"unstaged\n\0"
     );
     assert_eq!(
         fs::read(repo.root.join("scratch.bin")).unwrap(),
-        untracked_before
+        b"untracked\n\xff"
     );
     let state = json_stdout(
         repo.arc(&repo.root)
             .args(["show", "dirty-in-place", "--json"]),
     );
-    assert!(state["worktree"].is_null(), "{state}");
-    assert!(
-        output.contains("invoking working tree is dirty"),
-        "{output}"
-    );
-    // Every worktree shares the stash, so the advice keeps the dirty work out
-    // of it: commit or copy it aside, or check the branch out elsewhere.
-    assert!(!output.contains("git stash"), "{output}");
-    assert!(
-        output.contains(
-            "next: commit the work in progress or copy it aside, then `git checkout 'arc/dirty-in-place'`"
-        ),
-        "{output}"
-    );
-    let own = repo.home.join(".worktrees").join("repo-dirty-in-place");
-    assert!(
-        output.contains(&format!(
-            "or check the branch out in its own worktree: `git worktree add '{}' 'arc/dirty-in-place'`",
-            own.display()
-        )),
-        "{output}"
-    );
+    assert_eq!(state["worktree"], repo.root.to_str().unwrap());
 }
 
 #[test]
-fn no_worktree_leaves_a_clean_checkout_on_another_branch_and_names_the_checkout_command() {
+fn no_worktree_refuses_overwrite_without_creating_branch_or_change() {
     let repo = Repo::new();
-    git(&repo.root, &["checkout", "-b", "other"]);
+    git(&repo.root, &["checkout", "-b", "different"]);
+    repo.commit(&repo.root, "README.md", "different\n", "test: differ");
+    git(&repo.root, &["checkout", "master"]);
+    fs::write(repo.root.join("README.md"), "dirty\n").unwrap();
+    repo.arc(&repo.root)
+        .args(["begin", "unsafe", "--no-worktree", "--base", "different"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("overwritten"));
+    assert_eq!(git_out(&repo.root, &["branch", "--show-current"]), "master");
+    assert_eq!(
+        fs::read_to_string(repo.root.join("README.md")).unwrap(),
+        "dirty\n"
+    );
+    assert!(git_out(&repo.root, &["branch", "--list", "arc/unsafe"]).is_empty());
+    repo.arc(&repo.root)
+        .args(["show", "unsafe"])
+        .assert()
+        .failure();
+}
 
-    let output = repo
-        .arc(&repo.root)
+#[test]
+fn no_worktree_refuses_untracked_overwrite_without_writes() {
+    let repo = Repo::new();
+    git(&repo.root, &["checkout", "-b", "different"]);
+    repo.commit(&repo.root, "scratch.txt", "committed\n", "test: add path");
+    git(&repo.root, &["checkout", "master"]);
+    fs::write(repo.root.join("scratch.txt"), "untracked\n").unwrap();
+    repo.arc(&repo.root)
         .args([
             "begin",
-            "elsewhere-in-place",
+            "unsafe-untracked",
             "--no-worktree",
-            "--target",
-            "master",
+            "--base",
+            "different",
         ])
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
-    let output = String::from_utf8_lossy(&output.stdout);
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("overwritten"));
+    assert_eq!(git_out(&repo.root, &["branch", "--show-current"]), "master");
+    assert_eq!(
+        fs::read_to_string(repo.root.join("scratch.txt")).unwrap(),
+        "untracked\n"
+    );
+    assert!(git_out(&repo.root, &["branch", "--list", "arc/unsafe-untracked"]).is_empty());
+    repo.arc(&repo.root)
+        .args(["show", "unsafe-untracked"])
+        .assert()
+        .failure();
+}
 
-    assert_eq!(git_out(&repo.root, &["branch", "--show-current"]), "other");
-    let state = json_stdout(
-        repo.arc(&repo.root)
-            .args(["show", "elsewhere-in-place", "--json"]),
+#[test]
+fn no_worktree_refuses_adopted_branch_checked_out_elsewhere() {
+    let repo = Repo::new();
+    let elsewhere = repo.home.join("elsewhere");
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "existing",
+            elsewhere.to_str().unwrap(),
+        ],
     );
-    assert!(state["worktree"].is_null(), "{state}");
-    assert!(
-        output
-            .contains("invoking checkout is on branch \"other\", not requested target \"master\""),
-        "{output}"
-    );
-    assert!(
-        output.contains("next: `git checkout 'arc/elsewhere-in-place'`"),
-        "{output}"
+    repo.arc(&repo.root)
+        .args(["begin", "occupied", "--no-worktree", "--adopt", "existing"])
+        .assert()
+        .failure()
+        .stderr(
+            predicates::str::contains("already checked out")
+                .or(predicates::str::contains("already used by worktree")),
+        );
+    assert_eq!(git_out(&repo.root, &["branch", "--show-current"]), "master");
+    repo.arc(&repo.root)
+        .args(["show", "occupied"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn no_worktree_switches_from_another_branch() {
+    let repo = Repo::new();
+    git(&repo.root, &["checkout", "-b", "other"]);
+    stdout(repo.arc(&repo.root).args([
+        "begin",
+        "elsewhere-in-place",
+        "--no-worktree",
+        "--target",
+        "master",
+    ]));
+    assert_eq!(
+        git_out(&repo.root, &["branch", "--show-current"]),
+        "arc/elsewhere-in-place"
     );
 }
 
@@ -650,42 +693,20 @@ fn explicit_target_overrides_a_closed_in_place_change() {
     assert_eq!(state["base"], chosen_target_head);
     assert_eq!(
         git_out(&repo.root, &["branch", "--show-current"]),
-        "arc/one"
+        "arc/explicit"
     );
 }
 
 #[test]
-fn no_worktree_quotes_a_branch_advice_that_is_safe_to_run() {
+fn no_worktree_switches_to_a_branch_with_shell_metacharacters() {
     let repo = Repo::new();
-    git(&repo.root, &["checkout", "-b", "other"]);
-    let output = stdout(repo.arc(&repo.root).args([
+    stdout(repo.arc(&repo.root).args([
         "begin",
         "quoted",
         "--no-worktree",
-        "--target",
-        "master",
         "--branch",
         "arc/topic;true",
     ]));
-    assert!(
-        output.contains("next: `git checkout 'arc/topic;true'`"),
-        "{output}"
-    );
-
-    let next = output
-        .lines()
-        .find_map(|line| {
-            line.strip_prefix("next: `")
-                .and_then(|command| command.strip_suffix('`'))
-        })
-        .expect("begin should print a next command")
-        .to_string();
-    assert!(Command::new("sh")
-        .args(["-c", &next])
-        .current_dir(&repo.root)
-        .status()
-        .unwrap()
-        .success());
     assert_eq!(
         git_out(&repo.root, &["branch", "--show-current"]),
         "arc/topic;true"
@@ -1423,7 +1444,7 @@ fn guarded_integration_records_exact_authorization_basis() {
     git(&repo.root, &["add", ".arc/gates.toml"]);
     git(&repo.root, &["commit", "-m", "test: declare a gate"]);
 
-    let prerequisite = begin_no_worktree(&repo, "first", &[]);
+    let prerequisite = begin_without_checkout(&repo, "first", &[]);
     let dependent = opened_change_id(&stdout(repo.arc(&repo.root).args([
         "begin",
         "second",
@@ -2636,7 +2657,7 @@ fn piped_output_dies_on_sigpipe_without_panicking() {
     // pipe buffer, so the child is guaranteed to still be writing when the
     // reader goes away.
     for i in 0..250 {
-        begin_no_worktree(&repo, &format!("ch{i}"), &[]);
+        begin_without_checkout(&repo, &format!("ch{i}"), &[]);
     }
 
     let binary = std::env::var_os("CARGO_BIN_EXE_arc").expect("cargo should provide arc binary");

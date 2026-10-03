@@ -275,7 +275,7 @@ fn an_assumed_actor_is_announced_and_recorded_as_assumed() {
         // A declared identity records as declared and says nothing.
         let declared = repo
             .arc(&repo.root)
-            .args(["begin", "declared", "--no-worktree"])
+            .args(["begin", "declared", "--no-worktree", "--target", "master"])
             .output()
             .unwrap();
         (opened, declared)
@@ -476,6 +476,8 @@ fn require_declared_actor_refuses_the_git_fallback() {
                 "begin",
                 "delegated",
                 "--no-worktree",
+                "--target",
+                "master",
             ])
             .assert()
             .success();

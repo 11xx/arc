@@ -1367,8 +1367,8 @@ fn every_watch_document_carries_its_schema() {
 #[test]
 fn events_can_follow_a_tagged_program() {
     let repo = Repo::new();
-    begin_no_worktree(&repo, "member", &["--tag", "program"]);
-    begin_no_worktree(&repo, "outsider", &[]);
+    begin_without_checkout(&repo, "member", &["--tag", "program"]);
+    begin_without_checkout(&repo, "outsider", &[]);
 
     let tagged = stdout(repo.arc(&repo.root).args(["events", "--tag", "program"]));
     assert!(tagged.contains("member"), "{tagged}");

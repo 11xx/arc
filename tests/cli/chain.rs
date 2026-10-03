@@ -1,7 +1,7 @@
 use super::common::*;
 
 fn begin(repo: &Repo, slug: &str, extra: &[&str]) -> String {
-    begin_no_worktree(repo, slug, extra)
+    begin_without_checkout(repo, slug, extra)
 }
 
 fn chain_json(repo: &Repo, tag: &str) -> serde_json::Value {

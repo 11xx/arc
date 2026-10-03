@@ -2712,7 +2712,7 @@ fn workspace_backlog_exposes_every_change_predicate() {
     let blocked = begin_change(&repo, "pred-blocked", Some(&blocker));
     expected.push((blocked, "blocked"));
 
-    let iterating = begin_no_worktree(&repo, "pred-iterating", &["--iterating"]);
+    let iterating = begin_without_checkout(&repo, "pred-iterating", &["--iterating"]);
     expected.push((iterating, "iterating"));
 
     let stalled = begin_change(&repo, "pred-stalled", None);
@@ -3485,7 +3485,7 @@ fn workspace_report_debt_rows_carry_the_declaration() {
 #[test]
 fn workspace_report_counts_changes_once_across_buckets() {
     let repo = Repo::new();
-    let change = begin_no_worktree(&repo, "many-states", &[]);
+    let change = begin_without_checkout(&repo, "many-states", &[]);
     repo.arc(&repo.root)
         .args(["hold", &change, "--reason", "inspection"])
         .assert()
@@ -3683,9 +3683,9 @@ fn shared_facts(repo: &Repo) -> Vec<serde_json::Value> {
 fn report_flags_open_changes_sharing_a_plan_slice() {
     let repo = Repo::new();
     let (_, plan) = journal_artifact(&repo, "shared-plan", "plan", "# Plan\n");
-    let first = begin_no_worktree(&repo, "first-answer", &[]);
-    let second = begin_no_worktree(&repo, "second-answer", &[]);
-    let other = begin_no_worktree(&repo, "other-slice", &[]);
+    let first = begin_without_checkout(&repo, "first-answer", &[]);
+    let second = begin_without_checkout(&repo, "second-answer", &[]);
+    let other = begin_without_checkout(&repo, "other-slice", &[]);
     brief(&repo, &first, "# First\n", Some((&plan, "slice-a")));
     brief(&repo, &second, "# Second\n", Some((&plan, "slice-a")));
     brief(&repo, &other, "# Other\n", Some((&plan, "slice-b")));
@@ -3701,9 +3701,9 @@ fn report_flags_open_changes_sharing_a_plan_slice() {
 #[test]
 fn report_flags_open_changes_sharing_a_brief_digest() {
     let repo = Repo::new();
-    let first = begin_no_worktree(&repo, "first-copy", &[]);
-    let second = begin_no_worktree(&repo, "second-copy", &[]);
-    let distinct = begin_no_worktree(&repo, "distinct-body", &[]);
+    let first = begin_without_checkout(&repo, "first-copy", &[]);
+    let second = begin_without_checkout(&repo, "second-copy", &[]);
+    let distinct = begin_without_checkout(&repo, "distinct-body", &[]);
     brief(&repo, &first, "# One contract\n", None);
     brief(&repo, &second, "# One contract\n", None);
     brief(&repo, &distinct, "# Another contract\n", None);
@@ -3722,8 +3722,8 @@ fn report_flags_open_changes_sharing_a_brief_digest() {
 fn report_ignores_a_closed_change_sharing_a_plan_slice() {
     let repo = Repo::new();
     let (_, plan) = journal_artifact(&repo, "closing-plan", "plan", "# Plan\n");
-    let kept = begin_no_worktree(&repo, "kept-answer", &[]);
-    let closed = begin_no_worktree(&repo, "closed-answer", &[]);
+    let kept = begin_without_checkout(&repo, "kept-answer", &[]);
+    let closed = begin_without_checkout(&repo, "closed-answer", &[]);
     brief(&repo, &kept, "# Kept\n", Some((&plan, "slice")));
     brief(&repo, &closed, "# Closed\n", Some((&plan, "slice")));
     assert_eq!(shared_facts(&repo).len(), 1);

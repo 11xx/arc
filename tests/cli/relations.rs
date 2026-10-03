@@ -6,7 +6,7 @@ fn digest(bytes: &[u8]) -> String {
 
 /// A change with one claim on it, returned as the change id and the claim id.
 fn claimed_change(repo: &Repo, slug: &str) -> (String, String) {
-    let change_id = begin_no_worktree(repo, slug, &[]);
+    let change_id = begin_without_checkout(repo, slug, &[]);
     repo.arc(&repo.root)
         .args(["claim", slug])
         .assert()

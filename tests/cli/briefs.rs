@@ -638,7 +638,7 @@ fn brief_base_is_resolved_at_write_time_and_does_not_follow_head() {
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    begin_no_worktree(
+    begin_without_checkout(
         &repo,
         "seed-anchor",
         &["--base", "HEAD~2", "--from-journal", &artifact],

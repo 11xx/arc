@@ -133,7 +133,6 @@ pub fn begin(
     let title = title.unwrap_or_else(|| slug.replace('-', " "));
     let base_from_target = base.is_none();
     let adopting = adopt.is_some();
-    let mut no_worktree_advice: Option<(String, String)> = None;
 
     let (branch_name, base_rev, worktree_path) = if let Some(adopted) = adopt {
         if !gitio::branch_exists(&ctx.cwd, &adopted) {
@@ -151,7 +150,13 @@ pub fn begin(
             Some(b) => gitio::rev_parse(&ctx.cwd, &b)?,
             None => gitio::merge_base(&ctx.cwd, &target_head, &branch_head)?,
         };
-        let wt = gitio::worktree_for_branch(&ctx.cwd, &adopted)?.map(|p| p.display().to_string());
+        let wt = if no_worktree {
+            let path = gitio::toplevel(&ctx.cwd)?;
+            gitio::checkout(&ctx.cwd, &adopted)?;
+            Some(path.display().to_string())
+        } else {
+            gitio::worktree_for_branch(&ctx.cwd, &adopted)?.map(|p| p.display().to_string())
+        };
         (adopted, base_rev, wt)
     } else {
         let branch_name = branch.unwrap_or_else(|| format!("arc/{slug}"));
@@ -165,56 +170,14 @@ pub fn begin(
             Some(b) => gitio::rev_parse(&ctx.cwd, &b)?,
             None => target_head.clone(),
         };
-        // Check the invoking checkout before creating the branch. A clean
-        // checkout already on the target can become the change's worktree;
-        // every other checkout stays untouched.
-        let in_place = if no_worktree {
-            Some((
-                gitio::current_branch(&ctx.cwd)?,
-                gitio::is_clean(&ctx.cwd)?,
-                gitio::toplevel(&ctx.cwd)?,
-            ))
+        let wt = if no_worktree {
+            let path = gitio::toplevel(&ctx.cwd)?;
+            // Git creates the branch only if the checkout succeeds, preserving
+            // tracked and untracked work or refusing an overwrite atomically.
+            gitio::git(&ctx.cwd, &["checkout", "-b", &branch_name, &base_rev])?;
+            Some(path.display().to_string())
         } else {
-            None
-        };
-        gitio::create_branch(&ctx.cwd, &branch_name, &base_rev)?;
-        let wt = if let Some((current, clean, path)) = in_place {
-            match (current, clean) {
-                (Some(current), true) if current == target_branch => {
-                    gitio::checkout(&ctx.cwd, &branch_name)?;
-                    Some(path.display().to_string())
-                }
-                // Every worktree shares `refs/stash`, so the advice never
-                // parks the dirty work there: another writer's pop would
-                // apply it in the wrong checkout.
-                (_, false) => {
-                    let branch = shell_quote(&branch_name);
-                    let own = default_worktree_path(&ctx.cwd, slug).map_or_else(
-                        |_| "<path>".to_string(),
-                        |path| shell_quote(&path.display().to_string()),
-                    );
-                    let checkout = format!("`git checkout {branch}`");
-                    let worktree = format!("`git worktree add {own} {branch}`");
-                    no_worktree_advice = Some((
-                        "in-place checkout declined: the invoking working tree is dirty"
-                            .to_string(),
-                        format!("commit the work in progress or copy it aside, then {checkout}; or check the branch out in its own worktree: {worktree}"),
-                    ));
-                    None
-                }
-                (current, true) => {
-                    let current = current.unwrap_or_else(|| "(detached HEAD)".to_string());
-                    no_worktree_advice = Some((
-                        format!(
-                            "in-place checkout declined: the invoking checkout is on branch \
-                             {current:?}, not requested target {target_branch:?}"
-                        ),
-                        format!("`git checkout {}`", shell_quote(&branch_name)),
-                    ));
-                    None
-                }
-            }
-        } else {
+            gitio::create_branch(&ctx.cwd, &branch_name, &base_rev)?;
             let path = match worktree {
                 Some(p) => PathBuf::from(p),
                 None => default_worktree_path(&ctx.cwd, slug)?,
@@ -434,10 +397,6 @@ pub fn begin(
     println!("branch: {branch_name}");
     if let Some(wt) = worktree_path {
         println!("worktree: {wt}");
-    }
-    if let Some((reason, next)) = no_worktree_advice {
-        println!("{reason}");
-        println!("next: {next}");
     }
     if let Some(warning) = stale_target {
         eprint!("{warning}");

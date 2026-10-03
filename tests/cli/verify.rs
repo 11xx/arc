@@ -2289,18 +2289,13 @@ fn stdout_lines(cwd: &std::path::Path, prefix: &str) -> Vec<String> {
         .collect()
 }
 
-/// A change opened with `--no-worktree` has nowhere to run its gates. Once the
-/// primary branch moves past it, evidence recorded from the primary checkout
-/// lands at the wrong revision, status ignores it, and `next_action` keeps
-/// advising a gate run that can never complete.
+/// A change without a checkout cannot run gates in a primary checkout that
+/// has moved past the change head; the refusal names a checkout to create.
 #[test]
 fn a_gate_run_away_from_the_change_head_is_refused_with_the_step_that_fixes_it() {
     let repo = Repo::new();
     write_two_gates(&repo, "true", "true");
-    stdout(
-        repo.arc(&repo.root)
-            .args(["begin", "checkoutless", "--no-worktree"]),
-    );
+    begin_without_checkout(&repo, "checkoutless", &[]);
     repo.commit(
         &repo.root,
         "moved.txt",
@@ -2504,10 +2499,7 @@ fn a_baseline_probe_still_runs_at_the_brief_base_revision() {
 fn attesting_off_the_change_head_warns_that_the_evidence_will_not_count() {
     let repo = Repo::new();
     write_two_gates(&repo, "true", "true");
-    stdout(
-        repo.arc(&repo.root)
-            .args(["begin", "attest-off-head", "--no-worktree"]),
-    );
+    begin_without_checkout(&repo, "attest-off-head", &[]);
     repo.commit(
         &repo.root,
         "moved.txt",

@@ -701,14 +701,13 @@ RUN A CHANGE
   prefixes that may still hold pins; the recorded integration succeeds,
   including as a queue member.
 
-  `--no-worktree` means in place, not nowhere: a clean checkout already on the
-  target is checked out onto the new branch and recorded as the change's
-  worktree, so the next command infers the change without being told. A dirty
-  checkout, or one standing elsewhere, is left exactly as it was — the change
-  still opens, and arc prints how to finish the switch. For a dirty one that is
-  committing the work in progress or copying it aside before `git checkout`,
-  or `git worktree add` for the branch; never `git stash`, which every
-  worktree of the repository shares.
+  `--no-worktree` creates and switches to the change branch in the invoking
+  checkout, recording it as the change's worktree so subsequent commands infer
+  the change. Tracked edits, staged changes, and untracked files carry across
+  when Git can preserve them. An overwrite conflict refuses with a non-zero
+  exit naming the conflict, without creating a branch or opening a change.
+  An existing branch requires `--adopt`; a branch checked out elsewhere cannot
+  be switched to in place.
 
   Release copy is recorded per change and rendered at release; arc imposes
   no file convention. While an open change has no changelog record, `arc

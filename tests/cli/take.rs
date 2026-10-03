@@ -3,15 +3,15 @@ use super::common::*;
 #[test]
 fn take_claims_ready_work_by_priority_and_skips_blocked_or_held_changes() {
     let repo = Repo::new();
-    let low_id = begin_no_worktree(&repo, "take-low", &[]);
-    let high_id = begin_no_worktree(&repo, "take-high", &[]);
-    let prerequisite_id = begin_no_worktree(&repo, "take-prerequisite", &[]);
-    begin_no_worktree(&repo, "take-blocked", &["--blocked-by", &prerequisite_id]);
+    let low_id = begin_without_checkout(&repo, "take-low", &[]);
+    let high_id = begin_without_checkout(&repo, "take-high", &[]);
+    let prerequisite_id = begin_without_checkout(&repo, "take-prerequisite", &[]);
+    begin_without_checkout(&repo, "take-blocked", &["--blocked-by", &prerequisite_id]);
     repo.arc(&repo.root)
         .args(["hold", "take-prerequisite", "--reason", "wait"])
         .assert()
         .success();
-    begin_no_worktree(&repo, "take-held", &[]);
+    begin_without_checkout(&repo, "take-held", &[]);
     repo.arc(&repo.root)
         .args(["hold", "take-held", "--reason", "wait"])
         .assert()
@@ -47,8 +47,8 @@ fn take_claims_ready_work_by_priority_and_skips_blocked_or_held_changes() {
 #[test]
 fn tagged_take_selects_the_chain_views_next_ready_member() {
     let repo = Repo::new();
-    let low_id = begin_no_worktree(&repo, "take-tag-low", &["--tag", "program"]);
-    let high_id = begin_no_worktree(&repo, "take-tag-high", &["--tag", "program"]);
+    let low_id = begin_without_checkout(&repo, "take-tag-low", &["--tag", "program"]);
+    let high_id = begin_without_checkout(&repo, "take-tag-high", &["--tag", "program"]);
     repo.arc(&repo.root)
         .args(["metadata", &low_id, "--priority", "10"])
         .assert()

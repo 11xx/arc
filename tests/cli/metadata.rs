@@ -19,9 +19,9 @@ fn reading_empty_metadata_prints_empty_fields() {
 #[test]
 fn populated_metadata_reads_back_as_text() {
     let repo = Repo::new();
-    let dependency = begin_no_worktree(&repo, "dependency", &[]);
+    let dependency = begin_without_checkout(&repo, "dependency", &[]);
     let dependency_id = dependency;
-    begin_no_worktree(&repo, "populated", &[]);
+    begin_without_checkout(&repo, "populated", &[]);
     repo.arc(&repo.root)
         .args([
             "metadata",
@@ -50,9 +50,9 @@ fn populated_metadata_reads_back_as_text() {
 #[test]
 fn json_metadata_has_exact_schema_and_values() {
     let repo = Repo::new();
-    let dependency = begin_no_worktree(&repo, "json-dep", &[]);
+    let dependency = begin_without_checkout(&repo, "json-dep", &[]);
     let dependency_id = dependency;
-    let target = begin_no_worktree(&repo, "json-target", &[]);
+    let target = begin_without_checkout(&repo, "json-target", &[]);
     let target_id = target;
     repo.arc(&repo.root)
         .args([

@@ -30,7 +30,7 @@ fn fixture(reuse: Option<&str>, must_read: &[&str], worktree: bool) -> Fixture {
     let change = if worktree {
         opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", "answer"])))
     } else {
-        begin_no_worktree(&repo, "answer", &[])
+        begin_without_checkout(&repo, "answer", &[])
     };
     repo.arc(&repo.root)
         .args(["claim", "answer"])

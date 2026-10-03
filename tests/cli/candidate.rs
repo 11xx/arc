@@ -2,7 +2,7 @@ use super::common::*;
 
 /// A change carrying one brief version, returned as its id.
 fn briefed_change(repo: &Repo, slug: &str, body: &str) -> String {
-    let change_id = begin_no_worktree(repo, slug, &[]);
+    let change_id = begin_without_checkout(repo, slug, &[]);
     brief(repo, slug, body, false);
     change_id
 }

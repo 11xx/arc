@@ -655,7 +655,7 @@ fn a_discharge_in_force_at_integration_is_inferred() {
 #[test]
 fn an_open_change_replays_as_of_an_event() {
     let repo = Repo::new();
-    let change_id = begin_no_worktree(&repo, "draft", &[]);
+    let change_id = begin_without_checkout(&repo, "draft", &[]);
     brief(&repo, &repo.root, "draft", "first contract", &[]);
     let first_brief = stdout(repo.arc(&repo.root).args([
         "events",
@@ -700,7 +700,7 @@ fn an_open_change_replays_as_of_an_event() {
 /// the artifact's path.
 fn opened_from_artifact(repo: &Repo, body: &str) -> (String, PathBuf) {
     let opening = artifact(repo, "todo", "framing", body);
-    let change_id = begin_no_worktree(repo, WORK, &["--from-journal", &file_name(&opening)]);
+    let change_id = begin_without_checkout(repo, WORK, &["--from-journal", &file_name(&opening)]);
     (change_id, opening)
 }
 
