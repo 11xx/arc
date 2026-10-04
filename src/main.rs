@@ -1101,7 +1101,9 @@ enum Cmd {
         #[arg(long)]
         provenance_only: bool,
     },
-    /// Pair independent stores and move integration authority with files
+    /// Pair independent stores and move integration authority with files.
+    /// Checkout paths and ownership belong to the recording replica. Local
+    /// checkout bindings take precedence; relayed bindings grant no cleanup rights.
     Replica {
         #[command(subcommand)]
         cmd: ReplicaCmd,

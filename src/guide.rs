@@ -1050,6 +1050,11 @@ PAIR REPLICA STORES
   operator-named peer by its repository ID; that peer adopts the project only
   by importing the exported pairing event. Replica files contain identities
   and authority events, while checkout paths remain local to their store.
+  ChangeCheckoutBound records a branch's local checkout and allocation owner.
+  Operational projections choose a binding from the local recording replica;
+  foreign checkout paths and owner tokens grant no cleanup rights. An existing
+  checkout binds without ownership; an allocated checkout carries its local
+  administrative owner record.
 
   The first replica holds integration authority. `authority offer` relinquishes
   it when the offer is recorded; the named replica acquires it when it imports

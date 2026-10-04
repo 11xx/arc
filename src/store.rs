@@ -745,9 +745,9 @@ impl Store {
             Payload::ContextRead { .. }
             | Payload::ContextDeclared { .. }
             | Payload::ContextCaptureReported { .. } => Some(7),
-            Payload::HistoryRewriteWithdrawn { .. } | Payload::ChangeRolesAsserted { .. } => {
-                Some(7)
-            }
+            Payload::HistoryRewriteWithdrawn { .. }
+            | Payload::ChangeRolesAsserted { .. }
+            | Payload::ChangeCheckoutBound { .. } => Some(7),
             // An older reader skips a post-integration disposition and reports
             // the finding with no disposition after it shipped.
             Payload::PostIntegrationDispositionRecorded { .. } => Some(7),
@@ -784,7 +784,9 @@ impl Store {
             Some("context-read") | Some("context-declared") | Some("context-capture-reported") => {
                 Some(7)
             }
-            Some("history-rewrite-withdrawn") | Some("change-roles-asserted") => Some(7),
+            Some("history-rewrite-withdrawn")
+            | Some("change-roles-asserted")
+            | Some("change-checkout-bound") => Some(7),
             Some("post-integration-disposition-recorded") => Some(7),
             Some("changelog-recorded")
                 if value

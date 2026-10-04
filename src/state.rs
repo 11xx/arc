@@ -1730,6 +1730,22 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
             Payload::ChangeOpened { .. } => {
                 bail!("duplicate change-opened event {}", ev.event_id)
             }
+            Payload::ChangeCheckoutBound {
+                branch,
+                worktree,
+                worktree_created,
+                worktree_owner_token,
+            } => {
+                if branch != &state.branch {
+                    bail!(
+                        "checkout binding branch {branch:?} differs from change branch {:?}",
+                        state.branch
+                    );
+                }
+                state.worktree = Some(worktree.clone());
+                state.worktree_created = *worktree_created;
+                state.worktree_owner_token = worktree_owner_token.clone();
+            }
             Payload::ChangeRolesAsserted {
                 asserted,
                 withdrawn,

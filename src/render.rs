@@ -1847,6 +1847,15 @@ pub(crate) fn kept_citations(cites: &[String]) -> String {
 /// Stable kebab event type plus a type-specific one-line summary.
 pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
     match payload {
+        Payload::ChangeCheckoutBound {
+            branch,
+            worktree,
+            worktree_created,
+            ..
+        } => (
+            "change-checkout-bound",
+            format!("{branch} at {worktree} (owned: {worktree_created})"),
+        ),
         Payload::ChangeOpened { slug, title, .. } => ("change-opened", format!("{slug}: {title}")),
         Payload::ChangeRolesAsserted {
             asserted,

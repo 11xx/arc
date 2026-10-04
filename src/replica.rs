@@ -305,12 +305,47 @@ pub fn localize_change(
     events: &[Event],
     state: &mut crate::state::ChangeState,
 ) {
-    let opener = events
-        .iter()
-        .find(|event| matches!(event.payload, Payload::ChangeOpened { .. }));
-    if opener.is_some_and(|event| event.repository_id != local_repository_id) {
-        state.worktree = None;
+    if let Some(event) = events.iter().rev().find(|event| {
+        event.repository_id == local_repository_id
+            && matches!(event.payload, Payload::ChangeCheckoutBound { .. })
+    }) {
+        if let Payload::ChangeCheckoutBound {
+            branch,
+            worktree,
+            worktree_created,
+            worktree_owner_token,
+        } = &event.payload
+        {
+            if branch == &state.branch {
+                state.worktree = Some(worktree.clone());
+                state.worktree_created = *worktree_created;
+                state.worktree_owner_token = worktree_owner_token.clone();
+                return;
+            }
+        }
     }
+    if let Some(event) = events
+        .iter()
+        .find(|event| matches!(event.payload, Payload::ChangeOpened { .. }))
+    {
+        if event.repository_id == local_repository_id {
+            if let Payload::ChangeOpened {
+                worktree,
+                worktree_created,
+                worktree_owner_token,
+                ..
+            } = &event.payload
+            {
+                state.worktree = worktree.clone();
+                state.worktree_created = *worktree_created;
+                state.worktree_owner_token = worktree_owner_token.clone();
+                return;
+            }
+        }
+    }
+    state.worktree = None;
+    state.worktree_created = false;
+    state.worktree_owner_token = None;
 }
 
 pub fn init(ctx: &Ctx, store: &Store, name: &str) -> Result<()> {

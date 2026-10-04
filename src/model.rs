@@ -661,6 +661,13 @@ pub enum Payload {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         dangerous: bool,
     },
+    ChangeCheckoutBound {
+        branch: String,
+        worktree: String,
+        worktree_created: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worktree_owner_token: Option<String>,
+    },
     ChangeRolesAsserted {
         asserted: BTreeMap<String, Vec<String>>,
         withdrawn: BTreeMap<String, Vec<String>>,
@@ -1886,7 +1893,8 @@ pub enum AppendPermission {
 /// may append it. New payload variants must make an explicit lifecycle choice.
 pub fn append_permission(payload: &Payload) -> AppendPermission {
     match payload {
-        Payload::MetadataUpdated { .. }
+        Payload::ChangeCheckoutBound { .. }
+        | Payload::MetadataUpdated { .. }
         | Payload::BriefRecorded { .. }
         | Payload::ChangeRolesAsserted { .. }
         | Payload::PatchsetAdded { .. }
