@@ -225,3 +225,135 @@ fn artifacts_digest(artifacts: &[BundledArtifact]) -> Result<String> {
     }
     Ok(hex::encode(hasher.finalize()))
 }
+
+struct RevisionBlock<'a> {
+    id: String,
+    timestamp: DateTime<Utc>,
+    body: &'a str,
+    event: Vec<u8>,
+}
+
+struct Revision<'a> {
+    base: &'a str,
+    blocks: Vec<RevisionBlock<'a>>,
+}
+
+/// Only sections identified by recorded append events participate in a merge.
+/// The base and every shared section must retain their exact bytes.
+fn revision<'a>(body: &'a str, events: &[JournalEvent]) -> Result<Revision<'a>> {
+    let descriptors: Vec<_> = events
+        .iter()
+        .filter_map(|event| event.exchange_block().map(|block| (event, block)))
+        .collect();
+    let mut starts = Vec::new();
+    let mut offset = 0;
+    let mut fence: Option<(char, usize)> = None;
+    for line in body.split_inclusive('\n') {
+        let text = line.trim_end_matches(['\r', '\n']);
+        let trimmed = text.trim_start_matches(' ');
+        if text.len() - trimmed.len() <= 3 {
+            let character = trimmed.chars().next().unwrap_or(' ');
+            let width = trimmed.chars().take_while(|c| *c == character).count();
+            if let Some((opened, length)) = fence {
+                if character == opened && width >= length && trimmed[width..].trim().is_empty() {
+                    fence = None;
+                }
+                offset += line.len();
+                continue;
+            }
+            if matches!(character, '`' | '~') && width >= 3 {
+                fence = Some((character, width));
+                offset += line.len();
+                continue;
+            }
+        }
+        if fence.is_none() {
+            let matching: Vec<_> = descriptors
+                .iter()
+                .filter(|(_, (heading, _, _, _))| text.starts_with(heading))
+                .collect();
+            if !matching.is_empty() {
+                if matching.len() != 1 || offset == 0 {
+                    bail!("{text} (no unique append event)");
+                }
+                starts.push((offset - 1, matching[0]));
+            }
+        }
+        offset += line.len();
+    }
+    let base = &body[..starts.first().map_or(body.len(), |(offset, _)| *offset)];
+    let mut blocks = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (index, (start, (event, (_, id, ts, digest)))) in starts.iter().enumerate() {
+        if !seen.insert(id.as_str()) {
+            bail!("{id} (duplicate block identity)");
+        }
+        let end = starts
+            .get(index + 1)
+            .map_or(body.len(), |(offset, _)| *offset);
+        let block = &body[*start..end];
+        if digest.is_some_and(|digest| body_digest(block) != digest) {
+            bail!("{id} (block digest differs from its event)");
+        }
+        blocks.push(RevisionBlock {
+            id: id.clone(),
+            timestamp: ts
+                .parse()
+                .with_context(|| format!("{id} (invalid event timestamp)"))?,
+            body: block,
+            event: serde_json::to_vec(event)?,
+        });
+    }
+    for (_, (_, id, _, _)) in &descriptors {
+        if !seen.contains(id.as_str()) {
+            bail!("{id} (event has no appended block)");
+        }
+    }
+    Ok(Revision { base, blocks })
+}
+
+pub(crate) fn merge_revision(
+    held_body: &str,
+    held_events: &[JournalEvent],
+    incoming: &BundledArtifact,
+) -> Result<String> {
+    let held = revision(held_body, held_events)?;
+    let incoming_revision = revision(&incoming.body, &incoming.events)?;
+    if held.base != incoming_revision.base {
+        bail!("base");
+    }
+    let mut union = std::collections::BTreeMap::new();
+    for block in &held.blocks {
+        union.insert(block.id.as_str(), block);
+    }
+    for block in &incoming_revision.blocks {
+        if let Some(local) = union.get(block.id.as_str()) {
+            if local.body != block.body || local.event != block.event {
+                bail!("{}", block.id);
+            }
+        } else {
+            union.insert(block.id.as_str(), block);
+        }
+    }
+    let prefix = |left: &Revision<'_>, right: &Revision<'_>| {
+        left.blocks.len() <= right.blocks.len()
+            && left
+                .blocks
+                .iter()
+                .zip(&right.blocks)
+                .all(|(left, right)| left.id == right.id)
+    };
+    if prefix(&held, &incoming_revision) {
+        return Ok(incoming.body.clone());
+    }
+    if prefix(&incoming_revision, &held) {
+        return Ok(held_body.to_string());
+    }
+    let mut blocks: Vec<_> = union.into_values().collect();
+    blocks.sort_by(|left, right| (left.timestamp, &left.id).cmp(&(right.timestamp, &right.id)));
+    let mut merged = held.base.to_string();
+    for block in blocks {
+        merged.push_str(block.body);
+    }
+    Ok(merged)
+}

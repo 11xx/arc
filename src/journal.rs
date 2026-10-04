@@ -1190,7 +1190,11 @@ pub enum JournalCmd {
         output: String,
     },
     /// Import arc-journal-bundle/2 or /1 from another paired replica.
-    /// Events without model provenance retain that absence
+    /// Prefix revisions retain the longer body. Concurrent appended sections
+    /// merge by event identity, ordered by timestamp then ID.
+    /// Edits to the base or a shared block refuse the entire bundle, naming
+    /// both digests and the first differing block. Storage tiers must agree.
+    /// Events retain their provenance; a repeated bundle changes nothing.
     Import {
         /// Input file ('-' for stdin)
         input: String,
@@ -1711,12 +1715,39 @@ pub(crate) fn artifact_references(event: &JournalEvent) -> Result<Vec<ArtifactRe
     Ok(references)
 }
 
+impl JournalEvent {
+    /// The section identity and ordering key carried by an append event.
+    pub(crate) fn exchange_block(&self) -> Option<(String, String, &str, Option<&str>)> {
+        let (heading, id) = match self.event.as_str() {
+            "position" => ("Position", self.position_id.as_deref()?),
+            "question" => ("Question", self.question_id.as_deref()?),
+            "answer" => ("Answer", self.question_id.as_deref()?),
+            "correction" => ("Correction", self.amendment_id.as_deref()?),
+            "retraction" => ("Retraction", self.amendment_id.as_deref()?),
+            "checkpoint" => ("Work checkpoint", self.checkpoint_id.as_deref()?),
+            _ => return None,
+        };
+        let key = if self.event == "answer" {
+            format!("answer:{id}")
+        } else {
+            id.to_string()
+        };
+        Some((
+            format!("### {heading} {id} "),
+            key,
+            &self.ts,
+            self.digest.as_deref(),
+        ))
+    }
+}
+
 /// One artifact an import would place, with what the receiving journal
 /// already holds of it.
 struct ExchangeImportPlan {
     artifact: crate::journal_exchange::BundledArtifact,
     local_digest: Option<String>,
     new_events: Vec<JournalEvent>,
+    merged_body: Option<String>,
 }
 
 fn import_artifacts(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
@@ -1795,14 +1826,28 @@ fn import_artifacts(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
             }
         }
         let local_digest = hot_digest.or(cold_digest);
+        let mut merged_body = None;
         if let Some(local_digest) = &local_digest {
             if local_digest != &artifact.digest {
-                bail!(
-                    "{} is present locally with digest {local_digest}, the bundle carries {}; \
-                     nothing was imported",
-                    artifact.file,
-                    artifact.digest
-                );
+                let path = if hot_path.is_file() {
+                    &hot_path
+                } else {
+                    &cold_path
+                };
+                let local_body = std::fs::read_to_string(path)?;
+                let events: Vec<_> = local_events
+                    .iter()
+                    .filter(|event| event.file.as_deref() == Some(artifact.file.as_str()))
+                    .cloned()
+                    .collect();
+                let body = crate::journal_exchange::merge_revision(&local_body, &events, artifact)
+                    .map_err(|error| anyhow::anyhow!(
+                        "{} is present locally with digest {local_digest}, the bundle carries {}; first differing block: {error}; nothing was imported",
+                        artifact.file, artifact.digest
+                    ))?;
+                if body != local_body {
+                    merged_body = Some(body);
+                }
             }
             let local_storage = if hot_path.is_file() {
                 crate::journal_exchange::HOT_STORAGE
@@ -1842,6 +1887,7 @@ fn import_artifacts(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
             artifact: artifact.clone(),
             local_digest,
             new_events,
+            merged_body,
         });
     }
     if dry_run {
@@ -1862,7 +1908,7 @@ fn import_artifacts(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
         eprintln!("warning: could not record this journal's project binding: {error:#}");
     }
     for entry in &plan {
-        if entry.local_digest.is_some() {
+        if entry.local_digest.is_some() && entry.merged_body.is_none() {
             continue;
         }
         let dir = if entry.artifact.storage == crate::journal_exchange::COLD_STORAGE {
@@ -1870,7 +1916,16 @@ fn import_artifacts(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
         } else {
             hot.clone()
         };
-        write_exchange_artifact(&dir, &dir.join(&entry.artifact.file), &entry.artifact.body)?;
+        let path = dir.join(&entry.artifact.file);
+        if let Some(body) = &entry.merged_body {
+            replace_exchange_artifact(&dir, &path, body)?;
+            let cold_path = cold.join(&entry.artifact.file);
+            if dir == hot && cold_path.is_file() {
+                replace_exchange_artifact(&cold, &cold_path, body)?;
+            }
+        } else {
+            write_exchange_artifact(&dir, &path, &entry.artifact.body)?;
+        }
     }
     append_exchange_events(&hot, &plan)?;
     let receipt = crate::journal_exchange::ImportReceipt {
@@ -1908,13 +1963,18 @@ fn print_exchange_import(
     for entry in plan {
         if entry.local_digest.is_none() {
             println!("new: {} ({})", entry.artifact.file, entry.artifact.storage);
+        } else if entry.merged_body.is_some() {
+            println!(
+                "updated: {} ({})",
+                entry.artifact.file, entry.artifact.storage
+            );
         } else {
             println!("skipped: {}", entry.artifact.file);
         }
     }
     let artifacts = plan
         .iter()
-        .filter(|entry| entry.local_digest.is_none())
+        .filter(|entry| entry.local_digest.is_none() || entry.merged_body.is_some())
         .count();
     let events: usize = plan.iter().map(|entry| entry.new_events.len()).sum();
     if dry_run {
@@ -1946,6 +2006,27 @@ fn write_exchange_artifact(dir: &Path, path: &Path, body: &str) -> Result<()> {
         })?;
     file.write_all(body.as_bytes())
         .with_context(|| format!("cannot write {}", path.display()))
+}
+
+/// Replace a held revision atomically while the journal transition lock is held.
+fn replace_exchange_artifact(dir: &Path, path: &Path, body: &str) -> Result<()> {
+    use std::io::Write as _;
+    let staging = dir.join(format!(".exchange-{}.tmp", ulid::Ulid::new()));
+    let result = (|| -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging)?;
+        file.set_permissions(std::fs::metadata(path)?.permissions())?;
+        file.write_all(body.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&staging, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staging);
+    }
+    result.with_context(|| format!("cannot replace {}", path.display()))
 }
 
 /// Append the events an import brings, keeping the identity each was recorded

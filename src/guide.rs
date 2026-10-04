@@ -917,10 +917,13 @@ PAIR REPLICA STORES
   each body, the events recorded about it, its digest, the exporting replica,
   and every artifact the selection references by filename. An import is
   all-or-nothing: the whole bundle is validated before anything is written.
-  An artifact the receiving journal holds in a different storage tier, or at a
-  different digest, refuses the whole import; an artifact that is not there
-  lands in the hot journal or the cold archive the bundle records, and its
-  events keep the identity they were recorded under. A live claim arriving on
+  Storage tiers must agree for a held artifact. Appended sections are keyed
+  by their recorded event identities. A prefix revision retains the longer
+  body; concurrent appends merge as a union ordered by event timestamp, then
+  event ID. The base and shared blocks must match byte for byte; divergence
+  refuses the whole bundle, naming both digests and the first differing block.
+  An absent artifact lands in the storage the bundle records. Events and
+  appended blocks keep their recorded provenance. A live claim arriving on
   an artifact a live local claim holds is reported as a contest naming both
   replicas, and nothing on either claim's behalf is recorded. Importing the
   same bundle twice changes nothing; the receipt names the source replica and

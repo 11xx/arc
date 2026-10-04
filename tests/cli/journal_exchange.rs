@@ -330,8 +330,12 @@ fn a_divergent_local_revision_refuses_the_whole_import() {
     let recipient_body = fs::read(recipient_dir.join(&divergent)).unwrap();
     let recipient_events = journal_events_dir(&recipient_dir);
 
-    // The origin extends the artifact and also sends a second, new one. The
-    // conflict refuses both: nothing partial lands.
+    // An edit conflicts with the held base and refuses every artifact.
+    fs::write(
+        journal_dir(&source).join(&divergent),
+        "# Divergent\n\nEdited.\n",
+    )
+    .unwrap();
     source
         .arc(&source.root)
         .args(["journal", "position", &divergent, "--body-file", "-"])
@@ -347,6 +351,7 @@ fn a_divergent_local_revision_refuses_the_whole_import() {
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(stderr.contains(&divergent), "{stderr}");
     assert!(stderr.contains("present locally with digest"), "{stderr}");
+    assert!(stderr.contains("first differing block: base"), "{stderr}");
     assert_eq!(
         fs::read(recipient_dir.join(&divergent)).unwrap(),
         recipient_body
@@ -617,4 +622,228 @@ fn previous_journal_bundles_import_without_model_provenance() {
     export(&recipient, &[&file], &current);
     let bundle: serde_json::Value = serde_json::from_slice(&fs::read(current).unwrap()).unwrap();
     assert_eq!(bundle["schema"], "arc-journal-bundle/2");
+}
+
+#[test]
+fn a_replica_checkpoint_returns_with_provenance_and_is_idempotent() {
+    let a = Repo::new();
+    let b = Repo::new();
+    pair(&a, &b, "a", "b");
+    let file = write_artifact(&a, "return-checkpoint", "plan", "# Plan\n");
+    let initial = bundle_file(&a, "initial");
+    export(&a, &[&file], &initial);
+    assert!(import(&b, &initial, false).status.success());
+    b.arc(&b.root)
+        .args(["claim", &file, "--ttl", "30m"])
+        .env("ARC_ACTOR", "executor-b")
+        .assert()
+        .success();
+    b.arc(&b.root)
+        .args(["journal", "checkpoint", &file, "--body-file", "-"])
+        .env("ARC_ACTOR", "executor-b")
+        .write_stdin("Checkpoint on B.\n")
+        .assert()
+        .success();
+    let back = bundle_file(&b, "back");
+    export(&b, &[&file], &back);
+    let preview = import(&a, &back, true);
+    assert!(preview.status.success(), "{preview:?}");
+    assert!(
+        String::from_utf8_lossy(&preview.stdout).contains("dry-run: would import 1 artifact(s)")
+    );
+    assert!(!fs::read_to_string(journal_dir(&a).join(&file))
+        .unwrap()
+        .contains("Checkpoint on B."));
+    let result = import(&a, &back, false);
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(
+        fs::read(journal_dir(&a).join(&file)).unwrap(),
+        fs::read(journal_dir(&b).join(&file)).unwrap()
+    );
+    let events = events_for(&journal_dir(&a), &file);
+    assert_eq!(
+        events.iter().find(|e| e["event"] == "checkpoint").unwrap()["actor"],
+        "executor-b"
+    );
+    let body = fs::read(journal_dir(&a).join(&file)).unwrap();
+    let before = journal_events_dir(&journal_dir(&a));
+    assert!(import(&a, &back, false).status.success());
+    assert_eq!(fs::read(journal_dir(&a).join(&file)).unwrap(), body);
+    assert_eq!(journal_events_dir(&journal_dir(&a)), before);
+    assert_eq!(receipts(&journal_dir(&a)), 1);
+}
+
+#[test]
+fn concurrent_appends_converge_in_timestamp_and_identity_order() {
+    let a = Repo::new();
+    let b = Repo::new();
+    pair(&a, &b, "a", "b");
+    let file = write_artifact(&a, "concurrent", "discussion", "# Shared\n");
+    let initial = bundle_file(&a, "initial");
+    export(&a, &[&file], &initial);
+    assert!(import(&b, &initial, false).status.success());
+    for (repo, body) in [
+        (&b, "Position: amend\n\nB append.\n"),
+        (&a, "Position: for\n\nA append.\n"),
+    ] {
+        repo.arc(&repo.root)
+            .args(["journal", "position", &file, "--body-file", "-"])
+            .write_stdin(body)
+            .assert()
+            .success();
+    }
+    let from_a = bundle_file(&a, "from-a");
+    let from_b = bundle_file(&b, "from-b");
+    export(&a, &[&file], &from_a);
+    export(&b, &[&file], &from_b);
+    let result = import(&a, &from_b, false);
+    assert!(result.status.success(), "{result:?}");
+    let result = import(&b, &from_a, false);
+    assert!(result.status.success(), "{result:?}");
+    let body = fs::read_to_string(journal_dir(&a).join(&file)).unwrap();
+    assert_eq!(
+        body,
+        fs::read_to_string(journal_dir(&b).join(&file)).unwrap()
+    );
+    let mut positions: Vec<_> = events_for(&journal_dir(&a), &file)
+        .into_iter()
+        .filter(|e| e["event"] == "position")
+        .collect();
+    positions.sort_by_key(|e| {
+        (
+            e["ts"].as_str().unwrap().to_string(),
+            e["position_id"].as_str().unwrap().to_string(),
+        )
+    });
+    assert!(
+        body.find(positions[0]["position_id"].as_str().unwrap())
+            .unwrap()
+            < body
+                .find(positions[1]["position_id"].as_str().unwrap())
+                .unwrap()
+    );
+    let merged = bundle_file(&a, "merged");
+    export(&a, &[&file], &merged);
+    assert!(import(&b, &merged, false).status.success());
+    assert!(import(&a, &from_b, false).status.success());
+    assert_eq!(
+        body,
+        fs::read_to_string(journal_dir(&b).join(&file)).unwrap()
+    );
+}
+
+#[test]
+fn edited_shared_blocks_are_refused_by_identity_and_both_digests() {
+    let a = Repo::new();
+    let b = Repo::new();
+    pair(&a, &b, "a", "b");
+    let file = discussion_with_records(&a);
+    let initial = bundle_file(&a, "initial");
+    export(&a, &[&file], &initial);
+    assert!(import(&b, &initial, false).status.success());
+    let path = journal_dir(&a).join(&file);
+    let body = fs::read_to_string(&path).unwrap();
+    fs::write(&path, body.replace("Move it.", "Edited position.")).unwrap();
+    let position_id = events_for(&journal_dir(&a), &file)
+        .into_iter()
+        .find(|event| event["event"] == "position")
+        .unwrap()["position_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let modified = bundle_file(&a, "modified");
+    export(&a, &[&file], &modified);
+    let result = import(&b, &modified, false);
+    assert!(!result.status.success(), "{result:?}");
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains(&format!("first differing block: {position_id}")),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(body.as_bytes()))
+        )),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(fs::read(&path).unwrap()))
+        )),
+        "{stderr}"
+    );
+    assert_eq!(
+        fs::read_to_string(journal_dir(&b).join(&file)).unwrap(),
+        body
+    );
+    assert_eq!(receipts(&journal_dir(&b)), 1);
+}
+
+#[test]
+fn typed_amendments_extend_bodies_with_prose_headings_and_fenced_examples() {
+    let a = Repo::new();
+    let b = Repo::new();
+    pair(&a, &b, "a", "b");
+    let file = write_artifact(
+        &a,
+        "amendments",
+        "discussion",
+        "# Shared\n\n### Position examples\n\nAn explanation.\n",
+    );
+    let initial = bundle_file(&a, "initial");
+    export(&a, &[&file], &initial);
+    assert!(import(&b, &initial, false).status.success());
+    b.arc(&b.root)
+        .args(["journal", "position", &file, "--body-file", "-"])
+        .write_stdin("Position: for\n\n```markdown\n### Position example\n```\n")
+        .assert()
+        .success();
+    let position = events_for(&journal_dir(&b), &file)
+        .into_iter()
+        .find(|e| e["event"] == "position")
+        .unwrap()["position_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    b.arc(&b.root)
+        .args([
+            "journal", "correct", &file, "--target", &position, "--field", "stance", "--value",
+            "amend",
+        ])
+        .assert()
+        .success();
+    b.arc(&b.root)
+        .args([
+            "journal",
+            "retract",
+            &file,
+            "--target",
+            &position,
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Further evidence withdraws the position.\n")
+        .assert()
+        .success();
+    let extended = bundle_file(&b, "extended");
+    export(&b, &[&file], &extended);
+    let result = import(&a, &extended, false);
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(
+        fs::read(journal_dir(&a).join(&file)).unwrap(),
+        fs::read(journal_dir(&b).join(&file)).unwrap()
+    );
+    assert_eq!(
+        events_for(&journal_dir(&a), &file),
+        events_for(&journal_dir(&b), &file)
+    );
+    // The older body has never been imported here; retaining the held extension
+    // therefore exercises revision comparison rather than the receipt shortcut.
+    assert!(import(&a, &initial, false).status.success());
+    assert_eq!(
+        fs::read(journal_dir(&a).join(&file)).unwrap(),
+        fs::read(journal_dir(&b).join(&file)).unwrap()
+    );
 }
