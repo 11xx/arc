@@ -658,6 +658,28 @@ impl Store {
     pub fn append_event(&self, event: &Event) -> Result<()> {
         self.refuse_read_only()?;
         self.refuse_undeclared_author(event)?;
+        ids::validate_id_component(&event.change_id)?;
+        ids::validate_id_component(&event.event_id)?;
+        if self
+            .list_change_ids()?
+            .iter()
+            .any(|id| id == &event.change_id)
+        {
+            if let Some((opening_id, _)) = self
+                .raw_events(&event.change_id)?
+                .iter()
+                .find(|(_, value)| value["event_type"] == "change-opened")
+            {
+                if event.event_id < *opening_id {
+                    bail!(
+                        "event {} sorts before change {} opening {}; nothing was written",
+                        event.event_id,
+                        event.change_id,
+                        opening_id
+                    );
+                }
+            }
+        }
         self.stamp_session_resolution(event.session_resolution)?;
         self.stamp_format_for(&event.payload)?;
         ids::validate_id_component(&event.change_id)?;
@@ -1580,5 +1602,28 @@ mod tests {
         let stored: StoreConfig =
             serde_json::from_slice(&fs::read(dir.path().join("config.json")).unwrap()).unwrap();
         assert_eq!(stored.schema_version, 3);
+    }
+    #[test]
+    fn append_refuses_an_event_before_the_change_opening_without_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let opening: Event = serde_json::from_value(serde_json::json!({
+            "schema_version": crate::model::SCHEMA_VERSION, "event_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV", "repository_id":"repo", "change_id":"change", "actor":"writer", "created_at":"2026-10-04T00:00:00Z",
+            "event_type":"change-opened", "slug":"change", "title":"Change", "profile":"local", "target_branch":"master", "branch":"arc/change", "base":"base"
+        })).unwrap();
+        store.append_event(&opening).unwrap();
+        let mut earlier = opening.clone();
+        earlier.event_id = "01ARZ3NDEKTSV4RRFFQ69G5FA0".into();
+        earlier.payload = Payload::HoldSet {
+            reason: "hold".into(),
+        };
+        let before = fs::read(dir.path().join("config.json")).unwrap_or_default();
+        let error = store.append_event(&earlier).unwrap_err();
+        assert!(format!("{error:#}").contains("opening"));
+        assert_eq!(store.raw_events("change").unwrap().len(), 1);
+        assert_eq!(
+            fs::read(dir.path().join("config.json")).unwrap_or_default(),
+            before
+        );
     }
 }

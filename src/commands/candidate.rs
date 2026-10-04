@@ -81,7 +81,7 @@ pub fn register(ctx: &Ctx, args: RegisterArgs) -> Result<()> {
             adopts: distinct(args.adopts),
             episodes: distinct(args.episodes),
         },
-    );
+    )?;
     // Judged by the same replay a bundle's copy is, so a registration typed
     // here can never be one an import would refuse.
     let mut ledger = ledger;
@@ -206,7 +206,7 @@ pub fn judge(
             judgement: judgement.clone(),
             reason,
         },
-    );
+    )?;
     ledger.record(&event)?;
     store.append_repository_event(&event)?;
     match judgement {
@@ -252,7 +252,7 @@ pub fn retire(ctx: &Ctx, candidate_id: String) -> Result<()> {
         Payload::CandidateRetired {
             candidate_id: candidate_id.clone(),
         },
-    );
+    )?;
     ledger.record(&event)?;
     ctx.ensure_declared_actor(&store)?;
     // The pin goes first: an interrupted retirement leaves an unpinned

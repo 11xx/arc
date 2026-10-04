@@ -114,22 +114,11 @@ fn next_event(
     ctx: &Ctx,
     store: &Store,
     subject: &Subject,
-    ledger: &[Event],
-    appended: &[Event],
+    _ledger: &[Event],
+    _appended: &[Event],
     payload: Payload,
 ) -> Result<Event> {
-    let mut event = ctx.event(store, subject.ledger_scope(), payload);
-    let latest = ledger
-        .iter()
-        .chain(appended)
-        .map(|event| event.event_id.as_str())
-        .max();
-    if let Some(latest) = latest {
-        if event.event_id.as_str() <= latest {
-            event.event_id = super::event_id_after(latest)?;
-        }
-    }
-    Ok(event)
+    ctx.event(store, subject.ledger_scope(), payload)
 }
 
 pub struct ReadArgs {

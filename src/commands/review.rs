@@ -616,13 +616,7 @@ pub(super) fn snapshot_holding(
     for skipped in &skipped_defaults {
         eprintln!("{skipped}");
     }
-    let mut ev = ctx.event_at(store, change_id, now, payload);
-    ev.event_id = event_id_after(
-        &events
-            .last()
-            .context("change has no opening event")?
-            .event_id,
-    )?;
+    let ev = ctx.event_at(store, change_id, now, payload)?;
     store.append_event(&ev)?;
     // Pin this head with its own ref: reviewed heads must stay reachable
     // individually, even if the branch is rewound or deleted later.
@@ -841,13 +835,7 @@ pub fn amend_attribution(
         contributors: contributors.clone(),
     };
     ensure_append_allowed(&st, &payload)?;
-    let mut event = ctx.event(&store, &change_id, payload);
-    event.event_id = event_id_after(
-        &events
-            .last()
-            .context("change has no opening event")?
-            .event_id,
-    )?;
+    let event = ctx.event(&store, &change_id, payload)?;
     store.append_event(&event)?;
     println!("patchset: {patchset_id}");
     println!("contributors: {}", contributors.join(","));
@@ -880,7 +868,7 @@ pub fn keep(
             evidence,
             cites,
         },
-    );
+    )?;
     store.append_event(&ev)?;
     println!("kept: {} {}", kind.as_str(), ev.event_id);
     Ok(())
@@ -951,7 +939,7 @@ pub fn comment(
             patchset_id,
             anchor,
         },
-    );
+    )?;
     store.append_event(&ev)?;
     println!("event: {}", ev.event_id);
     Ok(())
@@ -983,7 +971,7 @@ pub fn finding(
         anchor,
     };
     ensure_append_allowed(&st, &payload)?;
-    let ev = ctx.event(&store, &change_id, payload);
+    let ev = ctx.event(&store, &change_id, payload)?;
     store.append_event(&ev)?;
     println!("finding: {finding_id}");
     println!("event: {}", ev.event_id);
@@ -1003,7 +991,7 @@ pub fn reply(ctx: &Ctx, reference: &str, parent_event_id: String, body: String) 
             parent_event_id,
             body,
         },
-    );
+    )?;
     store.append_event(&ev)?;
     println!("event: {}", ev.event_id);
     Ok(())
@@ -1125,7 +1113,7 @@ pub fn resolve(
         }
     };
     ensure_append_allowed(&st, &payload)?;
-    let ev = ctx.event(&store, &change_id, payload);
+    let ev = ctx.event(&store, &change_id, payload)?;
     store.append_event(&ev)?;
     println!("finding: {finding_id} → {disposition:?}");
     println!("event: {}", ev.event_id);
@@ -1289,13 +1277,7 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
         route_version,
     };
     ensure_append_allowed(&st, &payload)?;
-    let mut ev = ctx.event(&store, &change_id, payload);
-    ev.event_id = event_id_after(
-        &events
-            .last()
-            .context("change has no opening event")?
-            .event_id,
-    )?;
+    let ev = ctx.event(&store, &change_id, payload)?;
     store.append_event(&ev)?;
     println!("verdict: {verdict:?} on {patchset_id}");
     if let Some(reason) = &provisional {

@@ -348,13 +348,6 @@ fn ensure_append_allowed(state: &ChangeState, payload: &Payload) -> Result<()> {
     }
 }
 
-fn event_id_after(previous: &str) -> Result<String> {
-    let previous = previous
-        .parse::<ulid::Ulid>()
-        .with_context(|| format!("event ID {previous:?} is not a ULID"))?;
-    Ok(crate::ids::new_event_id_after(previous).to_string())
-}
-
 impl Ctx {
     /// The ledger handle every path of this invocation reads and appends
     /// through. A read-only command's handle never parses the invoking
@@ -429,7 +422,7 @@ impl Ctx {
         gitio::primary_worktree(&self.cwd).unwrap_or_else(|_| self.cwd.clone())
     }
 
-    fn event(&self, store: &Store, change_id: &str, payload: Payload) -> Event {
+    fn event(&self, store: &Store, change_id: &str, payload: Payload) -> Result<Event> {
         self.event_at(store, change_id, chrono::Utc::now(), payload)
     }
 
@@ -556,18 +549,42 @@ impl Ctx {
         true
     }
 
+    /// Issue local facts after the newest stored ID in their ledger scope.
+    /// Callers retain their transition lock through any subsequent append.
     fn event_at(
         &self,
         store: &Store,
         change_id: &str,
         created_at: chrono::DateTime<chrono::Utc>,
         payload: Payload,
-    ) -> Event {
+    ) -> Result<Event> {
         self.announce_assumed_identity();
         let attribution = self.resolve_model();
-        Event {
+        let latest = if change_id == Store::REPOSITORY_SCOPE {
+            store
+                .raw_repository_events_unseen(&BTreeSet::new())?
+                .last()
+                .map(|(id, _)| id.clone())
+        } else if store.list_change_ids()?.iter().any(|id| id == change_id) {
+            store
+                .raw_events(change_id)?
+                .last()
+                .map(|(id, _)| id.clone())
+        } else {
+            None
+        };
+        let event_id = match latest {
+            Some(id) => {
+                let floor = id.parse::<ulid::Ulid>().with_context(|| {
+                    format!("cannot issue a local event after non-ULID history {id:?}")
+                })?;
+                ids::new_event_id_after(floor).to_string()
+            }
+            None => ids::new_event_id(),
+        };
+        Ok(Event {
             schema_version: SCHEMA_VERSION,
-            event_id: ids::new_event_id(),
+            event_id,
             repository_id: store.repository_id.clone(),
             change_id: change_id.to_string(),
             actor: self.actor.clone(),
@@ -582,7 +599,7 @@ impl Ctx {
             session_resolution: self.session_resolution,
             created_at,
             payload,
-        }
+        })
     }
 
     pub(crate) fn load_state(

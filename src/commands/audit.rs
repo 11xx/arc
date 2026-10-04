@@ -66,7 +66,7 @@ pub(super) fn declare_debt_locked(
         production,
     };
     ensure_append_allowed(st, &payload)?;
-    let event = ctx.event(store, change_id, payload);
+    let event = ctx.event(store, change_id, payload)?;
     // One judgment is one obligation: an `arc integrate --debt` retried after
     // a refusal answers with the debt its first attempt recorded.
     let (verb, event_id) = match st.debt.as_ref().filter(|debt| debt.restated_by(&event)) {
@@ -116,7 +116,7 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
         route_version: args.route_version,
     };
     ensure_append_allowed(&st, &payload)?;
-    let event = ctx.event(&store, &change_id, payload);
+    let event = ctx.event(&store, &change_id, payload)?;
     store.append_event(&event)?;
     println!("audit: {:?} at {revision}", args.verdict);
     for id in finding_ids {

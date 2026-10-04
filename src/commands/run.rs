@@ -258,7 +258,7 @@ pub fn dispatch_run(ctx: &Ctx, dispatch: DispatchInput) -> Result<()> {
             brief_event_id,
             note,
         },
-    );
+    )?;
     let subject = RunSubject::of(&event.payload);
     let round = rounds(&earlier)
         .iter()
@@ -350,7 +350,7 @@ pub fn end_run(ctx: &Ctx, dispatch_event_id: &str, ending: EndingInput) -> Resul
             collects: ending.collects,
             note: ending.note,
         },
-    );
+    )?;
     store.append_repository_event(&event)?;
     println!("run ended: {}", outcome.as_str());
     for finding in &deferred {

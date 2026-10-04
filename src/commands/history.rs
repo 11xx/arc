@@ -81,10 +81,7 @@ pub fn record_mapping(
             signature_only: Vec::new(),
             refs,
         },
-    );
-    if let Some(previous) = combined.last() {
-        event.event_id = event_id_after(&previous.event_id)?;
-    }
+    )?;
     combined.push(event.clone());
     combined.sort_by(|a, b| a.event_id.cmp(&b.event_id));
     let rewrites = RewriteMap::from_events(combined.iter())
@@ -139,7 +136,7 @@ pub fn withdraw_rewrite(ctx: &Ctx, event_id: &str, reason: String) -> Result<()>
                 rewrite_event_id: event_id.to_string(),
                 reason,
             },
-        );
+        )?;
         store.append_repository_event(&event)?;
         println!("withdrawn: {event_id}");
         println!("event: {}", event.event_id);

@@ -145,18 +145,7 @@ fn is_range(text: &str) -> bool {
 /// meets a selection before its promotion and a registration before its
 /// evaluations. Taken under the repository-events lock.
 fn repository_event(ctx: &Ctx, store: &Store, payload: Payload) -> Result<crate::model::Event> {
-    let mut event = ctx.event(store, Store::REPOSITORY_SCOPE, payload);
-    let latest = store
-        .load_repository_events()?
-        .into_iter()
-        .map(|event| event.event_id)
-        .max();
-    if let Some(latest) = latest {
-        if event.event_id <= latest {
-            event.event_id = super::event_id_after(&latest)?;
-        }
-    }
-    Ok(event)
+    ctx.event(store, Store::REPOSITORY_SCOPE, payload)
 }
 
 /// Whether the destination's phase admits the patchset a promotion ends in,
@@ -728,7 +717,7 @@ fn record_promotion(
 fn record_patchset(
     ctx: &Ctx,
     store: &Store,
-    events: &[crate::model::Event],
+    _events: &[crate::model::Event],
     st: &ChangeState,
     selection: &Selection,
     commit: &str,
@@ -765,13 +754,7 @@ fn record_patchset(
         }),
     };
     super::ensure_append_allowed(st, &payload)?;
-    let mut event = ctx.event(store, &st.change_id, payload);
-    event.event_id = super::event_id_after(
-        &events
-            .last()
-            .context("change has no opening event")?
-            .event_id,
-    )?;
+    let event = ctx.event(store, &st.change_id, payload)?;
     store.append_event(&event)?;
     gitio::update_ref(
         &ctx.cwd,

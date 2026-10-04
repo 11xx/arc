@@ -483,7 +483,7 @@ pub fn message(
             detail,
             metadata,
         },
-    );
+    )?;
     store.append_event(&event)?;
     println!("message: {} [{}]", message_type.as_str(), severity.as_str());
     println!("event: {}", event.event_id);

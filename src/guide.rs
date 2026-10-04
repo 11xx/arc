@@ -35,6 +35,11 @@ SAY WHO YOU ARE (before the first write)
   recorded with any observed disagreement. `arc show --json` and `arc log`
   show the model evidence.
 
+  Local change and repository events receive IDs after the newest stored event
+  in their scope, even in fresh processes and after imports from a clock ahead.
+  Observation timestamps retain the recording clock. The store refuses an
+  append that would sort before a change's opening event.
+
   Every event records who wrote it. Most writes accept an undeclared
   identity. In that case arc records an actor nobody claimed:
   `<harness>:<session>` when both are known, else `git config user.name`.

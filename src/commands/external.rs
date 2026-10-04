@@ -3,7 +3,7 @@
 use crate::commands::Ctx;
 use crate::gitio;
 use crate::model::{ExternalFinding, ExternalVerdict, Payload};
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 
 pub struct ExternalVerdictArgs {
     pub verdict: ExternalVerdict,
@@ -49,14 +49,7 @@ pub fn record_verdict(ctx: &Ctx, reference: &str, args: ExternalVerdictArgs) -> 
         findings: findings.clone(),
     };
     super::ensure_append_allowed(&state, &payload)?;
-    let events = store.load_events(&change_id)?;
-    let previous = events
-        .last()
-        .context("change has no opening event")?
-        .event_id
-        .as_str();
-    let mut event = ctx.event(&store, &change_id, payload);
-    event.event_id = super::event_id_after(previous)?;
+    let event = ctx.event(&store, &change_id, payload)?;
     store.append_event(&event)?;
 
     println!(

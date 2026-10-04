@@ -47,17 +47,11 @@ pub fn take(ctx: &Ctx, tags: Vec<String>, ttl: Option<String>, json: bool) -> Re
     let Some(candidate) = ready_candidate(&states, &tags, now) else {
         return Ok(2);
     };
-    let previous_event_id = store
-        .load_events(&candidate.change_id)?
-        .last()
-        .context("change has no opening event")?
-        .event_id
-        .clone();
     let displaced = candidate.claim.as_ref().map(|claim| {
         let timing = state::claim_timing_at(claim, now);
         displaced_claim(claim, &timing, None)
     });
-    let mut event = identity_event_at(
+    let event = identity_event_at(
         ctx,
         &store,
         &candidate.change_id,
@@ -69,8 +63,7 @@ pub fn take(ctx: &Ctx, tags: Vec<String>, ttl: Option<String>, json: bool) -> Re
             stage_budgets: default_stage_budgets(),
             displaced,
         },
-    );
-    event.event_id = event_id_after(&previous_event_id)?;
+    )?;
     store.append_event(&event)?;
     if json {
         let state = store.state(&candidate.change_id)?;
@@ -220,7 +213,7 @@ fn claim_inner(
         displaced: displaced.clone(),
     };
     ensure_append_allowed(&state, &payload)?;
-    let event = identity_event_at(ctx, &store, &change_id, now, &owner, payload);
+    let event = identity_event_at(ctx, &store, &change_id, now, &owner, payload)?;
     store.append_event(&event)?;
     if matches!(mode, ClaimMode::Standard { .. }) {
         if let Some(displaced) = &displaced {
@@ -272,7 +265,7 @@ pub fn release_claim(ctx: &Ctx, reference: &str) -> Result<i32> {
         Payload::ClaimReleased {
             claim_id: existing.claim_id.clone(),
         },
-    );
+    )?;
     store.append_event(&event)?;
     println!("claim released: {change_id}");
     println!("event: {}", event.event_id);
@@ -309,11 +302,6 @@ pub fn stage(
     let events = store.load_events(&change_id)?;
     let mut state = store.project_state(&events, &store.rewrites()?)?;
     crate::replica::localize_change(&store.repository_id, &events, &mut state);
-    let mut previous_event_id = events
-        .last()
-        .context("change has no opening event")?
-        .event_id
-        .clone();
     let blocker = blocker
         .as_deref()
         .map(|raw| resolve_blocker(&store, &state, raw))
@@ -342,10 +330,8 @@ pub fn stage(
             displaced,
         };
         ensure_append_allowed(&state, &payload)?;
-        let mut claim_event = identity_event_at(ctx, &store, &change_id, now, &owner, payload);
-        claim_event.event_id = event_id_after(&previous_event_id)?;
+        let claim_event = identity_event_at(ctx, &store, &change_id, now, &owner, payload)?;
         store.append_event(&claim_event)?;
-        previous_event_id = claim_event.event_id.clone();
         println!("claimed: {change_id} for 7200s");
         println!("event: {}", claim_event.event_id);
         state = store.state(&change_id)?;
@@ -374,8 +360,7 @@ pub fn stage(
         blocker,
     };
     ensure_append_allowed(&state, &payload)?;
-    let mut event = identity_event_at(ctx, &store, &change_id, now, &owner, payload);
-    event.event_id = event_id_after(&previous_event_id)?;
+    let event = identity_event_at(ctx, &store, &change_id, now, &owner, payload)?;
     store.append_event(&event)?;
     println!("stage: {}", stage.as_str());
     println!("event: {}", event.event_id);
@@ -475,12 +460,12 @@ fn identity_event_at(
     created_at: chrono::DateTime<chrono::Utc>,
     identity: &state::ClaimIdentity,
     payload: Payload,
-) -> Event {
-    let mut event = ctx.event_at(store, change_id, created_at, payload);
+) -> Result<Event> {
+    let mut event = ctx.event_at(store, change_id, created_at, payload)?;
     event.actor = identity.actor.clone();
     event.harness = Some(identity.harness.clone());
     event.session = Some(identity.session.clone());
-    event
+    Ok(event)
 }
 
 fn print_claim_conflict(message: &str, claim: &state::ClaimState, timing: &state::ClaimTiming) {

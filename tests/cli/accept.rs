@@ -1365,3 +1365,106 @@ fn accept_delivery_signer_failure_reports_commits_written_before_intent() {
     );
     assert_eq!(d.result(3)["preparation_complete"], true);
 }
+
+impl Delivery {
+    fn hour_ahead(&self) {
+        let future = chrono::Utc::now() + chrono::TimeDelta::hours(1);
+        self.mutate_bundle(|bundle| {
+            let mut ids = std::collections::BTreeMap::new();
+            for (index, event) in bundle["events"].as_array().unwrap().iter().enumerate() {
+                ids.insert(
+                    event["event_id"].as_str().unwrap().to_string(),
+                    ulid::Ulid::from_parts(future.timestamp_millis() as u64, index as u128)
+                        .to_string(),
+                );
+            }
+            fn remap(
+                value: &mut serde_json::Value,
+                ids: &std::collections::BTreeMap<String, String>,
+            ) {
+                match value {
+                    serde_json::Value::String(text) => {
+                        if let Some(id) = ids.get(text) {
+                            *text = id.clone();
+                        }
+                    }
+                    serde_json::Value::Array(items) => {
+                        for item in items {
+                            remap(item, ids);
+                        }
+                    }
+                    serde_json::Value::Object(items) => {
+                        for item in items.values_mut() {
+                            remap(item, ids);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            remap(&mut bundle["events"], &ids);
+            for event in bundle["events"].as_array_mut().unwrap() {
+                event["created_at"] = future.to_rfc3339().into();
+            }
+        });
+    }
+}
+
+fn assert_fresh_writer_follows_future_history(writer: &str) {
+    let d = Delivery::new();
+    d.hour_ahead();
+    assert_eq!(d.result(3)["preparation_complete"], true);
+    let before = fixture_events(&d.receiver, &d.change);
+    let floor = before.last().unwrap()["event_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut command = d.receiver.arc(&d.receiver.root);
+    command.env("ARC_ROLE", "lead").args([writer, &d.change]);
+    match writer {
+        "debt" | "hold" => {
+            command.args(["--reason", "fixture follow-up"]);
+        }
+        "message" => {
+            command.args(["--type", "note", "--summary", "fixture follow-up"]);
+        }
+        _ => {}
+    }
+    command.assert().success();
+    let shown = json_stdout(
+        d.receiver
+            .arc(&d.receiver.root)
+            .args(["show", &d.change, "--json"]),
+    );
+    assert_eq!(shown["change_id"], d.change);
+    let after = fixture_events(&d.receiver, &d.change);
+    let appended: Vec<_> = after
+        .iter()
+        .filter(|event| {
+            !before
+                .iter()
+                .any(|held| held["event_id"] == event["event_id"])
+        })
+        .collect();
+    assert_eq!(appended.len(), 1, "{writer}");
+    assert!(
+        appended[0]["event_id"].as_str().unwrap() > floor.as_str(),
+        "{writer}"
+    );
+}
+
+#[test]
+fn accept_delivery_fresh_debt_follows_future_history() {
+    assert_fresh_writer_follows_future_history("debt");
+}
+#[test]
+fn accept_delivery_fresh_hold_follows_future_history() {
+    assert_fresh_writer_follows_future_history("hold");
+}
+#[test]
+fn accept_delivery_fresh_claim_follows_future_history() {
+    assert_fresh_writer_follows_future_history("claim");
+}
+#[test]
+fn accept_delivery_fresh_message_follows_future_history() {
+    assert_fresh_writer_follows_future_history("message");
+}

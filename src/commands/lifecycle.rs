@@ -371,7 +371,7 @@ pub fn begin(
             from_fork: fork_provenance.clone(),
             dangerous,
         },
-    );
+    )?;
     store.append_event(&ev)?;
     super::roles::append(
         ctx,
@@ -382,12 +382,11 @@ pub fn begin(
         BTreeMap::new(),
     )?;
     if iterating {
-        let mut event = ctx.event(
+        let event = ctx.event(
             &store,
             &change_id,
             Payload::IterationScopeSet { iterating: true },
-        );
-        event.event_id = event_id_after(&ev.event_id)?;
+        )?;
         store.append_event(&event)?;
     }
 
@@ -441,7 +440,7 @@ pub fn begin(
                         plan_source: None,
                         must_read: Vec::new(),
                     },
-                );
+                )?;
                 if let Err(error) = store.append_event(&event) {
                     eprintln!("warning: could not seed a brief from {filename}: {error:#}");
                 }
@@ -586,7 +585,7 @@ pub fn iterating(ctx: &Ctx, reference: &str, off: bool) -> Result<()> {
         println!("iterating: {iterating} (unchanged)");
         return Ok(());
     }
-    let event = ctx.event(&store, &change_id, Payload::IterationScopeSet { iterating });
+    let event = ctx.event(&store, &change_id, Payload::IterationScopeSet { iterating })?;
     store.append_event(&event)?;
     println!("iterating: {iterating}");
     println!("event: {}", event.event_id);
@@ -958,7 +957,7 @@ pub fn brief(
                 "renegotiates nothing; drop --caused-by and --cause-note"
             ));
         }
-        let event = ctx.event(&store, &change_id, payload);
+        let event = ctx.event(&store, &change_id, payload)?;
         let event_id = event.event_id.clone();
         let event_plan_source = plan_source.clone();
         store.append_event(&event)?;
@@ -1266,7 +1265,7 @@ pub fn metadata(
         priority,
     };
     ensure_append_allowed(&state, &payload)?;
-    let event = ctx.event(&store, &change_id, payload);
+    let event = ctx.event(&store, &change_id, payload)?;
     store.append_event(&event)?;
     println!("event: {}", event.event_id);
     Ok(())

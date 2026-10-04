@@ -79,7 +79,7 @@ pub fn open_pass(ctx: &Ctx, raw_members: Vec<String>, note: Option<String>) -> R
             members,
             note,
         },
-    );
+    )?;
     store.append_repository_event(&event)?;
     println!("pass: {pass_id}");
     println!("review pass declared by caller");
@@ -102,7 +102,7 @@ pub fn complete_pass(ctx: &Ctx, pass_id: String, note: Option<String>) -> Result
             pass_id: canonical_id.clone(),
             note,
         },
-    );
+    )?;
     store.append_repository_event(&event)?;
     println!("pass completed by caller: {canonical_id}");
     println!("event: {}", event.event_id);
@@ -124,7 +124,7 @@ pub fn abandon_pass(ctx: &Ctx, pass_id: String, reason: String) -> Result<()> {
             pass_id: canonical_id.clone(),
             reason,
         },
-    );
+    )?;
     store.append_repository_event(&event)?;
     println!("pass abandoned by caller: {canonical_id}");
     println!("event: {}", event.event_id);

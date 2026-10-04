@@ -153,23 +153,6 @@ pub(super) fn event_ids(store: &Store, change: Option<&str>) -> Result<BTreeSet<
     Ok(ids)
 }
 
-/// Continue the process sequence after both admitted ledger scopes. The caller
-/// holds the change transition lock before assigning a dependent local fact.
-fn admitted_event_floor(store: &Store, change: &str) -> Result<Option<String>> {
-    let mut events = store.load_events(change)?;
-    events.extend(store.load_repository_events()?);
-    events
-        .iter()
-        .map(|event| {
-            event
-                .event_id
-                .parse::<ulid::Ulid>()
-                .with_context(|| format!("cannot append after non-ULID event {:?}", event.event_id))
-        })
-        .collect::<Result<Vec<_>>>()
-        .map(|ids| ids.into_iter().max().map(|id| id.to_string()))
-}
-
 fn step<T>(
     result: &mut AcceptanceResult,
     ctx: &Ctx,
@@ -560,7 +543,7 @@ fn validate_recovery(
             signature_only: Vec::new(),
             refs: intent.refs.clone(),
         },
-    ));
+    )?);
     let mapped = RewriteMap::from_events(combined.iter())?;
     if crate::rewrite::signature_only_successors(&ctx.cwd, &intent.mapping, &mapped).len()
         != intent.mapping.len()
@@ -977,10 +960,6 @@ fn execute_acceptance(
         let _transition = store.lock_transition(&plan.state.change_id)?;
         revalidate(ctx, plan, &plan.head)?;
         let current = store.state(&plan.state.change_id)?;
-        let floor = admitted_event_floor(&store, &plan.state.change_id)?;
-        if let Some(floor) = &floor {
-            event_id_after(floor)?;
-        }
         if !plan.create_checkout {
             validate_checkout(&ctx.with_cwd(plan.checkout.clone()), plan, &plan.head, true)?;
         }
@@ -1000,7 +979,7 @@ fn execute_acceptance(
         } else {
             (false, None)
         };
-        let mut event = ctx.event(
+        let event = ctx.event(
             &store,
             &plan.state.change_id,
             Payload::ChangeCheckoutBound {
@@ -1009,10 +988,7 @@ fn execute_acceptance(
                 worktree_created: created,
                 worktree_owner_token: token,
             },
-        );
-        if let Some(floor) = floor {
-            event.event_id = event_id_after(&floor)?;
-        }
+        )?;
         ensure_append_allowed(&current, &event.payload)?;
         store.append_event(&event)?;
         println!(
