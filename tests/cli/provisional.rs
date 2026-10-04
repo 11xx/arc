@@ -1566,6 +1566,19 @@ fn an_inflight_offer_requires_an_explicit_routing_recipient() {
         &hex::encode(Sha256::digest(bytes)),
     ]));
     let change = prepared(&worker);
+    let checked = worker
+        .arc(&worker.root)
+        .args(["check", &change, "--provisional"])
+        .assert()
+        .code(17);
+    let diagnostic = String::from_utf8_lossy(&checked.get_output().stderr);
+    let remedy = diagnostic
+        .lines()
+        .find_map(|line| line.strip_prefix("Try: "))
+        .unwrap_or_else(|| panic!("no executable remedy: {diagnostic}"));
+    let heads = git_out(&worker.root, &["show-ref", "--heads"]);
+    stdout(&mut worker.arc_shell(&worker.root, remedy));
+    assert_eq!(git_out(&worker.root, &["show-ref", "--heads"]), heads);
     worker
         .arc(&worker.root)
         .args(["integrate", &change, "--provisional"])

@@ -1174,8 +1174,10 @@ PAIR REPLICA STORES
   an explicit project or operator false disables it. protected_targets is
   the union of explicit project/operator declarations and protected branches.
   Recipient routing defaults to the known authority holder. An authority
-  offer in flight requires --for-replica or --for-forge. A forge reference
-  is opaque: preparation performs no transport and grants no authority.
+  offer in flight requires --for-replica or --for-forge.
+  Check reports an executable `integrate --provisional --dry-run` command with
+  explicit recipient routing when authority is in flight.
+  A forge reference is opaque: preparation performs no transport and grants no authority.
   An intent binds the exact event and guarded ref transition before visibility;
   publication failure reports the merge, observed staging and retention refs,
   event state, retained intent and exact recovery command. Execution --json

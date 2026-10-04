@@ -1176,6 +1176,8 @@ enum Cmd {
     #[command(after_help = blockers::exit_status_help())]
     Check {
         /// Evaluate explicit unsigned staging preparation and local provisional prerequisites.
+        /// An authority offer in flight reports an integrate --provisional --dry-run
+        /// command with an explicit recipient for the same readiness evaluation.
         #[arg(long, conflicts_with = "tag")]
         provisional: bool,
         /// Staging destination under arc/provisional/<local-replica>/; requires --provisional.

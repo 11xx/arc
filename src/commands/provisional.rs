@@ -153,13 +153,38 @@ fn select(
     }
     let recipient = match (replica, forge) {
         (Some(name), None) => {
-            let Some(peer) = status.peers.iter().chain(status.local.iter()).find(|peer| peer.name == name) else { return refuse_selection(17, format!("no determinable recipient: unknown replica {name}; use --for-replica with a paired name or --for-forge REFERENCE")); };
-            ProvisionalRecipient::Replica { repository_id: peer.repository_id.clone() }
+            let Some(peer) = status
+                .peers
+                .iter()
+                .chain(status.local.iter())
+                .find(|peer| peer.name == name)
+            else {
+                return refuse_selection(17, format!("no determinable recipient: unknown replica {name}; use --for-replica with a paired name or --for-forge REFERENCE"));
+            };
+            ProvisionalRecipient::Replica {
+                repository_id: peer.repository_id.clone(),
+            }
         }
-        (None, Some(reference)) if !reference.trim().is_empty() => ProvisionalRecipient::Forge { reference: reference.into() },
+        (None, Some(reference)) if !reference.trim().is_empty() => ProvisionalRecipient::Forge {
+            reference: reference.into(),
+        },
         (None, None) => match status.authority.as_ref().and_then(|a| a.holder.as_ref()) {
-            Some(holder) => ProvisionalRecipient::Replica { repository_id: holder.repository_id.clone() },
-            None => return refuse_selection(17, format!("authority has no holder (offer {:?}); specify --for-replica NAME or --for-forge REFERENCE", status.authority.as_ref().and_then(|a| a.offer_in_flight.as_ref()).map(|offer| &offer.offer_id))),
+            Some(holder) => ProvisionalRecipient::Replica {
+                repository_id: holder.repository_id.clone(),
+            },
+            None => {
+                let offer = status
+                    .authority
+                    .as_ref()
+                    .and_then(|authority| authority.offer_in_flight.as_ref());
+                let replica = offer
+                    .map(|offer| &offer.to.name)
+                    .or_else(|| status.peers.first().map(|peer| &peer.name));
+                let routing = replica
+                    .map(|name| format!("--for-replica {}", crate::context::shell_quote(name)))
+                    .unwrap_or_else(|| "--for-forge REFERENCE".into());
+                return refuse_selection(17, format!("authority has no holder (offer {:?}); explicit --for-replica or --for-forge routing is required\nTry: arc integrate {} --provisional --dry-run {routing}", offer.map(|offer| &offer.offer_id), state.change_id));
+            }
         },
         _ => bail!("conflicting --for-replica/--for-forge or blank forge recipient"),
     };
