@@ -14478,3 +14478,395 @@ fn global_sandbox_flag_selects_contained_journal() {
     );
     assert!(!repo.home.join(".local/ai/arc/journals/global").exists());
 }
+
+#[test]
+fn filed_groups_origins_and_tracks_fates_and_recorded_inactivity() {
+    let repo = Repo::new();
+    let open = filed_artifact(&repo, "todo", "waiting", "work\n");
+    let taken = filed_artifact(&repo, "todo", "promoted", "work\n");
+    let second = stdout(
+        repo.arc(&repo.root)
+            .env("ARC_SESSION", "session-b")
+            .args(["journal", "todo", "second", "--title", "Second"]),
+    );
+    repo.arc(&repo.root)
+        .args([
+            "begin",
+            "promoted",
+            "--no-worktree",
+            "--from-journal",
+            &taken,
+        ])
+        .assert()
+        .success();
+    for outcome in ["done", "superseded", "discarded"] {
+        let file = filed_artifact(&repo, "todo", outcome, "work\n");
+        repo.arc(&repo.root)
+            .args(["journal", "consume", &file, "--outcome", outcome])
+            .assert()
+            .success();
+    }
+    let dir = journal_dir(&repo);
+    let mut events = journal_events(&dir);
+    let old = (chrono::Utc::now() - chrono::Duration::days(20)).to_rfc3339();
+    for event in &mut events {
+        if event["file"] == open {
+            event["ts"] = old.clone().into();
+        }
+    }
+    fs::write(
+        dir.join("events.jsonl"),
+        events
+            .iter()
+            .map(|event| format!("{event}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let report = json_stdout(repo.arc(&repo.root).args(["journal", "filed", "--json"]));
+    assert_eq!(report["schema"], "arc-journal-filed/1");
+    assert_eq!(report["stale_count"], 1);
+    assert_eq!(
+        report["counts"],
+        serde_json::json!({"open":1,"taken":1,"done":1,"superseded":1,"discarded":1,"stale":1})
+    );
+    let groups = report["sessions"].as_array().unwrap();
+    assert_eq!(groups.len(), 2, "{report}");
+    let items = groups
+        .iter()
+        .find(|group| group["session"] == "session-a")
+        .unwrap()["items"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        items.iter().find(|item| item["file"] == open).unwrap()["fate"],
+        "stale"
+    );
+    let promoted = items.iter().find(|item| item["file"] == taken).unwrap();
+    assert_eq!(promoted["fate"], "taken", "{promoted}");
+    assert!(promoted["changes"].as_array().unwrap()[0]
+        .as_str()
+        .unwrap()
+        .starts_with("promoted-"));
+    for fate in ["done", "superseded", "discarded"] {
+        assert!(items.iter().any(|item| item["fate"] == fate), "{report}");
+    }
+    let filtered = json_stdout(repo.arc(&repo.root).args([
+        "journal",
+        "filed",
+        "--session",
+        "session-b",
+        "--json",
+    ]));
+    assert_eq!(filtered["sessions"].as_array().unwrap().len(), 1);
+    assert!(second.contains(
+        filtered["sessions"][0]["items"][0]["file"]
+            .as_str()
+            .unwrap()
+    ));
+    let catchup = stdout(repo.arc(&repo.root).args(["catchup"]));
+    assert!(
+        catchup.contains("1 filed items untouched for >14 days"),
+        "{catchup}"
+    );
+    repo.arc(&repo.root)
+        .args(["claim", &open])
+        .assert()
+        .success();
+    let touched = json_stdout(repo.arc(&repo.root).args(["journal", "filed", "--json"]));
+    assert_eq!(touched["stale_count"], 0);
+}
+
+#[test]
+fn catchup_merges_recorded_sessions_and_marks_unfiled_activity() {
+    let repo = Repo::new();
+    filed_artifact(&repo, "todo", "filed", "work\n");
+    repo.arc(&repo.root)
+        .env("ARC_SESSION", "session-b")
+        .args([
+            "journal",
+            "handoff",
+            "ending",
+            "--title",
+            "Ending",
+            "--source",
+            "harness=test session=session-a ts=2026-01-01T00:00:00Z",
+        ])
+        .assert()
+        .success();
+    let session = "11111111-2222-3333-4444-555555555555";
+    let store = repo.home.join(".claude/projects/-fixture");
+    fs::create_dir_all(&store).unwrap();
+    let ts = chrono::Utc::now().to_rfc3339();
+    let rows = [
+        serde_json::json!({"type":"user", "sessionId":session, "cwd":repo.root, "timestamp":ts, "message":{"role":"user", "content":"work"}}),
+        serde_json::json!({"type":"assistant", "sessionId":session, "timestamp":ts, "message":{"role":"assistant", "model":"fixture-model", "content":"answer"}}),
+    ];
+    fs::write(
+        store.join(format!("{session}.jsonl")),
+        rows.iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let pi_store = repo.home.join("pi-sessions");
+    fs::create_dir_all(&pi_store).unwrap();
+    let pi = [
+        serde_json::json!({"type":"session", "version":3, "id":session, "timestamp":ts, "cwd":repo.root}),
+        serde_json::json!({"type":"message", "id":"assistant-1", "parentId":null, "timestamp":ts, "message":{"role":"assistant", "model":"pi-model", "provider":"openai", "content":[{"type":"text", "text":"answer"}]}}),
+    ];
+    fs::write(
+        pi_store.join(format!("2026-01-01T00-00-00Z_{session}.jsonl")),
+        pi.map(|row| format!("{row}\n")).concat(),
+    )
+    .unwrap();
+    let value = json_stdout(
+        repo.arc(&repo.root)
+            .env("CLAUDE_CONFIG_DIR", repo.home.join(".claude"))
+            .env("PI_CODING_AGENT_SESSION_DIR", &pi_store)
+            .args(["catchup", "--sessions", "10", "--json"]),
+    );
+    assert_eq!(value["schema"], "arc-catchup/12");
+    let sessions = value["recent_sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 4, "{value}");
+    let recorded = sessions
+        .iter()
+        .find(|row| row["session"] == session && row["harness"] == "claude")
+        .unwrap();
+    assert_eq!(recorded["unfiled"], true);
+    assert_eq!(recorded["model"], "fixture-model");
+    let pi = sessions
+        .iter()
+        .find(|row| row["session"] == session && row["harness"] == "pi")
+        .unwrap();
+    assert_eq!(pi["model"], "pi-model");
+    assert_eq!(pi["unfiled"], true);
+    let filed = sessions
+        .iter()
+        .find(|row| row["session"] == "session-a")
+        .unwrap();
+    assert_eq!(filed["journal_items"], 1);
+    assert_eq!(filed["handoffs"].as_array().unwrap().len(), 1);
+    assert_eq!(filed["unfiled"], false);
+    let text = stdout(
+        repo.arc(&repo.root)
+            .env("CLAUDE_CONFIG_DIR", repo.home.join(".claude"))
+            .env("PI_CODING_AGENT_SESSION_DIR", &pi_store)
+            .args(["catchup"]),
+    );
+    assert!(text.contains("recent sessions"), "{text}");
+    assert!(text.contains("unfiled"), "{text}");
+    let limited = json_stdout(
+        repo.arc(&repo.root)
+            .env("CLAUDE_CONFIG_DIR", repo.home.join(".claude"))
+            .env("PI_CODING_AGENT_SESSION_DIR", &pi_store)
+            .args(["catchup", "--sessions", "1", "--json"]),
+    );
+    assert_eq!(limited["recent_sessions"].as_array().unwrap().len(), 1);
+    let handoff = filed["handoffs"][0].as_str().unwrap();
+    let source = format!("harness=claude session={session} ts={ts}");
+    repo.arc(&repo.root)
+        .args(["journal", "source-attach", handoff, "--source", &source])
+        .assert()
+        .success();
+    let named = json_stdout(
+        repo.arc(&repo.root)
+            .env("CLAUDE_CONFIG_DIR", repo.home.join(".claude"))
+            .env("PI_CODING_AGENT_SESSION_DIR", &pi_store)
+            .args(["catchup", "--json"]),
+    );
+    let named = named["recent_sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["harness"] == "claude" && row["session"] == session)
+        .unwrap();
+    assert_eq!(named["unfiled"], false);
+    assert_eq!(named["handoffs"][0], handoff);
+}
+
+#[test]
+fn catchup_discovers_worktree_recordings_and_merges_ledger_writers() {
+    let repo = Repo::new();
+    let worktree = repo.home.join("project-worktree");
+    git(
+        &repo.root,
+        &["worktree", "add", "-b", "side", worktree.to_str().unwrap()],
+    );
+    let session = "11111111-2222-3333-4444-555555555555";
+    let store = repo.home.join(".claude/projects/-fixture");
+    fs::create_dir_all(&store).unwrap();
+    let old = (chrono::Utc::now() - chrono::Duration::days(8)).to_rfc3339();
+    let row = serde_json::json!({"type":"user", "sessionId":session, "cwd":worktree, "timestamp":old, "message":{"role":"user", "content":"work"}});
+    fs::write(store.join(format!("{session}.jsonl")), format!("{row}\n")).unwrap();
+    let tapes_only = json_stdout(
+        repo.arc(&repo.root)
+            .env("CLAUDE_CONFIG_DIR", repo.home.join(".claude"))
+            .args(["catchup", "--json"]),
+    );
+    assert_eq!(tapes_only["recent_sessions"][0]["session"], session);
+    assert_eq!(tapes_only["recent_sessions"][0]["unfiled"], false);
+    repo.arc(&repo.root)
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_SESSION", session)
+        .env("ARC_MODEL", "writer-model#medium")
+        .args(["begin", "ledger-only", "--no-worktree"])
+        .assert()
+        .success();
+    let merged = json_stdout(
+        repo.arc(&repo.root)
+            .env("CLAUDE_CONFIG_DIR", repo.home.join(".claude"))
+            .args(["catchup", "--json"]),
+    );
+    assert_eq!(
+        merged["recent_sessions"].as_array().unwrap().len(),
+        1,
+        "{merged}"
+    );
+    assert_eq!(merged["recent_sessions"][0]["model"], "writer-model#medium");
+    assert_eq!(merged["recent_sessions"][0]["unfiled"], true);
+    repo.arc(&repo.root)
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_SESSION", session)
+        .args(["journal", "conclusion", "ending", "--title", "Ending"])
+        .assert()
+        .success();
+    let ended = json_stdout(
+        repo.arc(&repo.root)
+            .env("CLAUDE_CONFIG_DIR", repo.home.join(".claude"))
+            .args(["catchup", "--json"]),
+    );
+    assert_eq!(
+        ended["recent_sessions"][0]["conclusions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(ended["recent_sessions"][0]["unfiled"], false);
+    let disabled = json_stdout(
+        repo.arc(&repo.root)
+            .args(["catchup", "--sessions", "0", "--json"]),
+    );
+    assert!(disabled["recent_sessions"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn filed_retains_distillation_sources_archived_fates_and_thresholds() {
+    let repo = Repo::new();
+    let out = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "todo",
+        "distilled",
+        "--title",
+        "Distilled",
+        "--source",
+        "harness=claude session=source-session ts=2026-01-01T00:00:00Z",
+        "--item-key",
+        "request-a",
+    ]));
+    let file = Path::new(out.trim()).file_name().unwrap().to_str().unwrap();
+    let dir = journal_dir(&repo);
+    let mut events = journal_events(&dir);
+    events[0]["ts"] = (chrono::Utc::now() - chrono::Duration::days(20))
+        .to_rfc3339()
+        .into();
+    fs::write(
+        dir.join("events.jsonl"),
+        events
+            .iter()
+            .map(|event| format!("{event}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let report = json_stdout(repo.arc(&repo.root).args([
+        "journal",
+        "filed",
+        "--session",
+        "source-session",
+        "--stale",
+        "30",
+        "--json",
+    ]));
+    assert_eq!(report["sessions"][0]["session"], "session-a");
+    let item = &report["sessions"][0]["items"][0];
+    assert_eq!(item["fate"], "open");
+    assert_eq!(item["untouched_days"], 20);
+    assert_eq!(item["sources"][0]["session"], "source-session");
+    assert_eq!(item["sources"][0]["item_key"], "request-a");
+    let absent = json_stdout(repo.arc(&repo.root).args([
+        "journal",
+        "filed",
+        "--session",
+        "absent",
+        "--json",
+    ]));
+    assert!(absent["sessions"].as_array().unwrap().is_empty());
+    repo.arc(&repo.root)
+        .args(["journal", "consume", file, "--outcome", "done"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["journal", "archive", file])
+        .assert()
+        .success();
+    let archived = json_stdout(repo.arc(&dir).args(["journal", "filed", "--json"]));
+    assert_eq!(archived["sessions"][0]["items"][0]["fate"], "done");
+    assert_eq!(archived["stale_count"], 0);
+}
+
+#[test]
+fn filed_reads_preserve_the_event_log_and_ignore_append_policy() {
+    let repo = Repo::new();
+    filed_artifact(&repo, "todo", "queued", "work\n");
+    let dir = journal_dir(&repo);
+    let before = fs::read(dir.join("events.jsonl")).unwrap();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(repo.root.join(".arc/policy.toml"), "not valid toml [").unwrap();
+    let value = json_stdout(repo.arc(&repo.root).args(["journal", "filed", "--json"]));
+    assert_eq!(value["counts"]["open"], 1);
+    assert_eq!(fs::read(dir.join("events.jsonl")).unwrap(), before);
+    repo.arc(&repo.root)
+        .args(["journal", "filed", "--help"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("arc-journal-filed/1"));
+}
+
+#[test]
+fn catchup_discovery_keeps_opencode_store_commands_inside_the_sandbox() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = Repo::new();
+    let outside_data = repo.home.join("outside-data");
+    let db = outside_data.join("opencode/opencode.db");
+    fs::create_dir_all(db.parent().unwrap()).unwrap();
+    fs::write(&db, b"SQLite format 3\0").unwrap();
+    fs::write(
+        outside_data.join("opencode/opencode-next.db"),
+        b"SQLite format 3\0",
+    )
+    .unwrap();
+    let bin = repo.home.join("probe-bin");
+    fs::create_dir_all(&bin).unwrap();
+    for program in ["opencode", "opencode2"] {
+        let path = bin.join(program);
+        fs::write(
+            &path,
+            "#!/bin/sh\n: > \"$ARC_DISCOVERY_PROBE\"\nprintf '[]\\n'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let marker = repo.home.join("store-command-ran");
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    repo.arc(&repo.root)
+        .env("PATH", path)
+        .env("XDG_DATA_HOME", &outside_data)
+        .env("ARC_DISCOVERY_PROBE", &marker)
+        .args(["catchup", "--json"])
+        .assert()
+        .success();
+    assert!(
+        !marker.exists(),
+        "discovery invoked a store command outside the sandbox"
+    );
+}

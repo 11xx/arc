@@ -676,6 +676,22 @@ pub enum JournalCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Filed artifacts grouped by their writing session, with source references,
+    /// changes that took them up, and consumption outcomes (arc-journal-filed/1).
+    /// Open actionable items are stale after the threshold of recorded inactivity;
+    /// active claims suppress staleness. Plain reads record no activity.
+    /// Records no events; ledger reads do not require a parseable append policy.
+    Filed {
+        /// Filter by an exact writing or source session id
+        #[arg(long)]
+        session: Option<String>,
+        /// Mark open actionable items stale beyond this many days
+        #[arg(long, default_value = "14")]
+        stale: u64,
+        /// Emit structured JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
     /// Add a position block to an artifact and emit a typed `position` event.
     /// `--stance` writes the `Position: for | against | amend` line above the
     /// body; without it, the body can provide that line itself.
@@ -1230,6 +1246,7 @@ impl JournalCmd {
             JournalCmd::Dir { .. }
             | JournalCmd::Doctor { .. }
             | JournalCmd::Source { .. }
+            | JournalCmd::Filed { .. }
             | JournalCmd::Scaffolds { .. }
             | JournalCmd::Questions { .. }
             | JournalCmd::Events { .. }
@@ -1367,6 +1384,11 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd, global: bool) -> Result<i32> {
             item_key,
             json,
         } => source_report(ctx, &harness, &session, item_key.as_deref(), json),
+        JournalCmd::Filed {
+            session,
+            stale,
+            json,
+        } => filed(ctx, session.as_deref(), stale, json),
         JournalCmd::Position {
             filename,
             reference,
@@ -4935,6 +4957,361 @@ fn source_report(
         }
     }
     Ok(0)
+}
+
+#[derive(Serialize)]
+pub(crate) struct FiledItem {
+    pub(crate) file: String,
+    kind: String,
+    title: Option<String>,
+    filed_at: String,
+    last_activity: String,
+    pub(crate) fate: String,
+    untouched_days: Option<i64>,
+    changes: Vec<String>,
+    sources: Vec<ArtifactSource>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct FiledSession {
+    harness: String,
+    session: String,
+    model: Option<String>,
+    pub(crate) items: Vec<FiledItem>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct FiledReport {
+    schema: &'static str,
+    stale_days: u64,
+    pub(crate) stale_count: usize,
+    counts: std::collections::BTreeMap<String, usize>,
+    pub(crate) sessions: Vec<FiledSession>,
+}
+
+/// One derivation supplies the origin query and proactive stale counts.
+/// Fate records consumption except when supersession names the promoting change.
+pub(crate) fn filed_report(
+    ctx: &Ctx,
+    session: Option<&str>,
+    stale_days: u64,
+) -> Result<FiledReport> {
+    let dir = resolve_dir(&ctx.cwd)?;
+    let project = recorded_anchor(&dir)?
+        .map(PathBuf::from)
+        .unwrap_or_else(|| ctx.cwd.clone());
+    filed_report_in(&dir, &project, session, stale_days)
+}
+
+pub(crate) fn filed_report_in(
+    dir: &Path,
+    project: &Path,
+    session: Option<&str>,
+    stale_days: u64,
+) -> Result<FiledReport> {
+    let events = read_events(dir)?;
+    let changes = match Store::resolve_root(project) {
+        Ok(root) => Store::open_at(&root)?
+            .map(|store| {
+                store
+                    .readable_states()
+                    .map(|states| states.into_values().collect::<Vec<_>>())
+            })
+            .transpose()?
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    let now = Utc::now();
+    let mut groups: std::collections::BTreeMap<(String, String), FiledSession> =
+        std::collections::BTreeMap::new();
+    let mut seen = HashSet::new();
+    let mut stale_count = 0;
+    for event in events.iter().filter(|event| event.event == "note") {
+        let Some(file) = event.file.as_deref() else {
+            continue;
+        };
+        let Some((_, _, kind)) = parse_artifact_name(file) else {
+            continue;
+        };
+        if !seen.insert(file.to_string()) {
+            continue;
+        }
+        let sources = artifact_sources(&events, file);
+        if session.is_some_and(|session| {
+            event.session != session
+                && !sources
+                    .iter()
+                    .any(|source| source.source.session == session)
+        }) {
+            continue;
+        }
+        let activity = events
+            .iter()
+            .filter(|event| event.file.as_deref() == Some(file))
+            .filter_map(JournalEvent::timestamp)
+            .max()
+            .unwrap_or(now);
+        let age = now.signed_duration_since(activity).num_days().max(0);
+        let mut promotions: Vec<String> = inventory_promotions(&changes, file)
+            .into_iter()
+            .map(|promotion| promotion.change_id)
+            .collect();
+        promotions.extend(
+            events
+                .iter()
+                .filter(|event| event.file.as_deref() == Some(file))
+                .filter_map(|event| {
+                    event
+                        .promotion
+                        .as_ref()
+                        .map(|promotion| promotion.change_id.clone())
+                }),
+        );
+        promotions.sort();
+        promotions.dedup();
+        let consumed = events
+            .iter()
+            .rev()
+            .find(|event| event.file.as_deref() == Some(file) && event.event == "consumed");
+        let promoted_consumption = consumed.is_some_and(|event| {
+            event.outcome.as_deref() == Some("superseded")
+                && (event.promotion.is_some()
+                    || event.note.as_deref().is_some_and(|note| {
+                        promotions
+                            .iter()
+                            .any(|change| note == format!("change {change}"))
+                    }))
+        });
+        let fate = if promoted_consumption || (consumed.is_none() && !promotions.is_empty()) {
+            "taken".to_string()
+        } else if let Some(outcome) = consumption(&events, file) {
+            outcome
+        } else {
+            "open".to_string()
+        };
+        let claimed = open_artifact_claims(&events, file)
+            .iter()
+            .any(|claim| state::claim_timing_at(&claim.state, now).active);
+        let stale = fate == "open"
+            && is_actionable_kind(&kind)
+            && !claimed
+            && now.signed_duration_since(activity).num_seconds().max(0) as u64
+                > stale_days.saturating_mul(86_400);
+        let untouched_days = (fate == "open").then_some(age);
+        let fate = if stale {
+            stale_count += 1;
+            "stale".to_string()
+        } else {
+            fate
+        };
+        let group = groups
+            .entry((event.harness.clone(), event.session.clone()))
+            .or_insert_with(|| FiledSession {
+                harness: event.harness.clone(),
+                session: event.session.clone(),
+                model: event.model.clone(),
+                items: Vec::new(),
+            });
+        group.items.push(FiledItem {
+            file: file.to_string(),
+            kind,
+            title: event.title.clone(),
+            filed_at: event.ts.clone(),
+            last_activity: activity.to_rfc3339(),
+            fate,
+            untouched_days,
+            changes: promotions,
+            sources,
+        });
+    }
+    let sessions: Vec<_> = groups.into_values().collect();
+    let mut counts: std::collections::BTreeMap<String, usize> =
+        ["open", "taken", "done", "superseded", "discarded", "stale"]
+            .into_iter()
+            .map(|fate| (fate.to_string(), 0))
+            .collect();
+    for item in sessions.iter().flat_map(|group| &group.items) {
+        *counts.entry(item.fate.clone()).or_default() += 1;
+    }
+    Ok(FiledReport {
+        schema: "arc-journal-filed/1",
+        stale_days,
+        stale_count,
+        counts,
+        sessions,
+    })
+}
+
+fn filed(ctx: &Ctx, session: Option<&str>, stale_days: u64, json: bool) -> Result<i32> {
+    let report = filed_report(ctx, session, stale_days)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        for group in &report.sessions {
+            println!(
+                "{}/{} ({})",
+                group.harness,
+                group.session,
+                group.model.as_deref().unwrap_or("unknown")
+            );
+            for item in &group.items {
+                let age = item
+                    .untouched_days
+                    .map(|days| format!(", untouched {days} days"))
+                    .unwrap_or_default();
+                let changes = if item.changes.is_empty() {
+                    String::new()
+                } else {
+                    format!(", change {}", item.changes.join(", "))
+                };
+                println!("  {} [{}{age}{changes}]", item.file, item.fate);
+                for source in &item.sources {
+                    println!(
+                        "    source: {}{}",
+                        source.source.spec(),
+                        source
+                            .item_key
+                            .as_deref()
+                            .map(|key| format!(" item={key}"))
+                            .unwrap_or_default()
+                    );
+                }
+            }
+        }
+        if report.sessions.is_empty() {
+            println!("no filed items");
+        }
+    }
+    Ok(0)
+}
+
+/// Recent recordings and event writers share a harness/session key.
+pub(crate) fn recent_sessions(
+    ctx: &Ctx,
+    limit: usize,
+) -> Result<(Vec<crate::session_store::RecentSession>, Vec<String>)> {
+    use crate::session_store::RecentSession;
+    if limit == 0 {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let (recordings, mut unavailable) = crate::session_store::project_sessions(&ctx.cwd, limit)?;
+    let mut rows: std::collections::BTreeMap<(String, String), RecentSession> =
+        std::collections::BTreeMap::new();
+    for row in recordings {
+        let target = rows
+            .entry((row.harness.clone(), row.session.clone()))
+            .or_insert_with(|| RecentSession::new(&row.harness, &row.session));
+        target.observe(row.last_activity, row.model.as_deref());
+    }
+    let store = ctx.store()?;
+    let mut ledger = match store.load_repository_events() {
+        Ok(events) => events,
+        Err(error) => {
+            unavailable.push(format!("repository events: {error:#}"));
+            Vec::new()
+        }
+    };
+    for change in store.list_change_ids()? {
+        match store.load_events(&change) {
+            Ok(events) => ledger.extend(events),
+            Err(error) => unavailable.push(format!("change {change}: {error:#}")),
+        }
+    }
+    for event in ledger {
+        let (Some(harness), Some(session)) = (event.harness.as_deref(), event.session.as_deref())
+        else {
+            continue;
+        };
+        if present(session).is_none() || present(harness).is_none() {
+            continue;
+        }
+        let row = rows
+            .entry((harness.to_string(), session.to_string()))
+            .or_insert_with(|| RecentSession::new(harness, session));
+        row.observe(Some(event.created_at), event.model.as_deref());
+    }
+    let events = match resolve_dir(&ctx.cwd).and_then(|dir| read_events(&dir)) {
+        Ok(events) => events,
+        Err(error) => {
+            unavailable.push(format!("journal sessions: {error:#}"));
+            Vec::new()
+        }
+    };
+    let mut filed = HashSet::new();
+    for event in &events {
+        if present(&event.harness).is_none() || present(&event.session).is_none() {
+            continue;
+        }
+        let row = rows
+            .entry((event.harness.clone(), event.session.clone()))
+            .or_insert_with(|| RecentSession::new(&event.harness, &event.session));
+        row.observe(event.timestamp(), event.model.as_deref());
+        if event.event == "note" {
+            if let Some(file) = event
+                .file
+                .as_deref()
+                .filter(|file| parse_artifact_name(file).is_some())
+            {
+                if filed.insert(file.to_string()) {
+                    row.journal_items += 1;
+                }
+            }
+        }
+    }
+    for event in &events {
+        let Some(file) = event.file.as_deref() else {
+            continue;
+        };
+        let Some((_, _, kind)) = parse_artifact_name(file) else {
+            continue;
+        };
+        if !["handoff", "conclusion"].contains(&kind.as_str())
+            || !["note", "source-attach"].contains(&event.event.as_str())
+        {
+            continue;
+        }
+        let mut named = Vec::new();
+        if event.event == "note" {
+            named.push((event.harness.as_str(), event.session.as_str()));
+        }
+        if let Some(source) = &event.source {
+            named.push((source.harness.as_str(), source.session.as_str()));
+        }
+        for (harness, session) in named {
+            if present(harness).is_none() || present(session).is_none() {
+                continue;
+            }
+            let row = rows
+                .entry((harness.to_string(), session.to_string()))
+                .or_insert_with(|| RecentSession::new(harness, session));
+            let names = if kind == "handoff" {
+                &mut row.handoffs
+            } else {
+                &mut row.conclusions
+            };
+            if !names.iter().any(|name| name == file) {
+                names.push(file.to_string());
+            }
+        }
+    }
+    let mut rows: Vec<_> = rows.into_values().collect();
+    let now = Utc::now();
+    for row in &mut rows {
+        row.unfiled = row
+            .last_activity
+            .is_some_and(|activity| activity >= now - chrono::Duration::days(7))
+            && row.journal_items == 0
+            && row.handoffs.is_empty()
+            && row.conclusions.is_empty();
+    }
+    rows.sort_by(|left, right| {
+        right
+            .last_activity
+            .cmp(&left.last_activity)
+            .then_with(|| (&left.harness, &left.session).cmp(&(&right.harness, &right.session)))
+    });
+    rows.truncate(limit);
+    Ok((rows, unavailable))
 }
 
 /// Add a position to a live artifact and emit a typed `position` event.

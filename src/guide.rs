@@ -107,6 +107,9 @@ FROM A WORKSPACE ROOT (outside a project)
                        as itemized JSON for that exact scope; --items selects
                        the rows and --json selects the rendering.
   arc workspace inbox --here
+                       Each project's count of open actionable filings untouched
+                       for more than 14 days, including projects with no ledger.
+                       `arc journal filed --stale 14` lists their fates.
                        Each registered project's predicate buckets, observed
                        from that project's own checkout; the same --under and
                        --here scope selects the same set as the backlog.
@@ -136,6 +139,23 @@ FROM A WORKSPACE ROOT (outside a project)
   cd <anchor>          Enter one project named by the report, then orient there.
 
 ORIENT INSIDE A PROJECT (start here, in this order)
+  arc catchup --sessions 5
+                         Recent project sessions across harnesses, ordered by
+                         last activity, with model, filed item count, and naming
+                         handoffs/conclusions. Activity within seven days with
+                         neither filings nor an ending artifact reads unfiled.
+                         Recordings span the primary checkout and its worktrees;
+                         ledger and journal writers remain visible without a
+                         recording. Discovery failures are reported.
+  arc journal filed [--session ID] [--stale 14] [--json]
+                         Filed artifacts grouped by writing session, retaining
+                         distillation sources. --session matches the writing or
+                         source session id. Fates are open, taken (with change
+                         ids), done, superseded, discarded, or stale. Staleness
+                         measures recorded inactivity on open actionable items;
+                         active claims suppress it. Plain reads record no activity.
+                         JSON includes fate counts for mining and renderers.
+                         Catchup and workspace inbox surface the same stale count.
   arc catchup            Text warns when the build commit differs from HEAD
                          in an arc-ledger checkout: older for an ancestor,
                          differs otherwise, and dirty if built with tracked
@@ -2160,7 +2180,7 @@ SCHEMAS
     `arc-changelog-render-request/1` stdin of a command changelog renderer
     `arc-forks/2`                    arc fork list --json
     `arc-doctor/6`                   arc doctor --json
-    `arc-workspace/1`                arc workspace list|inbox --json
+    `arc-workspace/2`                arc workspace list|inbox --json
     `arc-workspace-backlog/19`       arc workspace backlog --json
     `arc-workspace-report/3`         arc workspace report --json
     `arc-workspace-inventory/2`      arc workspace inventory --json
@@ -2172,6 +2192,7 @@ SCHEMAS
     `arc-journal-questions/3`        arc journal questions --json
     `journal-discussion/4`           arc journal discussion --json
     `journal-source/1`               arc journal source --json
+    `arc-journal-filed/1`            arc journal filed --json
     `arc-journal-latest/1`           arc journal latest --json
     `arc-journal-scaffolds/1`        arc journal scaffolds --json
 

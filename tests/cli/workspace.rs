@@ -71,7 +71,7 @@ fn workspace_list_aggregates_repos_and_tags_rows_with_slugs() {
         .env("ARC_DATA_ROOT", data_root.path())
         .args(["workspace", "list", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace/1");
+    assert_eq!(value["schema"], "arc-workspace/2");
     let slugs: Vec<String> = value["repos"]
         .as_array()
         .unwrap()
@@ -872,7 +872,7 @@ fn workspace_rollups_answer_when_nothing_is_registered() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "list", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace/1");
+    assert_eq!(value["schema"], "arc-workspace/2");
     assert!(value["repos"].as_array().unwrap().is_empty(), "{value}");
 }
 
@@ -3771,4 +3771,33 @@ fn report_help_lists_every_attention_rule() {
             "{rule} missing from:\n{help}"
         );
     }
+}
+
+#[test]
+fn workspace_inbox_surfaces_stale_filings_without_open_changes() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["journal", "todo", "waiting", "--title", "Waiting"])
+        .assert()
+        .success();
+    let dir = PathBuf::from(stdout(repo.arc(&repo.root).args(["journal", "dir"])).trim());
+    let path = dir.join("events.jsonl");
+    let old = (chrono::Utc::now() - chrono::Duration::days(20)).to_rfc3339();
+    let events = fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let mut event: serde_json::Value = serde_json::from_str(line).unwrap();
+            event["ts"] = old.clone().into();
+            format!("{event}\n")
+        })
+        .collect::<String>();
+    fs::write(path, events).unwrap();
+    let text = stdout(repo.arc(&repo.root).args(["workspace", "inbox"]));
+    assert!(
+        text.contains("1 filed items untouched for >14 days"),
+        "{text}"
+    );
+    let value = json_stdout(repo.arc(&repo.root).args(["workspace", "inbox", "--json"]));
+    assert_eq!(value["repos"][0]["stale_filed_count"], 1, "{value}");
 }

@@ -163,6 +163,9 @@ struct WorkspaceInbox {
 #[derive(Serialize)]
 struct RepoInbox {
     repo: String,
+    stale_filed_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filed_error: Option<String>,
     #[serde(flatten)]
     inbox: crate::inbox::Inbox,
 }
@@ -410,7 +413,7 @@ fn workspace_list(stores: &[(String, Store)], json: bool) -> Result<()> {
         println!(
             "{}",
             serde_json::to_string_pretty(&WorkspaceList {
-                schema: "arc-workspace/1",
+                schema: "arc-workspace/2",
                 repos,
             })?
         );
@@ -446,22 +449,36 @@ fn workspace_inbox(ctx: &Ctx, scope: WorkspaceScope, json: bool) -> Result<()> {
         if !scope.includes(project.anchor.as_deref()) || !project.reachable {
             continue;
         }
-        let Some(root) = project.ledger.clone() else {
-            continue;
-        };
         let anchor = project
             .anchor
             .clone()
             .expect("a reachable project has an anchor");
-        let observed = Store::open_at(&root).and_then(|store| match store {
-            Some(store) => observe_changes(ctx, &store, &anchor).map(Some),
-            None => Ok(None),
-        });
-        match observed {
-            Ok(Some(inbox)) => repos.push(RepoInbox {
+        let observed = (|| -> Result<Option<RepoInbox>> {
+            let filed = crate::journal::filed_report_in(&project.journal_dir, &anchor, None, 14);
+            let inbox = match project
+                .ledger
+                .as_ref()
+                .map(|root| Store::open_at(root))
+                .transpose()?
+                .flatten()
+            {
+                Some(store) => Some(observe_changes(ctx, &store, &anchor)?),
+                None if filed.as_ref().is_ok_and(|report| report.stale_count > 0)
+                    || filed.is_err() =>
+                {
+                    Some(crate::inbox::Inbox::new(None))
+                }
+                None => None,
+            };
+            Ok(inbox.map(|inbox| RepoInbox {
                 repo: project.label(),
+                stale_filed_count: filed.as_ref().ok().map(|report| report.stale_count),
+                filed_error: filed.err().map(|error| format!("{error:#}")),
                 inbox,
-            }),
+            }))
+        })();
+        match observed {
+            Ok(Some(repo)) => repos.push(repo),
             Ok(None) => {}
             Err(error) => eprintln!("warning: skipping {}: {error:#}", project.label()),
         }
@@ -470,7 +487,7 @@ fn workspace_inbox(ctx: &Ctx, scope: WorkspaceScope, json: bool) -> Result<()> {
         println!(
             "{}",
             serde_json::to_string_pretty(&WorkspaceInbox {
-                schema: "arc-workspace/1",
+                schema: "arc-workspace/2",
                 repos,
             })?
         );
@@ -481,6 +498,14 @@ fn workspace_inbox(ctx: &Ctx, scope: WorkspaceScope, json: bool) -> Result<()> {
         }
         for repo in &repos {
             println!("# {}", repo.repo);
+            if let Some(count) = repo.stale_filed_count.filter(|count| *count > 0) {
+                println!(
+                    "  {count} filed items untouched for >14 days — arc journal filed --stale 14"
+                );
+            }
+            if let Some(error) = &repo.filed_error {
+                println!("  filed items: unavailable ({error})");
+            }
             for (name, rows) in repo.inbox.sections() {
                 if rows.is_empty() {
                     continue;

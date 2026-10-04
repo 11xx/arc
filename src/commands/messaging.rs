@@ -991,7 +991,7 @@ fn render_waiting_spools(ctx: &Ctx, states: &BTreeMap<String, crate::state::Chan
 /// journal's lanes, memories, and backlog. `inbox` answers what is already
 /// open; this answers what is waiting, which is the larger question and the
 /// one a session starting cold actually has.
-pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
+pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i32> {
     let store = ctx.store()?;
     let replica = crate::replica::status(&store)?;
     let mut inbox = collect_inbox(ctx, &store, None)?;
@@ -999,6 +999,9 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
         inbox.absorb_unowned(unowned);
     }
     let journal = crate::journal::orientation(ctx);
+    let (recent_sessions, session_discovery_errors) =
+        crate::journal::recent_sessions(ctx, sessions)?;
+    let filed = crate::journal::filed_report(ctx, None, 14);
     let forks = crate::commands::fork::list_entries(ctx).unwrap_or_default();
     let states = store.readable_states()?;
     let worktrees = crate::worktree_usage::measure(
@@ -1015,6 +1018,10 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
                 "ledger": inbox,
                 "journal": journal.as_ref().ok(),
                 "replica": replica,
+                "recent_sessions": recent_sessions,
+                "session_discovery_errors": session_discovery_errors,
+                "stale_filed_count": filed.as_ref().ok().map(|report| report.stale_count),
+                "filed_error": filed.as_ref().err().map(|error| format!("{error:#}")),
                 // Open forks only: retired ones are history, and the JSON
                 // view answers the same question the text section does.
                 "forks": forks
@@ -1066,6 +1073,38 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
     }
     if !any {
         println!("  no open changes");
+    }
+    println!("recent sessions ({}):", recent_sessions.len());
+    for row in &recent_sessions {
+        let id: String = row.session.chars().take(8).collect();
+        let activity = row
+            .last_activity
+            .map(|activity| activity.to_rfc3339())
+            .unwrap_or_else(|| "unknown".to_string());
+        let mark = if row.unfiled { " [unfiled]" } else { "" };
+        println!(
+            "  {id} {} {} {activity} — {} journal items; {} handoffs, {} conclusions{mark}",
+            row.harness,
+            row.model.as_deref().unwrap_or("unknown"),
+            row.journal_items,
+            row.handoffs.len(),
+            row.conclusions.len()
+        );
+        println!("    session: {}", row.session);
+        for file in row.handoffs.iter().chain(&row.conclusions) {
+            println!("    {file}");
+        }
+    }
+    for error in &session_discovery_errors {
+        println!("  sessions: unavailable ({error})");
+    }
+    match &filed {
+        Ok(report) if report.stale_count > 0 => println!(
+            "{} filed items untouched for >14 days — arc journal filed --stale 14",
+            report.stale_count
+        ),
+        Err(error) => println!("filed items: unavailable ({error:#})"),
+        _ => {}
     }
     render_forks(&forks);
     render_waiting_spools(ctx, &states);

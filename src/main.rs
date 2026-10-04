@@ -2101,7 +2101,10 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Orient a session: the ledger queue, the journal backlog, and live lanes.
+    /// Orient a session: ledger queue, journal backlog, live lanes, and recent
+    /// sessions across harnesses. Recent activity without filed artifacts or a
+    /// naming handoff/conclusion is marked unfiled. Stale filings name the
+    /// `journal filed` query; plain reads record no activity.
     /// Project memories precede global memory titles with their ages in days;
     /// bodies are read on demand with journal show --global.
     /// Text warns when the running build differs from HEAD in an arc-ledger
@@ -2110,6 +2113,9 @@ enum Cmd {
     /// Unreadable changes are named with their errors on stderr; readable
     /// changes remain in the output
     Catchup {
+        /// Number of recent sessions, ordered by last recorded activity
+        #[arg(long, default_value = "5")]
+        sessions: usize,
         /// Cap the changes listed per ledger bucket; the journal queue is
         /// always rendered in full, since finding it is the point
         #[arg(long, default_value = "10")]
@@ -2349,7 +2355,9 @@ enum WorkspaceCmd {
         #[arg(long)]
         json: bool,
     },
-    /// The inbox rollup for every registered project
+    /// The inbox rollup for every registered project, including the count of
+    /// open actionable filings untouched for more than 14 days. Plain reads
+    /// record no activity; active claims suppress staleness.
     /// Unreadable changes are named with their errors on stderr; readable
     /// changes remain in the output
     /// Records no events; ledger reads do not require a parseable append policy.
@@ -3259,6 +3267,18 @@ fn parse_cli() -> Result<(Cli, bool), clap::Error> {
             if !typed_on_command_line(query, id) {
                 *filter = None;
             }
+        }
+    }
+    if let Some(Cmd::Journal {
+        cmd: journal::JournalCmd::Filed { session, .. },
+        ..
+    }) = cli.cmd.as_mut()
+    {
+        let filed = matches
+            .subcommand_matches("journal")
+            .and_then(|journal| journal.subcommand_matches("filed"));
+        if !typed_on_command_line(filed, "session") {
+            *session = None;
         }
     }
     Ok((cli, reads_only))
@@ -5056,7 +5076,11 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             commands::restack(&ctx, &change, advise)?;
             Ok(0)
         }
-        Cmd::Catchup { limit, json } => commands::catchup(&ctx, limit, json),
+        Cmd::Catchup {
+            limit,
+            sessions,
+            json,
+        } => commands::catchup(&ctx, limit, sessions, json),
         Cmd::Fr { write } => journal::feature_request(&ctx, write),
         Cmd::Journal { cmd, global } => journal::run(&ctx, cmd, global),
     }

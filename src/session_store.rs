@@ -162,6 +162,120 @@ pub fn read_session(harness: &str, session: &str) -> SessionAnswer {
     SessionAnswer::Read(SessionRead { turns, bound, path })
 }
 
+/// Project session metadata merged from recordings and arc events.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct RecentSession {
+    pub(crate) session: String,
+    pub(crate) harness: String,
+    pub(crate) model: Option<String>,
+    pub(crate) last_activity: Option<chrono::DateTime<chrono::Utc>>,
+    pub(crate) journal_items: usize,
+    pub(crate) handoffs: Vec<String>,
+    pub(crate) conclusions: Vec<String>,
+    pub(crate) unfiled: bool,
+}
+
+impl RecentSession {
+    pub(crate) fn new(harness: &str, session: &str) -> Self {
+        Self {
+            session: session.to_string(),
+            harness: harness.to_string(),
+            model: None,
+            last_activity: None,
+            journal_items: 0,
+            handoffs: Vec::new(),
+            conclusions: Vec::new(),
+            unfiled: false,
+        }
+    }
+
+    pub(crate) fn observe(
+        &mut self,
+        activity: Option<chrono::DateTime<chrono::Utc>>,
+        model: Option<&str>,
+    ) {
+        if activity >= self.last_activity {
+            self.last_activity = activity;
+            if let Some(model) = model {
+                self.model = Some(model.to_string());
+            }
+        }
+    }
+}
+
+/// Harness subprocesses inherit sandboxed XDG roots during discovery.
+struct DiscoveryEnvironment(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+impl DiscoveryEnvironment {
+    fn sandboxed() -> anyhow::Result<Self> {
+        let mut saved = Vec::new();
+        if let Some(prefix) = crate::config::sandbox()? {
+            for (name, directory) in [
+                ("XDG_DATA_HOME", ".local/share"),
+                ("XDG_CONFIG_HOME", ".config"),
+                ("XDG_CACHE_HOME", ".cache"),
+                ("XDG_STATE_HOME", ".local/state"),
+            ] {
+                saved.push((name, std::env::var_os(name)));
+                std::env::set_var(name, prefix.join(directory));
+            }
+        }
+        Ok(Self(saved))
+    }
+}
+
+impl Drop for DiscoveryEnvironment {
+    fn drop(&mut self) {
+        for (name, value) in &self.0 {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+}
+
+/// Discover recordings in the repository's primary checkout and worktrees.
+/// Candidate failures and bounded scans remain visible to callers.
+pub(crate) fn project_sessions(
+    cwd: &std::path::Path,
+    limit: usize,
+) -> anyhow::Result<(Vec<RecentSession>, Vec<String>)> {
+    let _environment = DiscoveryEnvironment::sandboxed()?;
+    let scope = agent_tapes_core::scope::Scope::at(cwd)?;
+    let mut query = backend::Query::unscoped(limit);
+    query.scope = Some(&scope);
+    query.ceiling = 10_000;
+    let mut sessions = Vec::new();
+    let mut unavailable = Vec::new();
+    for backend in backend::backends()
+        .into_iter()
+        .filter(|backend| backend.available())
+    {
+        match backend.list(&query) {
+            Ok(listing) => {
+                if listing.scan_truncated {
+                    unavailable.push(format!(
+                        "{}: session discovery reached its candidate bound",
+                        backend.harness()
+                    ));
+                }
+                unavailable.extend(listing.unavailable);
+                for session in listing.sessions {
+                    let mut row = RecentSession::new(backend.harness(), &session.id);
+                    row.observe(
+                        session.last_activity_at,
+                        session.model.as_ref().map(model_name).as_deref(),
+                    );
+                    sessions.push(row);
+                }
+            }
+            Err(error) => unavailable.push(format!("{}: {error:#}", backend.harness())),
+        }
+    }
+    Ok((sessions, unavailable))
+}
+
 /// What a store holds for one session, and what arc may report from it.
 pub enum SessionIdentity {
     /// The store holds a recording naming this model, as `model#effort` when
