@@ -349,15 +349,7 @@ fn event_id_after(previous: &str) -> Result<String> {
     let previous = previous
         .parse::<ulid::Ulid>()
         .with_context(|| format!("event ID {previous:?} is not a ULID"))?;
-    let current = ulid::Ulid::new();
-    if current > previous {
-        Ok(current.to_string())
-    } else {
-        previous
-            .increment()
-            .context("event ID sequence overflowed")
-            .map(|id| id.to_string())
-    }
+    Ok(crate::ids::new_event_id_after(previous).to_string())
 }
 
 impl Ctx {
