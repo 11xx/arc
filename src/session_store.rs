@@ -12,6 +12,10 @@ use agent_tapes_core::model::{Role, SourceBound, TurnKind};
 use agent_tapes_core::ResolveError;
 use serde::Serialize;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+const CLAUDE_MODEL_WAIT: Duration = Duration::from_secs(1);
+const CLAUDE_MODEL_POLL: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Turn {
@@ -179,6 +183,8 @@ pub enum SessionIdentity {
 pub enum ModelUnavailable {
     /// The recording carries no model selection to attribute.
     NotRecorded,
+    /// No model-bearing record appeared during the bounded Claude flush wait.
+    NotRecordedAfterWait,
     /// The store holds a subagent recording the session has not recorded as
     /// finished. A subagent's tool shell carries its parent's session id, and
     /// the store does not say which subagent a shell belongs to, so the
@@ -193,6 +199,7 @@ impl ModelUnavailable {
         match self {
             ModelUnavailable::OutsideRead => "recording head not read; an earlier model selection may be outside the read",
             ModelUnavailable::NotRecorded => "the recording names no model for this session",
+            ModelUnavailable::NotRecordedAfterWait => "the recording names no model for this session after waiting up to 1 second for a model-bearing record",
             ModelUnavailable::SubagentActivity => {
                 "an unfinished subagent shares this session id; the store does not identify whether this shell belongs to the session or its subagent"
             }
@@ -201,16 +208,48 @@ impl ModelUnavailable {
 }
 
 /// Read the newest selection and operator boundary within tapes' source bound.
+/// A corroborated Claude recording without a model is polled every 50 ms for
+/// up to one second to allow the assistant record to reach the store.
 pub fn session_identity(harness: &str, session: &str) -> SessionIdentity {
-    let backends = harness_backends(harness);
-    let resolved = match resolve_exact(&backends, session) {
+    session_identity_with_backends(harness, session, &harness_backends(harness))
+}
+
+fn session_identity_with_backends(
+    harness: &str,
+    session: &str,
+    backends: &[Box<dyn Backend>],
+) -> SessionIdentity {
+    let resolved = match resolve_exact(backends, session) {
         Ok(resolved) => resolved,
         Err(LookupIssue::Missing) => return SessionIdentity::NoRecording,
         Err(LookupIssue::Ambiguous(_) | LookupIssue::Unreadable(_)) => {
             return SessionIdentity::Unresolved;
         }
     };
-    let backend = &backends[resolved.backend_index];
+    let backend = backends[resolved.backend_index].as_ref();
+    let deadline = Instant::now() + CLAUDE_MODEL_WAIT;
+    loop {
+        let identity = recording_identity(harness, backend, &resolved.session);
+        if harness != "claude"
+            || !matches!(
+                identity,
+                SessionIdentity::Unnamed(ModelUnavailable::NotRecorded)
+            )
+        {
+            return identity;
+        }
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return SessionIdentity::Unnamed(ModelUnavailable::NotRecordedAfterWait);
+        };
+        std::thread::sleep(CLAUDE_MODEL_POLL.min(remaining));
+    }
+}
+
+fn recording_identity(
+    harness: &str,
+    backend: &dyn Backend,
+    session: &agent_tapes_core::model::Session,
+) -> SessionIdentity {
     // Keep every turn in the file reader's 4 MiB window, so a presentation
     // limit cannot hide its newest operator. Paged stores have a turn cap.
     let turns = if matches!(harness, "claude" | "codex" | "pi") {
@@ -218,11 +257,11 @@ pub fn session_identity(harness: &str, session: &str) -> SessionIdentity {
     } else {
         4096
     };
-    let transcript = match backend.transcript(&resolved.session, turns) {
+    let transcript = match backend.transcript(session, turns) {
         Ok(transcript) => transcript,
         Err(_) => return SessionIdentity::Unresolved,
     };
-    if harness == "claude" && subagent_may_be_acting(backend.as_ref(), &resolved.session) {
+    if harness == "claude" && subagent_may_be_acting(backend, session) {
         return SessionIdentity::Unnamed(ModelUnavailable::SubagentActivity);
     }
     let head_read = transcript
@@ -311,4 +350,96 @@ pub fn operator_view(turns: Vec<Turn>, limit: usize) -> Vec<Turn> {
     }
     let keep_from = users.len().saturating_sub(limit);
     users.drain(keep_from..).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_tapes_core::backend::claude::ClaudeBackend;
+    use serde_json::json;
+    use std::fs::{self, OpenOptions};
+    use std::io::Write;
+    use std::time::{Duration, Instant};
+
+    const SESSION: &str = "11111111-2222-3333-4444-555555555555";
+
+    fn claude_fixture() -> (tempfile::TempDir, PathBuf, Vec<Box<dyn Backend>>) {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("projects/fixture");
+        fs::create_dir_all(&project).unwrap();
+        let path = project.join(format!("{SESSION}.jsonl"));
+        let user = json!({"type":"user", "uuid":"u1", "timestamp":"2026-01-01T10:00:00Z",
+            "message":{"role":"user", "content":"operator prompt"}});
+        fs::write(&path, format!("{user}\n")).unwrap();
+        let backend: Box<dyn Backend> = Box::new(ClaudeBackend::new(root.path().join("projects")));
+        (root, path, vec![backend])
+    }
+
+    #[test]
+    fn claude_model_wait_reads_an_assistant_line_flushed_after_lookup() {
+        let (_root, path, backends) = claude_fixture();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            let assistant = json!({"type":"assistant", "uuid":"a1", "timestamp":"2026-01-01T10:00:01Z",
+                "perTurnEffort":"medium", "message":{"role":"assistant", "model":"fixture-model", "content":"answer"}});
+            let mut recording = OpenOptions::new().append(true).open(path).unwrap();
+            writeln!(recording, "{assistant}").unwrap();
+        });
+        let identity = session_identity_with_backends("claude", SESSION, &backends);
+        writer.join().unwrap();
+        assert!(
+            matches!(identity, SessionIdentity::Named { model, observation: Some(_) } if model == "fixture-model#medium")
+        );
+    }
+
+    #[test]
+    fn claude_model_wait_does_not_delay_subagent_ambiguity() {
+        let (_root, path, backends) = claude_fixture();
+        let children = path.with_extension("").join("subagents");
+        fs::create_dir_all(&children).unwrap();
+        let assistant = json!({"type":"assistant", "sessionId":SESSION, "uuid":"child-a1",
+            "timestamp":"2026-01-01T10:00:01Z", "message":{"role":"assistant", "model":"child-model", "content":"answer"}});
+        fs::write(children.join("agent-child.jsonl"), format!("{assistant}\n")).unwrap();
+        let start = Instant::now();
+        let identity = session_identity_with_backends("claude", SESSION, &backends);
+        assert!(matches!(
+            identity,
+            SessionIdentity::Unnamed(ModelUnavailable::SubagentActivity)
+        ));
+        assert!(start.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn model_wait_does_not_delay_other_harnesses_or_missing_recordings() {
+        let (_root, _path, backends) = claude_fixture();
+        let start = Instant::now();
+        assert!(matches!(
+            session_identity_with_backends("codex", SESSION, &backends),
+            SessionIdentity::Unnamed(ModelUnavailable::NotRecorded)
+        ));
+        assert!(matches!(
+            session_identity_with_backends("claude", "missing", &backends),
+            SessionIdentity::NoRecording
+        ));
+        assert!(start.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn claude_model_wait_gives_up_after_one_second() {
+        let (_root, _path, backends) = claude_fixture();
+        let start = Instant::now();
+        let identity = session_identity_with_backends("claude", SESSION, &backends);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_secs(1),
+            "gave up after {elapsed:?}"
+        );
+        assert!(elapsed < Duration::from_secs(2), "waited {elapsed:?}");
+        let SessionIdentity::Unnamed(reason) = identity else {
+            panic!("a recording without a model must stay unnamed");
+        };
+        assert!(reason
+            .line()
+            .contains("after waiting up to 1 second for a model-bearing record"));
+    }
 }

@@ -78,7 +78,9 @@ struct Cli {
     session_link: Option<String>,
     /// Declare a model slug with optional #effort. Without this flag or
     /// ARC_MODEL, each invocation resolves the acting session store once when
-    /// it writes. Declarations retain any observed disagreement and its
+    /// it writes. A corroborated Claude recording without a model selection
+    /// is re-read every 50 ms for up to 1 second; other store answers return
+    /// immediately. Declarations retain any observed disagreement and its
     /// coordinate
     #[arg(long, global = true)]
     model: Option<String>,
@@ -1571,9 +1573,14 @@ enum Cmd {
     /// `PI_SESSION_ID` is the acting session, and a Claude subagent shares
     /// its parent's session id. An unfinished child recording leaves the
     /// invoking shell's owner ambiguous even if the parent's recording is newer,
-    /// so no model is named. Completed children permit the parent's recorded model.
-    /// Headless Claude runs use the same store evidence: a missing recording and
-    /// a recording without a model selection each receive an explicit diagnostic.
+    /// so no model is named. Claude Code exposes no evidence that distinguishes a
+    /// subagent's tool shell from its parent's. Completed children permit the
+    /// parent's recorded model. For a corroborated Claude recording without a
+    /// model selection, `arc env` and write-time model resolution re-read every
+    /// 50 ms for up to 1 second to allow the model-bearing record to reach disk.
+    /// Other store answers return immediately. A missing recording and a
+    /// recording still without a model after the wait each receive an explicit
+    /// diagnostic.
     /// Launch configuration does not establish an observed acting model. Not every
     /// harness exports a session variable, and a harness that
     /// does may not in every mode. OpenCode v2 exports none and is recognized

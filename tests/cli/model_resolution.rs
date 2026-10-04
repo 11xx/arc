@@ -562,7 +562,7 @@ fn env_explains_headless_startup_evidence_and_resolves_a_recorded_model() {
     recording(&repo, &[prompt("u1", "2026-01-01T10:00:00Z")]);
     let pending = stdout(acting(&repo).arg("env"));
     assert!(
-        pending.contains("unavailable: the recording names no model for this session"),
+        pending.contains("unavailable: the recording names no model for this session after waiting up to 1 second for a model-bearing record"),
         "{pending}"
     );
     recording(
@@ -575,4 +575,31 @@ fn env_explains_headless_startup_evidence_and_resolves_a_recorded_model() {
     let ready = stdout(acting(&repo).arg("env"));
     assert!(ready.contains("# model: m#medium"), "{ready}");
     assert!(!ready.contains("unavailable:"), "{ready}");
+}
+
+#[test]
+fn writes_wait_for_the_acting_claude_recording_to_flush_its_model() {
+    use std::io::Write;
+
+    let repo = Repo::new();
+    let path = recording(&repo, &[prompt("u1", "2026-01-01T10:00:00Z")]);
+    let writer = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(150));
+        let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+        writeln!(
+            file,
+            "{}",
+            assistant("a1", "2026-01-01T10:00:01Z", "medium")
+        )
+        .unwrap();
+    });
+    let change = begin(&repo);
+    writer.join().unwrap();
+    let events: Vec<Value> = stdout(acting(&repo).args(["events", "--change", &change]))
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(events[0]["model"], "m#medium");
+    assert_eq!(events[0]["model_source"], "resolved");
+    assert_eq!(events[0]["model_observation"]["native_id"], "a1");
 }

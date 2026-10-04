@@ -78,9 +78,14 @@ SAY WHO YOU ARE (before the first write)
   answer while `PI_SESSION_ID` is the acting session, and a Claude subagent
   shares its parent's session id. An unfinished child recording leaves the
   invoking shell's owner ambiguous even if the parent's recording is newer,
-  so no model is named. Completed children permit the parent's recorded model.
-  Headless Claude runs use the same store evidence: a missing recording and
-  a recording without a model selection each receive an explicit diagnostic.
+  so no model is named. Claude Code exposes no evidence that distinguishes a
+  subagent's tool shell from its parent's. Completed children permit the
+  parent's recorded model. For a corroborated Claude recording without a
+  model selection, `arc env` and write-time model resolution re-read every
+  50 ms for up to 1 second to allow the model-bearing record to reach disk.
+  Other store answers return immediately. A missing recording and a
+  recording still without a model after the wait each receive an explicit
+  diagnostic.
   Launch configuration does not establish an observed acting model.
   OpenCode v2 (`opencode2`) is recognized without one — by
   `OPENCODE_TERMINAL` or its process ancestry — and prints the harness
