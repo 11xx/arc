@@ -1233,6 +1233,7 @@ fn every_read_only_command_reads_past_a_broken_policy() {
             "--session",
             "session-a",
         ],
+        vec!["journal", "filed", "--json"],
         vec!["journal", "scaffolds", "--json"],
         vec!["journal", "questions", "--json"],
         vec!["journal", "events"],

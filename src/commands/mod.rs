@@ -161,6 +161,7 @@ pub(crate) const READ_ONLY_COMMANDS: &[&str] = &[
     "journal dir",
     "journal doctor",
     "journal source",
+    "journal filed",
     "journal scaffolds",
     "journal questions",
     "journal events",
