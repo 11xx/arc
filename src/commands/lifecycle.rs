@@ -22,10 +22,13 @@ pub fn begin(
     from_fork: Option<String>,
     dangerous: bool,
     iterating: bool,
+    recovery_role: Option<&str>,
 ) -> Result<()> {
     ids::validate_slug(slug)?;
-    if from_fork.is_some() && adopt.is_some() {
-        bail!("--from-fork opens the change's own branch; it cannot be combined with --adopt");
+    if from_fork.is_some() && adopt.is_some() && base.is_none() {
+        bail!(
+            "--from-fork cannot be combined with --adopt without an explicit --base for recovery"
+        );
     }
     // Promotion is one journal transition from the open preflight through the
     // superseding consume event. Holding the same guard across the Git and
@@ -225,10 +228,21 @@ pub fn begin(
             let admin = gitio::worktree_admin_dir(&path)?;
             let owner_token = gitio::write_worktree_owner(&admin, &change_id)?;
             if let Err(error) = gitio::populate_worktree(&path) {
-                let adopt = format!(
-                    "arc begin {} --adopt {}",
-                    shell_quote(slug),
-                    shell_quote(&branch_name)
+                let adopt = begin_adoption_recipe(
+                    slug,
+                    &branch_name,
+                    &title,
+                    &target_branch,
+                    &base_rev,
+                    profile,
+                    dangerous,
+                    iterating,
+                    &blocked_by,
+                    &tags,
+                    from_journal.as_deref(),
+                    from_fork.as_deref(),
+                    recovery_role,
+                    ctx.on_behalf_of.as_deref(),
                 );
                 let mut recovery = gitio::worktree_population_error(&branch_name, &path, &adopt);
                 if let Err(cleanup) = gitio::remove_worktree_owner(&admin, &change_id, &owner_token)
@@ -1575,4 +1589,55 @@ fn dependency_reaches(start: &str, target: &str, states: &BTreeMap<String, Chang
         }
     }
     false
+}
+
+#[allow(clippy::too_many_arguments)]
+fn begin_adoption_recipe(
+    slug: &str,
+    branch: &str,
+    title: &str,
+    target: &str,
+    base: &str,
+    profile: &str,
+    dangerous: bool,
+    iterating: bool,
+    blocked_by: &[String],
+    tags: &[String],
+    from_journal: Option<&str>,
+    from_fork: Option<&str>,
+    role: Option<&str>,
+    on_behalf_of: Option<&str>,
+) -> String {
+    let mut args = vec!["arc".to_string(), "begin".to_string(), shell_quote(slug)];
+    for (flag, value) in [
+        ("--adopt", branch),
+        ("--title", title),
+        ("--target", target),
+        ("--base", base),
+        ("--profile", profile),
+    ] {
+        args.extend([flag.to_string(), shell_quote(value)]);
+    }
+    if dangerous {
+        args.push("--dangerous".to_string());
+    }
+    if iterating {
+        args.push("--iterating".to_string());
+    }
+    for (flag, values) in [("--blocked-by", blocked_by), ("--tag", tags)] {
+        for value in values {
+            args.extend([flag.to_string(), shell_quote(value)]);
+        }
+    }
+    for (flag, value) in [
+        ("--from-journal", from_journal),
+        ("--from-fork", from_fork),
+        ("--role", role),
+        ("--on-behalf-of", on_behalf_of),
+    ] {
+        if let Some(value) = value {
+            args.extend([flag.to_string(), shell_quote(value)]);
+        }
+    }
+    args.join(" ")
 }

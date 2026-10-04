@@ -820,7 +820,10 @@ RUN A CHANGE
   Worktree creation runs post-checkout with a null old revision, HEAD as the
   new revision, and flag 1, matching Git's creation hook arguments. Population
   or hook failure keeps the branch and worktree and records no opening or fork
-  marker. The error prints adoption and discard commands. `begin` removes its
+  marker. The error prints adoption and discard commands. The begin adoption
+  command preserves the opening options and resolved target and base, with
+  the retained branch determining the checkout. Fork provenance during
+  adoption requires an explicit base. `begin` removes its
   unrecorded owner token when its identity matches; cleanup failures are reported.
   The registered checkout must still hold the change branch. Tracked edits
   and untracked or ignored content, including build output, keep it. An

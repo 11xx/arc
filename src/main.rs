@@ -251,6 +251,8 @@ enum Cmd {
     /// revision, HEAD, 1). Population or hook failure retains the branch and
     /// worktree, removes the unrecorded owner token when its identity matches,
     /// and reports adoption and discard commands without opening a change.
+    /// Adoption recovery preserves the opening options and resolved target
+    /// and base; checkout selection is determined by the retained branch.
     ///
     /// Without --base, the change derives its base from the local target:
     /// its head, or under --adopt the adopted branch's merge base with it.
@@ -317,7 +319,8 @@ enum Cmd {
         #[arg(long = "from-journal")]
         from_journal: Option<String>,
         /// Open by promoting a fork's work onto a new branch, recording the
-        /// fork slug and the source base, head, and tree. The fork keeps its
+        /// fork slug and the source base, head, and tree. Recovery adoption
+        /// requires an explicit --base. The fork keeps its
         /// branch, worktree, and marker; no review credit crosses the link
         #[arg(long = "from-fork")]
         from_fork: Option<String>,
@@ -3464,6 +3467,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 from_fork,
                 dangerous,
                 iterating,
+                cli.role.as_deref(),
             )?;
             Ok(0)
         }

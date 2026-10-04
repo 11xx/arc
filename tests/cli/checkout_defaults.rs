@@ -265,12 +265,74 @@ fn begin_worktree_hook_matches_native_creation() {
 fn begin_worktree_population_failure_reports_recovery() {
     use std::os::unix::fs::PermissionsExt;
     let repo = Repo::new();
+    git(&repo.root, &["branch", "release"]);
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "source"]));
+    let fork_checkout = repo.home.join(".worktrees/repo-fork-source");
+    repo.commit(
+        &fork_checkout,
+        "fork-work",
+        "source work",
+        "feat: fork work",
+    );
+    let fork_head = repo.head(&fork_checkout);
+    let journal = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "opening",
+                "--kind",
+                "todo",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("Opening context"),
+    );
+    let journal_file = std::path::Path::new(journal.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "dependency", "--no-worktree"]),
+    );
+    let base = repo.head(&repo.root);
+    let dependency = json_stdout(repo.arc(&repo.root).args(["show", "dependency", "--json"]));
     let hook = repo.root.join(".git/hooks/post-checkout");
     fs::write(&hook, "#!/bin/sh\necho preserved > local-work\nexit 1\n").unwrap();
     fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
     let output = repo
         .arc(&repo.root)
-        .args(["begin", "probe", "--worktree"])
+        .args([
+            "begin",
+            "probe",
+            "--worktree",
+            "--title",
+            "Repair 'quoted' scope",
+            "--target",
+            "release",
+            "--base",
+            &base,
+            "--profile",
+            "release",
+            "--from-journal",
+            &journal_file,
+            "--from-fork",
+            "source",
+            "--dangerous",
+            "--iterating",
+            "--blocked-by",
+            "dependency",
+            "--tag",
+            "repair",
+            "--tag",
+            "release",
+            "--role",
+            "lead",
+            "--on-behalf-of",
+            "scope owner",
+        ])
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -301,4 +363,24 @@ fn begin_worktree_population_failure_reports_recovery() {
     assert!(!std::path::Path::new(&admin).join("arc-owner").exists());
     let state = json_stdout(repo.arc(&repo.root).args(["show", "probe", "--json"]));
     assert_eq!(state["worktree_created"], false);
+    assert_eq!(state["title"], "Repair 'quoted' scope");
+    assert_eq!(state["target_branch"], "release");
+    assert_eq!(state["base"], base);
+    assert_eq!(state["profile"], "release");
+    assert_eq!(state["dangerous"], true);
+    assert_eq!(state["iterating"], true);
+    assert_eq!(state["journal_ref"], journal_file);
+    assert_eq!(state["from_fork"]["slug"], "source");
+    assert_eq!(state["from_fork"]["head"], fork_head);
+    assert!(worktree.join("fork-work").is_file());
+    assert_eq!(
+        state["blocked_by"],
+        serde_json::json!([dependency["change_id"]])
+    );
+    assert_eq!(state["tags"], serde_json::json!(["release", "repair"]));
+    assert!(recovery.contains("--role 'lead'"), "{recovery}");
+    assert!(
+        recovery.contains("--on-behalf-of 'scope owner'"),
+        "{recovery}"
+    );
 }
