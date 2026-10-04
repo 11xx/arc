@@ -6,7 +6,8 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
+use std::path::Path;
 
 pub const BUNDLE_SCHEMA: &str = "arc-bundle/6";
 
@@ -23,6 +24,14 @@ pub const READABLE_BUNDLE_SCHEMAS: &[&str] = &[BUNDLE_SCHEMA, "arc-bundle/5"];
 pub struct BundlePrefix {
     pub sha256: String,
     pub event_count: usize,
+}
+
+/// One Git object and the purpose for which the exported events cite it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BundleObject {
+    pub oid: String,
+    pub role: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -43,6 +52,10 @@ pub struct Bundle {
     #[serde(default = "legacy_store_format")]
     pub store_format: u32,
     pub events: Vec<Value>,
+    /// None identifies a bundle whose object availability is advisory.
+    /// Some, including an empty list, requires availability before import.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objects: Option<Vec<BundleObject>>,
     /// Repository-scoped events, carried so a change's recorded revisions stay
     /// followable after transport. A rewrite is not change-scoped, but a
     /// bundle that drops it hands the receiver revisions nothing can resolve.
@@ -63,7 +76,7 @@ impl Bundle {
     /// holds; the bundle then carries only the events after it, and its own
     /// `events_sha256` remains the checksum of the whole history so the
     /// receiver can verify the suffix against that prefix.
-    pub fn export(store: &Store, change_id: &str, since: Option<&str>) -> Result<Self> {
+    pub fn export(store: &Store, cwd: &Path, change_id: &str, since: Option<&str>) -> Result<Self> {
         ids::validate_id_component(change_id)?;
         let raw = store.raw_events(change_id)?;
         if raw.is_empty() {
@@ -128,6 +141,7 @@ impl Bundle {
             }
         };
 
+        let objects = exported_objects(cwd, change_id, &events, &repository_events)?;
         let events_sha256 = history_sha256;
         // The checksum covers the change's events, which is what the receiver
         // replays. Repository events travel beside them: they are context for
@@ -141,6 +155,7 @@ impl Bundle {
             events_sha256,
             since,
             events,
+            objects: Some(objects),
             repository_events,
         })
     }
@@ -167,6 +182,17 @@ impl Bundle {
                 "unsupported bundle schema {:?}; expected one of {READABLE_BUNDLE_SCHEMAS:?}",
                 bundle.schema
             );
+        }
+        if let Some(objects) = &bundle.objects {
+            for object in objects {
+                if !valid_object_id(&object.oid) || object.role.is_empty() {
+                    bail!(
+                        "invalid bundled object {:?} with role {:?}",
+                        object.oid,
+                        object.role
+                    );
+                }
+            }
         }
         ids::validate_id_component(&bundle.repository_id)?;
         ids::validate_id_component(&bundle.change_id)?;
@@ -339,6 +365,147 @@ impl Bundle {
             unknown_event_types,
         })
     }
+}
+
+fn valid_object_id(oid: &str) -> bool {
+    matches!(oid.len(), 40 | 64) && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// The closure covers the transported events, including repository facts,
+/// rather than the receiving state or the prefix of a delta.
+fn exported_objects(
+    cwd: &Path,
+    change_id: &str,
+    events: &[Value],
+    repository_events: &[Value],
+) -> Result<Vec<BundleObject>> {
+    let mut objects = BTreeSet::new();
+    for value in events.iter().chain(repository_events) {
+        let Some(event) = parse_typed_event(value)? else {
+            continue;
+        };
+        let payload = serde_json::to_value(&event.payload)?;
+        let event_type = payload["event_type"].as_str().unwrap_or_default();
+        collect_payload_objects(cwd, &payload, event_type, &mut objects)?;
+        if let Payload::VerificationRecorded {
+            revision,
+            against_target,
+            tested_tree,
+            ..
+        } = &event.payload
+        {
+            if let Some(tree) = tested_tree {
+                insert_object(cwd, &mut objects, tree, "retention-commit")?;
+            }
+            let name = crate::gitio::tree_retention_ref(change_id, &event.event_id);
+            if let Some(oid) = crate::gitio::ref_value(cwd, &name)? {
+                insert_object(cwd, &mut objects, &oid, "retention-commit")?;
+            }
+            if against_target.is_some() {
+                // The event names the merge even when its retention ref was released.
+                insert_object(cwd, &mut objects, revision, "synthesized-merge")?;
+                insert_object(cwd, &mut objects, revision, "retention-commit")?;
+                let name = crate::gitio::merge_retention_ref(change_id, revision);
+                if let Some(oid) = crate::gitio::ref_value(cwd, &name)? {
+                    insert_object(cwd, &mut objects, &oid, "retention-commit")?;
+                }
+            }
+        }
+        if let Payload::VerificationRunStarted { revision, .. }
+        | Payload::VerificationReused { revision, .. } = &event.payload
+        {
+            let name = crate::gitio::merge_retention_ref(change_id, revision);
+            if let Some(oid) = crate::gitio::ref_value(cwd, &name)? {
+                insert_object(cwd, &mut objects, revision, "synthesized-merge")?;
+                insert_object(cwd, &mut objects, &oid, "retention-commit")?;
+            }
+        }
+        if let Payload::HistoryRewritten { mapping, refs, .. } = &event.payload {
+            for (old, new) in mapping {
+                insert_object(cwd, &mut objects, old, "rewrite-source")?;
+                if let Some(new) = new {
+                    insert_object(cwd, &mut objects, new, "rewrite-successor")?;
+                }
+            }
+            for moved in refs.values() {
+                insert_object(cwd, &mut objects, &moved.old, "rewrite-source")?;
+                insert_object(cwd, &mut objects, &moved.new, "rewrite-successor")?;
+            }
+        }
+    }
+    Ok(objects.into_iter().collect())
+}
+
+fn insert_object(
+    cwd: &Path,
+    objects: &mut BTreeSet<BundleObject>,
+    revision: &str,
+    role: &str,
+) -> Result<()> {
+    let oid = if valid_object_id(revision) {
+        revision.to_owned()
+    } else {
+        crate::gitio::rev_parse(cwd, revision)
+            .with_context(|| format!("cannot identify exported {role} object {revision:?}"))?
+    };
+    objects.insert(BundleObject {
+        oid,
+        role: role.to_owned(),
+    });
+    Ok(())
+}
+
+/// Only the typed payload is traversed: unknown events and arbitrary message
+/// metadata have no object-field contract. Nested anchors, file requirements,
+/// read evidence and authorization carry the same Git-object field names.
+fn collect_payload_objects(
+    cwd: &Path,
+    value: &Value,
+    event_type: &str,
+    objects: &mut BTreeSet<BundleObject>,
+) -> Result<()> {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                collect_payload_objects(cwd, value, event_type, objects)?;
+            }
+        }
+        Value::Object(fields) => {
+            for (field, value) in fields {
+                if matches!(field.as_str(), "metadata" | "mapping" | "refs") {
+                    continue;
+                }
+                let role = match field.as_str() {
+                    "base" if event_type == "patchset-added" => Some("patchset-base"),
+                    "head" if event_type == "patchset-added" => Some("patchset-head"),
+                    "commit" => Some("disposition-commit"),
+                    "tree" | "tested_tree"
+                        if matches!(
+                            event_type,
+                            "verification-recorded" | "verification-reused" | "candidate-verified"
+                        ) =>
+                    {
+                        Some("evaluated-tree")
+                    }
+                    "tree" => Some("content-tree"),
+                    "blob" => Some("cited-blob"),
+                    "integrated_commit" | "merge_sha" => Some("integration-commit"),
+                    "against_target" | "target_before" | "target_revision" => Some("target-commit"),
+                    "target" if event_type == "candidate-selected" => Some("target-commit"),
+                    "base" | "head" | "merge_base" | "base_revision" | "revision"
+                    | "source_head" | "reviewed_head" | "head_sha" | "pr_head" | "compared_at"
+                    | "at" => Some("cited-commit"),
+                    _ => None,
+                };
+                if let (Some(role), Some(oid)) = (role, value.as_str()) {
+                    insert_object(cwd, objects, oid, role)?;
+                }
+                collect_payload_objects(cwd, value, event_type, objects)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 pub struct ValidatedBundle {

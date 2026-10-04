@@ -996,6 +996,9 @@ enum Cmd {
         json: bool,
     },
     /// Export one change as a deterministic, versioned JSON bundle
+    /// Includes a role-labelled Git object list derived from the exported
+    /// events, including a delta's suffix and repository events. The summary
+    /// counts objects by role; transports must deliver them before import.
     /// Records no events; ledger reads do not require a parseable append policy.
     Export {
         /// Change to export as a versioned bundle
@@ -1008,8 +1011,13 @@ enum Cmd {
         /// every bundle, even when the change suffix is empty
         #[arg(long, value_name = "SHA256")]
         since: Option<String>,
+        /// Write the objects array alone as JSON for a transport
+        #[arg(long, value_name = "FILE")]
+        objects_json: Option<String>,
     },
     /// Import arc-bundle/6 or /5 into this repository's local store.
+    /// Every listed Git object must exist before any events or refs are
+    /// written. Bundles without an objects field retain advisory commit checks.
     /// Candidate events stamp store format 7, including evaluations,
     /// selections, and promotions without a registration in the bundle.
     /// Events without model provenance retain that absence. Repository map
@@ -1025,6 +1033,10 @@ enum Cmd {
         /// Validate and report without writing events or retention refs
         #[arg(long)]
         dry_run: bool,
+        /// Import events even when listed Git objects are missing, reporting
+        /// each missing OID and role. Evidence requires those objects to arrive
+        #[arg(long)]
+        provenance_only: bool,
     },
     /// Pair independent stores and move integration authority with files
     Replica {
@@ -3857,11 +3869,22 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             change,
             output,
             since,
+            objects_json,
         } => {
-            commands::export_bundle(&ctx, &change, &output, since.as_deref())?;
+            commands::export_bundle(
+                &ctx,
+                &change,
+                &output,
+                since.as_deref(),
+                objects_json.as_deref(),
+            )?;
             Ok(0)
         }
-        Cmd::Import { input, dry_run } => commands::import_bundle(&ctx, &input, dry_run),
+        Cmd::Import {
+            input,
+            dry_run,
+            provenance_only,
+        } => commands::import_bundle(&ctx, &input, dry_run, provenance_only),
         Cmd::Replica { cmd } => match cmd {
             ReplicaCmd::Id { json } => {
                 commands::replica_id(&ctx, json)?;

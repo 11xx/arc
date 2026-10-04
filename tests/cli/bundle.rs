@@ -62,7 +62,7 @@ fn importing_an_integration_stamps_the_destination_store_format() {
 
     other
         .arc(&other.root)
-        .args(["import", bundle.to_str().unwrap()])
+        .args(["import", "--provenance-only", bundle.to_str().unwrap()])
         .assert()
         .success();
     let config: serde_json::Value =
@@ -97,7 +97,7 @@ fn importing_a_no_entry_changelog_record_stamps_store_format_seven() {
     let config_path = other.root.join(".git/arc/config.json");
     other
         .arc(&other.root)
-        .args(["import", bundle.to_str().unwrap()])
+        .args(["import", "--provenance-only", bundle.to_str().unwrap()])
         .assert()
         .success();
     let config: serde_json::Value =
@@ -196,7 +196,7 @@ fn importing_a_waiver_only_integration_stamps_store_format_three() {
 
     destination
         .arc(&destination.root)
-        .args(["import", bundle.to_str().unwrap()])
+        .args(["import", "--provenance-only", bundle.to_str().unwrap()])
         .assert()
         .success();
     let config: serde_json::Value =
@@ -225,7 +225,7 @@ fn a_bundle_from_a_newer_arc_is_refused_rather_than_partially_imported() {
     let other = Repo::new();
     other
         .arc(&other.root)
-        .args(["import", bundle.to_str().unwrap()])
+        .args(["import", "--provenance-only", bundle.to_str().unwrap()])
         .assert()
         .failure();
 }
@@ -267,7 +267,7 @@ fn import_reads_the_previous_bundle_version_and_refuses_older() {
     let older = Repo::new();
     older
         .arc(&older.root)
-        .args(["import", bundle.to_str().unwrap()])
+        .args(["import", "--provenance-only", bundle.to_str().unwrap()])
         .assert()
         .failure()
         .stderr(predicates::str::contains("unsupported bundle schema"));
@@ -277,7 +277,7 @@ fn import_reads_the_previous_bundle_version_and_refuses_older() {
     let other = Repo::new();
     other
         .arc(&other.root)
-        .args(["import", bundle.to_str().unwrap()])
+        .args(["import", "--provenance-only", bundle.to_str().unwrap()])
         .assert()
         .success();
     let show = json_stdout(other.arc(&other.root).args(["show", "previous", "--json"]));
@@ -381,7 +381,7 @@ fn bundle_roundtrip_preserves_claim_stage_and_snapshot_provenance_events() {
     let destination = Repo::new();
     destination
         .arc(&destination.root)
-        .args(["import", bundle.to_str().unwrap()])
+        .args(["import", "--provenance-only", bundle.to_str().unwrap()])
         .assert()
         .success()
         .stdout(predicates::str::contains("unknown event type").not());
@@ -457,7 +457,7 @@ fn verdict_event_without_body_remains_readable() {
     let destination = Repo::new();
     destination
         .arc(&destination.root)
-        .args(["import", bundle.to_str().unwrap()])
+        .args(["import", "--provenance-only", bundle.to_str().unwrap()])
         .assert()
         .success();
     let status = json_stdout(
@@ -518,7 +518,7 @@ fn export_import_roundtrip_is_byte_identical() {
     let destination = Repo::new();
     destination
         .arc(&destination.root)
-        .args(["import", bundle.to_str().unwrap()])
+        .args(["import", "--provenance-only", bundle.to_str().unwrap()])
         .assert()
         .success();
     let roundtrip = destination.home.join("roundtrip.json");
@@ -546,7 +546,7 @@ fn export_import_roundtrip_is_byte_identical() {
     let third = Repo::new();
     third
         .arc(&third.root)
-        .args(["import", continued.to_str().unwrap()])
+        .args(["import", "--provenance-only", continued.to_str().unwrap()])
         .assert()
         .success();
 }
@@ -569,12 +569,12 @@ fn import_is_idempotent() {
     let destination = Repo::new();
     destination
         .arc(&destination.root)
-        .args(["import", bundle.to_str().unwrap()])
+        .args(["import", "--provenance-only", bundle.to_str().unwrap()])
         .assert()
         .success();
     destination
         .arc(&destination.root)
-        .args(["import", bundle.to_str().unwrap()])
+        .args(["import", "--provenance-only", bundle.to_str().unwrap()])
         .assert()
         .success()
         .stdout(predicates::str::contains(format!(
@@ -596,7 +596,7 @@ fn import_conflict_writes_nothing() {
     let destination = Repo::new();
     destination
         .arc(&destination.root)
-        .args(["import", bundle.to_str().unwrap()])
+        .args(["import", "--provenance-only", bundle.to_str().unwrap()])
         .assert()
         .success();
     let bundle_json: serde_json::Value =
@@ -616,7 +616,7 @@ fn import_conflict_writes_nothing() {
 
     destination
         .arc(&destination.root)
-        .args(["import", bundle.to_str().unwrap()])
+        .args(["import", "--provenance-only", bundle.to_str().unwrap()])
         .assert()
         .code(1)
         .stdout(predicates::str::contains(format!("conflict: {event_id}")))
@@ -673,7 +673,7 @@ fn import_rejects_malformed_known_events_before_writing() {
     let destination = Repo::new();
     destination
         .arc(&destination.root)
-        .args(["import", bundle_path.to_str().unwrap()])
+        .args(["import", "--provenance-only", bundle_path.to_str().unwrap()])
         .assert()
         .failure()
         .stderr(predicates::str::contains(" is malformed"));
@@ -691,7 +691,11 @@ fn import_rejects_malformed_known_events_before_writing() {
     let malformed_envelope_destination = Repo::new();
     malformed_envelope_destination
         .arc(&malformed_envelope_destination.root)
-        .args(["import", malformed_envelope_path.to_str().unwrap()])
+        .args([
+            "import",
+            "--provenance-only",
+            malformed_envelope_path.to_str().unwrap(),
+        ])
         .assert()
         .failure()
         .stderr(predicates::str::contains(" is malformed"));
@@ -714,7 +718,11 @@ fn import_rejects_malformed_known_events_before_writing() {
     let ownerless_destination = Repo::new();
     ownerless_destination
         .arc(&ownerless_destination.root)
-        .args(["import", ownerless_path.to_str().unwrap()])
+        .args([
+            "import",
+            "--provenance-only",
+            ownerless_path.to_str().unwrap(),
+        ])
         .assert()
         .failure()
         .stderr(predicates::str::contains("has no session"));
@@ -766,7 +774,7 @@ fn import_rejects_malformed_changelog_before_writing() {
     let destination = Repo::new();
     destination
         .arc(&destination.root)
-        .args(["import", bundle_path.to_str().unwrap()])
+        .args(["import", "--provenance-only", bundle_path.to_str().unwrap()])
         .assert()
         .failure()
         .stderr(predicates::str::contains(" is malformed"));
@@ -820,7 +828,7 @@ fn import_replays_combined_history_before_writing() {
 
     destination
         .arc(&destination.root)
-        .args(["import", bundle_path.to_str().unwrap()])
+        .args(["import", "--provenance-only", bundle_path.to_str().unwrap()])
         .assert()
         .failure()
         .stderr(predicates::str::contains(
@@ -856,7 +864,7 @@ fn stale_imported_release_stage_and_snapshot_cannot_mutate_a_replacement_claim()
     let destination = Repo::new();
     destination
         .arc(&destination.root)
-        .args(["import", initial.to_str().unwrap()])
+        .args(["import", "--provenance-only", initial.to_str().unwrap()])
         .assert()
         .success();
     destination
@@ -918,7 +926,7 @@ fn stale_imported_release_stage_and_snapshot_cannot_mutate_a_replacement_claim()
 
     destination
         .arc(&destination.root)
-        .args(["import", updated.to_str().unwrap()])
+        .args(["import", "--provenance-only", updated.to_str().unwrap()])
         .assert()
         .success();
     let status: serde_json::Value = serde_json::from_str(&stdout(
@@ -961,7 +969,12 @@ fn import_dry_run_into_fresh_repo_writes_nothing() {
     let destination = Repo::new();
     destination
         .arc(&destination.root)
-        .args(["import", bundle.to_str().unwrap(), "--dry-run"])
+        .args([
+            "import",
+            "--provenance-only",
+            bundle.to_str().unwrap(),
+            "--dry-run",
+        ])
         .assert()
         .success()
         .stdout(predicates::str::contains(format!(
@@ -988,7 +1001,7 @@ fn import_restores_patchset_retention_refs() {
     git(&repo.root, &["update-ref", "-d", &retention_ref]);
 
     repo.arc(&repo.root)
-        .args(["import", bundle.to_str().unwrap()])
+        .args(["import", "--provenance-only", bundle.to_str().unwrap()])
         .assert()
         .success();
     assert_eq!(git_out(&repo.root, &["rev-parse", &retention_ref]), head);
@@ -1040,7 +1053,7 @@ fn import_preserves_unknown_event_bytes() {
     let destination = Repo::new();
     destination
         .arc(&destination.root)
-        .args(["import", bundle.to_str().unwrap()])
+        .args(["import", "--provenance-only", bundle.to_str().unwrap()])
         .assert()
         .success()
         .stdout(predicates::str::contains(format!(
@@ -1093,7 +1106,7 @@ fn export_import_roundtrips_message_events() {
     let destination = Repo::new();
     destination
         .arc(&destination.root)
-        .args(["import", bundle.to_str().unwrap()])
+        .args(["import", "--provenance-only", bundle.to_str().unwrap()])
         .assert()
         .success();
     let roundtrip = destination.home.join("roundtrip.json");
@@ -1198,7 +1211,7 @@ fn export_import_preserves_plan_links_on_every_brief_version() {
     let destination = Repo::new();
     destination
         .arc(&destination.root)
-        .args(["import", bundle.to_str().unwrap()])
+        .args(["import", "--provenance-only", bundle.to_str().unwrap()])
         .assert()
         .success();
     for (version, plan_ref, plan_slice, body) in [
@@ -1279,7 +1292,7 @@ fn a_delta_bundle_extends_a_verified_prefix() {
     let prefix_events = bundle_events(&full).len();
     recipient
         .arc(&recipient.root)
-        .args(["import", full.to_str().unwrap()])
+        .args(["import", "--provenance-only", full.to_str().unwrap()])
         .assert()
         .success();
     let prefix_only = event_files(&recipient, &change_id);
@@ -1317,6 +1330,7 @@ fn a_delta_bundle_extends_a_verified_prefix() {
 
     let preview = stdout(recipient.arc(&recipient.root).args([
         "import",
+        "--provenance-only",
         delta.to_str().unwrap(),
         "--dry-run",
     ]));
@@ -1328,7 +1342,7 @@ fn a_delta_bundle_extends_a_verified_prefix() {
     );
     recipient
         .arc(&recipient.root)
-        .args(["import", delta.to_str().unwrap()])
+        .args(["import", "--provenance-only", delta.to_str().unwrap()])
         .assert()
         .success();
 
@@ -1348,7 +1362,7 @@ fn a_delta_bundle_extends_a_verified_prefix() {
     let other = Repo::new();
     other
         .arc(&other.root)
-        .args(["import", full_after.to_str().unwrap()])
+        .args(["import", "--provenance-only", full_after.to_str().unwrap()])
         .assert()
         .success();
     assert_eq!(
@@ -1359,11 +1373,11 @@ fn a_delta_bundle_extends_a_verified_prefix() {
 
     // Re-importing the same suffix changes nothing.
     let after = event_files(&recipient, &change_id);
-    let again = stdout(
-        recipient
-            .arc(&recipient.root)
-            .args(["import", delta.to_str().unwrap()]),
-    );
+    let again = stdout(recipient.arc(&recipient.root).args([
+        "import",
+        "--provenance-only",
+        delta.to_str().unwrap(),
+    ]));
     assert!(again.contains("summary: new=0"), "{again}");
     assert_eq!(event_files(&recipient, &change_id), after);
 
@@ -1449,7 +1463,7 @@ fn a_suffix_over_an_unheld_prefix_is_refused() {
     let fresh = Repo::new();
     fresh
         .arc(&fresh.root)
-        .args(["import", delta.to_str().unwrap()])
+        .args(["import", "--provenance-only", delta.to_str().unwrap()])
         .assert()
         .code(1)
         .stderr(predicates::str::contains("nothing was imported"));
@@ -1458,7 +1472,7 @@ fn a_suffix_over_an_unheld_prefix_is_refused() {
     let holder = Repo::new();
     holder
         .arc(&holder.root)
-        .args(["import", full.to_str().unwrap()])
+        .args(["import", "--provenance-only", full.to_str().unwrap()])
         .assert()
         .success();
     let before = event_files(&holder, &change_id);
@@ -1467,7 +1481,7 @@ fn a_suffix_over_an_unheld_prefix_is_refused() {
     fs::write(&delta, json_file_bytes(&value)).unwrap();
     holder
         .arc(&holder.root)
-        .args(["import", delta.to_str().unwrap()])
+        .args(["import", "--provenance-only", delta.to_str().unwrap()])
         .assert()
         .code(1)
         .stderr(predicates::str::contains("does not cover prefix"));
@@ -1489,6 +1503,7 @@ fn importing_previous_bundles_preserves_absent_model_provenance() {
             .arc(&source.root)
             .args(["export", &change, "--output", "-"]),
     );
+    fixture.as_object_mut().unwrap().remove("objects");
     fixture["store_format"] = serde_json::json!(6);
     for event in fixture["events"].as_array_mut().unwrap() {
         event["schema_version"] = serde_json::json!(6);
@@ -1524,4 +1539,258 @@ fn importing_previous_bundles_preserves_absent_model_provenance() {
         assert_eq!(exported["schema"], "arc-bundle/6");
         assert_eq!(exported["events"], fixture["events"]);
     }
+}
+
+#[test]
+fn export_objects_include_against_evidence_and_retained_trees() {
+    let repo = Repo::new();
+    repo.declare_gates_locally("[gates.build]\ncommand = 'true'\n");
+    stdout(repo.arc(&repo.root).args(["begin", "closure"]));
+    let worktree = repo.home.join(".worktrees/repo-closure");
+    repo.commit(&worktree, "work.txt", "work\n", "test: work");
+    stdout(repo.arc(&worktree).args(["snapshot", "closure"]));
+    repo.commit(&repo.root, "target.txt", "target\n", "test: target");
+    fs::write(worktree.join("dirty.txt"), "uncommitted\n").unwrap();
+    stdout(repo.arc(&worktree).args(["verify", "closure", "--all"]));
+    stdout(
+        repo.arc(&worktree)
+            .args(["verify", "closure", "--against", "master"]),
+    );
+    let objects_path = repo.home.join("objects.json");
+    let bundle = json_stdout(repo.arc(&worktree).args([
+        "export",
+        "closure",
+        "--output",
+        "-",
+        "--objects-json",
+        objects_path.to_str().unwrap(),
+    ]));
+    let objects = bundle["objects"].as_array().unwrap();
+    let standalone: serde_json::Value =
+        serde_json::from_slice(&fs::read(objects_path).unwrap()).unwrap();
+    assert_eq!(standalone, bundle["objects"]);
+    for event in bundle["events"].as_array().unwrap() {
+        if event["event_type"] == "patchset-added" {
+            for (field, role) in [("base", "patchset-base"), ("head", "patchset-head")] {
+                assert!(objects.contains(&serde_json::json!({"oid": event[field], "role": role})));
+            }
+        }
+        if event["event_type"] == "verification-recorded" {
+            for field in ["tree", "tested_tree"] {
+                assert!(objects
+                    .contains(&serde_json::json!({"oid": event[field], "role": "evaluated-tree"})));
+            }
+            if event["against_target"].is_string() {
+                assert!(objects.contains(
+                    &serde_json::json!({"oid": event["revision"], "role": "synthesized-merge"})
+                ));
+            }
+            let name = format!(
+                "refs/arc/tree/{}/{}",
+                bundle["change_id"].as_str().unwrap(),
+                event["event_id"].as_str().unwrap()
+            );
+            let retained = git_out(&repo.root, &["rev-parse", &name]);
+            assert!(
+                objects.contains(&serde_json::json!({"oid": retained, "role": "retention-commit"}))
+            );
+        }
+    }
+    let path = repo.home.join("closure.json");
+    fs::write(&path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+    let recipient = Repo::new();
+    recipient
+        .arc(&recipient.root)
+        .args(["import", path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("evaluated-tree"))
+        .stderr(predicates::str::contains("synthesized-merge"));
+    let mut delivered = std::collections::BTreeSet::new();
+    for object in objects {
+        let oid = object["oid"].as_str().unwrap();
+        if delivered.insert(oid) {
+            git(
+                &recipient.root,
+                &["fetch", repo.root.to_str().unwrap(), oid],
+            );
+        }
+    }
+    stdout(
+        recipient
+            .arc(&recipient.root)
+            .args(["import", path.to_str().unwrap()]),
+    );
+}
+
+#[test]
+fn import_objects_refuses_missing_before_writing_and_allows_provenance_only() {
+    let source = Repo::new();
+    stdout(
+        source
+            .arc(&source.root)
+            .args(["begin", "missing-closure", "--no-worktree"]),
+    );
+    let mut bundle =
+        json_stdout(
+            source
+                .arc(&source.root)
+                .args(["export", "missing-closure", "--output", "-"]),
+        );
+    let oid = "0123456789012345678901234567890123456789";
+    bundle["objects"] = serde_json::json!([{ "oid": oid, "role": "evaluated-tree" }]);
+    let path = source.home.join("missing.json");
+    fs::write(&path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+    let recipient = Repo::new();
+    for extra in [None, Some("--dry-run")] {
+        let mut command = recipient.arc(&recipient.root);
+        command.args(["import", path.to_str().unwrap()]);
+        if let Some(extra) = extra {
+            command.arg(extra);
+        }
+        let output = command.assert().failure().get_output().clone();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            text.contains(oid) && text.contains("evaluated-tree"),
+            "{text}"
+        );
+        assert!(!recipient.root.join(".git/arc").exists());
+    }
+    let text = stdout(recipient.arc(&recipient.root).args([
+        "import",
+        path.to_str().unwrap(),
+        "--provenance-only",
+    ]));
+    assert!(
+        text.contains(oid) && text.contains("evaluated-tree"),
+        "{text}"
+    );
+    stdout(
+        recipient
+            .arc(&recipient.root)
+            .args(["show", "missing-closure"]),
+    );
+}
+
+#[test]
+fn delta_export_objects_only_describe_exported_events() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "delta-closure", "--no-worktree"]),
+    );
+    stdout(repo.arc(&repo.root).args(["snapshot", "delta-closure"]));
+    let prefix =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["export", "delta-closure", "--output", "-"]),
+        );
+    stdout(repo.arc(&repo.root).args([
+        "comment",
+        "delta-closure",
+        "--body",
+        "suffix without Git objects",
+    ]));
+    let delta = json_stdout(repo.arc(&repo.root).args([
+        "export",
+        "delta-closure",
+        "--output",
+        "-",
+        "--since",
+        prefix["events_sha256"].as_str().unwrap(),
+    ]));
+    assert_eq!(delta["objects"], serde_json::json!([]));
+}
+
+#[test]
+fn delta_export_objects_include_only_the_suffix_patchset() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "delta-patchsets", "--no-worktree"]),
+    );
+    repo.commit(&repo.root, "work.txt", "first\n", "test: first head");
+    stdout(repo.arc(&repo.root).args(["snapshot", "delta-patchsets"]));
+    let first_head = repo.head(&repo.root);
+    let prefix =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["export", "delta-patchsets", "--output", "-"]),
+        );
+    repo.commit(&repo.root, "work.txt", "second\n", "test: second head");
+    stdout(repo.arc(&repo.root).args(["snapshot", "delta-patchsets"]));
+    let delta = json_stdout(repo.arc(&repo.root).args([
+        "export",
+        "delta-patchsets",
+        "--output",
+        "-",
+        "--since",
+        prefix["events_sha256"].as_str().unwrap(),
+    ]));
+    let objects = delta["objects"].as_array().unwrap();
+    assert!(objects
+        .iter()
+        .all(|object| ["patchset-base", "patchset-head", "cited-commit"]
+            .iter()
+            .any(|role| object["role"] == *role)));
+    assert!(objects
+        .contains(&serde_json::json!({"oid": repo.head(&repo.root), "role": "patchset-head"})));
+    assert!(!objects.iter().any(|object| object["oid"] == first_head));
+    let patchset = delta["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["event_type"] == "patchset-added")
+        .unwrap();
+    assert!(
+        objects.contains(&serde_json::json!({"oid": patchset["base"], "role": "patchset-base"}))
+    );
+}
+
+#[test]
+fn export_objects_label_disposition_commits() {
+    let repo = Repo::new();
+    let opened =
+        stdout(
+            repo.arc(&repo.root)
+                .args(["begin", "disposition-closure", "--no-worktree"]),
+        );
+    let change = opened_change_id(&opened);
+    stdout(repo.arc(&repo.root).args([
+        "finding",
+        "disposition-closure",
+        "--summary",
+        "fixture finding",
+    ]));
+    stdout(repo.arc(&repo.root).args([
+        "comment",
+        "disposition-closure",
+        "--body",
+        "fixture envelope",
+    ]));
+    let files = event_files(&repo, &change);
+    let finding: serde_json::Value = serde_json::from_slice(&files[1].1).unwrap();
+    let (name, bytes) = files.last().unwrap();
+    let mut disposition: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+    disposition["event_type"] = serde_json::json!("disposition-recorded");
+    disposition["finding_id"] = finding["finding_id"].clone();
+    disposition["status"] = serde_json::json!("resolved");
+    disposition["commit"] = serde_json::json!(repo.head(&repo.root));
+    fs::write(
+        event_dir(&repo, &change).join(name),
+        serde_json::to_vec(&disposition).unwrap(),
+    )
+    .unwrap();
+    let bundle =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["export", "disposition-closure", "--output", "-"]),
+        );
+    assert!(bundle["objects"].as_array().unwrap().contains(
+        &serde_json::json!({"oid": repo.head(&repo.root), "role": "disposition-commit"})
+    ));
 }

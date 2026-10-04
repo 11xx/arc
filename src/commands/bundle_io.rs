@@ -1,9 +1,30 @@
 use super::*;
 
-pub fn export_bundle(ctx: &Ctx, reference: &str, output: &str, since: Option<&str>) -> Result<()> {
+pub fn export_bundle(
+    ctx: &Ctx,
+    reference: &str,
+    output: &str,
+    since: Option<&str>,
+    objects_json: Option<&str>,
+) -> Result<()> {
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
-    let bundle = Bundle::export(&store, &change_id, since)?;
+    let bundle = Bundle::export(&store, &ctx.cwd, &change_id, since)?;
+    let objects = bundle.objects.as_deref().unwrap_or_default();
+    if let Some(path) = objects_json {
+        let mut bytes = serde_json::to_vec_pretty(objects)?;
+        bytes.push(b'\n');
+        std::fs::write(path, bytes).with_context(|| format!("cannot write object list {path}"))?;
+    }
+    let mut counts = BTreeMap::new();
+    for object in objects {
+        *counts.entry(object.role.as_str()).or_insert(0usize) += 1;
+    }
+    let summary = counts
+        .iter()
+        .map(|(role, count)| format!("{role}={count}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     let bytes = bundle.to_bytes()?;
     let mut reported = format!("events: {}", bundle.event_count);
     if let Some(prefix) = &bundle.since {
@@ -13,6 +34,7 @@ pub fn export_bundle(ctx: &Ctx, reference: &str, output: &str, since: Option<&st
         ));
     }
     reported.push_str(&format!("\nsha256: {}", bundle.events_sha256));
+    reported.push_str(&format!("\nobjects: {} {summary}", objects.len()));
     if output == "-" {
         std::io::stdout().write_all(&bytes)?;
         eprintln!("{reported}\noutput: -");
@@ -24,7 +46,7 @@ pub fn export_bundle(ctx: &Ctx, reference: &str, output: &str, since: Option<&st
     Ok(())
 }
 
-pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
+pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool, provenance_only: bool) -> Result<i32> {
     let bytes = if input == "-" {
         let mut bytes = Vec::new();
         std::io::stdin().read_to_end(&mut bytes)?;
@@ -35,6 +57,26 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
     // Parsing validates every path-bearing ID, checksum, envelope, and
     // patchset field before the local store is inspected or created.
     let validated = Bundle::parse(&bytes)?;
+    if let Some(objects) = &validated.bundle.objects {
+        let mut missing = Vec::new();
+        for object in objects {
+            let status = gitio::git_command()
+                .args(["cat-file", "-e", "--", &object.oid])
+                .current_dir(&ctx.cwd)
+                .output()
+                .context("failed to check bundled Git object")?;
+            if !status.status.success() {
+                missing.push(format!("{} ({})", object.oid, object.role));
+            }
+        }
+        if !missing.is_empty() {
+            let report = missing.join("\n");
+            if !provenance_only {
+                bail!("missing bundled Git objects:\n{report}\nfetch these objects or use --provenance-only; nothing was imported");
+            }
+            println!("warning: provenance-only import is missing Git objects:\n{report}");
+        }
+    }
     let root = Store::resolve_root(&ctx.cwd)?;
     let local_repository_id = Store::repository_id_at(&root)?;
     let local_store = local_repository_id.as_ref().map(|repository_id| Store {

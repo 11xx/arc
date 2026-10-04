@@ -561,6 +561,29 @@ RUN A CHANGE
   arc integrate <c>...               Guarded integration once the gates are green.
     --shape ff-only|no-ff            Resolved style; built-in ff-only.
     <c> <c> <c>, or --tag <t>        Land a queue, in dependency order.
+  arc export <change> --output <file|-> [--since <sha256>]
+                                     Export a versioned event bundle and its
+                                     Git objects, with a count by role.
+    --objects-json <file>            Write the objects array alone for transport.
+  arc import <file|-> [--dry-run]     Require every listed object before writing
+                                     any events or refs. Missing OIDs and roles
+                                     are reported; transport the objects first.
+    --provenance-only                Import events despite missing objects,
+                                     reporting the unavailable evidence.
+
+  The bundle's `objects` array contains `{oid, role}` pairs, deduplicated by
+  pair and sorted by OID then role. It covers exactly the exported change
+  events (only the suffix under --since) and bundled repository events.
+  Roles are `patchset-base`, `patchset-head`, `evaluated-tree`,
+  `retention-commit` (objects held by refs/arc/tree for exported evidence,
+  including direct tree pins), `synthesized-merge` (verify --against),
+  `disposition-commit`, `integration-commit`, `target-commit`, `content-tree`,
+  `cited-blob`, `cited-commit`, `rewrite-source`, and `rewrite-successor`.
+  Unknown event payloads remain opaque. A transport publishes the listed
+  objects and their Git reachability closure through scoped refs or a Git
+  bundle before announcing the result. Bundles without the objects field
+  retain advisory patchset-commit checks; /6 accepts that absent field.
+
   arc replica id --json              Read this store's repository ID for pairing.
   arc replica init <name>             Start a logical project and hold authority.
   arc replica pair <name> --repository-id <id>
