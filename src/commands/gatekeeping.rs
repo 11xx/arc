@@ -3651,10 +3651,9 @@ fn cleanup_status(checkout: &Path, untracked: &str) -> Result<String> {
     )
 }
 
-/// Find checkout markers and bare repository layouts without following symlinks.
-fn cleanup_nested_repositories(checkout: &Path, ignored: &str) -> Result<Vec<String>> {
-    let root = checkout.join(ignored.trim_end_matches('/'));
-    let mut pending = vec![root];
+/// Inspect the checkout tree independently of Git status, without following symlinks.
+fn cleanup_nested_repositories(checkout: &Path) -> Result<Vec<String>> {
+    let mut pending = vec![checkout.to_path_buf()];
     let mut repositories = Vec::new();
     while let Some(directory) = pending.pop() {
         if !std::fs::symlink_metadata(&directory)
@@ -3676,6 +3675,9 @@ fn cleanup_nested_repositories(checkout: &Path, ignored: &str) -> Result<Vec<Str
             let kind = entry
                 .file_type()
                 .with_context(|| format!("cannot inspect {}", entry.path().display()))?;
+            if directory == checkout && entry.file_name() == ".git" && kind.is_file() {
+                continue;
+            }
             match entry.file_name().to_str() {
                 Some(".git") => checkout_marker = true,
                 Some("HEAD") => head = kind.is_file() || kind.is_symlink(),
@@ -3688,15 +3690,14 @@ fn cleanup_nested_repositories(checkout: &Path, ignored: &str) -> Result<Vec<Str
             }
         }
         if checkout_marker || head && objects && refs {
-            repositories.push(
-                directory
-                    .strip_prefix(checkout)?
-                    .to_string_lossy()
-                    .into_owned(),
-            );
-        } else {
-            pending.extend(children);
+            let relative = directory.strip_prefix(checkout)?;
+            repositories.push(if relative.as_os_str().is_empty() {
+                ".".to_string()
+            } else {
+                relative.to_string_lossy().into_owned()
+            });
         }
+        pending.extend(children);
     }
     Ok(repositories)
 }
@@ -3706,18 +3707,26 @@ fn cleanup_local_content(
     rules: &[crate::artifacts::Rule],
     discard: crate::style::Discard,
 ) -> Result<(Option<String>, Vec<crate::artifacts::Artifact>)> {
+    let mut paths = match cleanup_nested_repositories(checkout) {
+        Ok(repositories) => repositories
+            .into_iter()
+            .map(|path| format!("{path} (nested Git repository)"))
+            .collect::<Vec<_>>(),
+        Err(error) => vec![format!("repository scan failed: {error:#}")],
+    };
     let flagged = cleanup_git(checkout, &["ls-files", "-v", "-z"])?;
-    let mut paths = flagged
-        .split('\0')
-        .filter(|entry| {
-            entry
-                .as_bytes()
-                .first()
-                .is_some_and(|tag| *tag == b'S' || tag.is_ascii_lowercase())
-        })
-        .filter_map(|entry| entry.get(2..))
-        .map(str::to_string)
-        .collect::<Vec<_>>();
+    paths.extend(
+        flagged
+            .split('\0')
+            .filter(|entry| {
+                entry
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|tag| *tag == b'S' || tag.is_ascii_lowercase())
+            })
+            .filter_map(|entry| entry.get(2..))
+            .map(str::to_string),
+    );
     let status = cleanup_status(checkout, "--untracked-files=all")?;
     let ignored = cleanup_status(checkout, "--untracked-files=normal")?;
     let ignored_entries = ignored
@@ -3763,27 +3772,11 @@ fn cleanup_local_content(
         let recognized = artifacts.iter().any(|artifact| artifact.path == path);
         if arc_content || !recognized && discard == crate::style::Discard::Artifacts {
             paths.push(path.to_string());
-        } else {
-            match cleanup_nested_repositories(checkout, path) {
-                Ok(repositories) if repositories.is_empty() => {
-                    if !recognized {
-                        artifacts.push(crate::artifacts::Artifact {
-                            path: path.to_string(),
-                            identified_by: "ignored; integration.discard = ignored".to_string(),
-                        });
-                    }
-                }
-                Ok(repositories) => {
-                    paths.extend(
-                        repositories
-                            .into_iter()
-                            .map(|path| format!("{path} (nested Git repository)")),
-                    );
-                }
-                Err(error) => {
-                    paths.push(format!("{path} (repository scan failed: {error:#})"));
-                }
-            }
+        } else if !recognized {
+            artifacts.push(crate::artifacts::Artifact {
+                path: path.to_string(),
+                identified_by: "ignored; integration.discard = ignored".to_string(),
+            });
         }
     }
     paths.sort();

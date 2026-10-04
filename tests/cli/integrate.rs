@@ -5560,3 +5560,104 @@ fn cleanup_repository_symlinks_are_not_followed_in_both_scopes() {
         assert!(out.contains("discarded target/ (CACHEDIR.TAG)"), "{out}");
     }
 }
+
+fn assert_cleanup_retains_repository_in_tracked_directory(scope: &str, ignored: bool) {
+    let repo = repo_with_gates();
+    if ignored {
+        repo.commit(&repo.root, ".gitignore", "target/\n", "test: ignore target");
+    }
+    let source = if ignored {
+        "target/component/source.txt"
+    } else {
+        "component/source.txt"
+    };
+    let (id, wt) = approved_change(&repo, "tracked-nested-repo", source, "tracked source\n");
+    let nested = wt.join(source).parent().unwrap().to_path_buf();
+    git(&nested, &["init", "-b", "private"]);
+    git(&nested, &["config", "user.name", "Fixture"]);
+    git(
+        &nested,
+        &["config", "user.email", "fixture@example.invalid"],
+    );
+    git(&nested, &["config", "commit.gpgsign", "false"]);
+    git(&nested, &["add", "source.txt"]);
+    git(
+        &nested,
+        &["commit", "-m", "test: independent source history"],
+    );
+    git(
+        &nested,
+        &[
+            "commit",
+            "--allow-empty",
+            "-m",
+            "test: private nested commit",
+        ],
+    );
+    let private = repo.head(&nested);
+    let absent = Command::new("git")
+        .current_dir(&repo.root)
+        .args(["cat-file", "-e", &private])
+        .output()
+        .unwrap();
+    assert!(!absent.status.success());
+    if ignored {
+        fs::write(wt.join("target/CACHEDIR.TAG"), FIXTURE_CACHE_SIGNATURE).unwrap();
+        fs::write(wt.join("target/output"), "ignored output").unwrap();
+    }
+    let relative = nested.strip_prefix(&wt).unwrap().to_str().unwrap();
+    for untracked in ["--untracked-files=all", "--untracked-files=normal"] {
+        let status = git_out(
+            &wt,
+            &["status", "--porcelain", "--ignored=traditional", untracked],
+        );
+        assert!(!status.contains(relative), "{status}");
+        if ignored {
+            assert!(
+                status.contains("target/CACHEDIR.TAG") && status.contains("target/output"),
+                "{status}"
+            );
+        } else {
+            assert!(status.is_empty(), "{status}");
+        }
+    }
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--discard", scope]),
+    );
+    assert!(nested.exists(), "{out}");
+    assert!(
+        out.contains(&format!("{relative} (nested Git repository)")),
+        "{out}"
+    );
+    assert_eq!(repo.head(&nested), private);
+    assert_eq!(
+        fs::read_to_string(nested.join("source.txt")).unwrap(),
+        "tracked source\n"
+    );
+    assert!(
+        !git_out(&repo.root, &["branch", "--list", "arc/tracked-nested-repo"]).is_empty(),
+        "{out}"
+    );
+    assert!(!out.contains("discarded "), "{out}");
+}
+
+#[test]
+fn cleanup_repository_tracked_component_inside_ignored_path_ignored_scope() {
+    assert_cleanup_retains_repository_in_tracked_directory("ignored", true);
+}
+
+#[test]
+fn cleanup_repository_tracked_component_inside_ignored_path_artifacts_scope() {
+    assert_cleanup_retains_repository_in_tracked_directory("artifacts", true);
+}
+
+#[test]
+fn cleanup_repository_tracked_component_outside_ignored_paths_ignored_scope() {
+    assert_cleanup_retains_repository_in_tracked_directory("ignored", false);
+}
+
+#[test]
+fn cleanup_repository_tracked_component_outside_ignored_paths_artifacts_scope() {
+    assert_cleanup_retains_repository_in_tracked_directory("artifacts", false);
+}

@@ -1827,7 +1827,9 @@ enum Cmd {
         /// rule's path and marker
         /// is eligible for removal only if a scan finds no nested Git repository
         /// and encounters no read error. This applies under either discard scope;
-        /// scans include bare repositories and do not follow symlinks.
+        /// a worktree containing another repository is never removed. The whole
+        /// filesystem tree is walked independently of Git status, excluding only
+        /// the checkout's own .git file at its root, without following symlinks.
         /// integration.discard defaults to artifacts; --discard ignored also discards
         /// other ignored files and directories outside .arc/. Tracked edits,
         /// untracked files and index entries marked skip-worktree or assume-unchanged
@@ -1844,12 +1846,12 @@ enum Cmd {
         cleanup: bool,
         /// Select integration.discard: artifacts (built-in) discards recognized build
         /// artifacts; ignored uses the parent checkout's Git ignore rules outside
-        /// .arc/. Under either scope, every ignored directory eligible for removal
-        /// is scanned, including recognized build artifacts. Nested .git files or
-        /// directories and bare repositories (HEAD, objects/ and refs/) keep the
-        /// checkout and are named. Scans check each directory, including the
-        /// ignored root, without following symlinks. Any scan read error keeps
-        /// the checkout. Tracked edits, untracked files and index
+        /// .arc/. A worktree containing another repository is never removed under
+        /// either scope. Cleanup walks the whole filesystem tree independently of
+        /// Git status for .git entries and bare repositories (HEAD, objects/, refs/).
+        /// Repository paths are named. The checkout's own .git file at its root is
+        /// the only exclusion. The walk never follows symlinks; any read error
+        /// keeps the checkout. Tracked edits, untracked files and index
         /// entries marked skip-worktree or assume-unchanged keep the checkout.
         /// Ignored .arc/ entries, including recognized artifacts, keep it under
         /// either scope; only owned, emptied outbox metadata is exempt.

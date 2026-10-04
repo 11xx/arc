@@ -873,12 +873,13 @@ RUN A CHANGE
   implies cleanup, and conflicts with `--no-cleanup` for single changes and
   queues. The ignored scope discards every Git-ignored file and directory
   outside `.arc/`, as classified by the parent checkout's Git ignore rules.
-  Under either scope, every ignored directory eligible for removal is scanned
-  for nested Git repositories, including recognized build artifacts. A
-  `.git` file or directory, or a bare repository layout with `HEAD`,
-  `objects/` and `refs/`, keeps the checkout and is named. Scans check
-  each directory, including the ignored root, without following symlinks.
-  Any scan read error keeps the checkout. Tracked edits, untracked files and index entries marked skip-worktree or assume-unchanged
+  A worktree containing another repository is never removed, under either
+  scope. Cleanup walks its whole filesystem tree independently of Git status.
+  A directory with a `.git` entry or a bare repository layout (`HEAD`,
+  `objects/` and `refs/`) keeps the checkout and is named. The checkout's
+  own `.git` file at its root is the only exclusion. The walk never follows
+  symlinks, and any read error keeps the checkout. Tracked edits, untracked
+  files and index entries marked skip-worktree or assume-unchanged
   keep the checkout. Ignored `.arc/` content keeps it under either scope,
   including recognized artifacts; only owned, emptied outbox metadata is
   exempt. Ownership checks apply under either scope. Cleanup uses the
@@ -2004,14 +2005,14 @@ FILES
   `integration.discard` resolves through the style layers and accepts
   `"artifacts"` (built-in) or `"ignored"`. `integrate --discard` selects the
   scope, implies cleanup, and conflicts with `--no-cleanup`. The ignored
-  scope uses the parent checkout's Git ignore rules. Ignored subtrees
-  containing nested repositories or worktrees keep the checkout under either
-  scope. Every directory eligible for removal is scanned, including
-  recognized build artifacts. Scans check each directory, including the
-  ignored root, for `.git` files or directories and bare repository layouts
-  with `HEAD`, `objects/` and `refs/`, without following symlinks.
-  A repository or any scan read error keeps the checkout; the repository
-  path is named. Tracked edits, untracked files and index entries marked
+  scope uses the parent checkout's Git ignore rules. A worktree containing
+  another repository is never removed under either scope. Cleanup walks the
+  whole filesystem tree independently of Git status, checking every directory
+  for `.git` entries and bare repository layouts (`HEAD`, `objects/` and
+  `refs/`). The checkout's own `.git` file at its root is the only exclusion.
+  The walk never follows symlinks. A repository or any read error keeps the
+  checkout; repository paths are named. Tracked edits, untracked files and
+  index entries marked
   skip-worktree or assume-unchanged keep it. Ignored `.arc/` entries,
   including recognized artifacts, keep it under either scope; only owned,
   emptied outbox metadata is exempt. Ownership checks apply under either
