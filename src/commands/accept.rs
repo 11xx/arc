@@ -299,9 +299,15 @@ fn plan_acceptance(
             let rewrites = RewriteMap::from_events(repository.iter())?;
             let mut state = state::reduce_following(&events, &rewrites)?;
             crate::replica::localize_change(&store.repository_id, &events, &mut state);
-            if state.is_closed() {
-                return refuse(1, "accept requires an open, unintegrated delivery");
-            }
+            ensure_append_allowed(
+                &state,
+                &Payload::ChangeCheckoutBound {
+                    branch: state.branch.clone(),
+                    worktree: state.worktree.clone().unwrap_or_default(),
+                    worktree_created: false,
+                    worktree_owner_token: None,
+                },
+            )?;
             if args.branch != state.branch {
                 return refuse(1, format!("local branch {:?} differs from delivery branch {:?}; fetch the recorded branch without an alias", args.branch, state.branch));
             }
@@ -563,7 +569,7 @@ fn replay(state: &ChangeState, branch: &str) -> String {
             )
         })
         .unwrap_or_else(|| " --contributors ACTOR,...".into());
-    format!("git switch {branch}; arc rebase {change}{attribution}; arc snapshot {change} --base {target}{attribution}; arc review {change} --verdict approved (after fresh review)")
+    format!("# Replay in the delivery's owning checkout after transporting the authoritative target to {target}.\ngit switch {branch}\narc rebase {change}{attribution}\narc snapshot {change} --base {target}{attribution}\n# Read the replayed patchset and record approval only after fresh review.\narc review {change} --verdict approved")
 }
 
 fn acceptance_argv(args: &AcceptArgs) -> Vec<String> {

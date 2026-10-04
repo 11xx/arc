@@ -288,7 +288,11 @@ fn accept_delivery_dry_run_leaves_objects_refs_and_store_unchanged() {
 
 #[test]
 fn accept_delivery_moved_target_requires_explicit_replay() {
-    let d = Delivery::new();
+    let mut d = Delivery::new();
+    let branch = "arc/delivery;$(false)".to_string();
+    git(&d.receiver.root, &["branch", "-m", &d.branch, &branch]);
+    d.branch = branch;
+    d.mutate_bundle(|bundle| bundle["events"][0]["branch"] = d.branch.clone().into());
     d.receiver.commit(
         &d.receiver.root,
         "advance.txt",
@@ -299,6 +303,15 @@ fn accept_delivery_moved_target_requires_explicit_replay() {
     assert_eq!(result["stopped_at"], "preflight");
     let steps = result["next_steps"].to_string();
     assert!(steps.contains("rebase") && steps.contains("snapshot") && steps.contains("review"));
+    let detail = result["next_steps"][0].as_str().unwrap();
+    let start = detail.find("# Replay in").unwrap();
+    let remedy = &detail[start..];
+    assert!(remedy.contains("'arc/delivery;$(false)'"));
+    assert!(Command::new("sh")
+        .args(["-n", "-c", remedy])
+        .status()
+        .unwrap()
+        .success());
 }
 
 #[test]
