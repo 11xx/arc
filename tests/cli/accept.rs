@@ -138,6 +138,13 @@ impl Delivery {
 fn accept_delivery_prepares_signed_local_review_without_transport() {
     let d = Delivery::new();
     d.probe("test -f feature.txt");
+    stdout(
+        d.source
+            .arc(&d.source.root)
+            .env("ARC_ACTOR", "operator")
+            .args(["review", &d.change, "--verdict", "approved"]),
+    );
+    d.export();
     d.gates("true");
     let refs = git_out(
         &d.receiver.root,
@@ -848,4 +855,54 @@ fn accept_delivery_foreign_review_exception_is_explicit_in_readiness() {
         result["readiness"]["verdict_assessments"][0]["gating_eligible"],
         true
     );
+}
+
+#[test]
+fn accept_delivery_dangling_occupied_path_refuses_before_import() {
+    let d = Delivery::new();
+    let path = d.receiver.home.join("dangling checkout");
+    std::os::unix::fs::symlink(d.receiver.home.join("absent checkout"), &path).unwrap();
+    let output = d
+        .command()
+        .args(["--worktree", path.to_str().unwrap()])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["stopped_at"], "preflight");
+    assert!(!d.receiver.root.join(".git/arc/changes").exists());
+}
+
+#[test]
+fn accept_delivery_snapshot_spool_diagnostics_stay_inside_json() {
+    let d = Delivery::new();
+    let checkout = d.receiver.home.join("spooled checkout");
+    git(
+        &d.receiver.root,
+        &["worktree", "add", checkout.to_str().unwrap(), &d.branch],
+    );
+    fs::write(d.receiver.root.join(".git/info/exclude"), ".arc/outbox/\n").unwrap();
+    let outbox = checkout.join(".arc/outbox");
+    fs::create_dir_all(&outbox).unwrap();
+    fs::write(outbox.join("invalid.json"), "invalid spool\n").unwrap();
+    let output = d
+        .command()
+        .args(["--worktree", checkout.to_str().unwrap()])
+        .assert()
+        .code(3)
+        .get_output()
+        .clone();
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(result["steps"].to_string().contains("kept invalid.json"));
+    assert!(outbox.join("invalid.json").exists());
+}
+
+#[test]
+fn accept_delivery_gate_execution_error_is_not_a_failed_gate() {
+    let d = Delivery::new();
+    d.gates("exec /absent-acceptance-command");
+    let result = d.result(1);
+    assert_eq!(result["stopped_at"], "gate:acceptance");
+    assert!(result["next_steps"].to_string().contains("execute"));
 }

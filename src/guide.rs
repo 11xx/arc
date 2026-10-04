@@ -1035,6 +1035,8 @@ PREPARE A DELIVERED CHANGE
   through the explicit superseding verdict path after reading the signed head.
   A configured foreign-review exception remains visible in verdict assessments.
   Preparation commonly completes with exit 3 and local review still owed.
+  Gate failure exits 5, probe discrimination exits 12, and execution or
+  observation failure exits 1; an unavailable runner proves no discrimination.
 
   --json emits one arc-accept/1 document containing delivery coordinates,
   prepared head, worktree, preparation_complete, ordered operation argv/cwd,

@@ -2938,6 +2938,7 @@ fn spool(ctx: &Ctx, promote: bool) -> Result<i32> {
 /// caller supplies the paths, so the same promotion serves an outbox in this
 /// checkout and one in a change's worktree.
 fn promote_outbox(ctx: &Ctx, paths: &[PathBuf]) -> Result<()> {
+    use crate::operation_println as println;
     let journal = resolve_dir(&ctx.cwd)?;
     let _transition = lock_journal_transition(&journal)?;
     std::fs::create_dir_all(&journal)
@@ -3000,6 +3001,7 @@ fn promote_outbox(ctx: &Ctx, paths: &[PathBuf]) -> Result<()> {
 /// Promotion empties the outbox it reads, so a sandbox bounds which worktree
 /// it will look in: a recorded checkout outside the prefix keeps its spool.
 pub fn promote_worktree_spool(ctx: &Ctx, worktree: &Path) {
+    use crate::operation_println as println;
     if !ctx.admits_path(worktree) {
         return;
     }

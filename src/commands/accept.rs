@@ -109,7 +109,8 @@ fn configuration(ctx: &Ctx, state: &ChangeState) -> Result<String> {
 }
 
 fn authority(store: &Store) -> Result<()> {
-    if crate::replica::status(store)?.local.is_none() {
+    let replica = crate::replica::status(store)?;
+    if replica.local.is_none() || replica.peers.is_empty() {
         return refuse(
             17,
             "accept requires a paired receiver holding integration authority",
@@ -410,7 +411,15 @@ fn plan_acceptance(
                     format!("worktree {} is outside sandbox bounds", checkout.display()),
                 );
             }
-            let create_checkout = !checkout.try_exists()?;
+            let create_checkout = match std::fs::symlink_metadata(&checkout) {
+                Ok(_) => false,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("cannot inspect checkout path {}", checkout.display())
+                    })
+                }
+            };
             if create_checkout {
                 if let Some(entry) = matching {
                     return refuse(
@@ -660,6 +669,34 @@ fn validate_checkout(ctx: &Ctx, plan: &AcceptancePlan, expected: &str) -> Result
     Ok(())
 }
 
+fn check_execution(
+    store: &Store,
+    change: &str,
+    before: &BTreeSet<String>,
+    gate: &str,
+) -> Result<()> {
+    let events = store.load_events(change)?;
+    let evidence = events
+        .iter()
+        .filter(|event| !before.contains(&event.event_id))
+        .find(|event| matches!(event.payload, Payload::VerificationRecorded { .. }))
+        .context("local gate produced no observed verification evidence")?;
+    if let Payload::VerificationRecorded {
+        exit_code,
+        timed_out,
+        tree_moved,
+        revision,
+        ..
+    } = &evidence.payload
+    {
+        if exit_code.is_none() || matches!(exit_code, Some(126 | 127)) || *timed_out || *tree_moved
+        {
+            return refuse(1, format!("gate {gate} at {revision} could not execute or be observed; evidence {} remains recorded; inspect it before retrying", evidence.event_id));
+        }
+    }
+    Ok(())
+}
+
 fn verify_args() -> VerifyArgs {
     VerifyArgs {
         all: false,
@@ -843,7 +880,7 @@ fn execute_acceptance(
                 return Ok(());
             }
             let (created, token) = if plan.create_checkout {
-                if plan.checkout.try_exists()? {
+                if std::fs::symlink_metadata(&plan.checkout).is_ok() {
                     return refuse(
                         1,
                         format!("allocated path {} became occupied", plan.checkout.display()),
@@ -973,7 +1010,10 @@ fn execute_acceptance(
                 revalidate(&run, plan, &prepared)?;
                 let mut verify = verify_args();
                 verify.gate = Some(name.clone());
+                let before = event_ids(&plan.store, Some(&plan.state.change_id))?;
                 let code = gatekeeping::verify(&run, &plan.state.change_id, verify)?;
+                check_execution(&plan.store, &plan.state.change_id, &before, name)?;
+                revalidate(&run, plan, &prepared)?;
                 if code != 0 {
                     return refuse(5, format!("required local gate {name} failed; recorded evidence remains; run arc verify {} --gate {}", crate::context::shell_quote(&plan.state.change_id), crate::context::shell_quote(name)));
                 }
@@ -1045,7 +1085,7 @@ fn execute_acceptance(
                 ]),
                 || {
                     revalidate(&run, plan, &prepared)?;
-                    let before = plan.store.load_events(&plan.state.change_id)?.len();
+                    let before = event_ids(&plan.store, Some(&plan.state.change_id))?;
                     let mut verify = verify_args();
                     verify.probe = Some(probe.name.clone());
                     verify.brief_version = plan.brief_version;
@@ -1054,7 +1094,7 @@ fn execute_acceptance(
                     let events = plan.store.load_events(&plan.state.change_id)?;
                     let evidence = events
                         .iter()
-                        .skip(before)
+                        .filter(|event| !before.contains(&event.event_id))
                         .find_map(|event| match &event.payload {
                             Payload::VerificationRecorded {
                                 exit_code,

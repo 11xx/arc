@@ -1105,7 +1105,9 @@ enum Cmd {
     /// Prepare a delivered change on the paired integration authority (lead only).
     /// Admission precedes local checkout binding, exclusive scoped signing,
     /// snapshotting at the delivered base and bound brief, local gates, and
-    /// baseline/final probes. Preparation records evidence and returns readiness;
+    /// baseline/final probes. Execution or observation errors remain distinct
+    /// from failed gates and probe discrimination. Preparation records evidence
+    /// and returns readiness;
     /// it records no judgment. A local review still owed normally exits 3.
     /// Moved authoritative history requires explicit rebase, snapshot, and review.
     /// Stops at the first failure and reports retained effects. Retrying the same
@@ -5259,6 +5261,7 @@ mod tests {
     #[test]
     fn every_leaf_command_has_an_io_classification() {
         const WRITING_COMMANDS: &[&str] = &[
+            "accept",
             "begin",
             "roles",
             "brief",
