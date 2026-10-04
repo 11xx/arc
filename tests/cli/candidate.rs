@@ -481,32 +481,21 @@ fn export_and_import_carry_candidates() {
         .success();
 
     let destination = Repo::new();
+    deliver_git_objects(&source, &destination);
     let imported = stdout(
         destination
             .arc(&destination.root)
             .args(["import", bundle.to_str().unwrap()]),
     );
-    assert!(
-        imported.contains("tree not held here; pin absent"),
-        "{imported}"
-    );
+    assert!(imported.contains("pinned"), "{imported}");
 
-    let strip_pins = |mut view: serde_json::Value| {
-        for candidate in view["candidates"].as_array_mut().unwrap() {
-            candidate.as_object_mut().unwrap().remove("pin");
-        }
-        view
-    };
     let there = list(&destination, &destination.root);
-    assert_eq!(
-        strip_pins(list(&source, &source.root)),
-        strip_pins(there.clone())
-    );
+    assert_eq!(list(&source, &source.root), there);
     assert!(there["candidates"]
         .as_array()
         .unwrap()
         .iter()
-        .all(|candidate| candidate["pin"]["present"] == false));
+        .all(|candidate| candidate["pin"]["present"] == true));
     let config: serde_json::Value =
         serde_json::from_slice(&fs::read(destination.root.join(".git/arc/config.json")).unwrap())
             .unwrap();
@@ -555,6 +544,7 @@ fn import_refuses_a_bundle_whose_adoption_drops_a_producer() {
     fs::write(&path, serde_json::to_vec_pretty(&bundle).unwrap()).unwrap();
 
     let destination = Repo::new();
+    deliver_git_objects(&source, &destination);
     destination
         .arc(&destination.root)
         .args(["import", path.to_str().unwrap()])

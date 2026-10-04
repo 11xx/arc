@@ -724,6 +724,7 @@ fn forge_events_round_trip_through_export_import() {
         .success();
 
     let destination = Repo::new();
+    deliver_git_objects(&source, &destination);
     destination
         .arc(&destination.root)
         .args(["import", bundle.to_str().unwrap()])
@@ -786,6 +787,7 @@ fn typed_consumers_tolerate_imported_unknown_event_type() {
         .success();
 
     let dest = Repo::new();
+    deliver_git_objects(&source, &dest);
     dest.arc(&dest.root)
         .args(["import", bundle.to_str().unwrap()])
         .assert()

@@ -177,6 +177,7 @@ fn exported_changes_carry_their_cross_links() {
     assert!(text.contains("exported-1"), "{text}");
 
     let other = Repo::new();
+    deliver_git_objects(&repo, &other);
     other
         .arc(&other.root)
         .args(["import", bundle.to_str().unwrap()])

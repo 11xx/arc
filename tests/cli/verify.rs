@@ -508,6 +508,7 @@ fn verify_attest_records_gate_evidence_without_running() {
         .assert()
         .success();
     let destination = Repo::new();
+    deliver_git_objects(&repo, &destination);
     destination
         .arc(&destination.root)
         .args(["import", bundle.to_str().unwrap()])

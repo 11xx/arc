@@ -429,6 +429,7 @@ fn query_tags_batch_views_and_actionable_errors() {
         .assert()
         .success();
     let destination = Repo::new();
+    deliver_git_objects(&repo, &destination);
     destination
         .arc(&destination.root)
         .args(["import", bundle.to_str().unwrap()])

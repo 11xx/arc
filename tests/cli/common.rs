@@ -193,6 +193,20 @@ pub(crate) fn codex_recording(repo: &Repo, session: &str, model: &str) -> PathBu
 pub(crate) const NO_EDITOR: [(&str, &str); 2] =
     [("GIT_EDITOR", "true"), ("GIT_SEQUENCE_EDITOR", "true")];
 
+/// Deliver the objects reachable from every source ref, including Arc's
+/// evidence pins, under a namespace separate from the receiver's branches.
+pub(crate) fn deliver_git_objects(source: &Repo, destination: &Repo) {
+    git(
+        &destination.root,
+        &[
+            "fetch",
+            "--no-tags",
+            source.root.to_str().unwrap(),
+            "+refs/*:refs/delivered/*",
+        ],
+    );
+}
+
 pub(crate) fn git(cwd: &Path, args: &[&str]) {
     let st = Command::new("git")
         .args(args)

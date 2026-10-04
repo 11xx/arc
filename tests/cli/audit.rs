@@ -1528,6 +1528,7 @@ fn import_refuses_a_post_integration_disposition_its_change_could_not_take() {
         let path = source.home.join(name);
         fs::write(&path, json_file_bytes(bundle)).unwrap();
         let destination = Repo::new();
+        deliver_git_objects(&source, &destination);
         let assert = destination
             .arc(&destination.root)
             .args(["import", path.to_str().unwrap()])
@@ -1748,6 +1749,7 @@ fn audit_events_survive_a_bundle_round_trip() {
     // replay validation. Same-build loading may still recognize the raw event,
     // so transferred state alone does not prove that import classified it.
     let destination = Repo::new();
+    deliver_git_objects(&repo, &destination);
     destination
         .arc(&destination.root)
         .args(["import", bundle.to_str().unwrap()])
