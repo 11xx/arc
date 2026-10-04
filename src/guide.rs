@@ -569,13 +569,16 @@ RUN A CHANGE
   arc export <change> --output <file|-> [--since <sha256>]
                                      Export a versioned event bundle and its
                                      Git objects, with a count by role.
-    --objects-json <file>            Write the objects array alone for transport.
-  arc import <file|-> [--dry-run]     Require every listed object before writing
-                                     any events or refs. Missing OIDs and roles
-                                     are reported; transport the objects first.
+    --objects-json <file>            Write an arc-bundle-objects/1 transport file.
+  arc import <file|-> [--dry-run]     Require every listed object locally before
+                                     writing any events or refs. Missing OIDs and
+                                     roles are reported; transport the objects first.
     --provenance-only                Import events despite missing objects,
                                      reporting the unavailable evidence.
 
+  Availability checks never fetch from a promisor remote. A dry run writes
+  no files, Git objects, events, or refs. The --objects-json file is an
+  envelope with `schema: "arc-bundle-objects/1"` and an `objects` array.
   The bundle's `objects` array contains `{oid, role}` pairs, deduplicated by
   pair and sorted by OID then role. It covers exactly the exported change
   events (only the suffix under --since) and bundled repository events.
@@ -2105,6 +2108,7 @@ SCHEMAS
 
   Commitments, files:
     `arc-bundle/6`                   arc export / arc import
+    `arc-bundle-objects/1`           arc export --objects-json
     `arc-replica-bundle/3`           arc replica export / import
     `arc-replica-event/3`            one event inside an arc-replica-bundle
     `arc-journal-bundle/2`           arc journal export / import

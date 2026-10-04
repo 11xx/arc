@@ -1582,7 +1582,8 @@ fn export_objects_include_against_evidence_and_retained_trees() {
     let objects = bundle["objects"].as_array().unwrap();
     let standalone: serde_json::Value =
         serde_json::from_slice(&fs::read(objects_path).unwrap()).unwrap();
-    assert_eq!(standalone, bundle["objects"]);
+    assert_eq!(standalone["schema"], "arc-bundle-objects/1");
+    assert_eq!(standalone["objects"], bundle["objects"]);
     for event in bundle["events"].as_array().unwrap() {
         if event["event_type"] == "patchset-added" {
             for (field, role) in [("base", "patchset-base"), ("head", "patchset-head")] {
@@ -1679,6 +1680,163 @@ fn import_objects_refuses_missing_before_writing_and_allows_provenance_only() {
             .arc(&recipient.root)
             .args(["show", "missing-closure"]),
     );
+}
+
+fn partial_clone_import_checks_are_local(dry_run: bool, provenance_only: bool, legacy: bool) {
+    fn files_under(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        let mut files = std::collections::BTreeMap::new();
+        for entry in fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files.extend(files_under(&path));
+            } else {
+                files.insert(path.clone(), fs::read(path).unwrap());
+            }
+        }
+        files
+    }
+
+    let source = Repo::new();
+    stdout(
+        source
+            .arc(&source.root)
+            .args(["begin", "promised", "--no-worktree"]),
+    );
+    git(&source.root, &["config", "uploadpack.allowFilter", "true"]);
+    let recipient = Repo::new();
+    let clone = recipient.home.join("partial");
+    git(
+        &recipient.root,
+        &[
+            "clone",
+            "--filter=blob:none",
+            "--no-checkout",
+            &format!("file://{}", source.root.display()),
+            clone.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        git_out(&clone, &["config", "remote.origin.promisor"]),
+        "true"
+    );
+    source.commit(
+        &source.root,
+        "remote.txt",
+        "promised content\n",
+        "test: remote content",
+    );
+    stdout(source.arc(&source.root).args(["snapshot", "promised"]));
+    let blob = git_out(&source.root, &["rev-parse", "HEAD:README.md"]);
+    let head = source.head(&source.root);
+    for oid in [&blob, &head] {
+        assert!(!Command::new("git")
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .current_dir(&clone)
+            .args(["cat-file", "-e", oid])
+            .output()
+            .unwrap()
+            .status
+            .success());
+        git(&source.root, &["cat-file", "-e", oid]);
+    }
+    let contact = recipient.home.join("promisor-contact");
+    let upload_pack = recipient.home.join("upload-pack.sh");
+    fs::write(
+        &upload_pack,
+        "printf contacted > \"$ARC_TEST_PROMISOR_CONTACT\"\nexec git-upload-pack \"$@\"\n",
+    )
+    .unwrap();
+    git(
+        &clone,
+        &[
+            "config",
+            "remote.origin.uploadpack",
+            &format!("sh {}", upload_pack.display()),
+        ],
+    );
+    let mut bundle = json_stdout(
+        source
+            .arc(&source.root)
+            .args(["export", "promised", "--output", "-"]),
+    );
+    if legacy {
+        bundle.as_object_mut().unwrap().remove("objects");
+    } else {
+        bundle["objects"] = serde_json::json!([{ "oid": blob, "role": "cited-blob" }]);
+    }
+    let path = recipient.home.join("promised.json");
+    fs::write(&path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+    let before = files_under(&clone.join(".git"));
+    let mut command = recipient.arc(&clone);
+    command
+        .args(["import", path.to_str().unwrap()])
+        .env("GIT_NO_LAZY_FETCH", "0")
+        .env("ARC_TEST_PROMISOR_CONTACT", &contact);
+    if dry_run {
+        command.arg("--dry-run");
+    }
+    if provenance_only {
+        command.arg("--provenance-only");
+    }
+    let output = command.output().unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!contact.exists(), "promisor was contacted: {text}");
+    assert_eq!(
+        files_under(&clone.join(".git")),
+        before,
+        "import wrote Git files: {text}"
+    );
+    assert!(!clone.join(".git/arc").exists());
+    if legacy || provenance_only {
+        assert!(output.status.success(), "{text}");
+        assert!(text.contains(&head), "{text}");
+    } else {
+        assert!(!output.status.success(), "{text}");
+        assert!(
+            text.contains("missing bundled Git objects")
+                && text.contains(&blob)
+                && text.contains("cited-blob"),
+            "{text}"
+        );
+    }
+    // The fixture's promisor can actually serve the missing object.
+    let fetched = Command::new("git")
+        .current_dir(&clone)
+        .env_remove("GIT_NO_LAZY_FETCH")
+        .env("ARC_TEST_PROMISOR_CONTACT", &contact)
+        .args(["cat-file", "-e", &blob])
+        .output()
+        .unwrap();
+    assert!(
+        fetched.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fetched.stderr)
+    );
+    assert!(contact.exists());
+}
+
+#[test]
+fn import_objects_partial_clone_refuses_without_fetching() {
+    partial_clone_import_checks_are_local(false, false, false);
+}
+
+#[test]
+fn import_objects_partial_clone_dry_run_refuses_without_fetching() {
+    partial_clone_import_checks_are_local(true, false, false);
+}
+
+#[test]
+fn import_objects_partial_clone_provenance_dry_run_never_fetches() {
+    partial_clone_import_checks_are_local(true, true, false);
+}
+
+#[test]
+fn import_objects_partial_clone_advisory_dry_run_never_fetches() {
+    partial_clone_import_checks_are_local(true, false, true);
 }
 
 #[test]

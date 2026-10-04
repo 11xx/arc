@@ -12,7 +12,10 @@ pub fn export_bundle(
     let bundle = Bundle::export(&store, &ctx.cwd, &change_id, since)?;
     let objects = bundle.objects.as_deref().unwrap_or_default();
     if let Some(path) = objects_json {
-        let mut bytes = serde_json::to_vec_pretty(objects)?;
+        let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "arc-bundle-objects/1",
+            "objects": objects,
+        }))?;
         bytes.push(b'\n');
         std::fs::write(path, bytes).with_context(|| format!("cannot write object list {path}"))?;
     }

@@ -1050,13 +1050,15 @@ enum Cmd {
         /// every bundle, even when the change suffix is empty
         #[arg(long, value_name = "SHA256")]
         since: Option<String>,
-        /// Write the objects array alone as JSON for a transport
+        /// Write an `arc-bundle-objects/1` JSON envelope with `schema` and
+        /// `objects` fields for a transport
         #[arg(long, value_name = "FILE")]
         objects_json: Option<String>,
     },
     /// Import arc-bundle/6 or /5 into this repository's local store.
-    /// Every listed Git object must exist before any events or refs are
-    /// written. Bundles without an objects field retain advisory commit checks.
+    /// Every listed Git object must exist locally before any events or refs
+    /// are written. Availability checks never fetch from a promisor remote.
+    /// Bundles without an objects field retain advisory commit checks.
     /// Candidate events stamp store format 7, including evaluations,
     /// selections, and promotions without a registration in the bundle.
     /// Events without model provenance retain that absence. Repository map
@@ -1069,7 +1071,7 @@ enum Cmd {
     Import {
         /// Input file ('-' for stdin)
         input: String,
-        /// Validate and report without writing events or retention refs
+        /// Validate and report without writing files, Git objects, events, or refs
         #[arg(long)]
         dry_run: bool,
         /// Import events even when listed Git objects are missing, reporting

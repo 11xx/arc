@@ -23,7 +23,7 @@ pub fn with_deadline<T>(deadline: Option<Instant>, f: impl FnOnce() -> Result<T>
     })
 }
 
-/// A Git subprocess, with no way to reach an editor.
+/// A Git subprocess with lazy fetching disabled and no way to reach an editor.
 ///
 /// Git launches whatever editor the environment names as soon as it wants a
 /// message it was not given: `rebase --continue`, a merge it cannot
@@ -37,6 +37,7 @@ pub fn with_deadline<T>(deadline: Option<Instant>, f: impl FnOnce() -> Result<T>
 /// this rather than one per call site.
 pub fn git_command() -> Command {
     let mut command = Command::new("git");
+    command.env("GIT_NO_LAZY_FETCH", "1");
     command.env("GIT_EDITOR", "true");
     command.env("GIT_SEQUENCE_EDITOR", "true");
     command
