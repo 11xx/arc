@@ -1,5 +1,6 @@
 use crate::bundle::{Bundle, ValidatedBundle};
 mod accept;
+mod accept_checkout;
 mod accept_effects;
 mod audit;
 mod bundle_io;

@@ -1,4 +1,5 @@
 //! Preparation of a transported change under the receiver's local authority.
+use super::accept_checkout::Allocation;
 use super::accept_effects::{self, Effects};
 use super::*;
 use crate::operation_println as println;
@@ -99,6 +100,8 @@ struct AcceptancePlan {
     invocation: PathBuf,
     git_configuration: String,
     checkout_admin: Option<PathBuf>,
+    allocation: Option<Allocation>,
+    populate_checkout: bool,
 }
 
 fn configuration(ctx: &Ctx, state: &ChangeState) -> Result<String> {
@@ -161,13 +164,15 @@ fn step<T>(
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     result.stopped_at = Some(name.to_string());
-    let before = accept_effects::observation(ctx, result.change_id.as_deref());
+    let before =
+        accept_effects::observation(ctx, result.change_id.as_deref(), result.worktree.as_deref());
     let (mut value, output) = if before.errors.is_empty() {
         crate::operation_output::capture(operation)
     } else {
         (refuse(1, before.errors.join("\n")), String::new())
     };
-    let after = accept_effects::observation(ctx, result.change_id.as_deref());
+    let after =
+        accept_effects::observation(ctx, result.change_id.as_deref(), result.worktree.as_deref());
     let (effects, event_ids) = accept_effects::effects(ctx, &before, after, &argv);
     if value.is_ok() && !effects.observation_errors.is_empty() {
         value = refuse(1, effects.observation_errors.join("\n"));
@@ -439,6 +444,30 @@ fn plan_acceptance(
                     })
                 }
             };
+            let allocation = if create_checkout {
+                None
+            } else {
+                Allocation::load(&checkout)?
+            };
+            if let Some(allocation) = &allocation {
+                allocation.validate(ctx, &store, &state.change_id, &state.branch, &head)?;
+            }
+            let populate_checkout = create_checkout
+                || allocation
+                    .as_ref()
+                    .map(Allocation::unpopulated)
+                    .transpose()?
+                    .unwrap_or(false);
+            if let Some(allocation) = &allocation {
+                if !populate_checkout
+                    && !allocation.administrative_dir.join("index").try_exists()?
+                {
+                    return refuse(
+                        1,
+                        "unpopulated owned allocation contains unrelated content; keeping it",
+                    );
+                }
+            }
             if create_checkout {
                 if let Some(entry) = matching {
                     return refuse(
@@ -463,7 +492,7 @@ fn plan_acceptance(
                 {
                     return refuse(1, format!("occupied path {} is not a matching registered checkout of {:?} in this repository", checkout.display(), args.branch));
                 }
-                if !gitio::is_clean(&checkout)? {
+                if !populate_checkout && !gitio::is_clean(&checkout)? {
                     return refuse(
                         1,
                         format!(
@@ -488,6 +517,8 @@ fn plan_acceptance(
                 contributors,
                 checkout: checkout.clone(),
                 create_checkout,
+                allocation,
+                populate_checkout,
                 configuration,
                 invocation: ctx.cwd.clone(),
                 git_configuration: gitio::git(&ctx.cwd, &["config", "--list"])?,
@@ -835,7 +866,7 @@ fn execute_acceptance(
         ));
     }
     operations.push(("checkout-binding".into(), Vec::new(), ctx.cwd.clone()));
-    if plan.create_checkout {
+    if plan.populate_checkout {
         operations.push((
             "checkout-population".into(),
             population_argv.clone(),
@@ -961,7 +992,32 @@ fn execute_acceptance(
         revalidate(ctx, plan, &plan.head)?;
         let current = store.state(&plan.state.change_id)?;
         if !plan.create_checkout {
-            validate_checkout(&ctx.with_cwd(plan.checkout.clone()), plan, &plan.head, true)?;
+            validate_checkout(
+                &ctx.with_cwd(plan.checkout.clone()),
+                plan,
+                &plan.head,
+                !plan.populate_checkout,
+            )?;
+            if let Some(allocation) = &plan.allocation {
+                allocation.validate(
+                    ctx,
+                    &store,
+                    &plan.state.change_id,
+                    &plan.state.branch,
+                    &plan.head,
+                )?;
+            }
+            if plan.populate_checkout
+                && plan
+                    .allocation
+                    .as_ref()
+                    .is_some_and(|allocation| !allocation.unpopulated().unwrap_or(false))
+            {
+                return refuse(
+                    1,
+                    "owned allocation gained content or an index; preserve it before retrying",
+                );
+            }
         }
         if current
             .worktree
@@ -970,12 +1026,22 @@ fn execute_acceptance(
         {
             return Ok(());
         }
-        let (created, token) = if plan.create_checkout {
-            let admin = gitio::worktree_admin_dir(&plan.checkout)?;
-            (
-                true,
-                Some(gitio::write_worktree_owner(&admin, &plan.state.change_id)?),
-            )
+        let (created, token) = if let Some(allocation) = &plan.allocation {
+            allocation.ensure_owner(ctx, &store)?;
+            (true, Some(allocation.owner_token.clone()))
+        } else if plan.create_checkout {
+            let token = ulid::Ulid::new().to_string();
+            let allocation = Allocation::record(
+                ctx,
+                &store,
+                &plan.state.change_id,
+                &plan.state.branch,
+                &plan.checkout,
+                &plan.head,
+                token.clone(),
+            )?;
+            allocation.ensure_owner(ctx, &store)?;
+            (true, Some(token))
         } else {
             (false, None)
         };
@@ -999,7 +1065,7 @@ fn execute_acceptance(
         Ok(())
     })?;
     let run = ctx.with_cwd(plan.checkout.clone());
-    if plan.create_checkout {
+    if plan.populate_checkout {
         step(
             result,
             &run,
@@ -1008,6 +1074,21 @@ fn execute_acceptance(
             || {
                 revalidate(ctx, plan, &plan.head)?;
                 validate_checkout(&run, plan, &plan.head, false)?;
+                let allocation = Allocation::load(&plan.checkout)?
+                    .context("checkout population lacks local allocation proof")?;
+                allocation.validate(
+                    ctx,
+                    &plan.store,
+                    &plan.state.change_id,
+                    &plan.state.branch,
+                    &plan.head,
+                )?;
+                if !allocation.unpopulated()? {
+                    return refuse(
+                        1,
+                        "owned allocation gained content or an index before population; keeping it",
+                    );
+                }
                 gitio::git(
                     &run.cwd,
                     &population_argv[1..]
@@ -1031,6 +1112,24 @@ fn execute_acceptance(
         })?;
     }
 
+    if plan.create_checkout || plan.allocation.is_some() {
+        step(
+            result,
+            &run,
+            "checkout-recovery-complete",
+            Vec::new(),
+            || {
+                revalidate(&run, plan, &plan.head)?;
+                let store = run.store()?;
+                let _replica = crate::replica::lock(&store)?;
+                let _transition = store.lock_transition(&plan.state.change_id)?;
+                if let Some(allocation) = Allocation::load(&plan.checkout)? {
+                    allocation.clear(ctx, &store)?;
+                }
+                Ok(())
+            },
+        )?;
+    }
     step(result, &run, "sign", sign_argv, || {
         let _replica = crate::replica::lock(&plan.store)?;
         revalidate(&run, plan, &plan.head)?;
@@ -1321,6 +1420,27 @@ fn render_acceptance(result: &AcceptanceResult, json: bool) -> Result<()> {
             }
             for checkout in &step.effects.worktrees_removed {
                 println!("  checkout removed: {}", checkout.path.display());
+            }
+            for owner in &step.effects.owner_records {
+                println!(
+                    "  owner record written: {} change={} token={}",
+                    owner.path.display(),
+                    owner.change_id,
+                    owner.token
+                );
+            }
+            if let Some(binding) = &step.effects.pending_binding {
+                println!(
+                    "  {}: {} owner token={} recovery={}",
+                    if binding.binding_event_id.is_none() {
+                        "unpublished binding"
+                    } else {
+                        "binding awaiting population"
+                    },
+                    binding.allocation.worktree.display(),
+                    binding.allocation.owner_token,
+                    binding.allocation.path().display()
+                );
             }
             if let Some(pending) = &step.effects.pending_rewrite {
                 println!(

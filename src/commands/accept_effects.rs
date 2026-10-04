@@ -1,4 +1,5 @@
 //! Observed preparation effects, including writes preceding ledger publication.
+use super::accept_checkout::Allocation;
 use super::*;
 use crate::rewrite::RewriteIntent;
 
@@ -8,6 +9,8 @@ pub(super) struct Effects {
     pub objects: Vec<ObjectEffect>,
     pub worktrees_added: Vec<CheckoutEffect>,
     pub worktrees_removed: Vec<CheckoutEffect>,
+    pub owner_records: Vec<OwnerRecord>,
+    pub pending_binding: Option<PendingBinding>,
     pub pending_rewrite: Option<PendingRewrite>,
     pub observation_errors: Vec<String>,
 }
@@ -18,6 +21,8 @@ impl Effects {
             || !self.objects.is_empty()
             || !self.worktrees_added.is_empty()
             || !self.worktrees_removed.is_empty()
+            || !self.owner_records.is_empty()
+            || self.pending_binding.is_some()
             || self.pending_rewrite.is_some()
     }
 }
@@ -56,6 +61,20 @@ pub(super) struct PendingRewrite {
     pub continuation: Invocation,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(super) struct OwnerRecord {
+    pub path: PathBuf,
+    pub change_id: String,
+    pub token: String,
+}
+
+#[derive(Serialize)]
+pub(super) struct PendingBinding {
+    #[serde(flatten)]
+    pub allocation: Allocation,
+    pub binding_event_id: Option<String>,
+}
+
 #[derive(Default)]
 pub(super) struct Observation {
     refs: Option<BTreeMap<String, String>>,
@@ -63,6 +82,8 @@ pub(super) struct Observation {
     worktrees: Option<BTreeMap<PathBuf, Option<String>>>,
     pub events: Option<BTreeSet<String>>,
     intent: Option<RewriteIntent>,
+    owner: Option<Option<OwnerRecord>>,
+    allocation: Option<Allocation>,
     pub errors: Vec<String>,
 }
 
@@ -80,7 +101,7 @@ fn observe<T>(
     }
 }
 
-pub(super) fn observation(ctx: &Ctx, change: Option<&str>) -> Observation {
+pub(super) fn observation(ctx: &Ctx, change: Option<&str>, checkout: Option<&Path>) -> Observation {
     let mut observed = Observation::default();
     observed.refs = observe(&mut observed.errors, "Git refs", || {
         let output = gitio::git(
@@ -120,6 +141,43 @@ pub(super) fn observation(ctx: &Ctx, change: Option<&str>) -> Observation {
             .map(|entry| (entry.path, entry.branch))
             .collect())
     });
+    if let Some(checkout) = checkout {
+        if observed.worktrees.as_ref().is_some_and(|entries| {
+            entries
+                .keys()
+                .any(|path| config::resolved(path) == config::resolved(checkout))
+        }) {
+            observed.owner = observe(&mut observed.errors, "checkout owner record", || {
+                let path = gitio::worktree_admin_dir(checkout)?.join("arc-owner");
+                match std::fs::read(&path) {
+                    Ok(bytes) => {
+                        let value: serde_json::Value = serde_json::from_slice(&bytes)
+                            .with_context(|| {
+                                format!("malformed owner record {}", path.display())
+                            })?;
+                        Ok(Some(OwnerRecord {
+                            path,
+                            change_id: value["change_id"]
+                                .as_str()
+                                .context("owner lacks change")?
+                                .into(),
+                            token: value["token"].as_str().context("owner lacks token")?.into(),
+                        }))
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(error) => Err(error)
+                        .with_context(|| format!("cannot inspect owner record {}", path.display())),
+                }
+            });
+            observed.allocation =
+                observe(&mut observed.errors, "checkout allocation recovery", || {
+                    Allocation::load(checkout)
+                })
+                .flatten();
+        } else {
+            observed.owner = Some(None);
+        }
+    }
     // An uninitialized Arc store has no event or rewrite effects to observe.
     let root = observe(&mut observed.errors, "ledger location", || {
         Store::resolve_root(&ctx.cwd)
@@ -199,6 +257,21 @@ pub(super) fn effects(
         (Some(before), Some(after)) => after.difference(before).cloned().collect(),
         _ => Vec::new(),
     };
+    if let (Some(before), Some(Some(after_owner))) = (&before.owner, &after.owner) {
+        if before.as_ref() != Some(after_owner) {
+            effects.owner_records.push(after_owner.clone());
+        }
+    }
+    if let Some(allocation) = after.allocation {
+        let binding_event_id = observe(&mut after.errors, "local checkout binding", || {
+            let store = Store::discover_for_reading(&ctx.cwd)?;
+            Ok(store.load_events(&allocation.change_id)?.into_iter().rev().find(|event| event.repository_id == allocation.repository_id && matches!(&event.payload, Payload::ChangeCheckoutBound { worktree, worktree_owner_token, worktree_created: true, .. } if config::resolved(Path::new(worktree)) == allocation.worktree && worktree_owner_token.as_deref() == Some(&allocation.owner_token))).map(|event| event.event_id))
+        }).flatten();
+        effects.pending_binding = Some(PendingBinding {
+            allocation,
+            binding_event_id,
+        });
+    }
     if let Some(intent) = after.intent {
         let store = observe(&mut after.errors, "pending rewrite ledger", || {
             Store::discover_for_reading(&ctx.cwd)

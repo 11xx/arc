@@ -1112,6 +1112,9 @@ enum Cmd {
     /// Moved authoritative history requires explicit rebase, snapshot, and review.
     /// Stops at the first failure and reports refs, objects, events and pending
     /// rewrite recovery state, including effects preceding event publication.
+    /// Unpublished bindings report administrative ownership and allocation proof;
+    /// retry can finish a locally owned, empty, index-free checkout after guarded
+    /// identity checks. Unrelated contents or changed ownership refuse recovery.
     /// Commands carry executable argv/cwd; internal bindings and signature checks
     /// are identified separately. Local event IDs follow admitted history even
     /// when the sender's clock is ahead. Retrying the same

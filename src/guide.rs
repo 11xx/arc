@@ -1052,8 +1052,17 @@ PREPARE A DELIVERED CHANGE
   internal operations. Command argv and cwd reproduce the selected operation;
   checkout allocation uses --no-checkout, followed by an internal owner/binding
   record, explicit read-tree population, and the post-checkout hook.
+  A local allocation record binds repository, change, branch, expected head,
+  physical checkout and Git administrative directory to its reserved owner token.
+  A binding refusal retains this proof and reports unpublished binding state.
+  Retry revalidates registration, identity and ownership before finishing the
+  binding and population. Only an empty, index-free allocation containing its
+  own .git link can be populated; unrelated content or a displaced owner refuses
+  recovery. The record is removed only after a local binding and population
+  complete. Relayed paths and tokens supply no allocation proof.
   Steps report observed ref changes, written object IDs and kinds, checkout
-  allocations/removals, and pending rewrite intent with its map, planned refs,
+  allocations/removals, written administrative owner records, unpublished local
+  bindings and allocation recovery, and pending rewrite intent with its map, planned refs,
   current ref values, publication event, and continuation argv/cwd. These effects
   include commits and ref moves preceding event publication. Observation errors
   remain explicit and cannot turn incomplete accounting into successful

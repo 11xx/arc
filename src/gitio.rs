@@ -135,18 +135,18 @@ fn worktree_owner_path(checkout: &Path) -> Result<PathBuf> {
 
 /// Bind an arc-created checkout's administrative directory to its change.
 pub fn write_worktree_owner(admin: &Path, change_id: &str) -> Result<String> {
+    let token = ulid::Ulid::new().to_string();
+    write_worktree_owner_with_token(admin, change_id, &token)?;
+    Ok(token)
+}
+
+/// Publish a reserved local owner token without replacing an existing record.
+pub fn write_worktree_owner_with_token(admin: &Path, change_id: &str, token: &str) -> Result<()> {
     let owner = WorktreeOwner {
-        change_id: change_id.to_string(),
-        token: ulid::Ulid::new().to_string(),
+        change_id: change_id.into(),
+        token: token.into(),
     };
-    let path = admin.join("arc-owner");
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .with_context(|| format!("cannot create {}", path.display()))?;
-    file.write_all(&serde_json::to_vec(&owner)?)?;
-    Ok(owner.token)
+    crate::replica::write_exclusive(&admin.join("arc-owner"), &serde_json::to_vec(&owner)?)
 }
 
 /// Remove only the owner record belonging to an unrecorded allocation.

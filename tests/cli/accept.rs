@@ -1468,3 +1468,162 @@ fn accept_delivery_fresh_claim_follows_future_history() {
 fn accept_delivery_fresh_message_follows_future_history() {
     assert_fresh_writer_follows_future_history("message");
 }
+
+#[test]
+fn accept_delivery_binding_failure_reports_owner_and_printed_retry_completes() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = Delivery::new();
+    d.import();
+    let events = d
+        .receiver
+        .root
+        .join(".git/arc/changes")
+        .join(&d.change)
+        .join("events");
+    fs::create_dir_all(&events).unwrap();
+    fs::set_permissions(&events, fs::Permissions::from_mode(0o500)).unwrap();
+    let output = d.command().assert().code(1).get_output().clone();
+    fs::set_permissions(&events, fs::Permissions::from_mode(0o700)).unwrap();
+    let failed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(failed["stopped_at"], "checkout-binding");
+    let checkout = PathBuf::from(failed["worktree"].as_str().unwrap());
+    let admin = PathBuf::from(git_out(&checkout, &["rev-parse", "--absolute-git-dir"]));
+    let owner_path = admin.join("arc-owner");
+    let owner: serde_json::Value = serde_json::from_slice(&fs::read(&owner_path).unwrap()).unwrap();
+    let effects = &transcript_step(&failed, "checkout-binding")["effects"];
+    let written = effects["owner_records"].as_array().unwrap();
+    assert_eq!(written.len(), 1);
+    assert_eq!(written[0]["path"], owner_path.to_str().unwrap());
+    assert_eq!(written[0]["token"], owner["token"]);
+    assert_eq!(effects["pending_binding"]["owner_token"], owner["token"]);
+    assert!(effects["pending_binding"]["binding_event_id"].is_null());
+    assert_eq!(
+        transcript_step(&failed, "checkout-allocation")["effects"]["worktrees_added"][0]["path"],
+        checkout.to_str().unwrap()
+    );
+    assert!(fixture_events(&d.receiver, &d.change)
+        .iter()
+        .all(|event| event["event_type"] != "change-checkout-bound"));
+    json_stdout(
+        d.receiver
+            .arc(&d.receiver.root)
+            .args(["show", &d.change, "--json"]),
+    );
+    let sentinel = checkout.join("sentinel.txt");
+    fs::write(&sentinel, "unrelated content\n").unwrap();
+    d.command().assert().code(1);
+    assert_eq!(
+        fs::read_to_string(&sentinel).unwrap(),
+        "unrelated content\n"
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&fs::read(&owner_path).unwrap()).unwrap(),
+        owner
+    );
+    fs::remove_file(&sentinel).unwrap();
+    let mut displaced = owner.clone();
+    displaced["token"] = "unrelated-owner".into();
+    fs::write(&owner_path, serde_json::to_vec(&displaced).unwrap()).unwrap();
+    d.command().assert().code(1);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&fs::read(&owner_path).unwrap()).unwrap(),
+        displaced
+    );
+    fs::write(&owner_path, serde_json::to_vec(&owner).unwrap()).unwrap();
+    let retry = failed["next_steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|value| value.as_str())
+        .find_map(|line| line.split_once("retry: ").map(|(_, command)| command))
+        .unwrap();
+    let output = d
+        .receiver
+        .arc_shell(&d.receiver.root, retry)
+        .assert()
+        .code(3)
+        .get_output()
+        .clone();
+    let prepared: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(prepared["preparation_complete"], true);
+    assert_eq!(prepared["worktree"], failed["worktree"]);
+    let shown = json_stdout(
+        d.receiver
+            .arc(&d.receiver.root)
+            .args(["show", &d.change, "--json"]),
+    );
+    assert_eq!(shown["worktree_created"], true);
+    assert_eq!(shown["worktree_owner_token"], owner["token"]);
+    assert_eq!(
+        fixture_events(&d.receiver, &d.change)
+            .iter()
+            .filter(|event| event["event_type"] == "change-checkout-bound")
+            .count(),
+        1
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&fs::read(owner_path).unwrap()).unwrap(),
+        owner
+    );
+    assert_eq!(git_out(&checkout, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn accept_delivery_text_binding_failure_names_retained_owner_and_unpublished_binding() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = Delivery::new();
+    d.import();
+    let events = d
+        .receiver
+        .root
+        .join(".git/arc/changes")
+        .join(&d.change)
+        .join("events");
+    fs::create_dir_all(&events).unwrap();
+    fs::set_permissions(&events, fs::Permissions::from_mode(0o500)).unwrap();
+    let output = d
+        .receiver
+        .arc(&d.receiver.root)
+        .env("ARC_ROLE", "lead")
+        .args([
+            "accept",
+            d.input.to_str().unwrap(),
+            "--branch",
+            &d.branch,
+            "--publisher",
+            "channel",
+            "--received-sha256",
+            &hex::encode(Sha256::digest(fs::read(&d.input).unwrap())),
+        ])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    fs::set_permissions(&events, fs::Permissions::from_mode(0o700)).unwrap();
+    let checkout = d
+        .receiver
+        .home
+        .join(".worktrees")
+        .join(format!("accept-{}", d.change));
+    let admin = PathBuf::from(git_out(&checkout, &["rev-parse", "--absolute-git-dir"]));
+    let owner: serde_json::Value =
+        serde_json::from_slice(&fs::read(admin.join("arc-owner")).unwrap()).unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        text.contains("owner record written") && text.contains(owner["token"].as_str().unwrap())
+    );
+    assert!(text.contains("unpublished binding") && text.contains(checkout.to_str().unwrap()));
+    let retry = text
+        .lines()
+        .find_map(|line| line.split_once("retry: ").map(|(_, command)| command))
+        .unwrap();
+    d.receiver
+        .arc_shell(&d.receiver.root, retry)
+        .assert()
+        .code(3);
+    json_stdout(
+        d.receiver
+            .arc(&d.receiver.root)
+            .args(["show", &d.change, "--json"]),
+    );
+}
