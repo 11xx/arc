@@ -74,8 +74,10 @@ fn lock_journal_events(dir: &Path) -> Result<JournalTransitionLock> {
 }
 
 fn lock_journal_file(dir: &Path, name: &str, purpose: &str) -> Result<JournalTransitionLock> {
+    recover_journal_writes(dir)?;
     let lock = lock_journal_file_for_exchange(dir, name, purpose)?;
     ensure_exchange_settled(dir)?;
+    check_event_tail(dir, &event_log_raw(dir)?)?;
     Ok(lock)
 }
 
@@ -631,6 +633,8 @@ pub enum JournalCmd {
         write: KindWrite,
     },
     /// Append a log-only journal line (no artifact file is created).
+    /// Prepared appends and promotions recover before writing; unprepared
+    /// torn trailing lines refuse with a command preserving their bytes.
     /// With `--source --item-key --outcome no-action` the line is the standing
     /// answer that this source item needs no work, so a later scan of the same
     /// session is answered without an artifact entering any queue
@@ -996,7 +1000,8 @@ pub enum JournalCmd {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Dump the journal event log as newline-delimited JSON
+    /// Dump the journal event log as newline-delimited JSON.
+    /// A trailing line without its newline refuses with a recovery diagnostic.
     /// Records no events; ledger reads do not require a parseable append policy.
     Events {
         /// Cap the number of events (oldest first)
@@ -1188,8 +1193,10 @@ pub enum JournalCmd {
     /// --global. Both journals record the relation; the project memory is
     /// consumed as superseded and its historical body is retained. Both
     /// journals must have settled exchanges. An interrupted promotion is
-    /// completed by retrying the same command; changed bodies or a different
-    /// global journal refuse recovery. Open claims require release-claim.
+    /// completed before subsequent writes or by retrying the same command.
+    /// Complete staged bodies publish exclusively; success requires body and
+    /// event replay verification. Changed bodies or a different global journal
+    /// refuse recovery. Open claims require release-claim.
     Promote {
         /// Project memory filename (a name, not a path).
         filename: String,
@@ -1245,7 +1252,7 @@ pub enum JournalCmd {
     /// Events retain their provenance; a repeated bundle changes nothing.
     /// Interrupted writes retain a prepared transaction; an import completes
     /// it before comparing revisions. Every journal write, including provenance
-    /// repair and spool promotion, refuses a pending transaction and names its
+    /// repair and spool promotion, refuses a pending import and names its
     /// bundle digest and `arc journal import <bundle>` remedy. Reads stay allowed.
     /// Recovery refuses to overwrite unexpected body or event-log changes.
     /// --dry-run requires a completed exchange.
@@ -1347,6 +1354,20 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd, global: bool) -> Result<i32> {
         }
         None => ctx,
     };
+    if cmd.writes()
+        && !matches!(
+            cmd,
+            JournalCmd::Import { .. } | JournalCmd::Reattribute { dry_run: true, .. }
+        )
+    {
+        if let Ok(dir) = resolve_dir(&ctx.cwd) {
+            if let Err(error) = recover_journal_writes(&dir) {
+                if !out_of_reach(&error) {
+                    return Err(error);
+                }
+            }
+        }
+    }
     match cmd {
         JournalCmd::Dir { archive, explain } => {
             let resolution = resolve(&ctx.cwd)?;
@@ -1927,6 +1948,9 @@ fn import_artifacts(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
     };
     let receipt_path = exchange_imports_dir(&hot).join(format!("{digest}.json"));
     let _replica_state = store.as_ref().map(crate::replica::lock).transpose()?;
+    if !dry_run {
+        recover_journal_writes(&hot)?;
+    }
     let _transition = lock_journal_file_for_exchange(&hot, JOURNAL_TRANSITION_LOCK, "transition")?;
     if exchange_pending_path(&hot).exists() {
         if dry_run {
@@ -2110,7 +2134,8 @@ fn import_artifacts(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
         body_bases: Some(body_bases),
         events,
         events_basis,
-        receipt,
+        receipt: Some(receipt),
+        promotion: None,
     };
     publish_exchange_file(&exchange_pending_path(&hot), &serde_json::to_vec(&pending)?)?;
     finish_exchange_transaction(&hot)?;
@@ -2157,7 +2182,7 @@ fn print_exchange_import(
 }
 
 /// The prepared bodies, complete event log, and receipt are one recoverable unit.
-/// Writes refuse a pending exchange until an import completes it.
+/// Imports require explicit recovery; ordinary appends and promotions recover before writes.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExchangeTransaction {
@@ -2167,7 +2192,20 @@ struct ExchangeTransaction {
     events: String,
     #[serde(default)]
     events_basis: Option<String>,
-    receipt: crate::journal_exchange::ImportReceipt,
+    #[serde(default)]
+    receipt: Option<crate::journal_exchange::ImportReceipt>,
+    #[serde(default)]
+    promotion: Option<PromotionCommit>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PromotionCommit {
+    project: PathBuf,
+    filename: String,
+    prepared: MemoryPromotion,
+    events: String,
+    events_basis: String,
 }
 
 fn exchange_pending_path(hot: &Path) -> PathBuf {
@@ -2179,21 +2217,34 @@ fn ensure_exchange_settled(hot: &Path) -> Result<()> {
     if path.try_exists()? {
         let pending: ExchangeTransaction = serde_json::from_slice(&std::fs::read(&path)?)
             .context("cannot read pending journal exchange")?;
-        bail!(
-            "journal exchange is incomplete (transaction {} at {}); run `arc journal import <bundle>` to finish it before writing the journal",
-            pending.receipt.bundle_sha256,
-            path.display()
-        );
+        if let Some(receipt) = &pending.receipt {
+            bail!("journal exchange is incomplete (transaction {} at {}); run `arc journal import <bundle>` to finish it before writing the journal", receipt.bundle_sha256, path.display());
+        }
+        let remedy = if let Some(commit) = &pending.promotion {
+            format!(
+                "ARC_JOURNAL_DIR={} arc journal promote {} --global",
+                crate::context::shell_quote(&commit.project.display().to_string()),
+                crate::context::shell_quote(&commit.filename)
+            )
+        } else {
+            format!(
+                "ARC_JOURNAL_DIR={} arc journal log recovery 'complete prepared append'",
+                crate::context::shell_quote(&hot.display().to_string())
+            )
+        };
+        bail!("prepared journal write is incomplete at {}; run `{remedy}` to finish it before writing the journal", path.display());
     }
     Ok(())
 }
 
-/// Complete a prepared import under both journal locks, before revision parsing.
+/// Publish a prepared journal transaction under its participating journal locks.
 fn finish_exchange_transaction(hot: &Path) -> Result<()> {
     let path = exchange_pending_path(hot);
     let pending: ExchangeTransaction = serde_json::from_slice(&std::fs::read(&path)?)
         .context("cannot read pending journal exchange")?;
-    crate::ids::validate_id_component(&pending.receipt.bundle_sha256)?;
+    if let Some(receipt) = &pending.receipt {
+        crate::ids::validate_id_component(&receipt.bundle_sha256)?;
+    }
     for artifact in &pending.bodies {
         if artifact.file.contains(['/', '\\'])
             || parse_artifact_name(&artifact.file).is_none()
@@ -2215,6 +2266,17 @@ fn finish_exchange_transaction(hot: &Path) -> Result<()> {
     }
     for (index, artifact) in pending.bodies.iter().enumerate() {
         let current = exchange_body_digest(hot, artifact)?;
+        if current.is_none() {
+            if let Some(commit) = &pending.promotion {
+                let records: Vec<JournalEvent> = event_log_bytes(hot)?
+                    .lines()
+                    .filter_map(|line| serde_json::from_str(line).ok())
+                    .collect();
+                if promotion_event_recorded(&records, &commit.prepared.promoted)? {
+                    bail!("recorded promotion destination is missing; recovery refuses");
+                }
+            }
+        }
         let matches_base = pending
             .body_bases
             .as_ref()
@@ -2223,36 +2285,337 @@ fn finish_exchange_transaction(hot: &Path) -> Result<()> {
             bail!("journal body {} changed after exchange preparation or has no recorded baseline; recovery refuses to overwrite it", artifact.file);
         }
     }
-    let current = match std::fs::read_to_string(hot.join("events.jsonl")) {
-        Ok(events) => events,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(error.into()),
-    };
-    // An interrupted publication can leave a prefix of the prepared log.
-    if pending.events_basis.as_ref() != Some(&current) && !pending.events.starts_with(&current) {
-        bail!("journal event log changed after exchange preparation; recovery refuses to overwrite it");
+    validate_prepared_log(hot, &pending.events, pending.events_basis.as_deref())?;
+    if let Some(commit) = &pending.promotion {
+        if commit.prepared.global != hot
+            || commit.filename.contains(['/', '\\'])
+            || parse_artifact_name(&commit.filename).is_none()
+            || std::fs::read_to_string(commit.project.join(&commit.filename))?
+                != commit.prepared.body
+        {
+            bail!("source body or scope changed after promotion preparation; recovery refuses");
+        }
+        validate_prepared_log(&commit.project, &commit.events, Some(&commit.events_basis))?;
     }
-    // Respect the log's write permissions before publishing any body.
-    let events_path = hot.join("events.jsonl");
-    let events = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&events_path)
-        .with_context(|| format!("cannot open {}", events_path.display()))?;
-    drop(events);
-    for artifact in &pending.bodies {
+    // Import respects event permissions before publishing bodies; promotion
+    // publishes its complete body before recording the relation.
+    if pending.promotion.is_none() {
+        writable_event_log(hot)?;
+    }
+    for (index, artifact) in pending.bodies.iter().enumerate() {
         let dir = if artifact.storage == crate::journal_exchange::COLD_STORAGE {
             archive_dir(hot)
         } else {
             hot.to_path_buf()
         };
-        publish_exchange_file(&dir.join(&artifact.file), artifact.body.as_bytes())?;
+        let destination = dir.join(&artifact.file);
+        if pending.promotion.is_some()
+            && pending
+                .body_bases
+                .as_ref()
+                .is_some_and(|bases| bases[index].is_none())
+        {
+            publish_exclusive_body(&destination, artifact.body.as_bytes())?;
+        } else {
+            publish_exchange_file(&destination, artifact.body.as_bytes())?;
+        }
+        if std::fs::read(&destination)? != artifact.body.as_bytes() {
+            bail!("published journal body failed read-back verification");
+        }
     }
-    publish_exchange_file(&events_path, pending.events.as_bytes())?;
-    let receipt = exchange_imports_dir(hot).join(format!("{}.json", pending.receipt.bundle_sha256));
-    publish_exchange_file(&receipt, &serde_json::to_vec_pretty(&pending.receipt)?)?;
+    writable_event_log(hot)?;
+    publish_exchange_file(&hot.join("events.jsonl"), pending.events.as_bytes())?;
+    verify_prepared_log(hot, &pending.events)?;
+    if let Some(commit) = &pending.promotion {
+        let events = read_events(hot)?;
+        if !promotion_event_recorded(&events, &commit.prepared.promoted)? {
+            bail!("published promotion event failed replay verification");
+        }
+        writable_event_log(&commit.project)?;
+        publish_exchange_file(
+            &commit.project.join("events.jsonl"),
+            commit.events.as_bytes(),
+        )?;
+        verify_prepared_log(&commit.project, &commit.events)?;
+        if !promotion_event_recorded(&read_events(&commit.project)?, &commit.prepared.consumed)? {
+            bail!("published consumption event failed replay verification");
+        }
+    }
+    if let Some(receipt) = &pending.receipt {
+        let receipt_path =
+            exchange_imports_dir(hot).join(format!("{}.json", receipt.bundle_sha256));
+        publish_exchange_file(&receipt_path, &serde_json::to_vec_pretty(receipt)?)?;
+    }
     std::fs::remove_file(&path)?;
     File::open(path.parent().context("pending exchange has no parent")?)?.sync_all()?;
+    if let Some(commit) = &pending.promotion {
+        let intent = promotion_intent(&commit.project, &commit.filename);
+        if intent.try_exists()? {
+            std::fs::remove_file(&intent)?;
+            File::open(intent.parent().context("promotion intent has no parent")?)?.sync_all()?;
+        }
+    }
+    Ok(())
+}
+
+fn event_log_raw(hot: &Path) -> Result<Vec<u8>> {
+    match std::fs::read(hot.join("events.jsonl")) {
+        Ok(events) => Ok(events),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn event_log_bytes(hot: &Path) -> Result<String> {
+    String::from_utf8(event_log_raw(hot)?)
+        .with_context(|| format!("cannot read {}", hot.join("events.jsonl").display()))
+}
+
+fn check_event_tail(hot: &Path, events: &[u8]) -> Result<()> {
+    if !events.is_empty() && !events.ends_with(b"\n") {
+        let path = crate::context::shell_quote(&hot.join("events.jsonl").display().to_string());
+        if let Err(recovery) = ensure_exchange_settled(hot) {
+            bail!("torn trailing event in {path}; {recovery:#}");
+        }
+        bail!(
+            r#"torn trailing event in {path}; preserve and remove only the incomplete tail with: python3 -c 'import pathlib,sys; p=pathlib.Path(sys.argv[1]); b=p.read_bytes(); backup=p.with_name(p.name+".torn-backup"); backup.open("xb").write(b); p.write_bytes(b[:b.rfind(bytes([10]))+1])' {path}"#
+        );
+    }
+    Ok(())
+}
+
+fn validate_prepared_log(hot: &Path, expected: &str, basis: Option<&str>) -> Result<()> {
+    let current = event_log_raw(hot)?;
+    if basis.map(str::as_bytes) != Some(current.as_slice())
+        && !expected.as_bytes().starts_with(&current)
+    {
+        bail!("journal event log changed after exchange preparation; recovery refuses to overwrite it");
+    }
+    check_event_tail(hot, expected.as_bytes())
+}
+
+fn writable_event_log(hot: &Path) -> Result<()> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(hot.join("events.jsonl"))
+        .with_context(|| format!("cannot open {}", hot.join("events.jsonl").display()))?;
+    Ok(())
+}
+
+fn verify_prepared_log(hot: &Path, expected: &str) -> Result<()> {
+    if event_log_bytes(hot)? != expected {
+        bail!("published journal events failed read-back verification");
+    }
+    check_event_tail(hot, expected.as_bytes())
+}
+
+/// A complete staged body acquires its final name without replacing any file.
+fn publish_exclusive_body(path: &Path, bytes: &[u8]) -> Result<()> {
+    if path.try_exists()? {
+        if std::fs::read(path)? != bytes {
+            bail!("destination body changed after promotion preparation; recovery refuses");
+        }
+        return Ok(());
+    }
+    let dir = path.parent().context("promotion body has no parent")?;
+    let staged = dir.join(format!(".exchange-{}.body", ulid::Ulid::new()));
+    publish_exchange_file(&staged, bytes)?;
+    let result = std::fs::hard_link(&staged, path);
+    std::fs::remove_file(&staged)?;
+    result.with_context(|| format!("cannot publish exclusive body {}", path.display()))?;
+    File::open(dir)?.sync_all()?;
+    Ok(())
+}
+
+fn promotion_intent(project: &Path, filename: &str) -> PathBuf {
+    project.join(".promotions").join(format!("{filename}.json"))
+}
+
+fn prepared_event_log(hot: &Path, event: &JournalEvent) -> Result<(String, String)> {
+    let current = event_log_bytes(hot)?;
+    let mut basis = current.clone();
+    let line = format!("{}\n", serde_json::to_string(event)?);
+    if !basis.is_empty() && !basis.ends_with('\n') {
+        let boundary = basis.rfind('\n').map_or(0, |index| index + 1);
+        if !line.starts_with(&basis[boundary..]) {
+            check_event_tail(hot, basis.as_bytes())?;
+        }
+        basis.truncate(boundary);
+    }
+    let present = basis.lines().any(|record| {
+        serde_json::from_str::<serde_json::Value>(record).ok() == serde_json::to_value(event).ok()
+    });
+    if !present {
+        basis.push_str(&line);
+    }
+    Ok((basis, current))
+}
+
+fn stage_memory_promotion(
+    project: &Path,
+    filename: &str,
+    prepared: &MemoryPromotion,
+) -> Result<()> {
+    let global = &prepared.global;
+    if global != &config::global_journal_dir()? {
+        bail!("global journal changed after promotion preparation; recovery refuses");
+    }
+    if std::fs::read_to_string(project.join(filename))? != prepared.body {
+        bail!("source body changed after promotion preparation; recovery refuses");
+    }
+    let successor = prepared
+        .promoted
+        .file
+        .as_deref()
+        .context("promotion has no destination")?;
+    if successor.contains(['/', '\\'])
+        || parse_artifact_name(successor).is_none()
+        || prepared.consumed.file.as_deref() != Some(filename)
+    {
+        bail!("invalid pending memory promotion; recovery refuses");
+    }
+    let artifact = crate::journal_exchange::BundledArtifact {
+        file: successor.to_string(),
+        storage: crate::journal_exchange::HOT_STORAGE.to_string(),
+        digest: crate::journal_exchange::body_digest(&prepared.body),
+        body: prepared.body.clone(),
+        events: vec![prepared.promoted.clone()],
+    };
+    let current = exchange_body_digest(global, &artifact)?;
+    if current
+        .as_deref()
+        .is_some_and(|digest| digest != artifact.digest)
+    {
+        bail!("destination body changed after promotion preparation; recovery refuses");
+    }
+    let (events, events_basis) = prepared_event_log(global, &prepared.promoted)?;
+    let (source_events, source_basis) = prepared_event_log(project, &prepared.consumed)?;
+    let source_records: Vec<JournalEvent> = source_basis
+        .lines()
+        .filter_map(|line| serde_json::from_str::<JournalEvent>(line).ok())
+        .filter(JournalEvent::known)
+        .collect();
+    ensure_storage_settled(project, &source_records, filename)?;
+    if is_consumed(&source_records, filename)
+        && !promotion_event_recorded(&source_records, &prepared.consumed)?
+    {
+        bail!("source was consumed outside the pending promotion; recovery refuses");
+    }
+    if !open_artifact_claims(&source_records, filename).is_empty()
+        || !unanswered_questions(&source_records, filename).is_empty()
+    {
+        bail!("source claims or questions changed after promotion preparation; recovery refuses");
+    }
+    let global_records: Vec<JournalEvent> = events_basis
+        .lines()
+        .filter_map(|line| serde_json::from_str::<JournalEvent>(line).ok())
+        .filter(JournalEvent::known)
+        .collect();
+    if current.is_none()
+        && (promotion_event_recorded(&global_records, &prepared.promoted)?
+            || promotion_event_recorded(&source_records, &prepared.consumed)?)
+    {
+        bail!("recorded promotion destination is missing; recovery refuses");
+    }
+    let pending = ExchangeTransaction {
+        bodies: vec![artifact],
+        body_bases: Some(vec![None]),
+        events,
+        events_basis: Some(events_basis),
+        receipt: None,
+        promotion: Some(PromotionCommit {
+            project: project.to_path_buf(),
+            filename: filename.to_string(),
+            prepared: prepared.clone(),
+            events: source_events,
+            events_basis: source_basis,
+        }),
+    };
+    publish_exchange_file(
+        &exchange_pending_path(global),
+        &serde_json::to_vec(&pending)?,
+    )
+}
+
+fn recover_memory_promotion(project: &Path, filename: &str) -> Result<()> {
+    let intent = promotion_intent(project, filename);
+    let bytes = match std::fs::read(&intent) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let prepared: MemoryPromotion = serde_json::from_slice(&bytes)?;
+    if prepared.global != config::global_journal_dir()? {
+        bail!("global journal changed after promotion preparation; recovery refuses");
+    }
+    let _source = lock_journal_file_for_exchange(project, JOURNAL_TRANSITION_LOCK, "transition")?;
+    let _destination =
+        lock_journal_file_for_exchange(&prepared.global, JOURNAL_TRANSITION_LOCK, "transition")?;
+    let _source_events = lock_journal_file_for_exchange(project, JOURNAL_EVENTS_LOCK, "events")?;
+    let _destination_events =
+        lock_journal_file_for_exchange(&prepared.global, JOURNAL_EVENTS_LOCK, "events")?;
+    if !intent.try_exists()? {
+        return Ok(());
+    }
+    if !exchange_pending_path(&prepared.global).try_exists()? {
+        stage_memory_promotion(project, filename, &prepared)?;
+    } else {
+        let pending: ExchangeTransaction =
+            serde_json::from_slice(&std::fs::read(exchange_pending_path(&prepared.global))?)?;
+        if !pending
+            .promotion
+            .as_ref()
+            .is_some_and(|commit| commit.project == project && commit.filename == filename)
+        {
+            bail!("journal exchange is incomplete; finish its import before promotion recovery");
+        }
+    }
+    finish_exchange_transaction(&prepared.global)
+}
+
+/// Ordinary writers settle prepared appends and promotions before taking their lock.
+fn recover_journal_writes(hot: &Path) -> Result<()> {
+    let path = exchange_pending_path(hot);
+    if path.try_exists()? {
+        let pending: ExchangeTransaction = serde_json::from_slice(&std::fs::read(&path)?)?;
+        if let Some(commit) = &pending.promotion {
+            if promotion_intent(&commit.project, &commit.filename).try_exists()? {
+                recover_memory_promotion(&commit.project, &commit.filename)?;
+            } else {
+                let _source = lock_journal_file_for_exchange(
+                    &commit.project,
+                    JOURNAL_TRANSITION_LOCK,
+                    "transition",
+                )?;
+                let _destination =
+                    lock_journal_file_for_exchange(hot, JOURNAL_TRANSITION_LOCK, "transition")?;
+                let _source_events =
+                    lock_journal_file_for_exchange(&commit.project, JOURNAL_EVENTS_LOCK, "events")?;
+                let _destination_events =
+                    lock_journal_file_for_exchange(hot, JOURNAL_EVENTS_LOCK, "events")?;
+                finish_exchange_transaction(hot)?;
+            }
+        } else if pending.receipt.is_none() {
+            let _events = lock_journal_file_for_exchange(hot, JOURNAL_EVENTS_LOCK, "events")?;
+            if path.try_exists()? {
+                let current: ExchangeTransaction = serde_json::from_slice(&std::fs::read(&path)?)?;
+                if current.receipt.is_some() || current.promotion.is_some() {
+                    ensure_exchange_settled(hot)?;
+                }
+                finish_exchange_transaction(hot)?;
+            }
+        }
+    }
+    let intents = hot.join(".promotions");
+    if intents.is_dir() {
+        for entry in std::fs::read_dir(intents)? {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            if let Some(filename) = name.strip_suffix(".json") {
+                recover_memory_promotion(hot, filename)?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -3469,6 +3832,12 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
     if jsonl.is_file() {
         let text = std::fs::read_to_string(&jsonl)
             .with_context(|| format!("cannot read {}", jsonl.display()))?;
+        if let Err(error) = check_event_tail(&dir, text.as_bytes()) {
+            problems.push(DoctorFinding {
+                code: "torn-event-tail",
+                detail: error.to_string(),
+            });
+        }
         let mut question_events = Vec::new();
         for (index, line) in text.lines().enumerate() {
             match serde_json::from_str::<JournalEvent>(line) {
@@ -8188,19 +8557,22 @@ pub(crate) fn register_project(ctx: &Ctx) -> Result<()> {
 }
 
 fn write_event(dir: &Path, event: &JournalEvent) -> Result<()> {
-    use std::io::Write;
     let _events = lock_journal_events(dir)?;
-    let mut line = serde_json::to_string(event)?;
-    line.push('\n');
-    let journal_path = dir.join("events.jsonl");
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&journal_path)
-        .with_context(|| format!("cannot open {}", journal_path.display()))?;
-    f.write_all(line.as_bytes())
-        .with_context(|| format!("cannot append to {}", journal_path.display()))?;
-    Ok(())
+    let basis = event_log_bytes(dir)?;
+    check_event_tail(dir, basis.as_bytes())?;
+    let mut events = basis.clone();
+    events.push_str(&serde_json::to_string(event)?);
+    events.push('\n');
+    let pending = ExchangeTransaction {
+        bodies: Vec::new(),
+        body_bases: Some(Vec::new()),
+        events,
+        events_basis: Some(basis),
+        receipt: None,
+        promotion: None,
+    };
+    publish_exchange_file(&exchange_pending_path(dir), &serde_json::to_vec(&pending)?)?;
+    finish_exchange_transaction(dir)
 }
 
 const DEFAULT_LANE_TTL: u64 = 2 * 60 * 60;
@@ -8314,8 +8686,11 @@ pub(crate) fn read_events(dir: &Path) -> Result<Vec<JournalEvent>> {
     let mut events = Vec::new();
     let jsonl = dir.join("events.jsonl");
     if jsonl.is_file() {
-        let text = std::fs::read_to_string(&jsonl)
-            .with_context(|| format!("cannot read {}", jsonl.display()))?;
+        let bytes =
+            std::fs::read(&jsonl).with_context(|| format!("cannot read {}", jsonl.display()))?;
+        check_event_tail(dir, &bytes)?;
+        let text =
+            String::from_utf8(bytes).with_context(|| format!("cannot read {}", jsonl.display()))?;
         events.extend(text.lines().filter_map(|line| {
             let event: JournalEvent = serde_json::from_str(line).ok()?;
             event.known().then_some(event)
@@ -10492,7 +10867,7 @@ fn render_memories(memories: &[ArtifactEntry]) {
 
 /// A prepared promotion fixes the destination and event bytes before publication.
 /// Retries validate both bodies and finish the same relation without duplicating it.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MemoryPromotion {
     global: PathBuf,
@@ -10522,9 +10897,24 @@ fn promote_memory(ctx: &Ctx, filename: &str) -> Result<i32> {
         bail!("promotion needs a project memory, not a global memory");
     }
     // Both guarded locks precede intent, artifact, and event publication.
+    let intent = promotion_intent(&project, filename);
+    if intent.try_exists()? {
+        recover_memory_promotion(&project, filename)?;
+        let events = read_events(&project)?;
+        let successor = events
+            .iter()
+            .rev()
+            .find_map(|event| {
+                (event.event == "consumed" && event.file.as_deref() == Some(filename))
+                    .then(|| event.note.as_deref()?.strip_prefix("promoted to global::"))
+                    .flatten()
+            })
+            .context("recovered promotion has no consumption record")?;
+        println!("{}", global.join(successor).display());
+        return Ok(0);
+    }
     let _source_lock = lock_journal_transition(&project)?;
     let _destination_lock = lock_journal_transition(&global)?;
-    let intent = project.join(".promotions").join(format!("{filename}.json"));
     let events = read_events(&project)?;
     if !open_artifact_claims(&events, filename).is_empty() {
         bail!("{filename} carries open claims; release each with `arc release-claim {filename} --outcome paused|abandoned|expired` before promotion");
@@ -10533,7 +10923,8 @@ fn promote_memory(ctx: &Ctx, filename: &str) -> Result<i32> {
         bail!("cannot promote a memory with unanswered questions");
     }
     let global_ctx = ctx.with_cwd(global.clone());
-    let global_events = read_events(&global)?;
+    ensure_bound(&global_ctx, &global)?;
+    read_events(&global)?;
     let anchor = resolve(&ctx.cwd)?.anchor.unwrap_or_else(|| ctx.cwd.clone());
     let source = format!("{}::{filename}", config::path_slug(&anchor));
     let pending: MemoryPromotion = if intent.try_exists()? {
@@ -10588,31 +10979,11 @@ fn promote_memory(ctx: &Ctx, filename: &str) -> Result<i32> {
     if is_consumed(&events, filename) && !retired {
         bail!("source was consumed outside the pending promotion; recovery refuses");
     }
-    let destination = if let Some(path) = artifact_body_path(&global, successor) {
-        if std::fs::read_to_string(&path)? != pending.body {
-            bail!("destination body changed after promotion preparation; recovery refuses");
-        }
-        path
-    } else {
-        if retired || promotion_event_recorded(&global_events, &pending.promoted)? {
-            bail!("recorded promotion destination is missing; recovery refuses");
-        }
-        create_artifact(&global, &global.join(successor), &pending.body)?;
-        global.join(successor)
-    };
-    File::open(&destination)?.sync_all()?;
-    File::open(&global)?.sync_all()?;
-    if !promotion_event_recorded(&global_events, &pending.promoted)? {
-        append_event(&global_ctx, &global, &pending.promoted)?;
-    }
-    File::open(global.join("events.jsonl"))?.sync_all()?;
-    File::open(&global)?.sync_all()?;
-    if !retired {
-        append_event(ctx, &project, &pending.consumed)?;
-    }
-    File::open(project.join("events.jsonl"))?.sync_all()?;
-    std::fs::remove_file(&intent)?;
-    File::open(intent.parent().context("promotion intent has no parent")?)?.sync_all()?;
+    let _source_events = lock_journal_file_for_exchange(&project, JOURNAL_EVENTS_LOCK, "events")?;
+    let _destination_events =
+        lock_journal_file_for_exchange(&global, JOURNAL_EVENTS_LOCK, "events")?;
+    stage_memory_promotion(&project, filename, &pending)?;
+    finish_exchange_transaction(&global)?;
     println!("{}", global.join(successor).display());
     Ok(0)
 }

@@ -1019,7 +1019,7 @@ PAIR REPLICA STORES
   same bundle twice changes nothing; the receipt names the source replica and
   bundle digest. An interrupted write retains a prepared transaction with
   the bodies, event log, and receipt. Every journal write, including provenance
-  repair and spool promotion, refuses a pending exchange and names its bundle
+  repair and spool promotion, refuses a pending import and names its bundle
   digest and the remedy: `arc journal import <bundle>`. Reads stay allowed.
   Import completes the transaction before comparing revisions. Recovery refuses
   to overwrite unexpected body or event-log changes after preparation.
@@ -1085,10 +1085,18 @@ END A SESSION (what the next one reads)
   record as `superseded`, naming the global file. Historical project bodies
   remain available. Existing memories stay where the operator filed them.
   Both journals must have settled exchanges before promotion writes. A durable
-  intent fixes the destination and events; retry the same promotion command
-  after interruption to finish that relation. Recovery refuses changed bodies
-  or a different global journal. Open claims must be released with
+  intent fixes the destination body and both journals' event records in one
+  recoverable transaction. Complete bodies publish without replacing a file.
+  Subsequent journal writes finish interrupted promotions; retrying promotion
+  verifies the body and replays both relation records before reporting success.
+  Changed prepared bodies, event logs or a different global journal refuse
+  recovery. Open claims must be released with
   `arc release-claim <file> --outcome paused|abandoned|expired`.
+
+  A trailing event line without its newline is a torn append. Readers refuse
+  it; writers complete it from the shared prepared transaction. Without a
+  prepared record, the diagnostic gives a command that preserves the log and
+  removes only its incomplete tail.
 
   Global exchange uses `arc-journal-bundle/2` with logical project identity
   `arc-global-journal` and a local replica identity held in `replica.json`.
@@ -2239,7 +2247,7 @@ SCHEMAS
 
 WHAT ARC WILL NOT DO
   Ledger and repository:
-    arc never deletes or rewrites an event file.
+    arc never deletes or rewrites a ledger event file.
     arc rewrites a branch only through `arc rewrite`, which records the map
       it produced, and merges only through `arc integrate` when every
       required gate is green.

@@ -1189,7 +1189,8 @@ fn journal_log_appends_without_creating_artifact_file() {
         vec![
             ".locks".to_string(),
             "bindings.jsonl".to_string(),
-            "events.jsonl".to_string()
+            "events.jsonl".to_string(),
+            "exchange".to_string()
         ]
     );
     let event = &journal_events(&dir)[0];
@@ -15541,5 +15542,336 @@ fn pair_filed_repositories(source: &Repo, receiver: &Repo) {
         receiver
             .arc(&receiver.root)
             .args(["replica", "import", bundle.to_str().unwrap()]),
+    );
+}
+
+#[test]
+fn promotion_recovers_torn_prepared_event() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = Repo::new();
+    let (project, file) = journal_artifact(&repo, "torn-rule", "memory", "# Rule\n");
+    let global = repo.home.join(".local/ai/arc/journals/global");
+    let source_log = project.join("events.jsonl");
+    let permissions = fs::metadata(&source_log).unwrap().permissions();
+    fs::set_permissions(&source_log, fs::Permissions::from_mode(0o400)).unwrap();
+    repo.arc(&repo.root)
+        .args(["journal", "promote", &file, "--global"])
+        .assert()
+        .failure();
+    fs::set_permissions(&source_log, permissions).unwrap();
+    let log = global.join("events.jsonl");
+    let event = fs::read_to_string(&log).unwrap();
+    fs::write(&log, &event[..event.len() / 2]).unwrap();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "promote", &file, "--global"]),
+    );
+    assert_eq!(journal_event_log(&global).len(), 1);
+    assert_eq!(
+        journal_event_log(&project)
+            .iter()
+            .filter(|event| event["event"] == "consumed")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn promotion_body_failure_never_publishes_a_prefix() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = Repo::new();
+    let body = format!("# Rule\n{}", "x".repeat(32768));
+    let (project, file) = journal_artifact(&repo, "large-rule", "memory", &body);
+    let global = repo.home.join(".local/ai/arc/journals/global");
+    fs::create_dir_all(&global).unwrap();
+    let log = global.join("events.jsonl");
+    fs::write(&log, "").unwrap();
+    fs::set_permissions(&log, fs::Permissions::from_mode(0o400)).unwrap();
+    repo.arc(&repo.root)
+        .args(["journal", "promote", &file, "--global"])
+        .assert()
+        .failure();
+    fs::set_permissions(&log, fs::Permissions::from_mode(0o600)).unwrap();
+    let intent: serde_json::Value = serde_json::from_slice(
+        &fs::read(project.join(".promotions").join(format!("{file}.json"))).unwrap(),
+    )
+    .unwrap();
+    let destination = global.join(intent["promoted"]["file"].as_str().unwrap());
+    if destination.exists() {
+        fs::remove_file(&destination).unwrap();
+    }
+    repo.arc_shell(
+        &repo.root,
+        &format!("ulimit -f 8; arc journal promote {file} --global"),
+    )
+    .assert()
+    .failure();
+    assert!(!destination.exists(), "partial destination published");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "promote", &file, "--global"]),
+    );
+    assert_eq!(fs::read_to_string(destination).unwrap(), body);
+    assert_eq!(journal_event_log(&global).len(), 1);
+}
+
+#[test]
+fn journal_reader_and_writer_refuse_unprepared_torn_tail() {
+    let repo = Repo::new();
+    let (project, _) = journal_artifact(&repo, "tail-rule", "memory", "# Rule\n");
+    let path = project.join("events.jsonl");
+    let mut bytes = fs::read(&path).unwrap();
+    bytes.extend_from_slice(b"{\"event\":");
+    fs::write(&path, &bytes).unwrap();
+    repo.arc(&repo.root)
+        .args(["journal", "events"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("torn trailing event"));
+    repo.arc(&repo.root)
+        .args(["journal", "log", "tail-rule", "text"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("torn trailing event"));
+    assert_eq!(fs::read(path).unwrap(), bytes);
+}
+
+#[test]
+fn promotion_failure_boundaries_converge_on_retry() {
+    use std::os::unix::fs::PermissionsExt;
+    for step in [
+        "intent",
+        "stage",
+        "body",
+        "global-event",
+        "consumption",
+        "cleanup",
+    ] {
+        let repo = Repo::new();
+        let (project, file) = journal_artifact(&repo, "boundary-rule", "memory", "# Rule\n");
+        let global = repo.home.join(".local/ai/arc/journals/global");
+        fs::create_dir_all(global.join("exchange")).unwrap();
+        fs::create_dir_all(project.join(".promotions")).unwrap();
+        fs::write(global.join("events.jsonl"), "").unwrap();
+        let seal = match step {
+            "intent" | "cleanup" => project.join(".promotions"),
+            "stage" => global.join("exchange"),
+            "body" => global.clone(),
+            "global-event" => global.join("events.jsonl"),
+            "consumption" => project.join("events.jsonl"),
+            _ => unreachable!(),
+        };
+        if matches!(step, "body" | "cleanup") {
+            let log = global.join("events.jsonl");
+            fs::set_permissions(&log, fs::Permissions::from_mode(0o400)).unwrap();
+            repo.arc(&repo.root)
+                .args(["journal", "promote", &file, "--global"])
+                .assert()
+                .failure();
+            fs::set_permissions(&log, fs::Permissions::from_mode(0o600)).unwrap();
+            if step == "body" {
+                let prepared: serde_json::Value = serde_json::from_slice(
+                    &fs::read(project.join(".promotions").join(format!("{file}.json"))).unwrap(),
+                )
+                .unwrap();
+                fs::remove_file(global.join(prepared["promoted"]["file"].as_str().unwrap()))
+                    .unwrap();
+            }
+        }
+        let permissions = fs::metadata(&seal).unwrap().permissions();
+        fs::set_permissions(
+            &seal,
+            fs::Permissions::from_mode(if seal.is_dir() { 0o500 } else { 0o400 }),
+        )
+        .unwrap();
+        repo.arc(&repo.root)
+            .args(["journal", "promote", &file, "--global"])
+            .assert()
+            .failure();
+        fs::set_permissions(&seal, permissions).unwrap();
+        let result = stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "promote", &file, "--global"]),
+        );
+        assert_eq!(
+            fs::read_to_string(result.trim()).unwrap(),
+            "# Rule\n",
+            "{step}"
+        );
+        assert_eq!(journal_event_log(&global).len(), 1, "{step}");
+        assert_eq!(
+            journal_event_log(&project)
+                .iter()
+                .filter(|event| event["event"] == "consumed")
+                .count(),
+            1,
+            "{step}"
+        );
+        assert!(!global.join("exchange/pending.json").exists(), "{step}");
+        assert!(
+            !project
+                .join(".promotions")
+                .join(format!("{file}.json"))
+                .exists(),
+            "{step}"
+        );
+    }
+}
+
+#[test]
+fn subsequent_writers_finish_promotion_in_either_journal() {
+    use std::os::unix::fs::PermissionsExt;
+    for global_write in [false, true] {
+        let repo = Repo::new();
+        let (project, file) = journal_artifact(&repo, "later-rule", "memory", "# Rule\n");
+        let log = project.join("events.jsonl");
+        let permissions = fs::metadata(&log).unwrap().permissions();
+        fs::set_permissions(&log, fs::Permissions::from_mode(0o400)).unwrap();
+        repo.arc(&repo.root)
+            .args(["journal", "promote", &file, "--global"])
+            .assert()
+            .failure();
+        fs::set_permissions(&log, permissions).unwrap();
+        let mut command = repo.arc(&repo.root);
+        command.args(["journal", "log", "later-rule", "after recovery"]);
+        if global_write {
+            command.arg("--global");
+        }
+        command.assert().success();
+        let global = repo.home.join(".local/ai/arc/journals/global");
+        assert_eq!(
+            journal_event_log(&global)
+                .iter()
+                .filter(|event| event["event"] == "note")
+                .count(),
+            1
+        );
+        assert_eq!(
+            journal_event_log(&project)
+                .iter()
+                .filter(|event| event["event"] == "consumed")
+                .count(),
+            1
+        );
+        assert!(!project
+            .join(".promotions")
+            .join(format!("{file}.json"))
+            .exists());
+    }
+}
+
+#[test]
+fn shared_writer_completes_prepared_torn_append() {
+    let repo = Repo::new();
+    let (project, _) = journal_artifact(&repo, "append-rule", "memory", "# Rule\n");
+    let path = project.join("events.jsonl");
+    let basis = fs::read_to_string(&path).unwrap();
+    let mut event = journal_event_log(&project)[0].clone();
+    event["event"] = serde_json::json!("log");
+    event["message"] = serde_json::json!("prepared append");
+    let line = format!("{}\n", serde_json::to_string(&event).unwrap());
+    let expected = format!("{basis}{line}");
+    fs::write(
+        project.join("exchange/pending.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "bodies": [], "body_bases": [], "events": expected,
+            "events_basis": basis, "receipt": null, "promotion": null
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(&path, format!("{basis}{}", &line[..line.len() / 2])).unwrap();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "log", "append-rule", "next append"]),
+    );
+    let events = journal_event_log(&project);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["message"] == "prepared append")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["message"] == "next append")
+            .count(),
+        1
+    );
+    assert!(!project.join("exchange/pending.json").exists());
+}
+
+#[test]
+fn promotion_recovers_torn_source_consumption() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = Repo::new();
+    let (project, file) = journal_artifact(&repo, "source-tail", "memory", "# Rule\n");
+    let log = project.join("events.jsonl");
+    let permissions = fs::metadata(&log).unwrap().permissions();
+    fs::set_permissions(&log, fs::Permissions::from_mode(0o400)).unwrap();
+    repo.arc(&repo.root)
+        .args(["journal", "promote", &file, "--global"])
+        .assert()
+        .failure();
+    fs::set_permissions(&log, permissions).unwrap();
+    let global = repo.home.join(".local/ai/arc/journals/global");
+    let pending: serde_json::Value =
+        serde_json::from_slice(&fs::read(global.join("exchange/pending.json")).unwrap()).unwrap();
+    let prepared = pending["promotion"]["events"].as_str().unwrap();
+    fs::write(&log, &prepared[..prepared.len() - 1]).unwrap();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "promote", &file, "--global"]),
+    );
+    assert_eq!(
+        journal_event_log(&project)
+            .iter()
+            .filter(|event| event["event"] == "consumed")
+            .count(),
+        1
+    );
+    assert_eq!(journal_event_log(&global).len(), 1);
+}
+
+#[test]
+fn shared_writer_recovers_append_split_inside_utf8() {
+    let repo = Repo::new();
+    let (project, _) = journal_artifact(&repo, "utf8-tail", "memory", "# Rule\n");
+    let path = project.join("events.jsonl");
+    let basis = fs::read_to_string(&path).unwrap();
+    let mut event = journal_event_log(&project)[0].clone();
+    event["event"] = serde_json::json!("log");
+    event["message"] = serde_json::json!("prepared 🌍 append");
+    let line = format!("{}\n", serde_json::to_string(&event).unwrap());
+    let expected = format!("{basis}{line}");
+    fs::write(
+        project.join("exchange/pending.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "bodies": [], "body_bases": [], "events": expected,
+            "events_basis": basis, "receipt": null, "promotion": null
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut torn = basis.as_bytes().to_vec();
+    torn.extend_from_slice(&line.as_bytes()[..line.find('🌍').unwrap() + 1]);
+    fs::write(&path, &torn).unwrap();
+    repo.arc(&repo.root)
+        .args(["journal", "events"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("torn trailing event"));
+    stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "log", "utf8-tail", "next append"]),
+    );
+    assert_eq!(
+        journal_event_log(&project)
+            .iter()
+            .filter(|event| event["message"] == "prepared 🌍 append")
+            .count(),
+        1
     );
 }
