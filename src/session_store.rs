@@ -236,30 +236,23 @@ impl Drop for DiscoveryEnvironment {
 }
 
 /// Discover recordings in the repository's primary checkout and worktrees.
-/// Candidate failures and bounded scans remain visible to callers.
+/// Candidate windows expand until every recording can contribute its activity.
 pub(crate) fn project_sessions(
     cwd: &std::path::Path,
-    limit: usize,
 ) -> anyhow::Result<(Vec<RecentSession>, Vec<String>)> {
     let _environment = DiscoveryEnvironment::sandboxed()?;
     let scope = agent_tapes_core::scope::Scope::at(cwd)?;
-    let mut query = backend::Query::unscoped(limit);
+    let mut query = backend::Query::unscoped(usize::MAX);
     query.scope = Some(&scope);
-    query.ceiling = 10_000;
     let mut sessions = Vec::new();
     let mut unavailable = Vec::new();
     for backend in backend::backends()
         .into_iter()
         .filter(|backend| backend.available())
     {
-        match backend.list(&query) {
+        query.ceiling = 10_000;
+        match complete_listing(&mut query, |query| backend.list(query)) {
             Ok(listing) => {
-                if listing.scan_truncated {
-                    unavailable.push(format!(
-                        "{}: session discovery reached its candidate bound",
-                        backend.harness()
-                    ));
-                }
                 unavailable.extend(listing.unavailable);
                 for session in listing.sessions {
                     let mut row = RecentSession::new(backend.harness(), &session.id);
@@ -274,6 +267,25 @@ pub(crate) fn project_sessions(
         }
     }
     Ok((sessions, unavailable))
+}
+
+/// A modification-ordered window cannot establish recorded-activity order until
+/// the backend reports that the candidate scan is complete.
+fn complete_listing(
+    query: &mut backend::Query<'_>,
+    mut list: impl FnMut(&backend::Query<'_>) -> anyhow::Result<backend::Listing>,
+) -> anyhow::Result<backend::Listing> {
+    query.limit = usize::MAX;
+    loop {
+        let listing = list(query)?;
+        if !listing.scan_truncated {
+            return Ok(listing);
+        }
+        if query.ceiling == usize::MAX {
+            anyhow::bail!("session discovery could not complete its candidate scan");
+        }
+        query.ceiling = query.ceiling.saturating_mul(2);
+    }
 }
 
 /// What a store holds for one session, and what arc may report from it.
@@ -481,6 +493,26 @@ mod tests {
     use std::fs::{self, OpenOptions};
     use std::io::Write;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn discovery_expands_windows_until_recorded_activity_can_be_ranked() {
+        let mut query = backend::Query::unscoped(1);
+        query.ceiling = 2;
+        let mut windows = Vec::new();
+        let listing = complete_listing(&mut query, |window| {
+            windows.push(window.ceiling);
+            assert_eq!(window.limit, usize::MAX);
+            Ok(backend::Listing {
+                scan_truncated: window.ceiling < 5,
+                scanned: window.ceiling.min(5),
+                ..Default::default()
+            })
+        })
+        .unwrap();
+        assert_eq!(windows, [2, 4, 8]);
+        assert_eq!(listing.scanned, 5);
+        assert!(!listing.scan_truncated);
+    }
 
     const SESSION: &str = "11111111-2222-3333-4444-555555555555";
 

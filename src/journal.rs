@@ -689,6 +689,9 @@ pub enum JournalCmd {
     },
     /// Filed artifacts grouped by their writing session, with source references,
     /// changes that took them up, and consumption outcomes (arc-journal-filed/1).
+    /// Direct writes and transition successors retain their original writers,
+    /// including imported and spool-promoted artifacts. Successors name the
+    /// artifact they supersede.
     /// Open actionable items are stale after the threshold of recorded inactivity;
     /// active claims suppress staleness. Plain reads record no activity.
     /// Records no events; ledger reads do not require a parseable append policy.
@@ -5052,6 +5055,8 @@ pub(crate) struct FiledItem {
     kind: String,
     title: Option<String>,
     filed_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    supersedes: Option<String>,
     last_activity: String,
     pub(crate) fate: String,
     untouched_days: Option<i64>,
@@ -5113,7 +5118,7 @@ pub(crate) fn filed_report_in(
         std::collections::BTreeMap::new();
     let mut seen = HashSet::new();
     let mut stale_count = 0;
-    for event in events.iter().filter(|event| event.event == "note") {
+    for event in events.iter().filter(|event| event.creates_artifact()) {
         let Some(file) = event.file.as_deref() else {
             continue;
         };
@@ -5204,6 +5209,7 @@ pub(crate) fn filed_report_in(
             kind,
             title: event.title.clone(),
             filed_at: event.ts.clone(),
+            supersedes: event.supersedes.clone(),
             last_activity: activity.to_rfc3339(),
             fate,
             untouched_days,
@@ -5252,6 +5258,9 @@ fn filed(ctx: &Ctx, session: Option<&str>, stale_days: u64, json: bool) -> Resul
                     format!(", change {}", item.changes.join(", "))
                 };
                 println!("  {} [{}{age}{changes}]", item.file, item.fate);
+                if let Some(origin) = &item.supersedes {
+                    println!("    supersedes: {origin}");
+                }
                 for source in &item.sources {
                     println!(
                         "    source: {}{}",
@@ -5281,11 +5290,10 @@ pub(crate) fn recent_sessions(
     if limit == 0 {
         return Ok((Vec::new(), Vec::new()));
     }
-    let (recordings, mut unavailable) =
-        match crate::session_store::project_sessions(&ctx.cwd, limit) {
-            Ok(result) => result,
-            Err(error) => (Vec::new(), vec![format!("recording discovery: {error:#}")]),
-        };
+    let (recordings, mut unavailable) = match crate::session_store::project_sessions(&ctx.cwd) {
+        Ok(result) => result,
+        Err(error) => (Vec::new(), vec![format!("recording discovery: {error:#}")]),
+    };
     let mut rows: std::collections::BTreeMap<(String, String), RecentSession> =
         std::collections::BTreeMap::new();
     for row in recordings {
@@ -5337,7 +5345,7 @@ pub(crate) fn recent_sessions(
             .entry((event.harness.clone(), event.session.clone()))
             .or_insert_with(|| RecentSession::new(&event.harness, &event.session));
         row.observe(event.timestamp(), event.model.as_deref());
-        if event.event == "note" {
+        if event.creates_artifact() {
             if let Some(file) = event
                 .file
                 .as_deref()
@@ -5357,12 +5365,12 @@ pub(crate) fn recent_sessions(
             continue;
         };
         if !["handoff", "conclusion"].contains(&kind.as_str())
-            || !["note", "source-attach"].contains(&event.event.as_str())
+            || !(event.creates_artifact() || event.event == "source-attach")
         {
             continue;
         }
         let mut named = Vec::new();
-        if event.event == "note" {
+        if event.creates_artifact() {
             named.push((event.harness.as_str(), event.session.as_str()));
         }
         if let Some(source) = &event.source {
@@ -7546,6 +7554,12 @@ impl JournalEvent {
             digest: None,
             promotion: None,
         }
+    }
+
+    /// Creation events retain the writer even when the artifact arrives through
+    /// an exchange import or a spool promotion.
+    fn creates_artifact(&self) -> bool {
+        matches!(self.event.as_str(), "note" | "transition")
     }
 
     fn timestamp(&self) -> Option<DateTime<Utc>> {

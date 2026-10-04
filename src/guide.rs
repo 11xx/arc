@@ -141,17 +141,23 @@ FROM A WORKSPACE ROOT (outside a project)
 ORIENT INSIDE A PROJECT (start here, in this order)
   arc catchup --sessions 5
                          Recent project sessions across harnesses, ordered by
-                         last activity, with model, filed item count, and naming
-                         handoffs/conclusions. Activity within seven days with
-                         neither filings nor an ending artifact reads unfiled.
+                         last recorded activity, with model, filed item count,
+                         and naming handoffs/conclusions. Activity within seven
+                         days with neither filings nor an ending artifact reads
+                         unfiled.
                          Recordings span the primary checkout and its worktrees;
                          ledger and journal writers remain visible without a
-                         recording. Discovery failures are reported.
+                         recording. Candidate scans expand to completion before
+                         ranking; file modification time cannot select the rows.
+                         Discovery failures are reported.
   arc journal filed [--session ID] [--stale 14] [--json]
                          Filed artifacts grouped by writing session, retaining
-                         distillation sources. --session matches the writing or
-                         source session id. Fates are open, taken (with change
-                         ids), done, superseded, discarded, or stale. Staleness
+                         distillation sources and superseded origins. Direct writes
+                         and transition successors count, including imported and
+                         spool-promoted artifacts with their original writers.
+                         --session matches the writing or source session id.
+                         Fates are open, taken (with change ids), done, superseded,
+                         discarded, or stale. Staleness
                          measures recorded inactivity on open actionable items;
                          active claims suppress it. Plain reads record no activity.
                          JSON includes fate counts for mining and renderers.

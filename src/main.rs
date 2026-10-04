@@ -2103,8 +2103,9 @@ enum Cmd {
     },
     /// Orient a session: ledger queue, journal backlog, live lanes, and recent
     /// sessions across harnesses. Recent activity without filed artifacts or a
-    /// naming handoff/conclusion is marked unfiled. Stale filings name the
-    /// `journal filed` query; plain reads record no activity.
+    /// naming handoff/conclusion is marked unfiled. Filing counts include direct
+    /// writes and transition successors, with import and spool provenance.
+    /// Stale filings name the `journal filed` query; plain reads record no activity.
     /// Project memories precede global memory titles with their ages in days;
     /// bodies are read on demand with journal show --global. An unavailable
     /// journal carries its own warning, including global_memory_error or
@@ -2116,7 +2117,8 @@ enum Cmd {
     /// Unreadable changes are named with their errors on stderr; readable
     /// changes remain in the output
     Catchup {
-        /// Number of recent sessions, ordered by last recorded activity
+        /// Number of recent sessions, selected after ranking every discovered
+        /// candidate by its last recorded activity rather than file modification time
         #[arg(long, default_value = "5")]
         sessions: usize,
         /// Cap the changes listed per ledger bucket; the journal queue is
