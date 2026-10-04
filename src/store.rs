@@ -352,8 +352,7 @@ impl Store {
             .collect()
     }
 
-    /// Where a rewrite writes down what it is about to do, beside the events
-    /// its map will become. One repository, one rewrite at a time.
+    /// One exact staging transition is retained per change until its event is durable.
     pub(crate) fn provisional_intent_path(&self, change: &str) -> Result<PathBuf> {
         ids::validate_id_component(change)?;
         Ok(self.root.join("provisional").join(format!("{change}.json")))
@@ -405,6 +404,8 @@ impl Store {
             .map_err(Into::into)
     }
 
+    /// Where a rewrite writes down what it is about to do, beside the events
+    /// its map will become. One repository, one rewrite at a time.
     pub fn rewrite_intent_path(&self) -> PathBuf {
         self.root.join("repository").join("rewrite-intent.json")
     }
