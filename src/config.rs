@@ -4,13 +4,13 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// User-level configuration. arc treats `~/.local/ai/` as the AI data
-/// home (relocatable via `AI_HOME`) and reads `<ai-home>/arc/config.toml`.
+/// home (relocatable via `ARC_AI_HOME`, then `AI_HOME`) and reads `<ai-home>/arc/config.toml`.
 /// Environment variables override the file.
 ///
 /// A sandbox prefix (`ARC_SANDBOX`, `--sandbox`) stands in for the home
 /// directory everywhere arc derives a default path, so one value moves every
 /// root arc writes at once. A variable naming one exact directory
-/// (`AI_HOME`, `ARC_WORKTREES_DIR`, `ARC_DATA_ROOT`, `ARC_DATA_DIR`,
+/// (`ARC_AI_HOME`, `AI_HOME`, `ARC_WORKTREES_DIR`, `ARC_DATA_ROOT`, `ARC_DATA_DIR`,
 /// `ARC_JOURNAL_DIR`) still means the directory it names: the prefix replaces
 /// defaults, not statements.
 ///
@@ -167,10 +167,16 @@ pub fn real_home() -> Result<PathBuf> {
 }
 
 pub fn ai_home() -> Result<PathBuf> {
-    match std::env::var_os("AI_HOME") {
+    match std::env::var_os("ARC_AI_HOME").or_else(|| std::env::var_os("AI_HOME")) {
         Some(d) => Ok(PathBuf::from(d)),
         None => Ok(ai_home_under(&home()?)),
     }
+}
+
+/// The operator journal shared by every project. Explicit AI-home overrides
+/// name their own root; otherwise the sandbox supplies the home directory.
+pub fn global_journal_dir() -> Result<PathBuf> {
+    Ok(ai_home()?.join("arc/journals/global"))
 }
 
 /// The AI data home a home directory — or a sandbox prefix standing in for one

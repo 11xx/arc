@@ -14226,3 +14226,255 @@ fn first_spool_survives_unwritable_linked_git_directory() {
         "arc/confined-spool"
     );
 }
+
+#[test]
+fn global_memory_outside_repository_and_sandbox_containment() {
+    let repo = Repo::new();
+    let dir = repo.home.join(".local/ai/arc/journals/global");
+    let path = stdout(
+        repo.arc(&repo.home)
+            .args([
+                "journal",
+                "memory",
+                "--global",
+                "operator-rule",
+                "--title",
+                "Operator rule",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("Private body sentinel\n"),
+    );
+    assert_eq!(Path::new(path.trim()).parent(), Some(dir.as_path()));
+    let file = Path::new(path.trim())
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(stdout(
+        repo.arc(&repo.home)
+            .args(["journal", "list", "--global", "--json"])
+    )
+    .contains(file));
+    assert!(stdout(
+        repo.arc(&repo.home)
+            .args(["journal", "show", "--global", file])
+    )
+    .contains("Private body sentinel"));
+    stdout(
+        repo.arc(&repo.home)
+            .args(["journal", "position", "--global", file, "--body-file", "-"])
+            .write_stdin("Position: agree\nConfirmed across projects.\n"),
+    );
+    stdout(
+        repo.arc(&repo.home)
+            .args(["journal", "consume", "--global", file]),
+    );
+    assert!(!stdout(
+        repo.arc(&repo.home)
+            .args(["journal", "memories", "--global"])
+    )
+    .contains("Operator rule"));
+    assert!(!dir.join("bindings.jsonl").exists());
+}
+
+#[test]
+fn catchup_global_memory_titles_have_ages_without_bodies() {
+    let repo = Repo::new();
+    let dir = repo.home.join(".local/ai/arc/journals/global");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("20260101T000000Z-operator-rule-memory.md"),
+        "# Global title\n\nHidden global body\n",
+    )
+    .unwrap();
+    let out = stdout(repo.arc(&repo.root).args(["catchup"]));
+    assert!(out.contains("global memory:"), "{out}");
+    assert!(
+        out.contains("20260101T000000Z  operator-rule  Global title  ("),
+        "{out}"
+    );
+    assert!(out.contains("d)"), "{out}");
+    assert!(!out.contains("Hidden global body"));
+    let out = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
+    assert!(out.to_string().contains("global_memories"));
+    assert!(!out.to_string().contains("Hidden global body"));
+}
+
+#[test]
+fn promote_memory_to_global_links_and_consumes_project_copy() {
+    let repo = Repo::new();
+    let path = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "memory",
+                "shared-rule",
+                "--title",
+                "Shared rule",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("Shared body\n"),
+    );
+    let file = Path::new(path.trim())
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let promoted = stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "promote", file, "--global"]),
+    );
+    let global_file = Path::new(promoted.trim())
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let project = journal_dir(&repo);
+    let global = repo.home.join(".local/ai/arc/journals/global");
+    assert!(fs::read_to_string(global.join(global_file))
+        .unwrap()
+        .contains("Shared body"));
+    let project_events = fs::read_to_string(project.join("events.jsonl")).unwrap();
+    let global_events = fs::read_to_string(global.join("events.jsonl")).unwrap();
+    assert!(project_events.contains("superseded"));
+    assert!(project_events.contains(global_file));
+    assert!(global_events.contains(file));
+    let parsed = journal_events(&global);
+    assert!(parsed.iter().any(|event| event["note"]
+        .as_str()
+        .is_some_and(|source| source.ends_with(file))));
+    let bundle = repo.home.join("promoted-global.json");
+    stdout(repo.arc(&repo.home).args([
+        "journal",
+        "export",
+        "--global",
+        global_file,
+        "--output",
+        bundle.to_str().unwrap(),
+    ]));
+    let receiver = Repo::new();
+    stdout(receiver.arc(&receiver.home).args([
+        "journal",
+        "import",
+        "--global",
+        bundle.to_str().unwrap(),
+    ]));
+    assert!(fs::read_to_string(
+        receiver
+            .home
+            .join(".local/ai/arc/journals/global/events.jsonl")
+    )
+    .unwrap()
+    .contains(file));
+    assert!(!stdout(repo.arc(&repo.root).args(["journal", "memories"])).contains("Shared rule"));
+    repo.arc(&repo.root)
+        .args(["journal", "promote", file, "--global"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn global_journal_exchange_outside_repository() {
+    let sender = Repo::new();
+    let receiver = Repo::new();
+    let path = stdout(sender.arc(&sender.home).args([
+        "journal",
+        "memory",
+        "--global",
+        "portable-rule",
+        "--title",
+        "Portable rule",
+    ]));
+    let file = Path::new(path.trim())
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let bundle = sender.home.join("global.json");
+    stdout(sender.arc(&sender.home).args([
+        "journal",
+        "export",
+        "--global",
+        file,
+        "--output",
+        bundle.to_str().unwrap(),
+    ]));
+    stdout(receiver.arc(&receiver.home).args([
+        "journal",
+        "import",
+        "--global",
+        bundle.to_str().unwrap(),
+    ]));
+    assert!(stdout(
+        receiver
+            .arc(&receiver.home)
+            .args(["journal", "show", "--global", file])
+    )
+    .contains("Portable rule"));
+    assert!(stdout(receiver.arc(&receiver.home).args([
+        "journal",
+        "import",
+        "--global",
+        bundle.to_str().unwrap()
+    ]))
+    .contains("receipt already recorded"));
+}
+
+#[test]
+fn global_scope_overrides_project_journal_and_honors_ai_home() {
+    let repo = Repo::new();
+    let ai = repo.home.join("explicit-ai");
+    let project_override = repo.home.join("project-override");
+    let path = stdout(
+        repo.arc(&repo.home)
+            .env("ARC_AI_HOME", &ai)
+            .env("ARC_JOURNAL_DIR", &project_override)
+            .args([
+                "journal",
+                "note",
+                "--global",
+                "environment-fact",
+                "--title",
+                "Environment fact",
+            ]),
+    );
+    let global = ai.join("arc/journals/global");
+    assert_eq!(Path::new(path.trim()).parent(), Some(global.as_path()));
+    assert!(!project_override.exists());
+    assert!(!repo.home.join(".local/ai/arc/journals/global").exists());
+    let file = Path::new(path.trim())
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(stdout(
+        repo.arc(&repo.home)
+            .env("ARC_AI_HOME", &ai)
+            .env("ARC_JOURNAL_DIR", &project_override)
+            .args(["journal", "show", "--global", file])
+    )
+    .contains("Environment fact"));
+}
+
+#[test]
+fn global_sandbox_flag_selects_contained_journal() {
+    let repo = Repo::new();
+    let sandbox = repo.home.join("sandbox");
+    let path = stdout(repo.arc(&repo.home).args([
+        "--sandbox",
+        sandbox.to_str().unwrap(),
+        "journal",
+        "memory",
+        "--global",
+        "contained-rule",
+        "--title",
+        "Contained rule",
+    ]));
+    assert_eq!(
+        Path::new(path.trim()).parent(),
+        Some(sandbox.join(".local/ai/arc/journals/global").as_path())
+    );
+    assert!(!repo.home.join(".local/ai/arc/journals/global").exists());
+}

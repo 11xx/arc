@@ -2101,7 +2101,9 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Orient a session: the ledger queue, the journal backlog, and live lanes
+    /// Orient a session: the ledger queue, the journal backlog, and live lanes.
+    /// Project memories precede global memory titles with their ages in days;
+    /// bodies are read on demand with journal show --global.
     /// Text warns when the running build differs from HEAD in an arc-ledger
     /// checkout: older for an ancestor, differs otherwise, with dirty builds
     /// identified. Other projects and unknown build revisions have no warning.
@@ -2125,10 +2127,15 @@ enum Cmd {
         #[command(flatten)]
         write: journal::KindWrite,
     },
-    /// Cross-harness project journal mechanics (plain Markdown stays the
-    /// contract); read-only commands also resolve from the journal directory
-    /// itself, while a write names the checkout it needs
+    /// Cross-harness project and operator journals over plain Markdown.
+    /// Project reads also resolve from their journal directory; project writes
+    /// name the checkout they need. --global works from any directory.
     Journal {
+        /// Target the operator journal at <ai-home>/arc/journals/global, from
+        /// any directory. All journal kinds share this scope. With promote,
+        /// the source is a project memory and the destination is global.
+        #[arg(long, global = true)]
+        global: bool,
         #[command(subcommand)]
         cmd: journal::JournalCmd,
     },
@@ -5051,7 +5058,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
         }
         Cmd::Catchup { limit, json } => commands::catchup(&ctx, limit, json),
         Cmd::Fr { write } => journal::feature_request(&ctx, write),
-        Cmd::Journal { cmd } => journal::run(&ctx, cmd),
+        Cmd::Journal { cmd, global } => journal::run(&ctx, cmd, global),
     }
 }
 
@@ -5163,6 +5170,7 @@ mod tests {
             "journal lane close",
             "journal consume",
             "journal transition",
+            "journal promote",
             "journal archive",
             "journal unarchive",
             "journal import",

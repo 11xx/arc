@@ -301,7 +301,7 @@ SANDBOX (rehearse something destructive)
 
   The prefix stands in for the home directory, so one value moves every root
   at once and a configured `~/…` path follows it. A variable naming one exact
-  directory — AI_HOME, ARC_WORKTREES_DIR, ARC_DATA_ROOT, ARC_DATA_DIR,
+  directory — ARC_AI_HOME, AI_HOME, ARC_WORKTREES_DIR, ARC_DATA_ROOT, ARC_DATA_DIR,
   ARC_JOURNAL_DIR — still means the directory it names: the prefix replaces
   defaults, not statements.
 
@@ -1024,12 +1024,37 @@ KEEP WHAT THE WORK DISCOVERS (mid-change, before it is lost)
 END A SESSION (what the next one reads)
   arc journal handoff <topic> --derive        Stopped midstream.
   arc journal conclusion <topic> --body-file - Finished the thing.
-  arc journal memory <topic> --body-file -     Learned a durable fact.
+  arc journal memory <topic> --body-file -     Learned a durable project fact.
+  arc journal memory --global <topic> --body-file -
+                                              Learned an operator-wide fact.
+  arc journal promote <file> --global         Promote a project memory.
   arc journal consume <file> --outcome done    Drain what you resolved.
   arc journal archive --consumed               Move the drained to cold storage.
 
   ORIENT above is fed entirely by these writes: `catchup` surfaces memories,
   `journal open` lists what a handoff parked.
+
+  Global memories belong to the operator and apply across projects. Their
+  journal is `<ai-home>/arc/journals/global`; `ARC_AI_HOME`, then `AI_HOME`,
+  select an explicit AI home, otherwise `--sandbox`/`ARC_SANDBOX` supplies the
+  home beneath which `.local/ai` lives. `arc catchup` lists global timestamp,
+  topic, title and age in days beneath project memories, without bodies.
+  Read a body with `arc journal show --global <file>`.
+
+  `arc journal --global` selects that journal from any directory for all
+  kinds and their positions and corrections, including `memory`,
+  `show`, `list`, `memories`, `consume`, `position`, `export` and `import`.
+  Project directory mappings and `ARC_JOURNAL_DIR` do not redirect this scope.
+  Promotion takes a live project memory, preserves its body in the global
+  journal, links the journals in both directions and consumes the project
+  record as `superseded`, naming the global file. Historical project bodies
+  remain available. Existing memories stay where the operator filed them.
+
+  Global exchange uses `arc-journal-bundle/2` with logical project identity
+  `arc-global-journal` and a local replica identity held in `replica.json`.
+  The identity is allocated on a global write. Global import accepts global
+  bundles without Git replica pairing; the operator chooses which bundles
+  to carry. Project exchange retains its project identity and pairing checks.
 
   Which one is decided by how the work ended, not by how much there is to say.
   Stopped midstream — a handoff; `--derive` reads branch, worktree, head,
@@ -1956,7 +1981,7 @@ EXIT CODES
 
 FILES
   User configuration is `<ai-home>/arc/config.toml`; the AI data home is
-  `~/.local/ai/` unless AI_HOME names another. ARC_WORKTREES_DIR and
+  `~/.local/ai/` unless ARC_AI_HOME or AI_HOME names another. ARC_WORKTREES_DIR and
   ARC_DATA_ROOT override their keys, and ARC_DATA_DIR names one exact ledger
   directory for one repository, above both. `arc config` prints the resolved
   paths.

@@ -603,7 +603,8 @@ pub enum JournalCmd {
         #[command(flatten)]
         write: KindWrite,
     },
-    /// Record a durable project fact, surfaced by `catchup` every session
+    /// Record a durable fact, surfaced by `catchup` every session.
+    /// --global selects the operator journal; bodies are read with show.
     Memory {
         #[command(flatten)]
         write: KindWrite,
@@ -1152,6 +1153,13 @@ pub enum JournalCmd {
         #[arg(long)]
         no_planner: bool,
     },
+    /// Promote a live project memory into the operator journal. Requires
+    /// --global. Both journals record the relation; the project memory is
+    /// consumed as superseded and its historical body is retained.
+    Promote {
+        /// Project memory filename (a name, not a path).
+        filename: String,
+    },
     /// Move artifacts to the cold sibling archive without deleting history
     Archive {
         /// Artifact filename inside the hot dir (a name, not a path)
@@ -1179,7 +1187,8 @@ pub enum JournalCmd {
         filename: String,
     },
     /// Export selected journal artifacts as a versioned bundle for another
-    /// replica. The bundle carries each artifact body, the events recorded
+    /// replica. --global exports the operator journal without Git pairing.
+    /// The bundle carries each artifact body, the events recorded
     /// about it, its body digest, the exporting replica, and every artifact
     /// the selection references by filename. Exports arc-journal-bundle/2
     /// Records no events; ledger reads do not require a parseable append policy.
@@ -1193,6 +1202,7 @@ pub enum JournalCmd {
         output: String,
     },
     /// Import arc-journal-bundle/2 or /1 from another paired replica.
+    /// --global accepts only operator journal bundles, without Git pairing.
     /// Prefix revisions retain the longer body. Concurrent appended sections
     /// merge by event identity, ordered by timestamp then ID. Answers to a
     /// reopened question retain distinct append identities.
@@ -1248,6 +1258,9 @@ impl JournalCmd {
 /// runs from, and the refusal the others standing there get. `None` leaves
 /// the caller's directory alone.
 fn read_scope(ctx: &Ctx, cmd: &JournalCmd) -> Result<Option<PathBuf>> {
+    if is_global_dir(&ctx.cwd)? {
+        return Ok(None);
+    }
     if std::env::var_os("ARC_JOURNAL_DIR").is_some() {
         return Ok(None);
     }
@@ -1270,7 +1283,20 @@ fn read_scope(ctx: &Ctx, cmd: &JournalCmd) -> Result<Option<PathBuf>> {
     Ok(Some(anchor))
 }
 
-pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
+pub fn run(ctx: &Ctx, cmd: JournalCmd, global: bool) -> Result<i32> {
+    if let JournalCmd::Promote { filename } = &cmd {
+        if !global {
+            bail!("journal promote requires --global");
+        }
+        return promote_memory(ctx, filename);
+    }
+    let global_ctx;
+    let ctx = if global {
+        global_ctx = ctx.with_cwd(config::global_journal_dir()?);
+        &global_ctx
+    } else {
+        ctx
+    };
     // A journal directory records the project it belongs to. Read-only
     // commands answer for that project exactly as they would from its
     // checkout; a write needs the checkout itself, where the Git state a
@@ -1306,6 +1332,9 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
                 println!("{}", directory.display());
             }
             Ok(0)
+        }
+        JournalCmd::Promote { .. } => {
+            unreachable!("promotion is dispatched before scope selection")
         }
         JournalCmd::Doctor { json } => doctor(ctx, json),
         JournalCmd::Spool { promote } => spool(ctx, promote),
@@ -1559,18 +1588,54 @@ pub(crate) enum ArtifactReference {
     ForeignProject { file: String, project: String },
 }
 
+const GLOBAL_PROJECT_ID: &str = "arc-global-journal";
+const GLOBAL_REPLICA_FILE: &str = "replica.json";
+
+fn global_replica(hot: &Path) -> Result<Option<crate::replica::ReplicaIdentity>> {
+    let path = hot.join(GLOBAL_REPLICA_FILE);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let identity = serde_json::from_slice(&std::fs::read(&path)?)?;
+    crate::replica::validate_identity(&identity)?;
+    Ok(Some(identity))
+}
+
+fn ensure_global_replica(hot: &Path) -> Result<crate::replica::ReplicaIdentity> {
+    let _identity_lock = lock_journal_file(hot, "replica.lock", "global replica identity")?;
+    if let Some(identity) = global_replica(hot)? {
+        return Ok(identity);
+    }
+    let identity = crate::replica::ReplicaIdentity {
+        name: "global".to_string(),
+        repository_id: crate::ids::new_event_id(),
+    };
+    std::fs::create_dir_all(hot)?;
+    let staged = hot.join(".replica.json.pending");
+    std::fs::write(&staged, serde_json::to_vec(&identity)?)?;
+    std::fs::rename(staged, hot.join(GLOBAL_REPLICA_FILE))?;
+    Ok(identity)
+}
+
 fn export_artifacts(ctx: &Ctx, files: &[String], output: &str) -> Result<()> {
     let hot = resolve_dir(&ctx.cwd)?;
-    let store = ctx.store()?;
-    let replica = crate::replica::status(&store)?;
-    let local = replica.local.clone().context(
-        "this store is not a replica; record one with `arc replica init <name>` \
-         before exporting journal artifacts",
-    )?;
-    let project_id = replica.project_id.clone().context(
-        "this store is not a replica; record one with `arc replica init <name>` \
-         before exporting journal artifacts",
-    )?;
+    let (project_id, local) = if is_global_dir(&hot)? {
+        (
+            GLOBAL_PROJECT_ID.to_string(),
+            global_replica(&hot)?
+                .context("global journal has no replica identity; write a global artifact first")?,
+        )
+    } else {
+        let store = ctx.store()?;
+        let replica = crate::replica::status(&store)?;
+        let local = replica.local.clone().context(
+            "this store is not a replica; record one with `arc replica init <name>` before exporting journal artifacts",
+        )?;
+        let project_id = replica.project_id.clone().context(
+            "this store is not a replica; record one with `arc replica init <name>` before exporting journal artifacts",
+        )?;
+        (project_id, local)
+    };
     let events = read_events(&hot)?;
     let artifacts = collect_exchange_artifacts(&hot, &events, files)?;
     let bundle = crate::journal_exchange::JournalBundle::new(project_id, local, artifacts)?;
@@ -1775,47 +1840,57 @@ fn import_artifacts(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
     let digest = bundle.digest()?;
     let hot = resolve_dir(&ctx.cwd)?;
     let cold = archive_dir(&hot);
-    let store = ctx.store()?;
-    let replica = crate::replica::status(&store)?;
-    let local_replica = replica.local.clone().context(
-        "this store is not a replica; record one with `arc replica init <name>` \
-         before importing journal artifacts",
-    )?;
-    let project_id = replica.project_id.clone().context(
-        "this store is not a replica; record one with `arc replica init <name>` \
-         before importing journal artifacts",
-    )?;
-    if bundle.project_id != project_id {
-        bail!(
-            "journal bundle belongs to logical project {}; replica {} belongs to {}; \
-             nothing was imported",
-            bundle.project_id,
-            local_replica.name,
-            project_id
-        );
-    }
-    let paired = bundle.source_replica.repository_id == store.repository_id
-        || replica
-            .peers
-            .iter()
-            .any(|peer| peer.repository_id == bundle.source_replica.repository_id);
-    if !paired {
-        bail!(
-            "journal bundle source {} ({}) is not paired with replica {}; record the \
-             pairing first; nothing was imported",
-            bundle.source_replica.name,
-            bundle.source_replica.repository_id,
-            local_replica.name
-        );
-    }
+    let global = is_global_dir(&hot)?;
+    let store = if global { None } else { Some(ctx.store()?) };
+    let local_replica = if let Some(store) = store.as_ref() {
+        let replica = crate::replica::status(store)?;
+        let local_replica = replica.local.clone().context(
+            "this store is not a replica; record one with `arc replica init <name>` before importing journal artifacts",
+        )?;
+        let project_id = replica.project_id.clone().context(
+            "this store is not a replica; record one with `arc replica init <name>` before importing journal artifacts",
+        )?;
+        if bundle.project_id != project_id {
+            bail!(
+                "journal bundle belongs to logical project {}; replica {} belongs to {}; nothing was imported",
+                bundle.project_id,
+                local_replica.name,
+                project_id
+            );
+        }
+        let paired = bundle.source_replica.repository_id == store.repository_id
+            || replica
+                .peers
+                .iter()
+                .any(|peer| peer.repository_id == bundle.source_replica.repository_id);
+        if !paired {
+            bail!(
+                "journal bundle source {} ({}) is not paired with replica {}; record the pairing first; nothing was imported",
+                bundle.source_replica.name,
+                bundle.source_replica.repository_id,
+                local_replica.name
+            );
+        }
+        local_replica
+    } else {
+        if bundle.project_id != GLOBAL_PROJECT_ID {
+            bail!("--global imports only global journal bundles; nothing was imported");
+        }
+        global_replica(&hot)?.unwrap_or(crate::replica::ReplicaIdentity {
+            name: "global".to_string(),
+            repository_id: crate::ids::new_event_id(),
+        })
+    };
     let receipt_path = exchange_imports_dir(&hot).join(format!("{digest}.json"));
-    let _replica_state = crate::replica::lock(&store)?;
+    let _replica_state = store.as_ref().map(crate::replica::lock).transpose()?;
     let _transition = lock_journal_transition(&hot)?;
     if exchange_pending_path(&hot).exists() {
         if dry_run {
             bail!("journal exchange is incomplete; retry journal import without --dry-run before reading revisions");
         }
-        ctx.ensure_declared_actor(&store)?;
+        if let Some(store) = store.as_ref() {
+            ctx.ensure_declared_actor(store)?;
+        }
         let _events = lock_journal_events(&hot)?;
         finish_exchange_transaction(&hot)?;
     }
@@ -1923,7 +1998,14 @@ fn import_artifacts(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
         println!("artifacts: 0 imported (receipt already recorded); no changes");
         return Ok(0);
     }
-    ctx.ensure_declared_actor(&store)?;
+    if let Some(store) = store.as_ref() {
+        ctx.ensure_declared_actor(store)?;
+    }
+    let local_replica = if global {
+        ensure_global_replica(&hot)?
+    } else {
+        local_replica
+    };
     if let Err(error) = ensure_bound(ctx, &hot) {
         eprintln!("warning: could not record this journal's project binding: {error:#}");
     }
@@ -3571,6 +3653,7 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
 
 #[derive(Debug, Clone, Copy)]
 enum ResolutionSource {
+    Global,
     Env,
     ConfigPrefix,
     Git,
@@ -3581,6 +3664,7 @@ enum ResolutionSource {
 impl ResolutionSource {
     fn as_str(self) -> &'static str {
         match self {
+            ResolutionSource::Global => "global",
             ResolutionSource::Env => "env",
             ResolutionSource::ConfigPrefix => "config-prefix",
             ResolutionSource::Git => "git",
@@ -3603,7 +3687,18 @@ pub fn resolve_dir(cwd: &Path) -> Result<PathBuf> {
     Ok(resolve(cwd)?.directory)
 }
 
+fn is_global_dir(path: &Path) -> Result<bool> {
+    Ok(config::resolved(path) == config::resolved(&config::global_journal_dir()?))
+}
+
 fn resolve(cwd: &Path) -> Result<JournalResolution> {
+    if is_global_dir(cwd)? {
+        return Ok(JournalResolution {
+            directory: config::global_journal_dir()?,
+            source: ResolutionSource::Global,
+            anchor: None,
+        });
+    }
     if let Some(dir) = std::env::var_os("ARC_JOURNAL_DIR") {
         return Ok(JournalResolution {
             directory: anchor_journal_destination(cwd, PathBuf::from(dir))?,
@@ -7544,6 +7639,10 @@ pub(crate) fn recorded_anchor(dir: &Path) -> Result<Option<String>> {
 /// like the rest of the journal: a failure to record the binding never unwinds
 /// the artifact that was the point of the command.
 fn ensure_bound(ctx: &Ctx, dir: &Path) -> Result<()> {
+    if is_global_dir(dir)? {
+        ensure_global_replica(dir)?;
+        return Ok(());
+    }
     // The question is whether a binding was recorded, not whether a file
     // exists: an empty or unreadable bindings file would otherwise suppress
     // the record forever.
@@ -9903,6 +10002,81 @@ fn render_memories(memories: &[ArtifactEntry]) {
     for memory in memories {
         println!(
             "  {}  {}  {}",
+            memory.timestamp,
+            memory.topic,
+            memory.heading.as_deref().unwrap_or("")
+        );
+    }
+}
+
+fn promote_memory(ctx: &Ctx, filename: &str) -> Result<i32> {
+    let (topic, kind) = check_artifact_name(ctx, filename)?;
+    if kind != "memory" {
+        bail!("journal promote accepts only project memories");
+    }
+    let project = resolve_dir(&ctx.cwd)?;
+    let global = config::global_journal_dir()?;
+    if is_global_dir(&project)? {
+        bail!("promotion needs a project memory, not a global memory");
+    }
+    let _source_lock = lock_journal_transition(&project)?;
+    let (source_dir, path, _, _) = open_artifact(ctx, filename)?;
+    let events = read_events(&source_dir)?;
+    ensure_claims_acknowledged(&events, filename, &[], "promote")?;
+    if !unanswered_questions(&events, filename).is_empty() {
+        bail!("cannot promote a memory with unanswered questions");
+    }
+    let body = std::fs::read_to_string(&path)?;
+    let global_ctx = ctx.with_cwd(global.clone());
+    let _destination_lock = lock_journal_transition(&global)?;
+    let now = Utc::now();
+    let stamp = now.format("%Y%m%dT%H%M%SZ");
+    let successor = allocate_artifact_name(&global, &format!("{stamp}-{topic}-memory.md"))?;
+    let anchor = resolve(&ctx.cwd)?.anchor.unwrap_or_else(|| ctx.cwd.clone());
+    let source = format!("{}::{filename}", config::path_slug(&anchor));
+    let mut promoted = JournalEvent::base(&global_ctx, now, &topic, "note");
+    promoted.file = Some(successor.clone());
+    promoted.note = Some(format!("promoted from {source}"));
+    create_artifact(&global, &global.join(&successor), &body)?;
+    append_event(&global_ctx, &global, &promoted)?;
+    let mut consumed = JournalEvent::base(ctx, now, &topic, "consumed");
+    consumed.file = Some(filename.to_string());
+    consumed.outcome = Some("superseded".to_string());
+    consumed.note = Some(format!("promoted to global::{successor}"));
+    append_event(ctx, &project, &consumed)?;
+    println!("{}", global.join(successor).display());
+    Ok(0)
+}
+
+fn global_memories() -> Result<Vec<ArtifactEntry>> {
+    let mut memories = live_memories(&config::global_journal_dir()?)?;
+    let now = Utc::now();
+    for memory in &mut memories {
+        memory.heading = memory
+            .heading
+            .as_deref()
+            .map(|heading| heading.trim_start_matches('#').trim().to_string());
+        memory.age_seconds = memory
+            .filed_at
+            .as_deref()
+            .and_then(|stamp| DateTime::parse_from_rfc3339(stamp).ok())
+            .map(|stamp| (now - stamp.with_timezone(&Utc)).num_seconds().max(0) as u64);
+    }
+    Ok(memories)
+}
+
+fn render_global_memories(memories: &[ArtifactEntry]) {
+    println!("global memory:");
+    if memories.is_empty() {
+        println!("  (none)");
+    }
+    for memory in memories {
+        let age = memory
+            .age_seconds
+            .map(|seconds| format!("{}d", seconds / 86400))
+            .unwrap_or_else(|| "unknown age".to_string());
+        println!(
+            "  {}  {}  {}  ({age})",
             memory.timestamp,
             memory.topic,
             memory.heading.as_deref().unwrap_or("")
@@ -14070,6 +14244,7 @@ mod tests {
 pub(crate) struct Orientation {
     lanes: Vec<LaneEntry>,
     memories: Vec<ArtifactEntry>,
+    global_memories: Vec<ArtifactEntry>,
     /// Questions no agent may settle. Reported first, because a session that
     /// picks up work while one waits can do everything except the thing that
     /// is actually blocked.
@@ -14084,6 +14259,7 @@ pub(crate) fn orientation(ctx: &Ctx) -> Result<Orientation> {
     Ok(Orientation {
         lanes: lanes_from_journal(&read_events(&dir)?, now),
         memories: live_memories(&dir)?,
+        global_memories: global_memories()?,
         open_questions: open_questions(&dir)?,
         queue: collect_open(ctx, None)?,
     })
@@ -14121,6 +14297,7 @@ impl Orientation {
             println!("  `arc journal questions` for the options, `journal answer` to settle one");
         }
         render_memories(&self.memories);
+        render_global_memories(&self.global_memories);
         println!("journal: {}", self.queue.dir());
         println!("  {OPEN_TIER_LEGEND}");
         for (label, entries) in [
