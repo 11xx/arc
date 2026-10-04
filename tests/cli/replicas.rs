@@ -168,7 +168,7 @@ fn authority_moves_only_through_an_imported_offer() {
     );
     assert_eq!(catchup["replica"]["authority"]["holder"]["name"], "origin");
     let doctor = json_stdout(recipient.arc(&recipient.root).args(["doctor", "--json"]));
-    assert_eq!(doctor["schema"], "arc-doctor/5", "{doctor}");
+    assert_eq!(doctor["schema"], "arc-doctor/6", "{doctor}");
     assert_eq!(doctor["replica"]["local"]["name"], "peer", "{doctor}");
 
     let _ = change_with_patchset(&recipient, "authority-work");

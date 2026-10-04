@@ -861,7 +861,7 @@ fn env_detects_opencode2_by_terminal_variable_and_leaves_the_session_unset() {
         .env("OPENCODE_TERMINAL", "1")
         .assert()
         .success()
-        .stdout("export ARC_HARNESS='opencode'\nunset ARC_SESSION ARC_MODEL ARC_SESSION_LINK\n# export ARC_SESSION=<session-id>  # unavailable: opencode does not export a session variable; set it by hand\n");
+        .stdout(with_build_stamp("export ARC_HARNESS='opencode'\nunset ARC_SESSION ARC_MODEL ARC_SESSION_LINK\n# export ARC_SESSION=<session-id>  # unavailable: opencode does not export a session variable; set it by hand\n"));
 }
 
 #[test]
@@ -887,7 +887,7 @@ fn env_detects_opencode2_by_process_ancestry() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "export ARC_HARNESS='opencode'\nunset ARC_SESSION ARC_MODEL ARC_SESSION_LINK\n# export ARC_SESSION=<session-id>  # unavailable: opencode does not export a session variable; set it by hand\n"
+        with_build_stamp("export ARC_HARNESS='opencode'\nunset ARC_SESSION ARC_MODEL ARC_SESSION_LINK\n# export ARC_SESSION=<session-id>  # unavailable: opencode does not export a session variable; set it by hand\n")
     );
 }
 
@@ -998,10 +998,10 @@ fn env_reports_the_nested_harness_that_owns_the_process() {
         );
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            format!(
+            with_build_stamp(&format!(
                 "export ARC_HARNESS='{inner}' ARC_SESSION='{inner_session}'\nunset ARC_MODEL\n{}",
                 uncorroborated(inner)
-            ),
+            )),
             "{inner} under {outer} reported the wrong owner"
         );
     }
@@ -1056,10 +1056,10 @@ fn nested_detection_prefers_the_owner_over_a_corroborated_outer_session() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         without_observation(&String::from_utf8_lossy(&output.stdout)),
-        format!(
+        with_build_stamp(&format!(
             "export ARC_HARNESS='pi' ARC_SESSION='{inner_session}'\nunset ARC_MODEL\n# model: gpt-5.6-sol#medium\n{}",
             corroborated("pi")
-        )
+        ))
     );
 }
 
@@ -1126,13 +1126,13 @@ fn env_reports_ambiguity_when_no_ancestor_names_the_owner() {
         .env("PI_SESSION_ID", "inner-session")
         .assert()
         .code(1)
-        .stdout(concat!(
+        .stdout(with_build_stamp(concat!(
             "# export ARC_HARNESS=<claude|codex|opencode|pi> ARC_SESSION=<session-id> ",
             "ARC_SESSION_LINK=<url>\n",
             "# ambiguous: CLAUDE_CODE_SESSION_ID (claude) and PI_SESSION_ID (pi); ",
             "set ARC_HARNESS and ARC_SESSION by hand\n",
             "unset ARC_HARNESS ARC_SESSION ARC_MODEL ARC_SESSION_LINK\n"
-        ));
+        )));
 }
 
 /// The same ambiguity leaves an undeclared event's identity unset: nothing is
@@ -1891,7 +1891,19 @@ fn inference_failure_with_nothing_open_points_at_the_backlog() {
 
 /// Shell exports remain exact while observation comments have their own fixtures.
 fn env_output(expected: String) -> impl predicates::Predicate<str> {
+    let expected = with_build_stamp(&expected);
     predicates::function::function(move |actual: &str| without_observation(actual) == expected)
+}
+
+fn with_build_stamp(expected: &str) -> String {
+    let commit = env!("ARC_BUILD_COMMIT");
+    let dirty = env!("ARC_BUILD_DIRTY");
+    let stamp = if commit == "unknown" {
+        "unknown".to_owned()
+    } else {
+        format!("{commit} ({dirty})")
+    };
+    format!("# arc build: {stamp}\n{expected}")
 }
 
 fn without_observation(actual: &str) -> String {
