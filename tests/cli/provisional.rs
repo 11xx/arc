@@ -1713,3 +1713,29 @@ fn recipient_routing_does_not_grant_or_restrict_publication_authority() {
     assert_eq!(obligation(&authority, &change)["recipient"], recipient);
     assert_eq!(obligation(&authority, &change)["disposition"], "resolved");
 }
+
+#[test]
+fn retry_plan_and_execution_agree_on_reusing_the_completed_preparation() {
+    let (_authority, worker) = worker();
+    let change = prepared(&worker);
+    prepare(&worker, &change);
+    let existing = obligation(&worker, &change);
+    let plan = json_stdout(worker.arc(&worker.root).args([
+        "integrate",
+        &change,
+        "--provisional",
+        "--dry-run",
+        "--json",
+    ]));
+    assert_eq!(plan["merge_commit"], false, "{plan}");
+    assert_eq!(plan["reuse_event_id"], existing["event_id"]);
+    assert_eq!(plan["reuse_commit"], existing["provisional_commit"]);
+    prepare(&worker, &change);
+    assert_eq!(
+        status(&worker, &change)["provisional_integrations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}

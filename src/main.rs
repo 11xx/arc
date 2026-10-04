@@ -1997,7 +1997,9 @@ enum Cmd {
         /// target revision it was decided at, the approved head, and the tree
         /// the integration would ship, and its shape. The same decision governs
         /// the dry run and execution; a refusal prints the blocker on stderr
-        /// and nothing on stdout. One change only
+        /// and nothing on stdout. Provisional retries identify a completed
+        /// preparation through reuse_event_id and reuse_commit, with merge_commit
+        /// false. One change only
         #[arg(long, requires = "dry_run")]
         json: bool,
         /// Compare the fresh decision with a plan an earlier

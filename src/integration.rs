@@ -108,6 +108,7 @@ pub struct IntegrationFacts {
     pub mode_refusal: Option<String>,
     pub publication_target: String,
     pub recipient: Option<crate::model::ProvisionalRecipient>,
+    pub completed_provisional: Option<ProvisionalCompletion>,
     /// The change is open, not iterating, and its branch is not fork work.
     pub lifecycle_allows_integration: bool,
     pub shape: Shape,
@@ -293,6 +294,10 @@ pub struct IntegrationPlan {
     pub recipient: Option<crate::model::ProvisionalRecipient>,
     #[serde(default)]
     pub provisional_prerequisites: Vec<crate::model::ProvisionalPrerequisite>,
+    #[serde(default)]
+    pub reuse_event_id: Option<String>,
+    #[serde(default)]
+    pub reuse_commit: Option<String>,
     pub change_id: String,
     /// `change-integrated`, or `ready-to-send` for a contributed change.
     pub records: String,
@@ -314,6 +319,8 @@ impl IntegrationPlan {
             publication_target: plan.target.clone(),
             staging_destination: None,
             recipient: None,
+            reuse_event_id: None,
+            reuse_commit: None,
             schema: PLAN_SCHEMA.to_string(),
             change_id: change_id.to_string(),
             records: "change-integrated".to_string(),
@@ -335,6 +342,8 @@ impl IntegrationPlan {
             publication_target: plan.target.clone(),
             staging_destination: None,
             recipient: None,
+            reuse_event_id: None,
+            reuse_commit: None,
             schema: PLAN_SCHEMA.to_string(),
             change_id: change_id.to_string(),
             records: "ready-to-send".to_string(),
@@ -487,6 +496,7 @@ fn decision(facts: IntegrationFacts) -> Decision {
             evaluated_tree: tree,
             recipient,
             authorization,
+            reuse: facts.completed_provisional,
         });
     }
     if let Some(contribution) = observed!(facts.contribution) {
@@ -653,6 +663,12 @@ pub enum Mode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvisionalCompletion {
+    pub event_id: String,
+    pub commit: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProvisionalPlan {
     pub publication_target: String,
     pub staging_branch: String,
@@ -661,6 +677,7 @@ pub struct ProvisionalPlan {
     pub evaluated_tree: String,
     pub recipient: crate::model::ProvisionalRecipient,
     pub authorization: AuthorizationBasis,
+    pub reuse: Option<ProvisionalCompletion>,
 }
 impl IntegrationPlan {
     pub fn of_provisional(change: &str, plan: &ProvisionalPlan) -> Self {
@@ -672,13 +689,19 @@ impl IntegrationPlan {
             publication_target: plan.publication_target.clone(),
             staging_destination: Some(plan.staging_branch.clone()),
             recipient: Some(plan.recipient.clone()),
+            reuse_event_id: plan.reuse.as_ref().map(|reuse| reuse.event_id.clone()),
+            reuse_commit: plan.reuse.as_ref().map(|reuse| reuse.commit.clone()),
             records: "change-provisionally-integrated".into(),
             target: plan.staging_branch.clone(),
             target_revision: plan.staging_before.clone(),
             approved_patchset_id: plan.approved.patchset_id.clone(),
             approved_head: plan.approved.head.clone(),
-            merge_commit: true,
-            shape: Some(crate::model::IntegrationShape::Merge),
+            merge_commit: plan.reuse.is_none(),
+            shape: Some(if plan.reuse.is_some() {
+                crate::model::IntegrationShape::AlreadyContained
+            } else {
+                crate::model::IntegrationShape::Merge
+            }),
             evaluated_tree: Some(plan.evaluated_tree.clone()),
             authorization: plan.authorization.clone(),
         }
@@ -749,6 +772,7 @@ mod tests {
             mode_refusal: None,
             publication_target: "main".into(),
             recipient: None,
+            completed_provisional: None,
             lifecycle_allows_integration: true,
             shape: Shape::NoFf,
             target_is_ancestor: Ok(true),

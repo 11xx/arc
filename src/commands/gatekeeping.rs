@@ -4332,6 +4332,7 @@ fn integration_facts(
         mode_refusal: crate::replica::integration_refusal(store).ok().flatten(),
         publication_target: target.into(),
         recipient: None,
+        completed_provisional: None,
         lifecycle_allows_integration: report.state == "open"
             && !st.iterating
             && report.fork.is_none(),

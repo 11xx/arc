@@ -1177,7 +1177,8 @@ PAIR REPLICA STORES
   is opaque: preparation performs no transport and grants no authority.
   An intent binds the exact event and guarded ref transition before visibility;
   retry finishes that transition or preserves competing refs, and a completed
-  matching preparation reuses its merge and event.
+  matching preparation reuses its merge and event. Its dry-run plan names
+  reuse_event_id and reuse_commit and declares that it creates no merge.
 
   Every delivery is retained across snapshots and closure. Status lists its
   recipient, recording replica, merge and disposition. Catchup and workspace

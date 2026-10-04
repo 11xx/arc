@@ -385,11 +385,42 @@ fn plan(
         provisional,
     );
     let patchset = state.latest_patchset().context("no patchset recorded")?;
+    let mut completed_provisional = None;
+    for event in state.provisional_integrations.iter().rev() {
+        if event.repository_id != store.repository_id {
+            continue;
+        }
+        if let Payload::ChangeProvisionallyIntegrated {
+            source_patchset_id,
+            source_head,
+            staging_branch,
+            provisional_commit,
+            recipient,
+            publication_target,
+            ..
+        } = &event.payload
+        {
+            if *source_patchset_id == patchset.id
+                && *source_head == patchset.head
+                && *staging_branch == selection.branch
+                && *recipient == selection.recipient
+                && *publication_target == state.target_branch
+                && gitio::is_ancestor(&ctx.cwd, provisional_commit, &selection.before)?
+            {
+                completed_provisional = Some(integration::ProvisionalCompletion {
+                    event_id: event.event_id.clone(),
+                    commit: provisional_commit.clone(),
+                });
+                break;
+            }
+        }
+    }
     let facts = IntegrationFacts {
         mode: Mode::Provisional,
         mode_refusal: None,
         publication_target: state.target_branch.clone(),
         recipient: Some(selection.recipient.clone()),
+        completed_provisional,
         lifecycle_allows_integration: report.state == "open"
             && !state.iterating
             && report.fork.is_none(),
@@ -617,33 +648,22 @@ pub fn integrate_provisionally(
                     &plan
                 ))?
             );
+        } else if let Some(reuse) = &plan.reuse {
+            println!(
+                "would reuse provisional obligation {}; merge {}; staging refs remain at {}",
+                reuse.event_id, reuse.commit, plan.staging_before
+            );
         } else {
             println!("would prepare unsigned no-ff merge into refs/heads/{}; publication target {}; recipient {:?}; obligation remains open", plan.staging_branch, plan.publication_target, plan.recipient);
         }
         return Ok(0);
     }
-    for event in state.provisional_integrations.iter().rev() {
-        if let Payload::ChangeProvisionallyIntegrated {
-            source_patchset_id,
-            source_head,
-            staging_branch,
-            provisional_commit,
-            recipient,
-            publication_target,
-            ..
-        } = &event.payload
-        {
-            if *source_patchset_id == plan.approved.patchset_id
-                && *source_head == plan.approved.head
-                && *staging_branch == plan.staging_branch
-                && *recipient == plan.recipient
-                && *publication_target == plan.publication_target
-                && gitio::is_ancestor(&ctx.cwd, provisional_commit, &selection.before)?
-            {
-                println!("reused provisional obligation: {}\nprovisionally integrated: {provisional_commit}", event.event_id);
-                return Ok(0);
-            }
-        }
+    if let Some(reuse) = &plan.reuse {
+        println!(
+            "reused provisional obligation: {}\nprovisionally integrated: {}",
+            reuse.event_id, reuse.commit
+        );
+        return Ok(0);
     }
     let message = args
         .message
