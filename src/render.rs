@@ -1153,6 +1153,9 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
     if !report.obsolete_provisional_ancestry.is_empty() {
         let _ = writeln!(out, "publication head {:?} contains provisional merges {}; replay onto accepted authority history with arc rebase {} --verify, then record a new patchset and fresh review or debt", report.current_head, report.obsolete_provisional_ancestry.join(", "), state.change_id);
     }
+    if report.replay_snapshot_required {
+        let _ = writeln!(out, "a provisional ancestry substitution requires a new patchset: arc snapshot {} --verify, then fresh review or explicit debt", state.change_id);
+    }
     let titles = report
         .blockers()
         .iter()
@@ -1221,7 +1224,13 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
                     .blocker_status
                     .blockers_ready
                     .iter()
-                    .filter(|dependency| !dependency.integrated)
+                    .filter(|dependency| {
+                        !dependency.integrated
+                            && !report
+                                .provisional_prerequisites
+                                .iter()
+                                .any(|reference| reference.change_id == dependency.change_id)
+                    })
                 {
                     let _ = writeln!(
                         out,
@@ -1381,6 +1390,9 @@ pub fn next_step(report: &StatusReport) -> String {
         "arc external verdict {change} --verdict <verdict> --decided-by <who> --reference <ref> --revision <revision>"
     );
     let step = match code.split_once(':').unwrap_or((code, "")) {
+        ("snapshot_replayed_head", _) => format!("arc snapshot {change} --verify; obtain fresh review or declare debt for the recorded patchset"),
+        ("replay_provisional_ancestry", _) => format!("in the change checkout: git rebase {}; arc snapshot {change} --verify; obtain fresh review or debt", crate::context::shell_quote(&report.target_branch)),
+        ("check_provisional", _) => format!("arc check {change} --provisional; acquire authority only through the replica offer protocol"),
         ("none", "closed") => "nothing; the change is closed".to_string(),
         ("restore_branch", _) => match &report.latest_patchset {
             Some(patchset) => format!(
@@ -1454,6 +1466,7 @@ pub fn next_step(report: &StatusReport) -> String {
         ("await_receiver", _) => {
             format!("send the change to its receiver, then record their decision: {external}")
         }
+        ("integrate", _) if report.integration_mode == crate::integration::Mode::Provisional => format!("arc integrate {change} --provisional{}", report.provisional_staging_destination.as_ref().map(|branch| format!(" --into {}", crate::context::shell_quote(branch))).unwrap_or_default()),
         ("integrate", _) => format!("arc integrate {change}"),
         ("request_review", _) => {
             format!("ask a reviewer independent of the contributors to run: {review}")
@@ -2537,12 +2550,18 @@ pub fn check_explanation(state: &ChangeState, report: &StatusReport) -> String {
     condition(
         &mut out,
         Blocker::BlockedByChanges,
-        "prerequisites integrated",
+        "prerequisites satisfy selected mode",
         report
             .blocker_status
             .blockers_ready
             .iter()
-            .filter(|dependency| !dependency.integrated)
+            .filter(|dependency| {
+                !dependency.integrated
+                    && !report
+                        .provisional_prerequisites
+                        .iter()
+                        .any(|reference| reference.change_id == dependency.change_id)
+            })
             .map(|dependency| {
                 format!(
                     "{} (`{}`): {}",

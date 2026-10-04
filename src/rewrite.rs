@@ -192,6 +192,10 @@ impl RewriteMap {
         })
     }
 
+    pub(crate) fn mapped_revisions(&self) -> impl Iterator<Item = &str> {
+        self.steps.keys().map(String::as_str)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.steps.is_empty()
     }

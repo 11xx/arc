@@ -716,6 +716,9 @@ impl Ctx {
             state,
             &store.readable_states()?,
         )?);
+        report.require_replay_snapshot(crate::provisional::needs_replay_snapshot(
+            &self.cwd, store, state,
+        )?);
         report.declaration_notes = declarations.notes;
         report.select_mode(
             crate::integration::Mode::Authoritative,
@@ -740,6 +743,11 @@ impl Ctx {
         )?;
         report.require_provisional_replay(crate::provisional::obsolete_ancestry(
             &self.cwd, state, states,
+        )?);
+        report.require_replay_snapshot(crate::provisional::needs_replay_snapshot(
+            &self.cwd,
+            &self.store()?,
+            state,
         )?);
         report.select_mode(
             crate::integration::Mode::Authoritative,
@@ -773,6 +781,9 @@ impl Ctx {
             &self.cwd,
             state,
             &store.readable_states()?,
+        )?);
+        report.require_replay_snapshot(crate::provisional::needs_replay_snapshot(
+            &self.cwd, store, state,
         )?);
         report.declaration_notes = declarations.notes;
         report.select_mode(

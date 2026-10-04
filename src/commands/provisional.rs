@@ -12,6 +12,20 @@ struct Selection {
     project: String,
 }
 
+fn checked_out_staging(cwd: &Path, branch: &str) -> Result<Option<PathBuf>> {
+    Ok(gitio::worktree_inventory(cwd)?
+        .into_iter()
+        .find(|checkout| checkout.branch.as_deref() == Some(branch))
+        .map(|checkout| checkout.path))
+}
+
+fn refuse_selection(
+    code: i32,
+    reason: String,
+) -> Result<std::result::Result<Selection, (i32, String)>> {
+    Ok(Err((code, reason)))
+}
+
 fn select(
     ctx: &Ctx,
     store: &Store,
@@ -19,17 +33,19 @@ fn select(
     into: Option<&str>,
     replica: Option<&str>,
     forge: Option<&str>,
-) -> Result<std::result::Result<Selection, String>> {
+) -> Result<std::result::Result<Selection, (i32, String)>> {
     let status = crate::replica::status(store)?;
     let Some(local) = &status.local else {
-        return Ok(Err(
+        return refuse_selection(
+            17,
             "provisional execution requires a paired replica; this store is unpaired".into(),
-        ));
+        );
     };
     if status.peers.is_empty() {
-        return Ok(Err(
+        return refuse_selection(
+            17,
             "provisional execution requires a paired replica with a peer".into(),
-        ));
+        );
     }
     if status
         .authority
@@ -37,14 +53,35 @@ fn select(
         .and_then(|a| a.holder.as_ref())
         .is_some_and(|holder| holder.repository_id == store.repository_id)
     {
-        return Ok(Err(format!(
-            "replica {} holds authority; use ordinary integrate",
-            local.name
-        )));
+        return refuse_selection(
+            17,
+            format!(
+                "replica {} holds authority; use ordinary integrate",
+                local.name
+            ),
+        );
     }
-    let declarations = ctx.declarations(state)?;
+    if crate::ids::validate_id_component(&local.name).is_err() {
+        return refuse_selection(
+            17,
+            format!(
+                "replica name {:?} cannot define one staging namespace component",
+                local.name
+            ),
+        );
+    }
+    let declarations = crate::declarations::for_change(&ctx.cwd, state)?;
+    if declarations.target_unreadable {
+        return refuse_selection(
+            6,
+            format!(
+                "target branch {:?} is unreadable; canonical declarations cannot be established",
+                state.target_branch
+            ),
+        );
+    }
     if declarations.policy.replica.provisional_enabled == Some(false) {
-        return Ok(Err("provisional execution disabled by canonical project or operator replica.provisional_enabled=false".into()));
+        return refuse_selection(17, "provisional execution disabled by canonical project or operator replica.provisional_enabled=false".into());
     }
     let prefix = format!("arc/provisional/{}/", local.name);
     let branch = into
@@ -65,10 +102,21 @@ fn select(
         });
     let primary = gitio::current_branch(&gitio::primary_worktree(&ctx.cwd)?)?;
     let states = store.readable_states()?;
-    let protection = if states
-        .values()
-        .any(|s| s.target_branch.trim_start_matches("refs/heads/") == branch)
-    {
+    let unreadable: Vec<_> = store
+        .list_change_ids()?
+        .into_iter()
+        .filter(|id| !states.contains_key(id))
+        .collect();
+    if !unreadable.is_empty() {
+        return refuse_selection(17, format!("cannot establish protection for refs/heads/{branch}: unreadable canonical/source records {}", unreadable.join(", ")));
+    }
+    let protection = if states.values().any(|s| {
+        s.target_branch.trim_start_matches("refs/heads/") == branch
+            || s.closure
+                .as_ref()
+                .and_then(|closure| closure.target_branch.as_deref())
+                .is_some_and(|target| target.trim_start_matches("refs/heads/") == branch)
+    }) {
         Some("canonical target")
     } else if states
         .values()
@@ -91,13 +139,13 @@ fn select(
         None
     };
     if let Some(source) = protection {
-        return Ok(Err(format!("refs/heads/{branch} is protected by {source}; destination must remain under refs/heads/{prefix}")));
+        return refuse_selection(17, format!("refs/heads/{branch} is protected by {source}; destination must remain under refs/heads/{prefix}"));
     }
     gitio::git(
         &ctx.cwd,
         &["check-ref-format", &format!("refs/heads/{branch}")],
     )?;
-    if let Some(path) = gitio::worktree_for_branch(&ctx.cwd, &branch)? {
+    if let Some(path) = checked_out_staging(&ctx.cwd, &branch)? {
         bail!(
             "staging ref refs/heads/{branch} is checked out at {}; choose an unchecked staging ref",
             path.display()
@@ -105,13 +153,13 @@ fn select(
     }
     let recipient = match (replica, forge) {
         (Some(name), None) => {
-            let peer = status.peers.iter().chain(status.local.iter()).find(|peer| peer.name == name).with_context(|| format!("unknown recipient replica {name}"))?;
+            let Some(peer) = status.peers.iter().chain(status.local.iter()).find(|peer| peer.name == name) else { return refuse_selection(17, format!("no determinable recipient: unknown replica {name}; use --for-replica with a paired name or --for-forge REFERENCE")); };
             ProvisionalRecipient::Replica { repository_id: peer.repository_id.clone() }
         }
         (None, Some(reference)) if !reference.trim().is_empty() => ProvisionalRecipient::Forge { reference: reference.into() },
         (None, None) => match status.authority.as_ref().and_then(|a| a.holder.as_ref()) {
             Some(holder) => ProvisionalRecipient::Replica { repository_id: holder.repository_id.clone() },
-            None => return Ok(Err(format!("authority has no holder (offer {:?}); specify --for-replica NAME or --for-forge REFERENCE", status.authority.as_ref().and_then(|a| a.offer_in_flight.as_ref()).map(|offer| &offer.offer_id)))),
+            None => return refuse_selection(17, format!("authority has no holder (offer {:?}); specify --for-replica NAME or --for-forge REFERENCE", status.authority.as_ref().and_then(|a| a.offer_in_flight.as_ref()).map(|offer| &offer.offer_id))),
         },
         _ => bail!("conflicting --for-replica/--for-forge or blank forge recipient"),
     };
@@ -159,6 +207,7 @@ fn report(
     }
     let states = store.readable_states()?;
     let mut dependencies = dependency_status(state, &states);
+    let canonical_dependencies = dependencies.clone();
     let mut provisional = Vec::new();
     for dependency in &mut dependencies.blockers_ready {
         if !dependency.integrated {
@@ -198,8 +247,13 @@ fn report(
         fork::fork_slug_for_branch(&ctx.cwd, &state.branch)?,
         Shape::NoFf,
     )?;
+    report.blocker_status = canonical_dependencies;
+    report.require_replay_snapshot(crate::provisional::needs_replay_snapshot(
+        &ctx.cwd, store, state,
+    )?);
     report.select_mode(Mode::Provisional, None);
     report.provisional_prerequisites = provisional.clone();
+    report.provisional_staging_destination = Some(selection.branch.clone());
     let normalized = super::gatekeeping::normalized_declarations(declarations, state);
     Ok((report, normalized, provisional))
 }
@@ -408,12 +462,18 @@ fn finish(ctx: &Ctx, store: &Store, intent: &Intent) -> Result<()> {
     {
         bail!("provisional commit {provisional_commit} has incorrect parents/tree or a signature");
     }
-    if gitio::worktree_for_branch(&ctx.cwd, staging_branch)?.is_some() {
+    if checked_out_staging(&ctx.cwd, staging_branch)?.is_some() {
         bail!("staging ref refs/heads/{staging_branch} is checked out; intent retained");
     }
     let staging = format!("refs/heads/{staging_branch}");
     let retention =
         crate::provisional::retention_ref(&intent.event.change_id, &intent.event.event_id);
+    if store.event_is_published(&intent.event)? {
+        store.publish_provisional_event(&intent.event)?;
+        store.clear_provisional_intent(&intent.event.change_id)?;
+        println!("recovered completed provisional obligation: {}; merge {provisional_commit}; current staging work is preserved", intent.event.event_id);
+        return Ok(());
+    }
     let held = gitio::ref_value(&ctx.cwd, &staging)?;
     let kept = gitio::ref_value(&ctx.cwd, &retention)?;
     if held.as_deref() == Some(provisional_commit) && kept.as_deref() == Some(provisional_commit) {
@@ -440,9 +500,7 @@ fn finish(ctx: &Ctx, store: &Store, intent: &Intent) -> Result<()> {
     } else {
         bail!("provisional intent {} conflicts with observed refs: staging={held:?}, retention={kept:?}; competing work is preserved", intent.event.event_id);
     }
-    if !store.event_is_published(&intent.event)? {
-        store.append_event(&intent.event)?;
-    }
+    store.publish_provisional_event(&intent.event)?;
     store.clear_provisional_intent(&intent.event.change_id)?;
     println!("provisionally integrated: {provisional_commit}\nstaging: refs/heads/{staging_branch}\nobligation: {}", intent.event.event_id);
     Ok(())
@@ -476,9 +534,9 @@ pub fn integrate_provisionally(
         args.for_forge.as_deref(),
     )? {
         Ok(s) => s,
-        Err(refusal) => {
+        Err((code, refusal)) => {
             eprintln!("Cannot prepare provisional integration: {refusal}");
-            return Ok(17);
+            return Ok(code);
         }
     };
     let _target = store.lock_target(&selection.branch)?;
@@ -604,7 +662,7 @@ pub fn integrate_provisionally(
         args.for_replica.as_deref(),
         args.for_forge.as_deref(),
     )?
-    .map_err(|reason| anyhow::anyhow!(reason))?;
+    .map_err(|(_, reason)| anyhow::anyhow!(reason))?;
     if fresh.before != selection.before
         || fresh.held != selection.held
         || fresh.recipient != selection.recipient
@@ -667,7 +725,7 @@ pub fn check_provisional(
             let (report, _, _) = report(ctx, &store, &state, &selection)?;
             (status::check_exit_code(&report), Some(report), None)
         }
-        Err(refusal) => (17, None, Some(refusal)),
+        Err((code, refusal)) => (code, None, Some(refusal)),
     };
     if json {
         println!(
@@ -704,8 +762,10 @@ pub fn resolve(
         eprintln!("Cannot resolve provisional integration: {refusal}");
         return Ok(17);
     }
-    let grant = crate::replica::observed_authority(&store)?
-        .context("resolution requires a paired authority grant")?;
+    let Some(grant) = crate::replica::observed_authority(&store)? else {
+        eprintln!("resolution requires a paired current authority grant; this store is unpaired");
+        return Ok(17);
+    };
     let (_, state) = ctx.load_state(&store, reference)?;
     let _transition = store.lock_transition(&state.change_id)?;
     let state = store.state(&state.change_id)?;
@@ -715,13 +775,10 @@ pub fn resolve(
         .find(|event| event.event_id == integration)
         .with_context(|| format!("missing integration resolution reference {integration}"))?;
     if let Payload::ChangeIntegrated {
-        authority_grant_event_id,
+        authority_grant_event_id: Some(grant),
         ..
     } = &accepting.payload
     {
-        let grant = authority_grant_event_id
-            .as_deref()
-            .context("accepting integration has no recorded authority grant")?;
         if crate::replica::grant_holder(&store, grant)?.as_deref() != Some(&accepting.repository_id)
         {
             bail!("integration {integration} names an invalid authority grant {grant}");
@@ -783,7 +840,16 @@ pub fn resolve(
         );
         let event = event?;
         store.append_event(&event)?;
-        println!("resolved provisional obligation {id} by {integration}");
+        if crate::provisional::project_obligations(&state)
+            .iter()
+            .any(|row| {
+                row.event_id == *id && matches!(row.recipient, ProvisionalRecipient::Forge { .. })
+            })
+        {
+            println!("resolved by assertion: provisional obligation {id} by {integration}");
+        } else {
+            println!("resolved provisional obligation {id} by {integration}");
+        }
     }
     Ok(0)
 }

@@ -555,10 +555,11 @@ pub(super) fn snapshot_holding(
     } else {
         (flagged_refs, Vec::new())
     };
+    let requires_replay_snapshot = crate::provisional::needs_replay_snapshot(&ctx.cwd, store, &st)?;
     let unchanged_patchset = st
         .latest_patchset()
         .filter(|p| {
-            p.head == head
+            !requires_replay_snapshot && p.head == head
                 && p.base == base_rev
                 && p.brief_ref == brief_ref
                 // Links supplied now are part of what the patchset records: a

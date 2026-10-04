@@ -1006,7 +1006,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
     let states = store.readable_states()?;
     let provisional_integrations: Vec<_> = states
         .values()
-        .flat_map(crate::provisional::unresolved)
+        .flat_map(|state| crate::provisional::unresolved_at(state, chrono::Utc::now()))
         .collect();
     let worktrees = crate::worktree_usage::measure(
         &ctx.cwd,

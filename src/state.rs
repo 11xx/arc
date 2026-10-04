@@ -483,6 +483,14 @@ fn history_releases(entries: &[DispositionEntry]) -> bool {
     matches!(eligible_disposition_tips(entries).as_slice(), [tip] if tip.status.releases_block())
 }
 
+pub(crate) fn verdict_tips_for(entries: &[VerdictEntry]) -> Vec<&VerdictEntry> {
+    let start = entries
+        .iter()
+        .rposition(|entry| entry.relation.is_none())
+        .unwrap_or(0);
+    observed_tips(&entries[start..])
+}
+
 fn observed_tips<T: TipEntry>(entries: &[T]) -> Vec<&T> {
     let superseded: Vec<&str> = entries
         .iter()
@@ -1233,10 +1241,19 @@ impl ChangeState {
             return Ok(());
         }
         for event in &self.provisional_integrations {
-            if let Payload::ChangeProvisionallyIntegrated { source_head, .. } = &event.payload {
+            if let Payload::ChangeProvisionallyIntegrated {
+                source_head,
+                provisional_commit,
+                ..
+            } = &event.payload
+            {
                 self.provisional_signature_successors.insert(
                     source_head.clone(),
                     rewrites.approved_successor(source_head)?,
+                );
+                self.provisional_signature_successors.insert(
+                    provisional_commit.clone(),
+                    rewrites.approved_successor(provisional_commit)?,
                 );
             }
         }

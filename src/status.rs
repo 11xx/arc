@@ -541,6 +541,8 @@ pub struct StatusReport {
     pub provisional_integrations: Vec<crate::provisional::Obligation>,
     pub obsolete_provisional_ancestry: Vec<String>,
     pub provisional_prerequisites: Vec<crate::model::ProvisionalPrerequisite>,
+    pub provisional_staging_destination: Option<String>,
+    pub replay_snapshot_required: bool,
     pub recorded_verdict_tips: Vec<String>,
     pub eligible_verdict_tips: Vec<String>,
     pub verdict_assessments: Vec<VerdictAssessment>,
@@ -577,6 +579,7 @@ pub struct StatusReport {
     pub priority: i32,
     pub messages: Vec<MessageStatus>,
     pub blocks: Vec<String>,
+    /// Canonical closures; local provisional prerequisite references are separate.
     pub blocker_status: BlockerStatus,
     pub claim: Option<ClaimStatus>,
     pub current_head: Option<String>,
@@ -1823,9 +1826,11 @@ fn build_report(
     Ok(StatusReport {
         obsolete_provisional_ancestry: Vec::new(),
         provisional_prerequisites: Vec::new(),
+        provisional_staging_destination: None,
+        replay_snapshot_required: false,
         integration_mode: crate::integration::Mode::Authoritative,
         integration_mode_refusal: None,
-        provisional_integrations: crate::provisional::project_obligations(state),
+        provisional_integrations: crate::provisional::project_obligations_at(state, now),
         recorded_verdict_tips: state
             .verdict_tips()
             .iter()
@@ -1971,8 +1976,28 @@ pub fn claim_status_at(
 }
 
 impl StatusReport {
+    pub fn require_replay_snapshot(&mut self, required: bool) {
+        self.replay_snapshot_required = required;
+        if required {
+            if !self.readiness.blockers.contains(&Blocker::NoValidApproval) {
+                self.readiness.blockers.push(Blocker::NoValidApproval);
+            }
+            self.readiness.blockers.sort_by_key(|blocker| {
+                blockers::PRIORITY
+                    .iter()
+                    .position(|candidate| candidate == blocker)
+            });
+            self.next_action = "snapshot_replayed_head".into();
+            self.ready_reason = "provisional ancestry substitution requires a new patchset and fresh review or debt".into();
+        }
+    }
     pub fn require_provisional_replay(&mut self, commits: Vec<String>) {
         self.obsolete_provisional_ancestry = commits;
+        if !self.obsolete_provisional_ancestry.is_empty() {
+            self.next_action = "replay_provisional_ancestry".into();
+            self.ready_reason =
+                "publication requires replay onto accepted authority history".into();
+        }
         if !self.obsolete_provisional_ancestry.is_empty()
             && !self.readiness.blockers.contains(&Blocker::NeedsRebase)
         {
@@ -1990,8 +2015,12 @@ impl StatusReport {
         self.readiness
             .blockers
             .retain(|blocker| *blocker != Blocker::IntegrationMode);
-        if self.integration_mode_refusal.is_some() {
+        if let Some(reason) = &self.integration_mode_refusal {
             self.readiness.blockers.insert(0, Blocker::IntegrationMode);
+            self.ready_reason = reason.clone();
+            if mode == crate::integration::Mode::Authoritative {
+                self.next_action = "check_provisional".into();
+            }
         }
     }
     /// Every blocker on the change, highest precedence first.

@@ -390,10 +390,14 @@ fn approve(repo: &Repo, change: &str) {
 }
 
 fn integrate_authority(repo: &Repo, change: &str) -> String {
-    stdout(
-        repo.arc(&repo.root)
-            .args(["integrate", change, "--shape", "no-ff"]),
-    );
+    stdout(repo.arc(&repo.root).args([
+        "integrate",
+        change,
+        "--shape",
+        "no-ff",
+        "--message",
+        "merge: authoritative acceptance",
+    ]));
     json_stdout(repo.arc(&repo.root).args(["show", change, "--json"]))["closure"]["event_id"]
         .as_str()
         .unwrap()
@@ -850,7 +854,7 @@ fn forge_settlement_uses_assertion_evidence_without_transport() {
         .as_str()
         .unwrap()
         .to_string();
-    stdout(authority.arc(&authority.root).args([
+    let output = stdout(authority.arc(&authority.root).args([
         "replica",
         "provisional",
         "resolve",
@@ -860,6 +864,7 @@ fn forge_settlement_uses_assertion_evidence_without_transport() {
         "--because",
         "forge acceptance",
     ]));
+    assert!(output.contains("resolved by assertion"), "{output}");
     assert_eq!(
         obligation(&authority, &change)["disposition"],
         "resolved-by-assertion"
@@ -1224,4 +1229,487 @@ fn provisional_import_requires_its_publishing_capability_and_pins_delivery_objec
         ),
         row["provisional_commit"].as_str().unwrap()
     );
+}
+
+#[test]
+fn replacing_provisional_ancestry_is_not_signature_only_and_forces_a_patchset() {
+    use std::io::Write;
+    let (authority, worker) = worker();
+    let prerequisite = prepared(&worker);
+    prepare(&worker, &prerequisite);
+    let staged = obligation(&worker, &prerequisite)["provisional_commit"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (change, worktree) = dependent(&worker, &prerequisite);
+    let old = worker.head(&worktree);
+    deliver(&worker, &authority, &prerequisite, true);
+    stdout(authority.arc(&authority.root).args([
+        "integrate",
+        &prerequisite,
+        "--shape",
+        "no-ff",
+        "--message",
+        "merge: canonical acceptance",
+    ]));
+    let accepted = authority.head(&authority.root);
+    deliver(&authority, &worker, &prerequisite, true);
+    let raw = Command::new("git")
+        .current_dir(&worktree)
+        .args(["cat-file", "commit", &old])
+        .output()
+        .unwrap()
+        .stdout;
+    let replaced = String::from_utf8(raw).unwrap().replace(
+        &format!("parent {staged}\n"),
+        &format!("parent {accepted}\n"),
+    );
+    let mut writer = Command::new("git")
+        .current_dir(&worktree)
+        .args(["hash-object", "-t", "commit", "-w", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    writer
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(replaced.as_bytes())
+        .unwrap();
+    let output = writer.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let rewritten = String::from_utf8(output.stdout).unwrap().trim().to_string();
+    git(
+        &worker.root,
+        &["update-ref", "refs/heads/arc/dependent", &rewritten, &old],
+    );
+    stdout(
+        worker
+            .arc(&worker.root)
+            .args([
+                "history",
+                "rewrite",
+                "--map",
+                "-",
+                "--reason",
+                "replay onto accepted prerequisite",
+            ])
+            .write_stdin(format!("{staged} {accepted}\n{old} {rewritten}\n")),
+    );
+    let status = status(&worker, &change);
+    assert_eq!(status["has_valid_approval"], false, "{status}");
+    let before = status["latest_patchset"]["id"].clone();
+    worker
+        .arc(&worker.root)
+        .args([
+            "integrate",
+            &change,
+            "--provisional",
+            "--debt",
+            "explicit debt still requires a replay snapshot",
+        ])
+        .assert()
+        .code(3);
+    stdout(worker.arc(&worktree).args(["snapshot", &change]));
+    let after = self::status(&worker, &change);
+    assert_ne!(
+        after["latest_patchset"]["id"], before,
+        "ancestry replay requires a new patchset"
+    );
+    assert_eq!(after["has_valid_approval"], false);
+    approve(&worker, &change);
+    assert_eq!(self::status(&worker, &change)["has_valid_approval"], true);
+}
+
+#[test]
+fn an_authority_refusal_blocks_stacking_until_its_verdict_is_superseded() {
+    let (authority, worker) = worker();
+    let prerequisite = prepared(&worker);
+    prepare(&worker, &prerequisite);
+    let (change, _) = dependent(&worker, &prerequisite);
+    deliver(&worker, &authority, &prerequisite, true);
+    stdout(authority.arc(&authority.root).args([
+        "review",
+        &prerequisite,
+        "--verdict",
+        "changes-requested",
+        "--cause",
+        "executor",
+    ]));
+    deliver(&authority, &worker, &prerequisite, false);
+    assert_eq!(
+        obligation(&worker, &prerequisite)["disposition"],
+        "authority-refused"
+    );
+    worker
+        .arc(&worker.root)
+        .args(["check", &change, "--provisional"])
+        .assert()
+        .code(7);
+    approve(&authority, &prerequisite);
+    deliver(&authority, &worker, &prerequisite, false);
+    worker
+        .arc(&worker.root)
+        .args(["check", &change, "--provisional"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn a_delivery_recorded_after_canonical_closure_stays_visible_and_can_reconcile() {
+    let (authority, worker) = worker();
+    let change = prepared(&worker);
+    deliver(&worker, &authority, &change, true);
+    let integration = integrate_authority(&authority, &change);
+    rewrite_event(&authority, &change, "change-integrated", |event| {
+        event
+            .as_object_mut()
+            .unwrap()
+            .remove("authority_grant_event_id");
+    });
+    prepare(&worker, &change);
+    let id = obligation(&worker, &change)["event_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        id > integration,
+        "late recording must follow closure in event-ID order"
+    );
+    deliver(&worker, &authority, &change, true);
+    assert_eq!(
+        obligation(&authority, &change)["disposition"],
+        "requires-reconciliation"
+    );
+    stdout(authority.arc(&authority.root).args([
+        "replica",
+        "provisional",
+        "resolve",
+        &change,
+        "--integration",
+        &integration,
+        "--because",
+        "late delivery of accepted head",
+    ]));
+    assert_eq!(obligation(&authority, &change)["disposition"], "resolved");
+}
+
+#[test]
+fn late_resolution_rejects_conflicting_patchset_kind_and_grant_evidence() {
+    for damaged in ["patchset", "kind", "grant"] {
+        let (authority, worker) = worker();
+        let change = prepared(&worker);
+        prepare(&worker, &change);
+        export_without_preparation(&worker, &authority, &change);
+        let integration = integrate_authority(&authority, &change);
+        deliver(&worker, &authority, &change, true);
+        if damaged == "grant" {
+            rewrite_event(&authority, &change, "change-integrated", |event| {
+                event["authority_grant_event_id"] = serde_json::json!("missing-grant");
+            });
+        } else {
+            stdout(authority.arc(&authority.root).args([
+                "replica",
+                "provisional",
+                "resolve",
+                &change,
+                "--integration",
+                &integration,
+                "--because",
+                "late acceptance",
+            ]));
+            rewrite_event(
+                &authority,
+                &change,
+                "provisional-integration-resolved",
+                |event| {
+                    if damaged == "patchset" {
+                        event["accepted_patchset_id"] = serde_json::json!("ps-missing");
+                    } else {
+                        event["kind"] = serde_json::json!("revised-head");
+                    }
+                },
+            );
+        }
+        let id = obligation(&authority, &change)["event_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        authority
+            .arc(&authority.root)
+            .args([
+                "replica",
+                "provisional",
+                "resolve",
+                &change,
+                "--integration",
+                &integration,
+                "--provisional",
+                &id,
+                "--because",
+                "validate evidence",
+            ])
+            .assert()
+            .code(1);
+    }
+}
+
+#[test]
+fn protected_primary_source_and_layered_policy_destinations_refuse() {
+    let (_authority, worker) = worker();
+    let change = prepared(&worker);
+    git(
+        &worker.root,
+        &["checkout", "-b", "arc/provisional/worker/primary"],
+    );
+    worker
+        .arc(&worker.root)
+        .args([
+            "integrate",
+            &change,
+            "--provisional",
+            "--into",
+            "arc/provisional/worker/primary",
+        ])
+        .assert()
+        .code(17)
+        .stderr(predicates::str::contains("primary checkout"));
+    git(&worker.root, &["checkout", "master"]);
+    git(
+        &worker.root,
+        &[
+            "branch",
+            "-m",
+            "arc/prepared",
+            "arc/provisional/worker/source",
+        ],
+    );
+    rewrite_event(&worker, &change, "change-opened", |event| {
+        event["branch"] = serde_json::json!("arc/provisional/worker/source");
+    });
+    worker
+        .arc(&worker.root)
+        .args([
+            "integrate",
+            &change,
+            "--provisional",
+            "--into",
+            "arc/provisional/worker/source",
+        ])
+        .assert()
+        .code(17)
+        .stderr(predicates::str::contains("source branch"));
+    fs::create_dir_all(worker.root.join(".arc")).unwrap();
+    worker.commit(&worker.root, ".arc/policy.toml", "[replica]\nprovisional_enabled=false\nprotected_targets=['arc/provisional/worker/project']\n", "policy: restrict preparation");
+    worker.declare_gates_locally("[replica]\nprovisional_enabled=true\nprotected_targets=['arc/provisional/worker/operator']\n");
+    worker
+        .arc(&worker.root)
+        .args(["integrate", &change, "--provisional"])
+        .assert()
+        .code(17)
+        .stderr(predicates::str::contains("disabled"));
+    worker.commit(&worker.root, ".arc/policy.toml", "[replica]\nprovisional_enabled=true\nprotected_targets=['arc/provisional/worker/project']\n", "policy: permit protected staging");
+    for target in [
+        "arc/provisional/worker/project",
+        "arc/provisional/worker/operator",
+    ] {
+        worker
+            .arc(&worker.root)
+            .args(["integrate", &change, "--provisional", "--into", target])
+            .assert()
+            .code(17)
+            .stderr(predicates::str::contains("protected_targets"));
+    }
+    worker.declare_gates_locally("[replica]\nprovisional_enabled=false\n");
+    worker
+        .arc(&worker.root)
+        .args(["check", &change, "--provisional"])
+        .assert()
+        .code(17);
+}
+
+#[test]
+fn an_inflight_offer_requires_an_explicit_routing_recipient() {
+    let (authority, worker) = worker();
+    let offline = Repo::new();
+    let id = json_stdout(offline.arc(&offline.root).args(["replica", "id", "--json"]));
+    stdout(authority.arc(&authority.root).args([
+        "replica",
+        "pair",
+        "offline",
+        "--repository-id",
+        id["repository_id"].as_str().unwrap(),
+    ]));
+    stdout(authority.arc(&authority.root).args([
+        "replica",
+        "authority",
+        "offer",
+        "--to",
+        "offline",
+    ]));
+    let pairing = authority.home.join("flight.json");
+    stdout(authority.arc(&authority.root).args([
+        "replica",
+        "export",
+        "--output",
+        pairing.to_str().unwrap(),
+    ]));
+    let bytes = fs::read(&pairing).unwrap();
+    stdout(worker.arc(&worker.root).args([
+        "replica",
+        "import",
+        pairing.to_str().unwrap(),
+        "--publisher",
+        "channel",
+        "--received-sha256",
+        &hex::encode(Sha256::digest(bytes)),
+    ]));
+    let change = prepared(&worker);
+    worker
+        .arc(&worker.root)
+        .args(["integrate", &change, "--provisional"])
+        .assert()
+        .code(17)
+        .stderr(predicates::str::contains("offer"));
+    worker
+        .arc(&worker.root)
+        .args([
+            "integrate",
+            &change,
+            "--provisional",
+            "--for-replica",
+            "missing",
+        ])
+        .assert()
+        .code(17);
+    stdout(worker.arc(&worker.root).args([
+        "integrate",
+        &change,
+        "--provisional",
+        "--for-forge",
+        "opaque",
+    ]));
+}
+
+#[test]
+fn staging_conflict_merged_tree_and_closed_guards_preserve_their_codes() {
+    for guard in ["conflict", "merged-tree", "closed"] {
+        let (_authority, worker) = worker();
+        let change = prepared(&worker);
+        let tree = worker.home.join(".worktrees/repo-prepared");
+        match guard {
+            "conflict" => {
+                worker.commit(&tree, "README.md", "source\n", "feat: source edit");
+                stdout(worker.arc(&tree).args(["snapshot", &change]));
+                approve(&worker, &change);
+                worker.commit(&worker.root, "README.md", "target\n", "feat: target edit");
+            }
+            "merged-tree" => {
+                worker.declare_gates_locally("[gates.required]\ncommand='true'\n");
+                stdout(worker.arc(&tree).args(["verify", &change, "--all"]));
+                worker.commit(
+                    &worker.root,
+                    "target.txt",
+                    "target\n",
+                    "feat: target advances",
+                );
+            }
+            "closed" => {
+                stdout(
+                    worker
+                        .arc(&worker.root)
+                        .args(["close", &change, "--abandoned"]),
+                );
+            }
+            _ => unreachable!(),
+        }
+        let code = match guard {
+            "conflict" => 11,
+            "merged-tree" => 14,
+            _ => 6,
+        };
+        worker
+            .arc(&worker.root)
+            .args(["check", &change, "--provisional"])
+            .assert()
+            .code(code);
+        worker
+            .arc(&worker.root)
+            .args(["integrate", &change, "--provisional"])
+            .assert()
+            .code(code);
+    }
+}
+
+#[test]
+fn completed_intent_recovery_preserves_a_competing_staging_ref() {
+    let (_authority, worker) = worker();
+    let change = prepared(&worker);
+    prepare(&worker, &change);
+    let row = obligation(&worker, &change);
+    let event_path = worker
+        .root
+        .join(".git/arc/changes")
+        .join(&change)
+        .join("events")
+        .join(format!("{}.json", row["event_id"].as_str().unwrap()));
+    let event: serde_json::Value = serde_json::from_slice(&fs::read(event_path).unwrap()).unwrap();
+    let intent = worker
+        .root
+        .join(".git/arc/provisional")
+        .join(format!("{change}.json"));
+    fs::write(
+        &intent,
+        serde_json::to_vec(&serde_json::json!({ "event": event, "old_staging": null })).unwrap(),
+    )
+    .unwrap();
+    let competing = worker.head(&worker.root);
+    git(
+        &worker.root,
+        &[
+            "update-ref",
+            "refs/heads/arc/provisional/worker/master",
+            &competing,
+        ],
+    );
+    prepare(&worker, &change);
+    assert_eq!(
+        git_out(
+            &worker.root,
+            &["rev-parse", "arc/provisional/worker/master"]
+        ),
+        competing
+    );
+    assert!(!intent.exists());
+    assert_eq!(
+        status(&worker, &change)["provisional_integrations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn recipient_routing_does_not_grant_or_restrict_publication_authority() {
+    let (authority, worker) = worker();
+    let change = prepared(&worker);
+    stdout(worker.arc(&worker.root).args([
+        "integrate",
+        &change,
+        "--provisional",
+        "--for-replica",
+        "worker",
+    ]));
+    worker
+        .arc(&worker.root)
+        .args(["integrate", &change])
+        .assert()
+        .code(17);
+    let recipient = obligation(&worker, &change)["recipient"].clone();
+    deliver(&worker, &authority, &change, true);
+    integrate_authority(&authority, &change);
+    assert_eq!(obligation(&authority, &change)["recipient"], recipient);
+    assert_eq!(obligation(&authority, &change)["disposition"], "resolved");
 }

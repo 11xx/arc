@@ -1685,16 +1685,25 @@ pub(crate) fn observed_authority(store: &Store) -> Result<Option<crate::model::A
 
 pub(crate) fn grant_holder(store: &Store, grant: &str) -> Result<Option<String>> {
     let events = load_events(store)?;
-    let Some(position) = events.iter().position(|event| event.event_id == grant) else {
+    let Some(initial) = events.first() else {
         return Ok(None);
     };
-    let Some(state) = snapshot(&events[..=position], &events[0].actor.repository_id)? else {
+    snapshot(&events, &initial.actor.repository_id)?;
+    let Some(event) = events.iter().find(|event| event.event_id == grant) else {
         return Ok(None);
     };
-    Ok((state.authority_event_id == grant)
-        .then_some(state.authority.holder)
-        .flatten()
-        .map(|holder| holder.repository_id))
+    let offer = |offer_id: &str| {
+        events.iter().find(|event| matches!(&event.payload, ReplicaPayload::AuthorityOffered { offer_id: held, .. } if held == offer_id))
+    };
+    Ok(match &event.payload {
+        ReplicaPayload::Initialized | ReplicaPayload::AuthorityAcquired { .. } => {
+            Some(event.actor.repository_id.clone())
+        }
+        ReplicaPayload::AuthorityReturnConfirmed { offer_id, .. } => {
+            offer(offer_id).map(|offer| offer.actor.repository_id.clone())
+        }
+        _ => None,
+    })
 }
 
 #[cfg(test)]

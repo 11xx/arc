@@ -694,7 +694,18 @@ fn plan_repository_events(
         if held.contains(&event.event_id) || withdrawn.contains(event.event_id.as_str()) {
             continue;
         }
-        let judged = crate::rewrite::signature_only_successors(cwd, mapping, &rewrites);
+        let extra: Vec<_> = validated
+            .events
+            .iter()
+            .filter_map(|event| event.typed.clone())
+            .collect();
+        let judged = crate::provisional::retain_signature_only(
+            cwd,
+            store,
+            &extra,
+            &rewrites,
+            crate::rewrite::signature_only_successors(cwd, mapping, &rewrites),
+        )?;
         let mut value = value.clone();
         if let Some(object) = value.as_object_mut() {
             object.remove(crate::store::SIGNATURE_ONLY_FIELD);

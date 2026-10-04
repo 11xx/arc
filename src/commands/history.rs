@@ -94,7 +94,13 @@ pub fn record_mapping(
         ..
     } = &mut event.payload
     {
-        *signature_only = crate::rewrite::signature_only_successors(&ctx.cwd, mapping, &rewrites);
+        *signature_only = crate::provisional::retain_signature_only(
+            &ctx.cwd,
+            Some(&store),
+            &[],
+            &rewrites,
+            crate::rewrite::signature_only_successors(&ctx.cwd, mapping, &rewrites),
+        )?;
     }
     store.append_repository_event(&event)?;
     println!("history rewrite recorded: {count} revisions");

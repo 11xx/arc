@@ -2005,7 +2005,7 @@ fn report_ledger_facts(
         };
         for (change_id, state) in states {
             ledger.provisional_integrations.extend(
-                crate::provisional::unresolved(&state)
+                crate::provisional::unresolved_at(&state, observed)
                     .into_iter()
                     .map(|row| {
                         serde_json::to_value(row).expect("serializable provisional obligation")

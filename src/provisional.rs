@@ -17,6 +17,7 @@ pub struct Obligation {
     pub publication_target: String,
     pub staging_branch: String,
     pub provisional_commit: String,
+    pub local_merge: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub age_seconds: u64,
     pub disposition: String,
@@ -56,9 +57,13 @@ pub fn project_obligations(state: &ChangeState) -> Vec<Obligation> {
                 publication_target: publication_target.clone(),
                 staging_branch: staging_branch.clone(),
                 provisional_commit: provisional_commit.clone(),
+                local_merge: state
+                    .provisional_signature_successors
+                    .get(provisional_commit)
+                    .cloned()
+                    .unwrap_or_else(|| provisional_commit.clone()),
                 created_at: event.created_at,
-                age_seconds: u64::try_from((chrono::Utc::now() - event.created_at).num_seconds())
-                    .unwrap_or(0),
+                age_seconds: 0,
                 disposition: "pending".into(),
                 reason: None,
                 refusal_event_id: None,
@@ -73,13 +78,21 @@ pub fn project_obligations(state: &ChangeState) -> Vec<Obligation> {
                 row.reason =
                     Some("another local preparation exists; acceptance remains owed".into());
             }
-            let holder = state.privilege_scope.as_ref().and_then(|scope| scope.authority_holder.as_ref()).or_else(|| authority_observed.as_ref().and_then(|authority| authority.holder_repository_id.as_ref()));
-            let mut authority_history = state.clone();
-            authority_history.verdicts.retain(|verdict| holder.is_some_and(|holder| *holder == verdict.origin_replica_id) && state.privilege_scope.as_ref().is_none_or(|scope| verdict.origin_replica_id == scope.local_origin && !scope.imported_event_ids.contains(&verdict.event_id) || scope.admission_for(&verdict.event_id).is_some_and(|receipt| receipt.authorized_roles.iter().any(|role| matches!(role, crate::import_authorization::Role::ReviewInput | crate::import_authorization::Role::ReviewAuthority)))));
-            if let Some(verdict) = authority_history.verdict_tips().into_iter().find(|verdict| verdict.verdict == Verdict::ChangesRequested && verdict.patchset_id == *source_patchset_id) {
+            let holder = state
+                .privilege_scope
+                .as_ref()
+                .and_then(|scope| scope.authority_holder.as_ref())
+                .or_else(|| {
+                    authority_observed
+                        .as_ref()
+                        .and_then(|authority| authority.holder_repository_id.as_ref())
+                });
+            if let Some(event_id) =
+                authority_refusal(state, holder.map(String::as_str), source_patchset_id)
+            {
                 row.disposition = "authority-refused".into();
                 row.reason = Some("changes requested on the delivered patchset".into());
-                row.refusal_event_id = Some(verdict.event_id.clone());
+                row.refusal_event_id = Some(event_id);
             }
             if let Some(closure) = &state.closure {
                 row.reason.get_or_insert_with(|| {
@@ -150,6 +163,57 @@ pub fn project_obligations(state: &ChangeState) -> Vec<Obligation> {
         .collect()
 }
 
+// An authority refusal is a negative fact; it grants no review or publication permission.
+fn authority_refusal(state: &ChangeState, holder: Option<&str>, patchset: &str) -> Option<String> {
+    let history: Vec<_> = state
+        .verdicts
+        .iter()
+        .filter(|verdict| {
+            holder == Some(verdict.origin_replica_id.as_str())
+                && state.privilege_scope.as_ref().is_none_or(|scope| {
+                    verdict.origin_replica_id == scope.local_origin
+                        && !scope.imported_event_ids.contains(&verdict.event_id)
+                        || scope
+                            .admission_for(&verdict.event_id)
+                            .is_some_and(|receipt| {
+                                receipt.authorized_roles.iter().any(|role| {
+                                    matches!(
+                                        role,
+                                        crate::import_authorization::Role::ReviewInput
+                                            | crate::import_authorization::Role::ReviewAuthority
+                                    )
+                                })
+                            })
+                })
+        })
+        .cloned()
+        .collect();
+    crate::state::verdict_tips_for(&history)
+        .into_iter()
+        .find(|verdict| {
+            verdict.verdict == Verdict::ChangesRequested && verdict.patchset_id == patchset
+        })
+        .map(|verdict| verdict.event_id.clone())
+}
+
+pub fn project_obligations_at(
+    state: &ChangeState,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<Obligation> {
+    let mut rows = project_obligations(state);
+    for row in &mut rows {
+        row.age_seconds = u64::try_from((now - row.created_at).num_seconds()).unwrap_or(0);
+    }
+    rows
+}
+
+pub fn unresolved_at(state: &ChangeState, now: chrono::DateTime<chrono::Utc>) -> Vec<Obligation> {
+    project_obligations_at(state, now)
+        .into_iter()
+        .filter(|row| !row.disposition.starts_with("resolved"))
+        .collect()
+}
+
 pub fn unresolved(state: &ChangeState) -> Vec<Obligation> {
     project_obligations(state)
         .into_iter()
@@ -163,15 +227,20 @@ pub fn satisfies_local_prerequisite(
     local: &str,
     staging_head: &str,
 ) -> Result<Option<ProvisionalPrerequisite>> {
+    if state.closure.is_some() {
+        return Ok(None);
+    }
     let Some(latest) = state.latest_patchset() else {
         return Ok(None);
     };
     for row in project_obligations(state).into_iter().rev() {
-        if state
-            .privilege_scope
-            .as_ref()
-            .is_some_and(|scope| scope.imported_event_ids.contains(&row.event_id))
-        {
+        if state.privilege_scope.as_ref().is_some_and(|scope| {
+            !scope.permits(
+                &row.event_id,
+                &row.source_replica,
+                crate::import_authorization::Role::ProvisionalIntegration,
+            )
+        }) {
             continue;
         }
         if row.source_replica != local
@@ -183,15 +252,15 @@ pub fn satisfies_local_prerequisite(
         {
             continue;
         }
-        if crate::gitio::read_commit(cwd, &row.provisional_commit).is_err() {
+        if crate::gitio::read_commit(cwd, &row.local_merge).is_err() {
             continue;
         }
-        if crate::gitio::is_ancestor(cwd, &row.provisional_commit, staging_head)? {
+        if crate::gitio::is_ancestor(cwd, &row.local_merge, staging_head)? {
             return Ok(Some(ProvisionalPrerequisite {
                 change_id: state.change_id.clone(),
                 provisional_event_id: row.event_id,
                 source_patchset_id: row.source_patchset_id,
-                provisional_commit: row.provisional_commit,
+                provisional_commit: row.local_merge,
             }));
         }
     }
@@ -222,7 +291,7 @@ pub fn acceptances(
 ) -> Result<Vec<ProvisionalResolution>> {
     Ok(unresolved(state)
         .into_iter()
-        .filter(|row| matches!(&row.recipient, ProvisionalRecipient::Replica { repository_id } if state.privilege_scope.as_ref().is_some_and(|scope| scope.local_origin == *repository_id)))
+        .filter(|row| matches!(&row.recipient, ProvisionalRecipient::Replica { repository_id } if !repository_id.trim().is_empty()))
         .map(|row| ProvisionalResolution {
             provisional_event_id: row.event_id,
             delivered_patchset_id: row.source_patchset_id,
@@ -254,15 +323,21 @@ pub fn validate_resolution(
         );
     }
     let (patchset, head) = match (&row.recipient, &integration.payload) {
-        (ProvisionalRecipient::Replica { repository_id }, Payload::ChangeIntegrated { source_patchset_id, source_head, .. }) if repository_id == recipient => (source_patchset_id, source_head),
+        (ProvisionalRecipient::Replica { repository_id }, Payload::ChangeIntegrated { source_patchset_id, source_head, .. }) if !repository_id.trim().is_empty() && integration.repository_id == recipient => (source_patchset_id, source_head),
         (ProvisionalRecipient::Forge { reference }, Payload::IntegrationAsserted { external_reference: Some(held), source_patchset_id, source_head, .. }) if reference == held => (source_patchset_id, source_head),
         _ => bail!("integration {} does not provide the required recipient/integration evidence for {provisional}", integration.event_id),
     };
+    let accepted_head = state
+        .closure
+        .as_ref()
+        .filter(|closure| closure.event_id == integration.event_id)
+        .and_then(|closure| closure.source_head.as_deref())
+        .unwrap_or(head);
     if integration.change_id != state.change_id
         || !state
             .patchsets
             .iter()
-            .any(|p| p.id == *patchset && p.head == *head)
+            .any(|p| p.id == *patchset && p.head == accepted_head)
     {
         bail!(
             "integration {} has no valid accepted patchset in {}",
@@ -270,10 +345,14 @@ pub fn validate_resolution(
             state.change_id
         );
     }
-    Ok((
-        patchset.clone(),
-        acceptance_kind(state, &row.source_head, head),
-    ))
+    let kind = acceptance_kind(state, &row.source_head, head);
+    if row.integration_event_id.is_some()
+        && (row.accepted_patchset_id.as_deref() != Some(patchset)
+            || row.resolution_kind != Some(kind))
+    {
+        bail!("conflicting accepted patchset or resolution kind for {provisional}");
+    }
+    Ok((patchset.clone(), kind))
 }
 
 pub fn retention_ref(change: &str, event: &str) -> String {
@@ -297,11 +376,13 @@ pub fn obsolete_ancestry(
     let mut merges = Vec::new();
     for prerequisite in states.values() {
         for row in project_obligations(prerequisite) {
-            if crate::gitio::commit_exists(cwd, &row.provisional_commit)?
-                && crate::gitio::is_ancestor(cwd, &row.provisional_commit, &patchset.head)?
-                && !crate::gitio::is_ancestor(cwd, &row.provisional_commit, &target)?
-            {
-                merges.push(row.provisional_commit);
+            for merge in [row.provisional_commit, row.local_merge] {
+                if crate::gitio::commit_exists(cwd, &merge)?
+                    && crate::gitio::is_ancestor(cwd, &merge, &patchset.head)?
+                    && !crate::gitio::is_ancestor(cwd, &merge, &target)?
+                {
+                    merges.push(merge);
+                }
             }
         }
     }
@@ -428,4 +509,117 @@ pub fn validate_resolution_history(
         }
     }
     Ok(())
+}
+
+/// Substitution of a staging merge with an accepting integration requires fresh review.
+pub fn retain_signature_only(
+    cwd: &Path,
+    store: Option<&crate::store::Store>,
+    extra: &[Event],
+    rewrites: &crate::rewrite::RewriteMap,
+    judged: Vec<String>,
+) -> Result<Vec<String>> {
+    let mut provisional = std::collections::BTreeSet::new();
+    let mut canonical = std::collections::BTreeSet::new();
+    if let Some(store) = store {
+        for state in store.readable_states()?.values() {
+            for row in &state.provisional_integrations {
+                if let Payload::ChangeProvisionallyIntegrated {
+                    provisional_commit, ..
+                } = &row.payload
+                {
+                    provisional.insert(provisional_commit.clone());
+                    if let Some(effective) = state
+                        .provisional_signature_successors
+                        .get(provisional_commit)
+                    {
+                        provisional.insert(effective.clone());
+                    }
+                }
+            }
+            if let Some(commit) = state
+                .closure
+                .as_ref()
+                .filter(|closure| closure.outcome == Closure::Integrated)
+                .and_then(|closure| closure.integrated_commit.clone())
+            {
+                canonical.insert(commit);
+            }
+        }
+    }
+    for event in extra {
+        match &event.payload {
+            Payload::ChangeProvisionallyIntegrated {
+                provisional_commit, ..
+            } => {
+                provisional.insert(provisional_commit.clone());
+            }
+            Payload::ChangeIntegrated {
+                integrated_commit, ..
+            }
+            | Payload::IntegrationAsserted {
+                integrated_commit, ..
+            } => {
+                canonical.insert(integrated_commit.clone());
+            }
+            _ => (),
+        }
+    }
+    let originals = provisional.clone();
+    for original in originals {
+        for candidate in rewrites.mapped_revisions() {
+            if candidate != original
+                && !canonical.contains(candidate)
+                && rewrites.same(&original, candidate)?
+            {
+                let mapping = std::collections::BTreeMap::from([(
+                    original.clone(),
+                    Some(candidate.to_string()),
+                )]);
+                if !crate::rewrite::signature_only_successors(cwd, &mapping, rewrites).is_empty() {
+                    provisional.insert(candidate.to_string());
+                }
+            }
+        }
+    }
+    let substitutions: Vec<_> = provisional
+        .into_iter()
+        .filter_map(|old| {
+            let new = rewrites.current(&old).ok()?;
+            (old != new && canonical.contains(&new)).then_some((old, new))
+        })
+        .collect();
+    let mut retained = Vec::new();
+    for old in judged {
+        let new = rewrites.current(&old)?;
+        let substituted = substitutions.iter().any(|(before, after)| {
+            crate::gitio::is_ancestor(cwd, before, &old).unwrap_or(true)
+                && crate::gitio::is_ancestor(cwd, after, &new).unwrap_or(true)
+        });
+        if !substituted {
+            retained.push(old);
+        }
+    }
+    Ok(retained)
+}
+
+pub fn needs_replay_snapshot(
+    cwd: &Path,
+    store: &crate::store::Store,
+    state: &ChangeState,
+) -> Result<bool> {
+    let Some(patchset) = state
+        .latest_patchset()
+        .filter(|patchset| patchset.head != patchset.approved_head)
+    else {
+        return Ok(false);
+    };
+    Ok(retain_signature_only(
+        cwd,
+        Some(store),
+        &[],
+        &store.rewrites()?,
+        vec![patchset.approved_head.clone()],
+    )?
+    .is_empty())
 }

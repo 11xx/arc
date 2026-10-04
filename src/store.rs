@@ -387,6 +387,16 @@ impl Store {
         create_private_dir_all(path.parent().context("intent has no parent")?)?;
         write_exclusive(&path, &serde_json::to_vec(intent)?)
     }
+    pub(crate) fn publish_provisional_event(&self, event: &Event) -> Result<()> {
+        self.refuse_read_only()?;
+        if !self.event_is_published(event)? {
+            self.append_event(event)?;
+        }
+        let directory = self.events_dir(&event.change_id);
+        File::open(directory.join(format!("{}.json", event.event_id)))?.sync_all()?;
+        File::open(directory)?.sync_all()?;
+        Ok(())
+    }
     pub(crate) fn clear_provisional_intent(&self, change: &str) -> Result<()> {
         let path = self.provisional_intent_path(change)?;
         fs::remove_file(&path)?;
