@@ -1062,7 +1062,13 @@ END A SESSION (what the next one reads)
   select an explicit AI home, otherwise `--sandbox`/`ARC_SANDBOX` supplies the
   home beneath which `.local/ai` lives. `arc catchup` lists global timestamp,
   topic, title and age in days beneath project memories, without bodies.
-  Read a body with `arc journal show --global <file>`.
+  Read a body with `arc journal show --global <file>`. An unavailable global
+  journal has one warning naming its source; JSON carries global_memory_error
+  in the journal field. Project context and other readable sources remain
+  in the orientation. An unavailable project journal carries
+  project_journal_error while global memories remain readable. Recording
+  discovery failures appear in session_discovery_errors; arc event writers
+  still supply session activity.
 
   `arc journal --global` selects that journal from any directory for all
   kinds and their positions and corrections, including `memory`,
@@ -1072,6 +1078,11 @@ END A SESSION (what the next one reads)
   journal, links the journals in both directions and consumes the project
   record as `superseded`, naming the global file. Historical project bodies
   remain available. Existing memories stay where the operator filed them.
+  Both journals must have settled exchanges before promotion writes. A durable
+  intent fixes the destination and events; retry the same promotion command
+  after interruption to finish that relation. Recovery refuses changed bodies
+  or a different global journal. Open claims must be released with
+  `arc release-claim <file> --outcome paused|abandoned|expired`.
 
   Global exchange uses `arc-journal-bundle/2` with logical project identity
   `arc-global-journal` and a local replica identity held in `replica.json`.

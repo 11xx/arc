@@ -14870,3 +14870,304 @@ fn catchup_discovery_keeps_opencode_store_commands_inside_the_sandbox() {
         "discovery invoked a store command outside the sandbox"
     );
 }
+
+#[test]
+fn global_memory_fixture_clears_inherited_root_overrides() {
+    let repo = Repo::new();
+    let mut command = AssertCommand::new("sh");
+    let variables = [
+        "ARC_AI_HOME",
+        "AI_HOME",
+        "ARC_DATA_DIR",
+        "ARC_DATA_ROOT",
+        "ARC_WORKTREES_DIR",
+        "ARC_JOURNAL_DIR",
+    ];
+    for variable in variables {
+        command.env(variable, repo.home.join("inherited-root"));
+    }
+    command.args(["-c", "for name in ARC_AI_HOME AI_HOME ARC_DATA_DIR ARC_DATA_ROOT ARC_WORKTREES_DIR ARC_JOURNAL_DIR; do eval \"present=\\${$name+x}\"; test -z \"$present\" || printf \"%s=present\\n\" \"$name\"; done; true"]);
+    let output = stdout(&mut repo.fixture_env(command, &repo.root));
+    for variable in variables {
+        assert!(
+            !output
+                .lines()
+                .any(|line| line.starts_with(&format!("{variable}="))),
+            "{output}"
+        );
+    }
+}
+
+fn global_memory_pending_exchange(dir: &Path) {
+    fs::create_dir_all(dir.join("exchange")).unwrap();
+    fs::write(
+        dir.join("exchange/pending.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "bodies": [], "events": "",
+            "receipt": {
+                "schema": "arc-journal-import/1", "bundle_sha256": "a".repeat(64),
+                "source_replica": {"name": "sender", "repository_id": "sender-id"},
+                "imported_by": {"name": "receiver", "repository_id": "receiver-id"},
+                "imported_at": "2026-01-01T00:00:00Z", "artifacts": []
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn global_memory_catchup_preserves_project_when_global_is_unavailable() {
+    let repo = Repo::new();
+    let (_, memory) = journal_artifact(&repo, "local-rule", "memory", "# Project rule\n");
+    let (_, todo) = journal_artifact(&repo, "local-work", "todo", "# Project work\n");
+    let (_, discussion) =
+        journal_artifact(&repo, "local-choice", "discussion", "# Project choice\n");
+    let question = pose_choice(&repo, &discussion, &["continue", "defer"]);
+    let global = repo.home.join(".local/ai/arc/journals/global");
+    fs::create_dir_all(&global).unwrap();
+    fs::write(global.join("events.jsonl"), [0xff]).unwrap();
+    let output = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
+    assert!(output["journal"].to_string().contains(&memory), "{output}");
+    assert!(output["journal"].to_string().contains(&todo), "{output}");
+    assert!(
+        output["journal"]["open_questions"]
+            .to_string()
+            .contains(&question),
+        "{output}"
+    );
+    assert!(
+        output["journal"]["global_memory_error"]
+            .as_str()
+            .unwrap()
+            .contains(&global.display().to_string()),
+        "{output}"
+    );
+    let output = stdout(repo.arc(&repo.root).args(["catchup"]));
+    assert!(
+        output.contains("Project rule") && output.contains("Project work"),
+        "{output}"
+    );
+    assert!(output.contains(&question), "{output}");
+    assert_eq!(
+        output
+            .lines()
+            .filter(|line| line.starts_with("global memory: unavailable"))
+            .count(),
+        1,
+        "{output}"
+    );
+    fs::remove_file(global.join("events.jsonl")).unwrap();
+    global_memory_pending_exchange(&global);
+    let output = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
+    assert!(
+        output["journal"]["global_memory_error"]
+            .as_str()
+            .unwrap()
+            .contains("incomplete"),
+        "{output}"
+    );
+    assert!(output["journal"].to_string().contains(&memory), "{output}");
+}
+
+#[test]
+fn global_memory_promotion_claim_hint_names_accepted_recovery() {
+    let repo = Repo::new();
+    let (_, file) = journal_artifact(&repo, "claimed-rule", "memory", "# Rule\n");
+    stdout(repo.arc(&repo.root).args(["claim", &file]));
+    repo.arc(&repo.root)
+        .args(["journal", "promote", &file, "--global"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("release-claim"))
+        .stderr(predicates::str::contains("--acknowledge-claim").not());
+    stdout(
+        repo.arc(&repo.root)
+            .args(["release-claim", &file, "--outcome", "paused"]),
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "promote", &file, "--global"]),
+    );
+}
+
+#[test]
+fn global_memory_promotion_preflights_both_exchanges() {
+    for pending_global in [false, true] {
+        let repo = Repo::new();
+        let (project, file) = journal_artifact(&repo, "pending-rule", "memory", "# Rule\n");
+        let global = repo.home.join(".local/ai/arc/journals/global");
+        global_memory_pending_exchange(if pending_global { &global } else { &project });
+        let before = journal_event_log(&project);
+        repo.arc(&repo.root)
+            .args(["journal", "promote", &file, "--global"])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("exchange is incomplete"));
+        assert_eq!(journal_event_log(&project), before);
+        assert!(journal_event_log(&global).is_empty());
+        assert!(
+            !global.exists()
+                || fs::read_dir(&global).unwrap().all(|entry| !entry
+                    .unwrap()
+                    .path()
+                    .extension()
+                    .is_some_and(|ext| ext == "md"))
+        );
+    }
+}
+
+#[test]
+fn global_memory_promotion_retry_reuses_published_destination() {
+    use std::os::unix::fs::PermissionsExt;
+    for fail_global_event in [false, true] {
+        let repo = Repo::new();
+        let (project, file) = journal_artifact(&repo, "retry-rule", "memory", "# Rule\n");
+        let global = repo.home.join(".local/ai/arc/journals/global");
+        fs::create_dir_all(&global).unwrap();
+        let events = if fail_global_event {
+            let events = global.join("events.jsonl");
+            fs::write(&events, "").unwrap();
+            events
+        } else {
+            project.join("events.jsonl")
+        };
+        let permissions = fs::metadata(&events).unwrap().permissions();
+        fs::set_permissions(&events, fs::Permissions::from_mode(0o400)).unwrap();
+        let output = repo
+            .arc(&repo.root)
+            .args(["journal", "promote", &file, "--global"])
+            .output()
+            .unwrap();
+        fs::set_permissions(&events, permissions).unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        let before = journal_event_log(&global);
+        assert_eq!(before.len(), usize::from(!fail_global_event));
+        let destination = fs::read_dir(&global)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "md"))
+            .unwrap();
+        let intent = project.join(".promotions").join(format!("{file}.json"));
+        assert!(intent.is_file());
+        let path = stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "promote", &file, "--global"]),
+        );
+        assert_eq!(path.trim(), destination.to_str().unwrap());
+        if !fail_global_event {
+            assert_eq!(journal_event_log(&global), before);
+        }
+        assert_eq!(journal_event_log(&global).len(), 1);
+        assert_eq!(
+            fs::read_dir(&global)
+                .unwrap()
+                .filter(|entry| entry
+                    .as_ref()
+                    .unwrap()
+                    .path()
+                    .extension()
+                    .is_some_and(|ext| ext == "md"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            journal_event_log(&project)
+                .iter()
+                .filter(|event| event["event"] == "consumed")
+                .count(),
+            1
+        );
+        assert!(!intent.exists());
+    }
+}
+
+#[test]
+fn global_memory_promotion_recovery_refuses_changed_bodies_and_scope() {
+    use std::os::unix::fs::PermissionsExt;
+    for changed in ["source", "destination", "global"] {
+        let repo = Repo::new();
+        let (project, file) = journal_artifact(&repo, "changed-rule", "memory", "# Rule\n");
+        let events = project.join("events.jsonl");
+        let permissions = fs::metadata(&events).unwrap().permissions();
+        fs::set_permissions(&events, fs::Permissions::from_mode(0o400)).unwrap();
+        let output = repo
+            .arc(&repo.root)
+            .args(["journal", "promote", &file, "--global"])
+            .output()
+            .unwrap();
+        fs::set_permissions(&events, permissions).unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        let global = repo.home.join(".local/ai/arc/journals/global");
+        let before = journal_event_log(&global);
+        let destination = global.join(before[0]["file"].as_str().unwrap());
+        let mut retry = repo.arc(&repo.root);
+        match changed {
+            "source" => fs::write(project.join(&file), "Changed source\n").unwrap(),
+            "destination" => fs::write(destination, "Changed destination\n").unwrap(),
+            "global" => {
+                retry
+                    .env("ARC_AI_HOME", repo.home.join("different-ai"))
+                    .env("ARC_JOURNAL_DIR", &project);
+            }
+            _ => unreachable!(),
+        }
+        retry
+            .args(["journal", "promote", &file, "--global"])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("recovery refuses"));
+        assert_eq!(journal_event_log(&global), before);
+        assert!(!journal_event_log(&project)
+            .iter()
+            .any(|event| event["event"] == "consumed"));
+        assert!(project
+            .join(".promotions")
+            .join(format!("{file}.json"))
+            .is_file());
+    }
+}
+
+#[test]
+fn global_memory_catchup_preserves_global_when_project_is_unavailable() {
+    let repo = Repo::new();
+    let (project, _) = journal_artifact(&repo, "project-rule", "memory", "# Project rule\n");
+    let path = stdout(repo.arc(&repo.home).args([
+        "journal",
+        "memory",
+        "--global",
+        "global-rule",
+        "--title",
+        "Global rule",
+    ]));
+    let file = Path::new(path.trim())
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    fs::write(project.join("events.jsonl"), [0xff]).unwrap();
+    let output = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
+    assert!(
+        output["journal"]["global_memories"]
+            .to_string()
+            .contains(file),
+        "{output}"
+    );
+    assert!(
+        output["journal"]["project_journal_error"]
+            .as_str()
+            .unwrap()
+            .contains(&project.display().to_string()),
+        "{output}"
+    );
+    let output = stdout(repo.arc(&repo.root).args(["catchup"]));
+    assert!(output.contains("Global rule"), "{output}");
+    assert_eq!(
+        output
+            .lines()
+            .filter(|line| line.starts_with("journal: unavailable"))
+            .count(),
+        1,
+        "{output}"
+    );
+}

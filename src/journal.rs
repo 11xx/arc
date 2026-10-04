@@ -1183,7 +1183,10 @@ pub enum JournalCmd {
     },
     /// Promote a live project memory into the operator journal. Requires
     /// --global. Both journals record the relation; the project memory is
-    /// consumed as superseded and its historical body is retained.
+    /// consumed as superseded and its historical body is retained. Both
+    /// journals must have settled exchanges. An interrupted promotion is
+    /// completed by retrying the same command; changed bodies or a different
+    /// global journal refuse recovery. Open claims require release-claim.
     Promote {
         /// Project memory filename (a name, not a path).
         filename: String,
@@ -5278,7 +5281,11 @@ pub(crate) fn recent_sessions(
     if limit == 0 {
         return Ok((Vec::new(), Vec::new()));
     }
-    let (recordings, mut unavailable) = crate::session_store::project_sessions(&ctx.cwd, limit)?;
+    let (recordings, mut unavailable) =
+        match crate::session_store::project_sessions(&ctx.cwd, limit) {
+            Ok(result) => result,
+            Err(error) => (Vec::new(), vec![format!("recording discovery: {error:#}")]),
+        };
     let mut rows: std::collections::BTreeMap<(String, String), RecentSession> =
         std::collections::BTreeMap::new();
     for row in recordings {
@@ -10469,6 +10476,27 @@ fn render_memories(memories: &[ArtifactEntry]) {
     }
 }
 
+/// A prepared promotion fixes the destination and event bytes before publication.
+/// Retries validate both bodies and finish the same relation without duplicating it.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemoryPromotion {
+    global: PathBuf,
+    body: String,
+    promoted: JournalEvent,
+    consumed: JournalEvent,
+}
+
+fn promotion_event_recorded(events: &[JournalEvent], event: &JournalEvent) -> Result<bool> {
+    let expected = serde_json::to_value(event)?;
+    for recorded in events {
+        if serde_json::to_value(recorded)? == expected {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn promote_memory(ctx: &Ctx, filename: &str) -> Result<i32> {
     let (topic, kind) = check_artifact_name(ctx, filename)?;
     if kind != "memory" {
@@ -10479,37 +10507,109 @@ fn promote_memory(ctx: &Ctx, filename: &str) -> Result<i32> {
     if is_global_dir(&project)? {
         bail!("promotion needs a project memory, not a global memory");
     }
+    // Both guarded locks precede intent, artifact, and event publication.
     let _source_lock = lock_journal_transition(&project)?;
-    let (source_dir, path, _, _) = open_artifact(ctx, filename)?;
-    let events = read_events(&source_dir)?;
-    ensure_claims_acknowledged(&events, filename, &[], "promote")?;
+    let _destination_lock = lock_journal_transition(&global)?;
+    let intent = project.join(".promotions").join(format!("{filename}.json"));
+    let events = read_events(&project)?;
+    if !open_artifact_claims(&events, filename).is_empty() {
+        bail!("{filename} carries open claims; release each with `arc release-claim {filename} --outcome paused|abandoned|expired` before promotion");
+    }
     if !unanswered_questions(&events, filename).is_empty() {
         bail!("cannot promote a memory with unanswered questions");
     }
-    let body = std::fs::read_to_string(&path)?;
     let global_ctx = ctx.with_cwd(global.clone());
-    let _destination_lock = lock_journal_transition(&global)?;
-    let now = Utc::now();
-    let stamp = now.format("%Y%m%dT%H%M%SZ");
-    let successor = allocate_artifact_name(&global, &format!("{stamp}-{topic}-memory.md"))?;
+    let global_events = read_events(&global)?;
     let anchor = resolve(&ctx.cwd)?.anchor.unwrap_or_else(|| ctx.cwd.clone());
     let source = format!("{}::{filename}", config::path_slug(&anchor));
-    let mut promoted = JournalEvent::base(&global_ctx, now, &topic, "note");
-    promoted.file = Some(successor.clone());
-    promoted.note = Some(format!("promoted from {source}"));
-    create_artifact(&global, &global.join(&successor), &body)?;
-    append_event(&global_ctx, &global, &promoted)?;
-    let mut consumed = JournalEvent::base(ctx, now, &topic, "consumed");
-    consumed.file = Some(filename.to_string());
-    consumed.outcome = Some("superseded".to_string());
-    consumed.note = Some(format!("promoted to global::{successor}"));
-    append_event(ctx, &project, &consumed)?;
+    let pending: MemoryPromotion = if intent.try_exists()? {
+        serde_json::from_slice(&std::fs::read(&intent)?)
+            .context("cannot read pending memory promotion")?
+    } else {
+        let (_, path, _, _) = open_artifact(ctx, filename)?;
+        let body = std::fs::read_to_string(&path)?;
+        let now = Utc::now();
+        let stamp = now.format("%Y%m%dT%H%M%SZ");
+        let successor = allocate_artifact_name(&global, &format!("{stamp}-{topic}-memory.md"))?;
+        let mut promoted = JournalEvent::base(&global_ctx, now, &topic, "note");
+        promoted.file = Some(successor.clone());
+        promoted.note = Some(format!("promoted from {source}"));
+        let mut consumed = JournalEvent::base(ctx, now, &topic, "consumed");
+        consumed.file = Some(filename.to_string());
+        consumed.outcome = Some("superseded".to_string());
+        consumed.note = Some(format!("promoted to global::{successor}"));
+        let pending = MemoryPromotion {
+            global: global.clone(),
+            body,
+            promoted,
+            consumed,
+        };
+        publish_exchange_file(&intent, &serde_json::to_vec(&pending)?)?;
+        pending
+    };
+    let successor = pending
+        .promoted
+        .file
+        .as_deref()
+        .context("pending promotion has no destination")?;
+    if pending.global != global
+        || successor.contains(['/', '\\'])
+        || !parse_artifact_name(successor).is_some_and(|(_, t, k)| t == topic && k == "memory")
+        || pending.promoted.event != "note"
+        || pending.promoted.topic != topic
+        || pending.promoted.note.as_deref() != Some(&format!("promoted from {source}"))
+        || pending.consumed.event != "consumed"
+        || pending.consumed.topic != topic
+        || pending.consumed.file.as_deref() != Some(filename)
+        || pending.consumed.outcome.as_deref() != Some("superseded")
+        || pending.consumed.note.as_deref() != Some(&format!("promoted to global::{successor}"))
+    {
+        bail!("pending memory promotion does not match this source and global journal; recovery refuses");
+    }
+    ensure_storage_settled(&project, &events, filename)?;
+    if std::fs::read_to_string(project.join(filename))? != pending.body {
+        bail!("source body changed after promotion preparation; recovery refuses");
+    }
+    let retired = promotion_event_recorded(&events, &pending.consumed)?;
+    if is_consumed(&events, filename) && !retired {
+        bail!("source was consumed outside the pending promotion; recovery refuses");
+    }
+    let destination = if let Some(path) = artifact_body_path(&global, successor) {
+        if std::fs::read_to_string(&path)? != pending.body {
+            bail!("destination body changed after promotion preparation; recovery refuses");
+        }
+        path
+    } else {
+        if retired || promotion_event_recorded(&global_events, &pending.promoted)? {
+            bail!("recorded promotion destination is missing; recovery refuses");
+        }
+        create_artifact(&global, &global.join(successor), &pending.body)?;
+        global.join(successor)
+    };
+    File::open(&destination)?.sync_all()?;
+    File::open(&global)?.sync_all()?;
+    if !promotion_event_recorded(&global_events, &pending.promoted)? {
+        append_event(&global_ctx, &global, &pending.promoted)?;
+    }
+    File::open(global.join("events.jsonl"))?.sync_all()?;
+    File::open(&global)?.sync_all()?;
+    if !retired {
+        append_event(ctx, &project, &pending.consumed)?;
+    }
+    File::open(project.join("events.jsonl"))?.sync_all()?;
+    std::fs::remove_file(&intent)?;
+    File::open(intent.parent().context("promotion intent has no parent")?)?.sync_all()?;
     println!("{}", global.join(successor).display());
     Ok(0)
 }
 
 fn global_memories() -> Result<Vec<ArtifactEntry>> {
-    let mut memories = live_memories(&config::global_journal_dir()?)?;
+    let dir = config::global_journal_dir()?;
+    ensure_exchange_settled(&dir)?;
+    if dir.try_exists()? && !dir.is_dir() {
+        bail!("global journal {} is not a directory", dir.display());
+    }
+    let mut memories = live_memories(&dir)?;
     let now = Utc::now();
     for memory in &mut memories {
         memory.heading = memory
@@ -14705,6 +14805,8 @@ pub(crate) struct Orientation {
     lanes: Vec<LaneEntry>,
     memories: Vec<ArtifactEntry>,
     global_memories: Vec<ArtifactEntry>,
+    global_memory_error: Option<String>,
+    project_journal_error: Option<String>,
     /// Questions no agent may settle. Reported first, because a session that
     /// picks up work while one waits can do everything except the thing that
     /// is actually blocked.
@@ -14714,19 +14816,85 @@ pub(crate) struct Orientation {
 }
 
 pub(crate) fn orientation(ctx: &Ctx) -> Result<Orientation> {
-    let dir = resolve_dir(&ctx.cwd)?;
     let now = Utc::now();
+    let (global_memories, global_memory_error) = match global_memories() {
+        Ok(memories) => (memories, None),
+        Err(error) => {
+            let source = config::global_journal_dir()
+                .map(|dir| dir.display().to_string())
+                .unwrap_or_else(|_| "global journal".to_string());
+            (Vec::new(), Some(format!("{source}: {error:#}")))
+        }
+    };
+    let project = (|| -> Result<_> {
+        let dir = resolve_dir(&ctx.cwd)?;
+        ensure_exchange_settled(&dir)?;
+        Ok((
+            lanes_from_journal(&read_events(&dir)?, now),
+            live_memories(&dir)?,
+            open_questions(&dir)?,
+            collect_open(ctx, None)?,
+        ))
+    })();
+    let (lanes, memories, open_questions, queue, project_journal_error) = match project {
+        Ok((lanes, memories, questions, queue)) => (lanes, memories, questions, queue, None),
+        Err(error) => {
+            let source = resolve_dir(&ctx.cwd)
+                .map(|dir| dir.display().to_string())
+                .unwrap_or_else(|_| "project journal".to_string());
+            let queue = OpenItems {
+                dir: source.clone(),
+                open: Vec::new(),
+                later: Vec::new(),
+                feature_requests: Vec::new(),
+                questions: Vec::new(),
+            };
+            (
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                queue,
+                Some(format!("{source}: {error:#}")),
+            )
+        }
+    };
     Ok(Orientation {
-        lanes: lanes_from_journal(&read_events(&dir)?, now),
-        memories: live_memories(&dir)?,
-        global_memories: global_memories()?,
-        open_questions: open_questions(&dir)?,
-        queue: collect_open(ctx, None)?,
+        lanes,
+        memories,
+        global_memories,
+        global_memory_error,
+        project_journal_error,
+        open_questions,
+        queue,
     })
 }
 
 impl Orientation {
     pub(crate) fn render(&self) {
+        if let Some(error) = &self.project_journal_error {
+            println!(
+                "journal: unavailable ({})",
+                error.replace(['\n', '\r'], " ")
+            );
+        } else {
+            self.render_project();
+            return;
+        }
+        self.render_global();
+    }
+
+    fn render_global(&self) {
+        if let Some(error) = &self.global_memory_error {
+            println!(
+                "global memory: unavailable ({})",
+                error.replace(['\n', '\r'], " ")
+            );
+        } else {
+            render_global_memories(&self.global_memories);
+        }
+    }
+
+    fn render_project(&self) {
         render_lanes(&self.lanes, Utc::now());
         if !self.open_questions.is_empty() {
             println!(
@@ -14757,7 +14925,7 @@ impl Orientation {
             println!("  `arc journal questions` for the options, `journal answer` to settle one");
         }
         render_memories(&self.memories);
-        render_global_memories(&self.global_memories);
+        self.render_global();
         println!("journal: {}", self.queue.dir());
         println!("  {OPEN_TIER_LEGEND}");
         for (label, entries) in [

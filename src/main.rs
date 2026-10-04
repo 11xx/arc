@@ -2106,7 +2106,10 @@ enum Cmd {
     /// naming handoff/conclusion is marked unfiled. Stale filings name the
     /// `journal filed` query; plain reads record no activity.
     /// Project memories precede global memory titles with their ages in days;
-    /// bodies are read on demand with journal show --global.
+    /// bodies are read on demand with journal show --global. An unavailable
+    /// journal carries its own warning, including global_memory_error or
+    /// project_journal_error in JSON; readable sources remain in the output.
+    /// Recording discovery failures appear in session_discovery_errors.
     /// Text warns when the running build differs from HEAD in an arc-ledger
     /// checkout: older for an ancestor, differs otherwise, with dirty builds
     /// identified. Other projects and unknown build revisions have no warning.

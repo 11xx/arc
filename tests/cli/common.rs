@@ -77,7 +77,7 @@ impl Repo {
         self.fixture_env(sh, cwd)
     }
 
-    fn fixture_env(&self, mut cmd: AssertCommand, cwd: &Path) -> AssertCommand {
+    pub(crate) fn fixture_env(&self, mut cmd: AssertCommand, cwd: &Path) -> AssertCommand {
         cmd.current_dir(cwd)
             .env("HOME", &self.home)
             .env("ARC_SANDBOX", &self.home)
@@ -96,6 +96,8 @@ impl Repo {
             .env_remove("ARC_DATA_DIR")
             .env_remove("ARC_DATA_ROOT")
             .env_remove("ARC_WORKTREES_DIR")
+            .env_remove("ARC_AI_HOME")
+            .env_remove("ARC_JOURNAL_DIR")
             .env_remove("AI_HOME")
             // The suite may itself run inside a harness. Whatever session
             // variable that harness exports must not reach the binary under
@@ -372,6 +374,8 @@ fn arc_command(repo: &Repo, cwd: &Path, args: &[&str], session: &str, stderr: St
         .env_remove("ARC_DATA_DIR")
         .env_remove("ARC_DATA_ROOT")
         .env_remove("ARC_WORKTREES_DIR")
+        .env_remove("ARC_AI_HOME")
+        .env_remove("ARC_JOURNAL_DIR")
         .env_remove("AI_HOME")
         .stdout(Stdio::piped())
         .stderr(stderr);
