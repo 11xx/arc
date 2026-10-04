@@ -44,6 +44,12 @@ fn independent_stores_expose_their_replica_identity() {
 #[test]
 fn imported_change_paths_remain_machine_local() {
     let source = Repo::new();
+    source.commit(
+        &source.root,
+        "source.txt",
+        "source history\n",
+        "test: source history",
+    );
     let recipient = Repo::new();
 
     let opened = stdout(source.arc(&source.root).args(["begin", "replica-path"]));
@@ -55,6 +61,7 @@ fn imported_change_paths_remain_machine_local() {
         .assert()
         .success();
 
+    deliver_git_objects(&source, &recipient);
     recipient
         .arc(&recipient.root)
         .args(["import", bundle.to_str().unwrap()])
@@ -643,6 +650,12 @@ fn reclaim_before_offer_delivery_waits_for_recipient_confirmation() {
 #[test]
 fn importing_a_contested_live_claim_writes_nothing() {
     let source = Repo::new();
+    source.commit(
+        &source.root,
+        "source.txt",
+        "source history\n",
+        "test: source history",
+    );
     let recipient = Repo::new();
     let recipient_id = repository_id(&recipient);
     source
@@ -666,6 +679,7 @@ fn importing_a_contested_live_claim_writes_nothing() {
         .args(["export", &change_id, "--output", bundle.to_str().unwrap()])
         .assert()
         .success();
+    deliver_git_objects(&source, &recipient);
     recipient
         .arc(&recipient.root)
         .args(["import", bundle.to_str().unwrap()])

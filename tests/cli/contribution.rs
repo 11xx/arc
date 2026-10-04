@@ -624,6 +624,12 @@ fn begin_and_brief_assert_change_roles() {
 #[test]
 fn change_roles_stamp_store_format_on_record_and_import() {
     let repo = Repo::new();
+    repo.commit(
+        &repo.root,
+        "source.txt",
+        "source history\n",
+        "test: source history",
+    );
     open(&repo, "portable-roles");
     stdout(
         repo.arc(&repo.root)
@@ -640,6 +646,7 @@ fn change_roles_stamp_store_format_on_record_and_import() {
         bundle.to_str().unwrap(),
     ]));
     let other = Repo::new();
+    deliver_git_objects(&repo, &other);
     stdout(other.arc(&other.root).args(["begin", "seed"]));
     stdout(
         other

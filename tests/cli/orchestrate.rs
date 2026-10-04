@@ -249,6 +249,12 @@ fn wedged_prerequisites_report_recovery_and_stay_blocked() {
 #[test]
 fn imported_change_can_remove_missing_blocker() {
     let source = Repo::new();
+    source.commit(
+        &source.root,
+        "source.txt",
+        "source history\n",
+        "test: source history",
+    );
     let blocker_out = stdout(source.arc(&source.root).args(["begin", "remote-blocker"]));
     let blocker_id = blocker_out
         .lines()
@@ -274,6 +280,7 @@ fn imported_change_can_remove_missing_blocker() {
         .success();
 
     let destination = Repo::new();
+    deliver_git_objects(&source, &destination);
     destination
         .arc(&destination.root)
         .env("ARC_ROLE", "implementer")

@@ -82,6 +82,12 @@ fn snapshotted_change_with_id(repo: &Repo, slug: &str) -> (String, PathBuf) {
 #[test]
 fn import_refuses_a_history_that_contradicts_itself() {
     let repo = Repo::new();
+    repo.commit(
+        &repo.root,
+        "source.txt",
+        "source history\n",
+        "test: source history",
+    );
     stdout(
         repo.arc(&repo.root)
             .args(["begin", "twice", "--no-worktree"]),
@@ -124,6 +130,7 @@ fn import_refuses_a_history_that_contradicts_itself() {
     fs::write(&bundle, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
 
     let other = Repo::new();
+    deliver_git_objects(&repo, &other);
     // The dry run must reach the same conclusion as the import: a preflight
     // that reports success for a bundle the real path refuses is worse than
     // no preflight, because it is believed.
@@ -131,12 +138,16 @@ fn import_refuses_a_history_that_contradicts_itself() {
         .arc(&other.root)
         .args(["import", bundle.to_str().unwrap(), "--dry-run"])
         .assert()
-        .failure();
+        .failure()
+        .stderr(predicates::str::contains("bundle closes"))
+        .stderr(predicates::str::contains("twice"));
     other
         .arc(&other.root)
         .args(["import", bundle.to_str().unwrap()])
         .assert()
-        .failure();
+        .failure()
+        .stderr(predicates::str::contains("bundle closes"))
+        .stderr(predicates::str::contains("twice"));
 }
 
 /// An audit reviews what reached the target, which is the range the

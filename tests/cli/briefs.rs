@@ -275,6 +275,12 @@ fn brief_write_is_lead_only() {
 #[test]
 fn brief_cause_is_canonical_validated_and_required_after_v1() {
     let source = Repo::new();
+    source.commit(
+        &source.root,
+        "source.txt",
+        "source history\n",
+        "test: source history",
+    );
     let change_id = begin(&source, "brief-causes");
     record(&source, "brief-causes", "initial contract\n", None);
     let finding = stdout(source.arc(&source.root).args([
@@ -356,6 +362,7 @@ fn brief_cause_is_canonical_validated_and_required_after_v1() {
         .assert()
         .success();
     let destination = Repo::new();
+    deliver_git_objects(&source, &destination);
     destination
         .arc(&destination.root)
         .args(["import", bundle.to_str().unwrap()])

@@ -679,6 +679,12 @@ fn env_requires_the_canonical_codex_id_before_using_its_model() {
 #[test]
 fn ambiguous_codex_prefix_keeps_session_resolution_unknown() {
     let repo = Repo::new();
+    repo.commit(
+        &repo.root,
+        "source.txt",
+        "source history\n",
+        "test: source history",
+    );
     let prefix = "019f0000";
     codex_recording(&repo, "019f0000-0000-7000-8000-000000000002", "first-model");
     codex_recording(
@@ -729,6 +735,7 @@ fn ambiguous_codex_prefix_keeps_session_resolution_unknown() {
     assert_eq!(exported["store_format"], 7, "{exported}");
 
     let recipient = Repo::new();
+    deliver_git_objects(&repo, &recipient);
     recipient
         .arc(&recipient.root)
         .args(["import", bundle.to_str().unwrap()])
