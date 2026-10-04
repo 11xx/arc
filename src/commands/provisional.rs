@@ -478,7 +478,125 @@ pub(crate) struct Intent {
     pub old_staging: Option<String>,
 }
 
-fn finish(ctx: &Ctx, store: &Store, intent: &Intent) -> Result<()> {
+pub(crate) const TRANSITION_SCHEMA: &str = "arc-provisional-transition/1";
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct PendingTransition {
+    pub change_id: String,
+    pub event_id: String,
+    pub source_replica: String,
+    pub provisional_commit: String,
+    pub staging_ref: String,
+    pub staging_head: Option<String>,
+    pub retention_ref: String,
+    pub retention_head: Option<String>,
+    pub applied: bool,
+    pub event_state: String,
+    pub observation_errors: Vec<String>,
+    pub intent_path: String,
+    pub intent_retained: bool,
+    pub recovery_command: String,
+}
+
+impl PendingTransition {
+    pub(crate) fn observe(cwd: &Path, store: &Store, intent: &Intent) -> Result<Self> {
+        let Payload::ChangeProvisionallyIntegrated {
+            staging_branch,
+            provisional_commit,
+            ..
+        } = &intent.event.payload
+        else {
+            bail!("provisional intent has the wrong event kind");
+        };
+        let mut observation_errors = Vec::new();
+        let staging_ref = format!("refs/heads/{staging_branch}");
+        let retention_ref =
+            crate::provisional::retention_ref(&intent.event.change_id, &intent.event.event_id);
+        let mut read_ref = |reference: &str| match gitio::ref_value(cwd, reference) {
+            Ok(value) => value,
+            Err(error) => {
+                observation_errors.push(format!("{reference}: {error:#}"));
+                None
+            }
+        };
+        let staging_head = read_ref(&staging_ref);
+        let retention_head = read_ref(&retention_ref);
+        let applied = if retention_head.as_deref() == Some(provisional_commit) {
+            match staging_head.as_deref() {
+                Some(head) => match gitio::is_ancestor(cwd, provisional_commit, head) {
+                    Ok(applied) => applied,
+                    Err(error) => {
+                        observation_errors.push(format!("staging containment: {error:#}"));
+                        false
+                    }
+                },
+                None => false,
+            }
+        } else {
+            false
+        };
+        let event_state = match store.event_is_published(&intent.event) {
+            Ok(true) => "published",
+            Ok(false) => "absent",
+            Err(error) => {
+                observation_errors.push(format!("event publication: {error:#}"));
+                "unknown"
+            }
+        };
+        let intent_path = store.provisional_intent_path(&intent.event.change_id)?;
+        Ok(Self {
+            change_id: intent.event.change_id.clone(),
+            event_id: intent.event.event_id.clone(),
+            source_replica: intent.event.repository_id.clone(),
+            provisional_commit: provisional_commit.clone(),
+            staging_ref,
+            staging_head,
+            retention_ref,
+            retention_head,
+            applied,
+            event_state: event_state.into(),
+            observation_errors,
+            intent_retained: intent_path.exists(),
+            intent_path: intent_path.display().to_string(),
+            recovery_command: format!("arc integrate {} --provisional", intent.event.change_id),
+        })
+    }
+
+    pub(crate) fn describe(&self) -> String {
+        format!(
+            "unfinished provisional integration {}; merge {}; applied={}; {}={:?}; {}={:?}; event state={}; retained intent={} at {}; recovery: {}",
+            self.event_id, self.provisional_commit, self.applied, self.staging_ref,
+            self.staging_head, self.retention_ref, self.retention_head, self.event_state,
+            self.intent_retained, self.intent_path, self.recovery_command
+        )
+    }
+}
+
+pub(crate) fn pending_transitions(cwd: &Path, store: &Store) -> Result<Vec<PendingTransition>> {
+    store
+        .provisional_intents()?
+        .iter()
+        .map(|intent| PendingTransition::observe(cwd, store, intent))
+        .collect()
+}
+
+pub(crate) fn attach_pending_transition(
+    report: &mut StatusReport,
+    cwd: &Path,
+    store: &Store,
+    change: &str,
+) -> Result<()> {
+    report.unfinished_provisional_integrations = store
+        .provisional_intent(change)?
+        .as_ref()
+        .map(|intent| PendingTransition::observe(cwd, store, intent))
+        .transpose()?
+        .into_iter()
+        .collect();
+    Ok(())
+}
+
+fn publish_transition(ctx: &Ctx, store: &Store, intent: &Intent) -> Result<()> {
     let Payload::ChangeProvisionallyIntegrated {
         staging_branch,
         staging_before,
@@ -501,23 +619,26 @@ fn finish(ctx: &Ctx, store: &Store, intent: &Intent) -> Result<()> {
     {
         bail!("provisional commit {provisional_commit} has incorrect parents/tree or a signature");
     }
-    if checked_out_staging(&ctx.cwd, staging_branch)?.is_some() {
-        bail!("staging ref refs/heads/{staging_branch} is checked out; intent retained");
-    }
     let staging = format!("refs/heads/{staging_branch}");
     let retention =
         crate::provisional::retention_ref(&intent.event.change_id, &intent.event.event_id);
     if store.event_is_published(&intent.event)? {
         store.publish_provisional_event(&intent.event)?;
         store.clear_provisional_intent(&intent.event.change_id)?;
-        println!("recovered completed provisional obligation: {}; merge {provisional_commit}; current staging work is preserved", intent.event.event_id);
         return Ok(());
     }
     let held = gitio::ref_value(&ctx.cwd, &staging)?;
     let kept = gitio::ref_value(&ctx.cwd, &retention)?;
-    if held.as_deref() == Some(provisional_commit) && kept.as_deref() == Some(provisional_commit) {
-        // Both refs prove the exact transition completed.
+    if kept.as_deref() == Some(provisional_commit)
+        && held.as_deref().is_some_and(|head| {
+            gitio::is_ancestor(&ctx.cwd, provisional_commit, head).unwrap_or(false)
+        })
+    {
+        // The exact retention pin and staging containment prove the applied transition.
     } else if held == intent.old_staging && kept.is_none() {
+        if checked_out_staging(&ctx.cwd, staging_branch)?.is_some() {
+            bail!("staging ref refs/heads/{staging_branch} is checked out; intent retained");
+        }
         gitio::update_refs(
             &ctx.cwd,
             &[
@@ -541,8 +662,31 @@ fn finish(ctx: &Ctx, store: &Store, intent: &Intent) -> Result<()> {
     }
     store.publish_provisional_event(&intent.event)?;
     store.clear_provisional_intent(&intent.event.change_id)?;
-    println!("provisionally integrated: {provisional_commit}\nstaging: refs/heads/{staging_branch}\nobligation: {}", intent.event.event_id);
     Ok(())
+}
+
+fn finish(ctx: &Ctx, store: &Store, intent: &Intent, json: bool) -> Result<i32> {
+    let result = publish_transition(ctx, store, intent);
+    let transition = PendingTransition::observe(&ctx.cwd, store, intent)?;
+    let exit_code = i32::from(result.is_err());
+    let error = result.err().map(|error| format!("{error:#}"));
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema": TRANSITION_SCHEMA, "exit_code": exit_code,
+                "transition": transition, "error": error,
+            }))?
+        );
+    } else if let Some(error) = error {
+        eprintln!(
+            "provisional transition failed: {error}\n{}",
+            transition.describe()
+        );
+    } else {
+        println!("provisionally integrated: {}\nstaging: {}\nobligation: {}; event published; current staging work is preserved", transition.provisional_commit, transition.staging_ref, transition.event_id);
+    }
+    Ok(exit_code)
 }
 
 pub fn integrate_provisionally(
@@ -564,6 +708,52 @@ pub fn integrate_provisionally(
     let store = ctx.store()?;
     let _authority = crate::replica::lock(&store)?;
     let (_, initial) = ctx.load_state(&store, &references[0])?;
+    if let Some(saved) = store.provisional_intent(&initial.change_id)? {
+        let Payload::ChangeProvisionallyIntegrated { staging_branch, .. } = &saved.event.payload
+        else {
+            bail!("provisional intent has the wrong event kind");
+        };
+        let _target = store.lock_target(staging_branch)?;
+        let _transition = store.lock_transition(&initial.change_id)?;
+        let intent = store
+            .provisional_intent(&initial.change_id)?
+            .context("provisional intent disappeared while acquiring its transition locks")?;
+        let observed = PendingTransition::observe(&ctx.cwd, &store, &intent)?;
+        if args.dry_run {
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "schema": TRANSITION_SCHEMA, "exit_code": 1, "transition": observed,
+                        "error": "an unfinished transition requires recovery",
+                    }))?
+                );
+            } else {
+                eprintln!("{}", observed.describe());
+            }
+            return Ok(1);
+        }
+        if !observed.applied && observed.event_state != "published" {
+            match select(
+                ctx,
+                &store,
+                &initial,
+                Some(staging_branch),
+                args.for_replica.as_deref(),
+                args.for_forge.as_deref(),
+            )? {
+                Ok(_) => (),
+                Err((code, refusal)) => {
+                    eprintln!(
+                        "Cannot apply provisional intent: {refusal}\n{}",
+                        observed.describe()
+                    );
+                    return Ok(code);
+                }
+            }
+        }
+        return finish(ctx, &store, &intent, args.json);
+    }
     let selection = match select(
         ctx,
         &store,
@@ -581,31 +771,6 @@ pub fn integrate_provisionally(
     let _target = store.lock_target(&selection.branch)?;
     let _transition = store.lock_transition(&initial.change_id)?;
     let mut state = store.state(&initial.change_id)?;
-    if let Some(intent) = store.provisional_intent(&state.change_id)? {
-        if let Payload::ChangeProvisionallyIntegrated {
-            staging_branch,
-            recipient,
-            ..
-        } = &intent.event.payload
-        {
-            if *staging_branch != selection.branch
-                || (args.for_replica.is_some() || args.for_forge.is_some())
-                    && *recipient != selection.recipient
-            {
-                bail!("requested staging/recipient differs from retained provisional intent {}; retry its exact destination", intent.event.event_id);
-            }
-        }
-
-        if args.dry_run {
-            bail!(
-                "provisional intent {} is unfinished; retry arc integrate {} --provisional",
-                intent.event.event_id,
-                state.change_id
-            );
-        }
-        finish(ctx, &store, &intent)?;
-        return Ok(0);
-    }
     if state.is_closed() {
         eprintln!(
             "change {} is closed; use arc replica provisional resolve for reconciliation",
@@ -625,7 +790,14 @@ pub fn integrate_provisionally(
         }
         if fork::fork_slug_for_branch(&ctx.cwd, &state.branch)?.is_none() {
             if let Some(debt) = args.debt {
-                super::audit::declare_debt_locked(ctx, &store, &state, &debt.reason, debt.kind)?;
+                let operation = || {
+                    super::audit::declare_debt_locked(ctx, &store, &state, &debt.reason, debt.kind)
+                };
+                if args.json {
+                    crate::operation_output::capture(operation).0?;
+                } else {
+                    operation()?;
+                }
                 state = store.state(&state.change_id)?;
             }
         }
@@ -667,10 +839,34 @@ pub fn integrate_provisionally(
         return Ok(0);
     }
     if let Some(reuse) = &plan.reuse {
-        println!(
-            "reused provisional obligation: {}\nprovisionally integrated: {}",
-            reuse.event_id, reuse.commit
-        );
+        if args.json {
+            let event = state
+                .provisional_integrations
+                .iter()
+                .find(|event| event.event_id == reuse.event_id)
+                .context("completed provisional event disappeared")?
+                .clone();
+            let transition = PendingTransition::observe(
+                &ctx.cwd,
+                &store,
+                &Intent {
+                    event,
+                    old_staging: None,
+                },
+            )?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "schema": TRANSITION_SCHEMA, "exit_code": 0, "transition": transition,
+                    "error": null,
+                }))?
+            );
+        } else {
+            println!(
+                "reused provisional obligation: {}\nprovisionally integrated: {}",
+                reuse.event_id, reuse.commit
+            );
+        }
         return Ok(0);
     }
     let message = args
@@ -729,8 +925,7 @@ pub fn integrate_provisionally(
         old_staging: selection.held,
     };
     store.write_provisional_intent(&intent)?;
-    finish(ctx, &store, &intent)?;
-    Ok(0)
+    finish(ctx, &store, &intent, args.json)
 }
 
 pub fn check_provisional(

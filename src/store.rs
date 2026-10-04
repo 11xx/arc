@@ -382,9 +382,34 @@ impl Store {
         intent: &crate::commands::provisional::Intent,
     ) -> Result<()> {
         self.refuse_read_only()?;
+        self.stamp_format_for(&intent.event.payload)?;
         let path = self.provisional_intent_path(&intent.event.change_id)?;
         create_private_dir_all(path.parent().context("intent has no parent")?)?;
         write_exclusive(&path, &serde_json::to_vec(intent)?)
+    }
+    pub(crate) fn provisional_intents(&self) -> Result<Vec<crate::commands::provisional::Intent>> {
+        let directory = self.root.join("provisional");
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error).context("cannot read provisional intents"),
+        };
+        let mut changes = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            let name = entry.file_name();
+            if let Some(change) = name.to_str().and_then(|name| name.strip_suffix(".json")) {
+                changes.push(change.to_string());
+            }
+        }
+        changes.sort();
+        changes
+            .into_iter()
+            .map(|change| {
+                self.provisional_intent(&change)?
+                    .with_context(|| format!("provisional intent for {change} disappeared"))
+            })
+            .collect()
     }
     pub(crate) fn publish_provisional_event(&self, event: &Event) -> Result<()> {
         self.refuse_read_only()?;

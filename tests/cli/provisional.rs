@@ -1843,3 +1843,293 @@ fn a_signature_only_staging_successor_retains_local_prerequisite_coverage() {
     prepare(&worker, &dependent);
     assert_eq!(status(&worker, &prerequisite)["state"], "open");
 }
+
+fn block_provisional_event_observation(worker: &Repo, change: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let hook = worker.root.join(".git/hooks/reference-transaction");
+    let intent = worker
+        .root
+        .join(".git/arc/provisional")
+        .join(format!("{change}.json"));
+    let events = worker
+        .root
+        .join(".git/arc/changes")
+        .join(change)
+        .join("events");
+    fs::write(&hook, format!("#!/bin/sh\nif [ \"$1\" = committed ]; then\npython3 - '{}' '{}' <<'PY'\nimport json, pathlib, sys\ne=json.load(open(sys.argv[1]))['event']\n(pathlib.Path(sys.argv[2])/(e['event_id']+'.json')).mkdir()\nPY\nfi\n", intent.display(), events.display())).unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    intent
+}
+
+fn block_provisional_publication(worker: &Repo, change: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let hook = worker.root.join(".git/hooks/reference-transaction");
+    let intent = worker
+        .root
+        .join(".git/arc/provisional")
+        .join(format!("{change}.json"));
+    let events = worker
+        .root
+        .join(".git/arc/changes")
+        .join(change)
+        .join("events");
+    fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = committed ]; then chmod 555 '{}'; fi\n",
+            events.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    intent
+}
+
+fn repair_provisional_publication(worker: &Repo, intent: &Path) -> serde_json::Value {
+    use std::os::unix::fs::PermissionsExt;
+    let saved: serde_json::Value = serde_json::from_slice(&fs::read(intent).unwrap()).unwrap();
+    let event = &saved["event"];
+    let blocked = worker
+        .root
+        .join(".git/arc/changes")
+        .join(event["change_id"].as_str().unwrap())
+        .join("events")
+        .join(format!("{}.json", event["event_id"].as_str().unwrap()));
+    if blocked.is_dir() {
+        fs::remove_dir(blocked).unwrap();
+    } else {
+        fs::set_permissions(blocked.parent().unwrap(), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    fs::remove_file(worker.root.join(".git/hooks/reference-transaction")).unwrap();
+    saved
+}
+
+fn import_replica_facts(source: &Repo, receiver: &Repo) {
+    let path = source.home.join("authority-transition.json");
+    stdout(source.arc(&source.root).args([
+        "replica",
+        "export",
+        "--output",
+        path.to_str().unwrap(),
+    ]));
+    let bytes = fs::read(&path).unwrap();
+    let bundle: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let exporter = bundle["source_replica_id"].as_str().unwrap();
+    let origins: std::collections::BTreeSet<_> = bundle["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| event["repository_id"].as_str().unwrap())
+        .collect();
+    let mut policy = format!(
+        "[[replica.publishers]]\nprincipal='authority-transfer'\nsource_replica_id='{exporter}'\n"
+    );
+    for origin in origins {
+        policy.push_str(&format!("[[replica.publishers.origins]]\nreplica_id='{origin}'\nroles=['authority']\nactors=['tester']\n"));
+    }
+    receiver.declare_gates_locally(&policy);
+    stdout(receiver.arc(&receiver.root).args([
+        "replica",
+        "import",
+        path.to_str().unwrap(),
+        "--publisher",
+        "authority-transfer",
+        "--received-sha256",
+        &hex::encode(Sha256::digest(bytes)),
+    ]));
+}
+
+#[test]
+fn failed_publication_reports_effects_and_discoverable_intents() {
+    let (_authority, worker) = worker();
+    let change = prepared(&worker);
+    let intent = block_provisional_publication(&worker, &change);
+    let failed = worker
+        .arc(&worker.root)
+        .args(["integrate", &change, "--provisional"])
+        .assert()
+        .code(1);
+    let saved: serde_json::Value = serde_json::from_slice(&fs::read(&intent).unwrap()).unwrap();
+    let event = &saved["event"];
+    let merge = event["provisional_commit"].as_str().unwrap();
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&failed.get_output().stdout),
+        String::from_utf8_lossy(&failed.get_output().stderr)
+    );
+    for expected in [
+        merge,
+        "refs/heads/arc/provisional/worker/master",
+        &format!(
+            "refs/arc/provisional/{change}/{}",
+            event["event_id"].as_str().unwrap()
+        ),
+        intent.to_str().unwrap(),
+        &format!("arc integrate {change} --provisional"),
+    ] {
+        assert!(
+            diagnostic.contains(expected),
+            "missing {expected}: {diagnostic}"
+        );
+    }
+    assert!(diagnostic.contains("event state=absent"), "{diagnostic}");
+    let status = status(&worker, &change);
+    assert_eq!(
+        status["unfinished_provisional_integrations"][0]["event_id"],
+        event["event_id"]
+    );
+    assert!(
+        stdout(worker.arc(&worker.root).args(["show", &change])).contains("unfinished provisional")
+    );
+    let doctor = json_stdout_any_status(worker.arc(&worker.root).args(["doctor", "--json"]));
+    assert_eq!(
+        doctor["unfinished_provisional_integrations"][0]["event_id"],
+        event["event_id"]
+    );
+    assert!(doctor["problems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["code"] == "unfinished-provisional-integration"));
+    let workspace = json_stdout(
+        worker
+            .arc(&worker.root)
+            .args(["workspace", "report", "--json"]),
+    );
+    assert_eq!(
+        workspace["sections"]["unfinished_provisional_integrations"][0]["event_id"],
+        event["event_id"]
+    );
+    assert!(
+        stdout(worker.arc(&worker.root).args(["workspace", "report"]))
+            .contains("Unfinished provisional integrations")
+    );
+    repair_provisional_publication(&worker, &intent);
+    prepare(&worker, &change);
+}
+
+#[test]
+fn failed_publication_has_structured_effects_in_execution_json() {
+    let (_authority, worker) = worker();
+    let change = prepared(&worker);
+    let intent = block_provisional_event_observation(&worker, &change);
+    let failed = worker
+        .arc(&worker.root)
+        .args(["integrate", &change, "--provisional", "--json"])
+        .assert()
+        .code(1);
+    let output: serde_json::Value = serde_json::from_slice(&failed.get_output().stdout).unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(&fs::read(&intent).unwrap()).unwrap();
+    assert_eq!(output["schema"], "arc-provisional-transition/1");
+    assert_eq!(output["exit_code"], 1);
+    assert_eq!(output["transition"]["applied"], true);
+    assert_eq!(output["transition"]["event_state"], "unknown");
+    assert_eq!(output["transition"]["event_id"], saved["event"]["event_id"]);
+    assert_eq!(
+        output["transition"]["staging_head"],
+        saved["event"]["provisional_commit"]
+    );
+    assert_eq!(
+        output["transition"]["retention_head"],
+        saved["event"]["provisional_commit"]
+    );
+    assert_eq!(
+        output["transition"]["intent_path"],
+        intent.to_str().unwrap()
+    );
+    repair_provisional_publication(&worker, &intent);
+    let recovered = json_stdout(worker.arc(&worker.root).args([
+        "integrate",
+        &change,
+        "--provisional",
+        "--json",
+    ]));
+    assert_eq!(recovered["exit_code"], 0);
+    assert_eq!(recovered["transition"]["event_state"], "published");
+    assert!(!intent.exists());
+}
+
+#[test]
+fn applied_intent_recovers_before_changed_authority_or_mode_eligibility() {
+    for mode in ["authority", "disabled"] {
+        let (authority, worker) = worker();
+        let change = prepared(&worker);
+        let intent = block_provisional_publication(&worker, &change);
+        worker
+            .arc(&worker.root)
+            .args(["integrate", &change, "--provisional"])
+            .assert()
+            .code(1);
+        let saved = repair_provisional_publication(&worker, &intent);
+        if mode == "authority" {
+            stdout(authority.arc(&authority.root).args([
+                "replica",
+                "authority",
+                "offer",
+                "--to",
+                "worker",
+            ]));
+            import_replica_facts(&authority, &worker);
+        } else {
+            worker.declare_gates_locally("[replica]\nprovisional_enabled=false\n");
+        }
+        prepare(&worker, &change);
+        assert!(!intent.exists());
+        let row = obligation(&worker, &change);
+        assert_eq!(row["event_id"], saved["event"]["event_id"]);
+        let event_path = worker
+            .root
+            .join(".git/arc/changes")
+            .join(&change)
+            .join("events")
+            .join(format!("{}.json", row["event_id"].as_str().unwrap()));
+        let published: serde_json::Value =
+            serde_json::from_slice(&fs::read(event_path).unwrap()).unwrap();
+        assert_eq!(published, saved["event"]);
+        assert_eq!(
+            git_out(
+                &worker.root,
+                &["rev-parse", "arc/provisional/worker/master"]
+            ),
+            saved["event"]["provisional_commit"].as_str().unwrap()
+        );
+    }
+}
+
+#[test]
+fn applied_intent_recovers_without_resetting_a_later_preparation() {
+    let (_authority, worker) = worker();
+    let change = prepared(&worker);
+    let intent = block_provisional_publication(&worker, &change);
+    worker
+        .arc(&worker.root)
+        .args(["integrate", &change, "--provisional"])
+        .assert()
+        .code(1);
+    let saved = repair_provisional_publication(&worker, &intent);
+    let (later, _, _) = change_with_patchset(&worker, "later");
+    approve(&worker, &later);
+    prepare(&worker, &later);
+    let advanced = git_out(
+        &worker.root,
+        &["rev-parse", "arc/provisional/worker/master"],
+    );
+    assert_ne!(
+        advanced,
+        saved["event"]["provisional_commit"].as_str().unwrap()
+    );
+    prepare(&worker, &change);
+    assert!(!intent.exists());
+    assert_eq!(
+        obligation(&worker, &change)["event_id"],
+        saved["event"]["event_id"]
+    );
+    assert_eq!(
+        git_out(
+            &worker.root,
+            &["rev-parse", "arc/provisional/worker/master"]
+        ),
+        advanced
+    );
+    assert_eq!(obligation(&worker, &later)["provisional_commit"], advanced);
+}

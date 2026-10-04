@@ -1153,7 +1153,7 @@ PAIR REPLICA STORES
   forwarded authority cannot confirm its return.
   arc integrate CHANGE --provisional [--into STAGING-BRANCH]
       [--for-replica NAME | --for-forge REFERENCE] [--message TEXT]
-      [--debt REASON [--kind KIND]] [--dry-run [--json]] [--expect-basis FILE]
+      [--debt REASON [--kind KIND]] [--dry-run] [--json] [--expect-basis FILE]
   arc check CHANGE --provisional [--into STAGING-BRANCH] [--explain | --json]
   arc replica provisional resolve CHANGE --integration EVENT-ID
       [--provisional EVENT-ID ...] --because REASON
@@ -1177,7 +1177,17 @@ PAIR REPLICA STORES
   offer in flight requires --for-replica or --for-forge. A forge reference
   is opaque: preparation performs no transport and grants no authority.
   An intent binds the exact event and guarded ref transition before visibility;
-  retry finishes that transition or preserves competing refs, and a completed
+  publication failure reports the merge, observed staging and retention refs,
+  event state, retained intent and exact recovery command. Execution --json
+  emits `arc-provisional-transition/1`. Doctor, status and workspace report
+  expose unfinished intents separately from published obligations and review debt.
+  Recovery of an applied transition precedes new-preparation eligibility checks,
+  including changed authority or provisional_enabled declarations, and retains
+  its exact event and authorization. Later preparations may advance the same
+  staging branch: the exact retention pin and containment in its staging history
+  prove the applied transition, whose recovery publishes its event without
+  resetting the later staging head. Divergent refs preserve the intent and refuse.
+  A retry finishes that transition or preserves competing refs, and a completed
   matching preparation reuses its merge and event. Its dry-run plan names
   reuse_event_id and reuse_commit and declares that it creates no merge.
 
@@ -2414,6 +2424,7 @@ SCHEMAS
     `arc-config/1`                   arc config
     `arc-accept/1`                   arc accept --json
     `arc-integration-plan/1`         arc integrate --dry-run --json
+    `arc-provisional-transition/1`   arc integrate --provisional --json
     `arc-brief/2`                    arc brief --json
     `arc-journal-artifact/2`         arc journal show --json
     `arc-journal-inventory/6`        arc journal inventory --json

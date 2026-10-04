@@ -77,10 +77,12 @@ pub(super) fn declare_debt_locked(
         }
     };
     match &patchset_id {
-        Some(id) => println!("debt {verb} for {id} ({}): {reason}", missing.as_str()),
-        None => println!("debt {verb} ({}): {reason}", missing.as_str()),
+        Some(id) => {
+            crate::operation_println!("debt {verb} for {id} ({}): {reason}", missing.as_str())
+        }
+        None => crate::operation_println!("debt {verb} ({}): {reason}", missing.as_str()),
     }
-    println!("event: {event_id}");
+    crate::operation_println!("event: {event_id}");
     Ok(())
 }
 

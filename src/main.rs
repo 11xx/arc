@@ -914,6 +914,7 @@ enum Cmd {
     /// are named with their errors on stderr and omitted from the dependency
     /// observation. An unreadable prerequisite cannot count as integrated
     /// Includes retained provisional deliveries, routing recipients, local merges and dispositions.
+    /// Unfinished transitions include observed refs, event state, retained intent and recovery command.
     Status {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1896,6 +1897,7 @@ enum Cmd {
     /// failure reports whether the event is published, absent or unreadable;
     /// inspect publication and durability before retrying.
     #[command(
+        group(clap::ArgGroup::new("integration_json_mode").args(["dry_run", "provisional"]).multiple(true)),
         after_help = "Arc exits 11 when --shape ff-only encounters a diverged target; run arc rebase <change> --verify and provide fresh review or declared debt. When --into selects a different destination, arc rebase cannot select it: run git rebase <destination> in the change checkout, then arc snapshot <change> --verify and obtain fresh review or debt. Arc exits 17 when a paired replica does not hold integration authority; the refusal names the holder or an offer in flight."
     )]
     Integrate {
@@ -1999,8 +2001,11 @@ enum Cmd {
         /// the dry run and execution; a refusal prints the blocker on stderr
         /// and nothing on stdout. Provisional retries identify a completed
         /// preparation through reuse_event_id and reuse_commit, with merge_commit
-        /// false. One change only
-        #[arg(long, requires = "dry_run")]
+        /// false. With provisional execution, emit `arc-provisional-transition/1`
+        /// with observed refs, event publication, retained intent and recovery command.
+        /// Applied intent recovery precedes eligibility checks for a fresh preparation.
+        /// One change only
+        #[arg(long, requires = "integration_json_mode")]
         json: bool,
         /// Compare the fresh decision with a plan an earlier
         /// `--dry-run --json` printed. The fresh readiness evaluation alone
@@ -2169,6 +2174,8 @@ enum Cmd {
     /// Check the append-only ledger for malformed or stale state (read-only)
     /// Reports the build commit and tracked-tree clean/dirty state in text
     /// and arc-doctor/6 JSON; builds outside Git report unknown.
+    /// Unfinished provisional transitions report their merge, refs, event state,
+    /// retained intent and exact recovery command as problems.
     ///
     /// Exits 0 when the ledger is clean or carries only advice, and 1 when it
     /// reports a problem. A ledger that cannot be read at all also exits 1,
@@ -2618,6 +2625,7 @@ enum WorkspaceCmd {
     /// stderr and retain readable changes
     /// Records no events; ledger reads do not require a parseable append policy.
     /// A separate provisional integration section carries recipient, age, refusal and reconciliation evidence.
+    /// Unfinished transitions have a separate section with refs, event publication and recovery commands.
     Report {
         /// Report only projects whose canonical anchor is beneath this path
         #[arg(long, value_name = "PATH", conflicts_with_all = ["here", "global"])]

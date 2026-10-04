@@ -288,6 +288,9 @@ pub fn markdown(
     let _ = writeln!(w, "# {} (`{}`)", state.title, state.change_id);
     let _ = writeln!(w);
     let _ = writeln!(w, "- State: {}", report.state);
+    for transition in &report.unfinished_provisional_integrations {
+        let _ = writeln!(w, "- {}", transition.describe());
+    }
     for row in &report.provisional_integrations {
         let _ = writeln!(w, "- Provisional integration `{}`: {}; recipient {:?}; source replica {}; local merge `{}` at `{}`; {}", row.event_id, row.disposition, row.recipient, row.source_replica, row.provisional_commit, row.staging_branch, row.reason.as_deref().unwrap_or("publication acceptance owed"));
     }

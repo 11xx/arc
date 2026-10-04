@@ -719,6 +719,7 @@ impl Ctx {
         report.require_replay_snapshot(crate::provisional::needs_replay_snapshot(
             &self.cwd, store, state,
         )?);
+        provisional::attach_pending_transition(&mut report, &self.cwd, store, &state.change_id)?;
         report.declaration_notes = declarations.notes;
         report.select_mode(
             crate::integration::Mode::Authoritative,
@@ -753,6 +754,12 @@ impl Ctx {
             crate::integration::Mode::Authoritative,
             crate::replica::integration_refusal(&self.store()?)?,
         );
+        provisional::attach_pending_transition(
+            &mut report,
+            &self.cwd,
+            &self.store()?,
+            &state.change_id,
+        )?;
         Ok(report)
     }
 
@@ -790,6 +797,7 @@ impl Ctx {
             crate::integration::Mode::Authoritative,
             crate::replica::integration_refusal(store)?,
         );
+        provisional::attach_pending_transition(&mut report, &self.cwd, store, &state.change_id)?;
         Ok(report)
     }
 }

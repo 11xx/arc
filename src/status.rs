@@ -539,6 +539,7 @@ pub struct StatusReport {
     pub integration_mode: crate::integration::Mode,
     pub integration_mode_refusal: Option<String>,
     pub provisional_integrations: Vec<crate::provisional::Obligation>,
+    pub unfinished_provisional_integrations: Vec<crate::commands::provisional::PendingTransition>,
     pub obsolete_provisional_ancestry: Vec<String>,
     pub provisional_prerequisites: Vec<crate::model::ProvisionalPrerequisite>,
     pub provisional_staging_destination: Option<String>,
@@ -1831,6 +1832,7 @@ fn build_report(
         integration_mode: crate::integration::Mode::Authoritative,
         integration_mode_refusal: None,
         provisional_integrations: crate::provisional::project_obligations_at(state, now),
+        unfinished_provisional_integrations: Vec::new(),
         recorded_verdict_tips: state
             .verdict_tips()
             .iter()

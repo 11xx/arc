@@ -1977,9 +1977,13 @@ fn report_ledger_facts(
                     .into_iter()
                     .filter(|id| !states.contains_key(id))
                     .collect::<Vec<_>>();
-                Ok((states, candidates, unreadable))
+                let pending = super::provisional::pending_transitions(
+                    anchor.as_deref().unwrap_or(root),
+                    &store,
+                )?;
+                Ok((states, candidates, unreadable, pending))
             });
-        let (states, candidates, unreadable) = match states {
+        let (states, candidates, unreadable, pending) = match states {
             Ok(states) => states,
             Err(error) => {
                 failures.push(CollectionFailure {
@@ -2001,6 +2005,10 @@ fn report_ledger_facts(
         }
         let mut ledger = report::LedgerFacts {
             unjudged_siblings: unjudged_siblings(&candidates),
+            unfinished_provisional_integrations: pending
+                .into_iter()
+                .map(|row| serde_json::to_value(row).expect("serializable pending transition"))
+                .collect(),
             ..Default::default()
         };
         for (change_id, state) in states {
@@ -2529,6 +2537,7 @@ mod report {
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub(crate) struct LedgerFacts {
         pub provisional_integrations: Vec<Value>,
+        pub unfinished_provisional_integrations: Vec<Value>,
         /// Open change id -> (title, whole days open at the observation).
         pub open: BTreeMap<String, (String, u64)>,
         /// Open change id -> the keys of its in-force brief, for each open
@@ -2595,6 +2604,7 @@ mod report {
     #[derive(Debug, Serialize, Default)]
     struct Sections {
         provisional_integrations: Vec<Value>,
+        unfinished_provisional_integrations: Vec<Value>,
         needs_person: Vec<QuestionRow>,
         needs_agent: Vec<QuestionRow>,
         in_flight: Vec<ChangeRow>,
@@ -2928,6 +2938,13 @@ mod report {
         let failed_before = previous.map(failed_projects).unwrap_or_default();
         let mut sections = Sections::default();
         for (project, ledger) in ledgers {
+            for row in &ledger.unfinished_provisional_integrations {
+                let mut row = row.clone();
+                row.as_object_mut()
+                    .expect("pending transition object")
+                    .insert("project".into(), Value::String(project.clone()));
+                sections.unfinished_provisional_integrations.push(row);
+            }
             for row in &ledger.provisional_integrations {
                 let mut row = row.clone();
                 row.as_object_mut()
@@ -3401,6 +3418,15 @@ mod report {
     impl Report {
         /// A compact text summary; `--json` carries every row.
         pub(crate) fn render(&self) {
+            if !self.sections.unfinished_provisional_integrations.is_empty() {
+                println!("Unfinished provisional integrations:");
+                for row in &self.sections.unfinished_provisional_integrations {
+                    println!("  {} / {}: merge {}; {}={}; {}={}; event state={}; retained intent {}; recovery: {}",
+                        text(row, "change_id"), text(row, "event_id"), text(row, "provisional_commit"),
+                        text(row, "staging_ref"), row["staging_head"], text(row, "retention_ref"), row["retention_head"],
+                        text(row, "event_state"), text(row, "intent_path"), text(row, "recovery_command"));
+                }
+            }
             if !self.sections.provisional_integrations.is_empty() {
                 println!("Provisional integrations:");
                 for row in &self.sections.provisional_integrations {

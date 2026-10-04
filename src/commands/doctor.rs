@@ -30,6 +30,7 @@ struct Report {
     build: crate::context::BuildRevision,
     roots: Roots,
     replica: Option<crate::replica::ReplicaStatus>,
+    unfinished_provisional_integrations: Vec<super::provisional::PendingTransition>,
     problems: Vec<Finding>,
     advice: Vec<Finding>,
 }
@@ -123,6 +124,25 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     // whatever happened to read it first — which is what doctor exists to
     // prevent for every other kind of event.
     let store = ctx.store()?;
+    let unfinished_provisional_integrations =
+        match super::provisional::pending_transitions(&ctx.cwd, &store) {
+            Ok(transitions) => {
+                for transition in &transitions {
+                    problems.push(Finding {
+                        code: "unfinished-provisional-integration",
+                        detail: transition.describe(),
+                    });
+                }
+                transitions
+            }
+            Err(error) => {
+                problems.push(Finding {
+                    code: "unreadable-provisional-intent",
+                    detail: format!("{error:#}"),
+                });
+                Vec::new()
+            }
+        };
     inspect_repository_events(&store, &mut problems);
     inspect_dangling_revisions(&ctx.cwd, &store, &states, &mut problems, &mut advice)?;
     inspect_refs(ctx, &states, &known_patchsets, &mut advice)?;
@@ -172,6 +192,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
         build: crate::context::build_revision(),
         roots: Roots::resolve(&ctx.cwd, &root)?,
         replica,
+        unfinished_provisional_integrations,
         problems,
         advice,
     };
