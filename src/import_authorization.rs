@@ -283,8 +283,18 @@ pub fn plan_import(
         return Err(refuse(format!("principal {principal}: declared exporter {:?} differs from enrolled exporter {}; enrollment source {}", request.source_replica_id, publisher.source_replica_id, source.display())));
     }
     if request.receiver_project.is_some() && request.project_id != request.receiver_project {
+        let witness = request
+            .events
+            .first()
+            .map(|(_, event)| {
+                format!(
+                    "event {}, recorded origin {}",
+                    event["event_id"], event["repository_id"]
+                )
+            })
+            .unwrap_or_else(|| "no newly introduced events".into());
         return Err(refuse(format!(
-            "wrong project {:?} for receiving replica {} (project {:?})",
+            "wrong project {:?} for receiving replica {} (project {:?}); {witness}",
             request.project_id, request.receiver_id, request.receiver_project
         )));
     }

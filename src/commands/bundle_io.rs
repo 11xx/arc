@@ -280,10 +280,19 @@ pub fn import_bundle(
     let _repository_events = store.lock_repository_events()?;
     let incoming = plan_repository_events(&ctx.cwd, Some(&store), &validated)?;
     let current_policy = crate::policy::load(&ctx.cwd)?;
-    if current_policy.replica != initial_policy.replica {
-        return Err(crate::import_authorization::Refusal(
-            "authorization configuration moved before publication: operator replica policy".into(),
-        )
+    let changed_input = if current_policy.replica != initial_policy.replica {
+        Some("operator replica policy")
+    } else if current_policy.policy.require_declared_actor
+        != initial_policy.policy.require_declared_actor
+    {
+        Some("policy.require_declared_actor")
+    } else {
+        None
+    };
+    if let Some(changed_input) = changed_input {
+        return Err(crate::import_authorization::Refusal(format!(
+            "authorization configuration moved before publication: {changed_input}"
+        ))
         .into());
     }
     let authorization = authorize_import(
@@ -324,8 +333,9 @@ pub fn import_bundle(
     }
     let (pinned, unpinned) =
         super::candidate::pin_imported(&ctx.cwd, &store, &incoming.keys().cloned().collect())
-            .with_context(|| {
-                format!("admission published: {published}; candidate retention maintenance failed")
+            .map_err(|error| crate::model::OperationFailure {
+                published,
+                message: format!("candidate retention maintenance failed: {error:#}"),
             })?;
     for candidate_id in pinned {
         println!("candidate {candidate_id}: pinned");
@@ -335,8 +345,11 @@ pub fn import_bundle(
     }
     drop(transition);
     for (name, head) in pins {
-        gitio::update_ref(&ctx.cwd, &name, &head).with_context(|| {
-            format!("admission published: {published}; retention-ref maintenance failed")
+        gitio::update_ref(&ctx.cwd, &name, &head).map_err(|error| {
+            crate::model::OperationFailure {
+                published,
+                message: format!("retention-ref maintenance failed: {error:#}"),
+            }
         })?;
     }
     Ok(crate::model::OperationResult {
@@ -376,6 +389,24 @@ fn authorize_import(
     for bytes in repository.values() {
         events.push(("repository".into(), serde_json::from_slice(bytes)?));
     }
+    let authorization = crate::import_authorization::plan_import(
+        policy,
+        &crate::policy::operator_path(&ctx.cwd)?,
+        crate::import_authorization::ImportRequest {
+            bytes,
+            principal: publisher,
+            received_sha256,
+            source_replica_id: validated.bundle.source_replica_id.as_deref(),
+            project_id: validated.bundle.project_id.as_deref(),
+            receiver_id: store
+                .map(|store| store.repository_id.as_str())
+                .unwrap_or("uninitialized"),
+            receiver_project: replica
+                .as_ref()
+                .and_then(|replica| replica.project_id.as_deref()),
+            events: &events,
+        },
+    )?;
     if let Some(replica) = replica
         .as_ref()
         .filter(|replica| replica.project_id.is_some())
@@ -411,24 +442,7 @@ fn authorize_import(
             .into());
         }
     }
-    crate::import_authorization::plan_import(
-        policy,
-        &crate::policy::operator_path(&ctx.cwd)?,
-        crate::import_authorization::ImportRequest {
-            bytes,
-            principal: publisher,
-            received_sha256,
-            source_replica_id: validated.bundle.source_replica_id.as_deref(),
-            project_id: validated.bundle.project_id.as_deref(),
-            receiver_id: store
-                .map(|store| store.repository_id.as_str())
-                .unwrap_or("uninitialized"),
-            receiver_project: replica
-                .as_ref()
-                .and_then(|replica| replica.project_id.as_deref()),
-            events: &events,
-        },
-    )
+    Ok(authorization)
 }
 
 /// A delta bundle carries the suffix of a history. The receiver must hold

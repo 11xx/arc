@@ -435,7 +435,8 @@ pub fn import(
     let bundle = parse_bundle(&bytes)?;
     let digest = bundle_digest(&bundle)?;
     let import_path = imports_dir(store).join(format!("{digest}.json"));
-    let initial_policy = crate::policy::load(&ctx.cwd)?.replica;
+    let initial_declarations = crate::policy::load(&ctx.cwd)?;
+    let initial_policy = initial_declarations.replica;
     let known = load_events(store)?;
     let known_by_id = event_map(&known)?;
     let receipt_exists = import_path.is_file();
@@ -495,12 +496,21 @@ pub fn import(
         .context("replica bundle does not name this local repository")?;
     let _lock = if dry_run { None } else { Some(lock(store)?) };
     if !dry_run {
-        let current_policy = crate::policy::load(&ctx.cwd)?.replica;
-        if current_policy != initial_policy {
-            return Err(crate::import_authorization::Refusal(
-                "authorization configuration moved before publication: operator replica policy"
-                    .into(),
-            )
+        let current_declarations = crate::policy::load(&ctx.cwd)?;
+        let current_policy = current_declarations.replica;
+        let changed_input = if current_policy != initial_policy {
+            Some("operator replica policy")
+        } else if current_declarations.policy.require_declared_actor
+            != initial_declarations.policy.require_declared_actor
+        {
+            Some("policy.require_declared_actor")
+        } else {
+            None
+        };
+        if let Some(changed_input) = changed_input {
+            return Err(crate::import_authorization::Refusal(format!(
+                "authorization configuration moved before publication: {changed_input}"
+            ))
             .into());
         }
         if load_events(store)? != known {

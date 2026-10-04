@@ -838,6 +838,9 @@ pub fn verdict_assessments(
                 covers_current_head: covers,
                 gating_eligible: eligible,
                 selected_authorizing_event: covers
+                    && state
+                        .latest_patchset()
+                        .is_some_and(|patchset| patchset.id == verdict.patchset_id)
                     && eligible
                     && selected == Some(verdict.event_id.as_str())
                     && verdict.verdict == Verdict::Approved,

@@ -1159,3 +1159,95 @@ fn digest_objects_and_authorization_refuse_before_publication() {
     deliver_git_objects(&source, &receiver);
     received(&receiver, &input, false).assert().success();
 }
+
+#[test]
+fn head_coverage_does_not_select_a_verdict_for_another_patchset() {
+    let (source, path, mut bundle) = exported_review();
+    let receiver = Repo::new();
+    deliver_git_objects(&source, &receiver);
+    bind_branch(&receiver, &source, &bundle);
+    enroll(
+        &receiver,
+        &bundle,
+        &["facts", "review-authority"],
+        &["operator"],
+        true,
+    );
+    received(&receiver, &path, false).assert().success();
+    let mut patchset = bundle["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["event_type"] == "patchset-added")
+        .unwrap()
+        .clone();
+    patchset["event_id"] = serde_json::json!("ZZZZ-same-head-patchset");
+    patchset["patchset_id"] = serde_json::json!("ps-02");
+    bundle["events"].as_array_mut().unwrap().push(patchset);
+    write_bundle(&path, &mut bundle);
+    received(&receiver, &path, false).assert().success();
+    let state = status(&receiver, &bundle);
+    assert_eq!(state["has_valid_approval"], false);
+    assert_eq!(state["verdict_assessments"][0]["covers_current_head"], true);
+    assert_eq!(state["verdict_assessments"][0]["gating_eligible"], true);
+    assert_eq!(
+        state["verdict_assessments"][0]["selected_authorizing_event"],
+        false
+    );
+    let check = json_stdout_any_status(receiver.arc(&receiver.root).args([
+        "check",
+        bundle["change_id"].as_str().unwrap(),
+        "--json",
+    ]));
+    assert!(check["selected_authorizing_event"].is_null());
+}
+
+#[test]
+fn replica_admission_preserves_the_receivers_declared_actor_guard() {
+    let origin = Repo::new();
+    let receiver = Repo::new();
+    let identity = json_stdout(
+        receiver
+            .arc(&receiver.root)
+            .args(["replica", "id", "--json"]),
+    );
+    stdout(origin.arc(&origin.root).args(["replica", "init", "origin"]));
+    stdout(origin.arc(&origin.root).args([
+        "replica",
+        "pair",
+        "receiver",
+        "--repository-id",
+        identity["repository_id"].as_str().unwrap(),
+    ]));
+    let input = origin.home.join("replicas.json");
+    stdout(origin.arc(&origin.root).args([
+        "replica",
+        "export",
+        "--output",
+        input.to_str().unwrap(),
+    ]));
+    let bytes = fs::read(&input).unwrap();
+    let bundle: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    receiver.declare_gates_locally(&format!("[policy]\nrequire_declared_actor=true\n[[replica.publishers]]\nprincipal='channel'\nsource_replica_id='{}'\n[[replica.publishers.origins]]\nreplica_id='{}'\nroles=['authority']\nactors=['tester']\n", bundle["source_replica_id"].as_str().unwrap(), bundle["source_replica_id"].as_str().unwrap()));
+    let config = fs::read(receiver.root.join(".git/arc/config.json")).unwrap();
+    receiver
+        .arc(&receiver.root)
+        .env_remove("ARC_ACTOR")
+        .args([
+            "replica",
+            "import",
+            input.to_str().unwrap(),
+            "--publisher",
+            "channel",
+            "--received-sha256",
+            &hex::encode(Sha256::digest(bytes)),
+        ])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("declared actor"));
+    assert_eq!(
+        fs::read(receiver.root.join(".git/arc/config.json")).unwrap(),
+        config
+    );
+    assert!(!receiver.root.join(".git/arc/replicas/imports").exists());
+}

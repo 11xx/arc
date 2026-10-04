@@ -50,6 +50,11 @@ pub fn import(
         anyhow::anyhow!("replica import requires a local repository ID; run arc replica id")
     })?;
     store.operator_policy_path = Some(crate::policy::operator_path(&ctx.cwd)?);
+    let policy = crate::policy::load(&ctx.cwd)?;
+    store.require_declared_actor = policy.policy.require_declared_actor;
+    store.require_declared_actor_sources = policy
+        .sources
+        .sources_for("policy.require_declared_actor=true");
     crate::replica::import(ctx, &store, input, dry_run, publisher, received_sha256)
 }
 

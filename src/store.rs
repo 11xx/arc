@@ -1207,16 +1207,26 @@ impl Store {
     pub fn publish_import(&self, batch: &ImportBatch) -> Result<()> {
         self.refuse_read_only()?;
         self.stamp_format(Some(7))
-            .context("admission published: false; store-format preparation failed")?;
+            .map_err(|error| crate::model::OperationFailure {
+                published: false,
+                message: format!("store-format preparation failed: {error:#}"),
+            })?;
         let dir = self.root.join("imports");
-        create_private_dir_all(&dir)?;
+        create_private_dir_all(&dir).map_err(|error| crate::model::OperationFailure {
+            published: false,
+            message: format!("batch directory preparation failed: {error:#}"),
+        })?;
         let path = dir.join(format!("{}.json", ids::new_event_id()));
         crate::replica::write_exclusive(&path, &serde_json::to_vec_pretty(batch)?).context(
             "import admission publication failed; inspect the published batch before retrying",
         )?;
         for value in batch.events.iter().chain(&batch.repository_events) {
-            self.stamp_format_for_value(Some(value))
-                .context("admission published; store-format maintenance failed")?;
+            self.stamp_format_for_value(Some(value)).map_err(|error| {
+                crate::model::OperationFailure {
+                    published: true,
+                    message: format!("store-format maintenance failed: {error:#}"),
+                }
+            })?;
         }
         Ok(())
     }
