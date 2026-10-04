@@ -284,50 +284,24 @@ pub(crate) fn for_change(state: &crate::state::ChangeState) -> ChangeTrailers {
         }
         if role == "Implemented-by" {
             for patchset in &state.patchsets {
-                let mut unresolved = Vec::new();
-                if !patchset
-                    .actor_source
-                    .is_some_and(crate::model::ActorSource::declared)
-                {
-                    unresolved.push("declared identity");
-                }
-                if patchset
-                    .harness
-                    .as_deref()
-                    .is_none_or(|value| value.trim().is_empty())
-                {
-                    unresolved.push("harness");
-                }
-                if patchset
-                    .model
-                    .as_deref()
-                    .is_none_or(|value| value.trim().is_empty())
-                {
-                    unresolved.push("model");
-                }
-                if !unresolved.is_empty() {
-                    notes.push(format!(
-                        "{}: Implemented-by omitted; unresolved {}",
-                        patchset.id,
-                        unresolved.join(", ")
-                    ));
-                    continue;
-                }
-                let value = format!(
-                    "{}:{}",
-                    patchset.harness.as_deref().unwrap(),
-                    patchset.model.as_deref().unwrap()
-                );
-                if !value_is_readable(&value) {
-                    notes.push(format!(
-                        "{}: Implemented-by omitted; invalid recorded coordinates",
-                        patchset.id
-                    ));
-                    continue;
-                }
-                let line = format!("{role}: {value}");
-                if !trailers.contains(&line) {
-                    trailers.push(line);
+                let subjects = if patchset.contributors.is_empty() {
+                    vec![patchset.effective_author()]
+                } else {
+                    patchset.contributors.iter().map(String::as_str).collect()
+                };
+                for subject in subjects {
+                    match implementation_identity(patchset, subject) {
+                        Ok(value) => {
+                            let line = format!("{role}: {value}");
+                            if !trailers.contains(&line) {
+                                trailers.push(line);
+                            }
+                        }
+                        Err(reason) => notes.push(format!(
+                            "{}: Implemented-by omitted for {subject}; {reason}",
+                            patchset.id
+                        )),
+                    }
                 }
             }
         } else if let Some(values) = state.contribution_roles.get(role) {
@@ -342,6 +316,44 @@ pub(crate) fn for_change(state: &crate::state::ChangeState) -> ChangeTrailers {
         trailers,
         notes,
     }
+}
+
+/// Recorder coordinates belong only to a subject that names the recorder.
+fn implementation_identity(
+    patchset: &crate::state::Patchset,
+    subject: &str,
+) -> Result<String, String> {
+    let declared = !patchset.contributors.is_empty()
+        || patchset.on_behalf_of.is_some()
+        || patchset
+            .actor_source
+            .is_some_and(crate::model::ActorSource::declared);
+    if !declared {
+        return Err("unresolved declared identity".to_string());
+    }
+    if value_is_readable(subject) {
+        return Ok(subject.trim().to_string());
+    }
+    if subject != patchset.actor {
+        return Err("unresolved subject harness and model".to_string());
+    }
+    let mut unresolved = Vec::new();
+    let harness = patchset.harness.as_deref().unwrap_or_default();
+    let model = patchset.model.as_deref().unwrap_or_default();
+    if harness.trim().is_empty() {
+        unresolved.push("harness");
+    }
+    if model.trim().is_empty() {
+        unresolved.push("model");
+    }
+    if !unresolved.is_empty() {
+        return Err(format!("unresolved {}", unresolved.join(", ")));
+    }
+    let value = format!("{harness}:{model}");
+    if !value_is_readable(&value) {
+        return Err("invalid recorded coordinates".to_string());
+    }
+    Ok(value)
 }
 
 #[cfg(test)]

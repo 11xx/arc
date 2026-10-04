@@ -396,7 +396,8 @@ fn change_trailers_order_declared_snapshots_and_unresolved_notes() {
 
 #[test]
 fn change_role_advisory_disappears_after_trailer_rewrite() {
-    let repo = contribution_repo("preserve");
+    let repo = Repo::new();
+    repo.declare_gates_locally("[gates.smoke]\ncommand = \"true\"\n");
     let wt = open(&repo, "advice");
     stdout(
         repo.arc(&wt)
@@ -415,16 +416,6 @@ fn change_role_advisory_disappears_after_trailer_rewrite() {
             .any(|a| a["code"] == "missing-contribution-trailers"),
         "{report}"
     );
-    repo.arc(&wt)
-        .args(["integrate", "advice", "--dry-run"])
-        .assert()
-        .success()
-        .stderr(predicates::str::contains("arc rewrite trailers"));
-    repo.arc(&wt)
-        .args(["integrate", "advice"])
-        .assert()
-        .success()
-        .stderr(predicates::str::contains("arc rewrite trailers"));
     stdout(repo.arc(&wt).args([
         "rewrite",
         "trailers",
@@ -433,6 +424,8 @@ fn change_role_advisory_disappears_after_trailer_rewrite() {
         "--no-sign",
         "--append",
         "Planned-by: lead:planner",
+        "--append",
+        "Assisted-by: helper:editor",
     ]));
     let report = json_stdout_any_status(repo.arc(&wt).args(["check", "advice", "--json"]));
     assert!(
@@ -442,6 +435,148 @@ fn change_role_advisory_disappears_after_trailer_rewrite() {
             .iter()
             .any(|a| a["code"] == "missing-contribution-trailers"),
         "{report}"
+    );
+    let status = json_stdout(repo.arc(&wt).args(["status", "advice", "--json"]));
+    assert!(status["closure"].is_null(), "{status}");
+    assert_eq!(status["has_valid_approval"], false, "{status}");
+    stdout(repo.arc(&wt).args(["snapshot", "advice", "--solo"]));
+    gate_and_approve(&repo, &wt, "advice");
+    let status = json_stdout(repo.arc(&wt).args(["status", "advice", "--json"]));
+    assert!(status["closure"].is_null(), "{status}");
+    assert_eq!(status["has_valid_approval"], true, "{status}");
+    stdout(repo.arc(&wt).args([
+        "rewrite",
+        "trailers",
+        "--from",
+        "HEAD",
+        "--no-sign",
+        "--drop",
+        "Planned-by",
+    ]));
+    let report = json_stdout_any_status(repo.arc(&wt).args(["check", "advice", "--json"]));
+    assert!(
+        report["advisories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["code"] == "missing-contribution-trailers"),
+        "{report}"
+    );
+    let status = json_stdout(repo.arc(&wt).args(["status", "advice", "--json"]));
+    assert!(status["closure"].is_null(), "{status}");
+    assert_eq!(status["has_valid_approval"], false, "{status}");
+}
+
+#[test]
+fn missing_contribution_trailers_do_not_block_integration() {
+    for contribution in [false, true] {
+        let repo = if contribution {
+            contribution_repo("preserve")
+        } else {
+            let repo = Repo::new();
+            repo.declare_gates_locally("[gates.smoke]\ncommand = \"true\"\n");
+            repo
+        };
+        let wt = open(&repo, "advisory-only");
+        stdout(
+            repo.arc(&wt)
+                .args(["roles", "advisory-only", "--planned-by", "lead:planner"]),
+        );
+        commit_file(&wt, "one", "one");
+        gate_and_approve(&repo, &wt, "advisory-only");
+        for args in [
+            vec!["integrate", "advisory-only", "--dry-run"],
+            vec!["integrate", "advisory-only", "--no-cleanup"],
+        ] {
+            repo.arc(&wt)
+                .args(args)
+                .assert()
+                .success()
+                .stderr(predicates::str::contains("arc rewrite trailers"));
+        }
+    }
+}
+
+#[test]
+fn change_trailers_print_declared_human_implementers() {
+    let repo = Repo::new();
+    let wt = open(&repo, "human-credit");
+    commit_file(&wt, "one", "one");
+    stdout(
+        repo.arc(&wt)
+            .args(["snapshot", "human-credit"])
+            .env("ARC_ACTOR", "Person <p@example.invalid>")
+            .env_remove("ARC_HARNESS"),
+    );
+    let result = json_stdout(repo.arc(&wt).args(["trailers", "human-credit", "--json"]));
+    assert_eq!(
+        result["trailers"],
+        serde_json::json!(["Implemented-by: Person <p@example.invalid>"])
+    );
+    assert_eq!(result["notes"].as_array().unwrap().len(), 1, "{result}");
+}
+
+#[test]
+fn change_trailers_omit_unresolved_delegated_subjects() {
+    let repo = Repo::new();
+    let wt = open(&repo, "delegated-credit");
+    commit_file(&wt, "one", "one");
+    stdout(
+        repo.arc(&wt)
+            .args(["snapshot", "delegated-credit", "--on-behalf-of", "executor"])
+            .env("ARC_MODEL", "recorder#high"),
+    );
+    let result = json_stdout(
+        repo.arc(&wt)
+            .args(["trailers", "delegated-credit", "--json"]),
+    );
+    assert_eq!(result["trailers"], serde_json::json!([]), "{result}");
+    assert!(
+        result["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n.as_str().unwrap().contains("executor")),
+        "{result}"
+    );
+}
+
+#[test]
+fn change_trailers_resolve_explicit_contributors_individually() {
+    let repo = Repo::new();
+    let wt = open(&repo, "contributor-credit");
+    commit_file(&wt, "one", "one");
+    stdout(
+        repo.arc(&wt)
+            .args([
+                "snapshot",
+                "contributor-credit",
+                "--on-behalf-of",
+                "subject",
+                "--contributors",
+                "executor,worker:implementation#medium,Person <p@example.invalid>",
+            ])
+            .env("ARC_MODEL", "recorder#high"),
+    );
+    let result = json_stdout(
+        repo.arc(&wt)
+            .args(["trailers", "contributor-credit", "--json"]),
+    );
+    assert_eq!(
+        result["trailers"],
+        serde_json::json!([
+            "Implemented-by: Person <p@example.invalid>",
+            "Implemented-by: worker:implementation#medium"
+        ]),
+        "{result}"
+    );
+    assert!(
+        result["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n.as_str().unwrap().contains("executor")),
+        "{result}"
     );
 }
 
@@ -517,4 +652,108 @@ fn change_roles_stamp_store_format_on_record_and_import() {
     assert_eq!(stamp["schema_version"], 7, "{stamp}");
     let block = stdout(other.arc(&other.root).args(["trailers", "portable-roles"]));
     assert_eq!(block, "Planned-by: lead:planner\n");
+}
+
+#[test]
+fn change_trailers_share_subject_attribution_across_ceremonies() {
+    for ceremony in ["snapshot", "review", "squash"] {
+        for subject in [
+            "executor",
+            "worker:implementation#medium",
+            "Person <p@example.invalid>",
+        ] {
+            let repo = Repo::new();
+            let wt = open(&repo, "subject-credit");
+            commit_file(&wt, "one", "one");
+            let args = match ceremony {
+                "review" => vec![
+                    "review",
+                    "subject-credit",
+                    "--snapshot",
+                    "--verdict",
+                    "approved",
+                ],
+                "squash" => {
+                    commit_file(&wt, "two", "two");
+                    vec!["squash", "subject-credit", "-m", "feat: combine"]
+                }
+                _ => vec!["snapshot", "subject-credit"],
+            };
+            stdout(
+                repo.arc(&wt)
+                    .args(args)
+                    .args(["--on-behalf-of", subject])
+                    .env("ARC_MODEL", "recorder#high")
+                    .env_remove("ARC_ACTOR"),
+            );
+            let before = json_stdout(repo.arc(&wt).args(["trailers", "subject-credit", "--json"]));
+            let expected = if subject == "executor" {
+                serde_json::json!([])
+            } else {
+                serde_json::json!([format!("Implemented-by: {subject}")])
+            };
+            assert_eq!(before["trailers"], expected, "{ceremony}: {before}");
+            stdout(
+                repo.arc(&wt)
+                    .args([
+                        "rewrite",
+                        "trailers",
+                        "--from",
+                        "HEAD",
+                        "--no-sign",
+                        "--append",
+                        "Assisted-by: helper:ceremony",
+                        "--on-behalf-of",
+                        "rewriter",
+                    ])
+                    .env("ARC_MODEL", "rewriter#high"),
+            );
+            let after = json_stdout(repo.arc(&wt).args(["trailers", "subject-credit", "--json"]));
+            assert_eq!(after, before, "{ceremony}: {after}");
+        }
+    }
+}
+
+#[test]
+fn change_trailers_use_recorder_coordinates_only_for_declared_recorder_work() {
+    for (actor, behalf, contributors, expected) in [
+        ("tester", "subject", "tester,executor", "test:recorder#high"),
+        ("tester", "tester", "", "test:recorder#high"),
+        (
+            "worker:implementation#medium",
+            "",
+            "",
+            "worker:implementation#medium",
+        ),
+        (
+            "tester",
+            "",
+            "Person <p@example.invalid>",
+            "Person <p@example.invalid>",
+        ),
+    ] {
+        let repo = Repo::new();
+        let wt = open(&repo, "recorder-credit");
+        commit_file(&wt, "one", "one");
+        let mut cmd = repo.arc(&wt);
+        cmd.args(["snapshot", "recorder-credit"])
+            .env("ARC_ACTOR", actor)
+            .env("ARC_MODEL", "recorder#high");
+        if !behalf.is_empty() {
+            cmd.args(["--on-behalf-of", behalf]);
+        }
+        if !contributors.is_empty() {
+            cmd.args(["--contributors", contributors]);
+        }
+        stdout(&mut cmd);
+        let result = json_stdout(
+            repo.arc(&wt)
+                .args(["trailers", "recorder-credit", "--json"]),
+        );
+        assert_eq!(
+            result["trailers"],
+            serde_json::json!([format!("Implemented-by: {expected}")]),
+            "{result}"
+        );
+    }
 }

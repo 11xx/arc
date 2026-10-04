@@ -1321,11 +1321,16 @@ CONTRIBUTION TRAILERS
                        writing a contract.
     arc trailers <change> [--json]
                        Print Planned-by and Orchestrated-by assertions and
-                       Implemented-by from declared snapshot recorders with
-                       their recorded harness and model evidence, in
+                       Implemented-by from declared patchset contributors,
+                       or the snapshot subject when none are listed, in
                        convention order. Duplicate lines print once.
-                       Unresolved identity, harness, or model coordinates are
-                       omitted and named in notes; no coordinate is guessed.
+                       The subject is --on-behalf-of when set, else the actor.
+                       A declared harness:model[#effort] or Name <email>
+                       supplies its own identity. Recorder harness and model
+                       evidence applies only to that recorder's contribution.
+                       Unresolved contributors are omitted and named in notes;
+                       no coordinate is guessed. Review snapshots and squash
+                       use the same rule; rewrites retain patchset attribution.
                        Review credit stays in the ledger: Reviewed-by is
                        never projected or backfilled into commits.
                        --json emits arc-trailers/1 with trailers and notes.
