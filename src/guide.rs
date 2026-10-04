@@ -631,7 +631,13 @@ RUN A CHANGE
   the probe runs in place. Attested baseline evidence requires
   --tested-revision equal to the base and creates no checkout. A creation
   refusal prints the reason and commands to create, verify in, and remove
-  a manual checkout. A removal failure warns with the path and cleanup
+  a manual checkout. Failed creation removes the allocation owned by that
+  attempt and prunes its registration. Failed cleanup reports the retained
+  path and its removal command instead of a command to recreate it.
+  --waive-dirty refuses before recording when a baseline requires a scratch
+  checkout: that checkout is clean, and the waiver would name a revision the
+  probe does not test. At the base, a waiver binds to that checkout's HEAD.
+  A removal failure warns with the path and cleanup
   command without changing the recorded result or exit code.
 
   A brief version keeps the preceding version's base unless `--base` names

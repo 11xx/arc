@@ -3842,3 +3842,148 @@ fn baseline_in_detached_manual_checkout_runs_in_place() {
         before
     );
 }
+
+#[test]
+fn scratch_baseline_refuses_dirty_waiver_without_recording() {
+    let (repo, worktree, _) = scratch_baseline_fixture("false");
+    let before = stdout(
+        repo.arc(&worktree)
+            .args(["events", "--change", "scratch-baseline"]),
+    );
+    let checkouts = git_out(&worktree, &["worktree", "list", "--porcelain"]);
+    repo.arc(&worktree)
+        .args([
+            "verify",
+            "scratch-baseline",
+            "--probe",
+            "check",
+            "--probe-phase",
+            "baseline",
+            "--waive-dirty",
+            "local edits",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("scratch checkout is clean"));
+    assert_eq!(
+        stdout(
+            repo.arc(&worktree)
+                .args(["events", "--change", "scratch-baseline"])
+        ),
+        before
+    );
+    assert_eq!(
+        git_out(&worktree, &["worktree", "list", "--porcelain"]),
+        checkouts
+    );
+}
+
+#[test]
+fn baseline_in_place_dirty_waiver_binds_to_tested_base() {
+    let (repo, worktree, base) = scratch_baseline_fixture("false");
+    git(&worktree, &["checkout", "--detach", &base]);
+    fs::write(worktree.join("README.md"), "dirty").unwrap();
+    repo.arc(&worktree)
+        .args([
+            "verify",
+            "scratch-baseline",
+            "--probe",
+            "check",
+            "--probe-phase",
+            "baseline",
+            "--waive-dirty",
+            "local edits",
+        ])
+        .assert()
+        .success();
+    let events = stdout(repo.arc(&worktree).args([
+        "events",
+        "--change",
+        "scratch-baseline",
+        "--type",
+        "dirty-tree-waived",
+    ]));
+    let waiver: serde_json::Value = serde_json::from_str(events.lines().last().unwrap()).unwrap();
+    assert_eq!(waiver["revision"], base);
+}
+
+#[test]
+fn scratch_baseline_creation_hook_failure_cleans_allocation() {
+    use std::os::unix::fs::PermissionsExt;
+    let (repo, worktree, _) = scratch_baseline_fixture("false");
+    let hook = repo.root.join(".git/hooks/post-checkout");
+    fs::write(
+        &hook,
+        "#!/bin/sh\necho initializer > partial-work\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let before = git_out(&worktree, &["worktree", "list", "--porcelain"]);
+    repo.arc(&worktree)
+        .args([
+            "verify",
+            "scratch-baseline",
+            "--probe",
+            "check",
+            "--probe-phase",
+            "baseline",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("manual recipe:"));
+    assert_eq!(
+        git_out(&worktree, &["worktree", "list", "--porcelain"]),
+        before
+    );
+    assert_eq!(
+        fs::read_dir(repo.home.join(".worktrees")).unwrap().count(),
+        1
+    );
+}
+
+#[test]
+fn scratch_baseline_creation_cleanup_failure_reports_retained_checkout() {
+    use std::os::unix::fs::PermissionsExt;
+    let (repo, worktree, _) = scratch_baseline_fixture("false");
+    let hook = repo.root.join(".git/hooks/post-checkout");
+    fs::write(
+        &hook,
+        r#"#!/bin/sh
+git worktree lock "$PWD"
+exit 1
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = repo
+        .arc(&worktree)
+        .args([
+            "verify",
+            "scratch-baseline",
+            "--probe",
+            "check",
+            "--probe-phase",
+            "baseline",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("allocation retained:"), "{error}");
+    assert!(!error.contains("manual recipe:"), "{error}");
+    assert!(
+        !error
+            .lines()
+            .any(|line| line.starts_with("git worktree add")),
+        "{error}"
+    );
+    let cleanup = error
+        .lines()
+        .find_map(|line| line.strip_prefix("cleanup: "))
+        .unwrap();
+    stdout(&mut repo.arc_shell(&worktree, cleanup));
+    assert_eq!(
+        fs::read_dir(repo.home.join(".worktrees")).unwrap().count(),
+        1
+    );
+}

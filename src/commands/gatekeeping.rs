@@ -288,6 +288,29 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     // it. It names the head it was declared at — the head of the checkout the
     // gate runs in, which is the tree whose dirt it excuses — and that is the
     // only revision it covers.
+    if waive_dirty.is_some()
+        && !attest
+        && probe.is_some()
+        && probe_phase == Some(ProbePhase::Baseline)
+    {
+        let brief = match brief_version {
+            Some(0) => bail!("brief version 0 not found"),
+            Some(version) => st
+                .briefs
+                .get(version - 1)
+                .with_context(|| format!("brief version {version} not found"))?,
+            None => st
+                .latest_brief()
+                .context("no brief recorded for acceptance probe")?,
+        };
+        let base = brief
+            .base_revision
+            .as_deref()
+            .context("legacy brief has no base revision for baseline probe evidence")?;
+        if gitio::head(&run_ctx.cwd)? != base {
+            bail!("--waive-dirty cannot be combined with a scratch baseline: the scratch checkout is clean and the waiver would bind to a revision the probe does not test");
+        }
+    }
     let st = if let Some(reason) = waive_dirty.as_deref() {
         let reason = reason.trim();
         if reason.is_empty() {
@@ -1710,6 +1733,7 @@ fn create_baseline_checkout(
     );
     let path = super::lifecycle::worktree_path_for(&ctx.cwd, &name)?;
     let quoted_path = crate::context::shell_quote(&path.display().to_string());
+    let mut allocation_attempted = false;
     let creation = (|| -> Result<()> {
         if let Some(prefix) = ctx.excluded_by_sandbox(&path)? {
             bail!(
@@ -1723,6 +1747,10 @@ fn create_baseline_checkout(
                 .with_context(|| format!("cannot create {}", parent.display()))?;
         }
         crate::worktree_usage::report_root_free(&path);
+        if path.exists() {
+            bail!("scratch path {} already exists", path.display());
+        }
+        allocation_attempted = true;
         gitio::git(
             &ctx.cwd,
             &[
@@ -1736,6 +1764,32 @@ fn create_baseline_checkout(
         Ok(())
     })();
     if let Err(error) = creation {
+        if allocation_attempted {
+            let mut cleanup_command = format!("git worktree remove --force --force {quoted_path}");
+            let cleanup = (|| -> Result<()> {
+                let registered = gitio::worktree_inventory(&ctx.cwd)?
+                    .iter()
+                    .any(|entry| entry.path == path);
+                if registered {
+                    gitio::remove_worktree(&ctx.cwd, &path, true)?;
+                } else if path.exists() {
+                    cleanup_command = format!("rm -rf -- {quoted_path}");
+                    std::fs::remove_dir_all(&path)
+                        .with_context(|| format!("cannot remove {}", path.display()))?;
+                }
+                gitio::git(&ctx.cwd, &["worktree", "prune"])?;
+                Ok(())
+            })();
+            if let Err(cleanup) = cleanup {
+                bail!(
+                    "cannot create baseline scratch checkout {}: {error:#}
+allocation retained: {cleanup:#}
+cleanup: {cleanup_command}
+git worktree prune",
+                    path.display()
+                );
+            }
+        }
         bail!(
             "cannot create baseline scratch checkout {}: {error:#}
 manual recipe:

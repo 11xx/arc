@@ -1407,7 +1407,9 @@ enum Cmd {
         /// Acceptance-probe evidence phase (defaults to final).
         /// Baseline commands run at the brief's base, in a detached scratch
         /// checkout under the configured worktrees directory when HEAD differs.
-        /// The scratch checkout is removed after the run. Attested baseline
+        /// The scratch checkout is removed after the run. Failed creation
+        /// cleans this attempt's allocation; failed cleanup reports the
+        /// retained path and its removal command. Attested baseline
         /// evidence requires --tested-revision equal to the base.
         #[arg(long, value_enum)]
         probe_phase: Option<ProbePhase>,
@@ -1447,6 +1449,8 @@ enum Cmd {
         /// binds the way the evidence binds — to this head alone — so the next
         /// commit ends it rather than leaving a standing exemption. It is
         /// visible to a reviewer, who is free to disagree with it.
+        /// A baseline probe requiring a clean scratch checkout refuses this
+        /// flag before recording; a baseline at HEAD can waive that HEAD.
         #[arg(long = "waive-dirty", value_name = "REASON")]
         waive_dirty: Option<String>,
         /// Earlier failing evidence for this same check that this run answers.
