@@ -355,6 +355,13 @@ fn session_identity_with_backends(
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
             return SessionIdentity::Unnamed(ModelUnavailable::NotRecordedAfterWait);
         };
+        // Debug test runners publish a model only after this model-less read.
+        #[cfg(debug_assertions)]
+        if std::env::var_os("ARC_TEST_CLAUDE_MODEL_WAIT_TRACE").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+        {
+            eprintln!("arc test: Claude model lookup has no model; retrying");
+        }
         std::thread::sleep(CLAUDE_MODEL_POLL.min(remaining));
     }
 }

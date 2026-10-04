@@ -578,34 +578,59 @@ fn env_explains_headless_startup_evidence_and_resolves_a_recorded_model() {
 }
 
 #[test]
+#[cfg(debug_assertions)]
 fn writes_wait_for_the_acting_claude_recording_to_flush_its_model() {
     use std::io::Write;
-    use std::time::SystemTime;
 
     let repo = Repo::new();
     let path = recording(&repo, &[prompt("u1", "2026-01-01T10:00:00Z")]);
-    // An access timestamp older than the write is a sentinel for the reader's
-    // first access, including on filesystems using relatime.
-    fs::File::open(&path)
-        .unwrap()
-        .set_times(fs::FileTimes::new().set_accessed(SystemTime::UNIX_EPOCH))
+    let mut invocation = acting(&repo);
+    invocation
+        .args(["begin", "model-evidence"])
+        .env("ARC_TEST_CLAUDE_MODEL_WAIT_TRACE", "1");
+    let mut command = Command::new(invocation.get_program());
+    command.args(invocation.get_args());
+    command.current_dir(invocation.get_current_dir().unwrap());
+    for (key, value) in invocation.get_envs() {
+        match value {
+            Some(value) => command.env(key, value),
+            None => command.env_remove(key),
+        };
+    }
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap();
+    let stderr = child.stderr.take().unwrap();
     let writer = thread::spawn(move || {
-        let deadline = Instant::now() + HANG_BOUND;
-        while fs::metadata(&path).unwrap().accessed().unwrap() == SystemTime::UNIX_EPOCH {
-            assert!(Instant::now() < deadline, "arc did not read the recording");
-            thread::sleep(Duration::from_millis(1));
+        let mut saw_model_less_lookup = false;
+        let mut diagnostics = String::new();
+        for line in BufReader::new(stderr).lines() {
+            let line = line.unwrap();
+            diagnostics.push_str(&line);
+            diagnostics.push('\n');
+            if line == "arc test: Claude model lookup has no model; retrying"
+                && !saw_model_less_lookup
+            {
+                saw_model_less_lookup = true;
+                let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+                writeln!(
+                    file,
+                    "{}",
+                    assistant("a1", "2026-01-01T10:00:01Z", "medium")
+                )
+                .unwrap();
+            }
         }
-        let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
-        writeln!(
-            file,
-            "{}",
-            assistant("a1", "2026-01-01T10:00:01Z", "medium")
-        )
-        .unwrap();
+        (saw_model_less_lookup, diagnostics)
     });
-    let change = begin(&repo);
-    writer.join().unwrap();
+    let status = wait_for_exit(&mut child);
+    let output = child_stdout(&mut child);
+    let (saw_model_less_lookup, diagnostics) = writer.join().unwrap();
+    assert!(saw_model_less_lookup, "no model-less lookup: {diagnostics}");
+    assert!(status.success(), "{status}: {diagnostics}");
+    let change = opened_change_id(&output);
     let events: Vec<Value> = stdout(acting(&repo).args(["events", "--change", &change]))
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
