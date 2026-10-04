@@ -273,28 +273,56 @@ fn revision<'a>(body: &'a str, events: &[JournalEvent]) -> Result<Revision<'a>> 
                 .filter(|(_, (heading, _, _, _))| text.starts_with(heading))
                 .collect();
             if !matching.is_empty() {
-                if matching.len() != 1 || offset == 0 {
+                if offset == 0 {
                     bail!("{text} (no unique append event)");
                 }
-                starts.push((offset - 1, matching[0]));
+                starts.push((offset - 1, text, matching));
             }
         }
         offset += line.len();
     }
-    let base = &body[..starts.first().map_or(body.len(), |(offset, _)| *offset)];
+    let base = &body[..starts.first().map_or(body.len(), |(offset, _, _)| *offset)];
     let mut blocks = Vec::new();
     let mut seen = BTreeSet::new();
-    for (index, (start, (event, (_, id, ts, digest)))) in starts.iter().enumerate() {
-        if !seen.insert(id.as_str()) {
-            bail!("{id} (duplicate block identity)");
-        }
+    for (index, (start, heading, candidates)) in starts.iter().enumerate() {
         let end = starts
             .get(index + 1)
-            .map_or(body.len(), |(offset, _)| *offset);
+            .map_or(body.len(), |(offset, _, _)| *offset);
         let block = &body[*start..end];
-        if digest.is_some_and(|digest| body_digest(block) != digest) {
-            bail!("{id} (block digest differs from its event)");
+        let digest = body_digest(block);
+        let mut matching: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|(_, (_, id, ts, recorded))| {
+                if seen.contains(id.as_str()) {
+                    return false;
+                }
+                if let Some(recorded) = recorded {
+                    return digest == *recorded;
+                }
+                // Answers without a digest bind by choice and second-resolution timestamp.
+                !id.starts_with("answer:")
+                    || ts.parse::<DateTime<Utc>>().is_ok_and(|ts| {
+                        heading.ends_with(&format!(
+                            ", {})",
+                            ts.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                        ))
+                    })
+            })
+            .collect();
+        matching.sort_by_key(|(_, (_, _, ts, _))| ts.parse::<DateTime<Utc>>().ok());
+        let Some((event, (_, id, ts, _))) = matching.first().copied() else {
+            let (_, (_, id, _, _)) = candidates[0];
+            bail!("{id} (block digest differs from its event or duplicate block identity)");
+        };
+        if matching.len() > 1
+            && !matching
+                .iter()
+                .all(|(_, (_, id, _, _))| id.starts_with("answer:"))
+        {
+            bail!("{heading} (no unique append event)");
         }
+        seen.insert(id.as_str());
         blocks.push(RevisionBlock {
             id: id.clone(),
             timestamp: ts

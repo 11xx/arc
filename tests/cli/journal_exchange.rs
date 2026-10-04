@@ -847,3 +847,354 @@ fn typed_amendments_extend_bodies_with_prose_headings_and_fenced_examples() {
         fs::read(journal_dir(&b).join(&file)).unwrap()
     );
 }
+
+fn assert_event_sets_equal(a: &Repo, b: &Repo, file: &str) {
+    let canonical = |repo: &Repo| {
+        let mut events: Vec<_> = events_for(&journal_dir(repo), file)
+            .iter()
+            .map(|event| serde_json::to_string(event).unwrap())
+            .collect();
+        events.sort();
+        events
+    };
+    assert_eq!(canonical(a), canonical(b));
+}
+
+#[test]
+fn every_typed_append_and_reanswered_question_exchanges_in_both_directions() {
+    let a = Repo::new();
+    let b = Repo::new();
+    pair(&a, &b, "a", "b");
+    let file = write_artifact(&a, "all-appends", "discussion", "# Shared\n");
+    let initial = bundle_file(&a, "initial");
+    export(&a, &[&file], &initial);
+    assert!(import(&b, &initial, false).status.success());
+    a.arc(&a.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "closing",
+            "--option",
+            "yes",
+            "--option",
+            "no",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Which option?\n")
+        .assert()
+        .success();
+    let question = events_for(&journal_dir(&a), &file)
+        .into_iter()
+        .find(|e| e["event"] == "question")
+        .unwrap()["question_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let target = format!("answer:{question}");
+    for (index, option) in ["yes", "no"].iter().enumerate() {
+        a.arc(&a.root)
+            .args([
+                "journal",
+                "answer",
+                &file,
+                "--question",
+                &question,
+                "--option",
+                option,
+                "--body-file",
+                "-",
+            ])
+            .write_stdin(format!("Answer {index}.\n"))
+            .assert()
+            .success();
+        if index == 0 {
+            a.arc(&a.root)
+                .args([
+                    "journal",
+                    "retract",
+                    &file,
+                    "--target",
+                    &target,
+                    "--body-file",
+                    "-",
+                ])
+                .write_stdin("Reconsider.\n")
+                .assert()
+                .success();
+        }
+    }
+    a.arc(&a.root)
+        .args(["claim", &file, "--ttl", "30m"])
+        .assert()
+        .success();
+    a.arc(&a.root)
+        .args(["journal", "checkpoint", &file, "--body-file", "-"])
+        .write_stdin("Work completed.\n")
+        .assert()
+        .success();
+    a.arc(&a.root)
+        .args(["release-claim", &file, "--outcome", "paused"])
+        .assert()
+        .success();
+    for repo in [&a, &b] {
+        repo.arc(&repo.root)
+            .args(["journal", "position", &file, "--body-file", "-"])
+            .write_stdin("Position: for\n\nIndependent argument.\n")
+            .assert()
+            .success();
+    }
+    let position = events_for(&journal_dir(&a), &file)
+        .into_iter()
+        .find(|e| e["event"] == "position")
+        .unwrap()["position_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    a.arc(&a.root)
+        .args([
+            "journal", "correct", &file, "--target", &position, "--field", "stance", "--value",
+            "amend",
+        ])
+        .assert()
+        .success();
+    a.arc(&a.root)
+        .args([
+            "journal",
+            "consume",
+            &file,
+            "--outcome",
+            "done",
+            "--drop-questions",
+            "--note",
+            "Question retained in the discussion.",
+        ])
+        .assert()
+        .success();
+    let from_a = bundle_file(&a, "from-a");
+    let from_b = bundle_file(&b, "from-b");
+    export(&a, &[&file], &from_a);
+    export(&b, &[&file], &from_b);
+    for (repo, bundle) in [(&b, &from_a), (&a, &from_b)] {
+        let result = import(repo, bundle, false);
+        assert!(result.status.success(), "{result:?}");
+    }
+    assert_eq!(
+        fs::read(journal_dir(&a).join(&file)).unwrap(),
+        fs::read(journal_dir(&b).join(&file)).unwrap()
+    );
+    assert_event_sets_equal(&a, &b, &file);
+    for kind in [
+        "position",
+        "question",
+        "answer",
+        "retraction",
+        "correction",
+        "checkpoint",
+        "consumed",
+    ] {
+        assert!(
+            events_for(&journal_dir(&b), &file)
+                .iter()
+                .any(|e| e["event"] == kind),
+            "missing {kind}"
+        );
+    }
+    let merged = bundle_file(&a, "merged");
+    export(&a, &[&file], &merged);
+    assert!(import(&b, &merged, false).status.success());
+}
+
+#[test]
+fn identical_and_off_menu_reanswers_have_distinct_append_identities() {
+    for flag in ["--option", "--other"] {
+        let a = Repo::new();
+        let b = Repo::new();
+        pair(&a, &b, "a", "b");
+        let file = write_artifact(&a, "identical-answers", "discussion", "# Shared\n");
+        let initial = bundle_file(&a, "initial");
+        export(&a, &[&file], &initial);
+        assert!(import(&b, &initial, false).status.success());
+        a.arc(&a.root)
+            .args([
+                "journal",
+                "question",
+                &file,
+                "--placement",
+                "closing",
+                "--option",
+                "yes",
+                "--option",
+                "no",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("Which option?\n")
+            .assert()
+            .success();
+        let question = events_for(&journal_dir(&a), &file)
+            .into_iter()
+            .find(|e| e["event"] == "question")
+            .unwrap()["question_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        for index in 0..2 {
+            a.arc(&a.root)
+                .args([
+                    "journal",
+                    "answer",
+                    &file,
+                    "--question",
+                    &question,
+                    flag,
+                    "yes",
+                    "--body-file",
+                    "-",
+                ])
+                .write_stdin("Same reasoning.\n")
+                .assert()
+                .success();
+            if index == 0 {
+                a.arc(&a.root)
+                    .args([
+                        "journal",
+                        "retract",
+                        &file,
+                        "--target",
+                        &format!("answer:{question}"),
+                        "--body-file",
+                        "-",
+                    ])
+                    .write_stdin("Reconsider.\n")
+                    .assert()
+                    .success();
+            }
+        }
+        let answers: Vec<_> = events_for(&journal_dir(&a), &file)
+            .into_iter()
+            .filter(|e| e["event"] == "answer")
+            .collect();
+        assert_eq!(answers.len(), 2);
+        assert_ne!(answers[0]["digest"], answers[1]["digest"]);
+        let incoming = bundle_file(&a, "incoming");
+        export(&a, &[&file], &incoming);
+        let result = import(&b, &incoming, false);
+        assert!(result.status.success(), "{result:?}");
+        let back = bundle_file(&b, "back");
+        export(&b, &[&file], &back);
+        assert!(import(&a, &back, false).status.success());
+        assert_eq!(
+            fs::read(journal_dir(&a).join(&file)).unwrap(),
+            fs::read(journal_dir(&b).join(&file)).unwrap()
+        );
+        assert_event_sets_equal(&a, &b, &file);
+    }
+}
+
+#[test]
+fn legacy_reanswers_without_block_digests_exchange() {
+    let a = Repo::new();
+    let b = Repo::new();
+    pair(&a, &b, "a", "b");
+    let file = discussion_with_records(&a);
+    a.arc(&a.root)
+        .args(["release-claim", &file, "--outcome", "paused"])
+        .assert()
+        .success();
+    let legacy = || {
+        let dir = journal_dir(&a);
+        let body = fs::read_to_string(dir.join(&file)).unwrap();
+        let body = body
+            .split_inclusive('\n')
+            .map(|line| {
+                if line.starts_with("### Answer ") {
+                    let timestamp = line
+                        .rsplit_once(", ")
+                        .unwrap()
+                        .1
+                        .trim_end_matches([')', '\n']);
+                    let seconds = chrono::DateTime::parse_from_rfc3339(timestamp)
+                        .unwrap()
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                    line.replace(timestamp, &seconds)
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<String>();
+        fs::write(dir.join(&file), body).unwrap();
+        let log = journal_events_dir(&dir)
+            .lines()
+            .map(|line| {
+                let mut event: serde_json::Value = serde_json::from_str(line).unwrap();
+                if event["file"] == file && event["event"] == "answer" {
+                    event.as_object_mut().unwrap().remove("digest");
+                }
+                serde_json::to_string(&event).unwrap() + "\n"
+            })
+            .collect::<String>();
+        fs::write(dir.join("events.jsonl"), log).unwrap();
+    };
+    legacy();
+    let initial = bundle_file(&a, "initial");
+    export(&a, &[&file], &initial);
+    assert!(import(&b, &initial, false).status.success());
+    let question = events_for(&journal_dir(&a), &file)
+        .into_iter()
+        .find(|e| e["event"] == "question")
+        .unwrap()["question_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    a.arc(&a.root)
+        .args([
+            "journal",
+            "retract",
+            &file,
+            "--target",
+            &format!("answer:{question}"),
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Reconsider.\n")
+        .assert()
+        .success();
+    thread::sleep(Duration::from_millis(1100));
+    a.arc(&a.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &question,
+            "--option",
+            "yes",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Different reasoning.\n")
+        .assert()
+        .success();
+    legacy();
+    let incoming = bundle_file(&a, "incoming");
+    export(&a, &[&file], &incoming);
+    let result = import(&b, &incoming, false);
+    assert!(result.status.success(), "{result:?}");
+    b.arc(&b.root)
+        .args(["journal", "position", &file, "--body-file", "-"])
+        .write_stdin("Position: amend\n\nFurther argument.\n")
+        .assert()
+        .success();
+    let back = bundle_file(&b, "back");
+    export(&b, &[&file], &back);
+    let result = import(&a, &back, false);
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(
+        fs::read(journal_dir(&a).join(&file)).unwrap(),
+        fs::read(journal_dir(&b).join(&file)).unwrap()
+    );
+    assert_event_sets_equal(&a, &b, &file);
+}

@@ -957,8 +957,10 @@ PAIR REPLICA STORES
   and every artifact the selection references by filename. An import is
   all-or-nothing: the whole bundle is validated before anything is written.
   Storage tiers must agree for a held artifact. Appended sections are keyed
-  by their recorded event identities. A prefix revision retains the longer
-  body; concurrent appends merge as a union ordered by event timestamp, then
+  by their recorded event identities. Each answer append has its own identity,
+  including answers to reopened questions that repeat a choice. A prefix
+  revision retains the longer body; concurrent appends merge as a union ordered
+  by event timestamp, then
   event ID. The base and shared blocks must match byte for byte; divergence
   refuses the whole bundle, naming both digests and the first differing block.
   An absent artifact lands in the storage the bundle records. Events and

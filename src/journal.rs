@@ -808,7 +808,9 @@ pub enum JournalCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Settle an open question by choosing one of its options, once. Branches
+    /// Settle an open question by choosing one of its options. Each answer
+    /// append carries its own block digest and precise timestamp, so answers
+    /// to a reopened question remain distinct during revision exchange. Branches
     /// that lost stay in the file: a branch argued and not taken is the only
     /// record that the alternative was explored rather than never considered.
     /// Use `arc journal answer <file> --question <id> --option <chosen>
@@ -1192,7 +1194,8 @@ pub enum JournalCmd {
     },
     /// Import arc-journal-bundle/2 or /1 from another paired replica.
     /// Prefix revisions retain the longer body. Concurrent appended sections
-    /// merge by event identity, ordered by timestamp then ID.
+    /// merge by event identity, ordered by timestamp then ID. Answers to a
+    /// reopened question retain distinct append identities.
     /// Edits to the base or a shared block refuse the entire bundle, naming
     /// both digests and the first differing block. Storage tiers must agree.
     /// Events retain their provenance; a repeated bundle changes nothing.
@@ -1728,17 +1731,22 @@ impl JournalEvent {
             "checkpoint" => ("Work checkpoint", self.checkpoint_id.as_deref()?),
             _ => return None,
         };
-        let key = if self.event == "answer" {
-            format!("answer:{id}")
+        let (matcher, key) = if self.event == "answer" {
+            let option = self.option.as_deref()?;
+            let menu = if self.off_menu == Some(true) {
+                "(none offered) "
+            } else {
+                ""
+            };
+            let bytes = serde_json::to_vec(self).ok()?;
+            (
+                format!("### Answer {id} = {menu}{option} ("),
+                format!("answer:{id}:{}", hex::encode(Sha256::digest(bytes))),
+            )
         } else {
-            id.to_string()
+            (format!("### {heading} {id} "), id.to_string())
         };
-        Some((
-            format!("### {heading} {id} "),
-            key,
-            &self.ts,
-            self.digest.as_deref(),
-        ))
+        Some((matcher, key, &self.ts, self.digest.as_deref()))
     }
 }
 
@@ -5326,7 +5334,7 @@ fn answer(
     }
 
     let now = Utc::now();
-    let ts = now.to_rfc3339_opts(SecondsFormat::Secs, true);
+    let ts = now.to_rfc3339_opts(SecondsFormat::Nanos, true);
     let (harness, _) = identity(ctx);
     let who = attribution(ctx, &harness);
     // A standing suggestion is advice the answerer may follow or leave. The
@@ -5352,6 +5360,9 @@ fn answer(
     let mut event = JournalEvent::base(ctx, now, &topic, "answer");
     event.file = Some(filename.to_string());
     event.question_id = Some(question_id.to_string());
+    event.digest = Some(crate::journal_exchange::body_digest(&block_bytes(
+        &heading, &body,
+    )));
     match chosen {
         Chosen::Offered(option) => event.option = Some(option.to_string()),
         Chosen::OffMenu(answer) => {
@@ -6683,8 +6694,8 @@ pub(crate) struct JournalEvent {
     /// follows the correction it understands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     supersedes_checkpoints: Option<Vec<String>>,
-    /// Digest of the block a checkpoint appended, so a later reader can tell
-    /// a block that still says what it said from one rewritten underneath.
+    /// Digest of the exact appended block bytes, binding an answer or checkpoint
+    /// to its recorded event during revision exchange.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     digest: Option<String>,
     /// The change in another project that took up the artifact named by
