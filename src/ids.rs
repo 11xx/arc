@@ -87,10 +87,12 @@ pub fn validate_id_component(id: &str) -> Result<()> {
 mod tests {
     #[test]
     fn ids_after_a_floor_stay_in_one_sequence() {
-        let future =
-            ulid::Ulid::from_parts(ulid::Ulid::new().timestamp_ms() + 60_000, u128::MAX >> 48);
-        let after = new_event_id_after(future);
-        assert!(after > future);
+        // The current millisecond with its random part exhausted: the next
+        // id moves to the following millisecond, never far ahead of the
+        // clock other tests in this process read.
+        let floor = ulid::Ulid::from_parts(ulid::Ulid::new().timestamp_ms(), u128::MAX >> 48);
+        let after = new_event_id_after(floor);
+        assert!(after > floor);
         let next = new_event_id();
         assert!(next > after.to_string());
     }
