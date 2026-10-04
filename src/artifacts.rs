@@ -13,8 +13,9 @@ const CACHE_SIGNATURE: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
 
 /// A recognizer every checkout gets. Its marker is a file the tool writes at a
 /// fixed place inside the directory, beginning with the bytes its format fixes.
-/// A marker proves only that the tool ran there, so `layout` must also show
-/// that everything the directory holds is the tool's regenerable output.
+/// A marker shows only that the tool ran there, so `layout` must also exclude
+/// every place the tool's own workflow puts sources: a built-in exists only
+/// for a directory whose every entry the tool writes and regenerates.
 struct Builtin {
     tool: &'static str,
     path: &'static str,
@@ -25,25 +26,11 @@ struct Builtin {
 
 const BUILTIN: &[Builtin] = &[
     Builtin {
-        tool: "CMake",
-        path: "**",
-        marker: "CMakeCache.txt",
-        signature: b"# This is the CMakeCache file.",
-        layout: out_of_source_cmake_build,
-    },
-    Builtin {
         tool: "Cabal",
         path: "**/dist-newstyle",
         marker: "cache/plan.json",
         signature: b"{\"cabal-version\":",
         layout: no_dependency_checkouts,
-    },
-    Builtin {
-        tool: "Python virtual environment",
-        path: "**",
-        marker: "pyvenv.cfg",
-        signature: b"home = ",
-        layout: only_virtual_environment_entries,
     },
     Builtin {
         tool: "Python package metadata",
@@ -54,29 +41,6 @@ const BUILTIN: &[Builtin] = &[
     },
 ];
 
-/// A CMake binary directory whose cache names it as the build directory and
-/// names a source directory outside it. An in-source build mixes the cache
-/// with the sources it was configured from.
-fn out_of_source_cmake_build(directory: &Path) -> bool {
-    let Ok(cache) = fs::read_to_string(directory.join("CMakeCache.txt")) else {
-        return false;
-    };
-    let recorded = |key: &str| {
-        cache
-            .lines()
-            .find_map(|line| line.strip_prefix(key))
-            .and_then(|path| Path::new(path).canonicalize().ok())
-    };
-    let (Some(build), Some(source), Ok(here)) = (
-        recorded("CMAKE_CACHEFILE_DIR:INTERNAL="),
-        recorded("CMAKE_HOME_DIRECTORY:INTERNAL="),
-        directory.canonicalize(),
-    ) else {
-        return false;
-    };
-    build == here && !source.starts_with(&here)
-}
-
 /// Cabal clones source-repository-package dependencies under
 /// `dist-newstyle/src`, where they can carry edits no plan regenerates.
 fn no_dependency_checkouts(directory: &Path) -> bool {
@@ -84,35 +48,6 @@ fn no_dependency_checkouts(directory: &Path) -> bool {
         fs::symlink_metadata(directory.join("src")),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound
     )
-}
-
-/// A virtual environment created in a directory of its own holds only what
-/// `venv`, virtualenv and uv lay out. Any other entry, such as application
-/// sources beside an environment created in place, keeps the directory.
-fn only_virtual_environment_entries(directory: &Path) -> bool {
-    const ENTRIES: &[&str] = &[
-        ".gitignore",
-        "CACHEDIR.TAG",
-        "Include",
-        "Lib",
-        "Scripts",
-        "bin",
-        "include",
-        "lib",
-        "lib64",
-        "pyvenv.cfg",
-        "share",
-    ];
-    fs::read_dir(directory).is_ok_and(|entries| {
-        entries.into_iter().all(|entry| {
-            entry.is_ok_and(|entry| {
-                entry
-                    .file_name()
-                    .to_str()
-                    .is_some_and(|name| ENTRIES.contains(&name))
-            })
-        })
-    })
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -394,22 +329,6 @@ mod tests {
         assert!(recognize(root, &entries, &[rule]).is_empty());
     }
 
-    fn cmake_cache(directory: &Path, build: &Path, source: &Path) {
-        fs::create_dir_all(directory).unwrap();
-        fs::write(
-            directory.join("CMakeCache.txt"),
-            [
-                "# This is the CMakeCache file.".to_string(),
-                format!("# For build in directory: {}", build.display()),
-                format!("CMAKE_CACHEFILE_DIR:INTERNAL={}", build.display()),
-                format!("CMAKE_HOME_DIRECTORY:INTERNAL={}", source.display()),
-                String::new(),
-            ]
-            .join("\n"),
-        )
-        .unwrap();
-    }
-
     fn recognized(root: &Path, directory: &str) -> Option<String> {
         let entry = vec![format!("!! {directory}/")];
         recognize(root, &entry, &[])
@@ -418,40 +337,33 @@ mod tests {
     }
 
     #[test]
-    fn cmake_builds_count_only_out_of_source() {
+    fn tool_state_markers_need_a_configured_rule() {
         let fixture = tempfile::tempdir().unwrap();
-        let root = fixture.path().canonicalize().unwrap();
-        cmake_cache(&root.join("build"), &root.join("build"), &root);
-        fs::write(root.join("build/output.o"), b"object").unwrap();
-        assert_eq!(
-            recognized(&root, "build").as_deref(),
-            Some("CMake: CMakeCache.txt")
-        );
-        // An in-source build keeps the sources it was configured from.
-        cmake_cache(
-            &root.join("local"),
-            &root.join("local"),
-            &root.join("local"),
-        );
-        fs::write(root.join("local/main.c"), b"int main(void) { return 0; }").unwrap();
-        assert_eq!(recognized(&root, "local"), None);
-        // So does a build directory holding its source directory.
-        fs::create_dir_all(root.join("outer/src")).unwrap();
-        cmake_cache(
-            &root.join("outer"),
-            &root.join("outer"),
-            &root.join("outer/src"),
-        );
-        assert_eq!(recognized(&root, "outer"), None);
-        // A cache copied from another build directory identifies nothing here.
-        cmake_cache(&root.join("copied"), &root.join("build"), &root);
-        assert_eq!(recognized(&root, "copied"), None);
-        fs::write(
-            root.join("build/CMakeCache.txt"),
-            b"notes the tool never wrote",
-        )
-        .unwrap();
-        assert_eq!(recognized(&root, "build"), None);
+        let root = fixture.path();
+        let write = |path: &str, content: &[u8]| {
+            let path = root.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, content).unwrap();
+        };
+        // An out-of-source CMake build holds FetchContent dependency sources.
+        write("build/CMakeCache.txt", b"# This is the CMakeCache file.\n");
+        write("build/_deps/dep-src/dep.c", b"int patched(void);");
+        // A virtual environment created over an application keeps its
+        // sources, and an installed package can carry a local patch.
+        write("app/pyvenv.cfg", b"home = /usr/bin\n");
+        write("app/bin/application.py", b"print('kept')");
+        write(".venv/pyvenv.cfg", b"home = /usr/bin\n");
+        write(".venv/lib/python3/site-packages/pip/patched.py", b"");
+        for directory in ["build", "app", ".venv"] {
+            assert_eq!(recognized(root, directory), None, "{directory}");
+        }
+        let rule = Rule {
+            path: "build".into(),
+            marker: "CMakeCache.txt".into(),
+            signature: Some("# This is the CMakeCache file.".into()),
+        };
+        let declared = recognize(root, &["!! build/".into()], &[rule]);
+        assert_eq!(declared[0].identified_by, "rule 1: marker CMakeCache.txt");
     }
 
     #[test]
@@ -475,21 +387,6 @@ mod tests {
         // Dependency checkouts can carry edits no plan regenerates.
         write("pkg/dist-newstyle/src/dep/Lib.hs", b"module Lib where");
         assert_eq!(recognized(root, "pkg/dist-newstyle"), None);
-
-        write(
-            ".venv/pyvenv.cfg",
-            b"home = /usr/bin\ninclude-system-site-packages = false\n",
-        );
-        write(".venv/bin/python", b"");
-        write(".venv/lib/python3/site-packages/m.py", b"");
-        write(".venv/.gitignore", b"*\n");
-        assert_eq!(
-            recognized(root, ".venv").as_deref(),
-            Some("Python virtual environment: pyvenv.cfg")
-        );
-        // An environment created in place beside application sources.
-        write(".venv/app.py", b"print('kept')");
-        assert_eq!(recognized(root, ".venv"), None);
 
         write(
             "src/pkg.egg-info/PKG-INFO",

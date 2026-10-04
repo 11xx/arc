@@ -1904,35 +1904,31 @@ FILES
   A CACHEDIR.TAG must be a regular file beginning with the exact bytes
   `Signature: 8a477f597d28d172789f06886806bc55`, which Cargo, Meson, uv,
   pytest and other tools write. A marker shows only that a tool ran in a
-  directory, so each built-in recognizer also requires a layout showing that
-  everything there is the tool's regenerable output. Each marker is a regular
-  file that must begin with the bytes shown:
+  directory, so a built-in recognizer exists only where the layout leaves the
+  tool's own workflow no place for sources. Each marker is a regular file
+  that must begin with the bytes shown:
 
-    any directory      CMakeCache.txt      `# This is the CMakeCache file.`
-                       The cache names this directory as the build directory
-                       and a source directory outside it; an in-source build
-                       is kept.
     **/dist-newstyle   cache/plan.json     `{"cabal-version":`
                        No `src` entry, where Cabal clones dependency sources.
-    any directory      pyvenv.cfg          `home = `
-                       Only virtual-environment entries: `bin`, `Scripts`,
-                       `include`, `Include`, `lib`, `Lib`, `lib64`, `share`,
-                       `pyvenv.cfg`, `.gitignore` and `CACHEDIR.TAG`.
     **/*.egg-info      PKG-INFO            `Metadata-Version: `
     **/__pycache__     Only `<module>.<cpython-* or pypy*>.pyc` files, each
                        opening with a magic number whose last two bytes are a
                        carriage return and a line feed.
 
-  Ninja logs and `node_modules` are not recognized: a log can sit beside a
-  hand-written `build.ninja`, and installed packages can carry edits not yet
-  saved as a patch. A configured rule can declare them disposable.
+  CMake build directories, virtual environments without a CACHEDIR.TAG,
+  Ninja logs and `node_modules` are not recognized. CMake's FetchContent
+  and ExternalProject place dependency sources inside the build directory,
+  a virtual environment can be created over an application or hold a
+  patched package, a log can sit beside a hand-written `build.ninja`, and
+  installed packages can carry edits not yet saved as a patch. A
+  configured rule declares such a directory disposable.
 
   CACHEDIR.TAG and the built-in recognizers always apply at any depth,
   independently of configured rules and checkout ownership. A configured rule
   covers an artifact they do not:
 
     [integration]
-    disposable = [{ path = "**/generated", marker = ".generator-stamp" }]
+    disposable = [{ path = "build", marker = "CMakeCache.txt" }]
 
   `integration.disposable` is an array of rules with required string `path`
   and `marker`, and optional string `signature`. Operator defaults, project
