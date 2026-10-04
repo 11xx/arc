@@ -7,11 +7,12 @@ use std::path::Path;
 
 pub const CONFIG_SCHEMA: &str = "arc-config/1";
 
-const KEYS: [(&str, &str); 5] = [
+const KEYS: [(&str, &str); 6] = [
     ("change.checkout", "in-place"),
     ("change.branch_prefix", "arc/"),
     ("integration.shape", "ff-only"),
     ("integration.cleanup", "false"),
+    ("integration.discard", "artifacts"),
     ("integration.disposable", "[]"),
 ];
 
@@ -50,12 +51,28 @@ impl Checkout {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Discard {
+    Artifacts,
+    Ignored,
+}
+
+impl Discard {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Artifacts => "artifacts",
+            Self::Ignored => "ignored",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct StyleFlags {
     pub shape: Option<crate::integration::Shape>,
     pub checkout: Option<Checkout>,
     pub branch_prefix: Option<String>,
     pub cleanup: Option<bool>,
+    pub discard: Option<Discard>,
 }
 
 #[derive(Debug)]
@@ -84,6 +101,14 @@ impl Style {
             .value
             .as_bool()
             .expect("resolved integration.cleanup is a boolean")
+    }
+
+    pub fn discard(&self) -> Discard {
+        match self.keys["integration.discard"].value.as_str() {
+            Some("artifacts") => Discard::Artifacts,
+            Some("ignored") => Discard::Ignored,
+            _ => unreachable!("resolved integration.discard is validated"),
+        }
     }
 
     pub fn disposable(&self) -> Vec<crate::artifacts::Rule> {
@@ -149,6 +174,7 @@ fn validate_value(key: &str, value: &toml::Value, origin: &str) -> Result<Value>
         "change.branch_prefix" => value.as_str().is_some(),
         "integration.shape" => matches!(value.as_str(), Some("ff-only" | "no-ff")),
         "integration.cleanup" => value.as_bool().is_some(),
+        "integration.discard" => matches!(value.as_str(), Some("artifacts" | "ignored")),
         _ => false,
     };
     if !valid {
@@ -326,6 +352,7 @@ fn resolve(layers: Vec<(String, toml::Value, bool)>, flags: StyleFlags) -> Resul
             "change.checkout" => flags.checkout.map(|v| json!(v.as_str())),
             "change.branch_prefix" => flags.branch_prefix.as_ref().map(|v| json!(v)),
             "integration.cleanup" => flags.cleanup.map(|v| json!(v)),
+            "integration.discard" => flags.discard.map(|v| json!(v.as_str())),
             "integration.shape" => flags.shape.map(|shape| {
                 json!(match shape {
                     crate::integration::Shape::FfOnly => "ff-only",
@@ -384,11 +411,77 @@ mod tests {
     use super::*;
 
     #[test]
+    fn discard_resolves_layers() {
+        let mut layers = Vec::new();
+        assert_eq!(
+            resolve(layers.clone(), StyleFlags::default()).unwrap().keys["integration.discard"]
+                .value,
+            "artifacts"
+        );
+        for (source, text, user, expected) in [
+            (
+                "user:fixture",
+                "[integration]\ndiscard='ignored'",
+                true,
+                "ignored",
+            ),
+            (
+                "project:fixture",
+                "[defaults.integration]\ndiscard='artifacts'",
+                false,
+                "artifacts",
+            ),
+            (
+                "operator:fixture",
+                "[defaults.integration]\ndiscard='ignored'",
+                false,
+                "ignored",
+            ),
+        ] {
+            layers.push((source.to_string(), parse(text, source, user).unwrap(), user));
+            let style = resolve(layers.clone(), StyleFlags::default()).unwrap();
+            assert_eq!(style.keys["integration.discard"].value, expected);
+            assert_eq!(style.keys["integration.discard"].source, source);
+            assert_eq!(style.discard().as_str(), expected);
+            let overridden = resolve(
+                layers.clone(),
+                StyleFlags {
+                    discard: Some(Discard::Artifacts),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(overridden.discard(), Discard::Artifacts);
+            assert_eq!(overridden.keys["integration.discard"].source, "flag");
+        }
+    }
+
+    #[test]
+    fn discard_unknown_value_names_origin() {
+        for (origin, text, user, key) in [
+            (
+                "user:fixture",
+                "[integration]\ndiscard='all'",
+                true,
+                "integration.discard",
+            ),
+            (
+                "project:fixture",
+                "[defaults.integration]\ndiscard='all'",
+                false,
+                "defaults.integration.discard",
+            ),
+        ] {
+            let error = parse(text, origin, user).unwrap_err().to_string();
+            assert!(error.contains(origin) && error.contains(key), "{error}");
+        }
+    }
+    #[test]
     fn every_style_key_resolves_each_layer_and_preserves_sources() {
         let texts = [
-            ("user:config.toml", "[change]\ncheckout='in-place'\nbranch_prefix='user/'\n[integration]\nshape='no-ff'\ncleanup=true", true),
-            ("project:target", "[defaults.change]\ncheckout='worktree'\nbranch_prefix='project/'\n[defaults.integration]\nshape='ff-only'\ncleanup=false", false),
-            ("operator:policy.toml", "[defaults.change]\ncheckout='in-place'\nbranch_prefix='operator/'\n[defaults.integration]\nshape='no-ff'\ncleanup=true", false),
+            ("user:config.toml", "[change]\ncheckout='in-place'\nbranch_prefix='user/'\n[integration]\nshape='no-ff'\ncleanup=true\ndiscard='ignored'", true),
+            ("project:target", "[defaults.change]\ncheckout='worktree'\nbranch_prefix='project/'\n[defaults.integration]\nshape='ff-only'\ncleanup=false\ndiscard='artifacts'", false),
+            ("operator:policy.toml", "[defaults.change]\ncheckout='in-place'\nbranch_prefix='operator/'\n[defaults.integration]\nshape='no-ff'\ncleanup=true\ndiscard='ignored'", false),
         ];
         let builtin = resolve(Vec::new(), StyleFlags::default()).unwrap();
         assert_eq!(builtin.keys["change.checkout"].value, "in-place");
@@ -497,11 +590,12 @@ mod tests {
     #[test]
     fn every_style_flag_overrides_layers() {
         let style = resolve(
-            vec![("user:config.toml".into(), parse("[change]\ncheckout='worktree'\nbranch_prefix='user/'\n[integration]\ncleanup=false\nshape='ff-only'", "user", true).unwrap(), true)],
+            vec![("user:config.toml".into(), parse("[change]\ncheckout='worktree'\nbranch_prefix='user/'\n[integration]\ncleanup=false\nshape='ff-only'\ndiscard='artifacts'", "user", true).unwrap(), true)],
             StyleFlags {
                 checkout: Some(Checkout::InPlace),
                 branch_prefix: Some("flag-".into()),
                 cleanup: Some(true),
+                discard: Some(Discard::Ignored),
                 shape: Some(crate::integration::Shape::NoFf),
             },
         ).unwrap();

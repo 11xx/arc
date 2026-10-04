@@ -4604,3 +4604,245 @@ fn disposable_cleanup_collapsed_outbox_requires_only_owned_metadata() {
         }
     }
 }
+
+fn ignored_discard_content(wt: &Path) {
+    fs::create_dir_all(wt.join("target/debug")).unwrap();
+    fs::write(wt.join("target/debug/output"), "local build").unwrap();
+    fs::write(wt.join(".env"), "fixture value").unwrap();
+}
+
+fn assert_ignored_discard_removed(repo: &Repo, wt: &Path, out: &str) {
+    assert!(!wt.exists(), "{out}");
+    assert!(git_out(&repo.root, &["branch", "--list", "arc/artifact-cleanup"]).is_empty());
+    for path in ["target/", ".env"] {
+        let report = format!("discarded {path} (ignored; integration.discard = ignored)");
+        assert!(out.contains(&report), "{out}");
+        assert!(
+            out.find(&report).unwrap() < out.find("removed worktree").unwrap(),
+            "{out}"
+        );
+    }
+}
+
+#[test]
+fn discard_ignored_explicit_cleanup_removes_ignored_content() {
+    let (repo, id, wt) = disposable_cleanup_fixture(false);
+    ignored_discard_content(&wt);
+    let out =
+        stdout(
+            repo.arc(&repo.root)
+                .args(["integrate", &id, "--cleanup", "--discard", "ignored"]),
+        );
+    assert_ignored_discard_removed(&repo, &wt, &out);
+}
+
+#[test]
+fn discard_ignored_implies_cleanup() {
+    let (repo, id, wt) = disposable_cleanup_fixture(false);
+    ignored_discard_content(&wt);
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--discard", "ignored"]),
+    );
+    assert_ignored_discard_removed(&repo, &wt, &out);
+}
+
+#[test]
+fn discard_ignored_user_default_and_flag_override() {
+    for override_flag in [false, true] {
+        let (repo, id, wt) = disposable_cleanup_fixture(false);
+        fs::write(
+            repo.home.join(".local/ai/arc/config.toml"),
+            "[integration]\ncleanup=true\ndiscard='ignored'\n",
+        )
+        .unwrap();
+        ignored_discard_content(&wt);
+        let mut cmd = repo.arc(&repo.root);
+        cmd.args(["integrate", &id]);
+        if override_flag {
+            cmd.args(["--discard", "artifacts"]);
+        }
+        let out = stdout(&mut cmd);
+        assert_eq!(wt.exists(), override_flag, "{out}");
+        if override_flag {
+            assert!(
+                out.contains("holds local content not in the branch: .env, target/"),
+                "{out}"
+            );
+        } else {
+            assert_ignored_discard_removed(&repo, &wt, &out);
+        }
+    }
+}
+
+#[test]
+fn discard_ignored_keeps_untracked_file() {
+    let (repo, id, wt) = disposable_cleanup_fixture(false);
+    ignored_discard_content(&wt);
+    fs::write(wt.join("local.txt"), "local").unwrap();
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--discard", "ignored"]),
+    );
+    assert!(wt.exists(), "{out}");
+    assert!(
+        out.contains("holds local content not in the branch: local.txt"),
+        "{out}"
+    );
+    assert!(wt.join(".env").exists());
+    assert!(!out.contains("discarded "), "{out}");
+}
+
+#[test]
+fn discard_ignored_keeps_tracked_edit() {
+    let (repo, id, wt) = disposable_cleanup_fixture(false);
+    fs::write(wt.join("README.md"), "local edit").unwrap();
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--discard", "ignored"]),
+    );
+    assert!(wt.exists(), "{out}");
+    assert!(
+        out.contains("holds local content not in the branch: README.md"),
+        "{out}"
+    );
+}
+
+#[test]
+fn discard_ignored_keeps_unpromoted_outbox() {
+    let (repo, id, wt) = disposable_cleanup_fixture(false);
+    stdout(
+        repo.arc(&wt)
+            .args(["journal", "log", "fixture", "--spool", "local note"]),
+    );
+    let entry = fs::read_dir(wt.join(".arc/outbox"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .unwrap();
+    // An unsupported schema leaves the entry unpromoted.
+    let mut body: serde_json::Value = serde_json::from_slice(&fs::read(&entry).unwrap()).unwrap();
+    body["schema"] = serde_json::json!("arc-journal-spool/999");
+    fs::write(&entry, serde_json::to_vec(&body).unwrap()).unwrap();
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--discard", "ignored"]),
+    );
+    assert!(wt.exists(), "{out}");
+    assert!(entry.exists(), "{out}");
+    assert!(
+        out.contains("holds local content not in the branch: .arc/"),
+        "{out}"
+    );
+}
+
+#[test]
+fn discard_ignored_conflicts_with_no_cleanup() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args([
+            "integrate",
+            "example",
+            "--discard",
+            "ignored",
+            "--no-cleanup",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cannot be used with"));
+}
+
+#[test]
+fn discard_ignored_queue_removes_ignored_content() {
+    let (repo, id, wt) = disposable_cleanup_fixture(false);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["metadata", &id, "--tag", "discard-fixture"]),
+    );
+    ignored_discard_content(&wt);
+    let out = stdout(repo.arc(&repo.root).args([
+        "integrate",
+        "--tag",
+        "discard-fixture",
+        "--discard",
+        "ignored",
+    ]));
+    assert_ignored_discard_removed(&repo, &wt, &out);
+}
+
+#[test]
+fn discard_config_projects_scope_and_source() {
+    let repo = Repo::new();
+    let config = json_stdout(repo.arc(&repo.root).arg("config"));
+    assert_eq!(config["schema"], "arc-config/1");
+    assert_eq!(config["style"]["integration.discard"]["value"], "artifacts");
+    assert_eq!(config["style"]["integration.discard"]["source"], "builtin");
+    fs::write(
+        repo.home.join(".local/ai/arc/config.toml"),
+        "[integration]\ndiscard='ignored'\n",
+    )
+    .unwrap();
+    let config = json_stdout(repo.arc(&repo.root).arg("config"));
+    let scope = &config["style"]["integration.discard"];
+    assert_eq!(scope["value"], "ignored");
+    assert!(scope["source"].as_str().unwrap().starts_with("user:"));
+    assert_eq!(scope["overridden"][0]["value"], "artifacts");
+}
+
+#[test]
+fn discard_dry_runs_name_scope_without_removing_content() {
+    for queue in [false, true] {
+        for scope in ["artifacts", "ignored"] {
+            let (repo, id, wt) = disposable_cleanup_fixture(false);
+            stdout(
+                repo.arc(&repo.root)
+                    .args(["metadata", &id, "--tag", "discard-fixture"]),
+            );
+            ignored_discard_content(&wt);
+            let mut cmd = repo.arc(&repo.root);
+            cmd.arg("integrate");
+            if queue {
+                cmd.args(["--tag", "discard-fixture"]);
+            } else {
+                cmd.arg(&id);
+            }
+            cmd.args(["--dry-run", "--discard", scope]);
+            let out = stdout(&mut cmd);
+            assert!(
+                out.contains(&format!("integration.discard = {scope}")),
+                "{out}"
+            );
+            assert!(wt.join(".env").exists(), "{out}");
+            assert!(!out.contains("removed worktree"), "{out}");
+        }
+    }
+}
+
+#[test]
+fn discard_ignored_retains_artifact_recognizer() {
+    let (repo, id, wt) = disposable_cleanup_fixture(false);
+    fixture_cache_tag(&wt, FIXTURE_CACHE_SIGNATURE);
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--discard", "ignored"]),
+    );
+    assert!(!wt.exists(), "{out}");
+    assert!(out.contains("discarded target/ (CACHEDIR.TAG)"), "{out}");
+}
+
+#[test]
+fn discard_ignored_keeps_other_arc_content() {
+    let (repo, id, wt) = disposable_cleanup_fixture(false);
+    fs::create_dir_all(wt.join(".arc")).unwrap();
+    fs::write(wt.join(".arc/.gitignore"), "*\n").unwrap();
+    fs::write(wt.join(".arc/local"), "local").unwrap();
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--discard", "ignored"]),
+    );
+    assert!(wt.join(".arc/local").exists(), "{out}");
+    assert!(
+        out.contains("holds local content not in the branch: .arc/"),
+        "{out}"
+    );
+}

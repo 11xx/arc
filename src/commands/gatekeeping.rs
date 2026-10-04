@@ -2332,6 +2332,7 @@ pub struct IntegrateArgs {
     pub into: Option<String>,
     pub message: Option<String>,
     pub cleanup: Option<bool>,
+    pub discard: Option<crate::style::Discard>,
     pub dry_run: bool,
     /// Print the dry run's plan as `arc-integration-plan` JSON.
     pub json: bool,
@@ -2347,6 +2348,7 @@ pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Resul
         into,
         message,
         cleanup,
+        discard,
         dry_run,
         json,
         expect_basis,
@@ -2402,12 +2404,14 @@ pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Resul
                 crate::style::StyleFlags {
                     shape,
                     cleanup,
+                    discard,
                     ..Default::default()
                 },
             )?;
             let flags = crate::style::StyleFlags {
                 shape,
                 cleanup,
+                discard,
                 ..Default::default()
             };
             let shape = style.shape();
@@ -2466,7 +2470,7 @@ pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Resul
             } else {
                 QueueSelection::Named(many.to_vec())
             };
-            integrate_queue(ctx, selection, cleanup, dry_run, shape)
+            integrate_queue(ctx, selection, cleanup, discard, dry_run, shape)
         }
     }
 }
@@ -2493,6 +2497,7 @@ fn integrate_queue(
     ctx: &Ctx,
     selection: QueueSelection,
     cleanup: Option<bool>,
+    discard: Option<crate::style::Discard>,
     dry_run: bool,
     shape: Option<integration::Shape>,
 ) -> Result<i32> {
@@ -2561,6 +2566,7 @@ fn integrate_queue(
                 crate::style::StyleFlags {
                     shape,
                     cleanup,
+                    discard,
                     ..Default::default()
                 },
                 &mut projected_targets,
@@ -2574,6 +2580,7 @@ fn integrate_queue(
                 crate::style::StyleFlags {
                     shape,
                     cleanup,
+                    discard,
                     ..Default::default()
                 },
                 &ctx.cwd,
@@ -2887,6 +2894,9 @@ fn queue_dry_run(
         );
     }
     println!("dry-run: would integrate {change_id} into {}; conditional on fresh checkout guards, authorization and required gates", st.target_branch);
+    if style.cleanup() {
+        println!("dry-run: would clean up {change_id} with integration.discard = {}; checkout ownership and local content checks apply", style.discard().as_str());
+    }
     if let Some(head) = advancing {
         projected_targets.insert(st.target_branch.clone(), head);
     }
@@ -3462,7 +3472,9 @@ fn integrate_one(
 
     if cleanup {
         let checkout = cleanup_checkout.as_deref().unwrap_or(&ctx.cwd);
-        if let Err(error) = cleanup_integrated_change(ctx, &st, &wt, checkout) {
+        if let Err(error) =
+            cleanup_integrated_change(ctx, &st, &wt, checkout, selection.flags.clone())
+        {
             eprintln!(
                 "warning: integration recorded; cleanup for branch {} failed: {error:#}",
                 st.branch
@@ -3478,6 +3490,7 @@ fn cleanup_integrated_change(
     st: &ChangeState,
     target: &Path,
     checkout: &Path,
+    flags: crate::style::StyleFlags,
 ) -> Result<()> {
     if let Some(wt_path) = &st.worktree {
         let path = PathBuf::from(wt_path);
@@ -3502,13 +3515,9 @@ fn cleanup_integrated_change(
             ) {
                 Some("ownership cannot be established".to_string())
             } else {
-                let rules = crate::style::resolved_style(
-                    target,
-                    &st.target_branch,
-                    crate::style::StyleFlags::default(),
-                )?
-                .disposable();
-                let (content, artifacts) = cleanup_local_content(&path, &rules)?;
+                let style = crate::style::resolved_style(target, &st.target_branch, flags)?;
+                let (content, artifacts) =
+                    cleanup_local_content(&path, &style.disposable(), style.discard())?;
                 if let Some(content) = content {
                     Some(format!("holds local content not in the branch: {content}"))
                 } else {
@@ -3587,6 +3596,7 @@ fn unused_outbox_metadata(checkout: &Path) -> Result<bool> {
 fn cleanup_local_content(
     checkout: &Path,
     rules: &[crate::artifacts::Rule],
+    discard: crate::style::Discard,
 ) -> Result<(Option<String>, Vec<crate::artifacts::Artifact>)> {
     let status = gitio::git(
         checkout,
@@ -3613,7 +3623,7 @@ fn cleanup_local_content(
         .filter(|entry| entry.starts_with("!! "))
         .map(str::to_string)
         .collect::<Vec<_>>();
-    let artifacts = crate::artifacts::recognize(checkout, &ignored_entries, rules);
+    let mut artifacts = crate::artifacts::recognize(checkout, &ignored_entries, rules);
     let unused_outbox = unused_outbox_metadata(checkout)?;
     let collapsed_outbox = unused_outbox
         && status
@@ -3645,8 +3655,21 @@ fn cleanup_local_content(
         let path = &entry[3..];
         let metadata = (unused_outbox && matches!(path, ".arc/outbox/" | ".arc/outbox/.gitignore"))
             || (collapsed_outbox && path == ".arc/");
-        if !metadata && !artifacts.iter().any(|artifact| artifact.path == path) {
+        if metadata {
+            continue;
+        }
+        let arc_content = path == ".arc" || path.starts_with(".arc/");
+        if arc_content {
             paths.push(path.to_string());
+        } else if !artifacts.iter().any(|artifact| artifact.path == path) {
+            if discard == crate::style::Discard::Ignored {
+                artifacts.push(crate::artifacts::Artifact {
+                    path: path.to_string(),
+                    identified_by: "ignored; integration.discard = ignored".to_string(),
+                });
+            } else {
+                paths.push(path.to_string());
+            }
         }
     }
     paths.sort();
@@ -4322,6 +4345,10 @@ fn integrate_dry_run(
         .unwrap_or_else(|| format!("merge({}): {}", st.slug, st.title));
 
     println!("dry-run: would integrate {} into {target}", st.change_id);
+    if selection.cleanup {
+        let style = crate::style::resolved_style(&ctx.cwd, target, selection.flags.clone())?;
+        println!("dry-run: would clean up {} with integration.discard = {}; checkout ownership and local content checks apply", st.change_id, style.discard().as_str());
+    }
     if checkout.switch_from.is_some() {
         println!(
             "dry-run: would check out {target} in {} and merge there",

@@ -868,7 +868,13 @@ RUN A CHANGE
 
   `integration.cleanup` governs branch and worktree cleanup after integration
   (built-in false). `integrate --cleanup` enables it; `--no-cleanup` overrides
-  a configured true. Cleanup deletes merged branches with Git’s merged-branch
+  a configured true. `integration.discard` selects `"artifacts"` (built-in) or
+  `"ignored"`. `integrate --discard <artifacts|ignored>` overrides that scope,
+  implies cleanup, and conflicts with `--no-cleanup` for single changes and
+  queues. The ignored scope discards every Git-ignored file and directory
+  outside `.arc/`. Tracked edits, untracked files, `.arc/` outbox content and
+  ownership checks keep the checkout; only owned, emptied outbox metadata
+  is exempt. Cleanup deletes merged branches with Git’s merged-branch
   check and removes only clean worktrees inside the sandbox. Arc removes only
   the checkout instance it created, identified by an owner record in that
   checkout’s Git administrative directory. `begin` allocates the worktree
@@ -890,8 +896,9 @@ RUN A CHANGE
   The registered checkout must still hold the change branch. An ignored
   directory identified as a build artifact by a valid CACHEDIR.TAG, a
   built-in recognizer, or a configured `integration.disposable` rule's path
-  and marker does not keep the checkout. Tracked edits, untracked files and all other ignored content
-  keep it. Recognition grants no checkout removal authority. An
+  and marker does not keep the checkout. With the artifacts scope, other
+  ignored content keeps it. Tracked edits and untracked files keep it under
+  either scope. Recognition grants no checkout removal authority. An
   outbox containing only the spool's regular `.gitignore` with `*` and a
   trailing newline is disposable metadata only when its Git administrative
   ownership record identifies that file and records successful promotion.
@@ -1971,7 +1978,7 @@ FILES
     [review] checklist = ["<item>"]              printed by `arc show`
     [contribution] history = "squash" | "preserve"
     [defaults.change] checkout = "worktree", branch_prefix = "arc/"
-    [defaults.integration] shape = "ff-only", cleanup = false
+    [defaults.integration] shape = "ff-only", cleanup = false, discard = "artifacts"
     [integration] shapes = ["ff-only", "no-ff"], history = "preserve"
     [candidates] evaluation_reuse = "matching-coordinates" | "never"
                                                  no default; `never` wins
@@ -1982,11 +1989,17 @@ FILES
   known keys must have valid types and values; refusals name the file and
   key. User configuration accepts style only.
   `integration.cleanup` governs post-integration branch and worktree cleanup;
-  `integrate --no-cleanup` overrides it for every selected change. Ignored
+  `integrate --no-cleanup` overrides it for every selected change.
+  `integration.discard` resolves through the style layers and accepts
+  `"artifacts"` (built-in) or `"ignored"`. `integrate --discard` selects the
+  scope, implies cleanup, and conflicts with `--no-cleanup`. The ignored
+  scope discards every Git-ignored file and directory outside `.arc/`.
+  Tracked edits, untracked files, `.arc/` outbox content and ownership checks
+  keep the checkout. Only owned, emptied outbox metadata is exempt. Ignored
   directories identified as build artifacts by a valid CACHEDIR.TAG, a
   built-in recognizer, or an `integration.disposable` rule's path and marker
-  do not keep a checkout; tracked edits, untracked files and all other ignored
-  content do. Every recognizer names a file its tool writes inside the
+  do not keep a checkout; other ignored content keeps it with the artifacts
+  scope. Every recognizer names a file its tool writes inside the
   directory; a directory name alone identifies nothing.
   A CACHEDIR.TAG must be a regular file beginning with the exact bytes
   `Signature: 8a477f597d28d172789f06886806bc55`, which Cargo, Meson, uv,
@@ -2031,8 +2044,10 @@ FILES
   are literal. Paths must be relative with no empty, `.` or `..` component.
   The marker must be a regular file inside a real directory, with no symlink
   traversal; `signature` requires its content to begin with those exact bytes.
-  Individually reported ignored files are never disposable. Cleanup reports
-  each discarded directory and its recognizer before reporting removal; it
+  Individually reported ignored files are discarded only with the ignored
+  scope. Cleanup reports each discarded entry after Git removes the worktree
+  and before reporting removal. Recognized artifacts name their recognizer;
+  other ignored entries name `integration.discard = ignored`. Cleanup
   deletes no artifacts from a checkout it keeps.
   Integration history folds with contribution history; squash requires at
   most one reviewed commit above the target. Integration alone stays local.

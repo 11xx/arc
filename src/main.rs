@@ -1825,7 +1825,9 @@ enum Cmd {
         /// as a build artifact by a valid CACHEDIR.TAG, a built-in recognizer (`arc`
         /// lists them), or a configured integration.disposable rule's path and marker
         /// does not keep the checkout.
-        /// Tracked edits, untracked files and all other ignored content keep it.
+        /// integration.discard defaults to artifacts; --discard ignored also discards
+        /// other ignored files and directories outside .arc/. Tracked edits,
+        /// untracked files and .arc/ content keep it.
         /// An outbox holding only the spool's regular .gitignore with "*" and a
         /// trailing newline is disposable only when its Git administrative ownership
         /// record identifies the file and records successful promotion. Foreign
@@ -1835,6 +1837,14 @@ enum Cmd {
         /// absent either flag, the resolved style default applies (built-in false).
         #[arg(long, conflicts_with = "no_cleanup")]
         cleanup: bool,
+        /// Select integration.discard: artifacts (built-in) discards recognized build
+        /// artifacts; ignored discards every Git-ignored entry outside .arc/.
+        /// Tracked edits, untracked files, .arc/ outbox content and ownership checks
+        /// keep the checkout. Only owned, emptied outbox metadata is exempt.
+        /// Implies --cleanup; overrides configured discard scope for single changes
+        /// and queues.
+        #[arg(long, value_enum, conflicts_with = "no_cleanup")]
+        discard: Option<style::Discard>,
         /// Keep the merged branch and worktree, overriding integration.cleanup
         #[arg(long, conflicts_with = "cleanup")]
         no_cleanup: bool,
@@ -4454,6 +4464,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             into,
             message,
             cleanup,
+            discard,
             no_cleanup,
             dry_run,
             json,
@@ -4484,7 +4495,8 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     tags: tag,
                     into,
                     message,
-                    cleanup: if cleanup {
+                    discard,
+                    cleanup: if cleanup || discard.is_some() {
                         Some(true)
                     } else if no_cleanup {
                         Some(false)
