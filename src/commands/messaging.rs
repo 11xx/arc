@@ -1027,6 +1027,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
         return Ok(0);
     }
 
+    crate::context::render_build_warning(&ctx.cwd);
     let debts = collect_debts(ctx, &states)?;
     let review_queue = collect_review_queue(&store, &states)?;
     println!("ledger: {}", store.root.display());

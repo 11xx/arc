@@ -494,6 +494,7 @@ fn claude_session_link() -> Option<String> {
 }
 
 pub fn print_env() -> i32 {
+    println!("# arc build: {}", build_revision().label());
     let identity = match detect_identity() {
         Detection::Resolved(identity) => identity,
         Detection::Ambiguous(claims) => {
@@ -927,4 +928,84 @@ pub(crate) fn unowned_surface(ctx: &Ctx) -> Result<crate::inbox::Unowned> {
     unowned.merged_branches.sort_by(|a, b| a.name.cmp(&b.name));
     unowned.worktrees.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(unowned)
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct BuildRevision {
+    pub commit: &'static str,
+    pub dirty: &'static str,
+}
+
+impl BuildRevision {
+    pub fn label(&self) -> String {
+        if self.commit == "unknown" {
+            "unknown".to_owned()
+        } else {
+            format!("{} ({})", self.commit, self.dirty)
+        }
+    }
+}
+
+pub(crate) fn build_revision() -> BuildRevision {
+    BuildRevision {
+        commit: env!("ARC_BUILD_COMMIT"),
+        dirty: env!("ARC_BUILD_DIRTY"),
+    }
+}
+
+fn build_comparison(commit: &str, head: &str, ancestor: bool) -> Option<&'static str> {
+    if commit == "unknown" || head == "unknown" || commit == head {
+        None
+    } else if ancestor {
+        Some("older")
+    } else {
+        Some("differs")
+    }
+}
+
+pub(crate) fn build_warning(cwd: &Path) -> Option<String> {
+    let root = gitio::toplevel(cwd).ok()?;
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
+    let manifest: toml::Value = toml::from_str(&manifest).ok()?;
+    if manifest.get("package")?.get("name")?.as_str()? != "arc-ledger" {
+        return None;
+    }
+    let build = build_revision();
+    let head = gitio::head(&root).ok()?;
+    let ancestor = build.commit != "unknown"
+        && build.commit != head
+        && gitio::is_ancestor(&root, build.commit, &head).unwrap_or(false);
+    let relation = match build_comparison(build.commit, &head, ancestor)? {
+        "older" => "is older than",
+        _ => "differs from",
+    };
+    let dirty = if build.dirty == "dirty" {
+        " (dirty)"
+    } else {
+        ""
+    };
+    Some(format!(
+        "warning: arc build {}{dirty} {relation} checkout {head}; reinstall arc",
+        build.commit
+    ))
+}
+
+pub(crate) fn render_build_warning(cwd: &Path) {
+    if let Some(warning) = build_warning(cwd) {
+        println!("{warning}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_revision_comparison() {
+        assert_eq!(build_comparison("a", "b", true), Some("older"));
+        assert_eq!(build_comparison("a", "b", false), Some("differs"));
+        assert_eq!(build_comparison("a", "a", true), None);
+        assert_eq!(build_comparison("unknown", "b", false), None);
+        assert_eq!(build_comparison("a", "unknown", false), None);
+    }
 }

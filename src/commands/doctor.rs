@@ -27,6 +27,7 @@ struct Finding {
 #[derive(Debug, Serialize)]
 struct Report {
     schema: &'static str,
+    build: crate::context::BuildRevision,
     roots: Roots,
     replica: Option<crate::replica::ReplicaStatus>,
     problems: Vec<Finding>,
@@ -167,7 +168,8 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
 
     let exit = i32::from(!problems.is_empty());
     let report = Report {
-        schema: "arc-doctor/5",
+        schema: "arc-doctor/6",
+        build: crate::context::build_revision(),
         roots: Roots::resolve(&ctx.cwd, &root)?,
         replica,
         problems,
@@ -176,6 +178,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     if json {
         println!("{}", serde_json::to_string(&report)?);
     } else {
+        println!("arc build: {}", report.build.label());
         report.roots.render();
         match &report.replica {
             Some(replica) => crate::replica::render_status(replica),

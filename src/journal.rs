@@ -970,6 +970,7 @@ pub enum JournalCmd {
         limit: Option<usize>,
     },
     /// Newest-first listing of artifacts plus the journal tail (read-only)
+    /// Text warns when the running build revision differs from an arc checkout.
     /// Records no events; ledger reads do not require a parseable append policy.
     Catchup {
         /// Cap the artifact list and journal tail (default 20)
@@ -9923,6 +9924,7 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
         };
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
+        crate::context::render_build_warning(project);
         render_lanes(&lanes, now);
         render_catchup_claims(&claims, now);
         if !archived {

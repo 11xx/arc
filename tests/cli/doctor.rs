@@ -56,7 +56,7 @@ fn doctor_clean_ledger_exits_zero() {
         .args(["doctor", "--json"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("\"schema\":\"arc-doctor/5\""));
+        .stdout(predicates::str::contains("\"schema\":\"arc-doctor/6\""));
 }
 
 #[test]
@@ -888,4 +888,66 @@ fn help_states_each_exit_status() {
 
     let backlog = help(&["workspace", "backlog"]);
     assert!(backlog.contains("exits 16"), "{backlog}");
+}
+
+#[test]
+fn env_carries_build_revision() {
+    let repo = Repo::new();
+    let out = stdout_any_status(repo.arc(&repo.root).args(["env"]));
+    let lines: Vec<_> = out
+        .lines()
+        .filter(|line| line.starts_with("# arc build: "))
+        .collect();
+    assert_eq!(lines.len(), 1, "{out}");
+    let stamp = lines[0].strip_prefix("# arc build: ").unwrap();
+    assert!(
+        stamp == "unknown" || stamp.ends_with(" (clean)") || stamp.ends_with(" (dirty)"),
+        "{stamp}"
+    );
+}
+
+#[test]
+fn doctor_carries_build_revision() {
+    let repo = Repo::new();
+    let report = json_stdout_any_status(repo.arc(&repo.root).args(["doctor", "--json"]));
+    assert_eq!(report["schema"], "arc-doctor/6");
+    assert_eq!(report["build"]["commit"], env!("ARC_BUILD_COMMIT"));
+    assert_eq!(report["build"]["dirty"], env!("ARC_BUILD_DIRTY"));
+    assert!(
+        matches!(
+            report["build"]["dirty"].as_str(),
+            Some("clean" | "dirty" | "unknown")
+        ),
+        "{report}"
+    );
+    let out = stdout(repo.arc(&repo.root).args(["doctor"]));
+    assert!(out.contains("arc build: "), "{out}");
+}
+
+#[test]
+fn catchup_build_warning_is_scoped_to_arc_checkouts() {
+    let repo = Repo::new();
+    let out = stdout(repo.arc(&repo.root).args(["catchup"]));
+    assert!(!out.contains("warning: arc build"), "{out}");
+    fs::write(
+        repo.root.join("Cargo.toml"),
+        "[package]\nname = 'arc-ledger'\nversion = '2026.9.29'\n",
+    )
+    .unwrap();
+    fs::create_dir(repo.root.join("nested")).unwrap();
+    for args in [&["catchup"][..], &["journal", "catchup"][..]] {
+        let out = stdout(repo.arc(&repo.root.join("nested")).args(args));
+        if env!("ARC_BUILD_COMMIT") != "unknown" {
+            assert_eq!(
+                out.lines()
+                    .filter(|line| line.starts_with("warning: arc build"))
+                    .count(),
+                1,
+                "{out}"
+            );
+            assert!(out.contains("differs from checkout"), "{out}");
+        }
+        let report = json_stdout_any_status(repo.arc(&repo.root).args(args).arg("--json"));
+        assert!(report.get("warnings").is_none(), "{report}");
+    }
 }

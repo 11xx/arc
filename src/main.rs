@@ -1602,6 +1602,8 @@ enum Cmd {
     /// by hand with ARC_MODEL or --model. Missing boundaries and incomplete
     /// head coverage are reported.
     /// Records no events; ledger reads do not require a parseable append policy.
+    /// Prints the build commit and tracked-tree clean/dirty state as a comment;
+    /// builds outside Git report unknown.
     Env,
     /// Print a shell completion script to stdout
     /// Records no events; ledger reads do not require a parseable append policy.
@@ -1961,6 +1963,8 @@ enum Cmd {
         cmd: SandboxCmd,
     },
     /// Check the append-only ledger for malformed or stale state (read-only)
+    /// Reports the build commit and tracked-tree clean/dirty state in text
+    /// and arc-doctor/6 JSON; builds outside Git report unknown.
     ///
     /// Exits 0 when the ledger is clean or carries only advice, and 1 when it
     /// reports a problem. A ledger that cannot be read at all also exits 1,
@@ -2011,6 +2015,9 @@ enum Cmd {
         args: Vec<String>,
     },
     /// Orient a session: the ledger queue, the journal backlog, and live lanes
+    /// Text warns when the running build differs from HEAD in an arc-ledger
+    /// checkout: older for an ancestor, differs otherwise, with dirty builds
+    /// identified. Other projects and unknown build revisions have no warning.
     /// Unreadable changes are named with their errors on stderr; readable
     /// changes remain in the output
     Catchup {

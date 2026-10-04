@@ -26,6 +26,10 @@ SAY WHO YOU ARE (before the first write)
   export ARC_ACTOR=<name> ARC_HARNESS=<claude|codex|opencode|pi> \
          ARC_SESSION=<id> ARC_SESSION_LINK=<url>
 
+  `arc env` prints a build comment naming the compiled commit and whether
+  tracked files differed at build time (clean or dirty). Builds outside Git
+  report unknown. `arc --version` is the release version.
+
   `arc env` leaves ARC_MODEL unset. Each write resolves the acting session's
   model. Declare one with `--model` or export ARC_MODEL; the declaration is
   recorded with any observed disagreement. `arc show --json` and `arc log`
@@ -132,7 +136,12 @@ FROM A WORKSPACE ROOT (outside a project)
   cd <anchor>          Enter one project named by the report, then orient there.
 
 ORIENT INSIDE A PROJECT (start here, in this order)
-  arc catchup            Live state: ledger queue, deferrals delegated rounds
+  arc catchup            Text warns when the build commit differs from HEAD
+                         in an arc-ledger checkout: older for an ancestor,
+                         differs otherwise, and dirty if built with tracked
+                         edits. Unknown revisions and other projects have no
+                         build warning.
+                         Live state: ledger queue, deferrals delegated rounds
                          left open, journal backlog, forks, unowned branches
                          and worktrees, and what the change and fork
                          worktrees occupy — apparent size, with the mount's
@@ -273,7 +282,9 @@ ORIENT INSIDE A PROJECT (start here, in this order)
   the row speaks up once the anchor head has moved past it.
 
 SANDBOX (rehearse something destructive)
-  arc doctor             Opens with the roots this invocation reads and
+  arc doctor             Reports the build commit and tracked-tree state
+                         (clean, dirty, or unknown) in text and JSON.
+                         Opens with the roots this invocation reads and
                          writes, and whether a sandbox is in force.
   arc sandbox clone <prefix>
                          Copy this project — repository, ledger, journal,
@@ -2018,7 +2029,7 @@ SCHEMAS
     `arc-changelog/1`                arc changelog --json
     `arc-changelog-render-request/1` stdin of a command changelog renderer
     `arc-forks/2`                    arc fork list --json
-    `arc-doctor/5`                   arc doctor --json
+    `arc-doctor/6`                   arc doctor --json
     `arc-workspace/1`                arc workspace list|inbox --json
     `arc-workspace-backlog/19`       arc workspace backlog --json
     `arc-workspace-report/3`         arc workspace report --json
