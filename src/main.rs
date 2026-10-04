@@ -1178,6 +1178,7 @@ enum Cmd {
         /// Evaluate explicit unsigned staging preparation and local provisional prerequisites.
         /// An authority offer in flight reports an integrate --provisional --dry-run
         /// command with an explicit recipient for the same readiness evaluation.
+        /// The command retains the selected staging destination.
         #[arg(long, conflicts_with = "tag")]
         provisional: bool,
         /// Staging destination under arc/provisional/<local-replica>/; requires --provisional.
@@ -2010,6 +2011,7 @@ enum Cmd {
         /// preparation through reuse_event_id and reuse_commit, with merge_commit
         /// false. With provisional execution, emit `arc-provisional-transition/1`
         /// with observed refs, event publication, retained intent and recovery command.
+        /// A later refusal includes any debt written or reused earlier in the invocation.
         /// Applied intent recovery precedes eligibility checks for a fresh preparation.
         /// Unapplied retries enforce current readiness and the saved basis. Explicit
         /// destination or recipient conflicts refuse with the exact retry parameters.

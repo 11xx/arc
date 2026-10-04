@@ -2730,3 +2730,119 @@ fn unapplied_retry_does_not_substitute_a_later_authorization_basis() {
     assert_eq!(fs::read(intent).unwrap(), bytes);
     assert_eq!(git_out(&worker.root, &["show-ref", "--heads"]), heads);
 }
+
+#[test]
+fn execution_json_reports_written_and_reused_debt_before_a_refusal() {
+    let (_authority, worker) = worker();
+    let change = prepared(&worker);
+    worker.declare_gates_locally("[gates.required]\ncommand='false'\n");
+    let mut event = None;
+    for disposition in ["written", "reused"] {
+        let refused = worker
+            .arc(&worker.root)
+            .args([
+                "integrate",
+                &change,
+                "--provisional",
+                "--json",
+                "--debt",
+                "review obligation retained",
+            ])
+            .assert()
+            .code(5);
+        let output: serde_json::Value = serde_json::from_slice(&refused.get_output().stdout)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "missing refusal effects: {error}; {}",
+                    String::from_utf8_lossy(&refused.get_output().stderr)
+                )
+            });
+        assert_eq!(output["schema"], "arc-provisional-transition/1");
+        assert_eq!(output["exit_code"], 5);
+        assert_eq!(output["debt"]["disposition"], disposition);
+        assert_eq!(output["debt"]["reason"], "review obligation retained");
+        assert!(output["debt"]["event_id"].is_string());
+        let recorded = json_stdout(worker.arc(&worker.root).args(["show", &change, "--json"]));
+        assert_eq!(output["debt"]["event_id"], recorded["debt"]["event_id"]);
+        if let Some(event) = &event {
+            assert_eq!(&output["debt"]["event_id"], event);
+        }
+        event = Some(output["debt"]["event_id"].clone());
+        assert!(status(&worker, &change)["provisional_integrations"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(git_out(
+            &worker.root,
+            &["branch", "--list", "arc/provisional/worker/master"]
+        )
+        .is_empty());
+    }
+}
+
+#[test]
+fn an_inflight_remedy_keeps_the_selected_conflicting_staging_destination() {
+    let (authority, worker) = worker();
+    let offline = Repo::new();
+    let id = json_stdout(offline.arc(&offline.root).args(["replica", "id", "--json"]));
+    stdout(authority.arc(&authority.root).args([
+        "replica",
+        "pair",
+        "offline",
+        "--repository-id",
+        id["repository_id"].as_str().unwrap(),
+    ]));
+    stdout(authority.arc(&authority.root).args([
+        "replica",
+        "authority",
+        "offer",
+        "--to",
+        "offline",
+    ]));
+    import_replica_facts(&authority, &worker);
+    let change = prepared(&worker);
+    let source = worker.home.join(".worktrees/repo-prepared");
+    worker.commit(&source, "README.md", "source edit\n", "feat: source edit");
+    stdout(worker.arc(&source).args(["snapshot", &change]));
+    approve(&worker, &change);
+    let staging = "arc/provisional/worker/alternate";
+    let checkout = worker.home.join("alternate-staging");
+    git(
+        &worker.root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            staging,
+            checkout.to_str().unwrap(),
+            "master",
+        ],
+    );
+    worker.commit(
+        &checkout,
+        "README.md",
+        "staging edit\n",
+        "feat: staging edit",
+    );
+    git(
+        &worker.root,
+        &["worktree", "remove", checkout.to_str().unwrap()],
+    );
+    let checked = worker
+        .arc(&worker.root)
+        .args(["check", &change, "--provisional", "--into", staging])
+        .assert()
+        .code(17);
+    let message = String::from_utf8_lossy(&checked.get_output().stderr);
+    let command = message
+        .lines()
+        .find_map(|line| line.strip_prefix("Try: "))
+        .unwrap();
+    assert!(
+        command.contains("--into") && command.contains(staging),
+        "{command}"
+    );
+    let heads = git_out(&worker.root, &["show-ref", "--heads"]);
+    worker.arc_shell(&worker.root, command).assert().code(11);
+    assert_eq!(git_out(&worker.root, &["show-ref", "--heads"]), heads);
+}

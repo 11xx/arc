@@ -1,6 +1,7 @@
 //! Unsigned staging preparation and authority-owned reconciliation.
 use super::*;
 use crate::integration::{self, Decision, IntegrationFacts, IntegrationPlan, Mode, Refusal, Shape};
+use crate::operation_println as println;
 use serde::{Deserialize, Serialize};
 
 struct Selection {
@@ -183,7 +184,7 @@ fn select(
                 let routing = replica
                     .map(|name| format!("--for-replica {}", crate::context::shell_quote(name)))
                     .unwrap_or_else(|| "--for-forge REFERENCE".into());
-                return refuse_selection(17, format!("authority has no holder (offer {:?}); explicit --for-replica or --for-forge routing is required\nTry: arc integrate {} --provisional --dry-run {routing}", offer.map(|offer| &offer.offer_id), state.change_id));
+                return refuse_selection(17, format!("authority has no holder (offer {:?}); explicit --for-replica or --for-forge routing is required\nTry: arc integrate {} --provisional --dry-run --into {} {routing}", offer.map(|offer| &offer.offer_id), state.change_id, crate::context::shell_quote(&branch)));
             }
         },
         _ => bail!("conflicting --for-replica/--for-forge or blank forge recipient"),
@@ -775,6 +776,45 @@ pub fn integrate_provisionally(
     references: &[String],
     args: IntegrateArgs,
 ) -> Result<i32> {
+    let mut debt_effect = None;
+    if !args.json || args.dry_run {
+        return integrate_provisionally_inner(ctx, references, args, &mut debt_effect);
+    }
+    let (result, output) = crate::operation_output::capture(|| {
+        integrate_provisionally_inner(ctx, references, args, &mut debt_effect)
+    });
+    let (exit_code, error) = match result {
+        Ok(code) => (
+            code,
+            (code != 0).then(|| "current readiness or transition refused".to_string()),
+        ),
+        Err(error) => (1, Some(format!("{error:#}"))),
+    };
+    let mut document = serde_json::from_str::<serde_json::Value>(&output)
+        .ok()
+        .filter(|value| value.is_object())
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "schema": TRANSITION_SCHEMA, "exit_code": exit_code, "transition": null,
+                "error": error, "output": output,
+            })
+        });
+    if let Some(debt) = debt_effect {
+        document
+            .as_object_mut()
+            .context("execution result is not an object")?
+            .insert("debt".into(), debt);
+    }
+    println!("{}", serde_json::to_string_pretty(&document)?);
+    Ok(exit_code)
+}
+
+fn integrate_provisionally_inner(
+    ctx: &Ctx,
+    references: &[String],
+    args: IntegrateArgs,
+    debt_effect: &mut Option<serde_json::Value>,
+) -> Result<i32> {
     if references.len() != 1 || !args.tags.is_empty() {
         eprintln!("--provisional requires one change; queues and --tag conflict");
         return Ok(2);
@@ -922,15 +962,30 @@ pub fn integrate_provisionally(
         }
         if fork::fork_slug_for_branch(&ctx.cwd, &state.branch)?.is_none() {
             if let Some(debt) = args.debt {
+                let previous = state.debt.as_ref().map(|debt| debt.event_id.clone());
                 let operation = || {
                     super::audit::declare_debt_locked(ctx, &store, &state, &debt.reason, debt.kind)
                 };
-                if args.json {
-                    crate::operation_output::capture(operation).0?;
+                let details = if args.json {
+                    let (result, details) = crate::operation_output::capture(operation);
+                    result?;
+                    details
                 } else {
                     operation()?;
-                }
+                    String::new()
+                };
                 state = store.state(&state.change_id)?;
+                let recorded = state
+                    .debt
+                    .as_ref()
+                    .context("declared debt is missing from its ledger")?;
+                *debt_effect = Some(serde_json::json!({
+                    "event_id": recorded.event_id,
+                    "disposition": if previous.as_ref() == Some(&recorded.event_id) { "reused" } else { "written" },
+                    "reason": recorded.reason, "patchset_id": recorded.patchset_id,
+                    "origin_replica_id": recorded.origin_replica_id,
+                    "declared_by": recorded.actor, "details": details,
+                }));
             }
         }
     }

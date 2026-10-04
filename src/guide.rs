@@ -1176,12 +1176,15 @@ PAIR REPLICA STORES
   Recipient routing defaults to the known authority holder. An authority
   offer in flight requires --for-replica or --for-forge.
   Check reports an executable `integrate --provisional --dry-run` command with
-  explicit recipient routing when authority is in flight.
+  explicit recipient routing and the selected staging destination when authority
+  is in flight.
   A forge reference is opaque: preparation performs no transport and grants no authority.
   An intent binds the exact event and guarded ref transition before visibility;
   publication failure reports the merge, observed staging and retention refs,
   event state, retained intent and exact recovery command. Execution --json
-  emits `arc-provisional-transition/1`. Doctor, status and workspace report
+  emits `arc-provisional-transition/1`. Execution JSON includes debt declared
+  before any subsequent refusal, naming its written or reused event, bound
+  patchset, reason and declaration details. Doctor, status and workspace report
   expose unfinished intents separately from published obligations and review debt.
   Recovery of an applied transition precedes new-preparation eligibility checks,
   including changed authority or provisional_enabled declarations, and retains
