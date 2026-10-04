@@ -1099,8 +1099,7 @@ fn pending_exchange_recovers_after_body_or_receipt_publication_fails() {
         a.arc(&a.root)
             .args(["journal", "questions", "--json"])
             .assert()
-            .failure()
-            .stderr(predicates::str::contains("exchange is incomplete"));
+            .success();
         a.arc(&a.root)
             .args(["journal", "position", &file, "--body-file", "-"])
             .write_stdin("Position: against\n\nCannot interleave.\n")
@@ -1130,6 +1129,212 @@ fn pending_exchange_recovers_after_body_or_receipt_publication_fails() {
         assert_eq!(fs::read(dir.join("events.jsonl")).unwrap(), log);
         assert_eq!(receipts(&dir), 1);
     }
+}
+
+fn receipt_failure_fixture() -> (Repo, Repo, String, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let a = Repo::new();
+    let b = Repo::new();
+    pair(&a, &b, "a", "b");
+    let file = write_artifact(&a, "pending-guard", "discussion", "# Shared\n");
+    a.arc(&a.root)
+        .args([
+            "journal",
+            "reattribute",
+            &file,
+            "--set-actor",
+            "earlier-author",
+        ])
+        .assert()
+        .success();
+    let initial = bundle_file(&a, "initial");
+    export(&a, &[&file], &initial);
+    assert!(import(&b, &initial, false).status.success());
+    b.arc(&b.root)
+        .args(["journal", "position", &file, "--body-file", "-"])
+        .write_stdin("Position: for\n\nIncoming argument.\n")
+        .assert()
+        .success();
+    let incoming = bundle_file(&b, "incoming");
+    export(&b, &[&file], &incoming);
+    let dir = journal_dir(&a);
+    let imports = dir.join("exchange/imports");
+    fs::create_dir_all(&imports).unwrap();
+    let permissions = fs::metadata(&imports).unwrap().permissions();
+    fs::set_permissions(&imports, fs::Permissions::from_mode(0o500)).unwrap();
+    let failed = import(&a, &incoming, false);
+    fs::set_permissions(&imports, permissions).unwrap();
+    assert!(!failed.status.success(), "{failed:?}");
+    assert!(dir.join("exchange/pending.json").is_file());
+    (a, b, file, incoming)
+}
+
+#[test]
+fn pending_exchange_refuses_provenance_repair_until_recovered() {
+    assert_pending_writer_refused("reattribute");
+}
+
+#[test]
+fn pending_exchange_refuses_consume_until_recovered() {
+    assert_pending_writer_refused("consume");
+}
+
+fn assert_pending_writer_refused(writer: &str) {
+    let (a, _b, file, incoming) = receipt_failure_fixture();
+    let dir = journal_dir(&a);
+    let log = fs::read(dir.join("events.jsonl")).unwrap();
+    let body = fs::read(dir.join(&file)).unwrap();
+    let pending = fs::read(dir.join("exchange/pending.json")).unwrap();
+    let transaction: serde_json::Value = serde_json::from_slice(&pending).unwrap();
+    let digest = transaction["receipt"]["bundle_sha256"].as_str().unwrap();
+    let args = if writer == "reattribute" {
+        vec!["journal", writer, &file, "--set-actor", "repaired-author"]
+    } else {
+        vec![
+            "journal",
+            writer,
+            &file,
+            "--outcome",
+            "discarded",
+            "--note",
+            "Settled",
+        ]
+    };
+    a.arc(&a.root)
+        .args(&args)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("exchange is incomplete"))
+        .stderr(predicates::str::contains("arc journal import <bundle>"))
+        .stderr(predicates::str::contains(digest));
+    assert_eq!(fs::read(dir.join("events.jsonl")).unwrap(), log);
+    assert_eq!(fs::read(dir.join(&file)).unwrap(), body);
+    assert_eq!(
+        fs::read(dir.join("exchange/pending.json")).unwrap(),
+        pending
+    );
+    a.arc(&a.root)
+        .args(["journal", "questions", "--json"])
+        .assert()
+        .success();
+    let retry = import(&a, &incoming, false);
+    assert!(retry.status.success(), "{retry:?}");
+    assert!(events_for(&dir, &file)
+        .iter()
+        .any(|event| { event["event"] == "note" && event["actor"] == "earlier-author" }));
+    a.arc(&a.root).args(&args).assert().success();
+    let settled = fs::read(dir.join("events.jsonl")).unwrap();
+    assert!(import(&a, &incoming, false).status.success());
+    assert_eq!(fs::read(dir.join("events.jsonl")).unwrap(), settled);
+}
+
+#[test]
+fn pending_exchange_refuses_body_creation_positions_and_spool_promotion() {
+    let (a, _b, file, incoming) = receipt_failure_fixture();
+    let dir = journal_dir(&a);
+    a.arc(&a.root)
+        .args([
+            "journal",
+            "note",
+            "waiting-spool",
+            "--kind",
+            "todo",
+            "--spool",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Spooled body\n")
+        .assert()
+        .success();
+    let log = fs::read(dir.join("events.jsonl")).unwrap();
+    let body = fs::read(dir.join(&file)).unwrap();
+    let mut before: Vec<_> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    before.sort();
+    for writer in ["note", "position", "spool"] {
+        let mut cmd = a.arc(&a.root);
+        match writer {
+            "note" => {
+                cmd.args([
+                    "journal",
+                    writer,
+                    "pending-note",
+                    "--kind",
+                    "todo",
+                    "--body-file",
+                    "-",
+                ])
+                .write_stdin("Must not create a body\n");
+            }
+            "position" => {
+                cmd.args(["journal", writer, &file, "--body-file", "-"])
+                    .write_stdin("Position: against\n\nMust not append a body\n");
+            }
+            _ => {
+                cmd.args(["journal", writer, "--promote"]);
+            }
+        }
+        cmd.assert()
+            .failure()
+            .stderr(predicates::str::contains("arc journal import <bundle>"));
+        assert_eq!(fs::read(dir.join("events.jsonl")).unwrap(), log);
+        assert_eq!(fs::read(dir.join(&file)).unwrap(), body);
+        let mut after: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        after.sort();
+        assert_eq!(after, before);
+    }
+    assert!(import(&a, &incoming, false).status.success());
+    a.arc(&a.root)
+        .args(["journal", "spool", "--promote"])
+        .assert()
+        .success();
+    a.arc(&a.root)
+        .args(["journal", "position", &file, "--body-file", "-"])
+        .write_stdin("Position: against\n\nSettled exchange\n")
+        .assert()
+        .success();
+}
+
+#[test]
+fn pending_exchange_recovery_refuses_unexpected_log_writes() {
+    assert_pending_recovery_refused("events.jsonl");
+}
+
+#[test]
+fn pending_exchange_recovery_refuses_unexpected_body_writes() {
+    assert_pending_recovery_refused("body");
+}
+
+fn assert_pending_recovery_refused(target: &str) {
+    let (a, _b, file, incoming) = receipt_failure_fixture();
+    let dir = journal_dir(&a);
+    let path = dir.join(if target == "body" { &file } else { target });
+    let mut changed = fs::read(&path).unwrap();
+    if target == "body" {
+        changed.extend_from_slice(b"Unexpected write\n");
+    } else {
+        changed = String::from_utf8(changed)
+            .unwrap()
+            .replace("earlier-author", "unexpected-author")
+            .into_bytes();
+    }
+    fs::write(&path, &changed).unwrap();
+    let log = fs::read(dir.join("events.jsonl")).unwrap();
+    let body = fs::read(dir.join(&file)).unwrap();
+    let retry = import(&a, &incoming, false);
+    assert!(!retry.status.success(), "{retry:?}");
+    assert!(
+        String::from_utf8_lossy(&retry.stderr).contains("changed after"),
+        "{retry:?}"
+    );
+    assert_eq!(fs::read(dir.join("events.jsonl")).unwrap(), log);
+    assert_eq!(fs::read(dir.join(&file)).unwrap(), body);
+    assert!(dir.join("exchange/pending.json").is_file());
 }
 
 #[test]

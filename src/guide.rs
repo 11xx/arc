@@ -1012,8 +1012,11 @@ PAIR REPLICA STORES
   replicas, and nothing on either claim's behalf is recorded. Importing the
   same bundle twice changes nothing; the receipt names the source replica and
   bundle digest. An interrupted write retains a prepared transaction with
-  the bodies, event log, and receipt. Journal event reads and writes refuse
-  that pending exchange; an import completes it before comparing revisions.
+  the bodies, event log, and receipt. Every journal write, including provenance
+  repair and spool promotion, refuses a pending exchange and names its bundle
+  digest and the remedy: `arc journal import <bundle>`. Reads stay allowed.
+  Import completes the transaction before comparing revisions. Recovery refuses
+  to overwrite unexpected body or event-log changes after preparation.
   A dry-run requires the pending exchange to be completed first.
 
 KEEP WHAT THE WORK DISCOVERS (mid-change, before it is lost)
