@@ -1,7 +1,20 @@
 use anyhow::{bail, Result};
 
+/// Event ids sort in the order this process wrote them, so a command that
+/// records several dependent events (an opening and the facts asserted with
+/// it) replays them in that order even within one millisecond.
+static EVENT_IDS: std::sync::Mutex<ulid::Generator> = std::sync::Mutex::new(ulid::Generator::new());
+
 pub fn new_event_id() -> String {
-    ulid::Ulid::new().to_string()
+    let mut generator = EVENT_IDS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Overflow needs 2^80 ids in one millisecond; a fresh id then still
+    // carries a later timestamp than any already issued.
+    generator
+        .generate()
+        .unwrap_or_else(|_| ulid::Ulid::new())
+        .to_string()
 }
 
 pub fn new_finding_id() -> String {
@@ -53,6 +66,12 @@ pub fn validate_id_component(id: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn event_ids_sort_in_issue_order() {
+        let ids = (0..10_000).map(|_| new_event_id()).collect::<Vec<_>>();
+        assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
     use super::*;
 
     #[test]
