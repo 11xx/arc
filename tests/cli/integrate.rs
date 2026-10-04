@@ -4846,3 +4846,422 @@ fn discard_ignored_keeps_other_arc_content() {
         "{out}"
     );
 }
+
+fn assert_cleanup_hidden_index_flag(scope: &str, flag: &str) {
+    let (repo, id, wt) = disposable_cleanup_fixture(false);
+    fixture_cache_tag(&wt, FIXTURE_CACHE_SIGNATURE);
+    git(&wt, &["update-index", flag, "README.md"]);
+    fs::write(wt.join("README.md"), "hidden local edit\n").unwrap();
+    assert!(!git_out(&wt, &["status", "--porcelain"]).contains("README.md"));
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--discard", scope]),
+    );
+    assert!(wt.exists(), "{scope} {flag}: {out}");
+    assert!(out.contains("README.md"), "{out}");
+    assert_eq!(
+        fs::read_to_string(wt.join("README.md")).unwrap(),
+        "hidden local edit\n"
+    );
+    assert!(!out.contains("discarded "), "{out}");
+}
+
+#[test]
+fn cleanup_skip_worktree_keeps_artifacts_scope() {
+    assert_cleanup_hidden_index_flag("artifacts", "--skip-worktree");
+}
+
+#[test]
+fn cleanup_skip_worktree_keeps_ignored_scope() {
+    assert_cleanup_hidden_index_flag("ignored", "--skip-worktree");
+}
+
+#[test]
+fn cleanup_assume_unchanged_keeps_artifacts_scope() {
+    assert_cleanup_hidden_index_flag("artifacts", "--assume-unchanged");
+}
+
+#[test]
+fn cleanup_assume_unchanged_keeps_ignored_scope() {
+    assert_cleanup_hidden_index_flag("ignored", "--assume-unchanged");
+}
+
+fn assert_cleanup_style_from_before_policy_diff(key: &str) {
+    for queue in [false, true] {
+        let repo = repo_with_gates();
+        repo.commit(
+            &repo.root,
+            ".gitignore",
+            "target/\n",
+            "test: ignore build output",
+        );
+        repo.commit(
+            &repo.root,
+            ".arc/policy.toml",
+            "[defaults.integration]\ncleanup=true\ndiscard='artifacts'\n",
+            "test: declare cleanup scope",
+        );
+        let policy = match key {
+                "discard" => "[defaults.integration]\ncleanup=true\ndiscard='ignored'\n",
+                "disposable" => "[defaults.integration]\ncleanup=true\ndiscard='artifacts'\ndisposable=[{path='target',marker='output'}]\n",
+                _ => "[defaults.integration]\ncleanup=false\ndiscard='artifacts'\n",
+            };
+        let (id, wt) = approved_change(&repo, "cleanup-policy", ".arc/policy.toml", policy);
+        if key == "cleanup" {
+            fixture_cache_tag(&wt, FIXTURE_CACHE_SIGNATURE);
+        } else {
+            fs::create_dir_all(wt.join("target")).unwrap();
+            fs::write(wt.join("target/output"), "local build").unwrap();
+        }
+        let mut dry = repo.arc(&repo.root);
+        dry.arg("integrate");
+        if queue {
+            dry.args(["--tag", "series"]);
+        } else {
+            dry.arg(&id);
+        }
+        dry.arg("--dry-run");
+        let plan = stdout(&mut dry);
+        assert!(plan.contains("integration.discard = artifacts"), "{plan}");
+        let mut cmd = repo.arc(&repo.root);
+        cmd.arg("integrate");
+        if queue {
+            cmd.args(["--tag", "series"]);
+        } else {
+            cmd.arg(&id);
+        }
+        let out = stdout(&mut cmd);
+        assert_eq!(wt.exists(), key != "cleanup", "{key}: {out}");
+        if key != "cleanup" {
+            assert!(
+                out.contains("holds local content not in the branch: target/"),
+                "{out}"
+            );
+            assert!(wt.join("target/output").exists(), "{out}");
+        }
+    }
+}
+
+#[test]
+fn cleanup_discard_policy_diff_does_not_widen_scope() {
+    assert_cleanup_style_from_before_policy_diff("discard");
+}
+
+#[test]
+fn cleanup_disposable_policy_diff_does_not_widen_scope() {
+    assert_cleanup_style_from_before_policy_diff("disposable");
+}
+
+#[test]
+fn cleanup_enabled_policy_diff_uses_selected_value() {
+    assert_cleanup_style_from_before_policy_diff("cleanup");
+}
+
+#[test]
+fn cleanup_arc_cache_keeps_checkout_even_when_recognized() {
+    for scope in ["artifacts", "ignored"] {
+        let (repo, id, wt) = disposable_cleanup_fixture(false);
+        fs::create_dir_all(wt.join(".arc/cache")).unwrap();
+        fs::write(wt.join(".arc/.gitignore"), "cache/\n").unwrap();
+        fs::write(wt.join(".arc/cache/CACHEDIR.TAG"), FIXTURE_CACHE_SIGNATURE).unwrap();
+        fs::write(wt.join(".arc/cache/content"), "local").unwrap();
+        // The tracked ignore file prevents Git from collapsing the whole .arc directory.
+        git(&wt, &["add", ".arc/.gitignore"]);
+        git(&wt, &["commit", "-m", "test: ignore arc cache"]);
+        stdout(repo.arc(&wt).args(["snapshot", &id, "--verify"]));
+        approve(&repo, &id);
+        let out = stdout(
+            repo.arc(&repo.root)
+                .args(["integrate", &id, "--discard", scope]),
+        );
+        assert!(wt.join(".arc/cache/content").exists(), "{out}");
+        assert!(out.contains(".arc/cache/"), "{out}");
+    }
+}
+
+#[test]
+fn cleanup_ignored_nested_clone_preserves_private_history_and_work() {
+    let (repo, id, wt) = disposable_cleanup_fixture(false);
+    let nested = wt.join("target/dependency");
+    git(
+        &repo.root,
+        &[
+            "clone",
+            "-q",
+            repo.root.to_str().unwrap(),
+            nested.to_str().unwrap(),
+        ],
+    );
+    git(&nested, &["config", "user.name", "Fixture"]);
+    git(
+        &nested,
+        &["config", "user.email", "fixture@example.invalid"],
+    );
+    git(&nested, &["config", "commit.gpgsign", "false"]);
+    repo.commit(
+        &nested,
+        "private.txt",
+        "private commit\n",
+        "test: private history",
+    );
+    let private = repo.head(&nested);
+    fs::write(nested.join("README.md"), "dirty nested edit").unwrap();
+    fs::write(nested.join("untracked.txt"), "nested work").unwrap();
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--discard", "ignored"]),
+    );
+    assert!(nested.exists(), "{out}");
+    assert!(out.contains("target/dependency"), "{out}");
+    assert_eq!(repo.head(&nested), private);
+    assert!(nested.join("untracked.txt").exists(), "{out}");
+    assert_eq!(
+        fs::read_to_string(nested.join("README.md")).unwrap(),
+        "dirty nested edit"
+    );
+}
+
+#[test]
+fn cleanup_ignored_nested_linked_worktree_preserves_work() {
+    let (repo, id, wt) = disposable_cleanup_fixture(false);
+    let nested = wt.join("target/dependency");
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            nested.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    fs::write(nested.join("README.md"), "dirty linked edit").unwrap();
+    fs::write(nested.join("untracked.txt"), "linked work").unwrap();
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--discard", "ignored"]),
+    );
+    assert!(nested.exists(), "{out}");
+    assert!(out.contains("target/dependency"), "{out}");
+    assert!(nested.join("untracked.txt").exists(), "{out}");
+    assert_eq!(
+        fs::read_to_string(nested.join("README.md")).unwrap(),
+        "dirty linked edit"
+    );
+}
+
+#[test]
+fn cleanup_worktree_config_cannot_hide_executable_mode_edit() {
+    use std::os::unix::fs::PermissionsExt;
+    let (repo, id, wt) = disposable_cleanup_fixture(false);
+    fixture_cache_tag(&wt, FIXTURE_CACHE_SIGNATURE);
+    git(&repo.root, &["config", "extensions.worktreeConfig", "true"]);
+    git(&wt, &["config", "--worktree", "core.fileMode", "false"]);
+    fs::set_permissions(wt.join("README.md"), fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!git_out(&wt, &["status", "--porcelain"]).contains("README.md"));
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--discard", "ignored"]),
+    );
+    assert!(wt.exists(), "{out}");
+    assert!(out.contains("README.md"), "{out}");
+}
+
+#[test]
+fn cleanup_fsmonitor_hook_cannot_hide_tracked_edit() {
+    use std::os::unix::fs::PermissionsExt;
+    let (repo, id, wt) = disposable_cleanup_fixture(false);
+    fixture_cache_tag(&wt, FIXTURE_CACHE_SIGNATURE);
+    let hook = repo.home.join("empty-fsmonitor");
+    fs::write(&hook, "#!/bin/sh\nprintf 'fixture-token\\0'\n").unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    git(&repo.root, &["config", "extensions.worktreeConfig", "true"]);
+    git(
+        &wt,
+        &[
+            "config",
+            "--worktree",
+            "core.fsmonitor",
+            hook.to_str().unwrap(),
+        ],
+    );
+    git(
+        &wt,
+        &["config", "--worktree", "core.fsmonitorHookVersion", "2"],
+    );
+    git(&wt, &["update-index", "--fsmonitor"]);
+    git_out(&wt, &["status", "--porcelain"]);
+    git(&wt, &["update-index", "--fsmonitor-valid", "README.md"]);
+    fs::write(wt.join("README.md"), "hidden fsmonitor edit\n").unwrap();
+    assert!(!git_out(&wt, &["status", "--porcelain"]).contains("README.md"));
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--discard", "ignored"]),
+    );
+    assert!(wt.exists(), "{out}");
+    assert!(out.contains("README.md"), "{out}");
+}
+
+#[test]
+fn cleanup_configured_untracked_cache_and_visibility_keep_untracked_work() {
+    let (repo, id, wt) = disposable_cleanup_fixture(false);
+    fixture_cache_tag(&wt, FIXTURE_CACHE_SIGNATURE);
+    git(&repo.root, &["config", "extensions.worktreeConfig", "true"]);
+    git(
+        &wt,
+        &["config", "--worktree", "status.showUntrackedFiles", "no"],
+    );
+    git(
+        &wt,
+        &["config", "--worktree", "core.untrackedCache", "true"],
+    );
+    git_out(&wt, &["status", "--porcelain"]);
+    fs::write(wt.join("untracked.txt"), "local").unwrap();
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--discard", "ignored"]),
+    );
+    assert!(wt.exists(), "{out}");
+    assert!(out.contains("untracked.txt"), "{out}");
+}
+
+#[test]
+fn cleanup_submodule_ignore_cannot_hide_local_work() {
+    let repo = repo_with_gates();
+    let sub = repo.home.join("sub-source");
+    fs::create_dir_all(&sub).unwrap();
+    git(&sub, &["init"]);
+    git(&sub, &["config", "user.name", "Fixture"]);
+    git(&sub, &["config", "user.email", "fixture@example.invalid"]);
+    git(&sub, &["config", "commit.gpgsign", "false"]);
+    repo.commit(&sub, "sub.txt", "one\n", "test: submodule");
+    git(
+        &repo.root,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            sub.to_str().unwrap(),
+            "sub",
+        ],
+    );
+    git(
+        &repo.root,
+        &["config", "-f", ".gitmodules", "submodule.sub.ignore", "all"],
+    );
+    git(&repo.root, &["add", ".gitmodules", "sub"]);
+    git(
+        &repo.root,
+        &["commit", "-m", "test: declare ignored submodule status"],
+    );
+    let (id, wt) = approved_change(&repo, "sub-cleanup", "change.txt", "change\n");
+    git(
+        &wt,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--init",
+        ],
+    );
+    git(&wt, &["config", "diff.ignoreSubmodules", "all"]);
+    git(&wt, &["config", "submodule.sub.ignore", "all"]);
+    fs::write(wt.join("sub/sub.txt"), "local tracked edit").unwrap();
+    fs::write(wt.join("sub/local.txt"), "untracked work").unwrap();
+    assert!(!git_out(&wt, &["status", "--porcelain"]).contains("sub"));
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--discard", "ignored"]),
+    );
+    assert!(wt.join("sub/local.txt").exists(), "{out}");
+    assert!(
+        out.contains("holds local content not in the branch: sub"),
+        "{out}"
+    );
+}
+
+#[test]
+fn cleanup_ignored_repository_symlink_is_not_followed() {
+    let (repo, id, wt) = disposable_cleanup_fixture(false);
+    fs::create_dir_all(wt.join("target")).unwrap();
+    std::os::unix::fs::symlink(&repo.root, wt.join("target/repository-link")).unwrap();
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--discard", "ignored"]),
+    );
+    assert!(!wt.exists(), "{out}");
+    assert!(repo.root.join(".git").exists(), "{out}");
+    assert!(
+        out.contains("discarded target/ (ignored; integration.discard = ignored)"),
+        "{out}"
+    );
+}
+
+#[test]
+fn cleanup_clean_hidden_index_entry_keeps_checkout() {
+    let (repo, id, wt) = disposable_cleanup_fixture(false);
+    fixture_cache_tag(&wt, FIXTURE_CACHE_SIGNATURE);
+    git(&wt, &["update-index", "--skip-worktree", "README.md"]);
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--discard", "artifacts"]),
+    );
+    assert!(wt.exists(), "{out}");
+    assert!(out.contains("README.md"), "{out}");
+}
+
+#[test]
+fn cleanup_worktree_config_cannot_hide_symlink_type_edit() {
+    let repo = repo_with_gates();
+    std::os::unix::fs::symlink("README.md", repo.root.join("link")).unwrap();
+    git(&repo.root, &["add", "link"]);
+    git(&repo.root, &["commit", "-m", "test: tracked symlink"]);
+    let (id, wt) = approved_change(&repo, "symlink-cleanup", "change.txt", "change\n");
+    git(&repo.root, &["config", "extensions.worktreeConfig", "true"]);
+    git(&wt, &["config", "--worktree", "core.symlinks", "false"]);
+    fs::remove_file(wt.join("link")).unwrap();
+    fs::write(wt.join("link"), "README.md").unwrap();
+    assert!(!git_out(&wt, &["status", "--porcelain"]).contains("link"));
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--discard", "ignored"]),
+    );
+    assert!(wt.exists(), "{out}");
+    assert!(
+        out.contains("holds local content not in the branch: link"),
+        "{out}"
+    );
+}
+
+#[test]
+fn cleanup_worktree_config_cannot_redirect_content_inventory() {
+    let (repo, id, wt) = disposable_cleanup_fixture(false);
+    fixture_cache_tag(&wt, FIXTURE_CACHE_SIGNATURE);
+    let alternate = repo.home.join("alternate-content");
+    fs::create_dir_all(&alternate).unwrap();
+    for file in git_out(&wt, &["ls-files"]).lines() {
+        let destination = alternate.join(file);
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::copy(wt.join(file), destination).unwrap();
+    }
+    git(&repo.root, &["config", "extensions.worktreeConfig", "true"]);
+    git(
+        &wt,
+        &[
+            "config",
+            "--worktree",
+            "core.worktree",
+            alternate.to_str().unwrap(),
+        ],
+    );
+    fs::write(wt.join("README.md"), "hidden real checkout edit\n").unwrap();
+    assert!(!git_out(&wt, &["status", "--porcelain"]).contains("README.md"));
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--discard", "ignored"]),
+    );
+    assert!(wt.exists(), "{out}");
+    assert!(out.contains("README.md"), "{out}");
+}

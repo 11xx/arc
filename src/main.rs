@@ -1821,13 +1821,15 @@ enum Cmd {
         /// sandbox, excluding the integration checkout. Arc removes only the checkout
         /// instance it created, identified by an owner record in that checkout’s
         /// Git administrative directory. The registered
-        /// checkout must still hold the change branch. An ignored directory identified
-        /// as a build artifact by a valid CACHEDIR.TAG, a built-in recognizer (`arc`
-        /// lists them), or a configured integration.disposable rule's path and marker
+        /// checkout must still hold the change branch. An ignored directory outside
+        /// .arc/ identified as a build artifact by a valid CACHEDIR.TAG, a built-in
+        /// recognizer (`arc` lists them), or a configured integration.disposable rule's path and marker
         /// does not keep the checkout.
         /// integration.discard defaults to artifacts; --discard ignored also discards
         /// other ignored files and directories outside .arc/. Tracked edits,
-        /// untracked files and .arc/ content keep it.
+        /// untracked files and index entries marked skip-worktree or assume-unchanged
+        /// keep it. Ignored .arc/ entries, including recognized artifacts, keep
+        /// the checkout under either scope.
         /// An outbox holding only the spool's regular .gitignore with "*" and a
         /// trailing newline is disposable only when its Git administrative ownership
         /// record identifies the file and records successful promotion. Foreign
@@ -1838,9 +1840,16 @@ enum Cmd {
         #[arg(long, conflicts_with = "no_cleanup")]
         cleanup: bool,
         /// Select integration.discard: artifacts (built-in) discards recognized build
-        /// artifacts; ignored discards every Git-ignored entry outside .arc/.
-        /// Tracked edits, untracked files, .arc/ outbox content and ownership checks
-        /// keep the checkout. Only owned, emptied outbox metadata is exempt.
+        /// artifacts; ignored uses the parent checkout's Git ignore rules outside
+        /// .arc/. Ignored subtrees containing nested Git repositories or worktrees
+        /// keep the checkout; traversal does not follow symlinks and may skip
+        /// recognized build artifacts. Tracked edits, untracked files and index
+        /// entries marked skip-worktree or assume-unchanged keep the checkout.
+        /// Ignored .arc/ entries, including recognized artifacts, keep it under
+        /// either scope; only owned, emptied outbox metadata is exempt.
+        /// Ownership checks apply under either scope. Cleanup uses cleanup, discard
+        /// and disposable values selected before the merge; a change's policy edits
+        /// do not govern its own cleanup.
         /// Implies --cleanup; overrides configured discard scope for single changes
         /// and queues.
         #[arg(long, value_enum, conflicts_with = "no_cleanup")]

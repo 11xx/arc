@@ -2415,7 +2415,7 @@ pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Resul
                 ..Default::default()
             };
             let shape = style.shape();
-            let cleanup = style.cleanup();
+            let cleanup = CleanupStyle::from(&style);
             if shape == integration::Shape::FfOnly && message.is_some() {
                 bail!("--message names a merge commit; select --shape no-ff");
             }
@@ -2652,7 +2652,7 @@ fn queue_step(
         contribution_shape(ctx, &st.target_branch, &patchset.head, contribution.history)?;
     }
     let shape = style.shape();
-    let cleanup = style.cleanup();
+    let cleanup = CleanupStyle::from(&style);
     println!("{change_id}: integrating into {}", st.target_branch);
 
     if shape == integration::Shape::FfOnly && ff_diverged(ctx, &st, &st.target_branch)? {
@@ -2922,10 +2922,27 @@ struct SingleOptions {
     expect_basis: Option<IntegrationPlan>,
 }
 
+/// Cleanup uses the style selected before the change is merged.
+struct CleanupStyle {
+    enabled: bool,
+    discard: crate::style::Discard,
+    disposable: Vec<crate::artifacts::Rule>,
+}
+
+impl From<&crate::style::Style> for CleanupStyle {
+    fn from(style: &crate::style::Style) -> Self {
+        Self {
+            enabled: style.cleanup(),
+            discard: style.discard(),
+            disposable: style.disposable(),
+        }
+    }
+}
+
 /// The resolved behavior and the flags whose precedence each reading preserves.
 struct IntegrationStyle {
     shape: integration::Shape,
-    cleanup: bool,
+    cleanup: CleanupStyle,
     flags: crate::style::StyleFlags,
 }
 
@@ -2933,7 +2950,7 @@ impl IntegrationStyle {
     fn validate(&self, policy: &crate::policy::PolicyFile) -> Result<()> {
         let style = crate::style::resolved_style_with_policy(policy, self.flags.clone())
             .map_err(|_| Refusal::ConfigurationMoved.into_error())?;
-        if style.shape() != self.shape || style.cleanup() != self.cleanup {
+        if style.shape() != self.shape || style.cleanup() != self.cleanup.enabled {
             return Err(Refusal::ConfigurationMoved.into_error());
         }
         Ok(())
@@ -3105,7 +3122,7 @@ fn integrate_one(
     reference: &str,
     into: Option<String>,
     message: Option<String>,
-    cleanup: bool,
+    cleanup: CleanupStyle,
     closed_behavior: ClosedBehavior,
     options: SingleOptions,
 ) -> Result<i32> {
@@ -3470,11 +3487,9 @@ fn integrate_one(
     );
     advise_plan_promotions(&store, &st);
 
-    if cleanup {
+    if selection.cleanup.enabled {
         let checkout = cleanup_checkout.as_deref().unwrap_or(&ctx.cwd);
-        if let Err(error) =
-            cleanup_integrated_change(ctx, &st, &wt, checkout, selection.flags.clone())
-        {
+        if let Err(error) = cleanup_integrated_change(ctx, &st, &wt, checkout, &selection.cleanup) {
             eprintln!(
                 "warning: integration recorded; cleanup for branch {} failed: {error:#}",
                 st.branch
@@ -3490,7 +3505,7 @@ fn cleanup_integrated_change(
     st: &ChangeState,
     target: &Path,
     checkout: &Path,
-    flags: crate::style::StyleFlags,
+    style: &CleanupStyle,
 ) -> Result<()> {
     if let Some(wt_path) = &st.worktree {
         let path = PathBuf::from(wt_path);
@@ -3515,9 +3530,8 @@ fn cleanup_integrated_change(
             ) {
                 Some("ownership cannot be established".to_string())
             } else {
-                let style = crate::style::resolved_style(target, &st.target_branch, flags)?;
                 let (content, artifacts) =
-                    cleanup_local_content(&path, &style.disposable(), style.discard())?;
+                    cleanup_local_content(&path, &style.disposable, style.discard)?;
                 if let Some(content) = content {
                     Some(format!("holds local content not in the branch: {content}"))
                 } else {
@@ -3593,31 +3607,97 @@ fn unused_outbox_metadata(checkout: &Path) -> Result<bool> {
     Ok(ignore.file_type()?.is_file() && std::fs::read(ignore.path())? == b"*\n")
 }
 
+/// Cleanup reads Git content without configuration shortcuts.
+fn cleanup_git(checkout: &Path, args: &[&str]) -> Result<String> {
+    let mut command = vec![
+        "--work-tree",
+        checkout
+            .to_str()
+            .context("cleanup checkout path is not UTF-8")?,
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.untrackedCache=false",
+        "-c",
+        "core.ignoreStat=false",
+        "-c",
+        "core.fileMode=true",
+        "-c",
+        "core.symlinks=true",
+        "-c",
+        "core.ignoreCase=false",
+        "-c",
+        "core.trustCtime=true",
+        "-c",
+        "core.checkStat=default",
+    ];
+    command.extend_from_slice(args);
+    gitio::git(checkout, &command)
+}
+
+fn cleanup_status(checkout: &Path, untracked: &str) -> Result<String> {
+    cleanup_git(
+        checkout,
+        &[
+            "status",
+            "--porcelain",
+            "-z",
+            "--ignored=traditional",
+            "--ignore-submodules=none",
+            untracked,
+        ],
+    )
+}
+
+/// Find nested repository markers by directory traversal without following symlinks.
+fn cleanup_nested_repositories(checkout: &Path, ignored: &str) -> Result<Vec<String>> {
+    let root = checkout.join(ignored.trim_end_matches('/'));
+    if !std::fs::symlink_metadata(&root)?.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut pending = vec![root];
+    let mut repositories = Vec::new();
+    while let Some(directory) = pending.pop() {
+        if !std::fs::symlink_metadata(&directory)?.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&directory)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if entry.file_name() == ".git" {
+                repositories.push(
+                    directory
+                        .strip_prefix(checkout)?
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            } else if kind.is_dir() {
+                pending.push(entry.path());
+            }
+        }
+    }
+    Ok(repositories)
+}
+
 fn cleanup_local_content(
     checkout: &Path,
     rules: &[crate::artifacts::Rule],
     discard: crate::style::Discard,
 ) -> Result<(Option<String>, Vec<crate::artifacts::Artifact>)> {
-    let status = gitio::git(
-        checkout,
-        &[
-            "status",
-            "--porcelain",
-            "-z",
-            "--ignored=traditional",
-            "--untracked-files=all",
-        ],
-    )?;
-    let ignored = gitio::git(
-        checkout,
-        &[
-            "status",
-            "--porcelain",
-            "-z",
-            "--ignored=traditional",
-            "--untracked-files=normal",
-        ],
-    )?;
+    let flagged = cleanup_git(checkout, &["ls-files", "-v", "-z"])?;
+    let mut paths = flagged
+        .split('\0')
+        .filter(|entry| {
+            entry
+                .as_bytes()
+                .first()
+                .is_some_and(|tag| *tag == b'S' || tag.is_ascii_lowercase())
+        })
+        .filter_map(|entry| entry.get(2..))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let status = cleanup_status(checkout, "--untracked-files=all")?;
+    let ignored = cleanup_status(checkout, "--untracked-files=normal")?;
     let ignored_entries = ignored
         .split('\0')
         .filter(|entry| entry.starts_with("!! "))
@@ -3631,7 +3711,6 @@ fn cleanup_local_content(
             .filter_map(|entry| entry.strip_prefix("!! .arc/"))
             .eq(std::iter::once("outbox/.gitignore"));
     let mut entries = status.split('\0').filter(|entry| !entry.is_empty());
-    let mut paths = Vec::new();
     while let Some(entry) = entries.next() {
         if let Some(path) = entry.get(3..) {
             let metadata = unused_outbox
@@ -3663,10 +3742,19 @@ fn cleanup_local_content(
             paths.push(path.to_string());
         } else if !artifacts.iter().any(|artifact| artifact.path == path) {
             if discard == crate::style::Discard::Ignored {
-                artifacts.push(crate::artifacts::Artifact {
-                    path: path.to_string(),
-                    identified_by: "ignored; integration.discard = ignored".to_string(),
-                });
+                let repositories = cleanup_nested_repositories(checkout, path)?;
+                if repositories.is_empty() {
+                    artifacts.push(crate::artifacts::Artifact {
+                        path: path.to_string(),
+                        identified_by: "ignored; integration.discard = ignored".to_string(),
+                    });
+                } else {
+                    paths.extend(
+                        repositories
+                            .into_iter()
+                            .map(|path| format!("{path} (nested Git checkout)")),
+                    );
+                }
             } else {
                 paths.push(path.to_string());
             }
@@ -4345,9 +4433,8 @@ fn integrate_dry_run(
         .unwrap_or_else(|| format!("merge({}): {}", st.slug, st.title));
 
     println!("dry-run: would integrate {} into {target}", st.change_id);
-    if selection.cleanup {
-        let style = crate::style::resolved_style(&ctx.cwd, target, selection.flags.clone())?;
-        println!("dry-run: would clean up {} with integration.discard = {}; checkout ownership and local content checks apply", st.change_id, style.discard().as_str());
+    if selection.cleanup.enabled {
+        println!("dry-run: would clean up {} with integration.discard = {}; checkout ownership and local content checks apply", st.change_id, selection.cleanup.discard.as_str());
     }
     if checkout.switch_from.is_some() {
         println!(
