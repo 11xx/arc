@@ -323,7 +323,7 @@ impl FindingState {
     /// Disposition tips: dispositions not superseded by any later one.
     /// One tip = its status governs; several = contested.
     pub fn tips(&self) -> Vec<&DispositionEntry> {
-        observed_tips(&self.dispositions)
+        eligible_disposition_tips(&self.dispositions)
     }
 
     pub fn contested(&self) -> bool {
@@ -341,7 +341,7 @@ impl FindingState {
 
     /// The tips among the dispositions recorded after integration.
     pub fn after_integration_tips(&self) -> Vec<&DispositionEntry> {
-        observed_tips(&self.after_integration)
+        eligible_disposition_tips(&self.after_integration)
     }
 
     /// Whether the finding's own dispositions release it. For a review
@@ -353,7 +353,7 @@ impl FindingState {
     /// Whether the finding's applicable history releases it: the dispositions
     /// recorded after integration when there are any, otherwise its own.
     pub fn currently_released(&self) -> bool {
-        if self.after_integration.is_empty() {
+        if self.after_integration_tips().is_empty() {
             self.released()
         } else {
             history_releases(&self.after_integration)
@@ -464,11 +464,23 @@ trait TipEntry {
 /// Whether a disposition history releases its finding: a single tip that is
 /// resolved, accepted-risk, or obsolete. Several tips are contested and
 /// release nothing.
+fn eligible_disposition_tips(entries: &[DispositionEntry]) -> Vec<&DispositionEntry> {
+    let eligible: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.gating_eligible)
+        .collect();
+    let superseded: BTreeSet<_> = eligible
+        .iter()
+        .flat_map(|entry| entry.supersedes.iter().map(String::as_str))
+        .collect();
+    eligible
+        .into_iter()
+        .filter(|entry| !superseded.contains(entry.event_id.as_str()))
+        .collect()
+}
+
 fn history_releases(entries: &[DispositionEntry]) -> bool {
-    matches!(
-        observed_tips(&entries.iter().filter(|entry| entry.gating_eligible).cloned().collect::<Vec<_>>()).as_slice(),
-        [tip] if tip.status.releases_block()
-    )
+    matches!(eligible_disposition_tips(entries).as_slice(), [tip] if tip.status.releases_block())
 }
 
 fn observed_tips<T: TipEntry>(entries: &[T]) -> Vec<&T> {
@@ -555,6 +567,8 @@ pub struct Debt {
     /// predicate, when one exists.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discharged_by: Option<DebtCoverage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discharged_by_event_id: Option<String>,
 }
 
 impl Debt {
@@ -1412,25 +1426,43 @@ impl ChangeState {
                     || scope.permits(&entry.event_id, &entry.origin_replica_id, role);
             }
         }
-        let hold_events: Vec<_> = events
-            .iter()
-            .filter(|event| {
-                !matches!(event.payload, Payload::HoldReleased { .. })
-                    || scope.permits(
+        self.holds.clear();
+        for event in events {
+            match &event.payload {
+                Payload::HoldSet { reason } => {
+                    self.holds.insert(
+                        event.event_id.clone(),
+                        HoldState {
+                            hold_event_id: event.event_id.clone(),
+                            reason: reason.clone(),
+                            held_by: event.actor.clone(),
+                            created_at: event.created_at,
+                        },
+                    );
+                }
+                Payload::HoldReleased { hold_event_id, .. }
+                    if scope.permits(
                         &event.event_id,
                         &event.repository_id,
                         crate::import_authorization::Role::Waiver,
-                    )
-            })
-            .cloned()
-            .collect();
-        if let Ok(projected) = reduce(&hold_events) {
-            self.holds = projected.holds;
+                    ) =>
+                {
+                    match hold_event_id {
+                        Some(id) => {
+                            self.holds.remove(id);
+                        }
+                        None => self.holds.clear(),
+                    }
+                }
+                _ => {}
+            }
         }
         self.privilege_scope = Some(scope);
         if let Some(debt) = self.debt.clone() {
             let discharged_by = self.debt_discharge(&debt);
-            self.debt.as_mut().expect("held debt").discharged_by = discharged_by;
+            let current = self.debt.as_mut().expect("held debt");
+            current.discharged_by_event_id = discharged_by.as_ref().map(|(id, _)| id.clone());
+            current.discharged_by = discharged_by.map(|(_, coverage)| coverage);
         }
     }
 
@@ -2323,6 +2355,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     coverage: None,
                     production: None,
                     discharged_by: None,
+                    discharged_by_event_id: None,
                 });
             }
             Payload::DebtDeclared {
@@ -2348,6 +2381,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     coverage: Some(coverage.clone()),
                     production: production.clone(),
                     discharged_by: None,
+                    discharged_by_event_id: None,
                 });
             }
             Payload::AuditVerdictRecorded {
@@ -2892,7 +2926,8 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
     if let Some(debt) = state.debt.clone() {
         let discharged_by = state.debt_discharge(&debt);
         if let Some(current) = state.debt.as_mut() {
-            current.discharged_by = discharged_by;
+            current.discharged_by_event_id = discharged_by.as_ref().map(|(id, _)| id.clone());
+            current.discharged_by = discharged_by.map(|(_, coverage)| coverage);
         }
     }
     Ok(state)
@@ -3106,7 +3141,8 @@ impl ChangeState {
             verdict.verdict == Verdict::Approved && verdict.patchset_id == latest.id
         })?;
         let provisional = self.verdicts.iter().rev().find(|verdict| {
-            verdict.verdict == Verdict::Approved
+            self.review_eligible(&verdict.event_id, &verdict.origin_replica_id)
+                && verdict.verdict == Verdict::Approved
                 && verdict.provisional.is_some()
                 && verdict.patchset_id == latest.id
         })?;
@@ -3280,7 +3316,7 @@ impl ChangeState {
 
     /// The verdict or audit that satisfies the existing discharge predicate.
     /// The returned model is copied from that event and is never inferred.
-    fn debt_discharge(&self, debt: &Debt) -> Option<DebtCoverage> {
+    fn debt_discharge(&self, debt: &Debt) -> Option<(String, DebtCoverage)> {
         // A debt that names an independent review as the thing missing cannot
         // be settled by the people who wrote the patchset, nor by an identity
         // arc invented. A name taken from `git config` is not a claim anybody
@@ -3309,10 +3345,13 @@ impl ChangeState {
                         .is_none()
                 })
         }) {
-            return Some(DebtCoverage::new(
-                audit.effective_author().to_string(),
-                audit.model.clone(),
-                audit.route_version.clone(),
+            return Some((
+                audit.event_id.clone(),
+                DebtCoverage::new(
+                    audit.effective_author().to_string(),
+                    audit.model.clone(),
+                    audit.route_version.clone(),
+                ),
             ));
         }
         // Only a verdict on the revision that actually shipped counts; a
@@ -3331,10 +3370,13 @@ impl ChangeState {
                         .is_none()
             })
             .map(|verdict| {
-                DebtCoverage::new(
-                    verdict.effective_author().to_string(),
-                    verdict.model.clone(),
-                    verdict.route_version.clone(),
+                (
+                    verdict.event_id.clone(),
+                    DebtCoverage::new(
+                        verdict.effective_author().to_string(),
+                        verdict.model.clone(),
+                        verdict.route_version.clone(),
+                    ),
                 )
             })
     }

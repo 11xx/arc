@@ -18,6 +18,7 @@ macro_rules! candidate_format_barrier {
             matches!(payload, $(Payload::$variant { .. })|+)
         }
 
+        #[cfg(test)]
         fn is_candidate_event_type(event_type: &str) -> bool {
             matches!(event_type, $($wire)|+)
         }
@@ -114,6 +115,30 @@ pub fn import_batches(root: &Path) -> Result<Vec<ImportBatch>> {
             bail!("unsupported import batch schema {}", batch.schema);
         }
         ids::validate_id_component(&batch.change_id)?;
+        for value in &batch.events {
+            if value["change_id"].as_str() != Some(batch.change_id.as_str()) {
+                bail!(
+                    "batch event {} belongs to another change",
+                    value["event_id"]
+                );
+            }
+        }
+        if let Some(receipt) = &batch.authorization {
+            let values: Vec<_> = batch
+                .events
+                .iter()
+                .cloned()
+                .map(|value| ("change".into(), value))
+                .chain(
+                    batch
+                        .repository_events
+                        .iter()
+                        .cloned()
+                        .map(|value| ("repository".into(), value)),
+                )
+                .collect();
+            crate::import_authorization::validate_receipt_events(receipt, &values)?;
+        }
         batches.push(batch);
     }
     Ok(batches)
@@ -740,6 +765,7 @@ impl Store {
 
     /// Decide the format barrier from imported JSON. Candidate event kinds
     /// share their classification with typed records.
+    #[cfg(test)]
     fn stamp_format_for_value(&self, value: Option<&serde_json::Value>) -> Result<()> {
         if value
             .and_then(|value| value.get("session_resolution"))
@@ -805,9 +831,24 @@ impl Store {
         // update this one monotonic barrier. Serialize the read-modify-rename
         // so a stale writer for an older format cannot land after a newer one.
         let _format = self.lock_format()?;
+        self.stamp_format_locked(introduced_in)
+    }
+
+    fn stamp_format_locked(&self, introduced_in: u32) -> Result<()> {
         let config_path = self.root.join("config.json");
-        let mut cfg: StoreConfig = serde_json::from_slice(&fs::read(&config_path)?)
-            .context("malformed arc config.json")?;
+        let mut cfg: StoreConfig = match fs::read(&config_path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).context("malformed arc config.json")?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let cfg = StoreConfig {
+                    schema_version: introduced_in,
+                    repository_id: self.repository_id.clone(),
+                    created_at: chrono::Utc::now(),
+                };
+                write_exclusive(&config_path, &serde_json::to_vec_pretty(&cfg)?)?;
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        };
         if cfg.schema_version >= introduced_in {
             return Ok(());
         }
@@ -1057,6 +1098,11 @@ impl Store {
         if !found {
             bail!("unknown change {change_id:?}");
         }
+        for (id, value) in &events {
+            if value["change_id"].as_str() != Some(change_id) {
+                bail!("event {id} belongs to another change");
+            }
+        }
         events.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(events)
     }
@@ -1206,11 +1252,41 @@ impl Store {
 
     pub fn publish_import(&self, batch: &ImportBatch) -> Result<()> {
         self.refuse_read_only()?;
-        self.stamp_format(Some(7))
-            .map_err(|error| crate::model::OperationFailure {
-                published: false,
-                message: format!("store-format preparation failed: {error:#}"),
-            })?;
+        let _format = self.lock_format()?;
+        let policy_path = self
+            .operator_policy_path
+            .clone()
+            .unwrap_or_else(|| self.root.join("operator-policy.toml"));
+        let _publication = crate::policy::lock_publication(&policy_path)?;
+        let current = crate::policy::replica_at(&policy_path)?;
+        let values: Vec<_> = batch
+            .events
+            .iter()
+            .cloned()
+            .map(|value| ("change".into(), value))
+            .chain(
+                batch
+                    .repository_events
+                    .iter()
+                    .cloned()
+                    .map(|value| ("repository".into(), value)),
+            )
+            .collect();
+        if let Some(receipt) = &batch.authorization {
+            if crate::import_authorization::policy_digest(&current)? != receipt.policy_sha256 {
+                return Err(crate::import_authorization::Refusal(
+                    "authorization configuration moved before publication: operator replica policy"
+                        .into(),
+                )
+                .into());
+            }
+            crate::import_authorization::validate_receipt_events(receipt, &values)?;
+        } else if !current.publishers.is_empty()
+            || crate::replica::status(self)?.project_id.is_some()
+        {
+            return Err(crate::import_authorization::Refusal("authorization configuration moved before publication: publishing enrollment required".into()).into());
+        }
+        crate::import_authorization::validate_import_identities(self, &values)?;
         let dir = self.root.join("imports");
         create_private_dir_all(&dir).map_err(|error| crate::model::OperationFailure {
             published: false,
@@ -1220,14 +1296,11 @@ impl Store {
         crate::replica::write_exclusive(&path, &serde_json::to_vec_pretty(batch)?).context(
             "import admission publication failed; inspect the published batch before retrying",
         )?;
-        for value in batch.events.iter().chain(&batch.repository_events) {
-            self.stamp_format_for_value(Some(value)).map_err(|error| {
-                crate::model::OperationFailure {
-                    published: true,
-                    message: format!("store-format maintenance failed: {error:#}"),
-                }
+        self.stamp_format_locked(7)
+            .map_err(|error| crate::model::OperationFailure {
+                published: true,
+                message: format!("store-format maintenance failed: {error:#}"),
             })?;
-        }
         Ok(())
     }
 
@@ -1302,6 +1375,7 @@ fn same_repository_event(existing: &serde_json::Value, incoming: &serde_json::Va
     bare(existing) == bare(incoming)
 }
 
+#[cfg(test)]
 fn authorization_has_external_verdict(
     authorization: &serde_json::Map<String, serde_json::Value>,
 ) -> bool {

@@ -1251,3 +1251,414 @@ fn replica_admission_preserves_the_receivers_declared_actor_guard() {
     );
     assert!(!receiver.root.join(".git/arc/replicas/imports").exists());
 }
+
+#[test]
+fn receipts_cannot_cross_change_content_or_scope() {
+    let (source, input, original) = exported_review();
+    let receiver = Repo::new();
+    deliver_git_objects(&source, &receiver);
+    bind_branch(&receiver, &source, &original);
+    let mut legacy = original.clone();
+    legacy["change_id"] = serde_json::json!("legacy-collision");
+    for event in legacy["events"].as_array_mut().unwrap() {
+        event["change_id"] = serde_json::json!("legacy-collision");
+    }
+    write_bundle(&input, &mut legacy);
+    stdout(
+        receiver
+            .arc(&receiver.root)
+            .args(["import", input.to_str().unwrap()]),
+    );
+    enroll(
+        &receiver,
+        &original,
+        &["facts", "review-authority"],
+        &["operator"],
+        true,
+    );
+    let before = fs::read(receiver.root.join(".git/arc/config.json")).unwrap();
+    fs::write(&input, serde_json::to_vec(&original).unwrap()).unwrap();
+    received(&receiver, &input, false)
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("conflicting"));
+    let state = status(&receiver, &legacy);
+    assert_eq!(
+        state["verdict_assessments"][0]["admission_provenance"],
+        "legacy-unknown"
+    );
+    assert_eq!(state["has_valid_approval"], false);
+    assert_eq!(
+        fs::read(receiver.root.join(".git/arc/config.json")).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn an_unpublished_failure_preserves_the_store_format() {
+    let (source, input, bundle) = exported_review();
+    let receiver = Repo::new();
+    deliver_git_objects(&source, &receiver);
+    enroll(&receiver, &bundle, &["facts", "review-input"], &[], false);
+    stdout(receiver.arc(&receiver.root).args(["replica", "id"]));
+    let config = receiver.root.join(".git/arc/config.json");
+    let before = fs::read(&config).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let imports = receiver.root.join(".git/arc/imports");
+    fs::create_dir_all(&imports).unwrap();
+    fs::set_permissions(&imports, fs::Permissions::from_mode(0o500)).unwrap();
+    received(&receiver, &input, false).assert().code(1);
+    let after = fs::read(config).unwrap();
+    fs::set_permissions(&imports, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(after, before);
+}
+
+#[test]
+fn input_provisional_verdict_cannot_create_a_receiver_obligation() {
+    let (source, input, mut bundle) = exported_review();
+    let receiver = Repo::new();
+    deliver_git_objects(&source, &receiver);
+    bind_branch(&receiver, &source, &bundle);
+    enroll(&receiver, &bundle, &["facts", "review-input"], &[], false);
+    received(&receiver, &input, false).assert().success();
+    stdout(
+        receiver
+            .arc(&receiver.root)
+            .env("ARC_ACTOR", "local-reviewer")
+            .args([
+                "review",
+                bundle["change_id"].as_str().unwrap(),
+                "--verdict",
+                "approved",
+            ]),
+    );
+    let verdict = bundle["events"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|event| event["event_type"] == "verdict-recorded")
+        .unwrap();
+    verdict["event_id"] = serde_json::json!("ZZZZ-input-provisional");
+    verdict["provisional"] = serde_json::json!("unproven input");
+    verdict["created_at"] = serde_json::json!("2099-01-01T00:00:00Z");
+    write_bundle(&input, &mut bundle);
+    received(&receiver, &input, false).assert().success();
+    let state = status(&receiver, &bundle);
+    assert_eq!(state["has_valid_approval"], true);
+    assert_eq!(state["provisional_approval_outstanding"], false);
+}
+
+#[test]
+fn untrusted_disposition_cannot_release_a_local_blocker() {
+    let (source, input, mut bundle) = exported_review();
+    let receiver = Repo::new();
+    deliver_git_objects(&source, &receiver);
+    bind_branch(&receiver, &source, &bundle);
+    enroll(
+        &receiver,
+        &bundle,
+        &["facts", "review-authority"],
+        &["operator"],
+        false,
+    );
+    received(&receiver, &input, false).assert().success();
+    let change = bundle["change_id"].as_str().unwrap().to_string();
+    stdout(
+        receiver
+            .arc(&receiver.root)
+            .env("ARC_ACTOR", "local-reviewer")
+            .args(["review", &change, "--verdict", "approved"]),
+    );
+    stdout(receiver.arc(&receiver.root).args([
+        "finding",
+        &change,
+        "--blocking",
+        "--summary",
+        "local blocker",
+    ]));
+    let recorded = json_stdout(
+        receiver
+            .arc(&receiver.root)
+            .args(["show", &change, "--json"]),
+    );
+    let finding = recorded["findings"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    let mut disposition = bundle["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["event_type"] == "verdict-recorded")
+        .unwrap()
+        .clone();
+    disposition["event_type"] = serde_json::json!("disposition-recorded");
+    disposition["event_id"] = serde_json::json!("ZZZZ-foreign-disposition");
+    disposition["finding_id"] = serde_json::json!(finding);
+    disposition["status"] = serde_json::json!("resolved");
+    disposition["commit"] =
+        serde_json::json!(source.head(&source.home.join(".worktrees/repo-review-origin")));
+    disposition["evidence"] = serde_json::json!("reported fix");
+    disposition["supersedes"] = serde_json::json!([]);
+    let prefix = json_stdout(
+        receiver
+            .arc(&receiver.root)
+            .args(["export", &change, "--output", "-"]),
+    );
+    bundle["events"] = prefix["events"].clone();
+    bundle["events"]
+        .as_array_mut()
+        .unwrap()
+        .push(disposition.clone());
+    write_bundle(&input, &mut bundle);
+    let checksum = bundle["events_sha256"].clone();
+    bundle["since"] =
+        serde_json::json!({"sha256":prefix["events_sha256"],"event_count":prefix["event_count"]});
+    bundle["events"] = serde_json::json!([disposition]);
+    bundle["event_count"] = serde_json::json!(1);
+    bundle["events_sha256"] = checksum;
+    fs::write(&input, serde_json::to_vec(&bundle).unwrap()).unwrap();
+    received(&receiver, &input, false).assert().success();
+    let state = status(&receiver, &bundle);
+    assert!(state["open_blocking_findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|id| id == &finding));
+    receiver
+        .arc(&receiver.root)
+        .args(["check", &change])
+        .assert()
+        .code(2);
+}
+
+fn spawn_received(receiver: &Repo, input: &Path) -> Child {
+    let template = received(receiver, input, false);
+    let mut command = Command::new(template.get_program());
+    command
+        .args(template.get_args())
+        .current_dir(template.get_current_dir().unwrap())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in template.get_envs() {
+        if let Some(value) = value {
+            command.env(key, value);
+        } else {
+            command.env_remove(key);
+        }
+    }
+    command.spawn().unwrap()
+}
+
+#[test]
+fn policy_revocation_during_format_wait_refuses_without_writes() {
+    let (source, input, bundle) = exported_review();
+    let receiver = Repo::new();
+    deliver_git_objects(&source, &receiver);
+    enroll(
+        &receiver,
+        &bundle,
+        &["facts", "review-authority"],
+        &["operator"],
+        true,
+    );
+    stdout(receiver.arc(&receiver.root).args(["replica", "id"]));
+    let config = fs::read(receiver.root.join(".git/arc/config.json")).unwrap();
+    let locks = receiver.root.join(".git/arc/locks");
+    fs::create_dir_all(&locks).unwrap();
+    let lock_path = locks.join("format.lock");
+    let locked = fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .unwrap();
+    locked.lock().unwrap();
+    let child = spawn_received(&receiver, &input);
+    let fds = PathBuf::from(format!("/proc/{}/fd", child.id()));
+    let start = Instant::now();
+    loop {
+        let waiting = fs::read_dir(&fds)
+            .unwrap()
+            .filter_map(|entry| fs::read_link(entry.ok()?.path()).ok())
+            .any(|path| path == lock_path);
+        if waiting {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(1));
+        thread::sleep(Duration::from_millis(5));
+    }
+    let policy = receiver.home.join("revoked.toml");
+    fs::write(&policy,format!("[[replica.publishers]]\nprincipal='channel'\nsource_replica_id='{}'\n[[replica.publishers.origins]]\nreplica_id='{}'\nroles=['facts','review-input']\nactors=[]\n",bundle["source_replica_id"].as_str().unwrap(),bundle["repository_id"].as_str().unwrap())).unwrap();
+    stdout(receiver.arc(&receiver.root).args([
+        "policy",
+        "write",
+        "--body-file",
+        policy.to_str().unwrap(),
+    ]));
+    locked.unlock().unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(18), "{output:?}");
+    assert_eq!(
+        fs::read(receiver.root.join(".git/arc/config.json")).unwrap(),
+        config
+    );
+    assert!(!receiver.root.join(".git/arc/imports").exists());
+    assert!(!receiver.root.join(".git/refs/arc/keep").exists());
+}
+
+#[test]
+fn explain_uses_the_exact_eligible_debt_discharge_witness() {
+    let (source, input, mut bundle) = exported_review();
+    let receiver = Repo::new();
+    deliver_git_objects(&source, &receiver);
+    bind_branch(&receiver, &source, &bundle);
+    let patchset = bundle["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["event_type"] == "patchset-added")
+        .unwrap()
+        .clone();
+    let review = bundle["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["event_type"] == "verdict-recorded")
+        .unwrap()
+        .clone();
+    let mut debt = bundle["events"][0].clone();
+    debt["event_id"] = serde_json::json!("ZZZZ-001-debt");
+    debt["event_type"] = serde_json::json!("debt-declared");
+    debt["reason"] = serde_json::json!("review owed");
+    debt["missing"] = serde_json::json!("independent-review");
+    debt["patchset_id"] = patchset["patchset_id"].clone();
+    let mut closure = bundle["events"][0].clone();
+    closure["event_id"] = serde_json::json!("ZZZZ-002-integrated");
+    closure["event_type"] = serde_json::json!("change-integrated");
+    closure["integrated_commit"] = patchset["head"].clone();
+    closure["source_patchset_id"] = patchset["patchset_id"].clone();
+    closure["source_head"] = patchset["head"].clone();
+    closure["target_before"] = patchset["base"].clone();
+    closure["authorization"] = serde_json::json!({"gate_evidence":{},"prerequisites":[],"blocking_findings":[],"holds":[],"gates":{},"policy":{"forbid_self_approval":false,"require_declared_actor":false,"provenance_git_identity":"shared","declared_by":{}},"audit_debt_event_id":"ZZZZ-001-debt"});
+    let mut audit = review.clone();
+    audit["event_id"] = serde_json::json!("ZZZZ-003-foreign-audit");
+    audit["event_type"] = serde_json::json!("audit-verdict-recorded");
+    audit["revision"] = patchset["head"].clone();
+    audit["actor"] = serde_json::json!("same-reviewer");
+    audit["model"] = serde_json::json!("reviewer#medium");
+    audit["verdict"] = serde_json::json!("comment-only");
+    audit["created_at"] = serde_json::json!("2099-01-01T00:00:00Z");
+    bundle["events"]
+        .as_array_mut()
+        .unwrap()
+        .extend([debt, closure, audit]);
+    write_bundle(&input, &mut bundle);
+    enroll(
+        &receiver,
+        &bundle,
+        &["facts", "review-input", "debt-input", "integration"],
+        &["tester", "operator"],
+        false,
+    );
+    received(&receiver, &input, false).assert().success();
+    let identity = json_stdout(
+        receiver
+            .arc(&receiver.root)
+            .args(["replica", "id", "--json"]),
+    );
+    let mut local = review;
+    local["event_id"] = serde_json::json!("ZZZZ-004-local-review");
+    local["repository_id"] = identity["repository_id"].clone();
+    local["actor"] = serde_json::json!("same-reviewer");
+    local["model"] = serde_json::json!("reviewer#medium");
+    local["created_at"] = serde_json::json!("2099-01-02T00:00:00Z");
+    let change = bundle["change_id"].as_str().unwrap();
+    let events = receiver
+        .root
+        .join(".git/arc/changes")
+        .join(change)
+        .join("events");
+    fs::create_dir_all(&events).unwrap();
+    fs::write(
+        events.join("ZZZZ-004-local-review.json"),
+        serde_json::to_vec(&local).unwrap(),
+    )
+    .unwrap();
+    let explanation = json_stdout(
+        receiver
+            .arc(&receiver.root)
+            .args(["explain", change, "--json"]),
+    );
+    fn witness(value: &serde_json::Value) -> Option<&serde_json::Value> {
+        match value {
+            serde_json::Value::Object(map) => map
+                .get("discharged_later_by")
+                .or_else(|| map.values().find_map(witness)),
+            serde_json::Value::Array(values) => values.iter().find_map(witness),
+            _ => None,
+        }
+    }
+    assert_eq!(
+        witness(&explanation),
+        Some(&serde_json::json!("ZZZZ-004-local-review")),
+        "{explanation}"
+    );
+    let state = json_stdout(
+        receiver
+            .arc(&receiver.root)
+            .args(["show", change, "--json"]),
+    );
+    assert_eq!(
+        state["debt"]["discharged_by_event_id"],
+        "ZZZZ-004-local-review"
+    );
+}
+
+#[test]
+fn receipt_readers_reject_changed_content_and_scope() {
+    let (source, input, bundle) = exported_review();
+    for scope_corruption in [false, true] {
+        let receiver = Repo::new();
+        deliver_git_objects(&source, &receiver);
+        enroll(
+            &receiver,
+            &bundle,
+            &["facts", "review-authority"],
+            &["operator"],
+            true,
+        );
+        received(&receiver, &input, false).assert().success();
+        let path = fs::read_dir(receiver.root.join(".git/arc/imports"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let mut batch: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        if scope_corruption {
+            batch["authorization"]["events"][0]["scope"] = serde_json::json!("repository");
+        } else {
+            batch["events"][0]["title"] = serde_json::json!("changed after admission");
+        }
+        fs::write(path, serde_json::to_vec(&batch).unwrap()).unwrap();
+        for verb in ["show", "status", "check", "explain", "export"] {
+            let mut command = receiver.arc(&receiver.root);
+            command.args([verb, bundle["change_id"].as_str().unwrap()]);
+            if verb == "export" {
+                command.args(["--output", "-"]);
+            } else {
+                command.arg("--json");
+            }
+            command
+                .assert()
+                .code(1)
+                .stderr(predicates::str::contains("receipt"));
+        }
+    }
+}

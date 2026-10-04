@@ -3918,7 +3918,7 @@ fn authorization_basis(
                 receipt: st
                     .privilege_scope
                     .as_ref()
-                    .and_then(|scope| scope.admissions.get(&verdict.event_id))
+                    .and_then(|scope| scope.admission_for(&verdict.event_id))
                     .cloned(),
             },
         );

@@ -1022,6 +1022,17 @@ PAIR REPLICA STORES
   capabilities to introduce relayed events. Identical held events need no grant.
   Enrollment and review trust are operator-only; project policy cannot grant
   them. Unpaired receivers without enrollment retain legacy file imports.
+  Admission receipts bind each permission to its scope, recorded origin and
+  full canonical event content digest. An event ID cannot transfer permission
+  to another record. Conflicting event identities refuse the entire import.
+  Operator policy replacement and admission share a publication lock. Admission
+  revalidates enrollment after acquiring the format and publication locks;
+  revocation before that boundary refuses without publishing or changing format.
+  A published batch advances store format 7. An unpublished failure leaves its
+  format stamp unchanged. A failure after publication reports publication state.
+  Finding release, waiver, debt discharge and provisional corroboration use
+  eligible graphs. Debt discharge retains its exact witness event for explain
+  and every receiver projection.
   No foreign replica supplies review authority by default. A foreign verdict
   needs both admitted review-authority and current trusted_review_replicas
   membership to gate. Contributor and assumed-identity checks still apply.

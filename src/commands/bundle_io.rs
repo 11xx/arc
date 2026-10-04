@@ -212,7 +212,7 @@ pub fn import_bundle(
         root: root.clone(),
         repository_id: local_repository_id
             .clone()
-            .unwrap_or_else(|| "uninitialized".into()),
+            .unwrap_or_else(crate::ids::new_event_id),
         operator_policy_path: Some(crate::policy::operator_path(&ctx.cwd)?),
         require_declared_actor: initial_policy.policy.require_declared_actor,
         require_declared_actor_sources: initial_policy
@@ -307,7 +307,6 @@ pub fn import_bundle(
         received_sha256,
     )?;
     ctx.ensure_declared_actor(&store)?;
-    let store = Store::discover(&ctx.cwd)?;
     let rewrites = incoming.len();
     let batch = crate::store::ImportBatch {
         schema: "arc-import-batch/1".into(),
@@ -388,6 +387,9 @@ fn authorize_import(
         .collect();
     for bytes in repository.values() {
         events.push(("repository".into(), serde_json::from_slice(bytes)?));
+    }
+    if let Some(store) = store {
+        crate::import_authorization::validate_import_identities(store, &events)?;
     }
     let authorization = crate::import_authorization::plan_import(
         policy,

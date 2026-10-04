@@ -495,6 +495,13 @@ pub fn import(
         .cloned()
         .context("replica bundle does not name this local repository")?;
     let _lock = if dry_run { None } else { Some(lock(store)?) };
+    let _publication = if dry_run {
+        None
+    } else {
+        Some(crate::policy::lock_publication(
+            &crate::policy::operator_path(&ctx.cwd)?,
+        )?)
+    };
     if !dry_run {
         let current_declarations = crate::policy::load(&ctx.cwd)?;
         let current_policy = current_declarations.replica;
@@ -1525,6 +1532,14 @@ fn load_events(store: &Store) -> Result<Vec<ReplicaEvent>> {
             if path.file_stem().and_then(|name| name.to_str()) != Some(batch.bundle_sha256.as_str())
             {
                 bail!("replica import receipt filename does not match its digest");
+            }
+            if let Some(receipt) = &batch.authorization {
+                let values = batch
+                    .events
+                    .iter()
+                    .map(|event| Ok(("replica".into(), serde_json::to_value(event)?)))
+                    .collect::<Result<Vec<_>>>()?;
+                crate::import_authorization::validate_receipt_events(receipt, &values)?;
             }
             for event in batch.events {
                 insert_event(&mut events, event)?;

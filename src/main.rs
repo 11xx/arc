@@ -1071,6 +1071,9 @@ enum Cmd {
     /// publisher and exact received-byte SHA256. Operator enrollment authorizes
     /// each introduced origin and capability; actor strings remain claims.
     /// Admission and its private authorization receipt publish atomically.
+    /// Receipt permissions bind full canonical content and scope. Enrollment
+    /// is revalidated under the publication lock; unpublished failures leave
+    /// the format stamp unchanged.
     /// --provenance-only permits missing objects; it never bypasses authorization.
     /// Candidate events stamp store format 7, including evaluations,
     /// selections, and promotions without a registration in the bundle.
@@ -2347,6 +2350,7 @@ enum PolicyCmd {
     /// Records no events; ledger reads do not require a parseable append policy.
     Path,
     /// Replace the operator policy file with TOML from a file or stdin.
+    /// Replacement shares the admission publication lock.
     /// The operator-only [replica] table enrolls publishing principals and
     /// trusted review origins. Privileged roles require explicit actor allowlists.
     /// Style uses [defaults.change] and [defaults.integration]; constraints use

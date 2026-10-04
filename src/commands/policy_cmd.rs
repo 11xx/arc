@@ -18,6 +18,7 @@ pub fn write(ctx: &Ctx, text: &str) -> Result<i32> {
     crate::policy::validate_operator_text(text)
         .with_context(|| format!("invalid {}", path.display()))?;
     crate::gates::validate_operator_text(text)?;
+    let _publication = crate::policy::lock_publication(&path)?;
     let parent = path
         .parent()
         .context("operator policy path has no parent")?;

@@ -362,7 +362,7 @@ pub fn plan_import(
             event_id: event_id.into(),
             scope: scope.clone(),
             origin_replica_id: origin_id.into(),
-            event_sha256: digest(&serde_json::to_vec(value)?),
+            event_sha256: canonical_event_digest(value)?,
             authorized_roles,
         });
     }
@@ -377,6 +377,76 @@ pub fn plan_import(
     }))
 }
 
+/// Canonical content includes the complete envelope and every payload field.
+pub fn canonical_event_digest(value: &Value) -> Result<String> {
+    Ok(digest(&serde_json::to_vec(value)?))
+}
+
+pub fn validate_receipt_events(
+    receipt: &ImportAuthorization,
+    values: &[(String, Value)],
+) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    for grant in &receipt.events {
+        if !seen.insert(&grant.event_id) {
+            bail!("conflicting receipt identity {}", grant.event_id);
+        }
+        let value = values
+            .iter()
+            .find(|(scope, value)| {
+                scope == &grant.scope && value["event_id"].as_str() == Some(&grant.event_id)
+            })
+            .map(|(_, value)| value)
+            .with_context(|| {
+                format!(
+                    "receipt event {} has no matching scope {}",
+                    grant.event_id, grant.scope
+                )
+            })?;
+        if value["repository_id"].as_str() != Some(grant.origin_replica_id.as_str())
+            || canonical_event_digest(value)? != grant.event_sha256
+        {
+            bail!(
+                "receipt content digest or origin mismatch for {}",
+                grant.event_id
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Admission cannot introduce an ID already held with another scope or content.
+pub fn validate_import_identities(
+    store: &crate::store::Store,
+    values: &[(String, Value)],
+) -> Result<()> {
+    let mut held = std::collections::BTreeMap::<String, BTreeSet<(String, String)>>::new();
+    for change in store.list_change_ids()? {
+        for (id, value) in store.raw_events(&change)? {
+            held.entry(id)
+                .or_default()
+                .insert(("change".into(), canonical_event_digest(&value)?));
+        }
+    }
+    for (id, value) in store.raw_repository_events_unseen(&BTreeSet::new())? {
+        held.entry(id)
+            .or_default()
+            .insert(("repository".into(), canonical_event_digest(&value)?));
+    }
+    for (scope, value) in values {
+        let id = value["event_id"]
+            .as_str()
+            .context("import event has no ID")?;
+        let identity = (scope.clone(), canonical_event_digest(value)?);
+        let identities = held.entry(id.into()).or_default();
+        if identities.iter().any(|existing| existing != &identity) {
+            bail!("conflicting event identity {id}: scope or canonical content differs");
+        }
+        identities.insert(identity);
+    }
+    Ok(())
+}
+
 /// Receiver permissions remain separate from the recorded verdict graph.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct PrivilegeScope {
@@ -385,6 +455,8 @@ pub struct PrivilegeScope {
     pub trusted_review_replicas: Vec<String>,
     pub admissions: std::collections::BTreeMap<String, EventAuthorization>,
     pub imported_event_ids: BTreeSet<String>,
+    pub bound_events: std::collections::BTreeMap<String, (String, String, String)>,
+    pub ambiguous_event_ids: BTreeSet<String>,
 }
 impl PrivilegeScope {
     pub fn for_store(store: &crate::store::Store) -> Result<Self> {
@@ -411,6 +483,46 @@ impl PrivilegeScope {
                 }
             }
         }
+        let mut bound_events = std::collections::BTreeMap::new();
+        let mut ambiguous_event_ids = BTreeSet::new();
+        let mut bind = |scope: &str, id: String, value: Value| -> Result<()> {
+            let identity = (
+                scope.to_string(),
+                value["repository_id"]
+                    .as_str()
+                    .context("event has no origin")?
+                    .to_string(),
+                canonical_event_digest(&value)?,
+            );
+            if let Some(held) = bound_events.insert(id.clone(), identity.clone()) {
+                if held != identity {
+                    ambiguous_event_ids.insert(id);
+                }
+            }
+            Ok(())
+        };
+        if !admissions.is_empty() {
+            for change in store.list_change_ids()? {
+                if let Ok(values) = store.raw_events(&change) {
+                    for (id, value) in values {
+                        bind("change", id, value)?;
+                    }
+                }
+            }
+            if let Ok(values) = store.raw_repository_events_unseen(&BTreeSet::new()) {
+                for (id, value) in values {
+                    bind("repository", id, value)?;
+                }
+            }
+        }
+        admissions.retain(|id, receipt| {
+            !ambiguous_event_ids.contains(id)
+                && bound_events.get(id).is_some_and(|(scope, origin, hash)| {
+                    scope == &receipt.scope
+                        && origin == &receipt.origin_replica_id
+                        && hash == &receipt.event_sha256
+                })
+        });
         let replica = crate::replica::status(store)?;
         let origin_names = replica
             .local
@@ -424,10 +536,27 @@ impl PrivilegeScope {
             trusted_review_replicas: policy.trusted_review_replicas,
             admissions,
             imported_event_ids,
+            bound_events,
+            ambiguous_event_ids,
         })
     }
+    pub fn admission_for(&self, event_id: &str) -> Option<&EventAuthorization> {
+        if self.ambiguous_event_ids.contains(event_id) {
+            return None;
+        }
+        let receipt = self.admissions.get(event_id)?;
+        let (scope, origin, hash) = self.bound_events.get(event_id)?;
+        (scope == &receipt.scope
+            && origin == &receipt.origin_replica_id
+            && hash == &receipt.event_sha256)
+            .then_some(receipt)
+    }
+
     pub fn permits(&self, event_id: &str, origin: &str, role: Role) -> bool {
-        let capability = match self.admissions.get(event_id) {
+        if self.ambiguous_event_ids.contains(event_id) {
+            return false;
+        }
+        let capability = match self.admission_for(event_id) {
             Some(receipt) => {
                 receipt.origin_replica_id == origin && receipt.authorized_roles.contains(&role)
             }
@@ -442,7 +571,7 @@ impl PrivilegeScope {
                     .any(|trusted| trusted == origin))
     }
     pub fn provenance(&self, event_id: &str) -> &'static str {
-        if self.admissions.contains_key(event_id) {
+        if self.admission_for(event_id).is_some() {
             "transport-asserted"
         } else {
             "legacy-unknown"
@@ -452,8 +581,7 @@ impl PrivilegeScope {
         if self.permits(event_id, origin, Role::ReviewAuthority) {
             None
         } else if self
-            .admissions
-            .get(event_id)
+            .admission_for(event_id)
             .is_none_or(|event| !event.authorized_roles.contains(&Role::ReviewAuthority))
         {
             Some(format!(

@@ -1213,31 +1213,23 @@ struct Discharge {
 }
 
 /// Name the review behind `debt.discharged_by`, with its position on the
-/// ledger. The state already decided the discharge; this finds the event whose
-/// identity it copied, audits before verdicts, the order the discharge rule
-/// reads them in.
+/// ledger. The state preserves the exact eligible witness, including when
+/// several reviews share an attributed identity and model.
 fn discharge(state: &ChangeState, events: &[Event]) -> Option<(Discharge, usize)> {
     let debt = state.debt.as_ref()?;
     let coverage = debt.discharged_by.as_ref()?;
-    let (by_event_id, verdict) = state
+    let by_event_id = debt.discharged_by_event_id.clone()?;
+    let verdict = state
         .audit_verdicts
         .iter()
-        .find(|audit| {
-            audit.created_at >= debt.declared_at
-                && audit.effective_author() == coverage.reviewer
-                && audit.model == coverage.model
-        })
-        .map(|audit| (audit.event_id.clone(), audit.verdict))
+        .find(|audit| audit.event_id == by_event_id)
+        .map(|audit| audit.verdict)
         .or_else(|| {
             state
                 .verdicts
                 .iter()
-                .find(|verdict| {
-                    verdict.created_at >= debt.declared_at
-                        && verdict.effective_author() == coverage.reviewer
-                        && verdict.model == coverage.model
-                })
-                .map(|verdict| (verdict.event_id.clone(), verdict.verdict))
+                .find(|verdict| verdict.event_id == by_event_id)
+                .map(|verdict| verdict.verdict)
         })?;
     let position = events
         .iter()

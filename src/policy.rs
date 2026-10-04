@@ -597,6 +597,32 @@ pub fn replica_at(path: &Path) -> Result<crate::import_authorization::ReplicaPol
     Ok(replica)
 }
 
+/// Serialize operator policy replacement with import admission.
+pub struct PublicationLock(std::fs::File);
+impl Drop for PublicationLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+pub fn lock_publication(path: &Path) -> Result<PublicationLock> {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let parent = path.parent().context("operator policy has no parent")?;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(parent)?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(parent.join("import-publication.lock"))?;
+    file.lock()
+        .with_context(|| format!("cannot lock policy publication {}", path.display()))?;
+    Ok(PublicationLock(file))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
