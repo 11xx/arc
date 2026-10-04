@@ -2331,7 +2331,7 @@ enum WorkspaceCmd {
     /// section it belongs to, and the facts that deserve attention. Review-owed
     /// rows carry the effective `kind`, declared `reason`, nullable
     /// `patchset_id`, `declared_at`, and `declared_by`. Versioned
-    /// `arc-workspace-report/4`.
+    /// `arc-workspace-report/3`.
     /// With `--previous`, tallies carry their
     /// earlier values when both collections are complete, new rows are marked
     /// when their project was observed both times, and every artifact that left
