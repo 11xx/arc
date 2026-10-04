@@ -1451,6 +1451,8 @@ enum Cmd {
     #[command(group(clap::ArgGroup::new("snapshot_attribution").args(["contributors", "solo"]).requires("snapshot")))]
     /// Verdicts retain observed publication authority. A verified authority refusal
     /// on a provisional delivery remains applicable across authority transfer.
+    /// Clearing it requires applicable explicit supersession; event-ID order and
+    /// wall clock cannot make an earlier approval supersede an unobserved refusal.
     /// Scoped admission, trust and independence determine review eligibility.
     Review {
         /// Change to act on. Omitted, it is inferred from the current branch,

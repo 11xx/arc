@@ -2371,3 +2371,123 @@ fn trusted_foreign_approval_cannot_overcome_an_authority_local_refusal() {
         .assert()
         .code(3);
 }
+
+fn hour_ahead_clock(repo: &Repo) -> PathBuf {
+    let source = repo.home.join("hour-ahead.c");
+    let library = repo.home.join("hour-ahead.so");
+    fs::write(
+        &source,
+        r#"#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <time.h>
+int clock_gettime(clockid_t clock, struct timespec *value) {
+    static int (*original)(clockid_t, struct timespec *);
+    if (!original) original = dlsym(RTLD_NEXT, "clock_gettime");
+    int result = original(clock, value);
+    if (!result && clock == CLOCK_REALTIME) value->tv_sec += 3600;
+    return result;
+}
+"#,
+    )
+    .unwrap();
+    assert!(Command::new("cc")
+        .args(["-shared", "-fPIC"])
+        .arg(&source)
+        .arg("-o")
+        .arg(&library)
+        .arg("-ldl")
+        .status()
+        .unwrap()
+        .success());
+    library
+}
+
+#[test]
+fn a_clock_ahead_previous_grant_approval_cannot_clear_an_unobserved_rejection() {
+    let (authority, worker) = worker();
+    let successor = Repo::new();
+    let successor_id = json_stdout(
+        successor
+            .arc(&successor.root)
+            .args(["replica", "id", "--json"]),
+    );
+    stdout(authority.arc(&authority.root).args([
+        "replica",
+        "pair",
+        "successor",
+        "--repository-id",
+        successor_id["repository_id"].as_str().unwrap(),
+    ]));
+    import_replica_facts(&authority, &successor);
+    import_replica_facts(&authority, &worker);
+    let prerequisite = prepared(&worker);
+    prepare(&worker, &prerequisite);
+    let (dependent, _) = dependent(&worker, &prerequisite);
+    deliver(&worker, &authority, &prerequisite, false);
+    stdout(
+        authority
+            .arc(&authority.root)
+            .env("LD_PRELOAD", hour_ahead_clock(&authority))
+            .env("ARC_ACTOR", "authority-reviewer")
+            .args(["review", &prerequisite, "--verdict", "approved"]),
+    );
+    let older = json_stdout(
+        authority
+            .arc(&authority.root)
+            .args(["show", &prerequisite, "--json"]),
+    );
+    let approval = older["verdicts"].as_array().unwrap().last().unwrap();
+    assert!(approval["relation"].is_null());
+    let approval_id = approval["event_id"].as_str().unwrap().to_string();
+    stdout(authority.arc(&authority.root).args([
+        "replica",
+        "authority",
+        "offer",
+        "--to",
+        "successor",
+    ]));
+    import_replica_facts(&authority, &successor);
+    import_replica_facts(&successor, &worker);
+    deliver(&worker, &successor, &prerequisite, false);
+    stdout(successor.arc(&successor.root).args([
+        "review",
+        &prerequisite,
+        "--verdict",
+        "changes-requested",
+        "--cause",
+        "executor",
+    ]));
+    deliver(&successor, &worker, &prerequisite, false);
+    let refused = obligation(&worker, &prerequisite);
+    let rejection = refused["refusal_event_id"].as_str().unwrap();
+    assert!(
+        approval_id.as_str() > rejection,
+        "the earlier approval has a higher clock-derived ID"
+    );
+    worker
+        .arc(&worker.root)
+        .args(["check", &dependent, "--provisional"])
+        .assert()
+        .code(7);
+    deliver(&authority, &worker, &prerequisite, false);
+    let after = obligation(&worker, &prerequisite);
+    assert_eq!(after["disposition"], "authority-refused");
+    assert_eq!(after["refusal_event_id"], rejection);
+    worker
+        .arc(&worker.root)
+        .args(["check", &dependent, "--provisional"])
+        .assert()
+        .code(7);
+    worker
+        .arc(&worker.root)
+        .args(["integrate", &dependent, "--provisional"])
+        .assert()
+        .code(7);
+    approve(&successor, &prerequisite);
+    deliver(&successor, &worker, &prerequisite, false);
+    worker
+        .arc(&worker.root)
+        .args(["check", &dependent, "--provisional"])
+        .assert()
+        .success();
+}

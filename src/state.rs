@@ -485,14 +485,6 @@ fn history_releases(entries: &[DispositionEntry]) -> bool {
     matches!(eligible_disposition_tips(entries).as_slice(), [tip] if tip.status.releases_block())
 }
 
-pub(crate) fn verdict_tips_for(entries: &[VerdictEntry]) -> Vec<&VerdictEntry> {
-    let start = entries
-        .iter()
-        .rposition(|entry| entry.relation.is_none())
-        .unwrap_or(0);
-    observed_tips(&entries[start..])
-}
-
 fn observed_tips<T: TipEntry>(entries: &[T]) -> Vec<&T> {
     let superseded: Vec<&str> = entries
         .iter()

@@ -198,12 +198,45 @@ fn authority_refusal(state: &ChangeState, holder: Option<&str>, patchset: &str) 
         })
         .cloned()
         .collect();
-    crate::state::verdict_tips_for(&history)
-        .into_iter()
-        .find(|verdict| {
-            verdict.verdict == Verdict::ChangesRequested && verdict.patchset_id == patchset
+    history
+        .iter()
+        .find(|refusal| {
+            refusal.verdict == Verdict::ChangesRequested
+                && refusal.patchset_id == patchset
+                && !history.iter().any(|judgment| {
+                    judgment.verdict == Verdict::Approved
+                        && judgment.patchset_id == refusal.patchset_id
+                        && judgment.authority_observed.is_some()
+                        && explicitly_supersedes(
+                            judgment,
+                            &refusal.event_id,
+                            &history,
+                            &mut Default::default(),
+                        )
+                })
         })
         .map(|verdict| verdict.event_id.clone())
+}
+
+fn explicitly_supersedes(
+    judgment: &crate::state::VerdictEntry,
+    refusal: &str,
+    history: &[crate::state::VerdictEntry],
+    seen: &mut std::collections::BTreeSet<String>,
+) -> bool {
+    if !seen.insert(judgment.event_id.clone()) {
+        return false;
+    }
+    let Some(VerdictRelation::Supersedes { observed }) = &judgment.relation else {
+        return false;
+    };
+    observed.iter().any(|id| {
+        id == refusal
+            || history
+                .iter()
+                .find(|prior| prior.event_id == *id && prior.patchset_id == judgment.patchset_id)
+                .is_some_and(|prior| explicitly_supersedes(prior, refusal, history, seen))
+    })
 }
 
 pub fn project_obligations_at(

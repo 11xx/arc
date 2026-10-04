@@ -1196,6 +1196,10 @@ PAIR REPLICA STORES
   Authority verdicts retain their observed grant and holder. A verified refusal
   remains attached across authority transfer until an explicit superseding
   judgment disposes of it or an accepting integration settles the delivery.
+  An approval disposes of a refusal through a recorded supersession relation
+  on the delivered patchset, with its publication grant verified. Event-ID order
+  and wall clock never establish that observation; a late earlier-grant approval
+  without the relation leaves the refusal attached.
   Review eligibility follows the shared admission, trust and independence rules.
 
   Every delivery is retained across snapshots and closure. Status lists its
