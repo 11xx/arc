@@ -3513,6 +3513,10 @@ fn cleanup_integrated_change(
             let canonical_path = path.canonicalize()?;
             let reason = if !st.worktree_created {
                 Some("not created by arc".to_string())
+            } else if std::fs::symlink_metadata(&path)?.file_type().is_symlink() {
+                Some(
+                    "the recorded path is a symlink, so its contents are not inspected".to_string(),
+                )
             } else if canonical_path == gitio::toplevel(checkout)?.canonicalize()?
                 || canonical_path == target.canonicalize()?
             {
@@ -3653,6 +3657,14 @@ fn cleanup_status(checkout: &Path, untracked: &str) -> Result<String> {
 
 /// Inspect the checkout tree independently of Git status, without following symlinks.
 fn cleanup_nested_repositories(checkout: &Path) -> Result<Vec<String>> {
+    // A root that is not a real directory cannot be inspected, so it is never
+    // reported clean.
+    if !std::fs::symlink_metadata(checkout)
+        .with_context(|| format!("cannot inspect {}", checkout.display()))?
+        .is_dir()
+    {
+        bail!("{} is not a directory", checkout.display());
+    }
     let mut pending = vec![checkout.to_path_buf()];
     let mut repositories = Vec::new();
     while let Some(directory) = pending.pop() {

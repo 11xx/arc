@@ -1830,6 +1830,7 @@ enum Cmd {
         /// a worktree containing another repository is never removed. The whole
         /// filesystem tree is walked independently of Git status, excluding only
         /// the checkout's own .git file at its root, without following symlinks.
+        /// A recorded worktree path that is itself a symlink keeps the checkout.
         /// integration.discard defaults to artifacts; --discard ignored also discards
         /// other ignored files and directories outside .arc/. Tracked edits,
         /// untracked files and index entries marked skip-worktree or assume-unchanged

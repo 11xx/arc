@@ -4648,6 +4648,35 @@ fn discard_ignored_implies_cleanup() {
 }
 
 #[test]
+fn cleanup_keeps_a_worktree_whose_recorded_path_is_a_symlink() {
+    for scope in ["artifacts", "ignored"] {
+        let (repo, id, wt) = disposable_cleanup_fixture(false);
+        ignored_discard_content(&wt);
+        let moved = wt.with_file_name("repo-artifact-cleanup-moved");
+        git_out(
+            &repo.root,
+            &[
+                "worktree",
+                "move",
+                wt.to_str().unwrap(),
+                moved.to_str().unwrap(),
+            ],
+        );
+        std::os::unix::fs::symlink(&moved, &wt).unwrap();
+        let out =
+            stdout(
+                repo.arc(&repo.root)
+                    .args(["integrate", &id, "--cleanup", "--discard", scope]),
+            );
+        assert!(moved.join("target").exists(), "{scope}: {out}");
+        assert!(
+            out.contains("the recorded path is a symlink"),
+            "{scope}: {out}"
+        );
+    }
+}
+
+#[test]
 fn discard_ignored_user_default_and_flag_override() {
     for override_flag in [false, true] {
         let (repo, id, wt) = disposable_cleanup_fixture(false);

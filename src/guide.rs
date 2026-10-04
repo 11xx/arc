@@ -878,7 +878,8 @@ RUN A CHANGE
   A directory with a `.git` entry or a bare repository layout (`HEAD`,
   `objects/` and `refs/`) keeps the checkout and is named. The checkout's
   own `.git` file at its root is the only exclusion. The walk never follows
-  symlinks, and any read error keeps the checkout. Tracked edits, untracked
+  symlinks, and any read error keeps the checkout. A recorded worktree path
+  that is itself a symlink keeps the checkout uninspected. Tracked edits, untracked
   files and index entries marked skip-worktree or assume-unchanged
   keep the checkout. Ignored `.arc/` content keeps it under either scope,
   including recognized artifacts; only owned, emptied outbox metadata is
@@ -2010,8 +2011,8 @@ FILES
   whole filesystem tree independently of Git status, checking every directory
   for `.git` entries and bare repository layouts (`HEAD`, `objects/` and
   `refs/`). The checkout's own `.git` file at its root is the only exclusion.
-  The walk never follows symlinks. A repository or any read error keeps the
-  checkout; repository paths are named. Tracked edits, untracked files and
+  The walk never follows symlinks. A repository, a symlinked recorded path or
+  any read error keeps the checkout; repository paths are named. Tracked edits, untracked files and
   index entries marked
   skip-worktree or assume-unchanged keep it. Ignored `.arc/` entries,
   including recognized artifacts, keep it under either scope; only owned,
