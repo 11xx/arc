@@ -1793,3 +1793,53 @@ fn provisional_expected_basis_names_moved_guards_beside_the_refusal() {
         "{stderr}"
     );
 }
+
+#[test]
+fn a_signature_only_staging_successor_retains_local_prerequisite_coverage() {
+    let (_authority, worker) = worker();
+    let prerequisite = prepared(&worker);
+    prepare(&worker, &prerequisite);
+    let original = obligation(&worker, &prerequisite)["provisional_commit"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let key = worker.home.join("staging-signing-key");
+    assert!(Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+        .arg(&key)
+        .status()
+        .unwrap()
+        .success());
+    git(&worker.root, &["config", "gpg.format", "ssh"]);
+    git(&worker.root, &["switch", "arc/provisional/worker/master"]);
+    stdout(worker.arc(&worker.root).args([
+        "rewrite",
+        "sign",
+        "--key",
+        key.to_str().unwrap(),
+        "--from",
+        &original,
+        "--include-shared",
+    ]));
+    let signed = worker.head(&worker.root);
+    assert_ne!(signed, original);
+    git(&worker.root, &["switch", "master"]);
+    let (dependent, _) = dependent(&worker, &prerequisite);
+    let checked = json_stdout(worker.arc(&worker.root).args([
+        "check",
+        &dependent,
+        "--provisional",
+        "--json",
+    ]));
+    assert_eq!(
+        checked["provisional_prerequisites"][0]["provisional_commit"],
+        signed
+    );
+    assert_eq!(
+        obligation(&worker, &prerequisite)["provisional_commit"],
+        original
+    );
+    assert_eq!(obligation(&worker, &prerequisite)["local_merge"], signed);
+    prepare(&worker, &dependent);
+    assert_eq!(status(&worker, &prerequisite)["state"], "open");
+}
