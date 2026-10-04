@@ -3651,31 +3651,51 @@ fn cleanup_status(checkout: &Path, untracked: &str) -> Result<String> {
     )
 }
 
-/// Find nested repository markers by directory traversal without following symlinks.
+/// Find checkout markers and bare repository layouts without following symlinks.
 fn cleanup_nested_repositories(checkout: &Path, ignored: &str) -> Result<Vec<String>> {
     let root = checkout.join(ignored.trim_end_matches('/'));
-    if !std::fs::symlink_metadata(&root)?.is_dir() {
-        return Ok(Vec::new());
-    }
     let mut pending = vec![root];
     let mut repositories = Vec::new();
     while let Some(directory) = pending.pop() {
-        if !std::fs::symlink_metadata(&directory)?.is_dir() {
+        if !std::fs::symlink_metadata(&directory)
+            .with_context(|| format!("cannot inspect {}", directory.display()))?
+            .is_dir()
+        {
             continue;
         }
-        for entry in std::fs::read_dir(&directory)? {
-            let entry = entry?;
-            let kind = entry.file_type()?;
-            if entry.file_name() == ".git" {
-                repositories.push(
-                    directory
-                        .strip_prefix(checkout)?
-                        .to_string_lossy()
-                        .into_owned(),
-                );
-            } else if kind.is_dir() {
-                pending.push(entry.path());
+        let mut children = Vec::new();
+        let mut checkout_marker = false;
+        let mut head = false;
+        let mut objects = false;
+        let mut refs = false;
+        for entry in std::fs::read_dir(&directory)
+            .with_context(|| format!("cannot read {}", directory.display()))?
+        {
+            let entry = entry
+                .with_context(|| format!("cannot read an entry in {}", directory.display()))?;
+            let kind = entry
+                .file_type()
+                .with_context(|| format!("cannot inspect {}", entry.path().display()))?;
+            match entry.file_name().to_str() {
+                Some(".git") => checkout_marker = true,
+                Some("HEAD") => head = kind.is_file() || kind.is_symlink(),
+                Some("objects") => objects = kind.is_dir() || kind.is_symlink(),
+                Some("refs") => refs = kind.is_dir() || kind.is_symlink(),
+                _ => {}
             }
+            if kind.is_dir() {
+                children.push(entry.path());
+            }
+        }
+        if checkout_marker || head && objects && refs {
+            repositories.push(
+                directory
+                    .strip_prefix(checkout)?
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        } else {
+            pending.extend(children);
         }
     }
     Ok(repositories)
@@ -3740,25 +3760,29 @@ fn cleanup_local_content(
             continue;
         }
         let arc_content = path == ".arc" || path.starts_with(".arc/");
-        if arc_content {
+        let recognized = artifacts.iter().any(|artifact| artifact.path == path);
+        if arc_content || !recognized && discard == crate::style::Discard::Artifacts {
             paths.push(path.to_string());
-        } else if !artifacts.iter().any(|artifact| artifact.path == path) {
-            if discard == crate::style::Discard::Ignored {
-                let repositories = cleanup_nested_repositories(checkout, path)?;
-                if repositories.is_empty() {
-                    artifacts.push(crate::artifacts::Artifact {
-                        path: path.to_string(),
-                        identified_by: "ignored; integration.discard = ignored".to_string(),
-                    });
-                } else {
+        } else {
+            match cleanup_nested_repositories(checkout, path) {
+                Ok(repositories) if repositories.is_empty() => {
+                    if !recognized {
+                        artifacts.push(crate::artifacts::Artifact {
+                            path: path.to_string(),
+                            identified_by: "ignored; integration.discard = ignored".to_string(),
+                        });
+                    }
+                }
+                Ok(repositories) => {
                     paths.extend(
                         repositories
                             .into_iter()
-                            .map(|path| format!("{path} (nested Git checkout)")),
+                            .map(|path| format!("{path} (nested Git repository)")),
                     );
                 }
-            } else {
-                paths.push(path.to_string());
+                Err(error) => {
+                    paths.push(format!("{path} (repository scan failed: {error:#})"));
+                }
             }
         }
     }

@@ -873,10 +873,12 @@ RUN A CHANGE
   implies cleanup, and conflicts with `--no-cleanup` for single changes and
   queues. The ignored scope discards every Git-ignored file and directory
   outside `.arc/`, as classified by the parent checkout's Git ignore rules.
-  Ignored subtrees containing a nested Git repository or worktree keep the
-  checkout; cleanup checks for `.git` files and directories without following
-  symlinks, except inside recognized build artifacts. Tracked edits,
-  untracked files and index entries marked skip-worktree or assume-unchanged
+  Under either scope, every ignored directory eligible for removal is scanned
+  for nested Git repositories, including recognized build artifacts. A
+  `.git` file or directory, or a bare repository layout with `HEAD`,
+  `objects/` and `refs/`, keeps the checkout and is named. Scans check
+  each directory, including the ignored root, without following symlinks.
+  Any scan read error keeps the checkout. Tracked edits, untracked files and index entries marked skip-worktree or assume-unchanged
   keep the checkout. Ignored `.arc/` content keeps it under either scope,
   including recognized artifacts; only owned, emptied outbox metadata is
   exempt. Ownership checks apply under either scope. Cleanup uses the
@@ -904,8 +906,9 @@ RUN A CHANGE
   The registered checkout must still hold the change branch. An ignored
   directory outside `.arc/` identified as a build artifact by a valid
   CACHEDIR.TAG, a built-in recognizer, or a configured
-  `integration.disposable` rule's path and marker does not keep the checkout. With the artifacts scope, other
-  ignored content keeps it. Tracked edits and untracked files keep it under
+  `integration.disposable` rule's path and marker is eligible for removal
+  only if a repository scan succeeds and finds no repository. With the
+  artifacts scope, other ignored content keeps it. Tracked edits and untracked files keep it under
   either scope. Recognition grants no checkout removal authority. An
   outbox containing only the spool's regular `.gitignore` with `*` and a
   trailing newline is disposable metadata only when its Git administrative
@@ -2002,9 +2005,13 @@ FILES
   `"artifacts"` (built-in) or `"ignored"`. `integrate --discard` selects the
   scope, implies cleanup, and conflicts with `--no-cleanup`. The ignored
   scope uses the parent checkout's Git ignore rules. Ignored subtrees
-  containing nested repositories or worktrees keep the checkout; cleanup
-  walks directories without following symlinks and may skip recognized
-  build artifacts. Tracked edits, untracked files and index entries marked
+  containing nested repositories or worktrees keep the checkout under either
+  scope. Every directory eligible for removal is scanned, including
+  recognized build artifacts. Scans check each directory, including the
+  ignored root, for `.git` files or directories and bare repository layouts
+  with `HEAD`, `objects/` and `refs/`, without following symlinks.
+  A repository or any scan read error keeps the checkout; the repository
+  path is named. Tracked edits, untracked files and index entries marked
   skip-worktree or assume-unchanged keep it. Ignored `.arc/` entries,
   including recognized artifacts, keep it under either scope; only owned,
   emptied outbox metadata is exempt. Ownership checks apply under either
@@ -2012,9 +2019,9 @@ FILES
   discard and disposable; a change's policy edits do not govern its own
   cleanup. Ignored directories outside `.arc/` identified as build artifacts
   by a valid CACHEDIR.TAG, a built-in recognizer, or an
-  `integration.disposable` rule's path and marker
-  do not keep a checkout; other ignored content keeps it with the artifacts
-  scope. Every recognizer names a file its tool writes inside the
+  `integration.disposable` rule's path and marker are eligible for removal
+  only if their repository scans succeed and find no repositories. Other
+  ignored content keeps the checkout with the artifacts scope. Every recognizer names a file its tool writes inside the
   directory; a directory name alone identifies nothing.
   A CACHEDIR.TAG must be a regular file beginning with the exact bytes
   `Signature: 8a477f597d28d172789f06886806bc55`, which Cargo, Meson, uv,

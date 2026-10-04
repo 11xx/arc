@@ -5273,3 +5273,290 @@ fn cleanup_worktree_config_cannot_redirect_content_inventory() {
     assert!(wt.exists(), "{out}");
     assert!(out.contains("README.md"), "{out}");
 }
+
+fn repository_cleanup_boundary(repo: &Repo, wt: &Path, recognizer: &str) -> PathBuf {
+    let root = wt.join(if recognizer == "builtin" {
+        "dist-newstyle"
+    } else {
+        "target"
+    });
+    match recognizer {
+        "tag" => fixture_cache_tag(wt, FIXTURE_CACHE_SIGNATURE),
+        "configured" => {
+            fs::create_dir_all(&root).unwrap();
+            fs::write(root.join("fixture-marker"), "artifact marker").unwrap();
+            fs::write(
+                repo.home.join(".local/ai/arc/config.toml"),
+                "[integration]\ndisposable=[{path='target',marker='fixture-marker'}]\n",
+            )
+            .unwrap();
+        }
+        "builtin" => {
+            fs::create_dir_all(root.join("cache")).unwrap();
+            fs::write(root.join("cache/plan.json"), "{\"cabal-version\":\"3.0\"}").unwrap();
+        }
+        "plain" => {}
+        _ => panic!("unknown fixture recognizer"),
+    }
+    root
+}
+
+fn assert_repository_cleanup_retains(scope: &str, recognizer: &str, kind: &str, at_root: bool) {
+    let (repo, id, wt) = disposable_cleanup_fixture(false);
+    let boundary = wt.join(if recognizer == "builtin" {
+        "dist-newstyle"
+    } else {
+        "target"
+    });
+    let nested = if at_root {
+        boundary.clone()
+    } else {
+        boundary.join("deep/dependency")
+    };
+    let mut private = None;
+    match kind {
+        "clone" => {
+            git(
+                &repo.root,
+                &[
+                    "clone",
+                    "-q",
+                    repo.root.to_str().unwrap(),
+                    nested.to_str().unwrap(),
+                ],
+            );
+            git(&nested, &["config", "user.name", "Fixture"]);
+            git(
+                &nested,
+                &["config", "user.email", "fixture@example.invalid"],
+            );
+            git(&nested, &["config", "commit.gpgsign", "false"]);
+            repo.commit(
+                &nested,
+                "private.txt",
+                "private commit\n",
+                "test: private nested history",
+            );
+            private = Some(repo.head(&nested));
+            fs::write(nested.join("README.md"), "dirty nested edit").unwrap();
+            fs::write(nested.join("untracked.txt"), "nested work").unwrap();
+        }
+        "linked" => {
+            git(
+                &repo.root,
+                &[
+                    "worktree",
+                    "add",
+                    "--detach",
+                    nested.to_str().unwrap(),
+                    "HEAD",
+                ],
+            );
+            fs::write(nested.join("README.md"), "dirty nested edit").unwrap();
+            fs::write(nested.join("untracked.txt"), "nested work").unwrap();
+        }
+        "bare" => {
+            git(
+                &repo.root,
+                &[
+                    "clone",
+                    "--bare",
+                    "-q",
+                    repo.root.to_str().unwrap(),
+                    nested.to_str().unwrap(),
+                ],
+            );
+            let commit = git_out(
+                &nested,
+                &[
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit-tree",
+                    "HEAD^{tree}",
+                    "-p",
+                    "HEAD",
+                    "-m",
+                    "test: private bare history",
+                ],
+            );
+            git(&nested, &["update-ref", "HEAD", &commit]);
+            private = Some(commit);
+        }
+        _ => panic!("unknown fixture repository"),
+    }
+    if let Some(commit) = &private {
+        let absent = Command::new("git")
+            .current_dir(&repo.root)
+            .args(["cat-file", "-e", commit])
+            .output()
+            .unwrap();
+        assert!(
+            !absent.status.success(),
+            "private commit must be absent from source"
+        );
+    }
+    repository_cleanup_boundary(&repo, &wt, recognizer);
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--discard", scope]),
+    );
+    assert!(nested.exists(), "{scope} {recognizer} {kind}: {out}");
+    let relative = nested.strip_prefix(&wt).unwrap().to_str().unwrap();
+    assert!(out.contains(relative), "{out}");
+    assert!(out.contains("nested Git"), "{out}");
+    assert!(!out.contains("discarded "), "{out}");
+    assert!(
+        !git_out(&repo.root, &["branch", "--list", "arc/artifact-cleanup"]).is_empty(),
+        "{out}"
+    );
+    if let Some(commit) = &private {
+        assert_eq!(&repo.head(&nested), commit);
+        git(&nested, &["cat-file", "-e", commit]);
+    }
+    if kind != "bare" {
+        assert_eq!(
+            fs::read_to_string(nested.join("README.md")).unwrap(),
+            "dirty nested edit"
+        );
+        assert!(nested.join("untracked.txt").exists(), "{out}");
+    }
+}
+
+#[test]
+fn cleanup_repository_tagged_clone_ignored() {
+    assert_repository_cleanup_retains("ignored", "tag", "clone", false);
+}
+
+#[test]
+fn cleanup_repository_tagged_clone_artifacts() {
+    assert_repository_cleanup_retains("artifacts", "tag", "clone", false);
+}
+
+#[test]
+fn cleanup_repository_tagged_linked_worktree_ignored() {
+    assert_repository_cleanup_retains("ignored", "tag", "linked", false);
+}
+
+#[test]
+fn cleanup_repository_tagged_linked_worktree_artifacts() {
+    assert_repository_cleanup_retains("artifacts", "tag", "linked", false);
+}
+
+#[test]
+fn cleanup_repository_bare_ignored() {
+    assert_repository_cleanup_retains("ignored", "plain", "bare", false);
+}
+
+#[test]
+fn cleanup_repository_tagged_bare_artifacts() {
+    assert_repository_cleanup_retains("artifacts", "tag", "bare", false);
+}
+
+#[test]
+fn cleanup_repository_bare_at_ignored_root() {
+    assert_repository_cleanup_retains("ignored", "plain", "bare", true);
+}
+
+#[test]
+fn cleanup_repository_tagged_bare_at_ignored_root() {
+    assert_repository_cleanup_retains("artifacts", "tag", "bare", true);
+}
+
+#[test]
+fn cleanup_repository_configured_boundary_protects_both_scopes() {
+    for scope in ["ignored", "artifacts"] {
+        for kind in ["clone", "linked", "bare"] {
+            assert_repository_cleanup_retains(scope, "configured", kind, false);
+        }
+    }
+}
+
+#[test]
+fn cleanup_repository_builtin_boundary_protects_both_scopes() {
+    for scope in ["ignored", "artifacts"] {
+        for kind in ["clone", "linked", "bare"] {
+            assert_repository_cleanup_retains(scope, "builtin", kind, false);
+        }
+    }
+}
+
+#[test]
+fn cleanup_repository_plain_directory_discards_under_ignored() {
+    let (repo, id, wt) = disposable_cleanup_fixture(false);
+    fs::create_dir_all(wt.join("target/deep")).unwrap();
+    fs::write(wt.join("target/deep/output"), "plain ignored build output").unwrap();
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", &id, "--discard", "ignored"]),
+    );
+    assert!(!wt.exists(), "{out}");
+    assert!(
+        out.contains("discarded target/ (ignored; integration.discard = ignored)"),
+        "{out}"
+    );
+}
+
+#[test]
+fn cleanup_repository_scan_read_error_keeps_both_scopes() {
+    use std::os::unix::fs::PermissionsExt;
+    for scope in ["ignored", "artifacts"] {
+        let (repo, id, wt) = disposable_cleanup_fixture(false);
+        fixture_cache_tag(&wt, FIXTURE_CACHE_SIGNATURE);
+        let blocked = wt.join("target/unreadable");
+        fs::create_dir_all(&blocked).unwrap();
+        fs::write(blocked.join("local"), "local history").unwrap();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(fs::read_dir(&blocked).is_err());
+        let result = repo
+            .arc(&repo.root)
+            .args(["integrate", &id, "--discard", scope])
+            .output()
+            .unwrap();
+        if blocked.exists() {
+            fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let out = String::from_utf8_lossy(&result.stdout);
+        assert!(wt.exists(), "{out}");
+        assert!(out.contains("repository scan failed"), "{out}");
+        assert!(out.contains("target/unreadable"), "{out}");
+        assert!(blocked.join("local").exists(), "{out}");
+        assert!(!out.contains("discarded "), "{out}");
+    }
+}
+
+#[test]
+fn cleanup_repository_symlinks_are_not_followed_in_both_scopes() {
+    for scope in ["ignored", "artifacts"] {
+        let (repo, id, wt) = disposable_cleanup_fixture(false);
+        fixture_cache_tag(&wt, FIXTURE_CACHE_SIGNATURE);
+        let external = repo.home.join("bare-source");
+        git(
+            &repo.root,
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                repo.root.to_str().unwrap(),
+                external.to_str().unwrap(),
+            ],
+        );
+        std::os::unix::fs::symlink(&external, wt.join("target/repository-link")).unwrap();
+        let head = repo.head(&external);
+        let out = stdout(
+            repo.arc(&repo.root)
+                .args(["integrate", &id, "--discard", scope]),
+        );
+        assert!(!wt.exists(), "{out}");
+        assert_eq!(repo.head(&external), head);
+        assert!(out.contains("discarded target/ (CACHEDIR.TAG)"), "{out}");
+    }
+}

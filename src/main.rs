@@ -1823,8 +1823,11 @@ enum Cmd {
         /// Git administrative directory. The registered
         /// checkout must still hold the change branch. An ignored directory outside
         /// .arc/ identified as a build artifact by a valid CACHEDIR.TAG, a built-in
-        /// recognizer (`arc` lists them), or a configured integration.disposable rule's path and marker
-        /// does not keep the checkout.
+        /// recognizer (`arc` lists them), or a configured integration.disposable
+        /// rule's path and marker
+        /// is eligible for removal only if a scan finds no nested Git repository
+        /// and encounters no read error. This applies under either discard scope;
+        /// scans include bare repositories and do not follow symlinks.
         /// integration.discard defaults to artifacts; --discard ignored also discards
         /// other ignored files and directories outside .arc/. Tracked edits,
         /// untracked files and index entries marked skip-worktree or assume-unchanged
@@ -1841,9 +1844,12 @@ enum Cmd {
         cleanup: bool,
         /// Select integration.discard: artifacts (built-in) discards recognized build
         /// artifacts; ignored uses the parent checkout's Git ignore rules outside
-        /// .arc/. Ignored subtrees containing nested Git repositories or worktrees
-        /// keep the checkout; traversal does not follow symlinks and may skip
-        /// recognized build artifacts. Tracked edits, untracked files and index
+        /// .arc/. Under either scope, every ignored directory eligible for removal
+        /// is scanned, including recognized build artifacts. Nested .git files or
+        /// directories and bare repositories (HEAD, objects/ and refs/) keep the
+        /// checkout and are named. Scans check each directory, including the
+        /// ignored root, without following symlinks. Any scan read error keeps
+        /// the checkout. Tracked edits, untracked files and index
         /// entries marked skip-worktree or assume-unchanged keep the checkout.
         /// Ignored .arc/ entries, including recognized artifacts, keep it under
         /// either scope; only owned, emptied outbox metadata is exempt.
