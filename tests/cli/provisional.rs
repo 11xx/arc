@@ -1157,8 +1157,97 @@ fn provisional_probe_and_fork_guards_retain_their_codes() {
 #[test]
 fn canonical_policy_cannot_be_weakened_by_staging_declarations() {
     let (_authority, worker) = worker();
-    let change = prepared(&worker);
-    worker.declare_gates_locally("[gates.required]\ncommand='false'\n");
+    fs::create_dir_all(worker.root.join(".arc")).unwrap();
+    let canonical = "[policy]\nforbid_self_approval=true\n[replica]\nprovisional_enabled=true\n";
+    worker.commit(
+        &worker.root,
+        ".arc/policy.toml",
+        canonical,
+        "policy: require independent review",
+    );
+    worker.commit(
+        &worker.root,
+        ".arc/gates.toml",
+        "[gates.required]\ncommand='false'\n",
+        "gates: require canonical check",
+    );
+    let staging = "arc/provisional/worker/master";
+    let staging_checkout = worker.home.join("staging-policy");
+    git(
+        &worker.root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            staging,
+            staging_checkout.to_str().unwrap(),
+            "master",
+        ],
+    );
+    let weakened = "[policy]\nforbid_self_approval=false\n[replica]\nprovisional_enabled=true\n";
+    worker.commit(
+        &staging_checkout,
+        ".arc/policy.toml",
+        weakened,
+        "policy: permit staging self approval",
+    );
+    worker.commit(
+        &staging_checkout,
+        ".arc/gates.toml",
+        "[gates.required]\ncommand='true'\n",
+        "gates: weaken staging check",
+    );
+    git(
+        &worker.root,
+        &["worktree", "remove", staging_checkout.to_str().unwrap()],
+    );
+    assert_eq!(
+        git_out(&worker.root, &["show", "master:.arc/policy.toml"]),
+        canonical.trim()
+    );
+    assert_eq!(
+        git_out(
+            &worker.root,
+            &["show", &format!("{staging}:.arc/policy.toml")]
+        ),
+        weakened.trim()
+    );
+    let (change, _, _) = change_with_patchset(&worker, "prepared");
+    stdout(
+        worker
+            .arc(&worker.root)
+            .args(["review", &change, "--verdict", "approved"]),
+    );
+    let stage_evidence =
+        stdout(
+            worker
+                .arc(&worker.root)
+                .args(["verify", &change, "--against", staging]),
+        );
+    assert!(
+        stage_evidence.contains("verification: Pass"),
+        "{stage_evidence}"
+    );
+    let evidence = json_stdout(worker.arc(&worker.root).args(["show", &change, "--json"]));
+    assert_eq!(
+        evidence["verifications"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()["command"],
+        "true"
+    );
+    let before = git_out(&worker.root, &["show-ref", "--heads"]);
+    worker
+        .arc(&worker.root)
+        .args(["check", &change, "--provisional"])
+        .assert()
+        .code(3);
+    worker
+        .arc(&worker.root)
+        .args(["integrate", &change, "--provisional"])
+        .assert()
+        .code(3);
     worker
         .arc(&worker.root)
         .args([
@@ -1170,9 +1259,17 @@ fn canonical_policy_cannot_be_weakened_by_staging_declarations() {
         ])
         .assert()
         .code(5);
-    let before = git_out(&worker.root, &["show-ref", "--heads"]);
-    assert!(!before.contains("refs/heads/arc/provisional/worker/master"));
-    worker.declare_gates_locally("[replica]\nprovisional_enabled=false\n");
+    assert_eq!(git_out(&worker.root, &["show-ref", "--heads"]), before);
+    assert!(status(&worker, &change)["provisional_integrations"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    worker.commit(
+        &worker.root,
+        ".arc/policy.toml",
+        "[replica]\nprovisional_enabled=false\n",
+        "policy: disable staging preparation",
+    );
     worker
         .arc(&worker.root)
         .args(["check", &change, "--provisional"])
@@ -2204,4 +2301,73 @@ fn an_authority_refusal_survives_transfer_and_still_blocks_stacking() {
         .code(7);
     assert!(stdout(worker.arc(&worker.root).args(["catchup"]))
         .contains(refused["refusal_event_id"].as_str().unwrap()));
+}
+
+#[test]
+fn trusted_foreign_approval_cannot_overcome_an_authority_local_refusal() {
+    let (authority, worker) = worker();
+    let change = prepared(&worker);
+    deliver(&worker, &authority, &change, true);
+    stdout(
+        authority
+            .arc(&authority.root)
+            .env("ARC_ACTOR", "authority-reviewer")
+            .args([
+                "review",
+                &change,
+                "--verdict",
+                "changes-requested",
+                "--cause",
+                "executor",
+            ]),
+    );
+    let refused = status(&authority, &change);
+    let local = refused["verdict"]["event_id"].as_str().unwrap().to_string();
+    deliver(&authority, &worker, &change, false);
+    stdout(worker.arc(&worker.root).env("ARC_ACTOR", "reviewer").args([
+        "review",
+        &change,
+        "--verdict",
+        "approved",
+    ]));
+    let path = worker.home.join("foreign-after-local-refusal.json");
+    stdout(
+        worker
+            .arc(&worker.root)
+            .args(["export", &change, "--output", path.to_str().unwrap()]),
+    );
+    let mut bundle: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let origin = bundle["source_replica_id"].as_str().unwrap().to_string();
+    let approval = bundle["events"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .rev()
+        .find(|event| event["event_type"] == "verdict-recorded" && event["repository_id"] == origin)
+        .unwrap();
+    approval["relation"] = serde_json::json!({ "kind": "supersedes", "observed": [local] });
+    refresh_bundle_checksum(&mut bundle);
+    let bytes = serde_json::to_vec(&bundle).unwrap();
+    fs::write(&path, &bytes).unwrap();
+    stdout(authority.arc(&authority.root).args([
+        "import",
+        path.to_str().unwrap(),
+        "--publisher",
+        "delivery",
+        "--received-sha256",
+        &hex::encode(Sha256::digest(bytes)),
+    ]));
+    let received = status(&authority, &change);
+    assert_eq!(received["has_valid_approval"], false);
+    assert_eq!(received["verdict"]["event_id"], local);
+    authority
+        .arc(&authority.root)
+        .args(["check", &change])
+        .assert()
+        .code(3);
+    authority
+        .arc(&authority.root)
+        .args(["integrate", &change])
+        .assert()
+        .code(3);
 }
