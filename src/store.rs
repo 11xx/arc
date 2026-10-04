@@ -855,6 +855,10 @@ impl Store {
         let introduced_in = match payload {
             Payload::ChangeProvisionallyIntegrated { .. }
             | Payload::ProvisionalIntegrationResolved { .. } => Some(7),
+            Payload::VerdictRecorded {
+                authority_observed: Some(_),
+                ..
+            } => Some(7),
             Payload::ExternalVerdictRecorded { .. }
             | Payload::ReadyToSend { .. }
             | Payload::IntegrationAsserted {
@@ -918,6 +922,13 @@ impl Store {
         {
             Some("external-verdict-recorded") | Some("ready-to-send") => Some(4),
             Some("history-rewritten") => Some(6),
+            Some("verdict-recorded")
+                if value
+                    .and_then(|value| value.get("authority_observed"))
+                    .is_some_and(|observed| !observed.is_null()) =>
+            {
+                Some(7)
+            }
             Some(event_type) if is_candidate_event_type(event_type) => Some(7),
             Some("context-read") | Some("context-declared") | Some("context-capture-reported") => {
                 Some(7)

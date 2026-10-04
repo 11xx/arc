@@ -519,6 +519,7 @@ mod tests {
             event_id: format!("verdict-{actor}"),
             patchset_id: "ps-2".into(),
             verdict,
+            authority_observed: None,
             causes: Vec::new(),
             body: None,
             model: None,

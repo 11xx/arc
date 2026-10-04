@@ -78,20 +78,22 @@ pub fn project_obligations(state: &ChangeState) -> Vec<Obligation> {
                 row.reason =
                     Some("another local preparation exists; acceptance remains owed".into());
             }
-            let holder = state
-                .privilege_scope
+            let holder = authority_observed
                 .as_ref()
-                .and_then(|scope| scope.authority_holder.as_ref())
+                .and_then(|authority| authority.holder_repository_id.as_ref())
                 .or_else(|| {
-                    authority_observed
+                    state
+                        .privilege_scope
                         .as_ref()
-                        .and_then(|authority| authority.holder_repository_id.as_ref())
+                        .and_then(|scope| scope.authority_holder.as_ref())
                 });
             if let Some(event_id) =
                 authority_refusal(state, holder.map(String::as_str), source_patchset_id)
             {
                 row.disposition = "authority-refused".into();
-                row.reason = Some("changes requested on the delivered patchset".into());
+                row.reason = Some(format!(
+                    "changes requested on the delivered patchset by authority verdict {event_id}"
+                ));
                 row.refusal_event_id = Some(event_id);
             }
             if let Some(closure) = &state.closure {
@@ -169,22 +171,30 @@ fn authority_refusal(state: &ChangeState, holder: Option<&str>, patchset: &str) 
         .verdicts
         .iter()
         .filter(|verdict| {
-            holder == Some(verdict.origin_replica_id.as_str())
-                && state.privilege_scope.as_ref().is_none_or(|scope| {
-                    verdict.origin_replica_id == scope.local_origin
-                        && !scope.imported_event_ids.contains(&verdict.event_id)
-                        || scope
-                            .admission_for(&verdict.event_id)
-                            .is_some_and(|receipt| {
-                                receipt.authorized_roles.iter().any(|role| {
-                                    matches!(
-                                        role,
-                                        crate::import_authorization::Role::ReviewInput
-                                            | crate::import_authorization::Role::ReviewAuthority
-                                    )
-                                })
+            (match &verdict.authority_observed {
+                Some(observed) => {
+                    observed.holder_repository_id.as_deref() == Some(&verdict.origin_replica_id)
+                        && state.privilege_scope.as_ref().is_some_and(|scope| {
+                            scope.authority_grant_holders.get(&observed.grant_event_id)
+                                == Some(&verdict.origin_replica_id)
+                        })
+                }
+                None => holder == Some(verdict.origin_replica_id.as_str()),
+            }) && state.privilege_scope.as_ref().is_none_or(|scope| {
+                verdict.origin_replica_id == scope.local_origin
+                    && !scope.imported_event_ids.contains(&verdict.event_id)
+                    || scope
+                        .admission_for(&verdict.event_id)
+                        .is_some_and(|receipt| {
+                            receipt.authorized_roles.iter().any(|role| {
+                                matches!(
+                                    role,
+                                    crate::import_authorization::Role::ReviewInput
+                                        | crate::import_authorization::Role::ReviewAuthority
+                                )
                             })
-                })
+                        })
+            })
         })
         .cloned()
         .collect();

@@ -466,6 +466,7 @@ pub fn validate_import_identities(
 pub struct PrivilegeScope {
     pub local_origin: String,
     pub authority_holder: Option<String>,
+    pub authority_grant_holders: std::collections::BTreeMap<String, String>,
     pub origin_names: std::collections::BTreeMap<String, String>,
     pub trusted_review_replicas: Vec<String>,
     pub admissions: std::collections::BTreeMap<String, EventAuthorization>,
@@ -552,6 +553,7 @@ impl PrivilegeScope {
             .collect();
         Ok(Self {
             authority_holder,
+            authority_grant_holders: crate::replica::grant_holders(store)?,
             origin_names,
             local_origin: store.repository_id.clone(),
             trusted_review_replicas: policy.trusted_review_replicas,

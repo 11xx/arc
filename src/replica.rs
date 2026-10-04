@@ -1684,26 +1684,33 @@ pub(crate) fn observed_authority(store: &Store) -> Result<Option<crate::model::A
 }
 
 pub(crate) fn grant_holder(store: &Store, grant: &str) -> Result<Option<String>> {
+    Ok(grant_holders(store)?.remove(grant))
+}
+
+pub(crate) fn grant_holders(store: &Store) -> Result<BTreeMap<String, String>> {
     let events = load_events(store)?;
     let Some(initial) = events.first() else {
-        return Ok(None);
+        return Ok(BTreeMap::new());
     };
     snapshot(&events, &initial.actor.repository_id)?;
-    let Some(event) = events.iter().find(|event| event.event_id == grant) else {
-        return Ok(None);
-    };
     let offer = |offer_id: &str| {
         events.iter().find(|event| matches!(&event.payload, ReplicaPayload::AuthorityOffered { offer_id: held, .. } if held == offer_id))
     };
-    Ok(match &event.payload {
-        ReplicaPayload::Initialized | ReplicaPayload::AuthorityAcquired { .. } => {
-            Some(event.actor.repository_id.clone())
-        }
-        ReplicaPayload::AuthorityReturnConfirmed { offer_id, .. } => {
-            offer(offer_id).map(|offer| offer.actor.repository_id.clone())
-        }
-        _ => None,
-    })
+    Ok(events
+        .iter()
+        .filter_map(|event| {
+            let holder = match &event.payload {
+                ReplicaPayload::Initialized | ReplicaPayload::AuthorityAcquired { .. } => {
+                    Some(event.actor.repository_id.clone())
+                }
+                ReplicaPayload::AuthorityReturnConfirmed { offer_id, .. } => {
+                    offer(offer_id).map(|offer| offer.actor.repository_id.clone())
+                }
+                _ => None,
+            }?;
+            Some((event.event_id.clone(), holder))
+        })
+        .collect())
 }
 
 #[cfg(test)]

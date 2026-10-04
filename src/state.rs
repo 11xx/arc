@@ -387,6 +387,8 @@ pub struct VerdictEntry {
     pub event_id: String,
     pub patchset_id: String,
     pub verdict: Verdict,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_observed: Option<crate::model::AuthorityObserved>,
     pub causes: Vec<ReviewCause>,
     pub body: Option<String>,
     /// Model identity recorded on the verdict event, when one was declared.
@@ -2271,6 +2273,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
             Payload::VerdictRecorded {
                 patchset_id,
                 verdict,
+                authority_observed,
                 causes,
                 provisional,
                 body,
@@ -2304,6 +2307,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     event_id: ev.event_id.clone(),
                     patchset_id: patchset_id.clone(),
                     verdict: *verdict,
+                    authority_observed: authority_observed.clone(),
                     causes: causes.clone(),
                     body: body.clone(),
                     model: ev.model.clone(),
@@ -3608,6 +3612,7 @@ mod tests {
             Payload::VerdictRecorded {
                 patchset_id: patchset.into(),
                 verdict: Verdict::Approved,
+                authority_observed: None,
                 causes: Vec::new(),
                 body: None,
                 findings: Vec::new(),

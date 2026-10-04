@@ -2133,3 +2133,62 @@ fn applied_intent_recovers_without_resetting_a_later_preparation() {
     );
     assert_eq!(obligation(&worker, &later)["provisional_commit"], advanced);
 }
+
+#[test]
+fn an_authority_refusal_survives_transfer_and_still_blocks_stacking() {
+    let (authority, worker) = worker();
+    let successor = Repo::new();
+    let successor_id = json_stdout(
+        successor
+            .arc(&successor.root)
+            .args(["replica", "id", "--json"]),
+    );
+    stdout(authority.arc(&authority.root).args([
+        "replica",
+        "pair",
+        "successor",
+        "--repository-id",
+        successor_id["repository_id"].as_str().unwrap(),
+    ]));
+    import_replica_facts(&authority, &worker);
+    import_replica_facts(&authority, &successor);
+    let prerequisite = prepared(&worker);
+    prepare(&worker, &prerequisite);
+    let (dependent, _) = dependent(&worker, &prerequisite);
+    deliver(&worker, &authority, &prerequisite, true);
+    stdout(authority.arc(&authority.root).args([
+        "review",
+        &prerequisite,
+        "--verdict",
+        "changes-requested",
+        "--cause",
+        "executor",
+    ]));
+    deliver(&authority, &worker, &prerequisite, false);
+    let refused = obligation(&worker, &prerequisite);
+    assert_eq!(refused["disposition"], "authority-refused");
+    stdout(authority.arc(&authority.root).args([
+        "replica",
+        "authority",
+        "offer",
+        "--to",
+        "successor",
+    ]));
+    import_replica_facts(&authority, &successor);
+    import_replica_facts(&successor, &worker);
+    let after = obligation(&worker, &prerequisite);
+    assert_eq!(after["disposition"], "authority-refused");
+    assert_eq!(after["refusal_event_id"], refused["refusal_event_id"]);
+    worker
+        .arc(&worker.root)
+        .args(["check", &dependent, "--provisional"])
+        .assert()
+        .code(7);
+    worker
+        .arc(&worker.root)
+        .args(["integrate", &dependent, "--provisional"])
+        .assert()
+        .code(7);
+    assert!(stdout(worker.arc(&worker.root).args(["catchup"]))
+        .contains(refused["refusal_event_id"].as_str().unwrap()));
+}

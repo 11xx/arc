@@ -1191,6 +1191,11 @@ PAIR REPLICA STORES
   matching preparation reuses its merge and event. Its dry-run plan names
   reuse_event_id and reuse_commit and declares that it creates no merge.
 
+  Authority verdicts retain their observed grant and holder. A verified refusal
+  remains attached across authority transfer until an explicit superseding
+  judgment disposes of it or an accepting integration settles the delivery.
+  Review eligibility follows the shared admission, trust and independence rules.
+
   Every delivery is retained across snapshots and closure. Status lists its
   recipient, recording replica, merge and disposition. Catchup and workspace
   report list unresolved deliveries in separate provisional-integration

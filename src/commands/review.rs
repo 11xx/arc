@@ -1200,6 +1200,8 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
     // One lock covers the patchset `--snapshot` records and the verdict on
     // it, so nothing lands between them that would refuse the verdict after
     // the patchset is written.
+    // Authority remains fixed through the judgment's recorded observation.
+    let _authority = crate::replica::lock(&store)?;
     let transition = store.lock_transition(&change_id)?;
     let snapshot_patchset = if snapshot_first {
         let st = store.state(&change_id)?;
@@ -1270,6 +1272,7 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
     let payload = Payload::VerdictRecorded {
         patchset_id: patchset_id.clone(),
         verdict,
+        authority_observed: crate::replica::observed_authority(&store)?,
         causes,
         body,
         findings: inline,

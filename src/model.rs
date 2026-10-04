@@ -859,6 +859,9 @@ pub enum Payload {
     VerdictRecorded {
         patchset_id: String,
         verdict: Verdict,
+        /// Publication authority observed while recording the judgment; grants no review eligibility.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        authority_observed: Option<AuthorityObserved>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         causes: Vec<ReviewCause>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -1447,6 +1447,9 @@ enum Cmd {
     /// is advice about a verdict that already stands: a failure to evaluate it
     /// is a warning naming the recorded verdict, and the review still succeeds.
     #[command(group(clap::ArgGroup::new("snapshot_attribution").args(["contributors", "solo"]).requires("snapshot")))]
+    /// Verdicts retain observed publication authority. A verified authority refusal
+    /// on a provisional delivery remains applicable across authority transfer.
+    /// Scoped admission, trust and independence determine review eligibility.
     Review {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
