@@ -1560,14 +1560,29 @@ fn import_refuses_a_post_integration_disposition_its_change_could_not_take() {
         .unwrap()["finding_id"] = serde_json::json!(released_id);
     refresh_bundle_checksum(&mut released);
     let (destination, assert) = import("released.json", &released);
+    // Release eligibility is receiver-specific, not a replay constraint.
+    // A post-integration record can refer to a finding another receiver
+    // considered released; its permission is assessed in that receiver's view.
+    assert.success();
+    stdout(
+        destination
+            .arc(&destination.root)
+            .args(["show", &change_id, "--json"]),
+    );
+
+    let mut unknown = released.clone();
+    unknown["events"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|event| event["event_type"] == "post-integration-disposition-recorded")
+        .unwrap()["finding_id"] = serde_json::json!("unknown-finding");
+    refresh_bundle_checksum(&mut unknown);
+    let (destination, assert) = import("unknown.json", &unknown);
     assert
         .failure()
-        .stderr(predicates::str::contains("was accepted-risk when"));
-    assert!(!destination
-        .root
-        .join(".git/arc/changes")
-        .join(&change_id)
-        .exists());
+        .stderr(predicates::str::contains("references unknown finding"));
+    assert!(!destination.root.join(".git/arc/imports").exists());
 
     let unintegrated = |also_dropped: &[&str]| {
         let mut open = bundle.clone();

@@ -1344,8 +1344,10 @@ enum Cmd {
     /// integrated change, a review finding left open when the change shipped
     /// takes a post-integration disposition, recorded beside the finding
     /// state the change shipped with, which stays as it shipped; readers show
-    /// both. A finding resolved, accepted-risk, or obsolete at integration
-    /// takes none. An audit finding takes its disposition after integration.
+    /// both. A finding released by the receiver's eligible disposition graph
+    /// at integration takes none. Recorded dispositions replay independently
+    /// of receiver trust; eligibility is assessed in the receiver's projection.
+    /// An audit finding takes its disposition after integration.
     /// A disposition is not a verdict and discharges no review debt.
     #[command(allow_missing_positional = true)]
     Resolve {
@@ -1437,7 +1439,9 @@ enum Cmd {
         /// other verdict — independence and staleness are unchanged — but the
         /// change carries a recorded obligation until somebody else supplies
         /// a second judgment, and `arc query --provisional` finds it until
-        /// they do. Use it when the reviewer's
+        /// they do. Obligation selection follows approval's local-first
+        /// verdict history; a trusted foreign claim cannot create one beside
+        /// an authoritative local judgment. Use it when the reviewer's
         /// judgment has not been validated: an unproven model, a rushed pass,
         /// a reviewer outside their competence. arc never infers this; naming
         /// which reviewers are proven would be a routing opinion it does not

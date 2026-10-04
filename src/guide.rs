@@ -1031,8 +1031,10 @@ PAIR REPLICA STORES
   A published batch advances store format 7. An unpublished failure leaves its
   format stamp unchanged. A failure after publication reports publication state.
   Finding release, waiver, debt discharge and provisional corroboration use
-  eligible graphs. Debt discharge retains its exact witness event for explain
-  and every receiver projection.
+  eligible graphs. Provisional obligations use the same local-first verdict
+  history as approval: an eligible foreign claim creates no obligation beside
+  an authoritative local judgment. Debt discharge retains its exact witness
+  event for explain and every receiver projection.
   No foreign replica supplies review authority by default. A foreign verdict
   needs both admitted review-authority and current trusted_review_replicas
   membership to gate. Contributor and assumed-identity checks still apply.
@@ -1412,7 +1414,10 @@ REVIEW COVERAGE AND DEBT
   the integrated change records its later disposition, such as `resolved
   --commit <fix>`, `obsolete`, or `accepted-risk`, beside that state, and
   readers show both: how it shipped, and how it stood after integration. A
-  finding resolved, accepted-risk, or obsolete at integration takes none.
+  finding resolved, accepted-risk, or obsolete in the receiver's eligible
+  disposition graph at integration takes none. Replay preserves recorded
+  dispositions and references regardless of receiver trust; release permission
+  is assessed in the receiver's projection.
   Such a disposition is not a verdict and discharges no debt.
 
   `arc findings --format sarif` reports every unresolved finding, review or

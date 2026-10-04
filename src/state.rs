@@ -1363,31 +1363,35 @@ impl ChangeState {
         })
     }
 
-    pub fn eligible_verdict_tips(&self) -> Vec<&VerdictEntry> {
-        let local = self
-            .privilege_scope
-            .as_ref()
-            .map(|scope| scope.local_origin.as_str());
-        let local_verdicts: Vec<_> = self
+    /// The receiver's verdict history: local judgments take precedence over
+    /// foreign review even when the foreign events have review permission.
+    fn authoritative_verdict_history(&self) -> Vec<&VerdictEntry> {
+        let eligible: Vec<_> = self
             .verdicts
             .iter()
-            .filter(|verdict| {
-                Some(verdict.origin_replica_id.as_str()) == local
-                    && self.review_eligible(&verdict.event_id, &verdict.origin_replica_id)
-            })
+            .filter(|verdict| self.review_eligible(&verdict.event_id, &verdict.origin_replica_id))
+            .collect();
+        let Some(scope) = &self.privilege_scope else {
+            return eligible;
+        };
+        let local: Vec<_> = eligible
+            .iter()
+            .copied()
+            .filter(|verdict| verdict.origin_replica_id == scope.local_origin)
+            .collect();
+        if local.is_empty() {
+            eligible
+        } else {
+            local
+        }
+    }
+
+    pub fn eligible_verdict_tips(&self) -> Vec<&VerdictEntry> {
+        let selected: Vec<_> = self
+            .authoritative_verdict_history()
+            .into_iter()
             .cloned()
             .collect();
-        let selected: Vec<_> = if local_verdicts.is_empty() {
-            self.verdicts
-                .iter()
-                .filter(|verdict| {
-                    self.review_eligible(&verdict.event_id, &verdict.origin_replica_id)
-                })
-                .cloned()
-                .collect()
-        } else {
-            local_verdicts
-        };
         let start = selected
             .iter()
             .rposition(|verdict| verdict.relation.is_none())
@@ -1612,6 +1616,9 @@ pub fn reduce_following(events: &[Event], rewrites: &RewriteMap) -> Result<Chang
     Ok(state)
 }
 
+/// Replay recorded structure without deciding which claims can authorize
+/// this receiver. Eligibility belongs to `apply_privilege_scope`; changing
+/// receiver trust cannot invalidate recorded references or later facts.
 pub fn reduce(events: &[Event]) -> Result<ChangeState> {
     let replies = events
         .iter()
@@ -2505,17 +2512,6 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                         ev.event_id
                     );
                 };
-                if let Some(shipped) = finding
-                    .effective_status()
-                    .filter(|status| status.releases_block())
-                {
-                    bail!(
-                        "post-integration disposition {} targets finding {finding_id}, which was {} when change {} shipped",
-                        ev.event_id,
-                        shipped.as_str(),
-                        state.change_id
-                    );
-                }
                 finding.after_integration.push(DispositionEntry {
                     origin_replica_id: ev.repository_id.clone(),
                     gating_eligible: true,
@@ -3134,18 +3130,20 @@ impl ChangeState {
     /// to see it before the merge rather than after.
     pub fn outstanding_provisional_approval(&self) -> Option<&VerdictEntry> {
         let latest = self.latest_patchset()?;
-        // Something must actually be gated by an approval before an approval
-        // can owe anything. arc gates on the newest verdict, so a later
-        // changes-requested or comment-only leaves nothing to corroborate.
+        // A sole authoritative approval must gate this patchset before its
+        // review history can owe corroboration.
         self.latest_verdict().filter(|verdict| {
             verdict.verdict == Verdict::Approved && verdict.patchset_id == latest.id
         })?;
-        let provisional = self.verdicts.iter().rev().find(|verdict| {
-            self.review_eligible(&verdict.event_id, &verdict.origin_replica_id)
-                && verdict.verdict == Verdict::Approved
-                && verdict.provisional.is_some()
-                && verdict.patchset_id == latest.id
-        })?;
+        let provisional = self
+            .authoritative_verdict_history()
+            .into_iter()
+            .rev()
+            .find(|verdict| {
+                verdict.verdict == Verdict::Approved
+                    && verdict.provisional.is_some()
+                    && verdict.patchset_id == latest.id
+            })?;
         (!self.corroborates(latest, provisional)).then_some(provisional)
     }
 

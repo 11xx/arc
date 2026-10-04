@@ -1662,3 +1662,287 @@ fn receipt_readers_reject_changed_content_and_scope() {
         }
     }
 }
+
+#[test]
+fn trusted_foreign_provisional_cannot_shadow_local_approval() {
+    let (source, input, bundle) = exported_review();
+    let receiver = Repo::new();
+    deliver_git_objects(&source, &receiver);
+    bind_branch(&receiver, &source, &bundle);
+    enroll(
+        &receiver,
+        &bundle,
+        &["facts", "review-authority"],
+        &["operator"],
+        true,
+    );
+    received(&receiver, &input, false).assert().success();
+    let change = bundle["change_id"].as_str().unwrap();
+    stdout(
+        receiver
+            .arc(&receiver.root)
+            .env("ARC_ACTOR", "local-reviewer")
+            .args(["review", change, "--verdict", "approved"]),
+    );
+    let before = status(&receiver, &bundle);
+    assert_eq!(before["provisional_approval_outstanding"], false);
+    stdout(source.arc(&source.root).env("ARC_ACTOR", "operator").args([
+        "review",
+        change,
+        "--verdict",
+        "approved",
+        "--provisional",
+        "needs corroboration",
+    ]));
+    stdout(
+        source
+            .arc(&source.root)
+            .args(["export", change, "--output", input.to_str().unwrap()]),
+    );
+    received(&receiver, &input, false).assert().success();
+    let after = status(&receiver, &bundle);
+    assert_eq!(after["verdict"]["event_id"], before["verdict"]["event_id"]);
+    assert_eq!(after["has_valid_approval"], true);
+    let foreign = after["verdict_assessments"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap();
+    assert_eq!(foreign["gating_eligible"], true);
+    assert_eq!(foreign["selected_authorizing_event"], false);
+    assert_eq!(after["provisional_approval_outstanding"], false, "{after}");
+    assert!(!stdout(
+        receiver
+            .arc(&receiver.root)
+            .args(["query", "--provisional"])
+    )
+    .contains(change));
+    assert!(
+        !stdout(receiver.arc(&receiver.root).args(["check", change]))
+            .contains("provisional-approval")
+    );
+    let history = json_stdout(
+        receiver
+            .arc(&receiver.root)
+            .args(["review", change, "--json"]),
+    );
+    assert!(history["verdicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|verdict| verdict["provisional_outstanding"] != true));
+}
+
+#[test]
+fn imported_integrated_findings_replay_after_local_dispositions() {
+    let (source, input, bundle) = exported_review();
+    let change = bundle["change_id"].as_str().unwrap();
+    let finding = stdout(source.arc(&source.root).args([
+        "finding",
+        change,
+        "--blocking",
+        "--summary",
+        "source blocker",
+    ]))
+    .lines()
+    .find_map(|line| line.strip_prefix("finding: "))
+    .unwrap()
+    .to_string();
+    stdout(
+        source
+            .arc(&source.root)
+            .env("ARC_ACTOR", "operator")
+            .args(["resolve", change, &finding, "--status", "resolved"]),
+    );
+    stdout(
+        source
+            .arc(&source.root)
+            .args(["integrate", change, "--no-cleanup"]),
+    );
+    stdout(
+        source
+            .arc(&source.root)
+            .args(["export", change, "--output", input.to_str().unwrap()]),
+    );
+    let receiver = Repo::new();
+    deliver_git_objects(&source, &receiver);
+    enroll(
+        &receiver,
+        &bundle,
+        &["facts", "review-authority", "integration"],
+        &["operator", "tester"],
+        false,
+    );
+    received(&receiver, &input, false).assert().success();
+    let imported = json_stdout(
+        receiver
+            .arc(&receiver.root)
+            .args(["show", change, "--json"]),
+    );
+    assert_eq!(
+        imported["findings"][&finding]["dispositions"][0]["gating_eligible"],
+        false
+    );
+    for disposition in ["resolved", "still-open", "accepted-risk", "obsolete"] {
+        stdout(receiver.arc(&receiver.root).args([
+            "resolve",
+            change,
+            &finding,
+            "--status",
+            disposition,
+        ]));
+        let replayed = json_stdout(
+            receiver
+                .arc(&receiver.root)
+                .args(["show", change, "--json"]),
+        );
+        assert_eq!(
+            replayed["findings"][&finding]["after_integration"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()["status"],
+            disposition
+        );
+        stdout(
+            receiver
+                .arc(&receiver.root)
+                .args(["status", change, "--json"]),
+        );
+        stdout(
+            receiver
+                .arc(&receiver.root)
+                .args(["findings", change, "--format", "json"]),
+        );
+        stdout(
+            receiver
+                .arc(&receiver.root)
+                .args(["review", change, "--json"]),
+        );
+        stdout(
+            receiver
+                .arc(&receiver.root)
+                .args(["explain", change, "--json"]),
+        );
+    }
+    enroll(
+        &receiver,
+        &bundle,
+        &["facts", "review-authority", "integration"],
+        &["operator", "tester"],
+        true,
+    );
+    stdout(
+        receiver
+            .arc(&receiver.root)
+            .args(["show", change, "--json"]),
+    );
+    let relay = receiver.home.join("relay.json");
+    stdout(receiver.arc(&receiver.root).args([
+        "export",
+        change,
+        "--output",
+        relay.to_str().unwrap(),
+    ]));
+    let downstream = Repo::new();
+    deliver_git_objects(&source, &downstream);
+    stdout(
+        downstream
+            .arc(&downstream.root)
+            .args(["import", relay.to_str().unwrap()]),
+    );
+    stdout(
+        downstream
+            .arc(&downstream.root)
+            .args(["show", change, "--json"]),
+    );
+}
+
+#[test]
+fn imported_findings_replay_after_receiver_integration_and_trust_revocation() {
+    let (source, input, bundle) = exported_review();
+    let change = bundle["change_id"].as_str().unwrap();
+    let finding = stdout(source.arc(&source.root).args([
+        "finding",
+        change,
+        "--blocking",
+        "--summary",
+        "imported blocker",
+    ]))
+    .lines()
+    .find_map(|line| line.strip_prefix("finding: "))
+    .unwrap()
+    .to_string();
+    stdout(
+        source
+            .arc(&source.root)
+            .env("ARC_ACTOR", "operator")
+            .args(["resolve", change, &finding, "--status", "resolved"]),
+    );
+    stdout(
+        source
+            .arc(&source.root)
+            .args(["export", change, "--output", input.to_str().unwrap()]),
+    );
+    let receiver = Repo::new();
+    deliver_git_objects(&source, &receiver);
+    bind_branch(&receiver, &source, &bundle);
+    enroll(
+        &receiver,
+        &bundle,
+        &["facts", "review-authority"],
+        &["operator"],
+        true,
+    );
+    received(&receiver, &input, false).assert().success();
+    stdout(
+        receiver
+            .arc(&receiver.root)
+            .args(["integrate", change, "--no-cleanup"]),
+    );
+    enroll(
+        &receiver,
+        &bundle,
+        &["facts", "review-authority"],
+        &["operator"],
+        false,
+    );
+    stdout(
+        receiver
+            .arc(&receiver.root)
+            .args(["resolve", change, &finding, "--status", "resolved"]),
+    );
+    stdout(receiver.arc(&receiver.root).args([
+        "reply",
+        change,
+        &finding,
+        "--body",
+        "receiver resolution evidence",
+    ]));
+    let replayed = json_stdout(
+        receiver
+            .arc(&receiver.root)
+            .args(["show", change, "--json"]),
+    );
+    assert_eq!(
+        replayed["findings"][&finding]["after_integration"][0]["status"],
+        "resolved"
+    );
+    assert_eq!(
+        replayed["findings"][&finding]["replies"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    stdout(
+        receiver
+            .arc(&receiver.root)
+            .args(["status", change, "--json"]),
+    );
+    stdout(
+        receiver
+            .arc(&receiver.root)
+            .args(["export", change, "--output", "-"]),
+    );
+}
