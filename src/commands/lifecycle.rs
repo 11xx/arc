@@ -1616,7 +1616,7 @@ fn begin_adoption_recipe(
         ("--base", base),
         ("--profile", profile),
     ] {
-        args.extend([flag.to_string(), shell_quote(value)]);
+        args.push(format!("{flag}={}", shell_quote(value)));
     }
     if dangerous {
         args.push("--dangerous".to_string());
@@ -1626,7 +1626,7 @@ fn begin_adoption_recipe(
     }
     for (flag, values) in [("--blocked-by", blocked_by), ("--tag", tags)] {
         for value in values {
-            args.extend([flag.to_string(), shell_quote(value)]);
+            args.push(format!("{flag}={}", shell_quote(value)));
         }
     }
     for (flag, value) in [
@@ -1636,7 +1636,7 @@ fn begin_adoption_recipe(
         ("--on-behalf-of", on_behalf_of),
     ] {
         if let Some(value) = value {
-            args.extend([flag.to_string(), shell_quote(value)]);
+            args.push(format!("{flag}={}", shell_quote(value)));
         }
     }
     args.join(" ")

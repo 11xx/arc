@@ -308,8 +308,7 @@ fn begin_worktree_population_failure_reports_recovery() {
             "begin",
             "probe",
             "--worktree",
-            "--title",
-            "Repair 'quoted' scope",
+            "--title=--all 'quoted' behavior",
             "--target",
             "release",
             "--base",
@@ -358,12 +357,27 @@ fn begin_worktree_population_failure_reports_recovery() {
         .lines()
         .find_map(|line| line.trim().strip_prefix("adopt: "))
         .expect("adopt recovery");
+    for flag in [
+        "--adopt",
+        "--title",
+        "--target",
+        "--base",
+        "--profile",
+        "--blocked-by",
+        "--tag",
+        "--from-journal",
+        "--from-fork",
+        "--role",
+        "--on-behalf-of",
+    ] {
+        assert!(recovery.contains(&format!("{flag}=")), "{recovery}");
+    }
     stdout(&mut repo.arc_shell(&repo.root, recovery));
     let admin = git_out(&worktree, &["rev-parse", "--absolute-git-dir"]);
     assert!(!std::path::Path::new(&admin).join("arc-owner").exists());
     let state = json_stdout(repo.arc(&repo.root).args(["show", "probe", "--json"]));
     assert_eq!(state["worktree_created"], false);
-    assert_eq!(state["title"], "Repair 'quoted' scope");
+    assert_eq!(state["title"], "--all 'quoted' behavior");
     assert_eq!(state["target_branch"], "release");
     assert_eq!(state["base"], base);
     assert_eq!(state["profile"], "release");
@@ -378,9 +392,9 @@ fn begin_worktree_population_failure_reports_recovery() {
         serde_json::json!([dependency["change_id"]])
     );
     assert_eq!(state["tags"], serde_json::json!(["release", "repair"]));
-    assert!(recovery.contains("--role 'lead'"), "{recovery}");
+    assert!(recovery.contains("--role='lead'"), "{recovery}");
     assert!(
-        recovery.contains("--on-behalf-of 'scope owner'"),
+        recovery.contains("--on-behalf-of='scope owner'"),
         "{recovery}"
     );
 }

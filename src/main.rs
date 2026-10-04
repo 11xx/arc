@@ -252,7 +252,8 @@ enum Cmd {
     /// worktree, removes the unrecorded owner token when its identity matches,
     /// and reports adoption and discard commands without opening a change.
     /// Adoption recovery preserves the opening options and resolved target
-    /// and base; checkout selection is determined by the retained branch.
+    /// and base, attaching option values as --flag=<shell-quoted value> to
+    /// preserve leading hyphens. Checkout selection follows the retained branch.
     ///
     /// Without --base, the change derives its base from the local target:
     /// its head, or under --adopt the adopted branch's merge base with it.
@@ -1408,9 +1409,10 @@ enum Cmd {
         /// Baseline commands run at the brief's base, in a detached scratch
         /// checkout under the configured worktrees directory when HEAD differs.
         /// The scratch checkout is removed after the run. Failed creation
-        /// cleans this attempt's allocation; failed cleanup reports the
-        /// retained path and its removal command. Attested baseline
-        /// evidence requires --tested-revision equal to the base.
+        /// cleans only this attempt's allocation and administrative entries
+        /// whose gitdir names its path, preserving unrelated registrations.
+        /// Failed cleanup reports the retained path and its removal command.
+        /// Attested baseline evidence requires --tested-revision equal to the base.
         #[arg(long, value_enum)]
         probe_phase: Option<ProbePhase>,
         /// Record externally observed evidence without running the command

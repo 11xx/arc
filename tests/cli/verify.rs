@@ -3908,6 +3908,51 @@ fn baseline_in_place_dirty_waiver_binds_to_tested_base() {
 }
 
 #[test]
+fn scratch_baseline_creation_failure_preserves_moved_worktree_registration() {
+    use std::os::unix::fs::PermissionsExt;
+    let (repo, worktree, _) = scratch_baseline_fixture("false");
+    let peer = repo.home.join("peer");
+    git(
+        &repo.root,
+        &["worktree", "add", "--detach", peer.to_str().unwrap()],
+    );
+    let admin = git_out(&peer, &["rev-parse", "--absolute-git-dir"]);
+    let admin = PathBuf::from(admin);
+    let head = fs::read(admin.join("HEAD")).unwrap();
+    fs::write(admin.join("recovery-marker"), "preserve").unwrap();
+    fs::rename(&peer, repo.home.join("moved-peer")).unwrap();
+    let hook = repo.root.join(".git/hooks/post-checkout");
+    fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = repo
+        .arc(&worktree)
+        .args([
+            "verify",
+            "scratch-baseline",
+            "--probe",
+            "check",
+            "--probe-phase",
+            "baseline",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("manual recipe:"), "{error}");
+    assert!(!error.contains("worktree prune"), "{error}");
+    assert!(admin.is_dir(), "moved worktree registration was removed");
+    assert_eq!(fs::read(admin.join("HEAD")).unwrap(), head);
+    assert_eq!(
+        fs::read_to_string(admin.join("recovery-marker")).unwrap(),
+        "preserve"
+    );
+    assert_eq!(
+        fs::read_dir(repo.home.join(".worktrees")).unwrap().count(),
+        1
+    );
+}
+
+#[test]
 fn scratch_baseline_creation_hook_failure_cleans_allocation() {
     use std::os::unix::fs::PermissionsExt;
     let (repo, worktree, _) = scratch_baseline_fixture("false");

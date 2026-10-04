@@ -633,8 +633,9 @@ RUN A CHANGE
   --tested-revision equal to the base and creates no checkout. A creation
   refusal prints the reason and commands to create, verify in, and remove
   a manual checkout. Failed creation removes the allocation owned by that
-  attempt and prunes its registration. Failed cleanup reports the retained
-  path and its removal command instead of a command to recreate it.
+  attempt and only administrative entries whose gitdir names that path.
+  Unrelated worktree registrations are preserved. Failed cleanup reports the
+  retained path and its removal command instead of a command to recreate it.
   --waive-dirty refuses before recording when a baseline requires a scratch
   checkout: that checkout is clean, and the waiver would name a revision the
   probe does not test. At the base, a waiver binds to that checkout's HEAD.
@@ -831,8 +832,9 @@ RUN A CHANGE
   new revision, and flag 1, matching Git's creation hook arguments. Population
   or hook failure keeps the branch and worktree and records no opening or fork
   marker. The error prints adoption and discard commands. The begin adoption
-  command preserves the opening options and resolved target and base, with
-  the retained branch determining the checkout. Fork provenance during
+  command preserves the opening options and resolved target and base. Every
+  option value uses --flag=<shell-quoted value> to preserve leading hyphens.
+  The retained branch determines the checkout. Fork provenance during
   adoption requires an explicit base. `begin` removes its
   unrecorded owner token when its identity matches; cleanup failures are reported.
   The registered checkout must still hold the change branch. Tracked edits

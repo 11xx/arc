@@ -1777,15 +1777,36 @@ fn create_baseline_checkout(
                     std::fs::remove_dir_all(&path)
                         .with_context(|| format!("cannot remove {}", path.display()))?;
                 }
-                gitio::git(&ctx.cwd, &["worktree", "prune"])?;
+                let registrations = gitio::common_dir(&ctx.cwd)?.join("worktrees");
+                if registrations.is_dir() {
+                    for entry in std::fs::read_dir(&registrations)? {
+                        let entry = entry?;
+                        if !entry.file_type()?.is_dir() {
+                            continue;
+                        }
+                        let admin = entry.path();
+                        let gitdir = match std::fs::read_to_string(admin.join("gitdir")) {
+                            Ok(gitdir) => gitdir,
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                            Err(error) => return Err(error.into()),
+                        };
+                        if Path::new(gitdir.trim()) == path.join(".git") {
+                            cleanup_command = format!(
+                                "rm -rf -- {}",
+                                crate::context::shell_quote(&admin.display().to_string())
+                            );
+                            std::fs::remove_dir_all(&admin)
+                                .with_context(|| format!("cannot remove {}", admin.display()))?;
+                        }
+                    }
+                }
                 Ok(())
             })();
             if let Err(cleanup) = cleanup {
                 bail!(
                     "cannot create baseline scratch checkout {}: {error:#}
 allocation retained: {cleanup:#}
-cleanup: {cleanup_command}
-git worktree prune",
+cleanup: {cleanup_command}",
                     path.display()
                 );
             }
