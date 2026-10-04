@@ -3953,6 +3953,62 @@ fn scratch_baseline_creation_failure_preserves_moved_worktree_registration() {
 }
 
 #[test]
+fn scratch_baseline_relative_directory_hook_failure_cleans_registration() {
+    use std::os::unix::fs::PermissionsExt;
+    let (repo, worktree, _) = scratch_baseline_fixture("false");
+    let invoking = worktree.join("nested");
+    fs::create_dir(&invoking).unwrap();
+    let hook = repo.root.join(".git/hooks/post-checkout");
+    fs::write(
+        &hook,
+        "#!/bin/sh\necho initializer > partial-work\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let before = git_out(&worktree, &["worktree", "list", "--porcelain"]);
+    let output = repo
+        .arc(&invoking)
+        .env("ARC_WORKTREES_DIR", "../scratch")
+        .args([
+            "verify",
+            "scratch-baseline",
+            "--probe",
+            "check",
+            "--probe-phase",
+            "baseline",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("manual recipe:"), "{error}");
+    assert_eq!(
+        git_out(&worktree, &["worktree", "list", "--porcelain"]),
+        before,
+        "{error}"
+    );
+    let scratch_root = repo.home.join(".worktrees/scratch");
+    assert_eq!(fs::read_dir(&scratch_root).unwrap().count(), 0);
+    let recreate = error
+        .lines()
+        .find(|line| line.starts_with("git worktree add --detach "))
+        .unwrap();
+    assert!(recreate.contains(scratch_root.to_str().unwrap()), "{error}");
+    assert!(!recreate.contains("/../"), "{error}");
+    fs::remove_file(hook).unwrap();
+    stdout(&mut repo.arc_shell(&invoking, recreate));
+    let remove = error
+        .lines()
+        .find(|line| line.starts_with("git worktree remove --force "))
+        .unwrap();
+    stdout(&mut repo.arc_shell(&invoking, remove));
+    assert_eq!(
+        git_out(&worktree, &["worktree", "list", "--porcelain"]),
+        before
+    );
+}
+
+#[test]
 fn scratch_baseline_creation_hook_failure_cleans_allocation() {
     use std::os::unix::fs::PermissionsExt;
     let (repo, worktree, _) = scratch_baseline_fixture("false");

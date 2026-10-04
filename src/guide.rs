@@ -626,14 +626,17 @@ RUN A CHANGE
 
   Executed baseline probes run at the brief's recorded base. If the invoking
   checkout's HEAD differs, arc creates a detached scratch checkout under
-  the configured worktrees directory (including ARC_WORKTREES_DIR), reports
-  free space and its path, runs the probe there, and force-removes it after
-  the run. Evidence is recorded through the invoking checkout. At the base,
-  the probe runs in place. Attested baseline evidence requires
+  the configured worktrees directory (including ARC_WORKTREES_DIR). Relative
+  directories resolve against the invoking checkout's root. Arc reports
+  free space and the absolute path, runs the probe there, and force-removes
+  it after the run. Evidence is recorded through the invoking checkout. At
+  the base, the probe runs in place. Attested baseline evidence requires
   --tested-revision equal to the base and creates no checkout. A creation
   refusal prints the reason and commands to create, verify in, and remove
   a manual checkout. Failed creation removes the allocation owned by that
   attempt and only administrative entries whose gitdir names that path.
+  Cleanup confirms that Git's worktree inventory contains no registration
+  for the attempt's path before offering the manual recreation commands.
   Unrelated worktree registrations are preserved. Failed cleanup reports the
   retained path and its removal command instead of a command to recreate it.
   --waive-dirty refuses before recording when a baseline requires a scratch

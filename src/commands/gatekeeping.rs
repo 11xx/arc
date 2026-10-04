@@ -1731,7 +1731,18 @@ fn create_baseline_checkout(
         &base[..base.len().min(8)],
         ulid::Ulid::new()
     );
-    let path = super::lifecycle::worktree_path_for(&ctx.cwd, &name)?;
+    let chosen = super::lifecycle::worktree_path_for(&ctx.cwd, &name)?;
+    let absolute = config::resolved(&gitio::toplevel(&ctx.cwd)?.join(chosen));
+    let mut path = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                path.pop();
+            }
+            component => path.push(component.as_os_str()),
+        }
+    }
     let quoted_path = crate::context::shell_quote(&path.display().to_string());
     let mut allocation_attempted = false;
     let creation = (|| -> Result<()> {
@@ -1799,6 +1810,13 @@ fn create_baseline_checkout(
                                 .with_context(|| format!("cannot remove {}", admin.display()))?;
                         }
                     }
+                }
+                cleanup_command = format!("git worktree remove --force --force {quoted_path}");
+                if gitio::worktree_inventory(&ctx.cwd)?
+                    .iter()
+                    .any(|entry| entry.path == path)
+                {
+                    bail!("worktree registration remains for {}", path.display());
                 }
                 Ok(())
             })();

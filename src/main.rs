@@ -1409,9 +1409,13 @@ enum Cmd {
         /// Acceptance-probe evidence phase (defaults to final).
         /// Baseline commands run at the brief's base, in a detached scratch
         /// checkout under the configured worktrees directory when HEAD differs.
+        /// Relative directories resolve against the invoking checkout's root;
+        /// creation, cleanup and printed commands use the same absolute path.
         /// The scratch checkout is removed after the run. Failed creation
         /// cleans only this attempt's allocation and administrative entries
         /// whose gitdir names its path, preserving unrelated registrations.
+        /// Cleanup confirms the path is absent from Git's worktree inventory
+        /// before offering manual recreation commands.
         /// Failed cleanup reports the retained path and its removal command.
         /// Attested baseline evidence requires --tested-revision equal to the base.
         #[arg(long, value_enum)]
