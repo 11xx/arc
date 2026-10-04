@@ -14,6 +14,7 @@ use serde::Serialize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Blocker {
+    IntegrationMode,
     Closed,
     BranchMissing,
     TargetUnreadable,
@@ -30,7 +31,8 @@ pub enum Blocker {
 }
 
 /// Every blocker, highest precedence first.
-pub const PRIORITY: [Blocker; 13] = [
+pub const PRIORITY: [Blocker; 14] = [
+    Blocker::IntegrationMode,
     Blocker::Closed,
     Blocker::BranchMissing,
     Blocker::TargetUnreadable,
@@ -49,6 +51,7 @@ pub const PRIORITY: [Blocker; 13] = [
 impl Blocker {
     pub fn exit_code(self) -> i32 {
         match self {
+            Blocker::IntegrationMode => 17,
             Blocker::Closed | Blocker::BranchMissing | Blocker::TargetUnreadable => 6,
             Blocker::ForkBranch => 15,
             Blocker::Iterating => 13,
@@ -65,6 +68,7 @@ impl Blocker {
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Blocker::IntegrationMode => "integration-mode",
             Blocker::Closed => "closed",
             Blocker::BranchMissing => "branch-missing",
             Blocker::TargetUnreadable => "target-unreadable",
@@ -93,6 +97,7 @@ pub struct GateFact {
 /// The facts a change's blockers follow from.
 #[derive(Debug, Clone)]
 pub struct BlockerFacts {
+    pub mode_refused: bool,
     pub closed: bool,
     pub branch_missing: bool,
     /// The change's target branch cannot be resolved, so the declarations it
@@ -118,6 +123,7 @@ pub struct BlockerFacts {
 impl BlockerFacts {
     fn raises(&self, blocker: Blocker) -> bool {
         match blocker {
+            Blocker::IntegrationMode => self.mode_refused,
             Blocker::Closed => self.closed,
             Blocker::BranchMissing => self.branch_missing,
             Blocker::TargetUnreadable => self.target_unreadable,
@@ -193,6 +199,7 @@ mod tests {
 
     fn clear() -> BlockerFacts {
         BlockerFacts {
+            mode_refused: false,
             closed: false,
             branch_missing: false,
             target_unreadable: false,
@@ -224,7 +231,8 @@ mod tests {
 
     #[test]
     fn each_fact_alone_raises_its_blocker() {
-        let cases: [(Raise, Blocker); 13] = [
+        let cases: [(Raise, Blocker); 14] = [
+            (|f| f.mode_refused = true, Blocker::IntegrationMode),
             (|f| f.closed = true, Blocker::Closed),
             (|f| f.branch_missing = true, Blocker::BranchMissing),
             (|f| f.target_unreadable = true, Blocker::TargetUnreadable),
@@ -275,6 +283,7 @@ mod tests {
     #[test]
     fn all_facts_raise_every_blocker_in_priority_order() {
         let facts = BlockerFacts {
+            mode_refused: true,
             closed: true,
             branch_missing: true,
             target_unreadable: true,
@@ -318,7 +327,7 @@ mod tests {
         seen.sort_by_key(|blocker| blocker.as_str());
         seen.dedup();
         assert_eq!(seen.len(), PRIORITY.len());
-        assert_eq!(PRIORITY.len(), 13);
+        assert_eq!(PRIORITY.len(), 14);
     }
 
     #[test]

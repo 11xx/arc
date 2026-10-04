@@ -507,6 +507,9 @@ fn collect_payload_objects(
                     }
                     "tree" => Some("content-tree"),
                     "blob" => Some("cited-blob"),
+                    "provisional_commit" => Some("provisional-merge"),
+                    "evaluated_tree" => Some("evaluated-tree"),
+                    "staging_before" => Some("staging-base"),
                     "integrated_commit" | "merge_sha" => Some("integration-commit"),
                     "against_target" | "target_before" | "target_revision" => Some("target-commit"),
                     "target" if event_type == "candidate-selected" => Some("target-commit"),

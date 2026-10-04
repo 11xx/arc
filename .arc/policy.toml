@@ -22,6 +22,7 @@ paths = [
   "src/replica.rs",
   "src/state.rs",
   "src/model.rs",
+  "src/import_authorization.rs",
   "src/session_store.rs",
   "src/bundle.rs",
   "src/rewrite.rs",
@@ -60,6 +61,8 @@ paths = [
   "src/commands/gatekeeping.rs",
   # Decides whether a merge is authorized and what it must ship.
   "src/integration.rs",
+  "src/provisional.rs",
+  "src/commands/provisional.rs",
   "src/commands/chain.rs",
   # Output schemas, and this file, which decides all of the above.
   "src/render.rs",

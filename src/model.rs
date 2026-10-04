@@ -1163,7 +1163,32 @@ pub enum Payload {
     /// head, evaluated tree, target revision and authorization. A fast-forward
     /// lands at the approved head; a merge verifies both parents; an
     /// already-contained integration leaves the target revision unchanged.
+    ChangeProvisionallyIntegrated {
+        project_id: String,
+        source_patchset_id: String,
+        source_head: String,
+        publication_target: String,
+        staging_branch: String,
+        staging_before: String,
+        provisional_commit: String,
+        evaluated_tree: String,
+        recipient: ProvisionalRecipient,
+        authority_observed: Option<AuthorityObserved>,
+        authorization: AuthorizationBasis,
+    },
+    ProvisionalIntegrationResolved {
+        provisional_event_id: String,
+        integration_event_id: String,
+        accepted_patchset_id: String,
+        authority_grant_event_id: String,
+        kind: ProvisionalResolutionKind,
+        reason: String,
+    },
     ChangeIntegrated {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        authority_grant_event_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        provisional_resolutions: Vec<ProvisionalResolution>,
         integrated_commit: String,
         source_patchset_id: String,
         source_head: String,
@@ -1786,6 +1811,8 @@ pub struct AuthorizationBasis {
     pub gate_evidence: std::collections::BTreeMap<String, String>,
     /// Each prerequisite change and the closure that satisfied it.
     pub prerequisites: Vec<PrerequisiteClosure>,
+    #[serde(default)]
+    pub provisional_prerequisites: Vec<ProvisionalPrerequisite>,
     /// Vectors that had to be empty for this event to be written at all.
     /// Recorded rather than implied, so an auditor reads a checked fact
     /// instead of inferring one from an absence.
@@ -1914,7 +1941,9 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         | Payload::HoldSet { .. }
         | Payload::ReadyToSend { .. }
         | Payload::ForgeProjection { .. } => AppendPermission::OpenOnly,
-        Payload::Message { .. }
+        Payload::ChangeProvisionallyIntegrated { .. }
+        | Payload::ProvisionalIntegrationResolved { .. }
+        | Payload::Message { .. }
         | Payload::ClaimReleased { .. }
         | Payload::ContextKept { .. }
         | Payload::CommentAdded { .. }
@@ -2504,4 +2533,40 @@ mod tests {
             ));
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum ProvisionalRecipient {
+    Replica { repository_id: String },
+    Forge { reference: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorityObserved {
+    pub grant_event_id: String,
+    pub holder_repository_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProvisionalResolutionKind {
+    SameHead,
+    RevisedHead,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProvisionalResolution {
+    pub provisional_event_id: String,
+    pub delivered_patchset_id: String,
+    pub accepted_patchset_id: String,
+    pub kind: ProvisionalResolutionKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProvisionalPrerequisite {
+    pub change_id: String,
+    pub provisional_event_id: String,
+    pub source_patchset_id: String,
+    pub provisional_commit: String,
 }

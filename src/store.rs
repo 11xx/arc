@@ -354,6 +354,47 @@ impl Store {
 
     /// Where a rewrite writes down what it is about to do, beside the events
     /// its map will become. One repository, one rewrite at a time.
+    pub(crate) fn provisional_intent_path(&self, change: &str) -> Result<PathBuf> {
+        ids::validate_id_component(change)?;
+        Ok(self.root.join("provisional").join(format!("{change}.json")))
+    }
+    pub(crate) fn provisional_intent(
+        &self,
+        change: &str,
+    ) -> Result<Option<crate::commands::provisional::Intent>> {
+        let path = self.provisional_intent_path(change)?;
+        match fs::read(&path) {
+            Ok(bytes) => {
+                let intent: crate::commands::provisional::Intent =
+                    serde_json::from_slice(&bytes).context("malformed provisional intent")?;
+                if intent.event.change_id != change
+                    || intent.event.repository_id != self.repository_id
+                {
+                    bail!("provisional intent identity conflicts with this store/change");
+                }
+                Ok(Some(intent))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+    pub(crate) fn write_provisional_intent(
+        &self,
+        intent: &crate::commands::provisional::Intent,
+    ) -> Result<()> {
+        self.refuse_read_only()?;
+        let path = self.provisional_intent_path(&intent.event.change_id)?;
+        create_private_dir_all(path.parent().context("intent has no parent")?)?;
+        write_exclusive(&path, &serde_json::to_vec(intent)?)
+    }
+    pub(crate) fn clear_provisional_intent(&self, change: &str) -> Result<()> {
+        let path = self.provisional_intent_path(change)?;
+        fs::remove_file(&path)?;
+        File::open(path.parent().context("intent has no parent")?)?
+            .sync_all()
+            .map_err(Into::into)
+    }
+
     pub fn rewrite_intent_path(&self) -> PathBuf {
         self.root.join("repository").join("rewrite-intent.json")
     }
@@ -776,6 +817,8 @@ impl Store {
 
     fn stamp_format_for(&self, payload: &Payload) -> Result<()> {
         let introduced_in = match payload {
+            Payload::ChangeProvisionallyIntegrated { .. }
+            | Payload::ProvisionalIntegrationResolved { .. } => Some(7),
             Payload::ExternalVerdictRecorded { .. }
             | Payload::ReadyToSend { .. }
             | Payload::IntegrationAsserted {
@@ -878,6 +921,7 @@ impl Store {
             {
                 Some(3)
             }
+            Some("change-provisionally-integrated" | "provisional-integration-resolved") => Some(7),
             Some("change-integrated") | Some("integration-asserted") => Some(2),
             _ => None,
         };

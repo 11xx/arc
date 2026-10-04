@@ -1971,9 +1971,15 @@ fn report_ledger_facts(
                     .map(crate::policy::operator_path)
                     .transpose()?;
                 let candidates = super::candidate::load_ledger(&store)?;
-                Ok((store.readable_states()?, candidates))
+                let states = store.readable_states()?;
+                let unreadable = store
+                    .list_change_ids()?
+                    .into_iter()
+                    .filter(|id| !states.contains_key(id))
+                    .collect::<Vec<_>>();
+                Ok((states, candidates, unreadable))
             });
-        let (states, candidates) = match states {
+        let (states, candidates, unreadable) = match states {
             Ok(states) => states,
             Err(error) => {
                 failures.push(CollectionFailure {
@@ -1985,11 +1991,26 @@ fn report_ledger_facts(
                 continue;
             }
         };
+        if !unreadable.is_empty() {
+            failures.push(CollectionFailure {
+                project: label.clone(),
+                anchor: anchor.as_ref().map(|path| path.display().to_string()),
+                component: "report-ledger",
+                reason: format!("unreadable changes: {}", unreadable.join(", ")),
+            });
+        }
         let mut ledger = report::LedgerFacts {
             unjudged_siblings: unjudged_siblings(&candidates),
             ..Default::default()
         };
         for (change_id, state) in states {
+            ledger.provisional_integrations.extend(
+                crate::provisional::unresolved(&state)
+                    .into_iter()
+                    .map(|row| {
+                        serde_json::to_value(row).expect("serializable provisional obligation")
+                    }),
+            );
             match &state.closure {
                 None => {
                     let days = u64::try_from((observed - state.opened_at).num_days()).unwrap_or(0);
@@ -2507,6 +2528,7 @@ mod report {
     /// answers, and which closed changes still have their worktree on disk.
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub(crate) struct LedgerFacts {
+        pub provisional_integrations: Vec<Value>,
         /// Open change id -> (title, whole days open at the observation).
         pub open: BTreeMap<String, (String, u64)>,
         /// Open change id -> the keys of its in-force brief, for each open
@@ -2572,6 +2594,7 @@ mod report {
 
     #[derive(Debug, Serialize, Default)]
     struct Sections {
+        provisional_integrations: Vec<Value>,
         needs_person: Vec<QuestionRow>,
         needs_agent: Vec<QuestionRow>,
         in_flight: Vec<ChangeRow>,
@@ -2904,6 +2927,15 @@ mod report {
         let failed_now = failed_projects(backlog);
         let failed_before = previous.map(failed_projects).unwrap_or_default();
         let mut sections = Sections::default();
+        for (project, ledger) in ledgers {
+            for row in &ledger.provisional_integrations {
+                let mut row = row.clone();
+                row.as_object_mut()
+                    .expect("obligation object")
+                    .insert("project".into(), Value::String(project.clone()));
+                sections.provisional_integrations.push(row);
+            }
+        }
         let mut attention = Vec::new();
         let mut projects = Vec::new();
 
@@ -3369,6 +3401,21 @@ mod report {
     impl Report {
         /// A compact text summary; `--json` carries every row.
         pub(crate) fn render(&self) {
+            if !self.sections.provisional_integrations.is_empty() {
+                println!("Provisional integrations:");
+                for row in &self.sections.provisional_integrations {
+                    println!(
+                        "  {} / {}: {}; recipient {}; age {}s; {}; integration {}",
+                        text(row, "change_id"),
+                        text(row, "event_id"),
+                        text(row, "disposition"),
+                        row["recipient"],
+                        row["age_seconds"],
+                        row["reason"],
+                        row["integration_event_id"]
+                    );
+                }
+            }
             let tally = |key: &str| {
                 self.tallies
                     .get(key)

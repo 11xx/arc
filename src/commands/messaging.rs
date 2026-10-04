@@ -1004,6 +1004,10 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
     let filed = crate::journal::filed_report(ctx, None, 14);
     let forks = crate::commands::fork::list_entries(ctx).unwrap_or_default();
     let states = store.readable_states()?;
+    let provisional_integrations: Vec<_> = states
+        .values()
+        .flat_map(crate::provisional::unresolved)
+        .collect();
     let worktrees = crate::worktree_usage::measure(
         &ctx.cwd,
         &states,
@@ -1018,6 +1022,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
                 "ledger": inbox,
                 "journal": journal.as_ref().ok(),
                 "replica": replica,
+                "provisional_integrations": provisional_integrations,
                 "recent_sessions": recent_sessions,
                 "session_discovery_errors": session_discovery_errors,
                 "stale_filed_count": filed.as_ref().ok().map(|report| report.stale_count),
@@ -1038,6 +1043,23 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
     let debts = collect_debts(ctx, &states)?;
     let review_queue = collect_review_queue(&store, &states)?;
     println!("ledger: {}", store.root.display());
+    if !provisional_integrations.is_empty() {
+        println!("Provisional integrations:");
+        for row in &provisional_integrations {
+            println!(
+                "  {} / {}: {}; recipient {:?}; source {}; merge {}; age {}s; {}; integration {:?}",
+                row.change_id,
+                row.event_id,
+                row.disposition,
+                row.recipient,
+                row.source_replica,
+                row.provisional_commit,
+                row.age_seconds,
+                row.reason.as_deref().unwrap_or("acceptance owed"),
+                row.integration_event_id
+            );
+        }
+    }
     crate::replica::render_status(&replica);
     let mut any = false;
     let mut rendered_debt_details = BTreeSet::new();

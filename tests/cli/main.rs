@@ -37,6 +37,7 @@ mod paths;
 mod planners;
 mod policy;
 mod provenance;
+mod provisional;
 mod queue;
 mod rebase;
 mod relations;

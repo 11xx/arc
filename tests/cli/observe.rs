@@ -1499,10 +1499,15 @@ fn aggregate_views_keep_healthy_changes_when_one_reduction_fails() {
         vec!["workspace", "backlog", "--items", "--json"],
         vec!["workspace", "report", "--json"],
     ] {
+        let code = if args.first() == Some(&"workspace") && args.get(1) == Some(&"report") {
+            16
+        } else {
+            0
+        };
         repo.arc(&repo.root)
             .args(args)
             .assert()
-            .success()
+            .code(code)
             .stdout(predicates::str::contains(&good))
             .stderr(predicates::str::contains(format!(
                 "unreadable change {bad}"
@@ -1550,10 +1555,15 @@ fn aggregate_views_keep_healthy_changes_when_one_reduction_fails() {
         vec!["stats", "--by-model", "--json"],
         vec!["changelog", "--json"],
     ] {
+        let code = if args.first() == Some(&"workspace") && args.get(1) == Some(&"report") {
+            16
+        } else {
+            0
+        };
         repo.arc(&repo.root)
             .args(args)
             .assert()
-            .success()
+            .code(code)
             .stderr(predicates::str::contains(format!(
                 "unreadable change {bad}"
             )));

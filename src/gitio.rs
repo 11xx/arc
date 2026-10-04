@@ -1996,6 +1996,26 @@ pub fn commit_exists(cwd: &Path, oid: &str) -> Result<bool> {
     Ok(out.status.success())
 }
 
+pub fn commit_tree_unsigned(
+    cwd: &Path,
+    tree: &str,
+    parents: &[&str],
+    message: &str,
+) -> Result<String> {
+    let mut args = vec![
+        "-c",
+        "commit.gpgsign=false",
+        "commit-tree",
+        "--no-gpg-sign",
+        tree,
+    ];
+    for parent in parents {
+        args.extend(["-p", parent]);
+    }
+    args.extend(["-m", message]);
+    git(cwd, &args)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -163,6 +163,26 @@ pub(super) fn import_validated_guarded(
         }
     }
 
+    for value in &validated.bundle.events {
+        let event: Event = serde_json::from_value(value.clone())?;
+        if let Payload::ChangeProvisionallyIntegrated {
+            provisional_commit, ..
+        } = &event.payload
+        {
+            if gitio::commit_exists(&ctx.cwd, provisional_commit)? {
+                pins.push((
+                    crate::provisional::retention_ref(&event.change_id, &event.event_id),
+                    provisional_commit.clone(),
+                ));
+            } else {
+                missing_objects.push((
+                    event.event_id.clone(),
+                    "provisional-merge",
+                    provisional_commit.clone(),
+                ));
+            }
+        }
+    }
     let initial_policy = crate::policy::load(&ctx.cwd)?;
     let preflight = classify_import_events(&root, validated)?;
     if !preflight.conflicts.is_empty() {
@@ -186,7 +206,12 @@ pub(super) fn import_validated_guarded(
             return Ok(crate::model::OperationResult::unpublished(1));
         }
     }
-    validate_import_candidate(local_store.as_ref(), validated, &preflight.new_events)?;
+    validate_import_candidate(
+        &ctx.cwd,
+        local_store.as_ref(),
+        validated,
+        &preflight.new_events,
+    )?;
     let repository = plan_repository_events(&ctx.cwd, local_store.as_ref(), validated)?;
     let initial_authorization = authorize_import(
         ctx,
@@ -209,7 +234,7 @@ pub(super) fn import_validated_guarded(
                 claim_contest = claim_contest_for_import(store, validated, &plan.new_events)?;
             }
             if claim_contest.is_none() {
-                validate_import_candidate(store, validated, &plan.new_events)?;
+                validate_import_candidate(&ctx.cwd, store, validated, &plan.new_events)?;
             }
             // The same refusals the import makes: a preflight that reports
             // success for a bundle the real path rejects is believed, and
@@ -286,7 +311,7 @@ pub(super) fn import_validated_guarded(
         None
     };
     if plan.conflicts.is_empty() && claim_contest.is_none() {
-        validate_import_candidate(Some(&store), validated, &plan.new_events)?;
+        validate_import_candidate(&ctx.cwd, Some(&store), validated, &plan.new_events)?;
     }
 
     print_import_report(
@@ -714,6 +739,7 @@ fn classify_import_events(root: &Path, validated: &ValidatedBundle) -> Result<Im
 /// stand on its own — otherwise a dry run against a fresh destination reports
 /// success for an import that will fail.
 fn validate_import_candidate(
+    cwd: &Path,
     store: Option<&Store>,
     validated: &ValidatedBundle,
     new_events: &[String],
@@ -741,8 +767,26 @@ fn validate_import_candidate(
             .filter_map(|event| event.typed.clone()),
     );
     candidate.sort_by(|a, b| a.event_id.cmp(&b.event_id));
-    state::reduce(&candidate)
+    let mut projected = state::reduce(&candidate)
         .context("combined local and bundled known events are not replayable")?;
+    let mut repository_events = store
+        .map(Store::load_repository_events)
+        .transpose()?
+        .unwrap_or_default();
+    let held: BTreeSet<_> = repository_events
+        .iter()
+        .map(|event| event.event_id.clone())
+        .collect();
+    for bytes in plan_repository_events(cwd, store, validated)?.values() {
+        let event: Event = serde_json::from_slice(bytes)?;
+        if !held.contains(&event.event_id) {
+            repository_events.push(event);
+        }
+    }
+    projected.follow_rewrites(&crate::rewrite::RewriteMap::from_events(
+        repository_events.iter(),
+    )?)?;
+    crate::provisional::validate_resolution_history(&projected, &candidate, store)?;
     // Relations on the change are judged by the rules a local write is.
     crate::relations::Relations::replay(&candidate).map_err(|refusal| {
         anyhow::anyhow!("the bundle's relations on the change are refused: {refusal}")

@@ -25,6 +25,7 @@ mod operation_output;
 mod policy;
 mod process_group;
 mod project;
+mod provisional;
 mod registry;
 mod relations;
 mod render;
@@ -912,6 +913,7 @@ enum Cmd {
     /// An unreadable selected change fails; unreadable neighboring changes
     /// are named with their errors on stderr and omitted from the dependency
     /// observation. An unreadable prerequisite cannot count as integrated
+    /// Includes retained provisional deliveries, routing recipients, local merges and dispositions.
     Status {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1172,6 +1174,12 @@ enum Cmd {
     /// cannot authorize integration
     #[command(after_help = blockers::exit_status_help())]
     Check {
+        /// Evaluate explicit unsigned staging preparation and local provisional prerequisites.
+        #[arg(long, conflicts_with = "tag")]
+        provisional: bool,
+        /// Staging destination under arc/provisional/<local-replica>/; requires --provisional.
+        #[arg(long, requires = "provisional")]
+        into: Option<String>,
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
         change: Option<String>,
@@ -1836,6 +1844,13 @@ enum Cmd {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Explicit --provisional prepares one unsigned no-ff merge into an unchecked staging ref
+    /// under refs/heads/arc/provisional/<local-replica>/<recorded-target>. Canonical policy,
+    /// review and gate requirements apply. Publication and closure remain owed to the
+    /// recipient, defaulting to the known authority holder. Recipient flags route an
+    /// obligation and grant no authority. Provisional prerequisites satisfy local preparation
+    /// only; authority publication requires canonical closures. Replacing provisional ancestry
+    /// requires a content replay, a new patchset and fresh review or explicit debt.
     /// Guarded integration of one change, or of a dependency-ordered queue named
     /// by several changes or by --tag.
     ///
@@ -1884,6 +1899,15 @@ enum Cmd {
         after_help = "Arc exits 11 when --shape ff-only encounters a diverged target; run arc rebase <change> --verify and provide fresh review or declared debt. When --into selects a different destination, arc rebase cannot select it: run git rebase <destination> in the change checkout, then arc snapshot <change> --verify and obtain fresh review or debt. Arc exits 17 when a paired replica does not hold integration authority; the refusal names the holder or an offer in flight."
     )]
     Integrate {
+        /// Prepare an unsigned merge in this replica's staging namespace; publication remains owed.
+        #[arg(long)]
+        provisional: bool,
+        /// Route the obligation to a paired replica; grants no authority.
+        #[arg(long, requires = "provisional", conflicts_with = "for_forge")]
+        for_replica: Option<String>,
+        /// Route the obligation to an opaque forge reference without transport.
+        #[arg(long, requires = "provisional", conflicts_with = "for_replica")]
+        for_forge: Option<String>,
         /// Changes to integrate. Several run as a queue, in dependency order,
         /// stopping at the first that needs a person. Omit only when
         /// selecting with --tag
@@ -1891,6 +1915,8 @@ enum Cmd {
         /// Integrate every change carrying all supplied tags, in dependency order
         #[arg(long)]
         tag: Vec<String>,
+        /// Provisional mode selects an unchecked staging branch in the local replica namespace.
+        /// Its declarations may add gates but cannot weaken canonical policy.
         /// Integrate into this branch; its gate, actor, contribution and
         /// authorization declarations govern every integration check
         #[arg(long)]
@@ -2207,6 +2233,7 @@ enum Cmd {
     /// identified. Other projects and unknown build revisions have no warning.
     /// Unreadable changes are named with their errors on stderr; readable
     /// changes remain in the output
+    /// Provisional integration obligations have a separate section and do not count as review debt.
     Catchup {
         /// Number of recent sessions, selected after ranking every discovered
         /// candidate by its last recorded activity rather than file modification time.
@@ -2246,6 +2273,11 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum ReplicaCmd {
+    /// Reconcile retained provisional integration obligations with authoritative acceptance.
+    Provisional {
+        #[command(subcommand)]
+        cmd: ReplicaProvisionalCmd,
+    },
     /// Print this store's repository ID for an explicit pairing record
     /// Records no events; ledger reads do not require a parseable append policy.
     Id {
@@ -2302,6 +2334,25 @@ enum ReplicaCmd {
     Authority {
         #[command(subcommand)]
         cmd: ReplicaAuthorityCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReplicaProvisionalCmd {
+    /// Resolve late delivery against this change's accepting integration. Requires current authority.
+    /// Forge obligations require asserted integration with the exact external reference.
+    Resolve {
+        /// Change whose provisional delivery is being reconciled.
+        change: String,
+        /// Accepting change-integrated or integration-asserted event ID.
+        #[arg(long)]
+        integration: String,
+        /// Obligation event IDs; omitted, resolve every matching outstanding obligation.
+        #[arg(long)]
+        provisional: Vec<String>,
+        /// Reason for explicit reconciliation; never silently disposes of a refusal.
+        #[arg(long)]
+        because: String,
     },
 }
 
@@ -2413,8 +2464,8 @@ enum PolicyCmd {
     Path,
     /// Replace the operator policy file with TOML from a file or stdin.
     /// Replacement shares the admission publication lock.
-    /// The operator-only [replica] table enrolls publishing principals and
-    /// trusted review origins. Privileged roles require explicit actor allowlists.
+    /// Publishing principals and trusted review origins in [replica] are operator-only.
+    /// Provisional preparation settings may also be declared by canonical project policy. Privileged roles require explicit actor allowlists.
     /// Style uses [defaults.change] and [defaults.integration]; constraints use
     /// [integration] shapes and history. Malformed tables and invalid known keys
     /// refuse with file and key before writing.
@@ -2563,6 +2614,7 @@ enum WorkspaceCmd {
     /// Change observations name unreadable changes with their errors on
     /// stderr and retain readable changes
     /// Records no events; ledger reads do not require a parseable append policy.
+    /// A separate provisional integration section carries recipient, age, refusal and reconciliation evidence.
     Report {
         /// Report only projects whose canonical anchor is beneath this path
         #[arg(long, value_name = "PATH", conflicts_with_all = ["here", "global"])]
@@ -3288,6 +3340,9 @@ fn role_refusal(role: ExecutionRole, command: &Cmd) -> Option<(&'static str, &'s
         ExecutionRole::Reviewer => match command {
             Cmd::Accept { .. } => Some(("accept", "lead")),
             Cmd::Integrate { .. } => Some(("integrate", "lead")),
+            Cmd::Replica {
+                cmd: ReplicaCmd::Provisional { .. },
+            } => Some(("replica provisional resolve", "lead")),
             Cmd::Debt { .. } => Some(("debt", "lead")),
             Cmd::Close { .. } => Some(("close", "lead")),
             _ => None,
@@ -3305,6 +3360,9 @@ fn role_refusal(role: ExecutionRole, command: &Cmd) -> Option<(&'static str, &'s
             Cmd::Close { .. } => Some(("close", "lead")),
             Cmd::Accept { .. } => Some(("accept", "lead")),
             Cmd::Integrate { .. } => Some(("integrate", "lead")),
+            Cmd::Replica {
+                cmd: ReplicaCmd::Provisional { .. },
+            } => Some(("replica provisional resolve", "lead")),
             _ => None,
         },
     }
@@ -4170,6 +4228,15 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
         )
         .map(|result| result.exit_code),
         Cmd::Replica { cmd } => match cmd {
+            ReplicaCmd::Provisional {
+                cmd:
+                    ReplicaProvisionalCmd::Resolve {
+                        change,
+                        integration,
+                        provisional,
+                        because,
+                    },
+            } => commands::resolve_provisional(&ctx, &change, &integration, &provisional, &because),
             ReplicaCmd::Id { json } => {
                 commands::replica_id(&ctx, json)?;
                 Ok(0)
@@ -4222,6 +4289,8 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             },
         },
         Cmd::Check {
+            provisional,
+            into,
             change,
             tag,
             explain,
@@ -4235,7 +4304,18 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 // reach it to be refused.
                 select(change)?
             };
-            commands::check_selection(&ctx, change.as_deref(), tag, explain, json, shape)
+            if provisional {
+                commands::check_provisional(
+                    &ctx,
+                    change.as_deref().context("provide one change")?,
+                    into,
+                    explain,
+                    json,
+                    shape,
+                )
+            } else {
+                commands::check_selection(&ctx, change.as_deref(), tag, explain, json, shape)
+            }
         }
         Cmd::Claim {
             change,
@@ -4677,6 +4757,9 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             Ok(0)
         }
         Cmd::Integrate {
+            provisional,
+            for_replica,
+            for_forge,
             change,
             tag,
             into,
@@ -4710,6 +4793,9 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 &ctx,
                 &changes,
                 commands::IntegrateArgs {
+                    provisional,
+                    for_replica,
+                    for_forge,
                     tags: tag,
                     into,
                     message,
@@ -5303,6 +5389,7 @@ mod tests {
             "replica init",
             "replica pair",
             "replica import",
+            "replica provisional resolve",
             "replica authority offer",
             "replica authority reclaim",
             "replica authority confirm-return",

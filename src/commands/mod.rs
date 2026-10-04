@@ -23,6 +23,8 @@ pub(crate) mod messaging;
 mod observe;
 mod pass;
 mod policy_cmd;
+pub(crate) mod provisional;
+pub use provisional::{check_provisional, resolve as resolve_provisional};
 pub(crate) mod relations;
 mod replica;
 mod rescue;
@@ -709,7 +711,16 @@ impl Ctx {
             fork::fork_slug_for_branch(&self.cwd, &state.branch)?,
             shape,
         )?;
+        report.require_provisional_replay(crate::provisional::obsolete_ancestry(
+            &self.cwd,
+            state,
+            &store.readable_states()?,
+        )?);
         report.declaration_notes = declarations.notes;
+        report.select_mode(
+            crate::integration::Mode::Authoritative,
+            crate::replica::integration_refusal(store)?,
+        );
         Ok(report)
     }
 
@@ -719,14 +730,22 @@ impl Ctx {
         states: &BTreeMap<String, ChangeState>,
     ) -> Result<StatusReport> {
         let declarations = crate::declarations::for_change(&self.cwd, state)?;
-        status::build(
+        let mut report = status::build(
             state,
             &self.cwd,
             &declarations,
             dependency_status(state, states),
             changes_blocked_by(&state.change_id, states),
             fork::fork_slug_for_branch(&self.cwd, &state.branch)?,
-        )
+        )?;
+        report.require_provisional_replay(crate::provisional::obsolete_ancestry(
+            &self.cwd, state, states,
+        )?);
+        report.select_mode(
+            crate::integration::Mode::Authoritative,
+            crate::replica::integration_refusal(&self.store()?)?,
+        );
+        Ok(report)
     }
 
     /// Build a report for a state replayed to a past event: the latest
@@ -750,7 +769,16 @@ impl Ctx {
             Some(toplevel.as_path()),
             fork::fork_slug_for_branch(&self.cwd, &state.branch)?,
         )?;
+        report.require_provisional_replay(crate::provisional::obsolete_ancestry(
+            &self.cwd,
+            state,
+            &store.readable_states()?,
+        )?);
         report.declaration_notes = declarations.notes;
+        report.select_mode(
+            crate::integration::Mode::Authoritative,
+            crate::replica::integration_refusal(store)?,
+        );
         Ok(report)
     }
 }
@@ -1186,6 +1214,9 @@ mod tests {
 
     fn change(id: &str, blocked_by: &[&str], closure: Option<Closure>) -> ChangeState {
         ChangeState {
+            provisional_signature_successors: BTreeMap::new(),
+            provisional_integrations: Vec::new(),
+            provisional_resolutions: Vec::new(),
             privilege_scope: None,
             schema: crate::state::CHANGE_STATE_SCHEMA,
             model_attributions: BTreeMap::new(),

@@ -288,6 +288,9 @@ pub fn markdown(
     let _ = writeln!(w, "# {} (`{}`)", state.title, state.change_id);
     let _ = writeln!(w);
     let _ = writeln!(w, "- State: {}", report.state);
+    for row in &report.provisional_integrations {
+        let _ = writeln!(w, "- Provisional integration `{}`: {}; recipient {:?}; source replica {}; local merge `{}` at `{}`; {}", row.event_id, row.disposition, row.recipient, row.source_replica, row.provisional_commit, row.staging_branch, row.reason.as_deref().unwrap_or("publication acceptance owed"));
+    }
     let _ = writeln!(w, "- Profile: {}", state.profile);
     if state.iterating {
         let _ = writeln!(
@@ -1147,6 +1150,9 @@ pub fn advisories(report: &StatusReport) {
 /// next step, so a reader who keeps any one line of it still learns why.
 pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String {
     let mut out = String::new();
+    if !report.obsolete_provisional_ancestry.is_empty() {
+        let _ = writeln!(out, "publication head {:?} contains provisional merges {}; replay onto accepted authority history with arc rebase {} --verify, then record a new patchset and fresh review or debt", report.current_head, report.obsolete_provisional_ancestry.join(", "), state.change_id);
+    }
     let titles = report
         .blockers()
         .iter()
@@ -1167,6 +1173,16 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
     for (index, blocker) in report.blockers().iter().enumerate() {
         let _ = writeln!(out, "Blocker {}: {}", index + 1, blocker_title(*blocker));
         match blocker {
+            Blocker::IntegrationMode => {
+                let _ = writeln!(
+                    out,
+                    "  - {}",
+                    report
+                        .integration_mode_refusal
+                        .as_deref()
+                        .unwrap_or("integration mode refused")
+                );
+            }
             Blocker::Closed => {
                 let _ = writeln!(out, "  - Change is already closed");
             }
@@ -1600,6 +1616,7 @@ pub fn gates_owed(report: &StatusReport) -> String {
 
 fn blocker_title(blocker: Blocker) -> &'static str {
     match blocker {
+        Blocker::IntegrationMode => "integration mode refused",
         Blocker::Closed => "change closed",
         Blocker::BranchMissing => "branch missing",
         Blocker::TargetUnreadable => "target declarations unreadable",
@@ -2440,6 +2457,8 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
         Payload::ForgePrState { state, .. } => {
             ("forge-pr-state", format!("{state:?}").to_lowercase())
         }
+        Payload::ChangeProvisionallyIntegrated { provisional_commit, staging_branch, recipient, .. } => ("change-provisionally-integrated", format!("{provisional_commit} into {staging_branch}; recipient {recipient:?}; publication owed")),
+        Payload::ProvisionalIntegrationResolved { provisional_event_id, integration_event_id, reason, .. } => ("provisional-integration-resolved", format!("{provisional_event_id} accepted by {integration_event_id}: {reason}")),
         Payload::Unknown => ("unknown", String::new()),
     }
 }

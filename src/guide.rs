@@ -1150,6 +1150,61 @@ PAIR REPLICA STORES
   records `authority confirm-return`, and exports that confirmation. The
   origin reacquires authority only after importing it. A recipient that has
   forwarded authority cannot confirm its return.
+  arc integrate CHANGE --provisional [--into STAGING-BRANCH]
+      [--for-replica NAME | --for-forge REFERENCE] [--message TEXT]
+      [--debt REASON [--kind KIND]] [--dry-run [--json]] [--expect-basis FILE]
+  arc check CHANGE --provisional [--into STAGING-BRANCH] [--explain | --json]
+  arc replica provisional resolve CHANGE --integration EVENT-ID
+      [--provisional EVENT-ID ...] --because REASON
+
+  Explicit provisional preparation is available on paired replicas without
+  authority. Plain integrate refuses there with exit 17. Preparation creates
+  an unsigned no-ff merge through plumbing and updates only an unchecked
+  staging ref and refs/arc/provisional/<change>/<event>. The default staging
+  ref is refs/heads/arc/provisional/<local-replica>/<recorded-target>. Supplied
+  destinations stay in that namespace; canonical targets, source branches,
+  the primary checkout branch and replica.protected_targets are protected.
+  Queues, --tag, --shape ff-only and --cleanup conflict with provisional mode.
+  Publication history shape constraints apply to canonical publication;
+  canonical review, actor and gate rules and additional staging/head gates
+  still govern preparation. A staging policy cannot weaken them.
+
+  [replica] provisional_enabled defaults to enabled for paired workers;
+  an explicit project or operator false disables it. protected_targets is
+  the union of explicit project/operator declarations and protected branches.
+  Recipient routing defaults to the known authority holder. An authority
+  offer in flight requires --for-replica or --for-forge. A forge reference
+  is opaque: preparation performs no transport and grants no authority.
+  An intent binds the exact event and guarded ref transition before visibility;
+  retry finishes that transition or preserves competing refs, and a completed
+  matching preparation reuses its merge and event.
+
+  Every delivery is retained across snapshots and closure. Status lists its
+  recipient, recording replica, merge and disposition. Catchup and workspace
+  report list unresolved deliveries in separate provisional-integration
+  sections, including age and refusal/reconciliation evidence. They are not
+  review debt; query --provisional selects provisional review approvals.
+  Changes requested, abandonment and supersession leave publication owed.
+  Local preparation may consume an applicable local provisional prerequisite
+  held in the selected staging history without an authority rejection; its
+  authorization records provisional_prerequisites apart from canonical closures.
+  Imported preparation never satisfies a canonical dependency.
+
+  arc begin dependent --target MAIN --base STAGING-BRANCH --blocked-by PREREQUISITE
+
+  Publish prerequisites canonically before dependents. A dependent containing
+  provisional ancestry requires replay onto accepted authority history,
+  a new patchset and fresh review or explicit debt. Substituting an authority
+  merge for a provisional merge is a content rewrite, not signature-only.
+  Authority integration atomically records closure and accepted deliveries,
+  distinguishing same-head from revised-head acceptance. Review eligibility
+  is the shared admission/trust policy, including independence requirements.
+  Worker debt imported without waiver authority remains an obligation input.
+  Late delivery requires explicit authority-owned reconciliation naming the
+  valid accepting integration and reason. Forge settlement requires asserted
+  integration with matching external-reference evidence and is labeled
+  resolved by assertion. Conflicting or missing references refuse.
+
   Imports have a dry-run preview, are idempotent, and record a receipt with the
   source replica and bundle digest. A paired replica without authority is
   refused by `integrate`.

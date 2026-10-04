@@ -1016,6 +1016,10 @@ pub struct ChangeState {
     #[serde(skip)]
     pub privilege_scope: Option<crate::import_authorization::PrivilegeScope>,
     pub schema: &'static str,
+    #[serde(skip)]
+    pub provisional_signature_successors: BTreeMap<String, String>,
+    pub provisional_integrations: Vec<Event>,
+    pub provisional_resolutions: Vec<Event>,
     /// Write-time model evidence, keyed by the ledger event that carries it.
     pub model_attributions: BTreeMap<String, ModelAttribution>,
     pub change_id: String,
@@ -1227,6 +1231,14 @@ impl ChangeState {
     pub fn follow_rewrites(&mut self, rewrites: &RewriteMap) -> Result<()> {
         if rewrites.is_empty() {
             return Ok(());
+        }
+        for event in &self.provisional_integrations {
+            if let Payload::ChangeProvisionallyIntegrated { source_head, .. } = &event.payload {
+                self.provisional_signature_successors.insert(
+                    source_head.clone(),
+                    rewrites.approved_successor(source_head)?,
+                );
+            }
         }
         rewrites.advance(&mut self.base)?;
         for patchset in &mut self.patchsets {
@@ -1648,6 +1660,9 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 dangerous,
             } => (
                 ChangeState {
+                    provisional_signature_successors: BTreeMap::new(),
+                    provisional_integrations: Vec::new(),
+                    provisional_resolutions: Vec::new(),
                     privilege_scope: None,
                     schema: CHANGE_STATE_SCHEMA,
                     model_attributions: BTreeMap::new(),
@@ -2780,7 +2795,15 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     created_at: ev.created_at,
                 });
             }
+            Payload::ChangeProvisionallyIntegrated { .. } => {
+                state.provisional_integrations.push(ev.clone())
+            }
+            Payload::ProvisionalIntegrationResolved { .. } => {
+                state.provisional_resolutions.push(ev.clone())
+            }
             Payload::ChangeIntegrated {
+                provisional_resolutions,
+                authority_grant_event_id: _,
                 integrated_commit,
                 source_patchset_id,
                 source_head,
@@ -2802,6 +2825,9 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 closure.shape = Some(shape.unwrap_or_else(|| {
                     crate::model::IntegrationShape::from_legacy(*already_contained)
                 }));
+                if !provisional_resolutions.is_empty() {
+                    state.provisional_resolutions.push(ev.clone());
+                }
                 closure.authorization = authorization.clone();
                 closure.external_reference = authorization
                     .as_ref()
@@ -3534,6 +3560,8 @@ mod tests {
             let integrated = ev(
                 "fix",
                 Payload::ChangeIntegrated {
+                    authority_grant_event_id: None,
+                    provisional_resolutions: Vec::new(),
                     integrated_commit: "head".into(),
                     source_patchset_id: "ps-01".into(),
                     source_head: "head".into(),

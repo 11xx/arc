@@ -53,6 +53,10 @@ pub struct ReplicaPolicy {
     pub trusted_review_replicas: Vec<String>,
     #[serde(default)]
     pub publishers: Vec<Publisher>,
+    #[serde(default)]
+    pub provisional_enabled: Option<bool>,
+    #[serde(default)]
+    pub protected_targets: Vec<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -151,6 +155,8 @@ pub fn required_roles(payload: &Payload) -> Option<Vec<Vec<Role>>> {
             roles
         }
         HistoryRewritten { .. } | HistoryRewriteWithdrawn { .. } => vec![vec![Rewrite]],
+        ChangeProvisionallyIntegrated { .. } => vec![vec![ProvisionalIntegration]],
+        ProvisionalIntegrationResolved { .. } => vec![vec![Integration]],
         ChangeIntegrated { .. }
         | IntegrationAsserted { .. }
         | ChangeClosed { .. }
@@ -253,7 +259,14 @@ pub fn plan_import(
     source: &Path,
     request: ImportRequest<'_>,
 ) -> Result<Option<ImportAuthorization>> {
-    let enforced = request.receiver_project.is_some() || !policy.publishers.is_empty();
+    let enforced = request.receiver_project.is_some()
+        || !policy.publishers.is_empty()
+        || request.events.iter().any(|(_, event)| {
+            matches!(
+                event["event_type"].as_str(),
+                Some("change-provisionally-integrated" | "provisional-integration-resolved")
+            )
+        });
     if request.principal.is_none() && request.received_sha256.is_none() && !enforced {
         return Ok(None);
     }
@@ -452,6 +465,7 @@ pub fn validate_import_identities(
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct PrivilegeScope {
     pub local_origin: String,
+    pub authority_holder: Option<String>,
     pub origin_names: std::collections::BTreeMap<String, String>,
     pub trusted_review_replicas: Vec<String>,
     pub admissions: std::collections::BTreeMap<String, EventAuthorization>,
@@ -525,6 +539,11 @@ impl PrivilegeScope {
                 })
         });
         let replica = crate::replica::status(store)?;
+        let authority_holder = replica
+            .authority
+            .as_ref()
+            .and_then(|authority| authority.holder.as_ref())
+            .map(|holder| holder.repository_id.clone());
         let origin_names = replica
             .local
             .into_iter()
@@ -532,6 +551,7 @@ impl PrivilegeScope {
             .map(|identity| (identity.repository_id, identity.name))
             .collect();
         Ok(Self {
+            authority_holder,
             origin_names,
             local_origin: store.repository_id.clone(),
             trusted_review_replicas: policy.trusted_review_replicas,

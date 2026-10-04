@@ -329,7 +329,15 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<PolicyFile>
         let layer =
             toml::from_str::<PolicyLayer>(&text).with_context(|| format!("malformed {origin}"))?;
         if let Some(replica) = &layer.replica {
-            if source == PROJECT_SOURCE {
+            if source == PROJECT_SOURCE
+                && toml::from_str::<toml::Value>(&text)?["replica"]
+                    .as_table()
+                    .is_some_and(|table| {
+                        table
+                            .keys()
+                            .any(|key| key != "provisional_enabled" && key != "protected_targets")
+                    })
+            {
                 anyhow::bail!("{origin}: replica enrollment and review trust are operator-only");
             }
             replica
@@ -363,7 +371,21 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<PolicyFile>
     for (source, layer) in layers {
         if let Some(raw) = layer.replica {
             sources.record("replica".into(), &source);
-            replica = raw;
+            let disabled = replica.provisional_enabled == Some(false)
+                || raw.provisional_enabled == Some(false);
+            let mut protected = replica.protected_targets.clone();
+            protected.extend(raw.protected_targets.iter().cloned());
+            if source != PROJECT_SOURCE {
+                replica = raw;
+            } else {
+                replica.provisional_enabled = raw.provisional_enabled;
+            }
+            if disabled {
+                replica.provisional_enabled = Some(false);
+            }
+            protected.sort();
+            protected.dedup();
+            replica.protected_targets = protected;
         }
         if let Some(defaults) = layer.defaults {
             for table in ["change", "integration"] {

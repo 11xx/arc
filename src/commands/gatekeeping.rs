@@ -2316,6 +2316,9 @@ pub struct DebtDeclaration {
 
 /// Everything an integration was asked for beyond which changes to land.
 pub struct IntegrateArgs {
+    pub provisional: bool,
+    pub for_replica: Option<String>,
+    pub for_forge: Option<String>,
     pub shape: Option<integration::Shape>,
     pub tags: Vec<String>,
     pub into: Option<String>,
@@ -2331,7 +2334,13 @@ pub struct IntegrateArgs {
 }
 
 pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Result<i32> {
+    if args.provisional {
+        return super::provisional::integrate_provisionally(ctx, references, args);
+    }
     let IntegrateArgs {
+        provisional: _,
+        for_replica: _,
+        for_forge: _,
         shape,
         tags,
         into,
@@ -3271,6 +3280,7 @@ fn integrate_one(
                 send.authorization,
             );
         }
+        Decision::Provisional(_) => bail!("authoritative decision produced a provisional plan"),
         Decision::Merge(plan) => {
             warn_moved(moved.as_deref());
             plan
@@ -3300,6 +3310,15 @@ fn integrate_one(
         &store,
         &change_id,
         Payload::ChangeIntegrated {
+            authority_grant_event_id: crate::replica::observed_authority(&store)?
+                .map(|a| a.grant_event_id),
+            provisional_resolutions: if crate::replica::observed_authority(&store)?.is_some_and(
+                |authority| authority.holder_repository_id.as_deref() == Some(&store.repository_id),
+            ) {
+                crate::provisional::acceptances(&st, &approved_patchset_id, &approved_head)?
+            } else {
+                Vec::new()
+            },
             integrated_commit: old_target.clone(),
             source_patchset_id: approved_patchset_id.clone(),
             source_head: approved_head.clone(),
@@ -3923,6 +3942,7 @@ fn authorization_basis(
         verdict_provisional: approval.verdict_provisional,
         gate_evidence,
         prerequisites,
+        provisional_prerequisites: Vec::new(),
         // Empty by construction: `integrate_ready` is false while either is
         // non-empty, so the event cannot be written otherwise. Recording them
         // says the guard checked, rather than leaving an auditor to infer it.
@@ -3964,7 +3984,7 @@ fn ensure_destination_actor(ctx: &Ctx, policy: &crate::policy::PolicyFile) -> Re
     Ok(())
 }
 
-fn normalized_declarations(
+pub(super) fn normalized_declarations(
     declarations: crate::declarations::Declarations,
     st: &ChangeState,
 ) -> integration::Declarations {
@@ -4308,6 +4328,10 @@ fn integration_facts(
         Err(error) => (Err(anyhow::anyhow!("{error}")), Err(error)),
     };
     IntegrationFacts {
+        mode: integration::Mode::Authoritative,
+        mode_refusal: crate::replica::integration_refusal(store).ok().flatten(),
+        publication_target: target.into(),
+        recipient: None,
         lifecycle_allows_integration: report.state == "open"
             && !st.iterating
             && report.fork.is_none(),
@@ -4378,6 +4402,7 @@ fn integrate_dry_run_json(
             contribution_shape(ctx, target, &send.approved.head, send.contribution.history)?;
             IntegrationPlan::of_send(&st.change_id, &send)
         }
+        Decision::Provisional(_) => bail!("authoritative decision produced a provisional plan"),
         Decision::Merge(plan) => {
             if plan.shape == crate::model::IntegrationShape::FastForward {
                 refuse_initialized_gitlink_changes(

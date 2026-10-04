@@ -1672,6 +1672,31 @@ pub(crate) fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<()> {
     })
 }
 
+pub(crate) fn observed_authority(store: &Store) -> Result<Option<crate::model::AuthorityObserved>> {
+    Ok(
+        snapshot(&load_events(store)?, &store.repository_id)?.map(|snapshot| {
+            crate::model::AuthorityObserved {
+                grant_event_id: snapshot.authority_event_id,
+                holder_repository_id: snapshot.authority.holder.map(|holder| holder.repository_id),
+            }
+        }),
+    )
+}
+
+pub(crate) fn grant_holder(store: &Store, grant: &str) -> Result<Option<String>> {
+    let events = load_events(store)?;
+    let Some(position) = events.iter().position(|event| event.event_id == grant) else {
+        return Ok(None);
+    };
+    let Some(state) = snapshot(&events[..=position], &events[0].actor.repository_id)? else {
+        return Ok(None);
+    };
+    Ok((state.authority_event_id == grant)
+        .then_some(state.authority.holder)
+        .flatten()
+        .map(|holder| holder.repository_id))
+}
+
 #[cfg(test)]
 mod authority_tests {
     use super::*;

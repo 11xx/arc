@@ -536,6 +536,11 @@ impl Serialize for Readiness {
 
 #[derive(Debug, Serialize)]
 pub struct StatusReport {
+    pub integration_mode: crate::integration::Mode,
+    pub integration_mode_refusal: Option<String>,
+    pub provisional_integrations: Vec<crate::provisional::Obligation>,
+    pub obsolete_provisional_ancestry: Vec<String>,
+    pub provisional_prerequisites: Vec<crate::model::ProvisionalPrerequisite>,
     pub recorded_verdict_tips: Vec<String>,
     pub eligible_verdict_tips: Vec<String>,
     pub verdict_assessments: Vec<VerdictAssessment>,
@@ -1598,6 +1603,7 @@ fn build_report(
         .unwrap_or_default();
 
     let blockers = blockers::derive(&BlockerFacts {
+        mode_refused: false,
         closed: state.is_closed(),
         branch_missing: current_head.is_none(),
         // A closed change is judged by nothing further, so a target deleted
@@ -1815,6 +1821,11 @@ fn build_report(
     };
 
     Ok(StatusReport {
+        obsolete_provisional_ancestry: Vec::new(),
+        provisional_prerequisites: Vec::new(),
+        integration_mode: crate::integration::Mode::Authoritative,
+        integration_mode_refusal: None,
+        provisional_integrations: crate::provisional::project_obligations(state),
         recorded_verdict_tips: state
             .verdict_tips()
             .iter()
@@ -1960,6 +1971,29 @@ pub fn claim_status_at(
 }
 
 impl StatusReport {
+    pub fn require_provisional_replay(&mut self, commits: Vec<String>) {
+        self.obsolete_provisional_ancestry = commits;
+        if !self.obsolete_provisional_ancestry.is_empty()
+            && !self.readiness.blockers.contains(&Blocker::NeedsRebase)
+        {
+            self.readiness.blockers.push(Blocker::NeedsRebase);
+            self.readiness.blockers.sort_by_key(|blocker| {
+                blockers::PRIORITY
+                    .iter()
+                    .position(|candidate| candidate == blocker)
+            });
+        }
+    }
+    pub fn select_mode(&mut self, mode: crate::integration::Mode, refusal: Option<String>) {
+        self.integration_mode = mode;
+        self.integration_mode_refusal = refusal;
+        self.readiness
+            .blockers
+            .retain(|blocker| *blocker != Blocker::IntegrationMode);
+        if self.integration_mode_refusal.is_some() {
+            self.readiness.blockers.insert(0, Blocker::IntegrationMode);
+        }
+    }
     /// Every blocker on the change, highest precedence first.
     pub fn blockers(&self) -> &[Blocker] {
         &self.readiness.blockers

@@ -104,6 +104,10 @@ pub struct Confirmation {
 /// can fail carries its error, which becomes the refusal only when the
 /// decision reaches it.
 pub struct IntegrationFacts {
+    pub mode: Mode,
+    pub mode_refusal: Option<String>,
+    pub publication_target: String,
+    pub recipient: Option<crate::model::ProvisionalRecipient>,
     /// The change is open, not iterating, and its branch is not fork work.
     pub lifecycle_allows_integration: bool,
     pub shape: Shape,
@@ -163,6 +167,7 @@ pub struct SendPlan {
 pub enum Refusal {
     /// The readiness report blocks; it explains why.
     NotReady,
+    Mode(String),
     Diverged,
     /// Readiness or the basis differed between two readings.
     ConfigurationMoved,
@@ -182,6 +187,7 @@ impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Refusal::Diverged => f.write_str("target is not an ancestor of the approved head"),
+            Refusal::Mode(reason) => f.write_str(reason),
             Refusal::NotReady => f.write_str("the change is not ready to integrate"),
             Refusal::ConfigurationMoved => f.write_str(CONFIGURATION_MOVED),
             Refusal::TrackedDirt { checkout } => write!(
@@ -212,6 +218,7 @@ impl Refusal {
 
 #[derive(Debug)]
 pub enum Decision {
+    Provisional(ProvisionalPlan),
     Merge(MergePlan),
     ReadyToSend(SendPlan),
     Refused(Refusal),
@@ -224,6 +231,7 @@ pub enum Moved {
     Target { from: String, to: String },
     Gates { changed: Vec<String> },
     Policy,
+    Preparation,
     Approval { from: String, to: String },
 }
 
@@ -241,6 +249,7 @@ impl fmt::Display for Moved {
                 "the gate declarations you checked changed: {}",
                 changed.join(", ")
             ),
+            Moved::Preparation => f.write_str("the integration mode, publication target, recipient or provisional prerequisites you checked changed"),
             Moved::Policy => f.write_str("the policy you checked changed"),
             Moved::Approval { from, to } => {
                 write!(f, "the approval you checked moved from {from} to {to}")
@@ -274,6 +283,16 @@ pub fn describe_moved(moved: &[Moved]) -> Option<String> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IntegrationPlan {
     pub schema: String,
+    #[serde(default)]
+    pub mode: Mode,
+    #[serde(default)]
+    pub publication_target: String,
+    #[serde(default)]
+    pub staging_destination: Option<String>,
+    #[serde(default)]
+    pub recipient: Option<crate::model::ProvisionalRecipient>,
+    #[serde(default)]
+    pub provisional_prerequisites: Vec<crate::model::ProvisionalPrerequisite>,
     pub change_id: String,
     /// `change-integrated`, or `ready-to-send` for a contributed change.
     pub records: String,
@@ -290,6 +309,11 @@ pub struct IntegrationPlan {
 impl IntegrationPlan {
     pub fn of_merge(change_id: &str, plan: &MergePlan) -> Self {
         IntegrationPlan {
+            provisional_prerequisites: Vec::new(),
+            mode: Mode::Authoritative,
+            publication_target: plan.target.clone(),
+            staging_destination: None,
+            recipient: None,
             schema: PLAN_SCHEMA.to_string(),
             change_id: change_id.to_string(),
             records: "change-integrated".to_string(),
@@ -306,6 +330,11 @@ impl IntegrationPlan {
 
     pub fn of_send(change_id: &str, plan: &SendPlan) -> Self {
         IntegrationPlan {
+            provisional_prerequisites: Vec::new(),
+            mode: Mode::Authoritative,
+            publication_target: plan.target.clone(),
+            staging_destination: None,
+            recipient: None,
             schema: PLAN_SCHEMA.to_string(),
             change_id: change_id.to_string(),
             records: "ready-to-send".to_string(),
@@ -402,6 +431,9 @@ pub fn decide(facts: IntegrationFacts, prior: Option<&IntegrationPlan>) -> Integ
 }
 
 fn decision(facts: IntegrationFacts) -> Decision {
+    if let Some(reason) = facts.mode_refusal {
+        return Decision::Refused(Refusal::Mode(reason));
+    }
     macro_rules! observed {
         ($fact:expr) => {
             match $fact {
@@ -440,6 +472,23 @@ fn decision(facts: IntegrationFacts) -> Decision {
         return Decision::Refused(Refusal::ConfigurationMoved);
     }
 
+    if facts.mode == Mode::Provisional {
+        let Some(recipient) = facts.recipient else {
+            return Decision::Refused(Refusal::Failed(anyhow!("provisional recipient is missing")));
+        };
+        let Some(tree) = observed!(facts.evaluated_tree) else {
+            return Decision::Refused(Refusal::Diverged);
+        };
+        return Decision::Provisional(ProvisionalPlan {
+            publication_target: facts.publication_target,
+            staging_branch: facts.target,
+            staging_before: observed!(facts.target_revision),
+            approved,
+            evaluated_tree: tree,
+            recipient,
+            authorization,
+        });
+    }
     if let Some(contribution) = observed!(facts.contribution) {
         return Decision::ReadyToSend(SendPlan {
             target: facts.target,
@@ -495,6 +544,16 @@ fn decision(facts: IntegrationFacts) -> Decision {
 /// facts could not observe is not reported: unknown is not moved.
 fn moved(prior: &IntegrationPlan, facts: &IntegrationFacts) -> Vec<Moved> {
     let mut moved = Vec::new();
+    if prior.mode != facts.mode
+        || prior.recipient != facts.recipient
+        || (!prior.publication_target.is_empty()
+            && prior.publication_target != facts.publication_target)
+        || facts.basis.as_ref().is_ok_and(|basis| {
+            prior.authorization.provisional_prerequisites != basis.provisional_prerequisites
+        })
+    {
+        moved.push(Moved::Preparation);
+    }
 
     let prior_head = format!("{} ({})", prior.approved_patchset_id, prior.approved_head);
     match &facts.approved {
@@ -585,6 +644,47 @@ fn approval_label(
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Mode {
+    #[default]
+    Authoritative,
+    Provisional,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvisionalPlan {
+    pub publication_target: String,
+    pub staging_branch: String,
+    pub staging_before: String,
+    pub approved: Approved,
+    pub evaluated_tree: String,
+    pub recipient: crate::model::ProvisionalRecipient,
+    pub authorization: AuthorizationBasis,
+}
+impl IntegrationPlan {
+    pub fn of_provisional(change: &str, plan: &ProvisionalPlan) -> Self {
+        Self {
+            schema: PLAN_SCHEMA.into(),
+            mode: Mode::Provisional,
+            provisional_prerequisites: plan.authorization.provisional_prerequisites.clone(),
+            change_id: change.into(),
+            publication_target: plan.publication_target.clone(),
+            staging_destination: Some(plan.staging_branch.clone()),
+            recipient: Some(plan.recipient.clone()),
+            records: "change-provisionally-integrated".into(),
+            target: plan.staging_branch.clone(),
+            target_revision: plan.staging_before.clone(),
+            approved_patchset_id: plan.approved.patchset_id.clone(),
+            approved_head: plan.approved.head.clone(),
+            merge_commit: true,
+            shape: Some(crate::model::IntegrationShape::Merge),
+            evaluated_tree: Some(plan.evaluated_tree.clone()),
+            authorization: plan.authorization.clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -623,6 +723,7 @@ mod tests {
             external_verdict: None,
             gate_evidence: BTreeMap::from([("build".to_string(), "evidence-1".to_string())]),
             prerequisites: Vec::new(),
+            provisional_prerequisites: Vec::new(),
             blocking_findings: Vec::new(),
             holds: Vec::new(),
             gates: gates(),
@@ -644,6 +745,10 @@ mod tests {
     /// `OLD_TARGET`.
     fn ready() -> IntegrationFacts {
         IntegrationFacts {
+            mode: Mode::Authoritative,
+            mode_refusal: None,
+            publication_target: "main".into(),
+            recipient: None,
             lifecycle_allows_integration: true,
             shape: Shape::NoFf,
             target_is_ancestor: Ok(true),
