@@ -2011,6 +2011,8 @@ enum Cmd {
         /// false. With provisional execution, emit `arc-provisional-transition/1`
         /// with observed refs, event publication, retained intent and recovery command.
         /// Applied intent recovery precedes eligibility checks for a fresh preparation.
+        /// Unapplied retries enforce current readiness and the saved basis. Explicit
+        /// destination or recipient conflicts refuse with the exact retry parameters.
         /// One change only
         #[arg(long, requires = "integration_json_mode")]
         json: bool,

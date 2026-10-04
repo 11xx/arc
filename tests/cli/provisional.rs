@@ -2491,3 +2491,242 @@ fn a_clock_ahead_previous_grant_approval_cannot_clear_an_unobserved_rejection() 
         .assert()
         .success();
 }
+
+fn unapplied_provisional_intent(worker: &Repo, change: &str) -> (PathBuf, Vec<u8>) {
+    use std::os::unix::fs::PermissionsExt;
+    let hook = worker.root.join(".git/hooks/reference-transaction");
+    fs::write(
+        &hook,
+        "#!/bin/sh\nif [ \"$1\" = prepared ]; then exit 1; fi\n",
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    worker
+        .arc(&worker.root)
+        .args(["integrate", change, "--provisional"])
+        .assert()
+        .code(1);
+    fs::remove_file(hook).unwrap();
+    let path = worker
+        .root
+        .join(".git/arc/provisional")
+        .join(format!("{change}.json"));
+    let bytes = fs::read(&path).unwrap();
+    assert!(git_out(
+        &worker.root,
+        &["branch", "--list", "arc/provisional/worker/master"]
+    )
+    .is_empty());
+    (path, bytes)
+}
+
+fn current_guard_refuses_unapplied_retry(guard: &str, code: i32) {
+    let (_authority, worker) = worker();
+    let change = prepared(&worker);
+    let (intent, bytes) = unapplied_provisional_intent(&worker, &change);
+    match guard {
+        "finding" => {
+            stdout(worker.arc(&worker.root).args([
+                "finding",
+                &change,
+                "--blocking",
+                "--summary",
+                "blocking",
+                "--body",
+                "repair required",
+            ]));
+        }
+        "hold" => {
+            stdout(
+                worker
+                    .arc(&worker.root)
+                    .args(["hold", &change, "--reason", "wait"]),
+            );
+        }
+        "closed" => {
+            stdout(
+                worker
+                    .arc(&worker.root)
+                    .args(["close", &change, "--abandoned"]),
+            );
+        }
+        "iteration" => {
+            stdout(worker.arc(&worker.root).args(["iterating", &change]));
+        }
+        "gate" => worker.declare_gates_locally("[gates.required]\ncommand='false'\n"),
+        "prerequisite" => {
+            let (blocker, _, _) = change_with_patchset(&worker, "blocker");
+            stdout(
+                worker
+                    .arc(&worker.root)
+                    .args(["metadata", &change, "--blocked-by", &blocker]),
+            );
+        }
+        "approval" => {
+            stdout(worker.arc(&worker.root).args([
+                "review",
+                &change,
+                "--verdict",
+                "changes-requested",
+                "--cause",
+                "executor",
+            ]));
+        }
+        "probe" => {
+            stdout(
+                worker
+                    .arc(&worker.root)
+                    .args([
+                        "brief",
+                        &change,
+                        "--body-file",
+                        "-",
+                        "--probe",
+                        "regression=false",
+                    ])
+                    .write_stdin("A discriminating acceptance probe."),
+            );
+            stdout(
+                worker
+                    .arc(&worker.home.join(".worktrees/repo-prepared"))
+                    .args(["snapshot", &change]),
+            );
+            approve(&worker, &change);
+        }
+        "fork" => {
+            git(&worker.root, &["branch", "fork/prepared", "arc/prepared"]);
+            rewrite_event(&worker, &change, "change-opened", |event| {
+                event["branch"] = serde_json::json!("fork/prepared")
+            });
+        }
+        _ => panic!("unknown guard"),
+    }
+    worker
+        .arc(&worker.root)
+        .args(["check", &change, "--provisional"])
+        .assert()
+        .code(code);
+    let heads = git_out(&worker.root, &["show-ref", "--heads"]);
+    worker
+        .arc(&worker.root)
+        .args(["integrate", &change, "--provisional"])
+        .assert()
+        .code(code);
+    assert_eq!(fs::read(intent).unwrap(), bytes);
+    assert_eq!(git_out(&worker.root, &["show-ref", "--heads"]), heads);
+    let saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(git_out(
+        &worker.root,
+        &[
+            "for-each-ref",
+            &format!(
+                "refs/arc/provisional/{change}/{}",
+                saved["event"]["event_id"].as_str().unwrap()
+            )
+        ]
+    )
+    .is_empty());
+}
+
+#[test]
+fn unapplied_retry_respects_blocking_findings() {
+    current_guard_refuses_unapplied_retry("finding", 2);
+}
+#[test]
+fn unapplied_retry_respects_holds() {
+    current_guard_refuses_unapplied_retry("hold", 4);
+}
+#[test]
+fn unapplied_retry_respects_abandonment() {
+    current_guard_refuses_unapplied_retry("closed", 6);
+}
+#[test]
+fn unapplied_retry_respects_iteration() {
+    current_guard_refuses_unapplied_retry("iteration", 13);
+}
+#[test]
+fn unapplied_retry_respects_required_gates() {
+    current_guard_refuses_unapplied_retry("gate", 5);
+}
+#[test]
+fn unapplied_retry_respects_prerequisites() {
+    current_guard_refuses_unapplied_retry("prerequisite", 7);
+}
+#[test]
+fn unapplied_retry_respects_approval() {
+    current_guard_refuses_unapplied_retry("approval", 3);
+}
+#[test]
+fn unapplied_retry_respects_probes() {
+    current_guard_refuses_unapplied_retry("probe", 12);
+}
+#[test]
+fn unapplied_retry_respects_fork_isolation() {
+    current_guard_refuses_unapplied_retry("fork", 15);
+}
+
+#[test]
+fn retained_retry_refuses_changed_destination_or_recipient_before_mutation() {
+    for arguments in [
+        vec!["--into", "arc/provisional/worker/alternate"],
+        vec!["--for-forge", "another-route"],
+        vec!["--for-replica", "worker"],
+        vec![
+            "--into",
+            "arc/provisional/worker/alternate",
+            "--for-forge",
+            "another-route",
+        ],
+    ] {
+        let (_authority, worker) = worker();
+        let change = prepared(&worker);
+        let (intent, bytes) = unapplied_provisional_intent(&worker, &change);
+        let heads = git_out(&worker.root, &["show-ref", "--heads"]);
+        let refused = worker
+            .arc(&worker.root)
+            .args(["integrate", &change, "--provisional"])
+            .args(arguments)
+            .assert()
+            .code(1);
+        let message = String::from_utf8_lossy(&refused.get_output().stderr);
+        assert!(
+            message.contains("--into")
+                && message.contains("arc/provisional/worker/master")
+                && message.contains("--for-replica")
+                && message.contains("authority"),
+            "{message}"
+        );
+        assert_eq!(fs::read(intent).unwrap(), bytes);
+        assert_eq!(git_out(&worker.root, &["show-ref", "--heads"]), heads);
+        prepare(&worker, &change);
+    }
+}
+
+#[test]
+fn unapplied_retry_does_not_substitute_a_later_authorization_basis() {
+    let (_authority, worker) = worker();
+    let change = prepared(&worker);
+    let (intent, bytes) = unapplied_provisional_intent(&worker, &change);
+    let tree = worker.home.join(".worktrees/repo-prepared");
+    worker.commit(
+        &tree,
+        "revision.txt",
+        "revised\n",
+        "feat: revised preparation",
+    );
+    stdout(worker.arc(&tree).args(["snapshot", &change]));
+    approve(&worker, &change);
+    worker
+        .arc(&worker.root)
+        .args(["check", &change, "--provisional"])
+        .assert()
+        .success();
+    let heads = git_out(&worker.root, &["show-ref", "--heads"]);
+    worker
+        .arc(&worker.root)
+        .args(["integrate", &change, "--provisional"])
+        .assert()
+        .code(1);
+    assert_eq!(fs::read(intent).unwrap(), bytes);
+    assert_eq!(git_out(&worker.root, &["show-ref", "--heads"]), heads);
+}

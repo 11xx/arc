@@ -1189,6 +1189,11 @@ PAIR REPLICA STORES
   staging branch: the exact retention pin and containment in its staging history
   prove the applied transition, whose recovery publishes its event without
   resetting the later staging head. Divergent refs preserve the intent and refuse.
+  An unapplied retry rereads lifecycle and every readiness guard under its
+  transition lock. A refusal retains the saved event and authorization; an
+  eligible retry must still match that basis and ref transition exactly.
+  Explicit destination or recipient changes refuse before any mutation and
+  name the exact saved retry parameters.
   A retry finishes that transition or preserves competing refs, and a completed
   matching preparation reuses its merge and event. Its dry-run plan names
   reuse_event_id and reuse_commit and declares that it creates no merge.

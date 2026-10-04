@@ -714,6 +714,62 @@ fn finish(ctx: &Ctx, store: &Store, intent: &Intent, json: bool) -> Result<i32> 
     Ok(exit_code)
 }
 
+fn refuse_intent(
+    ctx: &Ctx,
+    store: &Store,
+    intent: &Intent,
+    json: bool,
+    code: i32,
+    reason: &str,
+) -> Result<i32> {
+    let transition = PendingTransition::observe(&ctx.cwd, store, intent)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema": TRANSITION_SCHEMA, "exit_code": code, "transition": transition,
+                "error": reason,
+            }))?
+        );
+    } else {
+        eprintln!("{reason}\n{}", transition.describe());
+    }
+    Ok(code)
+}
+
+fn saved_routing(
+    store: &Store,
+    recipient: &ProvisionalRecipient,
+) -> Result<(Option<String>, Option<String>)> {
+    match recipient {
+        ProvisionalRecipient::Forge { reference } => Ok((None, Some(reference.clone()))),
+        ProvisionalRecipient::Replica { repository_id } => {
+            let status = crate::replica::status(store)?;
+            Ok((
+                status
+                    .local
+                    .iter()
+                    .chain(&status.peers)
+                    .find(|replica| &replica.repository_id == repository_id)
+                    .map(|replica| replica.name.clone()),
+                None,
+            ))
+        }
+    }
+}
+
+fn retry_command(change: &str, branch: &str, replica: Option<&str>, forge: Option<&str>) -> String {
+    let routing = match (replica, forge) {
+        (Some(name), _) => format!(" --for-replica {}", crate::context::shell_quote(name)),
+        (_, Some(reference)) => format!(" --for-forge {}", crate::context::shell_quote(reference)),
+        _ => String::new(),
+    };
+    format!(
+        "arc integrate {change} --provisional --into {}{routing}",
+        crate::context::shell_quote(branch)
+    )
+}
+
 pub fn integrate_provisionally(
     ctx: &Ctx,
     references: &[String],
@@ -743,6 +799,41 @@ pub fn integrate_provisionally(
         let intent = store
             .provisional_intent(&initial.change_id)?
             .context("provisional intent disappeared while acquiring its transition locks")?;
+        let Payload::ChangeProvisionallyIntegrated {
+            staging_branch,
+            recipient,
+            source_patchset_id,
+            source_head,
+            publication_target,
+            staging_before,
+            evaluated_tree,
+            authorization,
+            ..
+        } = &intent.event.payload
+        else {
+            bail!("provisional intent has the wrong event kind");
+        };
+        let (replica, forge) = saved_routing(&store, recipient)?;
+        let exact_retry = retry_command(
+            &initial.change_id,
+            staging_branch,
+            replica.as_deref(),
+            forge.as_deref(),
+        );
+        if args.into.as_deref().is_some_and(|branch| {
+            branch.strip_prefix("refs/heads/").unwrap_or(branch) != staging_branch
+        }) || args
+            .for_replica
+            .as_ref()
+            .is_some_and(|requested| replica.as_ref() != Some(requested))
+            || args
+                .for_forge
+                .as_ref()
+                .is_some_and(|requested| forge.as_ref() != Some(requested))
+        {
+            return refuse_intent(ctx, &store, &intent, args.json, 1,
+                &format!("requested destination or recipient conflicts with retained transition {}; exact retry: {exact_retry}", intent.event.event_id));
+        }
         let observed = PendingTransition::observe(&ctx.cwd, &store, &intent)?;
         if args.dry_run {
             if args.json {
@@ -759,22 +850,38 @@ pub fn integrate_provisionally(
             return Ok(1);
         }
         if !observed.applied && observed.event_state != "published" {
-            match select(
+            let state = store.state(&initial.change_id)?;
+            let selection = match select(
                 ctx,
                 &store,
-                &initial,
+                &state,
                 Some(staging_branch),
-                args.for_replica.as_deref(),
-                args.for_forge.as_deref(),
+                replica.as_deref(),
+                forge.as_deref(),
             )? {
-                Ok(_) => (),
+                Ok(selection) => selection,
                 Err((code, refusal)) => {
-                    eprintln!(
-                        "Cannot apply provisional intent: {refusal}\n{}",
-                        observed.describe()
-                    );
-                    return Ok(code);
+                    return refuse_intent(ctx, &store, &intent, args.json, code, &refusal);
                 }
+            };
+            ctx.ensure_declared_actor(&store)?;
+            ctx.ensure_target_declares_actor(&state)?;
+            let fresh = match plan(ctx, &store, &state, &selection, None)? {
+                Ok(fresh) => fresh,
+                Err(code) => return refuse_intent(ctx, &store, &intent, args.json, code,
+                    &format!("current readiness refuses the unapplied transition; exact retry: {exact_retry}")),
+            };
+            if fresh.approved.patchset_id != *source_patchset_id
+                || fresh.approved.head != *source_head
+                || fresh.publication_target != *publication_target
+                || fresh.staging_before != *staging_before
+                || fresh.evaluated_tree != *evaluated_tree
+                || fresh.recipient != *recipient
+                || fresh.authorization != *authorization
+                || fresh.reuse.is_some()
+            {
+                return refuse_intent(ctx, &store, &intent, args.json, 1,
+                    &format!("current basis or refs differ from retained transition {}; saved event and authorization remain unchanged; exact retry: {exact_retry}", intent.event.event_id));
             }
         }
         return finish(ctx, &store, &intent, args.json);
