@@ -1199,6 +1199,9 @@ pub enum JournalCmd {
     /// Edits to the base or a shared block refuse the entire bundle, naming
     /// both digests and the first differing block. Storage tiers must agree.
     /// Events retain their provenance; a repeated bundle changes nothing.
+    /// Interrupted writes retain a prepared transaction; an import completes
+    /// it before comparing revisions. Journal event reads and writes refuse
+    /// a pending transaction; --dry-run requires a completed exchange.
     Import {
         /// Input file ('-' for stdin)
         input: String,
@@ -1808,6 +1811,14 @@ fn import_artifacts(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
     let receipt_path = exchange_imports_dir(&hot).join(format!("{digest}.json"));
     let _replica_state = crate::replica::lock(&store)?;
     let _transition = lock_journal_transition(&hot)?;
+    if exchange_pending_path(&hot).exists() {
+        if dry_run {
+            bail!("journal exchange is incomplete; retry journal import without --dry-run before reading revisions");
+        }
+        ctx.ensure_declared_actor(&store)?;
+        let _events = lock_journal_events(&hot)?;
+        finish_exchange_transaction(&hot)?;
+    }
     let local_events = read_events(&hot)?;
     let mut held = BTreeSet::new();
     for event in &local_events {
@@ -1916,27 +1927,6 @@ fn import_artifacts(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
     if let Err(error) = ensure_bound(ctx, &hot) {
         eprintln!("warning: could not record this journal's project binding: {error:#}");
     }
-    for entry in &plan {
-        if entry.local_digest.is_some() && entry.merged_body.is_none() {
-            continue;
-        }
-        let dir = if entry.artifact.storage == crate::journal_exchange::COLD_STORAGE {
-            cold.clone()
-        } else {
-            hot.clone()
-        };
-        let path = dir.join(&entry.artifact.file);
-        if let Some(body) = &entry.merged_body {
-            replace_exchange_artifact(&dir, &path, body)?;
-            let cold_path = cold.join(&entry.artifact.file);
-            if dir == hot && cold_path.is_file() {
-                replace_exchange_artifact(&cold, &cold_path, body)?;
-            }
-        } else {
-            write_exchange_artifact(&dir, &path, &entry.artifact.body)?;
-        }
-    }
-    append_exchange_events(&hot, &plan)?;
     let receipt = crate::journal_exchange::ImportReceipt {
         schema: crate::journal_exchange::IMPORT_RECEIPT_SCHEMA.to_string(),
         bundle_sha256: digest.clone(),
@@ -1953,7 +1943,44 @@ fn import_artifacts(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
             })
             .collect(),
     };
-    write_exchange_receipt(&receipt_path, &receipt)?;
+    let _events = lock_journal_events(&hot)?;
+    let mut events = match std::fs::read_to_string(hot.join("events.jsonl")) {
+        Ok(events) => events,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in &plan {
+        for event in &entry.new_events {
+            events.push_str(&serde_json::to_string(event)?);
+            events.push('\n');
+        }
+    }
+    let mut bodies = Vec::new();
+    for entry in &plan {
+        if entry.local_digest.is_some() && entry.merged_body.is_none() {
+            continue;
+        }
+        let mut artifact = entry.artifact.clone();
+        if let Some(body) = &entry.merged_body {
+            artifact.body = body.clone();
+        }
+        artifact.digest = crate::journal_exchange::body_digest(&artifact.body);
+        if artifact.storage == crate::journal_exchange::HOT_STORAGE
+            && cold.join(&artifact.file).is_file()
+        {
+            let mut duplicate = artifact.clone();
+            duplicate.storage = crate::journal_exchange::COLD_STORAGE.to_string();
+            bodies.push(duplicate);
+        }
+        bodies.push(artifact);
+    }
+    let pending = ExchangeTransaction {
+        bodies,
+        events,
+        receipt,
+    };
+    publish_exchange_file(&exchange_pending_path(&hot), &serde_json::to_vec(&pending)?)?;
+    finish_exchange_transaction(&hot)?;
     print_exchange_import(&bundle, &digest, &plan, false);
     Ok(0)
 }
@@ -1996,89 +2023,95 @@ fn print_exchange_import(
     }
 }
 
-/// Write one imported body into the journal storage the bundle recorded,
-/// creating that directory and refusing a name that has appeared since the
-/// destination was checked.
-fn write_exchange_artifact(dir: &Path, path: &Path, body: &str) -> Result<()> {
-    use std::io::Write as _;
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("cannot create journal directory {}", dir.display()))?;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .with_context(|| {
-            format!(
-                "cannot create {} (an artifact with this name already exists)",
-                path.display()
-            )
-        })?;
-    file.write_all(body.as_bytes())
-        .with_context(|| format!("cannot write {}", path.display()))
+/// The prepared bodies, complete event log, and receipt are one recoverable unit.
+/// Readers and writers refuse a pending exchange until an import completes it.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExchangeTransaction {
+    bodies: Vec<crate::journal_exchange::BundledArtifact>,
+    events: String,
+    receipt: crate::journal_exchange::ImportReceipt,
 }
 
-/// Replace a held revision atomically while the journal transition lock is held.
-fn replace_exchange_artifact(dir: &Path, path: &Path, body: &str) -> Result<()> {
+fn exchange_pending_path(hot: &Path) -> PathBuf {
+    hot.join("exchange/pending.json")
+}
+
+fn ensure_exchange_settled(hot: &Path) -> Result<()> {
+    if exchange_pending_path(hot).exists() {
+        bail!("journal exchange is incomplete; retry journal import before reading or writing the journal");
+    }
+    Ok(())
+}
+
+/// Complete a prepared import under both journal locks, before revision parsing.
+fn finish_exchange_transaction(hot: &Path) -> Result<()> {
+    let path = exchange_pending_path(hot);
+    let pending: ExchangeTransaction = serde_json::from_slice(&std::fs::read(&path)?)
+        .context("cannot read pending journal exchange")?;
+    crate::ids::validate_id_component(&pending.receipt.bundle_sha256)?;
+    for artifact in &pending.bodies {
+        if artifact.file.contains(['/', '\\'])
+            || parse_artifact_name(&artifact.file).is_none()
+            || !matches!(
+                artifact.storage.as_str(),
+                crate::journal_exchange::HOT_STORAGE | crate::journal_exchange::COLD_STORAGE
+            )
+            || artifact.digest != crate::journal_exchange::body_digest(&artifact.body)
+        {
+            bail!("invalid body in pending journal exchange");
+        }
+    }
+    // Respect the log's write permissions before publishing any body.
+    let events_path = hot.join("events.jsonl");
+    let events = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&events_path)
+        .with_context(|| format!("cannot open {}", events_path.display()))?;
+    drop(events);
+    for artifact in &pending.bodies {
+        let dir = if artifact.storage == crate::journal_exchange::COLD_STORAGE {
+            archive_dir(hot)
+        } else {
+            hot.to_path_buf()
+        };
+        publish_exchange_file(&dir.join(&artifact.file), artifact.body.as_bytes())?;
+    }
+    publish_exchange_file(&events_path, pending.events.as_bytes())?;
+    let receipt = exchange_imports_dir(hot).join(format!("{}.json", pending.receipt.bundle_sha256));
+    publish_exchange_file(&receipt, &serde_json::to_vec_pretty(&pending.receipt)?)?;
+    std::fs::remove_file(&path)?;
+    File::open(path.parent().context("pending exchange has no parent")?)?.sync_all()?;
+    Ok(())
+}
+
+/// Publish complete bytes by rename, preserving permissions and syncing the directory.
+fn publish_exchange_file(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write as _;
+    let dir = path
+        .parent()
+        .context("journal exchange file has no parent")?;
+    std::fs::create_dir_all(dir)?;
     let staging = dir.join(format!(".exchange-{}.tmp", ulid::Ulid::new()));
     let result = (|| -> Result<()> {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&staging)?;
-        file.set_permissions(std::fs::metadata(path)?.permissions())?;
-        file.write_all(body.as_bytes())?;
+        if let Ok(metadata) = std::fs::metadata(path) {
+            file.set_permissions(metadata.permissions())?;
+        }
+        file.write_all(bytes)?;
         file.sync_all()?;
         std::fs::rename(&staging, path)?;
+        File::open(dir)?.sync_all()?;
         Ok(())
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&staging);
     }
-    result.with_context(|| format!("cannot replace {}", path.display()))
-}
-
-/// Append the events an import brings, keeping the identity each was recorded
-/// under rather than recording the importer's.
-fn append_exchange_events(hot: &Path, plan: &[ExchangeImportPlan]) -> Result<()> {
-    use std::io::Write as _;
-    let _events = lock_journal_events(hot)?;
-    let path = hot.join("events.jsonl");
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .with_context(|| format!("cannot open {}", path.display()))?;
-    for entry in plan {
-        for event in &entry.new_events {
-            let mut line = serde_json::to_string(event)?;
-            line.push('\n');
-            file.write_all(line.as_bytes())
-                .with_context(|| format!("cannot append to {}", path.display()))?;
-        }
-    }
-    Ok(())
-}
-
-fn write_exchange_receipt(
-    path: &Path,
-    receipt: &crate::journal_exchange::ImportReceipt,
-) -> Result<()> {
-    use std::io::Write as _;
-    let dir = path
-        .parent()
-        .context("journal import receipt has no parent")?;
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("cannot create journal exchange directory {}", dir.display()))?;
-    let mut bytes = serde_json::to_vec_pretty(receipt)?;
-    bytes.push(b'\n');
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .with_context(|| format!("cannot record journal import receipt {}", path.display()))?;
-    file.write_all(&bytes)
-        .with_context(|| format!("cannot write {}", path.display()))
+    result.with_context(|| format!("cannot publish {}", path.display()))
 }
 
 /// A live claim arriving with a bundle on an artifact a live local claim
@@ -7575,6 +7608,7 @@ pub(crate) fn register_project(ctx: &Ctx) -> Result<()> {
 fn write_event(dir: &Path, event: &JournalEvent) -> Result<()> {
     use std::io::Write;
     let _events = lock_journal_events(dir)?;
+    ensure_exchange_settled(dir)?;
     let mut line = serde_json::to_string(event)?;
     line.push('\n');
     let journal_path = dir.join("events.jsonl");
@@ -7696,6 +7730,7 @@ fn parse_lane_marker(message: &str) -> Option<LaneMarker> {
 }
 
 pub(crate) fn read_events(dir: &Path) -> Result<Vec<JournalEvent>> {
+    ensure_exchange_settled(dir)?;
     let mut events = Vec::new();
     let jsonl = dir.join("events.jsonl");
     if jsonl.is_file() {

@@ -968,7 +968,10 @@ PAIR REPLICA STORES
   an artifact a live local claim holds is reported as a contest naming both
   replicas, and nothing on either claim's behalf is recorded. Importing the
   same bundle twice changes nothing; the receipt names the source replica and
-  bundle digest.
+  bundle digest. An interrupted write retains a prepared transaction with
+  the bodies, event log, and receipt. Journal event reads and writes refuse
+  that pending exchange; an import completes it before comparing revisions.
+  A dry-run requires the pending exchange to be completed first.
 
 KEEP WHAT THE WORK DISCOVERS (mid-change, before it is lost)
   arc keep --kind rejected   --body "<why it failed>" --evidence "<what showed it>"

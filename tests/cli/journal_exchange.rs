@@ -1008,6 +1008,131 @@ fn every_typed_append_and_reanswered_question_exchanges_in_both_directions() {
 }
 
 #[test]
+fn failed_event_append_preserves_bodies_and_retry_converges() {
+    use std::os::unix::fs::PermissionsExt;
+    let a = Repo::new();
+    let b = Repo::new();
+    pair(&a, &b, "a", "b");
+    let file = write_artifact(&a, "retry-merge", "discussion", "# Shared\n");
+    let initial = bundle_file(&a, "initial");
+    export(&a, &[&file], &initial);
+    assert!(import(&b, &initial, false).status.success());
+    for (repo, body) in [
+        (&b, "Position: for\n\nEarlier incoming.\n"),
+        (&a, "Position: amend\n\nLater held.\n"),
+    ] {
+        repo.arc(&repo.root)
+            .args(["journal", "position", &file, "--body-file", "-"])
+            .write_stdin(body)
+            .assert()
+            .success();
+    }
+    let from_b = bundle_file(&b, "from-b");
+    export(&b, &[&file], &from_b);
+    let dir = journal_dir(&a);
+    let before = fs::read(dir.join(&file)).unwrap();
+    let events = fs::read(dir.join("events.jsonl")).unwrap();
+    let permissions = fs::metadata(dir.join("events.jsonl"))
+        .unwrap()
+        .permissions();
+    fs::set_permissions(dir.join("events.jsonl"), fs::Permissions::from_mode(0o400)).unwrap();
+    let failed = import(&a, &from_b, false);
+    fs::set_permissions(dir.join("events.jsonl"), permissions).unwrap();
+    assert!(!failed.status.success(), "{failed:?}");
+    assert_eq!(fs::read(dir.join(&file)).unwrap(), before);
+    assert_eq!(fs::read(dir.join("events.jsonl")).unwrap(), events);
+    let retry = import(&a, &from_b, false);
+    assert!(retry.status.success(), "{retry:?}");
+    let merged = bundle_file(&a, "merged");
+    export(&a, &[&file], &merged);
+    assert!(import(&b, &merged, false).status.success());
+    assert_eq!(
+        fs::read(dir.join(&file)).unwrap(),
+        fs::read(journal_dir(&b).join(&file)).unwrap()
+    );
+    assert_event_sets_equal(&a, &b, &file);
+    let final_events = fs::read(dir.join("events.jsonl")).unwrap();
+    assert!(import(&a, &from_b, false).status.success());
+    assert_eq!(fs::read(dir.join("events.jsonl")).unwrap(), final_events);
+}
+
+#[test]
+fn pending_exchange_recovers_after_body_or_receipt_publication_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    for failure in ["body", "receipt", "interrupted-log"] {
+        let a = Repo::new();
+        let b = Repo::new();
+        pair(&a, &b, "a", "b");
+        let file = write_artifact(&a, "recover-unit", "discussion", "# Shared\n");
+        let initial = bundle_file(&a, "initial");
+        export(&a, &[&file], &initial);
+        assert!(import(&b, &initial, false).status.success());
+        for repo in [&b, &a] {
+            repo.arc(&repo.root)
+                .args(["journal", "position", &file, "--body-file", "-"])
+                .write_stdin("Position: for\n\nIndependent append.\n")
+                .assert()
+                .success();
+        }
+        let fresh = write_artifact(&b, "zz-recover", "todo", "# Fresh\n");
+        let incoming = bundle_file(&b, "incoming");
+        export(&b, &[&file, &fresh], &incoming);
+        let dir = journal_dir(&a);
+        let original = fs::read(dir.join(&file)).unwrap();
+        let imports_dir = dir.join("exchange/imports");
+        fs::create_dir_all(&imports_dir).unwrap();
+        let permissions = fs::metadata(&imports_dir).unwrap().permissions();
+        if failure == "body" {
+            fs::create_dir(dir.join(&fresh)).unwrap();
+        } else {
+            fs::set_permissions(&imports_dir, fs::Permissions::from_mode(0o500)).unwrap();
+        }
+        let failed = import(&a, &incoming, false);
+        if failure == "body" {
+            fs::remove_dir(dir.join(&fresh)).unwrap();
+        } else {
+            fs::set_permissions(&imports_dir, permissions).unwrap();
+        }
+        assert!(!failed.status.success(), "{failed:?}");
+        assert!(dir.join("exchange/pending.json").is_file());
+        assert_ne!(fs::read(dir.join(&file)).unwrap(), original);
+        a.arc(&a.root)
+            .args(["journal", "questions", "--json"])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("exchange is incomplete"));
+        a.arc(&a.root)
+            .args(["journal", "position", &file, "--body-file", "-"])
+            .write_stdin("Position: against\n\nCannot interleave.\n")
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("exchange is incomplete"));
+        assert!(!import(&a, &incoming, true).status.success());
+        if failure == "interrupted-log" {
+            let log = fs::read(dir.join("events.jsonl")).unwrap();
+            fs::write(dir.join("events.jsonl"), &log[..log.len() - 5]).unwrap();
+        }
+        let retry = import(&a, &incoming, false);
+        assert!(retry.status.success(), "{retry:?}");
+        assert!(!dir.join("exchange/pending.json").exists());
+        assert!(dir.join(&fresh).is_file());
+        let merged = bundle_file(&a, "merged");
+        export(&a, &[&file, &fresh], &merged);
+        assert!(import(&b, &merged, false).status.success());
+        assert_eq!(
+            fs::read(dir.join(&file)).unwrap(),
+            fs::read(journal_dir(&b).join(&file)).unwrap()
+        );
+        assert_event_sets_equal(&a, &b, &file);
+        assert_event_sets_equal(&a, &b, &fresh);
+        let log = fs::read(dir.join("events.jsonl")).unwrap();
+        assert!(import(&a, &incoming, false).status.success());
+        assert_eq!(fs::read(dir.join("events.jsonl")).unwrap(), log);
+        assert_eq!(receipts(&dir), 1);
+    }
+}
+
+#[test]
 fn identical_and_off_menu_reanswers_have_distinct_append_identities() {
     for flag in ["--option", "--other"] {
         let a = Repo::new();
