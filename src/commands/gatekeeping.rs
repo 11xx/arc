@@ -3619,6 +3619,8 @@ fn cleanup_git(checkout: &Path, args: &[&str]) -> Result<String> {
         "-c",
         "core.untrackedCache=false",
         "-c",
+        "status.showUntrackedFiles=all",
+        "-c",
         "core.ignoreStat=false",
         "-c",
         "core.fileMode=true",

@@ -5127,59 +5127,67 @@ fn cleanup_configured_untracked_cache_and_visibility_keep_untracked_work() {
 
 #[test]
 fn cleanup_submodule_ignore_cannot_hide_local_work() {
-    let repo = repo_with_gates();
-    let sub = repo.home.join("sub-source");
-    fs::create_dir_all(&sub).unwrap();
-    git(&sub, &["init"]);
-    git(&sub, &["config", "user.name", "Fixture"]);
-    git(&sub, &["config", "user.email", "fixture@example.invalid"]);
-    git(&sub, &["config", "commit.gpgsign", "false"]);
-    repo.commit(&sub, "sub.txt", "one\n", "test: submodule");
-    git(
-        &repo.root,
-        &[
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
-            sub.to_str().unwrap(),
-            "sub",
-        ],
-    );
-    git(
-        &repo.root,
-        &["config", "-f", ".gitmodules", "submodule.sub.ignore", "all"],
-    );
-    git(&repo.root, &["add", ".gitmodules", "sub"]);
-    git(
-        &repo.root,
-        &["commit", "-m", "test: declare ignored submodule status"],
-    );
-    let (id, wt) = approved_change(&repo, "sub-cleanup", "change.txt", "change\n");
-    git(
-        &wt,
-        &[
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "update",
-            "--init",
-        ],
-    );
-    git(&wt, &["config", "diff.ignoreSubmodules", "all"]);
-    git(&wt, &["config", "submodule.sub.ignore", "all"]);
-    fs::write(wt.join("sub/sub.txt"), "local tracked edit").unwrap();
-    fs::write(wt.join("sub/local.txt"), "untracked work").unwrap();
-    assert!(!git_out(&wt, &["status", "--porcelain"]).contains("sub"));
-    let out = stdout(
-        repo.arc(&repo.root)
-            .args(["integrate", &id, "--discard", "ignored"]),
-    );
-    assert!(wt.join("sub/local.txt").exists(), "{out}");
-    assert!(
-        out.contains("holds local content not in the branch: sub"),
-        "{out}"
-    );
+    for tracked in [true, false] {
+        let repo = repo_with_gates();
+        let sub = repo.home.join("sub-source");
+        fs::create_dir_all(&sub).unwrap();
+        git(&sub, &["init"]);
+        git(&sub, &["config", "user.name", "Fixture"]);
+        git(&sub, &["config", "user.email", "fixture@example.invalid"]);
+        git(&sub, &["config", "commit.gpgsign", "false"]);
+        repo.commit(&sub, "sub.txt", "one\n", "test: submodule");
+        git(
+            &repo.root,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                sub.to_str().unwrap(),
+                "sub",
+            ],
+        );
+        git(
+            &repo.root,
+            &["config", "-f", ".gitmodules", "submodule.sub.ignore", "all"],
+        );
+        git(&repo.root, &["add", ".gitmodules", "sub"]);
+        git(
+            &repo.root,
+            &["commit", "-m", "test: declare ignored submodule status"],
+        );
+        let (id, wt) = approved_change(&repo, "sub-cleanup", "change.txt", "change\n");
+        git(
+            &wt,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "update",
+                "--init",
+            ],
+        );
+        git(&wt, &["config", "diff.ignoreSubmodules", "all"]);
+        git(&wt, &["config", "submodule.sub.ignore", "all"]);
+        git(
+            &wt.join("sub"),
+            &["config", "status.showUntrackedFiles", "no"],
+        );
+        if tracked {
+            fs::write(wt.join("sub/sub.txt"), "local tracked edit").unwrap();
+        }
+        fs::write(wt.join("sub/local.txt"), "untracked work").unwrap();
+        assert!(!git_out(&wt, &["status", "--porcelain"]).contains("sub"));
+        let out = stdout(
+            repo.arc(&repo.root)
+                .args(["integrate", &id, "--discard", "ignored"]),
+        );
+        assert!(wt.join("sub/local.txt").exists(), "{out}");
+        assert!(
+            out.contains("holds local content not in the branch: sub"),
+            "{out}"
+        );
+    }
 }
 
 #[test]
