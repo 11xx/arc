@@ -1739,3 +1739,57 @@ fn retry_plan_and_execution_agree_on_reusing_the_completed_preparation() {
         1
     );
 }
+
+#[test]
+fn provisional_expected_basis_names_moved_guards_beside_the_refusal() {
+    let (_authority, worker) = worker();
+    let change = prepared(&worker);
+    let expected = worker.home.join("provisional-plan.json");
+    fs::write(
+        &expected,
+        stdout(worker.arc(&worker.root).args([
+            "integrate",
+            &change,
+            "--provisional",
+            "--dry-run",
+            "--json",
+        ])),
+    )
+    .unwrap();
+    worker.declare_gates_locally("[gates.required]\ncommand='false'\n");
+    let refused = worker
+        .arc(&worker.root)
+        .args(["integrate", &change, "--provisional", "--expect-basis"])
+        .arg(&expected)
+        .assert()
+        .code(5);
+    let stderr = String::from_utf8_lossy(&refused.get_output().stderr);
+    assert!(stderr.contains("you checked"), "{stderr}");
+    assert!(stderr.contains("required"), "{stderr}");
+    assert!(!stderr.contains("warning:"), "{stderr}");
+    assert!(status(&worker, &change)["provisional_integrations"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    worker.declare_gates_locally("");
+    git(
+        &worker.root,
+        &[
+            "commit",
+            "--allow-empty",
+            "-m",
+            "chore: advance canonical base",
+        ],
+    );
+    let permitted = worker
+        .arc(&worker.root)
+        .args(["integrate", &change, "--provisional", "--expect-basis"])
+        .arg(&expected)
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&permitted.get_output().stderr);
+    assert!(
+        stderr.contains("warning: the target you checked moved"),
+        "{stderr}"
+    );
+}

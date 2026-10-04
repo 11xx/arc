@@ -2006,9 +2006,10 @@ enum Cmd {
         /// `--dry-run --json` printed. The fresh readiness evaluation alone
         /// decides; the file never changes the decision. When the approved
         /// head, the target revision, the gate or policy declarations, or the
-        /// approval moved since, a refusal adds one line naming what moved
-        /// and a permitted integration proceeds with a warning naming it. An
-        /// unchanged basis adds nothing. One change only
+        /// approval moved since, a refusal adds one line naming what moved.
+        /// A permitted integration proceeds with a warning naming what moved.
+        /// Provisional plans also compare recipient and prerequisite references.
+        /// An unchanged basis adds nothing. One change only
         #[arg(long = "expect-basis", value_name = "FILE", conflicts_with = "dry_run")]
         expect_basis: Option<PathBuf>,
         /// Integrate without an independent verdict, recording the review this

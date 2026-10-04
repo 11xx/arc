@@ -362,10 +362,6 @@ fn plan(
     expected: Option<&IntegrationPlan>,
 ) -> Result<std::result::Result<integration::ProvisionalPlan, i32>> {
     let (report, declarations, provisional) = report(ctx, store, state, selection)?;
-    if !report.integrate_ready() {
-        eprint!("{}", render::blocker_explanation(state, &report));
-        return Ok(Err(status::check_exit_code(&report)));
-    }
     let authorization = basis(
         ctx,
         store,
@@ -373,7 +369,7 @@ fn plan(
         &report,
         declarations.clone(),
         provisional,
-    )?;
+    );
     let (confirmation, confirmed_declarations, provisional) =
         self::report(ctx, store, state, selection)?;
     let confirmed = basis(
@@ -384,7 +380,7 @@ fn plan(
         confirmed_declarations,
         provisional,
     );
-    let patchset = state.latest_patchset().context("no patchset recorded")?;
+    let patchset = state.latest_patchset();
     let mut completed_provisional = None;
     for event in state.provisional_integrations.iter().rev() {
         if event.repository_id != store.repository_id {
@@ -400,9 +396,9 @@ fn plan(
             ..
         } = &event.payload
         {
-            if *source_patchset_id == patchset.id
-                && *source_head == patchset.head
-                && *staging_branch == selection.branch
+            if patchset.is_some_and(|patchset| {
+                *source_patchset_id == patchset.id && *source_head == patchset.head
+            }) && *staging_branch == selection.branch
                 && *recipient == selection.recipient
                 && *publication_target == state.target_branch
                 && gitio::is_ancestor(&ctx.cwd, provisional_commit, &selection.before)?
@@ -427,14 +423,14 @@ fn plan(
         shape: Shape::NoFf,
         target_is_ancestor: Ok(true),
         target: selection.branch.clone(),
-        approved: Some(integration::Approved {
+        approved: patchset.map(|patchset| integration::Approved {
             patchset_id: patchset.id.clone(),
             head: patchset.head.clone(),
         }),
         ready: report.integrate_ready(),
-        approval: integration::approval(state, &report, &patchset.id),
+        approval: integration::approval(state, &report, patchset.map_or("", |p| &p.id)),
         declarations: Ok(declarations),
-        basis: Ok(authorization),
+        basis: authorization,
         confirmation: Ok(integration::Confirmation {
             ready: confirmation.integrate_ready(),
             basis: confirmed,
@@ -443,19 +439,31 @@ fn plan(
         checkout: Err(anyhow::anyhow!("provisional staging has no checkout")),
         tracked_dirt: Ok(false),
         target_revision: Ok(selection.before.clone()),
-        evaluated_tree: gitio::merge_outcome(&ctx.cwd, &selection.before, &patchset.head)
-            .map(|m| m.tree),
+        evaluated_tree: patchset
+            .context("no patchset recorded")
+            .and_then(|patchset| {
+                gitio::merge_outcome(&ctx.cwd, &selection.before, &patchset.head).map(|m| m.tree)
+            }),
         write_collisions: Ok(Vec::new()),
         untouched: Ok(Vec::new()),
         already_contained: Ok(false),
     };
     let decision = integration::decide(facts, expected);
     if let Some(moved) = integration::describe_moved(&decision.moved) {
-        eprintln!("{moved}");
+        if matches!(decision.decision, Decision::Refused(_)) {
+            eprintln!("{moved}");
+        } else {
+            eprintln!("warning: {moved}");
+        }
     }
     match decision.decision {
         Decision::Provisional(plan) => Ok(Ok(plan)),
+        Decision::Refused(Refusal::NotReady) => {
+            eprint!("{}", render::blocker_explanation(state, &report));
+            Ok(Err(status::check_exit_code(&report)))
+        }
         Decision::Refused(Refusal::Diverged) => {
+            let patchset = patchset.context("no patchset recorded")?;
             eprintln!("conflicting staging merge: {} and {}; run git rebase {} in the change checkout, then arc snapshot {} --verify and obtain fresh review or debt", selection.before, patchset.head, selection.branch, state.change_id);
             Ok(Err(11))
         }

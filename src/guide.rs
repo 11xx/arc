@@ -901,7 +901,8 @@ RUN A CHANGE
   that plan, decided the same way, as `arc-integration-plan/1`. Handing it
   back with `integrate --expect-basis <file>` never changes the decision; it
   names what moved since — the approved head, the target revision, the gate
-  or policy declarations, or the approval — in one line beside a refusal, or
+  or policy declarations, the approval, or provisional routing and prerequisites
+  — in one line beside a refusal, or
   as a warning when the integration still proceeds.
 
   When no checkout holds the target, `integrate` takes over the change's own
