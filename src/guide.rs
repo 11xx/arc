@@ -1911,6 +1911,11 @@ FILES
     **/dist-newstyle   cache/plan.json     `{"cabal-version":`
                        No `src` entry, where Cabal clones dependency sources.
     **/*.egg-info      PKG-INFO            `Metadata-Version: `
+                       Only files setuptools writes there: `PKG-INFO`,
+                       `SOURCES.txt`, `requires.txt`, `entry_points.txt`,
+                       `top_level.txt`, `dependency_links.txt`,
+                       `namespace_packages.txt`, `eager_resources.txt`,
+                       `zip-safe` and `not-zip-safe`.
     **/__pycache__     Only `<module>.<cpython-* or pypy*>.pyc` files, each
                        opening with a magic number whose last two bytes are a
                        carriage return and a line feed.

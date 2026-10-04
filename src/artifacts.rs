@@ -37,9 +37,38 @@ const BUILTIN: &[Builtin] = &[
         path: "**/*.egg-info",
         marker: "PKG-INFO",
         signature: b"Metadata-Version: ",
-        layout: |_| true,
+        layout: only_setuptools_metadata,
     },
 ];
+
+/// Setuptools writes these files into `*.egg-info` and rewrites them on every
+/// build. A project may keep metadata of its own there, so any other entry
+/// keeps the directory.
+fn only_setuptools_metadata(directory: &Path) -> bool {
+    const WRITTEN: &[&str] = &[
+        "PKG-INFO",
+        "SOURCES.txt",
+        "dependency_links.txt",
+        "eager_resources.txt",
+        "entry_points.txt",
+        "namespace_packages.txt",
+        "not-zip-safe",
+        "requires.txt",
+        "top_level.txt",
+        "zip-safe",
+    ];
+    fs::read_dir(directory).is_ok_and(|entries| {
+        entries.into_iter().all(|entry| {
+            entry.is_ok_and(|entry| {
+                entry.file_type().is_ok_and(|kind| kind.is_file())
+                    && entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| WRITTEN.contains(&name))
+            })
+        })
+    })
+}
 
 /// Cabal clones source-repository-package dependencies under
 /// `dist-newstyle/src`, where they can carry edits no plan regenerates.
@@ -396,6 +425,12 @@ mod tests {
             recognized(root, "src/pkg.egg-info").as_deref(),
             Some("Python package metadata: PKG-INFO")
         );
+        write("src/pkg.egg-info/SOURCES.txt", b"setup.py\n");
+        assert!(recognized(root, "src/pkg.egg-info").is_some());
+        // A project may keep metadata of its own beside what setuptools writes.
+        write("src/pkg.egg-info/plugin-config.json", b"{}");
+        assert_eq!(recognized(root, "src/pkg.egg-info"), None);
+        fs::remove_file(root.join("src/pkg.egg-info/plugin-config.json")).unwrap();
         write("src/pkg.egg-info/PKG-INFO", b"Name: pkg\n");
         assert_eq!(recognized(root, "src/pkg.egg-info"), None);
 

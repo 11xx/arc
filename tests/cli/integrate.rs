@@ -4474,9 +4474,25 @@ fn disposable_cleanup_keeps_a_cmake_build_without_a_rule() {
         .unwrap();
     std::io::Write::write_all(&mut exclude, b"build/\n").unwrap();
     fs::create_dir_all(wt.join("build/_deps/dep-src")).unwrap();
+    // An out-of-source build: the cache names this build directory and the
+    // checkout as its source, as CMake writes them.
+    let checkout = wt.canonicalize().unwrap();
     fs::write(
         wt.join("build/CMakeCache.txt"),
-        "# This is the CMakeCache file.\n",
+        [
+            "# This is the CMakeCache file.".to_string(),
+            format!(
+                "# For build in directory: {}",
+                checkout.join("build").display()
+            ),
+            format!(
+                "CMAKE_CACHEFILE_DIR:INTERNAL={}",
+                checkout.join("build").display()
+            ),
+            format!("CMAKE_HOME_DIRECTORY:INTERNAL={}", checkout.display()),
+            String::new(),
+        ]
+        .join("\n"),
     )
     .unwrap();
     fs::write(wt.join("build/_deps/dep-src/dep.c"), "int patched(void);").unwrap();
