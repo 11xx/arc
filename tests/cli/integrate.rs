@@ -4432,6 +4432,52 @@ fn disposable_cleanup_configured_marker_controls_removal() {
     }
 }
 
+#[test]
+fn disposable_cleanup_builtin_recognizer_requires_its_layout() {
+    for out_of_source in [true, false] {
+        let (repo, id, wt) = disposable_cleanup_fixture(false);
+        let mut exclude = fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(repo.root.join(".git/info/exclude"))
+            .unwrap();
+        std::io::Write::write_all(&mut exclude, b"build/\n").unwrap();
+        let build = wt.canonicalize().unwrap().join("build");
+        let source = if out_of_source {
+            wt.canonicalize().unwrap()
+        } else {
+            build.clone()
+        };
+        fs::create_dir_all(&build).unwrap();
+        fs::write(
+            build.join("CMakeCache.txt"),
+            [
+                "# This is the CMakeCache file.".to_string(),
+                format!("CMAKE_CACHEFILE_DIR:INTERNAL={}", build.display()),
+                format!("CMAKE_HOME_DIRECTORY:INTERNAL={}", source.display()),
+                String::new(),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let content = if out_of_source { "output.o" } else { "main.c" };
+        fs::write(build.join(content), "content").unwrap();
+        let out = stdout(repo.arc(&repo.root).args(["integrate", &id, "--cleanup"]));
+        assert_eq!(!wt.exists(), out_of_source, "{out}");
+        if out_of_source {
+            assert!(
+                out.contains("discarded build/ (CMake: CMakeCache.txt)"),
+                "{out}"
+            );
+        } else {
+            assert!(
+                out.contains("holds local content not in the branch: build/"),
+                "{out}"
+            );
+        }
+    }
+}
+
 fn assert_other_content_keeps_only_its_path(file: &str) {
     let (repo, id, wt) = disposable_cleanup_fixture(false);
     fixture_cache_tag(&wt, FIXTURE_CACHE_SIGNATURE);

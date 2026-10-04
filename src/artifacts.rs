@@ -11,14 +11,16 @@ use std::path::{Path, PathBuf};
 
 const CACHE_SIGNATURE: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
 
-/// A recognizer every checkout gets: the file its tool writes at a fixed place
-/// inside the directory, and the bytes that file begins with where the tool's
-/// format fixes them.
+/// A recognizer every checkout gets. Its marker is a file the tool writes at a
+/// fixed place inside the directory, beginning with the bytes its format fixes.
+/// A marker proves only that the tool ran there, so `layout` must also show
+/// that everything the directory holds is the tool's regenerable output.
 struct Builtin {
     tool: &'static str,
     path: &'static str,
     marker: &'static str,
-    signature: Option<&'static [u8]>,
+    signature: &'static [u8],
+    layout: fn(&Path) -> bool,
 }
 
 const BUILTIN: &[Builtin] = &[
@@ -26,51 +28,92 @@ const BUILTIN: &[Builtin] = &[
         tool: "CMake",
         path: "**",
         marker: "CMakeCache.txt",
-        signature: Some(b"# This is the CMakeCache file."),
-    },
-    Builtin {
-        tool: "Ninja",
-        path: "**",
-        marker: ".ninja_log",
-        signature: Some(b"# ninja log v"),
+        signature: b"# This is the CMakeCache file.",
+        layout: out_of_source_cmake_build,
     },
     Builtin {
         tool: "Cabal",
         path: "**/dist-newstyle",
         marker: "cache/plan.json",
-        signature: Some(b"{\"cabal-version\":"),
+        signature: b"{\"cabal-version\":",
+        layout: no_dependency_checkouts,
     },
     Builtin {
         tool: "Python virtual environment",
         path: "**",
         marker: "pyvenv.cfg",
-        signature: Some(b"home = "),
+        signature: b"home = ",
+        layout: only_virtual_environment_entries,
     },
     Builtin {
         tool: "Python package metadata",
         path: "**/*.egg-info",
         marker: "PKG-INFO",
-        signature: Some(b"Metadata-Version: "),
-    },
-    Builtin {
-        tool: "npm",
-        path: "**/node_modules",
-        marker: ".package-lock.json",
-        signature: None,
-    },
-    Builtin {
-        tool: "pnpm",
-        path: "**/node_modules",
-        marker: ".modules.yaml",
-        signature: None,
-    },
-    Builtin {
-        tool: "Yarn",
-        path: "**/node_modules",
-        marker: ".yarn-integrity",
-        signature: None,
+        signature: b"Metadata-Version: ",
+        layout: |_| true,
     },
 ];
+
+/// A CMake binary directory whose cache names it as the build directory and
+/// names a source directory outside it. An in-source build mixes the cache
+/// with the sources it was configured from.
+fn out_of_source_cmake_build(directory: &Path) -> bool {
+    let Ok(cache) = fs::read_to_string(directory.join("CMakeCache.txt")) else {
+        return false;
+    };
+    let recorded = |key: &str| {
+        cache
+            .lines()
+            .find_map(|line| line.strip_prefix(key))
+            .and_then(|path| Path::new(path).canonicalize().ok())
+    };
+    let (Some(build), Some(source), Ok(here)) = (
+        recorded("CMAKE_CACHEFILE_DIR:INTERNAL="),
+        recorded("CMAKE_HOME_DIRECTORY:INTERNAL="),
+        directory.canonicalize(),
+    ) else {
+        return false;
+    };
+    build == here && !source.starts_with(&here)
+}
+
+/// Cabal clones source-repository-package dependencies under
+/// `dist-newstyle/src`, where they can carry edits no plan regenerates.
+fn no_dependency_checkouts(directory: &Path) -> bool {
+    matches!(
+        fs::symlink_metadata(directory.join("src")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    )
+}
+
+/// A virtual environment created in a directory of its own holds only what
+/// `venv`, virtualenv and uv lay out. Any other entry, such as application
+/// sources beside an environment created in place, keeps the directory.
+fn only_virtual_environment_entries(directory: &Path) -> bool {
+    const ENTRIES: &[&str] = &[
+        ".gitignore",
+        "CACHEDIR.TAG",
+        "Include",
+        "Lib",
+        "Scripts",
+        "bin",
+        "include",
+        "lib",
+        "lib64",
+        "pyvenv.cfg",
+        "share",
+    ];
+    fs::read_dir(directory).is_ok_and(|entries| {
+        entries.into_iter().all(|entry| {
+            entry.is_ok_and(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| ENTRIES.contains(&name))
+            })
+        })
+    })
+}
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -106,7 +149,8 @@ pub fn recognize(root: &Path, entries: &[String], rules: &[Rule]) -> Vec<Artifac
                 "CACHEDIR.TAG".to_string()
             } else if let Some(builtin) = BUILTIN.iter().find(|builtin| {
                 path_matches(builtin.path, path)
-                    && marker_matches(&directory, builtin.marker, builtin.signature)
+                    && marker_matches(&directory, builtin.marker, Some(builtin.signature))
+                    && (builtin.layout)(&directory)
             }) {
                 format!("{}: {}", builtin.tool, builtin.marker)
             } else if python_bytecode_cache(&directory, path) {
@@ -130,8 +174,9 @@ pub fn recognize(root: &Path, entries: &[String], rules: &[Rule]) -> Vec<Artifac
         .collect()
 }
 
-/// CPython's `__pycache__` holds only `.pyc` files, each opening with a magic
-/// number whose last two bytes are `\r\n`. Any other entry keeps the directory.
+/// Python's `__pycache__` holds only `<module>.<implementation tag>.pyc` files,
+/// each opening with a magic number whose last two bytes are `\r\n`. Any other
+/// entry keeps the directory.
 fn python_bytecode_cache(directory: &Path, path: &str) -> bool {
     if path.rsplit('/').next() != Some("__pycache__") {
         return false;
@@ -144,10 +189,9 @@ fn python_bytecode_cache(directory: &Path, path: &str) -> bool {
         let Ok(entry) = entry else {
             return false;
         };
-        let is_pyc = entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| name.ends_with(".pyc"));
+        let is_pyc = entry.file_name().to_str().is_some_and(|name| {
+            name.ends_with(".pyc") && (name.contains(".cpython-") || name.contains(".pypy"))
+        });
         if !is_pyc || !entry.file_type().is_ok_and(|kind| kind.is_file()) {
             return false;
         }
@@ -350,74 +394,121 @@ mod tests {
         assert!(recognize(root, &entries, &[rule]).is_empty());
     }
 
+    fn cmake_cache(directory: &Path, build: &Path, source: &Path) {
+        fs::create_dir_all(directory).unwrap();
+        fs::write(
+            directory.join("CMakeCache.txt"),
+            [
+                "# This is the CMakeCache file.".to_string(),
+                format!("# For build in directory: {}", build.display()),
+                format!("CMAKE_CACHEFILE_DIR:INTERNAL={}", build.display()),
+                format!("CMAKE_HOME_DIRECTORY:INTERNAL={}", source.display()),
+                String::new(),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+    }
+
+    fn recognized(root: &Path, directory: &str) -> Option<String> {
+        let entry = vec![format!("!! {directory}/")];
+        recognize(root, &entry, &[])
+            .pop()
+            .map(|artifact| artifact.identified_by)
+    }
+
     #[test]
-    fn builtin_recognizers_need_their_tools_marker() {
+    fn cmake_builds_count_only_out_of_source() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        cmake_cache(&root.join("build"), &root.join("build"), &root);
+        fs::write(root.join("build/output.o"), b"object").unwrap();
+        assert_eq!(
+            recognized(&root, "build").as_deref(),
+            Some("CMake: CMakeCache.txt")
+        );
+        // An in-source build keeps the sources it was configured from.
+        cmake_cache(
+            &root.join("local"),
+            &root.join("local"),
+            &root.join("local"),
+        );
+        fs::write(root.join("local/main.c"), b"int main(void) { return 0; }").unwrap();
+        assert_eq!(recognized(&root, "local"), None);
+        // So does a build directory holding its source directory.
+        fs::create_dir_all(root.join("outer/src")).unwrap();
+        cmake_cache(
+            &root.join("outer"),
+            &root.join("outer"),
+            &root.join("outer/src"),
+        );
+        assert_eq!(recognized(&root, "outer"), None);
+        // A cache copied from another build directory identifies nothing here.
+        cmake_cache(&root.join("copied"), &root.join("build"), &root);
+        assert_eq!(recognized(&root, "copied"), None);
+        fs::write(
+            root.join("build/CMakeCache.txt"),
+            b"notes the tool never wrote",
+        )
+        .unwrap();
+        assert_eq!(recognized(&root, "build"), None);
+    }
+
+    #[test]
+    fn builtin_recognizers_need_marker_and_layout() {
         let fixture = tempfile::tempdir().unwrap();
         let root = fixture.path();
-        let cases: [(&str, &str, &[u8]); 8] = [
-            (
-                "build",
-                "CMakeCache.txt",
-                b"# This is the CMakeCache file.\n# For build in directory",
-            ),
-            ("out", ".ninja_log", b"# ninja log v7\n1\t15\t"),
-            (
-                "pkg/dist-newstyle",
-                "cache/plan.json",
-                b"{\"cabal-version\":\"3.16.1.0\"}",
-            ),
-            (
-                ".venv",
-                "pyvenv.cfg",
-                b"home = /usr/bin\ninclude-system-site-packages = false\n",
-            ),
-            (
-                "src/pkg.egg-info",
-                "PKG-INFO",
-                b"Metadata-Version: 2.4\nName: pkg\n",
-            ),
-            (
-                "node_modules",
-                ".package-lock.json",
-                b"{\n  \"name\": \"app\"",
-            ),
-            (
-                "web/node_modules",
-                ".modules.yaml",
-                b"{\n  \"hoistedDependencies\": {}",
-            ),
-            (
-                "ui/node_modules",
-                ".yarn-integrity",
-                b"{\n  \"systemParams\": \"linux-x64\"",
-            ),
-        ];
-        for (directory, marker, content) in cases {
-            let marker_path = root.join(directory).join(marker);
-            fs::create_dir_all(marker_path.parent().unwrap()).unwrap();
-            fs::write(&marker_path, content).unwrap();
-            let entry = vec![format!("!! {directory}/")];
-            let found = recognize(root, &entry, &[]);
-            assert_eq!(found.len(), 1, "{directory}");
-            assert!(found[0].identified_by.ends_with(marker), "{found:?}");
-            // A name without its tool's file is never an artifact.
-            fs::remove_file(&marker_path).unwrap();
-            assert!(recognize(root, &entry, &[]).is_empty(), "{directory}");
-        }
-        for (directory, marker) in [
-            ("build", "CMakeCache.txt"),
-            ("out", ".ninja_log"),
-            ("pkg/dist-newstyle", "cache/plan.json"),
-            (".venv", "pyvenv.cfg"),
-            ("src/pkg.egg-info", "PKG-INFO"),
-        ] {
-            fs::write(
-                root.join(directory).join(marker),
-                b"notes the tool never wrote",
-            )
-            .unwrap();
-            let entry = vec![format!("!! {directory}/")];
-            assert!(recognize(root, &entry, &[]).is_empty(), "{directory}");
+        let write = |path: &str, content: &[u8]| {
+            let path = root.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, content).unwrap();
+        };
+        write(
+            "pkg/dist-newstyle/cache/plan.json",
+            b"{\"cabal-version\":\"3.16.1.0\"}",
+        );
+        write("pkg/dist-newstyle/build/output", b"object");
+        assert_eq!(
+            recognized(root, "pkg/dist-newstyle").as_deref(),
+            Some("Cabal: cache/plan.json")
+        );
+        // Dependency checkouts can carry edits no plan regenerates.
+        write("pkg/dist-newstyle/src/dep/Lib.hs", b"module Lib where");
+        assert_eq!(recognized(root, "pkg/dist-newstyle"), None);
+
+        write(
+            ".venv/pyvenv.cfg",
+            b"home = /usr/bin\ninclude-system-site-packages = false\n",
+        );
+        write(".venv/bin/python", b"");
+        write(".venv/lib/python3/site-packages/m.py", b"");
+        write(".venv/.gitignore", b"*\n");
+        assert_eq!(
+            recognized(root, ".venv").as_deref(),
+            Some("Python virtual environment: pyvenv.cfg")
+        );
+        // An environment created in place beside application sources.
+        write(".venv/app.py", b"print('kept')");
+        assert_eq!(recognized(root, ".venv"), None);
+
+        write(
+            "src/pkg.egg-info/PKG-INFO",
+            b"Metadata-Version: 2.4\nName: pkg\n",
+        );
+        assert_eq!(
+            recognized(root, "src/pkg.egg-info").as_deref(),
+            Some("Python package metadata: PKG-INFO")
+        );
+        write("src/pkg.egg-info/PKG-INFO", b"Name: pkg\n");
+        assert_eq!(recognized(root, "src/pkg.egg-info"), None);
+
+        // Markers that cannot rule out hand-written or unsaved work.
+        write("out/.ninja_log", b"# ninja log v7\n");
+        write("node_modules/.package-lock.json", b"{}");
+        write("web/node_modules/.modules.yaml", b"{}");
+        write("ui/node_modules/.yarn-integrity", b"{}");
+        for directory in ["out", "node_modules", "web/node_modules", "ui/node_modules"] {
+            assert_eq!(recognized(root, directory), None, "{directory}");
         }
         fs::create_dir_all(root.join("dist-newstyles/cache")).unwrap();
         fs::write(
@@ -425,7 +516,7 @@ mod tests {
             b"{\"cabal-version\":\"3.16.1.0\"}",
         )
         .unwrap();
-        assert!(recognize(root, &["!! dist-newstyles/".into()], &[]).is_empty());
+        assert_eq!(recognized(root, "dist-newstyles"), None);
     }
 
     #[test]
@@ -453,6 +544,12 @@ mod tests {
         std::os::unix::fs::symlink("m.cpython-314.pyc", cache.join("l.cpython-314.pyc")).unwrap();
         assert!(recognize(root, &entry, &[]).is_empty(), "symlinked module");
         fs::remove_file(cache.join("l.cpython-314.pyc")).unwrap();
+        fs::write(cache.join("plain.pyc"), b"\x2b\x0e\r\n\0\0\0\0").unwrap();
+        assert!(
+            recognize(root, &entry, &[]).is_empty(),
+            "no implementation tag"
+        );
+        fs::remove_file(cache.join("plain.pyc")).unwrap();
         fs::create_dir_all(root.join("pkg/cache")).unwrap();
         fs::write(root.join("pkg/cache/m.cpython-314.pyc"), b"\x2b\x0e\r\n").unwrap();
         assert!(

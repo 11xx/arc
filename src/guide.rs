@@ -1903,18 +1903,29 @@ FILES
   directory; a directory name alone identifies nothing.
   A CACHEDIR.TAG must be a regular file beginning with the exact bytes
   `Signature: 8a477f597d28d172789f06886806bc55`, which Cargo, Meson, uv,
-  pytest and other tools write. The built-in recognizers, each a regular
+  pytest and other tools write. A marker shows only that a tool ran in a
+  directory, so each built-in recognizer also requires a layout showing that
+  everything there is the tool's regenerable output. Each marker is a regular
   file that must begin with the bytes shown:
 
     any directory      CMakeCache.txt      `# This is the CMakeCache file.`
-    any directory      .ninja_log          `# ninja log v`
+                       The cache names this directory as the build directory
+                       and a source directory outside it; an in-source build
+                       is kept.
     **/dist-newstyle   cache/plan.json     `{"cabal-version":`
+                       No `src` entry, where Cabal clones dependency sources.
     any directory      pyvenv.cfg          `home = `
+                       Only virtual-environment entries: `bin`, `Scripts`,
+                       `include`, `Include`, `lib`, `Lib`, `lib64`, `share`,
+                       `pyvenv.cfg`, `.gitignore` and `CACHEDIR.TAG`.
     **/*.egg-info      PKG-INFO            `Metadata-Version: `
-    **/node_modules    .package-lock.json, .modules.yaml or .yarn-integrity
-    **/__pycache__     only .pyc files, each opening with a magic number
-                       whose last two bytes are a carriage return and a
-                       line feed
+    **/__pycache__     Only `<module>.<cpython-* or pypy*>.pyc` files, each
+                       opening with a magic number whose last two bytes are a
+                       carriage return and a line feed.
+
+  Ninja logs and `node_modules` are not recognized: a log can sit beside a
+  hand-written `build.ninja`, and installed packages can carry edits not yet
+  saved as a patch. A configured rule can declare them disposable.
 
   CACHEDIR.TAG and the built-in recognizers always apply at any depth,
   independently of configured rules and checkout ownership. A configured rule
