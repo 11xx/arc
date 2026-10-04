@@ -140,9 +140,8 @@ fn authority_moves_only_through_an_imported_offer() {
         .success();
     let pairing = source.home.join("pairing.json");
     export_replica(&source, &pairing);
-    recipient
-        .arc(&recipient.root)
-        .args(["replica", "import", pairing.to_str().unwrap(), "--dry-run"])
+    admitted_replica_command(&recipient, &pairing)
+        .arg("--dry-run")
         .assert()
         .success()
         .stdout(predicates::str::contains("dry-run: would import"));
@@ -296,9 +295,7 @@ fn authority_moves_only_through_an_imported_offer() {
         .args(["integrate", "authority-work"])
         .assert()
         .success();
-    recipient
-        .arc(&recipient.root)
-        .args(["replica", "import", offer.to_str().unwrap()])
+    admitted_replica_command(&recipient, &offer)
         .assert()
         .success();
     assert_eq!(replica_import_count(&recipient), imports);
@@ -680,9 +677,7 @@ fn importing_a_contested_live_claim_writes_nothing() {
         .assert()
         .success();
     deliver_git_objects(&source, &recipient);
-    recipient
-        .arc(&recipient.root)
-        .args(["import", bundle.to_str().unwrap()])
+    admitted_change_command(&recipient, &bundle)
         .assert()
         .success();
 
@@ -705,16 +700,13 @@ fn importing_a_contested_live_claim_writes_nothing() {
         .success();
 
     let before = event_count(&recipient, &change_id);
-    recipient
-        .arc(&recipient.root)
-        .args(["import", bundle.to_str().unwrap(), "--dry-run"])
+    admitted_change_command(&recipient, &bundle)
+        .arg("--dry-run")
         .assert()
         .code(1)
         .stdout(predicates::str::contains("claim contest"));
     assert_eq!(event_count(&recipient, &change_id), before);
-    recipient
-        .arc(&recipient.root)
-        .args(["import", bundle.to_str().unwrap()])
+    admitted_change_command(&recipient, &bundle)
         .assert()
         .code(1)
         .stdout(predicates::str::contains("claim contest"))
@@ -754,11 +746,38 @@ fn export_replica(repo: &Repo, path: &Path) {
         .success();
 }
 
+fn admitted_replica_command(repo: &Repo, path: &Path) -> AssertCommand {
+    let bytes = fs::read(path).unwrap();
+    let bundle: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let source = bundle["source_replica_id"].as_str().unwrap();
+    let mut policy = format!(
+        "[[replica.publishers]]\nprincipal='fixture-channel'\nsource_replica_id='{source}'\n"
+    );
+    let origins: std::collections::BTreeSet<_> = bundle["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| event["repository_id"].as_str().unwrap())
+        .collect();
+    for origin in origins {
+        policy.push_str(&format!("[[replica.publishers.origins]]\nreplica_id='{origin}'\nroles=['authority']\nactors=['tester']\n"));
+    }
+    repo.declare_gates_locally(&policy);
+    let mut command = repo.arc(&repo.root);
+    command.args([
+        "replica",
+        "import",
+        path.to_str().unwrap(),
+        "--publisher",
+        "fixture-channel",
+        "--received-sha256",
+        &hex::encode(Sha256::digest(&bytes)),
+    ]);
+    command
+}
+
 fn import_replica(repo: &Repo, path: &Path) {
-    repo.arc(&repo.root)
-        .args(["replica", "import", path.to_str().unwrap()])
-        .assert()
-        .success();
+    admitted_replica_command(repo, path).assert().success();
 }
 
 fn replica_status(repo: &Repo) -> serde_json::Value {
@@ -769,4 +788,21 @@ fn replica_import_count(repo: &Repo) -> usize {
     fs::read_dir(repo.root.join(".git/arc/replicas/imports"))
         .unwrap()
         .count()
+}
+
+fn admitted_change_command(repo: &Repo, path: &Path) -> AssertCommand {
+    let bytes = fs::read(path).unwrap();
+    let bundle: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let source = bundle["source_replica_id"].as_str().unwrap();
+    repo.declare_gates_locally(&format!("[[replica.publishers]]\nprincipal='fixture-change'\nsource_replica_id='{source}'\n[[replica.publishers.origins]]\nreplica_id='{source}'\nroles=['facts']\nactors=[]\n"));
+    let mut cmd = repo.arc(&repo.root);
+    cmd.args([
+        "import",
+        path.to_str().unwrap(),
+        "--publisher",
+        "fixture-change",
+        "--received-sha256",
+        &hex::encode(Sha256::digest(&bytes)),
+    ]);
+    cmd
 }

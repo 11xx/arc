@@ -39,6 +39,8 @@ pub fn check_selection(
 
 #[derive(serde::Serialize)]
 struct CheckOutput<'a> {
+    verdict_assessments: &'a [crate::status::VerdictAssessment],
+    selected_authorizing_event: Option<&'a str>,
     schema: &'static str,
     change_id: &'a str,
     ready: bool,
@@ -1054,7 +1056,7 @@ fn reusable_evidence<'a>(
     })
     .filter(|evidence| {
         evidence.recorded_tree() == Some(tree)
-            && evidence.green_at_head(st.dirty_tree_waiver.as_ref())
+            && evidence.green_at_head(st.eligible_dirty_tree_waiver())
     })
 }
 
@@ -1073,7 +1075,7 @@ fn append_reuses(
     }
     let _transition = store.lock_transition(change_id)?;
     let events = store.load_events(change_id)?;
-    let mut state = state::reduce_following(&events, &store.rewrites()?)?;
+    let mut state = store.project_state(&events, &store.rewrites()?)?;
     crate::replica::localize_change(&store.repository_id, &events, &mut state);
     let mut previous_id = events
         .last()
@@ -1999,7 +2001,7 @@ fn append_verifications(
     // Acquire the append lock only after they return, then re-check closure.
     let _transition = store.lock_transition(change_id)?;
     let events = store.load_events(change_id)?;
-    let mut st = state::reduce_following(&events, &store.rewrites()?)?;
+    let mut st = store.project_state(&events, &store.rewrites()?)?;
     crate::replica::localize_change(&store.repository_id, &events, &mut st);
     let mut previous_id = events
         .last()
@@ -3854,7 +3856,7 @@ fn authorization_basis(
             format!("prerequisite {blocker} cannot be read, so the authorization basis                      would be incomplete")
         })?;
         let mut blocker_id = blocker.clone();
-        let mut blocker_state = state::reduce_following(&events, &store.rewrites()?)?;
+        let mut blocker_state = store.project_state(&events, &store.rewrites()?)?;
         crate::replica::localize_change(&store.repository_id, &events, &mut blocker_state);
         // Dependency readiness follows supersession, so the basis must record
         // the closure that actually satisfied the dependency rather than the
@@ -3874,7 +3876,7 @@ fn authorization_basis(
             };
             seen.push(successor.clone());
             blocker_id = successor;
-            blocker_state = state::reduce_following(&events, &store.rewrites()?)?;
+            blocker_state = store.project_state(&events, &store.rewrites()?)?;
             crate::replica::localize_change(&store.repository_id, &events, &mut blocker_state);
         }
         if let Some(closure) = &blocker_state.closure {
@@ -3900,7 +3902,28 @@ fn authorization_basis(
     .map_err(|_| Refusal::ConfigurationMoved.into_error())?;
     let declarations = normalized_declarations(declarations, st);
 
+    let selected_verdict_provenance = approval
+        .verdict_event_id
+        .as_ref()
+        .and_then(|id| st.verdicts.iter().find(|verdict| &verdict.event_id == id))
+        .map(
+            |verdict| crate::import_authorization::SelectedVerdictProvenance {
+                origin_replica_id: verdict.origin_replica_id.clone(),
+                admission_provenance: st
+                    .privilege_scope
+                    .as_ref()
+                    .map(|scope| scope.provenance(&verdict.event_id))
+                    .unwrap_or("legacy-unknown")
+                    .into(),
+                receipt: st
+                    .privilege_scope
+                    .as_ref()
+                    .and_then(|scope| scope.admissions.get(&verdict.event_id))
+                    .cloned(),
+            },
+        );
     Ok(crate::model::AuthorizationBasis {
+        selected_verdict_provenance,
         verdict_event_id: approval.verdict_event_id,
         external_verdict: approval.external_verdict,
         verdict_provisional: approval.verdict_provisional,
@@ -3970,6 +3993,7 @@ fn normalized_declarations(
     integration::Declarations {
         gates,
         policy: crate::model::NormalizedPolicy {
+            replica: policy.replica,
             forbid_self_approval: policy.policy.forbid_self_approval,
             require_declared_actor: policy.policy.require_declared_actor,
             provenance_git_identity: policy.provenance.git_identity.as_str().to_string(),
@@ -4789,7 +4813,13 @@ fn check(
             }
         }
         let output = CheckOutput {
-            schema: "arc-check/3",
+            schema: "arc-check/4",
+            verdict_assessments: &report.verdict_assessments,
+            selected_authorizing_event: report
+                .verdict_assessments
+                .iter()
+                .find(|verdict| verdict.selected_authorizing_event)
+                .map(|verdict| verdict.event_id.as_str()),
             change_id: &change_id,
             ready: report.integrate_ready(),
             exit_code: code,
@@ -4822,6 +4852,7 @@ fn check(
     } else {
         print!("{}", render::blocker_explanation(&st, &report));
     }
+    crate::render::verdict_assessments(&report.verdict_assessments);
     if let Some(queue) = &review_queue {
         queue.render();
     }

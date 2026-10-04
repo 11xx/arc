@@ -20,6 +20,7 @@ mod fork;
 mod gate_declarations;
 mod gate_environment;
 mod hooks;
+mod import_authorization;
 mod instructions;
 mod integrate;
 mod journal;

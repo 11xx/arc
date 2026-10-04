@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 /// Effective policy declarations and the source files that supplied them.
 #[derive(Debug, Default)]
 pub struct PolicyFile {
+    pub replica: crate::import_authorization::ReplicaPolicy,
     pub policy: Policy,
     pub review: Review,
     pub provenance: ProvenanceBehavior,
@@ -217,6 +218,7 @@ fn matches_from(pattern: &[u8], path: &[u8]) -> bool {
 
 #[derive(Debug, Default, Deserialize)]
 struct PolicyLayer {
+    replica: Option<crate::import_authorization::ReplicaPolicy>,
     defaults: Option<toml::Value>,
     integration: Option<IntegrationLayer>,
     policy: Option<PolicyLayerPolicy>,
@@ -281,7 +283,10 @@ const OPERATOR_SOURCE: &str = "<git-common-dir>/arc/operator-policy.toml";
 /// Validate the policy portion of an operator-policy document.
 pub fn validate_operator_text(text: &str) -> Result<()> {
     crate::style::validate_policy(text, "operator policy")?;
-    toml::from_str::<PolicyLayer>(text).context("malformed operator policy TOML")?;
+    let layer = toml::from_str::<PolicyLayer>(text).context("malformed operator policy TOML")?;
+    if let Some(replica) = layer.replica {
+        replica.validate()?;
+    }
     Ok(())
 }
 
@@ -323,9 +328,18 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<PolicyFile>
         style_layers.push((format!("{source}:{origin}"), style, false));
         let layer =
             toml::from_str::<PolicyLayer>(&text).with_context(|| format!("malformed {origin}"))?;
+        if let Some(replica) = &layer.replica {
+            if source == PROJECT_SOURCE {
+                anyhow::bail!("{origin}: replica enrollment and review trust are operator-only");
+            }
+            replica
+                .validate()
+                .with_context(|| format!("invalid {origin}: replica"))?;
+        }
         layers.push((source.to_string(), layer));
     }
 
+    let mut replica = crate::import_authorization::ReplicaPolicy::default();
     let mut policy = Policy::default();
     let mut review = Review::default();
     let mut danger = Danger::default();
@@ -347,6 +361,10 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<PolicyFile>
     let mut candidates = Candidates::default();
 
     for (source, layer) in layers {
+        if let Some(raw) = layer.replica {
+            sources.record("replica".into(), &source);
+            replica = raw;
+        }
         if let Some(defaults) = layer.defaults {
             for table in ["change", "integration"] {
                 if let Some(entries) = defaults.get(table).and_then(toml::Value::as_table) {
@@ -498,6 +516,7 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<PolicyFile>
     };
 
     Ok(PolicyFile {
+        replica,
         policy,
         review,
         provenance: ProvenanceBehavior { git_identity },
@@ -556,6 +575,26 @@ pub struct Policy {
 #[derive(Debug, Default)]
 pub struct Review {
     pub checklist: Vec<String>,
+}
+
+/// Read publishing grants and review trust exclusively from operator policy.
+pub fn replica_at(path: &Path) -> Result<crate::import_authorization::ReplicaPolicy> {
+    let Some(text) = read_optional(path)? else {
+        return Ok(Default::default());
+    };
+    let document: toml::Value =
+        toml::from_str(&text).with_context(|| format!("malformed {}", path.display()))?;
+    let replica: crate::import_authorization::ReplicaPolicy = match document.get("replica") {
+        Some(value) => value
+            .clone()
+            .try_into()
+            .with_context(|| format!("invalid {}: replica", path.display()))?,
+        None => Default::default(),
+    };
+    replica
+        .validate()
+        .with_context(|| format!("invalid {}: replica", path.display()))?;
+    Ok(replica)
 }
 
 #[cfg(test)]

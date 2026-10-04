@@ -240,7 +240,13 @@ fn registry_stores(cfg: &crate::config::Config) -> Result<Vec<(String, Store)>> 
             continue;
         };
         match Store::open_at(&root) {
-            Ok(Some(store)) => stores.push((project.label(), store)),
+            Ok(Some(mut store)) => {
+                store.operator_policy_path = project
+                    .anchor
+                    .as_deref()
+                    .and_then(|anchor| crate::policy::operator_path(anchor).ok());
+                stores.push((project.label(), store));
+            }
             Ok(None) => {}
             Err(error) => eprintln!("warning: skipping {}: {error:#}", project.label()),
         }
@@ -1333,7 +1339,7 @@ fn project_row(
 
     let (queues, changes) = match &project.ledger {
         Some(root) => {
-            let queues = match ledger_queues(root) {
+            let queues = match ledger_queues(root, Some(anchor)) {
                 Ok(queues) => queues,
                 Err(error) => {
                     failures.push(ComponentFailure {
@@ -1343,7 +1349,7 @@ fn project_row(
                     LedgerQueues::default()
                 }
             };
-            let changes = match Store::open_at(root) {
+            let changes = match Store::open_at_for(root, anchor) {
                 Ok(Some(store)) => match observe_changes(ctx, &store, anchor) {
                     Ok(inbox) => inbox,
                     Err(error) => {
@@ -1959,7 +1965,11 @@ fn report_ledger_facts(
         let anchor = project.anchor.clone();
         let states = Store::open_at(root)
             .and_then(|store| store.context("ledger is missing"))
-            .and_then(|store| {
+            .and_then(|mut store| {
+                store.operator_policy_path = anchor
+                    .as_deref()
+                    .map(crate::policy::operator_path)
+                    .transpose()?;
                 let candidates = super::candidate::load_ledger(&store)?;
                 Ok((store.readable_states()?, candidates))
             });
@@ -2207,10 +2217,13 @@ struct LedgerQueues {
     shared_surfaces: BTreeMap<String, Vec<String>>,
 }
 
-fn ledger_queues(root: &Path) -> Result<LedgerQueues> {
-    let Some(store) = Store::open_at(root)? else {
+fn ledger_queues(root: &Path, anchor: Option<&Path>) -> Result<LedgerQueues> {
+    let Some(mut store) = Store::open_at(root)? else {
         return Ok(LedgerQueues::default());
     };
+    if let Some(anchor) = anchor {
+        store.operator_policy_path = Some(crate::policy::operator_path(anchor)?);
+    }
     let states = store.readable_states()?;
     let now = chrono::Utc::now();
     let mut needs_review = Vec::new();

@@ -894,7 +894,8 @@ pub fn markdown(
             // A passing run that cannot be reused reads as `Pass` above, next
             // to a gate summary that says the same gate is not green. Saying
             // why here is what keeps the two from contradicting each other.
-            if let Some(reason) = unusable_gate_evidence_reason(v, state.dirty_tree_waiver.as_ref())
+            if let Some(reason) =
+                unusable_gate_evidence_reason(v, state.eligible_dirty_tree_waiver())
             {
                 let _ = writeln!(w, "  - not reusable as evidence: {reason}");
             }
@@ -2665,4 +2666,14 @@ pub fn check_explanation(state: &ChangeState, report: &StatusReport) -> String {
         let _ = writeln!(out, "Exit code: {code} ({first})");
     }
     out
+}
+
+/// Recorded coverage and receiver permission are distinct review facts.
+pub fn verdict_assessments(assessments: &[crate::status::VerdictAssessment]) {
+    for verdict in assessments {
+        println!("verdict {}: origin {} ({}), actor {}, subject {:?}, provenance {}, covers head {}, gating eligible {}{}",
+            verdict.event_id, verdict.origin_replica_id, verdict.origin_name.as_deref().unwrap_or("unnamed"), verdict.actor,
+            verdict.on_behalf_of, verdict.admission_provenance, verdict.covers_current_head, verdict.gating_eligible,
+            verdict.rejection_reason.as_ref().map(|reason| format!(", {reason}")).unwrap_or_default());
+    }
 }

@@ -2,6 +2,40 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// One operation's outcome, including whether its durable admission published.
+#[derive(Debug, Clone, Serialize)]
+pub struct OperationResult<T> {
+    pub exit_code: i32,
+    pub published: bool,
+    pub output: T,
+}
+impl<T: Default> OperationResult<T> {
+    pub fn unpublished(exit_code: i32) -> Self {
+        Self {
+            exit_code,
+            published: false,
+            output: T::default(),
+        }
+    }
+}
+
+/// A failed durable operation reports whether publication occurred.
+#[derive(Debug)]
+pub struct OperationFailure {
+    pub published: bool,
+    pub message: String,
+}
+impl std::fmt::Display for OperationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "publication published={}: {}",
+            self.published, self.message
+        )
+    }
+}
+impl std::error::Error for OperationFailure {}
+
 /// The store format this build writes and understands. A build refuses a
 /// store stamped newer than this, because the alternative is what silently
 /// went wrong before: an older binary skipping event types it does not know,
@@ -1729,6 +1763,8 @@ pub struct ExternalVerdictBasis {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorizationBasis {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_verdict_provenance: Option<crate::import_authorization::SelectedVerdictProvenance>,
     /// The verdict that approved the merged patchset, when one did. Absent
     /// when a declared debt stood in for a review nobody performed: the
     /// merge then rests on `audit_debt_event_id` alone, and saying so is more
@@ -1827,6 +1863,8 @@ pub struct NormalizedGate {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NormalizedPolicy {
+    #[serde(default)]
+    pub replica: crate::import_authorization::ReplicaPolicy,
     pub forbid_self_approval: bool,
     pub require_declared_actor: bool,
     pub provenance_git_identity: String,

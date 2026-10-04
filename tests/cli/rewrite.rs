@@ -1744,10 +1744,11 @@ fn an_imported_map_naming_a_different_tree_leaves_the_approval_stale() {
         .assert()
         .success();
 
-    let recorded = repository_events(&repo);
-    assert_eq!(recorded.len(), 1, "the map was imported");
-    let event: serde_json::Value =
-        serde_json::from_slice(&fs::read(&recorded[0]).unwrap()).unwrap();
+    let events = stdout(
+        repo.arc(&repo.root)
+            .args(["events", "--type", "history-rewritten"]),
+    );
+    let event: serde_json::Value = serde_json::from_str(events.trim()).unwrap();
     assert!(
         event.get("signature_only").is_none(),
         "the sender's judgement was kept: {event}"

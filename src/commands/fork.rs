@@ -725,7 +725,7 @@ fn describe(
 /// holds any change, and a read that created one would be a write.
 fn read_only_store(cwd: &Path) -> Result<Option<crate::store::Store>> {
     let root = crate::store::Store::resolve_root(cwd)?;
-    crate::store::Store::open_at(&root)
+    crate::store::Store::open_at_for(&root, cwd)
 }
 
 /// The open change recording a branch, if one does: the state `adopt` must

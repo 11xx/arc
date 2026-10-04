@@ -989,6 +989,49 @@ RUN A CHANGE
   complete replacement file, written atomically after it exits 0.
 
 PAIR REPLICA STORES
+  Import reads received bytes once and checks a supplied --received-sha256
+  before parsing. Object availability and publishing authorization are checked
+  before publication. Either refusal leaves events, receipts, configuration,
+  format stamps and refs unchanged. --provenance-only permits missing listed
+  Git objects; publishing authorization still applies. Git checks do not fetch
+  from promisor remotes.
+  Pairing grants project membership, never publishing capabilities. A paired
+  receiver requires --publisher PRINCIPAL and --received-sha256 SHA256 on both
+  import commands. Enroll publishing principals only in operator-policy.toml:
+
+    [replica]
+    trusted_review_replicas = []
+    [[replica.publishers]]
+    principal = "worker-channel"
+    source_replica_id = "worker-store-id"
+    [[replica.publishers.origins]]
+    replica_id = "worker-store-id"
+    roles = ["facts", "review-input", "debt-input", "rewrite", "provisional-integration"]
+    actors = []
+
+  The receiving caller obtains the principal from authenticated transport and
+  computes the exact received file's SHA256 independently of bundle contents.
+  Arc checks the assertion against local enrollment and binds the exact bytes
+  to the supplied digest. Arc does not authenticate a flag or actor string;
+  integrity against a supplied checksum establishes no identity or independence.
+  A caller able to edit policy or assert arbitrary principals controls admission.
+
+  source_replica_id identifies the exporting store; repository_id identifies
+  each event's recording origin and the change's original store. Relay export
+  preserves all recorded identities. A publisher needs explicit per-origin
+  capabilities to introduce relayed events. Identical held events need no grant.
+  Enrollment and review trust are operator-only; project policy cannot grant
+  them. Unpaired receivers without enrollment retain legacy file imports.
+  No foreign replica supplies review authority by default. A foreign verdict
+  needs both admitted review-authority and current trusted_review_replicas
+  membership to gate. Contributor and assumed-identity checks still apply.
+  Recorded supersession history remains visible; foreign edges cannot replace
+  a local refusal or settle a contested local graph. Review-input audits cannot
+  discharge debt or corroborate provisional approval; debt-input cannot waive
+  approval. Status and check separate head coverage from gating permission.
+  Historical closures remain facts; legacy events have legacy-unknown admission
+  provenance, with no transport authentication invented for their claims.
+
   A store keeps its own repository ID as event provenance. `replica init`
   records the first replica and logical project ID. `replica pair` records an
   operator-named peer by its repository ID; that peer adopts the project only
@@ -2004,6 +2047,15 @@ EXIT CODES
     `arc take` exits 2 when no change is ready.
     `arc env` exits 1 and prints the export template when no harness is
       detected.
+    Both import commands exit 18 for publishing authorization refusals,
+      including missing provenance, digest mismatch, exporter/origin mismatch,
+      missing capability, forbidden actor claims, and authorization movement.
+      Exit 1 reports invalid bundles, enrollment, replay, or publication failures.
+      An admission batch publishes change facts, repository facts and its local
+      authorization receipt together. Admission batches require store format 7.
+      Temporary batches are invisible. Receipts
+      are private admission evidence and never exported as a trust grant.
+      Retention failures after publication name the published admission.
     `arc import` exits 1 and writes nothing when an event conflicts.
     `arc changelog --write` exits 1 and writes nothing when the renderer
       cannot perform the write, naming the target and the reason on stderr.
@@ -2188,7 +2240,7 @@ SCHEMAS
     `arc-state/3`                    arc show --json
     `arc-trailers/1`                 arc trailers --json
     `arc-status/27`                  arc status
-    `arc-check/3`                    arc check --json
+    `arc-check/4`                    arc check --json
     `arc-inbox/10`                   arc inbox --json
     `arc-catchup/12`                 arc catchup --json
     `arc-journal-catchup/8`          arc journal catchup --json
@@ -2246,7 +2298,8 @@ SCHEMAS
 
   Internal:
     store format 7                   .git/arc/config.json and the change ledger
-    `arc-replica-import/2`           receipt of an imported replica bundle
+    `arc-import-batch/1`             local atomic change import and authorization
+    `arc-replica-import/3`           receipt of an imported replica bundle
     `arc-journal-exchange-import/1`  receipt of an imported journal bundle
     `arc-sandbox/2`                  .arc-sandbox.json
     `journal-binding/1`              bindings.jsonl

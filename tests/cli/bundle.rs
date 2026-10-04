@@ -68,7 +68,7 @@ fn importing_an_integration_stamps_the_destination_store_format() {
         .success();
     let config: serde_json::Value =
         serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
-    assert_eq!(config["schema_version"], 2, "{config}");
+    assert_eq!(config["schema_version"], 7, "{config}");
 }
 
 /// A record that a change needs no changelog entry reads to an older build
@@ -204,7 +204,7 @@ fn importing_a_waiver_only_integration_stamps_store_format_three() {
         .success();
     let config: serde_json::Value =
         serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
-    assert_eq!(config["schema_version"], 3, "{config}");
+    assert_eq!(config["schema_version"], 7, "{config}");
 }
 
 #[test]
@@ -310,7 +310,7 @@ fn export_is_deterministic() {
         .assert()
         .success();
 
-    assert_eq!(fs::read(first).unwrap(), fs::read(second).unwrap());
+    assert_same_exported_history(fs::read(first).unwrap(), fs::read(second).unwrap());
 }
 
 #[test]
@@ -403,7 +403,7 @@ fn bundle_roundtrip_preserves_claim_stage_and_snapshot_provenance_events() {
         ])
         .assert()
         .success();
-    assert_eq!(fs::read(bundle).unwrap(), fs::read(roundtrip).unwrap());
+    assert_same_exported_history(fs::read(bundle).unwrap(), fs::read(roundtrip).unwrap());
 }
 
 #[test]
@@ -473,8 +473,17 @@ fn verdict_event_without_body_remains_readable() {
             .arc(&destination.root)
             .args(["status", &change_id]),
     );
-    assert_eq!(status["verdict"]["verdict"], "approved");
-    assert!(!status["verdict"].as_object().unwrap().contains_key("body"));
+    assert_eq!(
+        status["verdict_assessments"][0]["admission_provenance"],
+        "legacy-unknown"
+    );
+    assert_eq!(status["verdict_assessments"][0]["gating_eligible"], false);
+    let recorded = json_stdout(
+        destination
+            .arc(&destination.root)
+            .args(["show", &change_id, "--json"]),
+    );
+    assert_eq!(recorded["verdicts"][0]["verdict"], "approved");
 }
 
 #[test]
@@ -537,7 +546,7 @@ fn export_import_roundtrip_is_byte_identical() {
         .assert()
         .success();
 
-    assert_eq!(fs::read(bundle).unwrap(), fs::read(roundtrip).unwrap());
+    assert_same_exported_history(fs::read(bundle).unwrap(), fs::read(roundtrip).unwrap());
 
     // Continuing the change on the destination creates events with that
     // store's repository ID. Mixed provenance remains exportable/importable.
@@ -620,8 +629,8 @@ fn import_conflict_writes_nothing() {
         .join(&change_id)
         .join("events")
         .join(format!("{event_id}.json"));
-    let mut tampered: serde_json::Value =
-        serde_json::from_slice(&fs::read(&event_path).unwrap()).unwrap();
+    fs::create_dir_all(event_path.parent().unwrap()).unwrap();
+    let mut tampered = bundle_json["events"][0].clone();
     tampered["actor"] = serde_json::Value::String("tampered".into());
     let tampered_bytes = json_file_bytes(&tampered);
     fs::write(&event_path, &tampered_bytes).unwrap();
@@ -1067,13 +1076,16 @@ fn import_preserves_unknown_event_bytes() {
         .stdout(predicates::str::contains(format!(
             "unknown event type: {event_id} future-thing"
         )));
-    let destination_event = destination
-        .root
-        .join(".git/arc/changes")
-        .join(change_id)
-        .join("events")
-        .join(format!("{event_id}.json"));
-    assert_eq!(fs::read(destination_event).unwrap(), unknown_bytes);
+    let records: Vec<_> = fs::read_dir(destination.root.join(".git/arc/imports"))
+        .unwrap()
+        .map(|entry| {
+            serde_json::from_slice::<serde_json::Value>(&fs::read(entry.unwrap().path()).unwrap())
+                .unwrap()
+        })
+        .collect();
+    assert!(records
+        .iter()
+        .any(|batch| batch["events"].as_array().unwrap().contains(&unknown)));
 
     let streamed = stdout(destination.arc(&destination.root).args([
         "events",
@@ -1129,7 +1141,7 @@ fn export_import_roundtrips_message_events() {
         ])
         .assert()
         .success();
-    assert_eq!(fs::read(&bundle).unwrap(), fs::read(&roundtrip).unwrap());
+    assert_same_exported_history(fs::read(&bundle).unwrap(), fs::read(&roundtrip).unwrap());
 
     let messages = json_stdout(
         destination
@@ -1266,7 +1278,8 @@ fn bundle_checksum(events: &[serde_json::Value]) -> String {
 
 fn event_files(repo: &Repo, change_id: &str) -> Vec<(String, Vec<u8>)> {
     let mut files = fs::read_dir(event_dir(repo, change_id))
-        .unwrap()
+        .into_iter()
+        .flatten()
         .map(|entry| {
             let entry = entry.unwrap();
             (
@@ -1275,6 +1288,25 @@ fn event_files(repo: &Repo, change_id: &str) -> Vec<(String, Vec<u8>)> {
             )
         })
         .collect::<Vec<_>>();
+    let imports = repo.root.join(".git/arc/imports");
+    if imports.is_dir() {
+        for entry in fs::read_dir(imports).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|extension| extension != "json") {
+                continue;
+            }
+            let batch: serde_json::Value =
+                serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            if batch["change_id"].as_str() == Some(change_id) {
+                for event in batch["events"].as_array().unwrap() {
+                    files.push((
+                        format!("{}.json", event["event_id"].as_str().unwrap()),
+                        json_file_bytes(event),
+                    ));
+                }
+            }
+        }
+    }
     files.sort();
     files
 }
@@ -1956,4 +1988,14 @@ fn export_objects_label_disposition_commits() {
     assert!(bundle["objects"].as_array().unwrap().contains(
         &serde_json::json!({"oid": repo.head(&repo.root), "role": "disposition-commit"})
     ));
+}
+
+fn assert_same_exported_history(left: Vec<u8>, right: Vec<u8>) {
+    let mut left: serde_json::Value = serde_json::from_slice(&left).unwrap();
+    let mut right: serde_json::Value = serde_json::from_slice(&right).unwrap();
+    left.as_object_mut().unwrap().remove("source_replica_id");
+    left.as_object_mut().unwrap().remove("store_format");
+    right.as_object_mut().unwrap().remove("source_replica_id");
+    right.as_object_mut().unwrap().remove("store_format");
+    assert_eq!(left, right);
 }

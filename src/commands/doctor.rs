@@ -305,13 +305,31 @@ fn inspect_changes(
 ) -> Result<()> {
     let changes = root.join("changes");
     let entries = match fs::read_dir(&changes) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Ok(entries) => Some(entries),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
             return Err(error).with_context(|| format!("cannot read {}", changes.display()))
         }
     };
-    for entry in entries {
+    let batches = match crate::store::import_batches(root) {
+        Ok(batches) => batches,
+        Err(error) => {
+            problems.push(Finding {
+                code: "malformed-import-batch",
+                detail: format!("{error:#}"),
+            });
+            Vec::new()
+        }
+    };
+    let mut imported = BTreeMap::<String, Vec<serde_json::Value>>::new();
+    for batch in batches {
+        imported
+            .entry(batch.change_id)
+            .or_default()
+            .extend(batch.events);
+    }
+    let mut inspected = BTreeSet::new();
+    for entry in entries.into_iter().flatten() {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
             continue;
@@ -324,23 +342,44 @@ fn inspect_changes(
             });
             continue;
         }
+        inspected.insert(change_id.clone());
         inspect_change(
             &inspection,
             &change_id,
             &entry.path(),
+            imported
+                .get(&change_id)
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
             problems,
             advice,
             states,
             patchsets,
         )?;
     }
+    for (change_id, events) in imported {
+        if !inspected.contains(&change_id) {
+            inspect_change(
+                &inspection,
+                &change_id,
+                &changes.join(&change_id),
+                &events,
+                problems,
+                advice,
+                states,
+                patchsets,
+            )?;
+        }
+    }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn inspect_change(
     inspection: &ChangeInspection<'_>,
     change_id: &str,
     change_dir: &Path,
+    imported: &[serde_json::Value],
     problems: &mut Vec<Finding>,
     advice: &mut Vec<Finding>,
     states: &mut BTreeMap<String, ChangeState>,
@@ -348,19 +387,15 @@ fn inspect_change(
 ) -> Result<()> {
     let events_dir = change_dir.join("events");
     let entries = match fs::read_dir(&events_dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            problems.push(Finding {
-                code: "missing-open-event",
-                detail: change_dir.display().to_string(),
-            });
-            return Ok(());
-        }
+        Ok(entries) => Some(entries),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
             return Err(error).with_context(|| format!("cannot read {}", events_dir.display()))
         }
     };
     let mut paths = entries
+        .into_iter()
+        .flatten()
         .map(|entry| entry.map(|entry| entry.path()))
         .collect::<std::io::Result<Vec<_>>>()?;
     paths.sort();
@@ -415,6 +450,42 @@ fn inspect_change(
         has_open |= matches!(event.payload, Payload::ChangeOpened { .. });
         events.push(event);
     }
+    for value in imported {
+        match crate::bundle::parse_typed_event(value) {
+            Ok(Some(event)) => {
+                if event.change_id != change_id {
+                    problems.push(Finding {
+                        code: "invalid-event-envelope",
+                        detail: event.event_id,
+                    });
+                    continue;
+                }
+                if let Some(existing) = events
+                    .iter()
+                    .find(|existing| existing.event_id == event.event_id)
+                {
+                    if serde_json::to_value(existing)? != *value {
+                        problems.push(Finding {
+                            code: "conflicting-event",
+                            detail: event.event_id,
+                        });
+                    }
+                    continue;
+                }
+                has_open |= matches!(event.payload, Payload::ChangeOpened { .. });
+                events.push(event);
+            }
+            Ok(None) => advice.push(Finding {
+                code: "unknown-event-type",
+                detail: value["event_id"].to_string(),
+            }),
+            Err(error) => problems.push(Finding {
+                code: "malformed-event",
+                detail: format!("{error:#}"),
+            }),
+        }
+    }
+    events.sort_by(|a, b| a.event_id.cmp(&b.event_id));
     if !has_open {
         problems.push(Finding {
             code: "missing-open-event",
@@ -428,6 +499,14 @@ fn inspect_change(
     let Ok(mut state) = state::reduce(&events) else {
         return Ok(());
     };
+    if let Some(root) = change_dir.parent().and_then(Path::parent) {
+        if let Some(store) = Store::open_at_for(root, inspection.cwd)? {
+            state.apply_privilege_scope(
+                crate::import_authorization::PrivilegeScope::for_store(&store)?,
+                &events,
+            );
+        }
+    }
     crate::replica::localize_change(inspection.local_repository_id, &events, &mut state);
     if state.closure.is_none() && !gitio::branch_exists(inspection.cwd, &state.branch) {
         advice.push(Finding {

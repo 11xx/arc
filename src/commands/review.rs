@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 #[derive(Serialize)]
 struct ReviewView<'a> {
     schema: &'static str,
+    verdict_assessments: &'a [crate::status::VerdictAssessment],
     change_id: &'a str,
     verdicts: Vec<ReviewVerdict<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -82,6 +83,7 @@ pub fn read_review(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
     let report = ctx.report(&store, &state)?;
     let view = ReviewView {
         schema: "arc-review/5",
+        verdict_assessments: &report.verdict_assessments,
         change_id: &state.change_id,
         verdicts: state
             .verdicts
@@ -114,6 +116,7 @@ pub fn read_review(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
     }
 
     println!("# Review: {}", state.change_id);
+    crate::render::verdict_assessments(&report.verdict_assessments);
     println!("\n## Verdict history\n");
     if view.verdicts.is_empty() {
         println!("No verdicts recorded.");
@@ -503,7 +506,7 @@ pub(super) fn snapshot_holding(
     request: SnapshotRequest,
 ) -> Result<String> {
     let events = store.load_events(change_id)?;
-    let mut st = state::reduce_following(&events, &store.rewrites()?)?;
+    let mut st = store.project_state(&events, &store.rewrites()?)?;
     crate::replica::localize_change(&store.repository_id, &events, &mut st);
     promote_change_spool(ctx, &st);
     let links_supplied = request.links_supplied();
@@ -777,7 +780,7 @@ pub fn amend_attribution(
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
     let events = store.load_events(&change_id)?;
-    let mut st = state::reduce_following(&events, &store.rewrites()?)?;
+    let mut st = store.project_state(&events, &store.rewrites()?)?;
     crate::replica::localize_change(&store.repository_id, &events, &mut st);
     let patchset_id = resolve_patchset_id(&st, Some(patchset))?
         .context("no patchset to amend; run `arc snapshot` first")?;
@@ -1214,7 +1217,7 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
     // The test suite holds the review here, between the snapshot and the verdict.
     super::pause_until_released("ARC_REVIEW_PAUSE")?;
     let events = store.load_events(&change_id)?;
-    let mut st = state::reduce_following(&events, &store.rewrites()?)?;
+    let mut st = store.project_state(&events, &store.rewrites()?)?;
     crate::replica::localize_change(&store.repository_id, &events, &mut st);
     let patchset_id = match snapshot_patchset {
         Some(patchset_id) => patchset_id,
@@ -1222,7 +1225,7 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
             .context("no patchset to review; run `arc snapshot` first")?,
     };
     let observed: Vec<String> = st
-        .verdict_tips()
+        .eligible_verdict_tips()
         .into_iter()
         .map(|verdict| verdict.event_id.clone())
         .collect();

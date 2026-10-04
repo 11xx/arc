@@ -39,6 +39,11 @@ pub fn show(ctx: &Ctx) -> Result<i32> {
     let operator_path = crate::policy::operator_path(&top)?;
     println!("operator policy: {}", operator_path.display());
     println!("effective policy:");
+    println!(
+        "  replica = {} (operator-only; {})",
+        serde_json::to_string(&policy.replica)?,
+        operator_path.display()
+    );
     let forbid_self_approval = policy.policy.forbid_self_approval.to_string();
     print_rule(
         "policy.forbid_self_approval",

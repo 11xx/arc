@@ -815,8 +815,18 @@ fn typed_consumers_tolerate_imported_unknown_event_type() {
         .success();
 
     // Storage kept the unknown event byte-identically, and re-export round-trips it.
-    let dest_event = event_dir(&dest, &change_id).join(format!("{event_id}.json"));
-    assert_eq!(fs::read(dest_event).unwrap(), unknown_bytes);
+    let streamed = stdout(dest.arc(&dest.root).args([
+        "events",
+        "--change",
+        &change_id,
+        "--type",
+        "quantum-entangled",
+    ]));
+    let stored: serde_json::Value = serde_json::from_str(streamed.trim()).unwrap();
+    assert_eq!(
+        stored,
+        serde_json::from_slice::<serde_json::Value>(&unknown_bytes).unwrap()
+    );
     let reexport = dest.home.join("reexport.json");
     dest.arc(&dest.root)
         .args(["export", &change_id, "--output", reexport.to_str().unwrap()])

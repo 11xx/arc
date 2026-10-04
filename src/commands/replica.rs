@@ -38,9 +38,19 @@ pub fn export(ctx: &Ctx, output: &str) -> Result<()> {
     crate::replica::export(&store, output)
 }
 
-pub fn import(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
-    let store = ctx.store()?;
-    crate::replica::import(ctx, &store, input, dry_run)
+pub fn import(
+    ctx: &Ctx,
+    input: &str,
+    dry_run: bool,
+    publisher: Option<&str>,
+    received_sha256: Option<&str>,
+) -> Result<crate::import_authorization::ImportResult> {
+    let root = crate::store::Store::resolve_root(&ctx.cwd)?;
+    let mut store = crate::store::Store::open_at(&root)?.ok_or_else(|| {
+        anyhow::anyhow!("replica import requires a local repository ID; run arc replica id")
+    })?;
+    store.operator_policy_path = Some(crate::policy::operator_path(&ctx.cwd)?);
+    crate::replica::import(ctx, &store, input, dry_run, publisher, received_sha256)
 }
 
 pub fn offer(ctx: &Ctx, recipient: &str) -> Result<()> {

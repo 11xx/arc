@@ -585,7 +585,7 @@ fn review_map_names_the_reviewer_that_never_saw_the_final_patchset() {
 
     // Advisory only: thin coverage never becomes a blocker.
     let check = json_stdout_any_status(repo.arc(&repo.root).args(["check", "drifted", "--json"]));
-    assert_eq!(check["schema"], "arc-check/3", "{check}");
+    assert_eq!(check["schema"], "arc-check/4", "{check}");
     assert!(check["advisories"]
         .as_array()
         .unwrap()

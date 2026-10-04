@@ -110,7 +110,7 @@ pub struct ApprovalOutcome {
 /// Provenance recorded before arc kept it is *unknown*, not assumed, and is
 /// compared by name as it always was — otherwise upgrading arc would strand
 /// every existing ledger that uses this policy.
-fn self_approval_rejection(
+pub(crate) fn self_approval_rejection(
     patchset: &Patchset,
     verdict_author: &str,
     verdict_assumed: bool,
@@ -165,6 +165,8 @@ pub fn decide(facts: &ApprovalFacts) -> ApprovalOutcome {
     let rejected_self_approval = would_reject_self_approval && !debt_waives_current_head;
 
     let verdict = facts.latest_verdict.map(|v| VerdictStatus {
+        event_id: v.event_id.clone(),
+        origin_replica_id: v.origin_replica_id.clone(),
         verdict: v.verdict,
         patchset_id: v.patchset_id.clone(),
         body: v.body.clone(),
@@ -513,6 +515,7 @@ mod tests {
 
     fn verdict(verdict: Verdict, actor: &str) -> VerdictEntry {
         VerdictEntry {
+            origin_replica_id: "repo".into(),
             event_id: format!("verdict-{actor}"),
             patchset_id: "ps-2".into(),
             verdict,
@@ -531,6 +534,7 @@ mod tests {
 
     fn external(event_id: &str, revision: &str, verdict: ExternalVerdict) -> ExternalVerdictEntry {
         ExternalVerdictEntry {
+            origin_replica_id: "repo".into(),
             source: "external",
             event_id: event_id.into(),
             revision: revision.into(),

@@ -76,7 +76,7 @@ pub fn begin(
     let rewrites = store.rewrites()?;
     for existing in store.list_change_ids()? {
         let events = store.load_events(&existing)?;
-        let mut st = state::reduce_following(&events, &rewrites)?;
+        let mut st = store.project_state(&events, &rewrites)?;
         crate::replica::localize_change(&store.repository_id, &events, &mut st);
         if st.is_closed() {
             let belongs_to_primary_in_place_change = primary_branch

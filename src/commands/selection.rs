@@ -554,7 +554,7 @@ fn promote_selection(ctx: &Ctx, store: &Store, selection_id: &str, recover: bool
         );
     }
     let events = store.load_events(&change_id)?;
-    let mut st = state::reduce_following(&events, &store.rewrites()?)?;
+    let mut st = store.project_state(&events, &store.rewrites()?)?;
     crate::replica::localize_change(&store.repository_id, &events, &mut st);
     patchset_admitted(&st).map_err(|error| anyhow::anyhow!("destination-closed: {error:#}"))?;
     let reference = candidate::promotion_ref(&selection.candidate_id, selection_id);

@@ -49,6 +49,7 @@ struct StoreConfig {
 /// The machine-local operational store: one directory of append-only
 /// event files per change, shared by every worktree of the repository.
 pub struct Store {
+    pub operator_policy_path: Option<PathBuf>,
     pub root: PathBuf,
     pub repository_id: String,
     /// Whether this repository requires every writer to declare itself, read
@@ -77,6 +78,72 @@ impl Drop for TransitionLock {
     fn drop(&mut self) {
         let _ = self.0.unlock();
     }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportBatch {
+    pub schema: String,
+    pub change_id: String,
+    pub events: Vec<serde_json::Value>,
+    pub repository_events: Vec<serde_json::Value>,
+    pub authorization: Option<crate::import_authorization::ImportAuthorization>,
+}
+
+/// Only published JSON records participate in ledger reads.
+pub fn import_batches(root: &Path) -> Result<Vec<ImportBatch>> {
+    let dir = root.join("imports");
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).with_context(|| format!("cannot read {}", dir.display())),
+    };
+    let mut paths = entries
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    paths.retain(|path| {
+        path.extension()
+            .is_some_and(|extension| extension == "json")
+    });
+    paths.sort();
+    let mut batches = Vec::new();
+    for path in paths {
+        let batch: ImportBatch = serde_json::from_slice(&fs::read(&path)?)
+            .with_context(|| format!("malformed import batch {}", path.display()))?;
+        if batch.schema != "arc-import-batch/1" {
+            bail!("unsupported import batch schema {}", batch.schema);
+        }
+        ids::validate_id_component(&batch.change_id)?;
+        batches.push(batch);
+    }
+    Ok(batches)
+}
+
+fn merge_raw(
+    events: &mut Vec<(String, serde_json::Value)>,
+    incoming: impl IntoIterator<Item = serde_json::Value>,
+    seen: &BTreeSet<String>,
+) -> Result<()> {
+    for value in incoming {
+        let id = value
+            .get("event_id")
+            .and_then(serde_json::Value::as_str)
+            .context("imported event has no ID")?
+            .to_string();
+        ids::validate_id_component(&id)?;
+        if seen.contains(&id) {
+            continue;
+        }
+        if let Some((_, existing)) = events.iter().find(|(held, _)| held == &id) {
+            if existing != &value {
+                bail!("event {id} has conflicting stored contents");
+            }
+        } else {
+            events.push((id, value));
+        }
+    }
+    events.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(())
 }
 
 impl Store {
@@ -152,6 +219,7 @@ impl Store {
             }
         };
         let store = Store {
+            operator_policy_path: Some(crate::policy::operator_path(cwd)?),
             root,
             repository_id,
             require_declared_actor,
@@ -169,6 +237,7 @@ impl Store {
     pub fn open_at(root: &Path) -> Result<Option<Store>> {
         match Self::repository_id_at(root)? {
             Some(repository_id) => Ok(Some(Store {
+                operator_policy_path: Some(root.join("operator-policy.toml")),
                 root: root.to_path_buf(),
                 repository_id,
                 require_declared_actor: false,
@@ -177,6 +246,14 @@ impl Store {
             })),
             None => Ok(None),
         }
+    }
+
+    pub fn open_at_for(root: &Path, cwd: &Path) -> Result<Option<Store>> {
+        let mut store = Self::open_at(root)?;
+        if let Some(store) = &mut store {
+            store.operator_policy_path = Some(crate::policy::operator_path(cwd)?);
+        }
+        Ok(store)
     }
 
     pub fn resolve_root(cwd: &Path) -> Result<PathBuf> {
@@ -236,34 +313,13 @@ impl Store {
     /// Repository-scoped events in ID order. A repository that has never had
     /// one has no directory, which is not an error.
     pub fn load_repository_events(&self) -> Result<Vec<Event>> {
-        let dir = self.repository_events_dir();
-        let mut names: Vec<String> = Vec::new();
-        let entries = match fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => {
-                return Err(error).with_context(|| format!("cannot read {}", dir.display()))
-            }
-        };
-        for entry in entries {
-            let name = entry?.file_name().to_string_lossy().into_owned();
-            if name.ends_with(".json") {
-                names.push(name);
-            }
-        }
-        names.sort();
-        let mut events = Vec::with_capacity(names.len());
-        for name in names {
-            let path = dir.join(&name);
-            let bytes = fs::read(&path)?;
-            let event: Event = serde_json::from_slice(&bytes)
-                .with_context(|| format!("malformed event file {}", path.display()))?;
-            if matches!(event.payload, crate::model::Payload::Unknown) {
-                continue;
-            }
-            events.push(event);
-        }
-        Ok(events)
+        self.raw_repository_events_unseen(&BTreeSet::new())?
+            .into_iter()
+            .filter_map(|(_, value)| match serde_json::from_value::<Event>(value) {
+                Ok(event) if matches!(event.payload, Payload::Unknown) => None,
+                other => Some(other.context("malformed repository event")),
+            })
+            .collect()
     }
 
     /// Where a rewrite writes down what it is about to do, beside the events
@@ -412,27 +468,21 @@ impl Store {
     /// Every change in the ledger. A ledger with no changes directory has no
     /// changes; one whose directory cannot be read is an error, never empty.
     pub fn list_change_ids(&self) -> Result<Vec<String>> {
+        let mut ids_out = BTreeSet::new();
         let dir = self.changes_dir();
-        let mut ids_out = Vec::new();
-        let entries = match fs::read_dir(&dir) {
-            Ok(e) => e,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(ids_out),
-            Err(error) => {
-                return Err(error).with_context(|| format!("cannot read {}", dir.display()))
-            }
-        };
-        for entry in entries {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if ids::validate_id_component(&name).is_ok() {
-                ids_out.push(name);
+        if dir.is_dir() {
+            for entry in fs::read_dir(&dir)? {
+                let entry = entry?;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if entry.file_type()?.is_dir() && ids::validate_id_component(&name).is_ok() {
+                    ids_out.insert(name);
+                }
             }
         }
-        ids_out.sort();
-        Ok(ids_out)
+        for batch in import_batches(&self.root)? {
+            ids_out.insert(batch.change_id);
+        }
+        Ok(ids_out.into_iter().collect())
     }
 
     /// Resolve a user-supplied change reference: exact ID, else unique
@@ -885,9 +935,27 @@ impl Store {
     /// not hold, and every reader would present that as the current state.
     /// `arc doctor` reports the contradiction as `invalid-rewrite-mapping`,
     /// which is where the refusal points.
+    pub fn project_state(
+        &self,
+        events: &[Event],
+        rewrites: &crate::rewrite::RewriteMap,
+    ) -> Result<crate::state::ChangeState> {
+        let mut state = crate::state::reduce_following(events, rewrites)?;
+        state.apply_privilege_scope(
+            crate::import_authorization::PrivilegeScope::for_store(self)?,
+            events,
+        );
+        crate::replica::localize_change(&self.repository_id, events, &mut state);
+        Ok(state)
+    }
+
     pub fn state(&self, change_id: &str) -> Result<crate::state::ChangeState> {
         let events = self.load_events(change_id)?;
         let mut state = crate::state::reduce_following(&events, &self.rewrites()?)?;
+        state.apply_privilege_scope(
+            crate::import_authorization::PrivilegeScope::for_store(self)?,
+            &events,
+        );
         crate::replica::localize_change(&self.repository_id, &events, &mut state);
         Ok(state)
     }
@@ -901,6 +969,10 @@ impl Store {
         for change_id in self.list_change_ids()? {
             let result = self.load_events(&change_id).and_then(|events| {
                 let mut state = crate::state::reduce_following(&events, &rewrites)?;
+                state.apply_privilege_scope(
+                    crate::import_authorization::PrivilegeScope::for_store(self)?,
+                    &events,
+                );
                 crate::replica::localize_change(&self.repository_id, &events, &mut state);
                 Ok(state)
             });
@@ -924,33 +996,13 @@ impl Store {
 
     /// All events of one change in ULID (i.e. chronological) order.
     pub fn load_events(&self, change_id: &str) -> Result<Vec<Event>> {
-        ids::validate_id_component(change_id)?;
-        let dir = self.events_dir(change_id);
-        let mut names: Vec<String> = Vec::new();
-        let entries =
-            fs::read_dir(&dir).with_context(|| format!("unknown change {change_id:?}"))?;
-        for entry in entries {
-            let name = entry?.file_name().to_string_lossy().into_owned();
-            if name.ends_with(".json") {
-                names.push(name);
-            }
-        }
-        names.sort();
-        let mut events = Vec::with_capacity(names.len());
-        for name in names {
-            let path = dir.join(&name);
-            let bytes = fs::read(&path)?;
-            let event: Event = serde_json::from_slice(&bytes)
-                .with_context(|| format!("malformed event file {}", path.display()))?;
-            // Skip (but never drop) events whose type this build does not
-            // recognize: the file stays on disk and raw export round-trips it,
-            // while typed replay tolerates a change that carries future events.
-            if matches!(event.payload, crate::model::Payload::Unknown) {
-                continue;
-            }
-            events.push(event);
-        }
-        Ok(events)
+        self.raw_events(change_id)?
+            .into_iter()
+            .filter_map(|(_, value)| match serde_json::from_value::<Event>(value) {
+                Ok(event) if matches!(event.payload, Payload::Unknown) => None,
+                other => Some(other.context("malformed event file in change ledger")),
+            })
+            .collect()
     }
 
     /// Raw JSON events of one change. Export deliberately bypasses the
@@ -969,10 +1021,15 @@ impl Store {
     ) -> Result<Vec<(String, serde_json::Value)>> {
         ids::validate_id_component(change_id)?;
         let dir = self.events_dir(change_id);
-        let entries =
-            fs::read_dir(&dir).with_context(|| format!("unknown change {change_id:?}"))?;
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => Some(entries),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot read {}", dir.display()))
+            }
+        };
         let mut events = Vec::new();
-        for entry in entries {
+        for entry in entries.into_iter().flatten() {
             let entry = entry?;
             if !entry.file_type()?.is_file() {
                 continue;
@@ -989,6 +1046,16 @@ impl Store {
             let value = serde_json::from_slice(&fs::read(&path)?)
                 .with_context(|| format!("malformed event file {}", path.display()))?;
             events.push((event_id.to_string(), value));
+        }
+        let mut found = dir.is_dir();
+        for batch in import_batches(&self.root)? {
+            if batch.change_id == change_id {
+                found = true;
+                merge_raw(&mut events, batch.events, seen)?;
+            }
+        }
+        if !found {
+            bail!("unknown change {change_id:?}");
         }
         events.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(events)
@@ -1018,19 +1085,29 @@ impl Store {
     pub fn repository_event_files(&self) -> Result<Vec<(String, Vec<u8>)>> {
         let dir = self.repository_events_dir();
         let entries = match fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Ok(entries) => Some(entries),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => {
                 return Err(error).with_context(|| format!("cannot read {}", dir.display()))
             }
         };
         let mut files = Vec::new();
-        for entry in entries {
+        for entry in entries.into_iter().flatten() {
             let name = entry?.file_name().to_string_lossy().into_owned();
             let Some(event_id) = name.strip_suffix(".json") else {
                 continue;
             };
             files.push((event_id.to_string(), fs::read(dir.join(&name))?));
+        }
+        for batch in import_batches(&self.root)? {
+            for value in batch.repository_events {
+                let id = value["event_id"]
+                    .as_str()
+                    .context("imported repository event has no ID")?;
+                if !files.iter().any(|(existing, _)| existing == id) {
+                    files.push((id.to_string(), serde_json::to_vec(&value)?));
+                }
+            }
         }
         files.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(files)
@@ -1043,14 +1120,14 @@ impl Store {
     ) -> Result<Vec<(String, serde_json::Value)>> {
         let dir = self.repository_events_dir();
         let entries = match fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Ok(entries) => Some(entries),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => {
                 return Err(error).with_context(|| format!("cannot read {}", dir.display()))
             }
         };
         let mut events = Vec::new();
-        for entry in entries {
+        for entry in entries.into_iter().flatten() {
             let name = entry?.file_name().to_string_lossy().into_owned();
             let Some(event_id) = name.strip_suffix(".json") else {
                 continue;
@@ -1061,6 +1138,9 @@ impl Store {
             let value: serde_json::Value = serde_json::from_slice(&fs::read(dir.join(&name))?)
                 .with_context(|| format!("malformed event file {}", dir.join(&name).display()))?;
             events.push((event_id.to_string(), value));
+        }
+        for batch in import_batches(&self.root)? {
+            merge_raw(&mut events, batch.repository_events, seen)?;
         }
         events.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(events)
@@ -1078,7 +1158,20 @@ impl Store {
             .join(format!("{event_id}.json"));
         match fs::read(&path) {
             Ok(bytes) => Ok(Some(bytes)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                for batch in import_batches(root)? {
+                    if batch.change_id == change_id {
+                        if let Some(value) = batch
+                            .events
+                            .iter()
+                            .find(|value| value["event_id"].as_str() == Some(event_id))
+                        {
+                            return Ok(Some(serde_json::to_vec(value)?));
+                        }
+                    }
+                }
+                Ok(None)
+            }
             Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
         }
     }
@@ -1104,19 +1197,33 @@ impl Store {
     /// written, so a contradiction cannot leave a partial import behind.
     pub fn repository_event_conflicts(&self, event_id: &str, bytes: &[u8]) -> Result<bool> {
         ids::validate_id_component(event_id)?;
-        let path = self
-            .repository_events_dir()
-            .join(format!("{event_id}.json"));
-        if !path.exists() {
-            return Ok(false);
-        }
-        let existing: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
         let incoming: serde_json::Value = serde_json::from_slice(bytes)?;
-        Ok(!same_repository_event(&existing, &incoming))
+        Ok(self
+            .raw_repository_events_unseen(&BTreeSet::new())?
+            .iter()
+            .any(|(id, existing)| id == event_id && !same_repository_event(existing, &incoming)))
+    }
+
+    pub fn publish_import(&self, batch: &ImportBatch) -> Result<()> {
+        self.refuse_read_only()?;
+        self.stamp_format(Some(7))
+            .context("admission published: false; store-format preparation failed")?;
+        let dir = self.root.join("imports");
+        create_private_dir_all(&dir)?;
+        let path = dir.join(format!("{}.json", ids::new_event_id()));
+        crate::replica::write_exclusive(&path, &serde_json::to_vec_pretty(batch)?).context(
+            "import admission publication failed; inspect the published batch before retrying",
+        )?;
+        for value in batch.events.iter().chain(&batch.repository_events) {
+            self.stamp_format_for_value(Some(value))
+                .context("admission published; store-format maintenance failed")?;
+        }
+        Ok(())
     }
 
     /// Write a repository-scoped event verbatim, as import does for a change.
     /// Idempotent: a rewrite already recorded here is the same fact.
+    #[cfg(test)]
     pub fn append_raw_repository_event(&self, event_id: &str, bytes: &[u8]) -> Result<bool> {
         self.refuse_read_only()?;
         ids::validate_id_component(event_id)?;
@@ -1145,6 +1252,7 @@ impl Store {
         Ok(true)
     }
 
+    #[cfg(test)]
     pub fn append_raw_event(&self, change_id: &str, event_id: &str, bytes: &[u8]) -> Result<()> {
         self.refuse_read_only()?;
         ids::validate_id_component(change_id)?;
@@ -1280,6 +1388,7 @@ mod tests {
 
     fn test_store(root: &Path) -> Store {
         Store {
+            operator_policy_path: None,
             root: root.to_path_buf(),
             repository_id: "repo".into(),
             require_declared_actor: false,

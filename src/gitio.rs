@@ -1475,7 +1475,7 @@ fn is_working_branch(cwd: &Path, branch: &str) -> bool {
     }
     let recorded = (|| -> Result<bool> {
         let root = crate::store::Store::resolve_root(cwd)?;
-        let Some(store) = crate::store::Store::open_at(&root)? else {
+        let Some(store) = crate::store::Store::open_at_for(&root, cwd)? else {
             return Ok(false);
         };
         for id in store.list_change_ids()? {

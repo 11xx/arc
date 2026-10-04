@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 const EVENT_SCHEMA: &str = "arc-replica-event/3";
 const BUNDLE_SCHEMA: &str = "arc-replica-bundle/3";
-const IMPORT_SCHEMA: &str = "arc-replica-import/2";
+const IMPORT_SCHEMA: &str = "arc-replica-import/3";
 const STATE_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const STATE_LOCK_RETRY: Duration = Duration::from_millis(10);
 pub const INTEGRATION_AUTHORITY_EXIT_CODE: i32 = 17;
@@ -100,6 +100,8 @@ struct ImportBatch {
     source_replica_id: String,
     bundle_sha256: String,
     imported_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    authorization: Option<crate::import_authorization::ImportAuthorization>,
     events: Vec<ReplicaEvent>,
 }
 
@@ -413,7 +415,14 @@ pub fn export(store: &Store, output: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn import(ctx: &Ctx, store: &Store, input: &str, dry_run: bool) -> Result<i32> {
+pub fn import(
+    ctx: &Ctx,
+    store: &Store,
+    input: &str,
+    dry_run: bool,
+    publisher: Option<&str>,
+    received_sha256: Option<&str>,
+) -> Result<crate::import_authorization::ImportResult> {
     let bytes = if input == "-" {
         use std::io::Read as _;
         let mut bytes = Vec::new();
@@ -422,10 +431,11 @@ pub fn import(ctx: &Ctx, store: &Store, input: &str, dry_run: bool) -> Result<i3
     } else {
         fs::read(input).with_context(|| format!("cannot read replica bundle {input}"))?
     };
+    crate::import_authorization::verify_received_digest(&bytes, received_sha256)?;
     let bundle = parse_bundle(&bytes)?;
     let digest = bundle_digest(&bundle)?;
     let import_path = imports_dir(store).join(format!("{digest}.json"));
-    let _lock = lock(store)?;
+    let initial_policy = crate::policy::load(&ctx.cwd)?.replica;
     let known = load_events(store)?;
     let known_by_id = event_map(&known)?;
     let receipt_exists = import_path.is_file();
@@ -444,6 +454,27 @@ pub fn import(ctx: &Ctx, store: &Store, input: &str, dry_run: bool) -> Result<i3
     candidate.extend(added.iter().cloned());
     let before = snapshot(&known, &store.repository_id)?;
     let mut after = snapshot(&candidate, &store.repository_id)?;
+    let admission_events: Vec<_> = added
+        .iter()
+        .map(|event| Ok(("replica".into(), serde_json::to_value(event)?)))
+        .collect::<Result<_>>()?;
+    let authorize = |policy: &crate::import_authorization::ReplicaPolicy| {
+        crate::import_authorization::plan_import(
+            policy,
+            &crate::policy::operator_path(&ctx.cwd)?,
+            crate::import_authorization::ImportRequest {
+                bytes: &bytes,
+                principal: publisher,
+                received_sha256,
+                source_replica_id: Some(&bundle.source_replica_id),
+                project_id: Some(&bundle.project_id),
+                receiver_id: &store.repository_id,
+                receiver_project: before.as_ref().map(|state| state.project_id.as_str()),
+                events: &admission_events,
+            },
+        )
+    };
+    let authorization = authorize(&initial_policy)?;
     if before
         .as_ref()
         .is_some_and(|state| state.project_id != bundle.project_id)
@@ -456,11 +487,27 @@ pub fn import(ctx: &Ctx, store: &Store, input: &str, dry_run: bool) -> Result<i3
     {
         bail!("replica bundle source is not a member of its project; nothing was imported");
     }
+
     let local = after
         .as_ref()
         .and_then(|state| state.members.get(&store.repository_id))
         .cloned()
         .context("replica bundle does not name this local repository")?;
+    let _lock = if dry_run { None } else { Some(lock(store)?) };
+    if !dry_run {
+        let current_policy = crate::policy::load(&ctx.cwd)?.replica;
+        if current_policy != initial_policy {
+            return Err(crate::import_authorization::Refusal(
+                "authorization configuration moved before publication: operator replica policy"
+                    .into(),
+            )
+            .into());
+        }
+        if load_events(store)? != known {
+            bail!("replica history moved before publication; retry import");
+        }
+        authorize(&current_policy)?;
+    }
     let accepted_offer = after.as_ref().and_then(|state| {
         state
             .authority
@@ -505,20 +552,43 @@ pub fn import(ctx: &Ctx, store: &Store, input: &str, dry_run: bool) -> Result<i3
             after.as_ref(),
             true,
         );
-        return Ok(0);
+        return Ok(crate::model::OperationResult {
+            exit_code: 0,
+            published: false,
+            output: crate::import_authorization::ImportSummary {
+                introduced_event_ids: if receipt_exists {
+                    Vec::new()
+                } else {
+                    added.iter().map(|event| event.event_id.clone()).collect()
+                },
+                authorization: authorization.clone(),
+            },
+        });
     }
     ctx.ensure_declared_actor(store)?;
     if receipt_exists {
         println!("source replica: {}", bundle.source_replica_id);
         println!("bundle sha256: {digest}");
         println!("events: 0 imported (receipt already recorded); no changes");
-        return Ok(0);
+        return Ok(crate::model::OperationResult {
+            exit_code: 0,
+            published: false,
+            output: crate::import_authorization::ImportSummary {
+                introduced_event_ids: if receipt_exists {
+                    Vec::new()
+                } else {
+                    added.iter().map(|event| event.event_id.clone()).collect()
+                },
+                authorization: authorization.clone(),
+            },
+        });
     }
     let batch = ImportBatch {
         schema: IMPORT_SCHEMA.to_string(),
         source_replica_id: bundle.source_replica_id.clone(),
         bundle_sha256: digest.clone(),
         imported_at: Utc::now(),
+        authorization: authorization.clone(),
         events: added.clone(),
     };
     let mut batch_bytes = serde_json::to_vec_pretty(&batch)?;
@@ -529,12 +599,19 @@ pub fn import(ctx: &Ctx, store: &Store, input: &str, dry_run: bool) -> Result<i3
             .context("replica import has no parent")?,
     )?;
     write_exclusive(&import_path, &batch_bytes)
-        .with_context(|| format!("replica import receipt {digest} already exists"))?;
+        .with_context(|| format!("replica import admission {digest} publication failed"))?;
     print_import_report(&bundle, &digest, &added, false, after.as_ref(), false);
     if acquired.is_some() {
         println!("integration authority: acquired by {}", local.name);
     }
-    Ok(0)
+    Ok(crate::model::OperationResult {
+        exit_code: 0,
+        published: true,
+        output: crate::import_authorization::ImportSummary {
+            introduced_event_ids: added.iter().map(|event| event.event_id.clone()).collect(),
+            authorization,
+        },
+    })
 }
 
 fn print_import_report(
@@ -1425,7 +1502,10 @@ fn load_events(store: &Store) -> Result<Vec<ReplicaEvent>> {
         for path in json_files(&imported_dir)? {
             let batch: ImportBatch = serde_json::from_slice(&fs::read(&path)?)
                 .with_context(|| format!("malformed replica import receipt {}", path.display()))?;
-            if batch.schema != IMPORT_SCHEMA && batch.schema != "arc-replica-import/1" {
+            if batch.schema != IMPORT_SCHEMA
+                && batch.schema != "arc-replica-import/1"
+                && batch.schema != "arc-replica-import/2"
+            {
                 bail!(
                     "unsupported replica import receipt schema in {}",
                     path.display()
@@ -1498,16 +1578,19 @@ fn create_private_dir_all(path: &Path) -> Result<()> {
 }
 
 /// Publish one complete JSON record without replacing an existing fact.
-fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<()> {
     let file_name = path
         .file_name()
         .context("replica event path has no file name")?
         .to_string_lossy();
     let temporary = path.with_file_name(format!(".{file_name}.{}.tmp", ids::new_event_id()));
+    let mut published = false;
     let publish = (|| -> Result<()> {
+        use std::os::unix::fs::OpenOptionsExt;
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
+            .mode(0o600)
             .open(&temporary)
             .with_context(|| format!("cannot create {}", temporary.display()))?;
         file.write_all(bytes)?;
@@ -1515,11 +1598,18 @@ fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<()> {
         drop(file);
         fs::hard_link(&temporary, path)
             .with_context(|| format!("cannot create {}", path.display()))?;
+        published = true;
         File::open(path.parent().context("replica event path has no parent")?)?.sync_all()?;
         Ok(())
     })();
     let _ = fs::remove_file(&temporary);
-    publish
+    publish.map_err(|error| {
+        crate::model::OperationFailure {
+            published,
+            message: format!("{error:#}"),
+        }
+        .into()
+    })
 }
 
 #[cfg(test)]

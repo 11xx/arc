@@ -626,7 +626,7 @@ fn watch_reached(
     until: WatchUntil,
 ) -> Result<Option<WatchReached>> {
     let events = store.load_events(change_id)?;
-    let mut state = state::reduce_following(&events, &store.rewrites()?)?;
+    let mut state = store.project_state(&events, &store.rewrites()?)?;
     crate::replica::localize_change(&store.repository_id, &events, &mut state);
     let snapshot_event = || {
         events

@@ -589,7 +589,7 @@ impl Ctx {
     ) -> Result<(String, ChangeState)> {
         let change_id = store.resolve_change(reference)?;
         let events = store.load_events(&change_id)?;
-        let mut state = state::reduce_following(&events, &store.rewrites()?)?;
+        let mut state = store.project_state(&events, &store.rewrites()?)?;
         crate::replica::localize_change(&store.repository_id, &events, &mut state);
         Ok((change_id, state))
     }
@@ -599,7 +599,7 @@ impl Ctx {
         let rewrites = store.rewrites()?;
         for change_id in store.list_change_ids()? {
             let events = store.load_events(&change_id)?;
-            let mut state = state::reduce_following(&events, &rewrites)?;
+            let mut state = store.project_state(&events, &rewrites)?;
             crate::replica::localize_change(&store.repository_id, &events, &mut state);
             states.insert(change_id, state);
         }
@@ -744,7 +744,7 @@ pub(crate) fn reduce_at(store: &Store, change_id: &str, event_id: &str) -> Resul
         .position(|event| event.event_id == event_id)
         .with_context(|| format!("unknown event {event_id:?} in {change_id}"))?;
     let prefix = &events[..=position];
-    let mut state = state::reduce_following(prefix, &store.rewrites()?)?;
+    let mut state = store.project_state(prefix, &store.rewrites()?)?;
     crate::replica::localize_change(&store.repository_id, prefix, &mut state);
     Ok(state)
 }
@@ -1165,6 +1165,7 @@ mod tests {
 
     fn change(id: &str, blocked_by: &[&str], closure: Option<Closure>) -> ChangeState {
         ChangeState {
+            privilege_scope: None,
             schema: crate::state::CHANGE_STATE_SCHEMA,
             model_attributions: BTreeMap::new(),
             contribution_roles: BTreeMap::new(),
@@ -1216,6 +1217,7 @@ mod tests {
             holds: BTreeMap::new(),
             forge: crate::forge::ForgeState::default(),
             closure: closure.map(|outcome| crate::state::ClosureState {
+                origin_replica_id: "repo".into(),
                 shape: None,
                 outcome,
                 integration: None,

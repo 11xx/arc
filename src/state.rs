@@ -263,6 +263,8 @@ fn seconds_delta(seconds: u64) -> TimeDelta {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DispositionEntry {
+    pub origin_replica_id: String,
+    pub gating_eligible: bool,
     pub event_id: String,
     pub status: DispositionStatus,
     pub commit: Option<String>,
@@ -381,6 +383,7 @@ impl FindingState {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct VerdictEntry {
+    pub origin_replica_id: String,
     pub event_id: String,
     pub patchset_id: String,
     pub verdict: Verdict,
@@ -438,6 +441,7 @@ pub struct ReadyToSendEntry {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ExternalVerdictEntry {
+    pub origin_replica_id: String,
     pub source: &'static str,
     pub event_id: String,
     pub revision: String,
@@ -462,7 +466,7 @@ trait TipEntry {
 /// release nothing.
 fn history_releases(entries: &[DispositionEntry]) -> bool {
     matches!(
-        observed_tips(entries).as_slice(),
+        observed_tips(&entries.iter().filter(|entry| entry.gating_eligible).cloned().collect::<Vec<_>>()).as_slice(),
         [tip] if tip.status.releases_block()
     )
 }
@@ -520,6 +524,7 @@ fn author_assumed(on_behalf_of: Option<&str>, source: Option<ActorSource>) -> bo
 /// A declared, not-yet-discharged review obligation.
 #[derive(Debug, Clone, Serialize)]
 pub struct Debt {
+    pub origin_replica_id: String,
     pub event_id: String,
     pub reason: String,
     /// The patchset this waiver was declared against, if it waived anything.
@@ -584,6 +589,7 @@ impl Debt {
 /// next commit rather than standing as an open exemption.
 #[derive(Debug, Clone, Serialize)]
 pub struct DirtyTreeWaiver {
+    pub origin_replica_id: String,
     pub event_id: String,
     pub reason: String,
     /// The head this was declared at, and the only revision it covers.
@@ -610,6 +616,7 @@ pub struct KeptContext {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditVerdictEntry {
+    pub origin_replica_id: String,
     pub event_id: String,
     /// The integrated revision reviewed.
     pub revision: String,
@@ -908,6 +915,7 @@ pub struct HoldState {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ClosureState {
+    pub origin_replica_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shape: Option<crate::model::IntegrationShape>,
     pub outcome: Closure,
@@ -957,6 +965,7 @@ fn integrated_closure(
     target_before: Option<String>,
 ) -> ClosureState {
     ClosureState {
+        origin_replica_id: ev.repository_id.clone(),
         shape: None,
         outcome: Closure::Integrated,
         integrated_commit: Some(integrated_commit.to_string()),
@@ -990,6 +999,8 @@ pub enum IntegrationKind {
 /// ULID order. The event ledger is authoritative; this is a view.
 #[derive(Debug, Clone, Serialize)]
 pub struct ChangeState {
+    #[serde(skip)]
+    pub privilege_scope: Option<crate::import_authorization::PrivilegeScope>,
     pub schema: &'static str,
     /// Write-time model evidence, keyed by the ledger event that carries it.
     pub model_attributions: BTreeMap<String, ModelAttribution>,
@@ -1328,15 +1339,110 @@ impl ChangeState {
         observed_tips(&self.verdicts[start..])
     }
 
+    pub fn review_eligible(&self, event_id: &str, origin: &str) -> bool {
+        self.privilege_scope.as_ref().is_none_or(|scope| {
+            scope.permits(
+                event_id,
+                origin,
+                crate::import_authorization::Role::ReviewAuthority,
+            )
+        })
+    }
+
+    pub fn eligible_verdict_tips(&self) -> Vec<&VerdictEntry> {
+        let local = self
+            .privilege_scope
+            .as_ref()
+            .map(|scope| scope.local_origin.as_str());
+        let local_verdicts: Vec<_> = self
+            .verdicts
+            .iter()
+            .filter(|verdict| {
+                Some(verdict.origin_replica_id.as_str()) == local
+                    && self.review_eligible(&verdict.event_id, &verdict.origin_replica_id)
+            })
+            .cloned()
+            .collect();
+        let selected: Vec<_> = if local_verdicts.is_empty() {
+            self.verdicts
+                .iter()
+                .filter(|verdict| {
+                    self.review_eligible(&verdict.event_id, &verdict.origin_replica_id)
+                })
+                .cloned()
+                .collect()
+        } else {
+            local_verdicts
+        };
+        let start = selected
+            .iter()
+            .rposition(|verdict| verdict.relation.is_none())
+            .unwrap_or(0);
+        let ids: BTreeSet<_> = observed_tips(&selected[start..])
+            .iter()
+            .map(|verdict| verdict.event_id.as_str())
+            .collect();
+        self.verdicts
+            .iter()
+            .filter(|verdict| ids.contains(verdict.event_id.as_str()))
+            .collect()
+    }
+
+    pub fn apply_privilege_scope(
+        &mut self,
+        scope: crate::import_authorization::PrivilegeScope,
+        events: &[Event],
+    ) {
+        for finding in self
+            .findings
+            .values_mut()
+            .chain(self.audit_findings.values_mut())
+        {
+            for entry in finding
+                .dispositions
+                .iter_mut()
+                .chain(&mut finding.after_integration)
+            {
+                let role = if entry.status == DispositionStatus::AcceptedRisk {
+                    crate::import_authorization::Role::Waiver
+                } else {
+                    crate::import_authorization::Role::ReviewAuthority
+                };
+                entry.gating_eligible = !entry.status.releases_block()
+                    || scope.permits(&entry.event_id, &entry.origin_replica_id, role);
+            }
+        }
+        let hold_events: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                !matches!(event.payload, Payload::HoldReleased { .. })
+                    || scope.permits(
+                        &event.event_id,
+                        &event.repository_id,
+                        crate::import_authorization::Role::Waiver,
+                    )
+            })
+            .cloned()
+            .collect();
+        if let Ok(projected) = reduce(&hold_events) {
+            self.holds = projected.holds;
+        }
+        self.privilege_scope = Some(scope);
+        if let Some(debt) = self.debt.clone() {
+            let discharged_by = self.debt_discharge(&debt);
+            self.debt.as_mut().expect("held debt").discharged_by = discharged_by;
+        }
+    }
+
     pub fn verdict_contested(&self) -> bool {
-        self.verdict_tips().len() > 1
+        self.eligible_verdict_tips().len() > 1
     }
 
     /// The sole authoritative verdict, when the observed verdict graph has
     /// one tip. Validity against the current head is a Git-time question
     /// answered by the status layer.
     pub fn latest_verdict(&self) -> Option<&VerdictEntry> {
-        let tips = self.verdict_tips();
+        let tips = self.eligible_verdict_tips();
         match tips.as_slice() {
             [tip] => Some(*tip),
             _ => None,
@@ -1503,6 +1609,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 dangerous,
             } => (
                 ChangeState {
+                    privilege_scope: None,
                     schema: CHANGE_STATE_SCHEMA,
                     model_attributions: BTreeMap::new(),
                     contribution_roles: BTreeMap::new(),
@@ -2063,6 +2170,8 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     );
                 };
                 f.dispositions.push(DispositionEntry {
+                    origin_replica_id: ev.repository_id.clone(),
+                    gating_eligible: true,
                     event_id: ev.event_id.clone(),
                     status: *status,
                     commit: commit.clone(),
@@ -2104,6 +2213,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     );
                 }
                 state.verdicts.push(VerdictEntry {
+                    origin_replica_id: ev.repository_id.clone(),
                     event_id: ev.event_id.clone(),
                     patchset_id: patchset_id.clone(),
                     verdict: *verdict,
@@ -2153,6 +2263,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     .then(|| state.latest_patchset().cloned())
                     .flatten();
                 state.external_verdicts.push(ExternalVerdictEntry {
+                    origin_replica_id: ev.repository_id.clone(),
                     source: "external",
                     event_id: ev.event_id.clone(),
                     revision: revision.clone(),
@@ -2165,6 +2276,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 });
                 if let Some(patchset) = closed_patchset {
                     state.closure = Some(ClosureState {
+                        origin_replica_id: ev.repository_id.clone(),
                         shape: None,
                         outcome: Closure::Abandoned,
                         integrated_commit: None,
@@ -2183,6 +2295,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
             }
             Payload::DirtyTreeWaived { reason, revision } => {
                 state.dirty_tree_waiver = Some(DirtyTreeWaiver {
+                    origin_replica_id: ev.repository_id.clone(),
                     event_id: ev.event_id.clone(),
                     reason: reason.clone(),
                     revision: revision.clone(),
@@ -2195,6 +2308,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 patchset_id,
             } => {
                 state.debt = Some(Debt {
+                    origin_replica_id: ev.repository_id.clone(),
                     event_id: ev.event_id.clone(),
                     reason: reason.clone(),
                     patchset_id: patchset_id.clone(),
@@ -2219,6 +2333,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 production,
             } => {
                 state.debt = Some(Debt {
+                    origin_replica_id: ev.repository_id.clone(),
                     event_id: ev.event_id.clone(),
                     reason: reason.clone(),
                     patchset_id: patchset_id.clone(),
@@ -2264,6 +2379,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     );
                 }
                 state.audit_verdicts.push(AuditVerdictEntry {
+                    origin_replica_id: ev.repository_id.clone(),
                     event_id: ev.event_id.clone(),
                     revision: revision.clone(),
                     verdict: *verdict,
@@ -2319,6 +2435,8 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     );
                 };
                 finding.dispositions.push(DispositionEntry {
+                    origin_replica_id: ev.repository_id.clone(),
+                    gating_eligible: true,
                     event_id: ev.event_id.clone(),
                     status: *status,
                     commit: commit.clone(),
@@ -2365,6 +2483,8 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     );
                 }
                 finding.after_integration.push(DispositionEntry {
+                    origin_replica_id: ev.repository_id.clone(),
+                    gating_eligible: true,
                     event_id: ev.event_id.clone(),
                     status: *status,
                     commit: commit.clone(),
@@ -2595,6 +2715,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 superseded_by,
             } => {
                 state.closure = Some(ClosureState {
+                    origin_replica_id: ev.repository_id.clone(),
                     shape: None,
                     outcome: *outcome,
                     integrated_commit: integrated_commit.clone(),
@@ -2928,6 +3049,18 @@ impl ChangeState {
     /// snapshot leaves the waiver behind exactly as it leaves an approval
     /// behind, so re-declaring is a deliberate act rather than a thing that
     /// happened once and never expired.
+    pub fn eligible_dirty_tree_waiver(&self) -> Option<&DirtyTreeWaiver> {
+        self.dirty_tree_waiver.as_ref().filter(|waiver| {
+            self.privilege_scope.as_ref().is_none_or(|scope| {
+                scope.permits(
+                    &waiver.event_id,
+                    &waiver.origin_replica_id,
+                    crate::import_authorization::Role::Waiver,
+                )
+            })
+        })
+    }
+
     pub fn debt_waives_latest_patchset(&self) -> bool {
         let Some(debt) = &self.debt else {
             return false;
@@ -2935,7 +3068,14 @@ impl ChangeState {
         let Some(declared_for) = debt.patchset_id.as_deref() else {
             return false;
         };
-        self.latest_patchset()
+        self.privilege_scope.as_ref().is_none_or(|scope| {
+            scope.permits(
+                &debt.event_id,
+                &debt.origin_replica_id,
+                crate::import_authorization::Role::Waiver,
+            )
+        }) && self
+            .latest_patchset()
             .is_some_and(|patchset| patchset.id == declared_for)
     }
 
@@ -2994,14 +3134,16 @@ impl ChangeState {
             author != reviewer && patchset.contributor_match(author).is_none() && !assumed
         };
         let later_clean_approval = self.verdicts.iter().any(|verdict| {
-            verdict.created_at > provisional.created_at
+            self.review_eligible(&verdict.event_id, &verdict.origin_replica_id)
+                && verdict.created_at > provisional.created_at
                 && verdict.verdict == Verdict::Approved
                 && verdict.provisional.is_none()
                 && verdict.patchset_id == provisional.patchset_id
                 && independent(verdict.effective_author(), verdict.author_assumed())
         });
         let later_audit = self.audit_verdicts.iter().any(|audit| {
-            audit.created_at > provisional.created_at
+            self.review_eligible(&audit.event_id, &audit.origin_replica_id)
+                && audit.created_at > provisional.created_at
                 && independent(audit.effective_author(), audit.author_assumed())
         });
         later_clean_approval || later_audit
@@ -3158,7 +3300,8 @@ impl ChangeState {
                     .find(|patchset| patchset.id == shipped)
             });
         if let Some(audit) = self.audit_verdicts.iter().find(|audit| {
-            audit.created_at >= debt.declared_at
+            self.review_eligible(&audit.event_id, &audit.origin_replica_id)
+                && audit.created_at >= debt.declared_at
                 && !audit.author_assumed()
                 && shipped_patchset.is_none_or(|patchset| {
                     patchset
@@ -3179,7 +3322,8 @@ impl ChangeState {
         self.verdicts
             .iter()
             .find(|verdict| {
-                verdict.created_at >= debt.declared_at
+                self.review_eligible(&verdict.event_id, &verdict.origin_replica_id)
+                    && verdict.created_at >= debt.declared_at
                     && verdict.patchset_id == shipped
                     && !verdict.author_assumed()
                     && patchset
@@ -3205,6 +3349,8 @@ mod tests {
     fn the_applicable_history_decides_whether_a_finding_is_released() {
         use DispositionStatus::{AcceptedRisk, Disputed, Obsolete, Resolved, StillOpen};
         let entry = |event_id: &str, status, supersedes: &[&str]| DispositionEntry {
+            origin_replica_id: "repo".into(),
+            gating_eligible: true,
             event_id: event_id.into(),
             status,
             commit: None,

@@ -15,6 +15,7 @@ mod gates;
 mod gitio;
 mod guide;
 mod ids;
+mod import_authorization;
 mod inbox;
 mod integration;
 mod journal;
@@ -900,6 +901,8 @@ enum Cmd {
         off: bool,
     },
     /// Machine-readable status report (the versioned arc-status/27 schema).
+    /// Every verdict names its recorded origin, actor claims and admission
+    /// provenance. Content coverage is separate from receiver gating eligibility.
     /// Readiness uses the integration shape resolved for the recorded target.
     /// Use check --shape to evaluate an explicit alternative.
     /// comparison_patchset names the closure's source patchset when recorded,
@@ -1036,7 +1039,8 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Export one change as a deterministic, versioned JSON bundle
+    /// Export one change as a deterministic, versioned JSON bundle.
+    /// Exporter/project metadata is distinct from the preserved event origins.
     /// Includes a role-labelled Git object list derived from the exported
     /// events, including a delta's suffix and repository events. The summary
     /// counts objects by role; transports must deliver them before import.
@@ -1058,9 +1062,16 @@ enum Cmd {
         objects_json: Option<String>,
     },
     /// Import arc-bundle/6 or /5 into this repository's local store.
-    /// Every listed Git object must exist locally before any events or refs
-    /// are written. Availability checks never fetch from a promisor remote.
+    /// Received-byte digest, object availability, and publishing authorization
+    /// are checked before publication; either refusal writes nothing.
+    /// Unless --provenance-only is selected, every listed Git object must
+    /// exist locally before any events or refs are written. Availability checks never fetch from a promisor remote.
     /// Bundles without an objects field retain advisory commit checks.
+    /// Paired stores and receivers with enrollments require a transport-asserted
+    /// publisher and exact received-byte SHA256. Operator enrollment authorizes
+    /// each introduced origin and capability; actor strings remain claims.
+    /// Admission and its private authorization receipt publish atomically.
+    /// --provenance-only permits missing objects; it never bypasses authorization.
     /// Candidate events stamp store format 7, including evaluations,
     /// selections, and promotions without a registration in the bundle.
     /// Events without model provenance retain that absence. Repository map
@@ -1073,6 +1084,12 @@ enum Cmd {
     Import {
         /// Input file ('-' for stdin)
         input: String,
+        /// Publishing principal asserted by the authenticated receiving caller
+        #[arg(long, requires = "received_sha256")]
+        publisher: Option<String>,
+        /// SHA256 of the exact received bytes, supplied by the receiving caller
+        #[arg(long, requires = "publisher")]
+        received_sha256: Option<String>,
         /// Validate and report without writing files, Git objects, events, or refs
         #[arg(long)]
         dry_run: bool,
@@ -1089,6 +1106,9 @@ enum Cmd {
     /// Integration preflight under the resolved target shape or --shape; exit code identifies the first blocker
     /// Missing asserted contribution trailers are advisory only. The remedy
     /// is arc rewrite trailers --from <rev> --append <line> before integration
+    /// Integration preflight under the resolved target shape or --shape; exit code identifies the first blocker.
+    /// arc-check/4 reports recorded origins, admission provenance, content
+    /// coverage, gating eligibility, and the selected authorizing verdict.
     ///
     /// Unreadable neighboring changes are named with their errors on stderr;
     /// an unreadable selected change fails and an unreadable prerequisite
@@ -1348,7 +1368,10 @@ enum Cmd {
         #[arg(long, value_name = "ID")]
         evidence_event: Option<String>,
     },
-    /// Read review state, or record a verdict with an optional findings batch
+    /// Read review state, or record a verdict with an optional findings batch.
+    /// Recorded history includes imported inputs; receiver eligibility requires
+    /// admitted review-authority and operator trust for a foreign origin.
+    /// Foreign verdicts cannot replace the receiver's local judgment.
     ///
     /// Once a verdict is recorded, review says whether an approval gates. That
     /// is advice about a verdict that already stands: a failure to evaluate it
@@ -2178,7 +2201,8 @@ enum ReplicaCmd {
         #[arg(long = "repository-id")]
         repository_id: String,
     },
-    /// Export this replica's known identity and authority events
+    /// Export this replica's known identity and authority events.
+    /// source_replica_id identifies the exporter; event origins remain intact.
     /// Records no events; ledger reads do not require a parseable append policy.
     Export {
         /// Output file ('-' for stdout)
@@ -2186,10 +2210,18 @@ enum ReplicaCmd {
         output: String,
     },
     /// Import a pairing record or authority exchange from another replica.
+    /// Paired stores and enrolled receivers require --publisher and
+    /// --received-sha256. Pairing grants membership, never publishing permission.
     /// Accepts arc-replica-bundle/3 and /2; absent model provenance stays absent
     Import {
         /// Input file ('-' for stdin)
         input: String,
+        /// Publishing principal asserted by the authenticated receiving caller
+        #[arg(long, requires = "received_sha256")]
+        publisher: Option<String>,
+        /// SHA256 of the exact received bytes, supplied by the receiving caller
+        #[arg(long, requires = "publisher")]
+        received_sha256: Option<String>,
         /// Validate and report without writing events or an import receipt
         #[arg(long)]
         dry_run: bool,
@@ -2307,13 +2339,16 @@ enum InstructionsCmd {
 
 #[derive(Subcommand)]
 enum PolicyCmd {
-    /// Show effective policy, gate environment probes, and each declaring file
+    /// Show effective policy, publishing enrollments, review trust, gate
+    /// environment probes, and each declaring file. Replica grants are operator-only.
     /// Records no events; ledger reads do not require a parseable append policy.
     Show,
     /// Print the operator policy file path for this repository
     /// Records no events; ledger reads do not require a parseable append policy.
     Path,
-    /// Replace the operator policy file with TOML from a file or stdin
+    /// Replace the operator policy file with TOML from a file or stdin.
+    /// The operator-only [replica] table enrolls publishing principals and
+    /// trusted review origins. Privileged roles require explicit actor allowlists.
     /// Style uses [defaults.change] and [defaults.integration]; constraints use
     /// [integration] shapes and history. Malformed tables and invalid known keys
     /// refuse with file and key before writing.
@@ -3411,7 +3446,13 @@ fn main() {
         Ok(code) => std::process::exit(code),
         Err(e) => {
             eprintln!("error: {e:#}");
-            std::process::exit(1);
+            std::process::exit(
+                if e.downcast_ref::<import_authorization::Refusal>().is_some() {
+                    18
+                } else {
+                    1
+                },
+            );
         }
     }
 }
@@ -4014,7 +4055,17 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             input,
             dry_run,
             provenance_only,
-        } => commands::import_bundle(&ctx, &input, dry_run, provenance_only),
+            publisher,
+            received_sha256,
+        } => commands::import_bundle(
+            &ctx,
+            &input,
+            dry_run,
+            provenance_only,
+            publisher.as_deref(),
+            received_sha256.as_deref(),
+        )
+        .map(|result| result.exit_code),
         Cmd::Replica { cmd } => match cmd {
             ReplicaCmd::Id { json } => {
                 commands::replica_id(&ctx, json)?;
@@ -4035,9 +4086,19 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 commands::replica_export(&ctx, &output)?;
                 Ok(0)
             }
-            ReplicaCmd::Import { input, dry_run } => {
-                commands::replica_import(&ctx, &input, dry_run)
-            }
+            ReplicaCmd::Import {
+                input,
+                dry_run,
+                publisher,
+                received_sha256,
+            } => commands::replica_import(
+                &ctx,
+                &input,
+                dry_run,
+                publisher.as_deref(),
+                received_sha256.as_deref(),
+            )
+            .map(|result| result.exit_code),
             ReplicaCmd::Status { json } => {
                 commands::replica_status(&ctx, json)?;
                 Ok(0)

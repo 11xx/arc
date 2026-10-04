@@ -12,6 +12,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::Path;
 
 pub use crate::blockers::Blocker;
@@ -535,6 +536,9 @@ impl Serialize for Readiness {
 
 #[derive(Debug, Serialize)]
 pub struct StatusReport {
+    pub recorded_verdict_tips: Vec<String>,
+    pub eligible_verdict_tips: Vec<String>,
+    pub verdict_assessments: Vec<VerdictAssessment>,
     pub schema: &'static str,
     pub change_id: String,
     pub slug: String,
@@ -762,8 +766,91 @@ pub fn brief_base_drift(
     })
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct VerdictAssessment {
+    pub event_id: String,
+    pub origin_replica_id: String,
+    pub origin_name: Option<String>,
+    pub actor: String,
+    pub on_behalf_of: Option<String>,
+    pub admission_provenance: String,
+    pub covers_current_head: bool,
+    pub gating_eligible: bool,
+    pub selected_authorizing_event: bool,
+    pub rejection_reason: Option<String>,
+}
+
+pub fn verdict_assessments(
+    state: &ChangeState,
+    current_head: Option<&str>,
+    policy: &crate::policy::PolicyFile,
+    danger: &DangerScope,
+) -> Vec<VerdictAssessment> {
+    let selected = state
+        .latest_verdict()
+        .map(|verdict| verdict.event_id.as_str());
+    state
+        .verdicts
+        .iter()
+        .map(|verdict| {
+            let patchset = state
+                .patchsets
+                .iter()
+                .find(|patchset| patchset.id == verdict.patchset_id);
+            let covers = patchset
+                .is_some_and(|patchset| Some(patchset.approved_head.as_str()) == current_head);
+            let reason = state
+                .privilege_scope
+                .as_ref()
+                .and_then(|scope| scope.rejection(&verdict.event_id, &verdict.origin_replica_id))
+                .or_else(|| {
+                    patchset
+                        .filter(|_| {
+                            policy.policy.forbid_self_approval
+                                && danger.dangerous
+                                && !state.debt_waives_latest_patchset()
+                        })
+                        .and_then(|patchset| {
+                            crate::approval::self_approval_rejection(
+                                patchset,
+                                verdict.effective_author(),
+                                verdict.author_assumed(),
+                            )
+                        })
+                });
+            let eligible = reason.is_none();
+            VerdictAssessment {
+                event_id: verdict.event_id.clone(),
+                origin_replica_id: verdict.origin_replica_id.clone(),
+                origin_name: state
+                    .privilege_scope
+                    .as_ref()
+                    .and_then(|scope| scope.origin_names.get(&verdict.origin_replica_id))
+                    .cloned(),
+                actor: verdict.actor.clone(),
+                on_behalf_of: verdict.on_behalf_of.clone(),
+                admission_provenance: state
+                    .privilege_scope
+                    .as_ref()
+                    .map(|scope| scope.provenance(&verdict.event_id))
+                    .unwrap_or("legacy-unknown")
+                    .into(),
+                covers_current_head: covers,
+                gating_eligible: eligible,
+                selected_authorizing_event: covers
+                    && eligible
+                    && selected == Some(verdict.event_id.as_str())
+                    && verdict.verdict == Verdict::Approved,
+                rejection_reason: reason,
+            }
+        })
+        .collect()
+}
+
 #[derive(Debug, Serialize)]
 pub struct VerdictStatus {
+    pub event_id: String,
+    pub origin_replica_id: String,
     pub verdict: Verdict,
     pub patchset_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1167,14 +1254,28 @@ fn build_report(
     });
 
     let review_map = reviewer_coverage(state);
-    let approval = approval::decide(&ApprovalFacts {
+    let eligible_external: Vec<_> = state
+        .external_verdicts
+        .iter()
+        .filter(|verdict| {
+            state.privilege_scope.as_ref().is_none_or(|scope| {
+                scope.permits(
+                    &verdict.event_id,
+                    &verdict.origin_replica_id,
+                    crate::import_authorization::Role::ExternalDecision,
+                )
+            })
+        })
+        .cloned()
+        .collect();
+    let mut approval = approval::decide(&ApprovalFacts {
         latest_patchset: latest_patchset.as_ref(),
         current_head: current_head.as_deref(),
         head_matches,
         approved_head_matches,
         latest_verdict: state.latest_verdict(),
-        verdict_tips: state.verdict_tips().len(),
-        external_verdicts: &state.external_verdicts,
+        verdict_tips: state.eligible_verdict_tips().len(),
+        external_verdicts: &eligible_external,
         debt_waives_latest_patchset: state.debt_waives_latest_patchset(),
         forbid_self_approval: policy.policy.forbid_self_approval,
         forbid_self_approval_sources: policy
@@ -1191,6 +1292,20 @@ fn build_report(
             .and_then(|patchset| reviewed_only_by_brief_author(state, patchset)),
         debt_outstanding: state.debt_outstanding(),
     });
+    if !approval.approval_valid && approval.approval_rejection_reason.is_none() {
+        let origins: BTreeSet<_> = state
+            .verdicts
+            .iter()
+            .filter(|verdict| !state.review_eligible(&verdict.event_id, &verdict.origin_replica_id))
+            .map(|verdict| verdict.origin_replica_id.as_str())
+            .collect();
+        if !origins.is_empty() {
+            approval.approval_rejection_reason = Some(format!(
+                "imported verdict origins {origins:?} are ineligible; local verdict owed"
+            ));
+        }
+    }
+
     let ApprovalOutcome {
         verdict,
         external_verdicts,
@@ -1210,8 +1325,8 @@ fn build_report(
     // Computed before the report takes ownership of the head it is compared
     // against. A waiver covers exactly the revision it names.
     let dirty_tree_waiver_in_force = state
-        .dirty_tree_waiver
-        .clone()
+        .eligible_dirty_tree_waiver()
+        .cloned()
         .filter(|waiver| Some(&waiver.revision) == current_head.as_ref());
 
     let findings: Vec<FindingSummary> = state
@@ -1385,12 +1500,12 @@ fn build_report(
             // whose declared timeout is unknown cannot be shown to satisfy
             // a declaration that has one.
             green_at_head: evidence.is_some_and(|e| {
-                e.green_at_head(state.dirty_tree_waiver.as_ref())
+                e.green_at_head(state.eligible_dirty_tree_waiver())
                     && matches_declaration(e, gate)
                     && environment_applies
             }),
             declaration_changed: evidence.is_some_and(|e| {
-                e.green_at_head(state.dirty_tree_waiver.as_ref()) && !matches_declaration(e, gate)
+                e.green_at_head(state.eligible_dirty_tree_waiver()) && !matches_declaration(e, gate)
             }),
             attested: evidence.is_some_and(|e| e.attested),
             tested_tree: evidence.and_then(|e| e.tested_tree.clone()),
@@ -1697,6 +1812,17 @@ fn build_report(
     };
 
     Ok(StatusReport {
+        recorded_verdict_tips: state
+            .verdict_tips()
+            .iter()
+            .map(|verdict| verdict.event_id.clone())
+            .collect(),
+        eligible_verdict_tips: state
+            .eligible_verdict_tips()
+            .iter()
+            .map(|verdict| verdict.event_id.clone())
+            .collect(),
+        verdict_assessments: verdict_assessments(state, current_head.as_deref(), policy, &danger),
         schema: STATUS_SCHEMA,
         change_id: state.change_id.clone(),
         slug: state.slug.clone(),
@@ -1911,6 +2037,9 @@ pub fn reviewer_coverage(state: &ChangeState) -> Vec<ReviewerCoverage> {
         };
 
     for verdict in &state.verdicts {
+        if !state.review_eligible(&verdict.event_id, &verdict.origin_replica_id) {
+            continue;
+        }
         record(
             verdict.effective_author(),
             &verdict.patchset_id,
@@ -2054,7 +2183,10 @@ fn reviewed_only_by_brief_author<'a>(
     let covering_reviewers = state
         .verdicts
         .iter()
-        .filter(|verdict| verdict.patchset_id == final_patchset.id)
+        .filter(|verdict| {
+            verdict.patchset_id == final_patchset.id
+                && state.review_eligible(&verdict.event_id, &verdict.origin_replica_id)
+        })
         .map(|verdict| {
             verdict
                 .on_behalf_of

@@ -38,6 +38,10 @@ pub struct BundleObject {
 pub struct Bundle {
     pub schema: String,
     pub repository_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_replica_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
     pub change_id: String,
     pub event_count: usize,
     pub events_sha256: String,
@@ -109,7 +113,11 @@ impl Bundle {
         // The opening event identifies the originating store. Later events
         // may legitimately come from other stores after transfer, and a
         // suffix bundle begins at neither the opener nor its own start.
-        let repository_id = event_envelope(&all[0])?.repository_id.to_string();
+        let opening = all
+            .iter()
+            .find(|value| value["event_type"] == "change-opened")
+            .context("change has no opening event")?;
+        let repository_id = event_envelope(opening)?.repository_id.to_string();
         // The checksum always covers the complete history at export: for a
         // full bundle that is its events, and for a delta it is the prefix
         // plus the suffix, which is what doubles as the next `--since` token
@@ -146,9 +154,12 @@ impl Bundle {
         // The checksum covers the change's events, which is what the receiver
         // replays. Repository events travel beside them: they are context for
         // resolving recorded revisions, not part of this change's history.
+        let replica = crate::replica::status(store)?;
         Ok(Bundle {
             schema: BUNDLE_SCHEMA.to_string(),
             store_format: crate::model::SCHEMA_VERSION,
+            source_replica_id: Some(store.repository_id.clone()),
+            project_id: replica.project_id,
             repository_id,
             change_id: change_id.to_string(),
             event_count: events.len(),
@@ -169,6 +180,14 @@ impl Bundle {
     pub fn parse(bytes: &[u8]) -> Result<ValidatedBundle> {
         let bundle: Bundle =
             serde_json::from_slice(bytes).context("malformed arc export bundle")?;
+        for (key, id) in [
+            ("source_replica_id", bundle.source_replica_id.as_deref()),
+            ("project_id", bundle.project_id.as_deref()),
+        ] {
+            if let Some(id) = id {
+                ids::validate_id_component(id).with_context(|| format!("invalid bundle {key}"))?;
+            }
+        }
         if bundle.store_format > crate::model::SCHEMA_VERSION {
             bail!(
                 "bundle was written by a newer arc (store format {}, this build understands \
@@ -342,7 +361,6 @@ impl Bundle {
             events.push(ValidatedEvent {
                 event_id: envelope.event_id.to_string(),
                 value: value.clone(),
-                bytes: event_file_bytes(value)?,
                 typed,
             });
         }
@@ -518,7 +536,6 @@ pub struct ValidatedBundle {
 pub struct ValidatedEvent {
     pub event_id: String,
     pub value: Value,
-    pub bytes: Vec<u8>,
     pub typed: Option<Event>,
 }
 
@@ -736,10 +753,4 @@ fn split_at_prefix(events: &[Value], prefix_sha256: &str) -> Result<(usize, Vec<
         );
     }
     Ok((event_count, events[event_count..].to_vec()))
-}
-
-fn event_file_bytes(event: &Value) -> Result<Vec<u8>> {
-    let mut bytes = serde_json::to_vec_pretty(event)?;
-    bytes.push(b'\n');
-    Ok(bytes)
 }

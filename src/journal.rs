@@ -4645,7 +4645,7 @@ fn infer_change_state(cwd: &Path) -> Option<ChangeState> {
     let store = Store::discover_for_reading(cwd).ok()?;
     let change_id = crate::context::infer_change(&store, cwd).ok().flatten()?;
     let events = store.load_events(&change_id).ok()?;
-    state::reduce_following(&events, &store.rewrites().ok()?).ok()
+    store.project_state(&events, &store.rewrites().ok()?).ok()
 }
 
 /// How far a change has got, named the way every other view names it: the
@@ -11827,7 +11827,8 @@ fn all_changes_in(
         .list_change_ids()?
         .into_iter()
         .map(|id| {
-            state::reduce_following(&store.load_events(&id)?, rewrites)
+            store
+                .project_state(&store.load_events(&id)?, rewrites)
                 .with_context(|| format!("cannot read change {id}"))
         })
         .collect()
@@ -11981,12 +11982,14 @@ impl ForeignLedgers {
             .or_insert_with(|| {
                 Store::resolve_root(Path::new(anchor))
                     .ok()
-                    .and_then(|root| Store::open_at(&root).ok().flatten())
+                    .and_then(|root| Store::open_at_for(&root, Path::new(anchor)).ok().flatten())
             })
             .as_ref()
             .filter(|store| store.repository_id == promotion.repository_id)?;
         let rewrites = store.rewrites().ok()?;
-        state::reduce_following(&store.load_events(&promotion.change_id).ok()?, &rewrites).ok()
+        store
+            .project_state(&store.load_events(&promotion.change_id).ok()?, &rewrites)
+            .ok()
     }
 }
 
@@ -12018,7 +12021,7 @@ fn project_inventory(
     let events = read_events(&hot)?;
     let observed = Utc::now();
     let (ledger, changes, rewrites) = match Store::resolve_root(project) {
-        Ok(root) => match Store::open_at(&root) {
+        Ok(root) => match Store::open_at_for(&root, project) {
             Ok(Some(store)) => {
                 let rewrites = store.rewrites().ok();
                 let loaded = rewrites

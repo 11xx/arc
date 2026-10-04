@@ -9,13 +9,25 @@ fn recorded_journal_event(repo: &Repo) -> serde_json::Value {
 }
 
 fn opened_event(repo: &Repo, change_id: &str) -> serde_json::Value {
-    let path = fs::read_dir(event_dir(repo, change_id))
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
-    serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    if let Ok(entries) = fs::read_dir(event_dir(repo, change_id)) {
+        let path = entries.into_iter().next().unwrap().unwrap().path();
+        return serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    }
+    for entry in fs::read_dir(repo.root.join(".git/arc/imports")).unwrap() {
+        let batch: serde_json::Value =
+            serde_json::from_slice(&fs::read(entry.unwrap().path()).unwrap()).unwrap();
+        if batch["change_id"].as_str() == Some(change_id) {
+            if let Some(event) = batch["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|event| event["event_type"] == "change-opened")
+            {
+                return event.clone();
+            }
+        }
+    }
+    panic!("missing opening event for {change_id}");
 }
 
 /// `arc env`'s line for a session the harness's own store backs.
@@ -746,7 +758,7 @@ fn ambiguous_codex_prefix_keeps_session_resolution_unknown() {
     let recipient_config: serde_json::Value =
         serde_json::from_slice(&fs::read(recipient.root.join(".git/arc/config.json")).unwrap())
             .unwrap();
-    assert_eq!(recipient_config["schema_version"], 5, "{recipient_config}");
+    assert_eq!(recipient_config["schema_version"], 7, "{recipient_config}");
 }
 
 #[test]

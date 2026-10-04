@@ -331,9 +331,12 @@ pub fn approval(st: &ChangeState, report: &StatusReport, approved_patchset_id: &
         .is_some_and(|verdict| verdict.valid_for_current_head || report.approval_waived_by_debt);
     let verdict = verdict_authorized_locally
         .then(|| {
-            st.verdicts.iter().rev().find(|verdict| {
-                verdict.patchset_id == approved_patchset_id
-                    && verdict.verdict == crate::model::Verdict::Approved
+            report.verdict.as_ref().and_then(|assessed| {
+                st.verdicts.iter().find(|verdict| {
+                    verdict.event_id == assessed.event_id
+                        && verdict.patchset_id == approved_patchset_id
+                        && verdict.verdict == crate::model::Verdict::Approved
+                })
             })
         })
         .flatten();
@@ -593,6 +596,7 @@ mod tests {
 
     fn policy() -> NormalizedPolicy {
         NormalizedPolicy {
+            replica: Default::default(),
             forbid_self_approval: false,
             require_declared_actor: false,
             provenance_git_identity: "shared".to_string(),
@@ -614,6 +618,7 @@ mod tests {
 
     fn basis() -> AuthorizationBasis {
         AuthorizationBasis {
+            selected_verdict_provenance: None,
             verdict_event_id: Some("verdict-1".to_string()),
             external_verdict: None,
             gate_evidence: BTreeMap::from([("build".to_string(), "evidence-1".to_string())]),

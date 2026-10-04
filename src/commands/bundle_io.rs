@@ -49,7 +49,14 @@ pub fn export_bundle(
     Ok(())
 }
 
-pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool, provenance_only: bool) -> Result<i32> {
+pub fn import_bundle(
+    ctx: &Ctx,
+    input: &str,
+    dry_run: bool,
+    provenance_only: bool,
+    publisher: Option<&str>,
+    received_sha256: Option<&str>,
+) -> Result<crate::import_authorization::ImportResult> {
     let bytes = if input == "-" {
         let mut bytes = Vec::new();
         std::io::stdin().read_to_end(&mut bytes)?;
@@ -57,6 +64,7 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool, provenance_only: boo
     } else {
         std::fs::read(input).with_context(|| format!("cannot read import bundle {input}"))?
     };
+    crate::import_authorization::verify_received_digest(&bytes, received_sha256)?;
     // Parsing validates every path-bearing ID, checksum, envelope, and
     // patchset field before the local store is inspected or created.
     let validated = Bundle::parse(&bytes)?;
@@ -83,6 +91,7 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool, provenance_only: boo
     let root = Store::resolve_root(&ctx.cwd)?;
     let local_repository_id = Store::repository_id_at(&root)?;
     let local_store = local_repository_id.as_ref().map(|repository_id| Store {
+        operator_policy_path: crate::policy::operator_path(&ctx.cwd).ok(),
         root: root.clone(),
         repository_id: repository_id.clone(),
         require_declared_actor: false,
@@ -108,6 +117,43 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool, provenance_only: boo
             missing_objects.push((patchset.event_id.clone(), "head", patchset.head.clone()));
         }
     }
+
+    let initial_policy = crate::policy::load(&ctx.cwd)?;
+    let preflight = classify_import_events(&root, &validated)?;
+    if !preflight.conflicts.is_empty() {
+        print_import_report(
+            &validated,
+            local_repository_id.as_deref(),
+            &preflight.new_events,
+            &preflight.skipped_events,
+            &preflight.conflicts,
+            &missing_objects,
+            &pins,
+            dry_run,
+        );
+        println!("aborted: no events or refs written");
+        return Ok(crate::model::OperationResult::unpublished(1));
+    }
+    if let Some(store) = &local_store {
+        if let Some(contest) = claim_contest_for_import(store, &validated, &preflight.new_events)? {
+            println!("{}", contest.render(&validated.bundle.change_id));
+            println!("aborted: no events or refs written");
+            return Ok(crate::model::OperationResult::unpublished(1));
+        }
+    }
+    validate_import_candidate(local_store.as_ref(), &validated, &preflight.new_events)?;
+    let repository = plan_repository_events(&ctx.cwd, local_store.as_ref(), &validated)?;
+    let initial_authorization = authorize_import(
+        ctx,
+        &initial_policy.replica,
+        local_store.as_ref(),
+        &bytes,
+        &validated,
+        &preflight.new_events,
+        &repository,
+        publisher,
+        received_sha256,
+    )?;
 
     if dry_run {
         let plan = classify_import_events(&root, &validated)?;
@@ -140,19 +186,48 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool, provenance_only: boo
         );
         if !plan.conflicts.is_empty() {
             println!("aborted: no events or refs written");
-            return Ok(1);
+            return Ok(crate::model::OperationResult::unpublished(1));
         }
         if let Some(contest) = claim_contest {
             println!("{}", contest.render(&validated.bundle.change_id));
             println!("aborted: no events or refs written");
-            return Ok(1);
+            return Ok(crate::model::OperationResult::unpublished(1));
         }
-        return Ok(0);
+        return Ok(crate::model::OperationResult {
+            exit_code: 0,
+            published: false,
+            output: crate::import_authorization::ImportSummary {
+                introduced_event_ids: plan
+                    .new_events
+                    .iter()
+                    .chain(repository.keys())
+                    .cloned()
+                    .collect(),
+                authorization: initial_authorization,
+            },
+        });
     }
 
-    let store = Store::discover(&ctx.cwd)?;
+    let store = Store {
+        root: root.clone(),
+        repository_id: local_repository_id
+            .clone()
+            .unwrap_or_else(|| "uninitialized".into()),
+        operator_policy_path: Some(crate::policy::operator_path(&ctx.cwd)?),
+        require_declared_actor: initial_policy.policy.require_declared_actor,
+        require_declared_actor_sources: initial_policy
+            .sources
+            .sources_for("policy.require_declared_actor=true"),
+        read_only: false,
+    };
     let _replica_state = crate::replica::lock(&store)?;
     let transition = store.lock_transition(&validated.bundle.change_id)?;
+    if Store::repository_id_at(&root)? != local_repository_id {
+        return Err(crate::import_authorization::Refusal(
+            "authorization input moved before publication: receiver repository ID".into(),
+        )
+        .into());
+    }
     // The prefix is judged under the same lock as the replay it authorises,
     // so a concurrent import cannot move the history between the two.
     verify_bundle_prefix(Some(&store), &validated)?;
@@ -181,12 +256,12 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool, provenance_only: boo
     );
     if !plan.conflicts.is_empty() {
         println!("aborted: no events or refs written");
-        return Ok(1);
+        return Ok(crate::model::OperationResult::unpublished(1));
     }
     if let Some(contest) = claim_contest {
         println!("{}", contest.render(&validated.bundle.change_id));
         println!("aborted: no events or refs written");
-        return Ok(1);
+        return Ok(crate::model::OperationResult::unpublished(1));
     }
 
     if local_repository_id.is_none() && store.repository_id != validated.bundle.repository_id {
@@ -204,22 +279,54 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool, provenance_only: boo
     // the judgement and the write that makes it true.
     let _repository_events = store.lock_repository_events()?;
     let incoming = plan_repository_events(&ctx.cwd, Some(&store), &validated)?;
-    let mut rewrites = 0;
-    for (event_id, bytes) in &incoming {
-        if store.append_raw_repository_event(event_id, bytes)? {
-            rewrites += 1;
-        }
+    let current_policy = crate::policy::load(&ctx.cwd)?;
+    if current_policy.replica != initial_policy.replica {
+        return Err(crate::import_authorization::Refusal(
+            "authorization configuration moved before publication: operator replica policy".into(),
+        )
+        .into());
     }
-    for event in &validated.events {
-        if plan.new_events.contains(&event.event_id) {
-            store.append_raw_event(&validated.bundle.change_id, &event.event_id, &event.bytes)?;
-        }
+    let authorization = authorize_import(
+        ctx,
+        &current_policy.replica,
+        Some(&store),
+        &bytes,
+        &validated,
+        &plan.new_events,
+        &incoming,
+        publisher,
+        received_sha256,
+    )?;
+    ctx.ensure_declared_actor(&store)?;
+    let store = Store::discover(&ctx.cwd)?;
+    let rewrites = incoming.len();
+    let batch = crate::store::ImportBatch {
+        schema: "arc-import-batch/1".into(),
+        change_id: validated.bundle.change_id.clone(),
+        events: validated
+            .events
+            .iter()
+            .filter(|event| plan.new_events.contains(&event.event_id))
+            .map(|event| event.value.clone())
+            .collect(),
+        repository_events: incoming
+            .values()
+            .map(|bytes| serde_json::from_slice(bytes))
+            .collect::<Result<Vec<_>, _>>()?,
+        authorization: authorization.clone(),
+    };
+    let published = !batch.events.is_empty() || !batch.repository_events.is_empty();
+    if published {
+        store.publish_import(&batch)?;
     }
     if rewrites > 0 {
         println!("repository events: {rewrites} imported");
     }
     let (pinned, unpinned) =
-        super::candidate::pin_imported(&ctx.cwd, &store, &incoming.keys().cloned().collect())?;
+        super::candidate::pin_imported(&ctx.cwd, &store, &incoming.keys().cloned().collect())
+            .with_context(|| {
+                format!("admission published: {published}; candidate retention maintenance failed")
+            })?;
     for candidate_id in pinned {
         println!("candidate {candidate_id}: pinned");
     }
@@ -228,9 +335,100 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool, provenance_only: boo
     }
     drop(transition);
     for (name, head) in pins {
-        gitio::update_ref(&ctx.cwd, &name, &head)?;
+        gitio::update_ref(&ctx.cwd, &name, &head).with_context(|| {
+            format!("admission published: {published}; retention-ref maintenance failed")
+        })?;
     }
-    Ok(0)
+    Ok(crate::model::OperationResult {
+        exit_code: 0,
+        published,
+        output: crate::import_authorization::ImportSummary {
+            introduced_event_ids: plan
+                .new_events
+                .iter()
+                .chain(incoming.keys())
+                .cloned()
+                .collect(),
+            authorization,
+        },
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn authorize_import(
+    ctx: &Ctx,
+    policy: &crate::import_authorization::ReplicaPolicy,
+    store: Option<&Store>,
+    bytes: &[u8],
+    validated: &ValidatedBundle,
+    new_events: &[String],
+    repository: &BTreeMap<String, Vec<u8>>,
+    publisher: Option<&str>,
+    received_sha256: Option<&str>,
+) -> Result<Option<crate::import_authorization::ImportAuthorization>> {
+    let replica = store.map(crate::replica::status).transpose()?;
+    let mut events: Vec<_> = validated
+        .events
+        .iter()
+        .filter(|event| new_events.contains(&event.event_id))
+        .map(|event| ("change".into(), event.value.clone()))
+        .collect();
+    for bytes in repository.values() {
+        events.push(("repository".into(), serde_json::from_slice(bytes)?));
+    }
+    if let Some(replica) = replica
+        .as_ref()
+        .filter(|replica| replica.project_id.is_some())
+    {
+        let members: BTreeSet<_> = replica
+            .local
+            .iter()
+            .chain(&replica.peers)
+            .map(|identity| identity.repository_id.as_str())
+            .collect();
+        for (_, value) in &events {
+            let origin = value["repository_id"]
+                .as_str()
+                .context("event has no recorded origin")?;
+            if !members.contains(origin) {
+                return Err(crate::import_authorization::Refusal(format!(
+                    "project {:?}: event {} origin {origin} is not a project member",
+                    replica.project_id, value["event_id"]
+                ))
+                .into());
+            }
+        }
+        if !validated
+            .bundle
+            .source_replica_id
+            .as_deref()
+            .is_some_and(|id| members.contains(id))
+        {
+            return Err(crate::import_authorization::Refusal(format!(
+                "project {:?}: exporter {:?} is not a project member",
+                replica.project_id, validated.bundle.source_replica_id
+            ))
+            .into());
+        }
+    }
+    crate::import_authorization::plan_import(
+        policy,
+        &crate::policy::operator_path(&ctx.cwd)?,
+        crate::import_authorization::ImportRequest {
+            bytes,
+            principal: publisher,
+            received_sha256,
+            source_replica_id: validated.bundle.source_replica_id.as_deref(),
+            project_id: validated.bundle.project_id.as_deref(),
+            receiver_id: store
+                .map(|store| store.repository_id.as_str())
+                .unwrap_or("uninitialized"),
+            receiver_project: replica
+                .as_ref()
+                .and_then(|replica| replica.project_id.as_deref()),
+            events: &events,
+        },
+    )
 }
 
 /// A delta bundle carries the suffix of a history. The receiver must hold
@@ -330,11 +528,11 @@ fn plan_repository_events(
         };
         let mut bytes = serde_json::to_vec_pretty(value)?;
         bytes.push(b'\n');
-        if store.is_some_and(|store| {
-            store
-                .repository_event_conflicts(event_id, &bytes)
-                .unwrap_or(false)
-        }) {
+        if store
+            .map(|store| store.repository_event_conflicts(event_id, &bytes))
+            .transpose()?
+            .unwrap_or(false)
+        {
             bail!(
                 "repository event {event_id} already exists here with different content; \
                  nothing was imported"
@@ -359,10 +557,14 @@ fn plan_repository_events(
         // bundle must still hold together on its own.
         None => Vec::new(),
     };
-    let held: BTreeSet<String> = combined
-        .iter()
-        .map(|event| event.event_id.clone())
-        .collect();
+    let held: BTreeSet<String> = match store {
+        Some(store) => store
+            .raw_repository_events_unseen(&BTreeSet::new())?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect(),
+        None => BTreeSet::new(),
+    };
     for value in &validated.bundle.repository_events {
         if let Some(event) = crate::bundle::parse_typed_event(value)? {
             if !held.contains(&event.event_id) {
@@ -418,6 +620,7 @@ fn plan_repository_events(
         bytes.push(b'\n');
         incoming.insert(event.event_id.clone(), bytes);
     }
+    incoming.retain(|id, _| !held.contains(id));
     Ok(incoming)
 }
 
