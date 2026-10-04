@@ -580,11 +580,22 @@ fn env_explains_headless_startup_evidence_and_resolves_a_recorded_model() {
 #[test]
 fn writes_wait_for_the_acting_claude_recording_to_flush_its_model() {
     use std::io::Write;
+    use std::time::SystemTime;
 
     let repo = Repo::new();
     let path = recording(&repo, &[prompt("u1", "2026-01-01T10:00:00Z")]);
+    // An access timestamp older than the write is a sentinel for the reader's
+    // first access, including on filesystems using relatime.
+    fs::File::open(&path)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_accessed(SystemTime::UNIX_EPOCH))
+        .unwrap();
     let writer = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(150));
+        let deadline = Instant::now() + HANG_BOUND;
+        while fs::metadata(&path).unwrap().accessed().unwrap() == SystemTime::UNIX_EPOCH {
+            assert!(Instant::now() < deadline, "arc did not read the recording");
+            thread::sleep(Duration::from_millis(1));
+        }
         let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
         writeln!(
             file,
@@ -602,4 +613,19 @@ fn writes_wait_for_the_acting_claude_recording_to_flush_its_model() {
     assert_eq!(events[0]["model"], "m#medium");
     assert_eq!(events[0]["model_source"], "resolved");
     assert_eq!(events[0]["model_observation"]["native_id"], "a1");
+}
+
+#[test]
+fn writes_give_up_when_the_acting_claude_recording_has_no_model() {
+    let repo = Repo::new();
+    recording(&repo, &[prompt("u1", "2026-01-01T10:00:00Z")]);
+    let started = Instant::now();
+    let change = begin(&repo);
+    assert!(started.elapsed() >= Duration::from_secs(1));
+    let events: Vec<Value> = stdout(acting(&repo).args(["events", "--change", &change]))
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(events[0].get("model").is_none());
+    assert!(events[0].get("model_source").is_none());
 }
