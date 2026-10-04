@@ -538,7 +538,7 @@ RUN A CHANGE
                                      a stale one on a change, an expired one
                                      on an artifact.
     --because <reason>               Displace one that may not be, stating why
-                                     its holder is gone. `harness-status-absent`
+                                     its holder is gone. `agent-status-absent`
                                      and `delegate-exit:<handle>` are the
                                      expected evidence; any text is accepted.
   arc accept INPUT --branch LOCAL-BRANCH --publisher PRINCIPAL
@@ -2006,7 +2006,7 @@ RULES THAT CHANGE WHAT YOU DO
   - A claim that is not yet reclaimable is displaced only by `--takeover
     --because <reason>`, and the reason is recorded on the displaced claim,
     printed wherever it is rendered, and verified by nobody. The evidence a
-    holder is gone — `harness-status-absent`, `delegate-exit:<handle>` — is
+    holder is gone — `agent-status-absent`, `delegate-exit:<handle>` — is
     observed outside the ledger, and the record is what makes a lease cut
     short auditable afterwards. Without a reason the refusal stands, because
     a live lease and a dead one read alike from inside arc.

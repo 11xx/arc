@@ -9692,7 +9692,7 @@ pub fn claim_artifact(
             eprintln!("--takeover is unavailable because the claim has not expired");
             eprintln!(
                 "--takeover --because <reason> displaces it and records the reason, \
-                 such as harness-status-absent or delegate-exit:<handle>"
+                 such as agent-status-absent or delegate-exit:<handle>"
             );
             return Ok(8);
         }

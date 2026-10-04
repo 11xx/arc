@@ -165,7 +165,7 @@ fn claim_inner(
                     eprintln!("--takeover is unavailable because the claim is not yet stale");
                     eprintln!(
                         "--takeover --because <reason> displaces it and records the reason, \
-                         such as harness-status-absent or delegate-exit:<handle>"
+                         such as agent-status-absent or delegate-exit:<handle>"
                     );
                     return Ok((8, None));
                 }

@@ -1227,7 +1227,7 @@ enum Cmd {
         takeover: bool,
         /// Why a lease that is not yet reclaimable is cut short, recorded on
         /// the displaced claim and verified by nobody (requires --takeover;
-        /// `harness-status-absent` and `delegate-exit:<handle>` are the
+        /// `agent-status-absent` and `delegate-exit:<handle>` are the
         /// expected evidence, and any text is accepted)
         #[arg(long)]
         because: Option<String>,

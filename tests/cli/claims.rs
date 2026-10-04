@@ -685,7 +685,7 @@ fn in_budget_refusal_names_the_reason_flag_and_its_evidence() {
         .code(8)
         .stderr(predicates::str::contains(
             "--takeover --because <reason> displaces it and records the reason, \
-             such as harness-status-absent or delegate-exit:<handle>",
+             such as agent-status-absent or delegate-exit:<handle>",
         ));
 }
 
@@ -711,12 +711,12 @@ fn a_stated_reason_displaces_a_claim_inside_its_budget() {
             "takeover-because",
             "--takeover",
             "--because",
-            "harness-status-absent",
+            "agent-status-absent",
         ])
         .assert()
         .success()
         .stdout(predicates::str::contains(
-            "displaced before its budget: harness-status-absent",
+            "displaced before its budget: agent-status-absent",
         ));
 
     let events = stdout(repo.arc(&repo.root).args([
@@ -730,11 +730,11 @@ fn a_stated_reason_displaces_a_claim_inside_its_budget() {
         serde_json::from_str(events.lines().last().unwrap()).unwrap();
     assert_eq!(replacement["displaced"]["actor"], "tester");
     assert_eq!(replacement["displaced"]["stage"], "implementing");
-    assert_eq!(replacement["displaced"]["reason"], "harness-status-absent");
+    assert_eq!(replacement["displaced"]["reason"], "agent-status-absent");
 
     let shown = stdout(repo.arc(&repo.root).args(["show", "takeover-because"]));
     assert!(
-        shown.contains("displaced before its budget: harness-status-absent"),
+        shown.contains("displaced before its budget: agent-status-absent"),
         "{shown}"
     );
 
@@ -743,7 +743,7 @@ fn a_stated_reason_displaces_a_claim_inside_its_budget() {
     ))
     .unwrap();
     assert_eq!(status["claim"]["owner"]["actor"], "taker");
-    assert_eq!(status["claim"]["displaced_reason"], "harness-status-absent");
+    assert_eq!(status["claim"]["displaced_reason"], "agent-status-absent");
 }
 
 #[test]
@@ -756,7 +756,7 @@ fn a_reason_without_a_takeover_is_a_usage_error() {
             "claim",
             "takeover-unasked",
             "--because",
-            "harness-status-absent",
+            "agent-status-absent",
         ])
         .assert()
         .failure()
