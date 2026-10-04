@@ -1,5 +1,7 @@
 //! Preparation of a transported change under the receiver's local authority.
+use super::accept_effects::{self, Effects};
 use super::*;
+use crate::operation_println as println;
 use crate::rewrite::RewriteMap;
 
 pub const ACCEPT_SCHEMA: &str = "arc-accept/1";
@@ -20,6 +22,8 @@ pub struct AcceptArgs {
 #[derive(Serialize)]
 pub struct AcceptanceStep {
     name: String,
+    kind: &'static str,
+    effects: Effects,
     argv: Vec<String>,
     cwd: PathBuf,
     outcome: String,
@@ -128,7 +132,7 @@ fn command(words: impl IntoIterator<Item = impl Into<String>>) -> Vec<String> {
         .collect()
 }
 
-fn event_ids(store: &Store, change: Option<&str>) -> Result<BTreeSet<String>> {
+pub(super) fn event_ids(store: &Store, change: Option<&str>) -> Result<BTreeSet<String>> {
     let mut ids: BTreeSet<_> = store
         .load_repository_events()?
         .into_iter()
@@ -174,18 +178,17 @@ fn step<T>(
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     result.stopped_at = Some(name.to_string());
-    let store = Store::discover_for_reading(&ctx.cwd).ok();
-    let before = store
-        .as_ref()
-        .map(|store| event_ids(store, result.change_id.as_deref()))
-        .transpose()?
-        .unwrap_or_default();
-    let (value, output) = crate::operation_output::capture(operation);
-    let after = store
-        .as_ref()
-        .map(|store| event_ids(store, result.change_id.as_deref()))
-        .transpose()?
-        .unwrap_or_default();
+    let before = accept_effects::observation(ctx, result.change_id.as_deref());
+    let (mut value, output) = if before.errors.is_empty() {
+        crate::operation_output::capture(operation)
+    } else {
+        (refuse(1, before.errors.join("\n")), String::new())
+    };
+    let after = accept_effects::observation(ctx, result.change_id.as_deref());
+    let (effects, event_ids) = accept_effects::effects(ctx, &before, after, &argv);
+    if value.is_ok() && !effects.observation_errors.is_empty() {
+        value = refuse(1, effects.observation_errors.join("\n"));
+    }
     let code = value.as_ref().err().map(exit_code).unwrap_or(0);
     let outcome = match &value {
         Ok(_) => {
@@ -199,11 +202,17 @@ fn step<T>(
     };
     result.steps.push(AcceptanceStep {
         name: name.into(),
+        kind: if argv.is_empty() {
+            "internal"
+        } else {
+            "command"
+        },
+        effects,
         argv,
         cwd: ctx.cwd.clone(),
         outcome,
         exit_code: Some(code),
-        event_ids: after.difference(&before).cloned().collect(),
+        event_ids,
     });
     value
 }
@@ -279,7 +288,11 @@ fn plan_acceptance(
         result,
         ctx,
         "preflight",
-        command(["accept", &args.input, "--branch", &args.branch, "--dry-run"]),
+        {
+            let mut argv = acceptance_argv(args);
+            argv.push("--dry-run".into());
+            argv
+        },
         || {
             let store = Store::discover_for_reading(&ctx.cwd)?;
             authority(&store)?;
@@ -647,12 +660,17 @@ fn revalidate(ctx: &Ctx, plan: &AcceptancePlan, expected: &str) -> Result<()> {
         return refuse(1, "acceptance policy, declarations, signing configuration, or worktree configuration moved; inspect configuration and retry the same delivery");
     }
     if config::resolved(&ctx.cwd) == plan.checkout {
-        validate_checkout(ctx, plan, expected)?;
+        validate_checkout(ctx, plan, expected, true)?;
     }
     Ok(())
 }
 
-fn validate_checkout(ctx: &Ctx, plan: &AcceptancePlan, expected: &str) -> Result<()> {
+fn validate_checkout(
+    ctx: &Ctx,
+    plan: &AcceptancePlan,
+    expected: &str,
+    require_clean: bool,
+) -> Result<()> {
     let inventory = gitio::worktree_inventory(&plan.invocation)?;
     let registered = inventory.iter().any(|entry| {
         config::resolved(&entry.path) == plan.checkout
@@ -680,7 +698,7 @@ fn validate_checkout(ctx: &Ctx, plan: &AcceptancePlan, expected: &str) -> Result
             "checkout administrative identity moved; inspect it before retrying",
         );
     }
-    if !gitio::is_clean(&ctx.cwd)? {
+    if require_clean && !gitio::is_clean(&ctx.cwd)? {
         return refuse(
             1,
             format!(
@@ -745,6 +763,11 @@ fn verify_args() -> VerifyArgs {
 }
 
 fn snapshot_argv(plan: &AcceptancePlan) -> Vec<String> {
+    if (plan.brief_version.is_none() && !plan.state.briefs.is_empty())
+        || plan.contributors.iter().any(|actor| actor.contains(','))
+    {
+        return Vec::new();
+    }
     let mut argv = command([
         "snapshot",
         &plan.state.change_id,
@@ -772,44 +795,87 @@ fn execute_acceptance(
     if let Some(key) = &args.key {
         sign_argv.extend(["--key".into(), key.clone()]);
     }
-    let checkout_argv = if plan.create_checkout {
-        vec![
-            "git".into(),
-            "worktree".into(),
-            "add".into(),
-            "--".into(),
-            plan.checkout.display().to_string(),
-            plan.state.branch.clone(),
-        ]
-    } else {
-        vec![
-            "git".into(),
-            "worktree".into(),
-            "list".into(),
-            "--porcelain".into(),
-        ]
-    };
-    let mut operations = vec![
-        (
-            "import".to_string(),
-            command([
-                "import",
-                &args.input,
-                "--publisher",
-                &args.publisher,
-                "--received-sha256",
-                &args.received_sha256,
-            ]),
-        ),
-        ("checkout-binding".into(), checkout_argv),
-        ("sign".into(), sign_argv.clone()),
-        ("snapshot".into(), snapshot_argv(plan)),
+    let checkout_argv = vec![
+        "git".into(),
+        "worktree".into(),
+        "add".into(),
+        "--no-checkout".into(),
+        plan.checkout.display().to_string(),
+        plan.state.branch.clone(),
     ];
+    let object_format = gitio::git(&ctx.cwd, &["rev-parse", "--show-object-format"])?;
+    let null_oid = match object_format.as_str() {
+        "sha1" => "0".repeat(40),
+        "sha256" => "0".repeat(64),
+        _ => {
+            return refuse(
+                1,
+                format!("unsupported Git object format {object_format:?}"),
+            )
+        }
+    };
+    let population_argv = vec![
+        "git".into(),
+        "read-tree".into(),
+        "--reset".into(),
+        "-u".into(),
+        "HEAD".into(),
+    ];
+    let hook_argv = vec![
+        "git".into(),
+        "hook".into(),
+        "run".into(),
+        "--ignore-missing".into(),
+        "post-checkout".into(),
+        "--".into(),
+        null_oid,
+        plan.head.clone(),
+        "1".into(),
+    ];
+    let mut operations = vec![(
+        "import".to_string(),
+        command([
+            "import",
+            &args.input,
+            "--publisher",
+            &args.publisher,
+            "--received-sha256",
+            &args.received_sha256,
+        ]),
+        ctx.cwd.clone(),
+    )];
+    if plan.create_checkout {
+        operations.push((
+            "checkout-allocation".into(),
+            checkout_argv.clone(),
+            ctx.cwd.clone(),
+        ));
+    }
+    operations.push(("checkout-binding".into(), Vec::new(), ctx.cwd.clone()));
+    if plan.create_checkout {
+        operations.push((
+            "checkout-population".into(),
+            population_argv.clone(),
+            plan.checkout.clone(),
+        ));
+        operations.push((
+            "checkout-hook".into(),
+            hook_argv.clone(),
+            plan.checkout.clone(),
+        ));
+    }
+    operations.push(("sign".into(), sign_argv.clone(), plan.checkout.clone()));
+    operations.push((
+        "snapshot".into(),
+        snapshot_argv(plan),
+        plan.checkout.clone(),
+    ));
     let gates = ctx.declarations(&plan.state)?.gates;
     for (name, _) in gates.required_for(&plan.state.profile) {
         operations.push((
             format!("gate:{name}"),
             command(["verify", &plan.state.change_id, "--gate", name]),
+            plan.checkout.clone(),
         ));
     }
     let target_tree_needed = !gitio::is_ancestor(&ctx.cwd, &plan.target, &plan.head)?;
@@ -823,6 +889,7 @@ fn execute_acceptance(
                 &plan.state.target_branch,
                 "--skip-green",
             ]),
+            plan.checkout.clone(),
         ));
     }
     for probe in &plan.probes {
@@ -839,19 +906,27 @@ fn execute_acceptance(
                     "--probe-phase",
                     phase,
                 ]),
+                plan.checkout.clone(),
             ));
         }
     }
     operations.push((
         "readiness".into(),
         command(["check", &plan.state.change_id, "--json"]),
+        plan.checkout.clone(),
     ));
     if args.dry_run {
-        for (name, argv) in operations {
+        for (name, argv, cwd) in operations {
             result.steps.push(AcceptanceStep {
                 name,
+                kind: if argv.is_empty() {
+                    "internal"
+                } else {
+                    "command"
+                },
+                effects: Effects::default(),
                 argv,
-                cwd: plan.checkout.clone(),
+                cwd,
                 outcome: "planned; signing and verification outcomes are conditional".into(),
                 exit_code: None,
                 event_ids: Vec::new(),
@@ -881,69 +956,105 @@ fn execute_acceptance(
         }
         Ok(())
     })?;
-    step(
-        result,
-        ctx,
-        "checkout-binding",
-        operations[1].1.clone(),
-        || {
+    if plan.create_checkout {
+        step(result, ctx, "checkout-allocation", checkout_argv, || {
             let store = ctx.store()?;
             let _replica = crate::replica::lock(&store)?;
             let _transition = store.lock_transition(&plan.state.change_id)?;
             revalidate(ctx, plan, &plan.head)?;
-            let current = store.state(&plan.state.change_id)?;
-            let floor = admitted_event_floor(&store, &plan.state.change_id)?;
-            if let Some(floor) = &floor {
-                event_id_after(floor)?;
+            if std::fs::symlink_metadata(&plan.checkout).is_ok() {
+                return refuse(
+                    1,
+                    format!("allocated path {} became occupied", plan.checkout.display()),
+                );
             }
-            if !plan.create_checkout {
-                validate_checkout(&ctx.with_cwd(plan.checkout.clone()), plan, &plan.head)?;
-            }
-            if current
-                .worktree
-                .as_deref()
-                .is_some_and(|path| config::resolved(Path::new(path)) == plan.checkout)
-            {
-                return Ok(());
-            }
-            let (created, token) = if plan.create_checkout {
-                if std::fs::symlink_metadata(&plan.checkout).is_ok() {
-                    return refuse(
-                        1,
-                        format!("allocated path {} became occupied", plan.checkout.display()),
-                    );
-                }
-                gitio::add_worktree(&ctx.cwd, &plan.checkout, &plan.state.branch)?;
-                let admin = gitio::worktree_admin_dir(&plan.checkout)?;
-                (
-                    true,
-                    Some(gitio::write_worktree_owner(&admin, &plan.state.change_id)?),
-                )
-            } else {
-                (false, None)
-            };
-            let mut event = ctx.event(
-                &store,
-                &plan.state.change_id,
-                Payload::ChangeCheckoutBound {
-                    branch: plan.state.branch.clone(),
-                    worktree: plan.checkout.display().to_string(),
-                    worktree_created: created,
-                    worktree_owner_token: token,
-                },
-            );
-            if let Some(floor) = floor {
-                event.event_id = event_id_after(&floor)?;
-            }
-            ensure_append_allowed(&current, &event.payload)?;
-            store.append_event(&event)?;
-            if created {
-                gitio::populate_worktree(&plan.checkout)?;
-            }
-            Ok(())
-        },
-    )?;
+            gitio::add_worktree(&ctx.cwd, &plan.checkout, &plan.state.branch)
+        })?;
+    }
+    step(result, ctx, "checkout-binding", Vec::new(), || {
+        let store = ctx.store()?;
+        let _replica = crate::replica::lock(&store)?;
+        let _transition = store.lock_transition(&plan.state.change_id)?;
+        revalidate(ctx, plan, &plan.head)?;
+        let current = store.state(&plan.state.change_id)?;
+        let floor = admitted_event_floor(&store, &plan.state.change_id)?;
+        if let Some(floor) = &floor {
+            event_id_after(floor)?;
+        }
+        if !plan.create_checkout {
+            validate_checkout(&ctx.with_cwd(plan.checkout.clone()), plan, &plan.head, true)?;
+        }
+        if current
+            .worktree
+            .as_deref()
+            .is_some_and(|path| config::resolved(Path::new(path)) == plan.checkout)
+        {
+            return Ok(());
+        }
+        let (created, token) = if plan.create_checkout {
+            let admin = gitio::worktree_admin_dir(&plan.checkout)?;
+            (
+                true,
+                Some(gitio::write_worktree_owner(&admin, &plan.state.change_id)?),
+            )
+        } else {
+            (false, None)
+        };
+        let mut event = ctx.event(
+            &store,
+            &plan.state.change_id,
+            Payload::ChangeCheckoutBound {
+                branch: plan.state.branch.clone(),
+                worktree: plan.checkout.display().to_string(),
+                worktree_created: created,
+                worktree_owner_token: token,
+            },
+        );
+        if let Some(floor) = floor {
+            event.event_id = event_id_after(&floor)?;
+        }
+        ensure_append_allowed(&current, &event.payload)?;
+        store.append_event(&event)?;
+        println!(
+            "bound checkout: {} at {}; locally allocated: {created}",
+            plan.state.branch,
+            plan.checkout.display()
+        );
+        Ok(())
+    })?;
     let run = ctx.with_cwd(plan.checkout.clone());
+    if plan.create_checkout {
+        step(
+            result,
+            &run,
+            "checkout-population",
+            population_argv.clone(),
+            || {
+                revalidate(ctx, plan, &plan.head)?;
+                validate_checkout(&run, plan, &plan.head, false)?;
+                gitio::git(
+                    &run.cwd,
+                    &population_argv[1..]
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>(),
+                )
+                .map(drop)
+            },
+        )?;
+        step(result, &run, "checkout-hook", hook_argv.clone(), || {
+            revalidate(&run, plan, &plan.head)?;
+            gitio::git(
+                &run.cwd,
+                &hook_argv[1..]
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+            )?;
+            revalidate(&run, plan, &plan.head)
+        })?;
+    }
+
     step(result, &run, "sign", sign_argv, || {
         let _replica = crate::replica::lock(&plan.store)?;
         revalidate(&run, plan, &plan.head)?;
@@ -968,39 +1079,33 @@ fn execute_acceptance(
     })?;
     let prepared = gitio::branch_head(&ctx.cwd, &plan.state.branch)?;
     result.prepared_head = Some(prepared.clone());
-    step(
-        result,
-        &run,
-        "signature-confirmation",
-        command(["history", "resolve", &plan.delivered_head]),
-        || {
-            if plan
-                .store
-                .rewrites()?
-                .approved_successor(&plan.delivered_head)?
-                != prepared
-            {
-                return refuse(
-                    11,
-                    format!(
-                        "signing changed more than signatures and translated parents; {}",
-                        replay(&plan.state, &plan.state.branch)
-                    ),
-                );
-            }
-            let text = gitio::git(&run.cwd, &["cat-file", "commit", &prepared])?;
-            if !text
-                .split("\n\n")
-                .next()
-                .unwrap_or_default()
-                .lines()
-                .any(|line| line.starts_with("gpgsig "))
-            {
-                return refuse(1, format!("prepared head {prepared} has no signature"));
-            }
-            revalidate(&run, plan, &prepared)
-        },
-    )?;
+    step(result, &run, "signature-confirmation", Vec::new(), || {
+        if plan
+            .store
+            .rewrites()?
+            .approved_successor(&plan.delivered_head)?
+            != prepared
+        {
+            return refuse(
+                11,
+                format!(
+                    "signing changed more than signatures and translated parents; {}",
+                    replay(&plan.state, &plan.state.branch)
+                ),
+            );
+        }
+        let text = gitio::git(&run.cwd, &["cat-file", "commit", &prepared])?;
+        if !text
+            .split("\n\n")
+            .next()
+            .unwrap_or_default()
+            .lines()
+            .any(|line| line.starts_with("gpgsig "))
+        {
+            return refuse(1, format!("prepared head {prepared} has no signature"));
+        }
+        revalidate(&run, plan, &prepared)
+    })?;
     step(result, &run, "snapshot", snapshot_argv(plan), || {
         let store = run.store()?;
         let _replica = crate::replica::lock(&store)?;
@@ -1020,6 +1125,8 @@ fn execute_acceptance(
     if gates.required_for(&plan.state.profile).is_empty() {
         result.steps.push(AcceptanceStep {
             name: "head-gates".into(),
+            kind: "internal",
+            effects: Effects::default(),
             argv: Vec::new(),
             cwd: run.cwd.clone(),
             outcome: format!(
@@ -1205,14 +1312,78 @@ fn render_acceptance(result: &AcceptanceResult, json: bool) -> Result<()> {
             );
             if !step.argv.is_empty() {
                 println!(
-                    "  {} (cwd {})",
+                    "  command: {}",
                     step.argv
                         .iter()
                         .map(|arg| crate::context::shell_quote(arg))
                         .collect::<Vec<_>>()
-                        .join(" "),
-                    step.cwd.display()
+                        .join(" ")
                 );
+                println!(
+                    "    cwd: {}",
+                    crate::context::shell_quote(&step.cwd.display().to_string())
+                );
+            }
+            println!("  operation: {}", step.kind);
+            for moved in &step.effects.refs {
+                println!(
+                    "  ref moved: {} {} -> {}",
+                    moved.name,
+                    moved.before.as_deref().unwrap_or("absent"),
+                    moved.after.as_deref().unwrap_or("absent")
+                );
+            }
+            for object in &step.effects.objects {
+                println!("  {} written: {}", object.kind, object.oid);
+            }
+            for checkout in &step.effects.worktrees_added {
+                println!(
+                    "  checkout allocated: {} ({:?})",
+                    checkout.path.display(),
+                    checkout.branch
+                );
+            }
+            for checkout in &step.effects.worktrees_removed {
+                println!("  checkout removed: {}", checkout.path.display());
+            }
+            if let Some(pending) = &step.effects.pending_rewrite {
+                println!(
+                    "  pending rewrite: {} (recorded event: {})",
+                    pending.path.display(),
+                    pending.recorded_event_id.as_deref().unwrap_or("unrecorded")
+                );
+                for (old, new) in &pending.intent.mapping {
+                    println!("    map: {old} -> {}", new.as_deref().unwrap_or("dropped"));
+                }
+                for (name, moved) in &pending.intent.refs {
+                    println!(
+                        "    planned ref: {name} {} -> {}; current {}",
+                        moved.old,
+                        moved.new,
+                        pending
+                            .ref_states
+                            .get(name)
+                            .and_then(|value| value.as_deref())
+                            .unwrap_or("absent or unobserved")
+                    );
+                }
+                println!(
+                    "  continue: {}",
+                    pending
+                        .continuation
+                        .argv
+                        .iter()
+                        .map(|arg| crate::context::shell_quote(arg))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
+                println!(
+                    "    cwd: {} (restore ledger publication access before continuing)",
+                    crate::context::shell_quote(&pending.continuation.cwd.display().to_string())
+                );
+            }
+            for error in &step.effects.observation_errors {
+                println!("  observation incomplete: {error}");
             }
             if !step.event_ids.is_empty() {
                 println!("  recorded: {}", step.event_ids.join(", "));
@@ -1285,7 +1456,12 @@ pub fn accept(ctx: &Ctx, args: AcceptArgs) -> Result<i32> {
                 result.prepared_head = gitio::branch_head(&ctx.cwd, &args.branch).ok();
             }
             result.next_steps.push(format!("{error:#}"));
-            if !args.dry_run && result.steps.iter().any(|step| !step.event_ids.is_empty()) {
+            if !args.dry_run
+                && result
+                    .steps
+                    .iter()
+                    .any(|step| !step.event_ids.is_empty() || step.effects.retained())
+            {
                 result.next_steps.push(format!(
                     "Earlier effects remain recorded. Inspect the transcript, then retry: {}",
                     acceptance_argv(&args)

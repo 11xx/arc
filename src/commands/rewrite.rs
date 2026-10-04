@@ -595,7 +595,7 @@ fn apply(ctx: &Ctx, store: &Store, intent: &RewriteIntent) -> Result<String> {
 /// The event already holding this intent's map, if an interrupted run
 /// recorded it. Recording it a second time would put two events on record
 /// claiming one rewrite.
-fn recorded_as(store: &Store, intent: &RewriteIntent) -> Result<Option<String>> {
+pub(super) fn recorded_as(store: &Store, intent: &RewriteIntent) -> Result<Option<String>> {
     let events = store.load_repository_events()?;
     let borrowed: Vec<_> = events.iter().collect();
     let withdrawn = crate::rewrite::withdrawn_event_ids(&borrowed)?;

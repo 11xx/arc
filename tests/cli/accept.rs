@@ -385,7 +385,28 @@ fn accept_delivery_runs_local_gates_and_reports_retained_failure() {
     let result = d.result(5);
     assert_eq!(result["stopped_at"], "gate:acceptance");
     assert_ne!(result["prepared_head"], d.head);
-    assert!(result["steps"].to_string().contains("event_ids"));
+    let events = fixture_events(&d.receiver, &d.change);
+    let verification = events
+        .iter()
+        .find(|event| {
+            event["event_type"] == "verification-recorded" && event["gate"] == "acceptance"
+        })
+        .unwrap();
+    assert_eq!(verification["result"], "fail");
+    assert_eq!(verification["revision"], result["prepared_head"]);
+    assert_eq!(
+        transcript_step(&result, "gate:acceptance")["event_ids"],
+        serde_json::json!([verification["event_id"]])
+    );
+    let pin = format!(
+        "refs/arc/tree/{}/{}",
+        d.change,
+        verification["event_id"].as_str().unwrap()
+    );
+    assert_eq!(
+        git_out(&d.receiver.root, &["rev-parse", &pin]),
+        verification["tested_tree"]
+    );
     assert!(!result["next_steps"].as_array().unwrap().is_empty());
     d.gates("true");
     assert_eq!(d.result(3)["preparation_complete"], true);
@@ -793,6 +814,7 @@ fn accept_delivery_rewrite_recovery_reuses_signed_objects_and_ref_moves() {
             .clone();
         let interrupted: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(interrupted["stopped_at"], "sign");
+        assert_pending_signing_effects(&d, &interrupted, phase == "refs");
         let objects = git_out(&d.receiver.root, &["count-objects", "-v"]);
         let result = d.result(3);
         assert_eq!(result["preparation_complete"], true);
@@ -940,6 +962,152 @@ fn transcript_step<'a>(result: &'a serde_json::Value, name: &str) -> &'a serde_j
         .unwrap()
 }
 
+fn assert_pending_signing_effects(d: &Delivery, result: &serde_json::Value, applied: bool) {
+    let pending_path = d
+        .receiver
+        .root
+        .join(".git/arc/repository/rewrite-intent.json");
+    let pending: serde_json::Value =
+        serde_json::from_slice(&fs::read(&pending_path).unwrap()).unwrap();
+    let effects = &transcript_step(result, "sign")["effects"];
+    assert_eq!(
+        effects["pending_rewrite"]["path"],
+        pending_path.to_str().unwrap()
+    );
+    assert_eq!(effects["pending_rewrite"]["intent"], pending);
+    assert!(effects["pending_rewrite"]["recorded_event_id"].is_null());
+    let refs = pending["refs"].as_object().unwrap();
+    for (name, moved) in refs {
+        let actual = git_out(&d.receiver.root, &["rev-parse", name]);
+        assert_eq!(effects["pending_rewrite"]["ref_states"][name], actual);
+        assert_eq!(actual, moved[if applied { "new" } else { "old" }]);
+        if applied {
+            let observed = effects["refs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["name"] == *name)
+                .unwrap();
+            assert_eq!(observed["before"], moved["old"]);
+            assert_eq!(observed["after"], moved["new"]);
+        }
+    }
+    if applied {
+        assert_eq!(effects["refs"].as_array().unwrap().len(), refs.len());
+    } else {
+        assert!(effects["refs"].as_array().unwrap().is_empty());
+    }
+    for successor in pending["mapping"].as_object().unwrap().values() {
+        let successor = successor.as_str().unwrap();
+        git(
+            &d.receiver.root,
+            &["cat-file", "-e", &format!("{successor}^{{commit}}")],
+        );
+        let object = effects["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|object| object["oid"] == successor)
+            .unwrap();
+        assert_eq!(object["kind"], "commit");
+    }
+    assert!(transcript_step(result, "sign")["event_ids"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let continuation = &effects["pending_rewrite"]["continuation"];
+    assert_eq!(continuation["cwd"], result["worktree"]);
+    assert_eq!(
+        continuation["argv"],
+        serde_json::json!(["arc", "rewrite", "sign"])
+    );
+}
+
+#[test]
+fn accept_delivery_sign_publication_failure_reports_actual_refs_objects_and_intent() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = Delivery::new();
+    let events = d.receiver.root.join(".git/arc/repository/events");
+    fs::create_dir_all(&events).unwrap();
+    fs::set_permissions(&events, fs::Permissions::from_mode(0o500)).unwrap();
+    let output = d.command().assert().code(1).get_output().clone();
+    fs::set_permissions(&events, fs::Permissions::from_mode(0o700)).unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["stopped_at"], "sign");
+    assert_pending_signing_effects(&d, &result, true);
+    let prepared = result["prepared_head"].as_str().unwrap();
+    assert_ne!(prepared, d.head);
+    assert_eq!(
+        git_out(&d.receiver.root, &["rev-parse", &d.branch]),
+        prepared
+    );
+    assert!(fs::read_dir(&events).unwrap().next().is_none());
+    let binding = fixture_events(&d.receiver, &d.change)
+        .into_iter()
+        .find(|event| event["event_type"] == "change-checkout-bound")
+        .unwrap();
+    assert!(transcript_step(&result, "checkout-binding")["event_ids"]
+        .as_array()
+        .unwrap()
+        .contains(&binding["event_id"]));
+    let retry = d.result(3);
+    assert_eq!(retry["prepared_head"], prepared);
+    assert!(!d
+        .receiver
+        .root
+        .join(".git/arc/repository/rewrite-intent.json")
+        .exists());
+    assert_eq!(fs::read_dir(&events).unwrap().count(), 1);
+}
+
+#[test]
+fn accept_delivery_text_reports_partial_signing_effects_before_refusal() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = Delivery::new();
+    let events = d.receiver.root.join(".git/arc/repository/events");
+    fs::create_dir_all(&events).unwrap();
+    fs::set_permissions(&events, fs::Permissions::from_mode(0o500)).unwrap();
+    let output = d
+        .receiver
+        .arc(&d.receiver.root)
+        .env("ARC_ROLE", "lead")
+        .args([
+            "accept",
+            d.input.to_str().unwrap(),
+            "--branch",
+            &d.branch,
+            "--publisher",
+            "channel",
+            "--received-sha256",
+            &hex::encode(Sha256::digest(fs::read(&d.input).unwrap())),
+        ])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    fs::set_permissions(&events, fs::Permissions::from_mode(0o700)).unwrap();
+    let pending: serde_json::Value = serde_json::from_slice(
+        &fs::read(
+            d.receiver
+                .root
+                .join(".git/arc/repository/rewrite-intent.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("pending rewrite"));
+    for (name, moved) in pending["refs"].as_object().unwrap() {
+        assert!(text.contains(name));
+        assert!(text.contains(moved["old"].as_str().unwrap()));
+        assert!(text.contains(moved["new"].as_str().unwrap()));
+    }
+    for (old, new) in pending["mapping"].as_object().unwrap() {
+        assert!(text.contains(old) && text.contains(new.as_str().unwrap()));
+    }
+    assert!(text.contains("commit written") && text.contains("continue:"));
+}
+
 #[test]
 fn accept_delivery_clock_skew_orders_all_local_events_after_admitted_history() {
     let d = Delivery::new();
@@ -1068,4 +1236,132 @@ fn accept_delivery_clock_skew_orders_all_local_events_after_admitted_history() {
         .as_array()
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn accept_delivery_transcript_commands_include_real_arguments_and_internal_steps() {
+    let d = Delivery::new();
+    let checkout = d.receiver.home.join("delivered ; checkout");
+    let output = d
+        .command()
+        .args(["--worktree", checkout.to_str().unwrap()])
+        .assert()
+        .code(3)
+        .get_output()
+        .clone();
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let preflight = transcript_step(&result, "preflight")["argv"]
+        .as_array()
+        .unwrap();
+    for argument in [
+        "--publisher",
+        "--received-sha256",
+        "--worktree",
+        "--dry-run",
+    ] {
+        assert!(preflight.contains(&serde_json::json!(argument)));
+    }
+    let preflight_args: Vec<_> = preflight
+        .iter()
+        .skip(1)
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    d.receiver
+        .arc(&d.receiver.root)
+        .env("ARC_ROLE", "lead")
+        .args(preflight_args)
+        .assert()
+        .success();
+    assert_eq!(
+        transcript_step(&result, "checkout-allocation")["argv"],
+        serde_json::json!([
+            "git",
+            "worktree",
+            "add",
+            "--no-checkout",
+            checkout,
+            d.branch
+        ])
+    );
+    assert_eq!(
+        transcript_step(&result, "checkout-population")["argv"],
+        serde_json::json!(["git", "read-tree", "--reset", "-u", "HEAD"])
+    );
+    assert_eq!(
+        transcript_step(&result, "checkout-population")["cwd"],
+        checkout.to_str().unwrap()
+    );
+    assert_eq!(transcript_step(&result, "checkout-hook")["argv"][0], "git");
+    let binding = transcript_step(&result, "checkout-binding");
+    assert_eq!(binding["kind"], "internal");
+    assert!(binding["argv"].as_array().unwrap().is_empty());
+    let output = d
+        .command()
+        .args(["--worktree", checkout.to_str().unwrap(), "--dry-run"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let dry: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(dry["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|step| step["effects"]["refs"].as_array().unwrap().is_empty()));
+}
+
+#[test]
+fn accept_delivery_signer_failure_reports_commits_written_before_intent() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut d = Delivery::new();
+    d.source.commit(
+        &d.source.root,
+        "second.txt",
+        "second\n",
+        "feat: second commit",
+    );
+    stdout(
+        d.source
+            .arc(&d.source.root)
+            .env("ARC_ACTOR", "worker")
+            .args(["snapshot", &d.change, "--contributors", "worker"]),
+    );
+    d.head = d.source.head(&d.source.root);
+    d.export();
+    deliver_git_objects(&d.source, &d.receiver);
+    git(
+        &d.receiver.root,
+        &["update-ref", &format!("refs/heads/{}", d.branch), &d.head],
+    );
+    let signer = d.receiver.home.join("fail-second-signature");
+    let counter = d.receiver.home.join("signature-count");
+    fs::write(&signer, format!("#!/bin/sh\nif [ \"$2\" = sign ]; then\n  count=$(cat '{}' 2>/dev/null || printf 0)\n  count=$((count + 1))\n  printf '%s\\n' \"$count\" > '{}'\n  if [ \"$count\" -eq 2 ]; then exit 1; fi\nfi\nexec ssh-keygen \"$@\"\n", counter.display(), counter.display())).unwrap();
+    fs::set_permissions(&signer, fs::Permissions::from_mode(0o700)).unwrap();
+    git(
+        &d.receiver.root,
+        &["config", "gpg.ssh.program", signer.to_str().unwrap()],
+    );
+    let result = d.result(1);
+    assert_eq!(result["stopped_at"], "sign");
+    let sign = transcript_step(&result, "sign");
+    assert!(sign["effects"]["pending_rewrite"].is_null());
+    assert!(sign["effects"]["refs"].as_array().unwrap().is_empty());
+    assert!(sign["event_ids"].as_array().unwrap().is_empty());
+    let commits: Vec<_> = sign["effects"]["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|object| object["kind"] == "commit")
+        .collect();
+    assert_eq!(commits.len(), 1);
+    let oid = commits[0]["oid"].as_str().unwrap();
+    assert!(git_out(&d.receiver.root, &["cat-file", "commit", oid]).contains("gpgsig "));
+    assert_eq!(git_out(&d.receiver.root, &["rev-parse", &d.branch]), d.head);
+    assert_eq!(result["prepared_head"], d.head);
+    assert!(result["next_steps"].to_string().contains("retry"));
+    git(
+        &d.receiver.root,
+        &["config", "gpg.ssh.program", "ssh-keygen"],
+    );
+    assert_eq!(d.result(3)["preparation_complete"], true);
 }

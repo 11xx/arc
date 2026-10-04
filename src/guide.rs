@@ -1016,9 +1016,9 @@ PREPARE A DELIVERED CHANGE
   A ChangeCheckoutBound fact binds the checkout to its recording replica.
   Only locally allocated ownership grants cleanup rights; relayed paths and
   tokens grant none. Local facts receive IDs after admitted change and repository
-  events, independently of sender timestamps, and retain their observation times.
-  Operational projections choose a local binding and clear
-  foreign paths and ownership.
+  events, independent of the sender's timestamps. Binding, signing, snapshot,
+  and verification records retain their own observation times. Operational
+  projections choose a local binding and clear foreign paths and ownership.
 
   In order, acceptance imports, binds the checkout, signs exclusive change
   commits using Git's configured key (or --key), snapshots, runs required local
@@ -1043,9 +1043,20 @@ PREPARE A DELIVERED CHANGE
   --json emits one arc-accept/1 document containing delivery coordinates,
   prepared head, worktree, preparation_complete, ordered operation argv/cwd,
   outcomes, exit codes, recorded event IDs, stopping step, readiness, verdict
-  tips, local_verdict_owed, and next_steps. Human output prints the same actual
-  constituent operations. The first failing step stops the coordinator; earlier
-  import, signing, checkout, snapshot, and evidence effects remain recorded.
+  tips, local_verdict_owed, and next_steps. Each step distinguishes commands from
+  internal operations. Command argv and cwd reproduce the selected operation;
+  checkout allocation uses --no-checkout, followed by an internal owner/binding
+  record, explicit read-tree population, and the post-checkout hook.
+  Steps report observed ref changes, written object IDs and kinds, checkout
+  allocations/removals, and pending rewrite intent with its map, planned refs,
+  current ref values, publication event, and continuation argv/cwd. These effects
+  include commits and ref moves preceding event publication. Observation errors
+  remain explicit and cannot turn incomplete accounting into successful
+  preparation. Human output prints the same actual constituent operations. The first failing step stops the coordinator; earlier
+  import, signing, checkout, snapshot, and evidence effects remain visible,
+  including unrecorded signing effects. Restore ledger publication access before
+  continuing a pending rewrite; the intent preserves the exact objects and ref
+  moves to reuse.
   Retry revalidates the same delivery and reuses admission, local binding,
   unchanged patchset, and rewrite recovery. Checks may record fresh evidence.
 

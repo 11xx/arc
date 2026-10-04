@@ -1110,8 +1110,11 @@ enum Cmd {
     /// and returns readiness;
     /// it records no judgment. A local review still owed normally exits 3.
     /// Moved authoritative history requires explicit rebase, snapshot, and review.
-    /// Local event IDs follow admitted history even when the sender clock is ahead.
-    /// Stops at the first failure and reports retained effects. Retrying the same
+    /// Stops at the first failure and reports refs, objects, events and pending
+    /// rewrite recovery state, including effects preceding event publication.
+    /// Commands carry executable argv/cwd; internal bindings and signature checks
+    /// are identified separately. Local event IDs follow admitted history even
+    /// when the sender's clock is ahead. Retrying the same
     /// delivery reuses admission, checkout binding, signature recovery, and snapshot.
     /// Dry-run validates admission and local state without allocating, signing,
     /// executing checks, creating objects, or recording evidence; future outcomes
