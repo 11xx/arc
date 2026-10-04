@@ -25,6 +25,7 @@ mod replica;
 mod rescue;
 pub(crate) mod review;
 mod rewrite;
+pub(crate) mod roles;
 pub mod run;
 pub(crate) mod sandbox;
 pub(crate) mod scaffold;
@@ -110,6 +111,7 @@ pub use workspace::{
 /// list from here.
 pub(crate) const READ_ONLY_COMMANDS: &[&str] = &[
     "status",
+    "trailers",
     "show",
     "check",
     "explain",
@@ -1172,6 +1174,7 @@ mod tests {
         ChangeState {
             schema: crate::state::CHANGE_STATE_SCHEMA,
             model_attributions: BTreeMap::new(),
+            contribution_roles: BTreeMap::new(),
             dirty_tree_waiver: None,
             dangerous: false,
             kept: Vec::new(),

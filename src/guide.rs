@@ -474,6 +474,10 @@ SETTLE A QUESTION (before it is work)
 
 RUN A CHANGE
   arc begin <slug> --profile <p>     Open a change: branch + checkout + record.
+    --planned-by [<value>]          Assert planning credit (repeatable).
+    --orchestrated-by [<value>]      Assert orchestration credit (repeatable).
+                                     With no value, use the declared invoking
+                                     identity; unresolved coordinates refuse.
     --from-journal <file>            Open it from a journal item, consuming it.
     --blocked-by <change> --tag <t>  Declare a chain up front, at planning time.
     --worktree [<path>]              Force a worktree, at the path or under worktrees_dir.
@@ -489,6 +493,7 @@ RUN A CHANGE
     --base <intended-base> --target <target>`. Repair the target deliberately;
     do not reset it.
   arc brief --body-file <f>          Record the next contract version.
+    --planned-by <value>             Assert planning credit on the change.
     --caused-by <kind:ref>           Why it changed. v1 refuses a cause; every
     --cause-note <text>              later version requires one of these.
   arc claim / stage / release-claim  Advisory liveness while implementing.
@@ -1297,6 +1302,30 @@ REVIEW AND REPAIR
   the diff.
 
 CONTRIBUTION TRAILERS
+    arc roles <change> --planned-by <value> --orchestrated-by <value>
+                       Assert roles on an open change. Both flags repeat;
+                       at least one assertion or withdrawal is required.
+                       --withdraw <role>=<value> withdraws an exact assertion.
+                       Values use the convention's agent or person form.
+                       Assertions are explicit; event ancestry grants none.
+                       begin's two role flags record the assertions directly
+                       after opening; brief --planned-by records them when
+                       writing a contract.
+    arc trailers <change> [--json]
+                       Print Planned-by and Orchestrated-by assertions and
+                       Implemented-by from declared snapshot recorders with
+                       their recorded harness and model evidence, in
+                       convention order. Duplicate lines print once.
+                       Unresolved identity, harness, or model coordinates are
+                       omitted and named in notes; no coordinate is guessed.
+                       Review credit stays in the ledger: Reviewed-by is
+                       never projected or backfilled into commits.
+                       --json emits arc-trailers/1 with trailers and notes.
+    check and integrate advise when a commit in target..head lacks an
+    asserted line, under missing-contribution-trailers. The advice never
+    blocks integration and names arc rewrite trailers --from <rev> --append
+    <line>, before integration. A message rewrite requires fresh snapshot
+    and approval or declared debt; post-integration audits stay in the ledger.
     arc instructions git [--check <file>]
                        Print the portable contribution-trailer convention
                        `arc-contribution-trailers/1`: `Planned-by`,
@@ -2026,6 +2055,7 @@ SCHEMAS
 
   Commitments, derived views:
     `arc-state/3`                    arc show --json
+    `arc-trailers/1`                 arc trailers --json
     `arc-status/27`                  arc status
     `arc-check/3`                    arc check --json
     `arc-inbox/10`                   arc inbox --json

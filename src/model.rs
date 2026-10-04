@@ -627,6 +627,10 @@ pub enum Payload {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         dangerous: bool,
     },
+    ChangeRolesAsserted {
+        asserted: BTreeMap<String, Vec<String>>,
+        withdrawn: BTreeMap<String, Vec<String>>,
+    },
     MetadataUpdated {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         add_blocked_by: Vec<String>,
@@ -1846,6 +1850,7 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
     match payload {
         Payload::MetadataUpdated { .. }
         | Payload::BriefRecorded { .. }
+        | Payload::ChangeRolesAsserted { .. }
         | Payload::PatchsetAdded { .. }
         | Payload::PatchsetAttributionAmended { .. }
         | Payload::ClaimSet { .. }

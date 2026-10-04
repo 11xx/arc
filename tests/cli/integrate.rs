@@ -1154,6 +1154,7 @@ fn every_read_only_command_reads_past_a_broken_policy() {
     // `check` answers that a closed change is not ready to integrate.
     let forms: Vec<(Vec<&str>, i32)> = vec![
         (vec!["status", id, "--json"], 0),
+        (vec!["trailers", id, "--json"], 0),
         (vec!["status", "read-only", "--at", &closure_event], 0),
         (vec!["--change", id, "status", "read-only"], 0),
         (vec!["show", "read-only"], 0),

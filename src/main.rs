@@ -271,6 +271,14 @@ enum Cmd {
     /// A target level with or ahead of its upstream, or tracking none, gets
     /// no warning.
     Begin {
+        /// Assert a planner: harness:model[#effort] or Name <email>; repeatable.
+        /// Without a value, use the declared invoking identity; unresolved coordinates refuse
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        planned_by: Vec<String>,
+        /// Assert an orchestrator in the same form; repeatable.
+        /// Without a value, use the declared invoking identity; unresolved coordinates refuse
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        orchestrated_by: Vec<String>,
         /// Kebab-case slug naming the outcome (also the ID prefix)
         slug: String,
         /// Human title (defaults to the slug with spaces)
@@ -335,6 +343,33 @@ enum Cmd {
         /// Open the change declaring that integration is not yet the goal
         #[arg(long)]
         iterating: bool,
+    },
+    /// Record explicit planning and orchestration assertions on an open change.
+    /// Values follow arc-contribution-trailers/1; ancestry grants no credit.
+    Roles {
+        /// Open change whose contribution assertions to record
+        change: String,
+        /// Assert a planner (repeatable harness:model[#effort] or Name <email>)
+        #[arg(long)]
+        planned_by: Vec<String>,
+        /// Assert an orchestrator (repeatable harness:model[#effort] or Name <email>)
+        #[arg(long)]
+        orchestrated_by: Vec<String>,
+        /// Withdraw an exact assertion (repeatable Planned-by=VALUE or Orchestrated-by=VALUE)
+        #[arg(long)]
+        withdraw: Vec<String>,
+    },
+    /// Print a change's portable trailer block in convention order.
+    /// Planning and orchestration come from assertions, implementation from
+    /// declared snapshot recorders and their recorded model evidence.
+    /// Unresolved coordinates are omitted and named in notes.
+    /// Review credit stays in the ledger; Reviewed-by is never projected.
+    Trailers {
+        /// Change whose attributed contribution trailers to print
+        change: String,
+        /// Emit arc-trailers/1 JSON with trailers and attribution notes
+        #[arg(long)]
+        json: bool,
     },
     /// List changes
     /// Unreadable changes are named with their errors on stderr; readable
@@ -592,6 +627,10 @@ enum Cmd {
     /// mandatory reads. Explicit metadata replaces the corresponding fields.
     /// A body or scaffold records a replacement contract.
     Brief {
+        /// Assert a planner on the change when writing a brief (repeatable).
+        /// Value: harness:model[#effort] or Name <email>
+        #[arg(long)]
+        planned_by: Vec<String>,
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
         change: Option<String>,
@@ -1044,6 +1083,8 @@ enum Cmd {
         cmd: ReplicaCmd,
     },
     /// Integration preflight under the resolved target shape or --shape; exit code identifies the first blocker
+    /// Missing asserted contribution trailers are advisory only. The remedy
+    /// is arc rewrite trailers --from <rev> --append <line> before integration
     ///
     /// Unreadable neighboring changes are named with their errors on stderr;
     /// an unreadable selected change fails and an unreadable prerequisite
@@ -1721,6 +1762,8 @@ enum Cmd {
     /// Style and history constraints are validated under the target and change
     /// locks against each authorization policy reading, retaining the original
     /// flags and enforcing the destination's declared actor requirement.
+    /// Missing asserted contribution trailers are advisory only; append them
+    /// with arc rewrite trailers before integration. Review credit stays in the ledger.
     /// Destination declarations are pinned to the transition's observed revision;
     /// their actor requirement and agreement with authorization are required.
     /// Configuration disagreement refuses before merging. A queue's
@@ -3477,6 +3520,8 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
 
     match cmd {
         Cmd::Begin {
+            planned_by,
+            orchestrated_by,
             slug,
             title,
             profile,
@@ -3511,7 +3556,22 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 dangerous,
                 iterating,
                 cli.role.as_deref(),
+                planned_by,
+                orchestrated_by,
             )?;
+            Ok(0)
+        }
+        Cmd::Roles {
+            change,
+            planned_by,
+            orchestrated_by,
+            withdraw,
+        } => {
+            commands::roles::record(&ctx, &change, planned_by, orchestrated_by, withdraw)?;
+            Ok(0)
+        }
+        Cmd::Trailers { change, json } => {
+            commands::roles::print(&ctx, &change, json)?;
             Ok(0)
         }
         Cmd::List { open, json, format } => {
@@ -3653,6 +3713,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             Ok(0)
         }
         Cmd::Brief {
+            planned_by,
             change,
             body_file,
             title,
@@ -3688,6 +3749,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 cause_note,
                 must_read,
                 json,
+                planned_by,
             )
         }
         Cmd::Changelog {
@@ -4969,6 +5031,7 @@ mod tests {
     fn every_leaf_command_has_an_io_classification() {
         const WRITING_COMMANDS: &[&str] = &[
             "begin",
+            "roles",
             "brief",
             "changelog",
             "message",

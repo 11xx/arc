@@ -51,7 +51,7 @@ impl ContributionIssue {
 /// Whether a role key's value is one of the convention's forms: an agent
 /// `harness:model[#effort]` coordinate, or a human `Name <email>` value. A
 /// value is one line, and no coordinate is empty.
-fn value_is_readable(value: &str) -> bool {
+pub(crate) fn value_is_readable(value: &str) -> bool {
     let value = value.trim();
     if value.is_empty() || value.contains(['\n', '\r']) {
         return false;
@@ -242,6 +242,106 @@ fn is_blank(line: &[u8]) -> bool {
 /// matches them, so `Foo-Session` and `foo-session` are one key.
 fn same_key(key: &[u8], wanted: &str) -> bool {
     key.eq_ignore_ascii_case(wanted.as_bytes())
+}
+
+/// Validate explicit roles with the same value grammar as the convention checker.
+pub(crate) fn validate_roles(
+    roles: &std::collections::BTreeMap<String, Vec<String>>,
+) -> anyhow::Result<()> {
+    for (role, values) in roles {
+        if !matches!(role.as_str(), "Planned-by" | "Orchestrated-by") {
+            anyhow::bail!("role {role:?} must be Planned-by or Orchestrated-by");
+        }
+        for value in values {
+            if !value_is_readable(value) {
+                anyhow::bail!("invalid {role} value: expected harness:model[#effort] or Name <email> on one line");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether the final trailer block carries the requested line verbatim.
+pub(crate) fn contains(message: &[u8], wanted: &str) -> bool {
+    let lines: Vec<&[u8]> = message.split(|byte| *byte == b'\n').collect();
+    block_of(&lines).is_some_and(|block| lines[block].contains(&wanted.as_bytes()))
+}
+
+/// Portable contribution lines and unresolved attribution notes for a change.
+#[derive(serde::Serialize)]
+pub(crate) struct ChangeTrailers {
+    pub schema: &'static str,
+    pub trailers: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+pub(crate) fn for_change(state: &crate::state::ChangeState) -> ChangeTrailers {
+    let mut trailers = Vec::new();
+    let mut notes = Vec::new();
+    for role in CONTRIBUTION_ROLES {
+        if role == "Reviewed-by" {
+            continue;
+        }
+        if role == "Implemented-by" {
+            for patchset in &state.patchsets {
+                let mut unresolved = Vec::new();
+                if !patchset
+                    .actor_source
+                    .is_some_and(crate::model::ActorSource::declared)
+                {
+                    unresolved.push("declared identity");
+                }
+                if patchset
+                    .harness
+                    .as_deref()
+                    .is_none_or(|value| value.trim().is_empty())
+                {
+                    unresolved.push("harness");
+                }
+                if patchset
+                    .model
+                    .as_deref()
+                    .is_none_or(|value| value.trim().is_empty())
+                {
+                    unresolved.push("model");
+                }
+                if !unresolved.is_empty() {
+                    notes.push(format!(
+                        "{}: Implemented-by omitted; unresolved {}",
+                        patchset.id,
+                        unresolved.join(", ")
+                    ));
+                    continue;
+                }
+                let value = format!(
+                    "{}:{}",
+                    patchset.harness.as_deref().unwrap(),
+                    patchset.model.as_deref().unwrap()
+                );
+                if !value_is_readable(&value) {
+                    notes.push(format!(
+                        "{}: Implemented-by omitted; invalid recorded coordinates",
+                        patchset.id
+                    ));
+                    continue;
+                }
+                let line = format!("{role}: {value}");
+                if !trailers.contains(&line) {
+                    trailers.push(line);
+                }
+            }
+        } else if let Some(values) = state.contribution_roles.get(role) {
+            for value in values {
+                trailers.push(format!("{role}: {value}"));
+            }
+        }
+    }
+    notes.push("review credit stays in the ledger; Reviewed-by is never projected or backfilled into commits".to_string());
+    ChangeTrailers {
+        schema: "arc-trailers/1",
+        trailers,
+        notes,
+    }
 }
 
 #[cfg(test)]

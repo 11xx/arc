@@ -23,7 +23,10 @@ pub fn begin(
     dangerous: bool,
     iterating: bool,
     recovery_role: Option<&str>,
+    planned_by: Vec<String>,
+    orchestrated_by: Vec<String>,
 ) -> Result<()> {
+    let contribution_roles = super::roles::assertions(ctx, planned_by, orchestrated_by)?;
     ids::validate_slug(slug)?;
     if from_fork.is_some() && adopt.is_some() && base.is_none() {
         bail!(
@@ -370,6 +373,14 @@ pub fn begin(
         },
     );
     store.append_event(&ev)?;
+    super::roles::append(
+        ctx,
+        &store,
+        &change_id,
+        &store.state(&change_id)?,
+        contribution_roles,
+        BTreeMap::new(),
+    )?;
     if iterating {
         let mut event = ctx.event(
             &store,
@@ -811,7 +822,18 @@ pub fn brief(
     cause_note: Option<String>,
     must_read: Vec<String>,
     json: bool,
+    planned_by: Vec<String>,
 ) -> Result<i32> {
+    let contribution_roles = super::roles::assertions(ctx, planned_by, Vec::new())?;
+    if !contribution_roles.is_empty()
+        && body_file.is_none()
+        && scaffold.is_none()
+        && probes_json.is_none()
+        && probes.is_empty()
+        && withdraw_probes.is_empty()
+    {
+        bail!("--planned-by requires a brief write; use arc roles to assert roles directly");
+    }
     if plan_ref.is_some() != plan_slice.is_some() {
         bail!("--plan-ref and --plan-slice must be provided together");
     }
@@ -940,6 +962,14 @@ pub fn brief(
         let event_id = event.event_id.clone();
         let event_plan_source = plan_source.clone();
         store.append_event(&event)?;
+        super::roles::append(
+            ctx,
+            &store,
+            &change_id,
+            &state,
+            contribution_roles,
+            BTreeMap::new(),
+        )?;
         // A plan in another project's journal learns of the brief framed by
         // it there; the brief already exists, so a failure only warns.
         if let Some(reference) = output_plan_ref.as_deref().filter(|_| records_plan) {

@@ -994,6 +994,8 @@ pub struct ChangeState {
     /// Write-time model evidence, keyed by the ledger event that carries it.
     pub model_attributions: BTreeMap<String, ModelAttribution>,
     pub change_id: String,
+    /// Explicit contribution assertions in force, independent of event ancestry.
+    pub contribution_roles: BTreeMap<String, Vec<String>>,
     pub slug: String,
     pub title: String,
     pub profile: String,
@@ -1503,6 +1505,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 ChangeState {
                     schema: CHANGE_STATE_SCHEMA,
                     model_attributions: BTreeMap::new(),
+                    contribution_roles: BTreeMap::new(),
                     dangerous: *dangerous,
                     dirty_tree_waiver: None,
                     iterating: false,
@@ -1580,6 +1583,29 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
         match &ev.payload {
             Payload::ChangeOpened { .. } => {
                 bail!("duplicate change-opened event {}", ev.event_id)
+            }
+            Payload::ChangeRolesAsserted {
+                asserted,
+                withdrawn,
+            } => {
+                crate::trailers::validate_roles(asserted)?;
+                crate::trailers::validate_roles(withdrawn)?;
+                for (role, values) in withdrawn {
+                    if let Some(current) = state.contribution_roles.get_mut(role) {
+                        current.retain(|value| !values.contains(value));
+                    }
+                }
+                for (role, values) in asserted {
+                    let current = state.contribution_roles.entry(role.clone()).or_default();
+                    for value in values {
+                        if !current.contains(value) {
+                            current.push(value.clone());
+                        }
+                    }
+                }
+                state
+                    .contribution_roles
+                    .retain(|_, values| !values.is_empty());
             }
             Payload::IterationScopeSet { iterating } => {
                 state.iterating = *iterating;

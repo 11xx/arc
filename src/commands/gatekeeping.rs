@@ -2825,6 +2825,7 @@ fn queue_dry_run(
     // Topology and constraints follow the projected destination; review,
     // findings, holds and iteration remain facts of the observed ledger.
     let report = ctx.report_for_queue(store, &st, Some(target))?;
+    advise_role_trailers(&report);
     let mut advancing = None;
     let mut conflicts = report.needs_rebase;
     let mut unresolved = true;
@@ -3221,6 +3222,7 @@ fn integrate_one(
             );
         }
     }
+    advise_role_trailers(&report);
     let facts = integration_facts(ctx, &store, &st, &report, &target, &selection);
     let outcome = integration::decide(facts, expect_basis.as_ref());
     let moved = integration::describe_moved(&outcome.moved);
@@ -4169,6 +4171,17 @@ fn integration_facts(
     }
 }
 
+fn advise_role_trailers(report: &StatusReport) {
+    for advisory in &report.advisories {
+        if matches!(
+            advisory.code,
+            "missing-contribution-trailers" | "contribution-trailers-unreadable"
+        ) {
+            eprintln!("advice: {}", advisory.detail);
+        }
+    }
+}
+
 /// The plan `integrate` would carry out, decided from the same facts and by
 /// the same function as the merge, printed as JSON. Nothing is locked or
 /// written.
@@ -4190,6 +4203,7 @@ fn integrate_dry_run_json(
         return Ok(refuse_divergence(st, target, &recorded_target));
     }
     let report = ctx.report_for_integration(store, st, target, shape)?;
+    advise_role_trailers(&report);
     let facts = integration_facts(ctx, store, st, &report, target, selection);
     let plan = match integration::decide(facts, None).decision {
         Decision::Refused(Refusal::Diverged) => {
@@ -4248,6 +4262,7 @@ fn integrate_dry_run(
     ctx.ensure_target_declares_actor(st)?;
     if let Some(contribution) = contribution_policy(ctx, st)? {
         let report = ctx.report_for_integration(store, st, target, shape)?;
+        advise_role_trailers(&report);
         if !report.integrate_ready() {
             eprint!("{}", render::blocker_explanation(st, &report));
             println!(
@@ -4276,6 +4291,7 @@ fn integrate_dry_run(
     let checkout = target_checkout(ctx, st, target)?;
     checkout_tracked_dirt(&checkout.path)?;
     let report = ctx.report_for_integration(store, st, target, shape)?;
+    advise_role_trailers(&report);
     if !report.integrate_ready() {
         eprint!("{}", render::blocker_explanation(st, &report));
         println!(

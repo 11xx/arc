@@ -1020,7 +1020,12 @@ pub fn build_at_with_shape(
             .transpose()?
     };
     let danger = DangerScope::resolve(state, policy, cwd, current_head.as_deref());
-    build_report(
+    let role_advisory = if state.is_closed() {
+        None
+    } else {
+        missing_role_trailers_advisory(state, cwd, target_head.as_deref(), current_head.as_deref())
+    };
+    let mut report = build_report(
         state,
         gates,
         policy,
@@ -1036,7 +1041,9 @@ pub fn build_at_with_shape(
         worktree_dirty,
         danger,
         fork,
-    )
+    )?;
+    report.advisories.extend(role_advisory);
+    Ok(report)
 }
 
 /// Build a report from a state replayed to a past event. Live Git facts are
@@ -2061,6 +2068,68 @@ fn reviewed_only_by_brief_author<'a>(
         (Some(author), Some(true)) => Some(author),
         _ => None,
     }
+}
+
+/// Missing asserted lines are advice only; they do not alter integration authorization.
+pub(crate) fn missing_role_trailers_advisory(
+    state: &ChangeState,
+    cwd: &Path,
+    target: Option<&str>,
+    head: Option<&str>,
+) -> Option<Advisory> {
+    if state.contribution_roles.is_empty() {
+        return None;
+    }
+    let (target, head) = (target?, head?);
+    let commits = match gitio::git(
+        cwd,
+        &["rev-list", "--reverse", &format!("{target}..{head}")],
+    ) {
+        Ok(commits) => commits,
+        Err(error) => {
+            return Some(Advisory {
+                code: "contribution-trailers-unreadable",
+                detail: format!("could not inspect contribution trailers: {error}"),
+            })
+        }
+    };
+    let mut missing = BTreeMap::<String, Vec<String>>::new();
+    for commit in commits.lines() {
+        let message = match gitio::read_commit(cwd, commit) {
+            Ok(commit) => commit.message,
+            Err(error) => {
+                return Some(Advisory {
+                    code: "contribution-trailers-unreadable",
+                    detail: format!("could not inspect contribution trailers on {commit}: {error}"),
+                })
+            }
+        };
+        for (role, values) in &state.contribution_roles {
+            for value in values {
+                let line = format!("{role}: {value}");
+                if !crate::trailers::contains(&message, &line) {
+                    missing.entry(line).or_default().push(commit.to_string());
+                }
+            }
+        }
+    }
+    if missing.is_empty() {
+        return None;
+    }
+    let first = commits.lines().next()?;
+    let details = missing
+        .iter()
+        .map(|(line, commits)| format!("{line} (missing on {})", commits.join(", ")))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let append = missing
+        .keys()
+        .map(|line| format!(" --append {}", crate::context::shell_quote(line)))
+        .collect::<String>();
+    Some(Advisory {
+        code: "missing-contribution-trailers",
+        detail: format!("asserted contribution trailers missing: {details}; before integration run `arc rewrite trailers --from {first}{append}`; message rewrites require a fresh snapshot and approval or declared debt"),
+    })
 }
 
 #[cfg(test)]

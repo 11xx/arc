@@ -1847,6 +1847,29 @@ pub(crate) fn kept_citations(cites: &[String]) -> String {
 pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
     match payload {
         Payload::ChangeOpened { slug, title, .. } => ("change-opened", format!("{slug}: {title}")),
+        Payload::ChangeRolesAsserted {
+            asserted,
+            withdrawn,
+        } => (
+            "change-roles-asserted",
+            format!(
+                "asserted: {}; withdrawn: {}",
+                asserted
+                    .iter()
+                    .flat_map(|(role, values)| values
+                        .iter()
+                        .map(move |value| format!("{role}: {value}")))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                withdrawn
+                    .iter()
+                    .flat_map(|(role, values)| values
+                        .iter()
+                        .map(move |value| format!("{role}: {value}")))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ),
         Payload::ContextKept {
             kind, body, cites, ..
         } => (

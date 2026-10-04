@@ -269,3 +269,252 @@ fn squash_preserves_untracked_content_obstructing_a_tracked_path() {
         }
     }
 }
+
+#[test]
+fn change_roles_assert_withdraw_and_validate() {
+    let repo = Repo::new();
+    open(&repo, "roles");
+    repo.arc(&repo.root)
+        .args([
+            "roles",
+            "roles",
+            "--planned-by",
+            "lead:planner#high",
+            "--planned-by",
+            "Person <p@example.invalid>",
+            "--orchestrated-by",
+            "lead:coordinator",
+        ])
+        .assert()
+        .success();
+    let events = json_stdout(repo.arc(&repo.root).args(["show", "roles", "--json"]));
+    assert_eq!(
+        events["contribution_roles"]["Planned-by"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let log = stdout(repo.arc(&repo.root).args(["log", "roles"]));
+    assert_eq!(log.matches("change-roles-asserted").count(), 1);
+    let block = stdout(repo.arc(&repo.root).args(["trailers", "roles"]));
+    assert!(block.contains("Planned-by: lead:planner#high"));
+    assert!(block.contains("Planned-by: Person <p@example.invalid>"));
+    assert!(block.contains("Orchestrated-by: lead:coordinator"));
+    repo.arc(&repo.root)
+        .args([
+            "roles",
+            "roles",
+            "--withdraw",
+            "Planned-by=lead:planner#high",
+        ])
+        .assert()
+        .success();
+    let block = stdout(repo.arc(&repo.root).args(["trailers", "roles"]));
+    assert!(!block.contains("Planned-by: lead:planner#high"));
+    repo.arc(&repo.root)
+        .args(["roles", "roles", "--planned-by", "unattributed"])
+        .assert()
+        .failure();
+    repo.arc(&repo.root)
+        .args(["roles", "roles", "--withdraw", "Reviewed-by=lead:reviewer"])
+        .assert()
+        .failure();
+    repo.arc(&repo.root)
+        .args(["roles", "roles"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn change_trailers_order_declared_snapshots_and_unresolved_notes() {
+    let repo = Repo::new();
+    let wt = open(&repo, "credit");
+    stdout(repo.arc(&wt).args([
+        "roles",
+        "credit",
+        "--orchestrated-by",
+        "lead:coordinator",
+        "--planned-by",
+        "lead:planner",
+    ]));
+    commit_file(&wt, "one", "one");
+    stdout(
+        repo.arc(&wt)
+            .args(["snapshot", "credit"])
+            .env("ARC_MODEL", "worker#medium"),
+    );
+    commit_file(&wt, "two", "two");
+    stdout(repo.arc(&wt).args(["snapshot", "credit"]));
+    commit_file(&wt, "three", "three");
+    stdout(
+        repo.arc(&wt)
+            .args(["snapshot", "credit"])
+            .env_remove("ARC_ACTOR")
+            .env("ARC_MODEL", "unclaimed#high"),
+    );
+    commit_file(&wt, "four", "four");
+    stdout(
+        repo.arc(&wt)
+            .args(["snapshot", "credit"])
+            .env_remove("ARC_HARNESS")
+            .env("ARC_MODEL", "unknown-harness#low"),
+    );
+    let result = json_stdout(repo.arc(&wt).args(["trailers", "credit", "--json"]));
+    assert_eq!(result["schema"], "arc-trailers/1");
+    assert_eq!(
+        result["trailers"],
+        serde_json::json!([
+            "Planned-by: lead:planner",
+            "Implemented-by: test:worker#medium",
+            "Orchestrated-by: lead:coordinator"
+        ])
+    );
+    assert!(result["notes"].as_array().unwrap().iter().any(|n| n
+        .as_str()
+        .unwrap()
+        .contains("ps-02")
+        && n.as_str().unwrap().contains("model")));
+    assert!(result["notes"].as_array().unwrap().iter().any(|n| n
+        .as_str()
+        .unwrap()
+        .contains("review credit stays in the ledger")));
+    for (patchset, coordinate) in [("ps-03", "declared identity"), ("ps-04", "harness")] {
+        assert!(
+            result["notes"].as_array().unwrap().iter().any(|note| {
+                let note = note.as_str().unwrap();
+                note.contains(patchset) && note.contains(coordinate)
+            }),
+            "{result}"
+        );
+    }
+    let out = stdout(repo.arc(&wt).args(["trailers", "credit"]));
+    assert!(out.find("Planned-by:").unwrap() < out.find("Implemented-by:").unwrap());
+    assert!(out.find("Implemented-by:").unwrap() < out.find("Orchestrated-by:").unwrap());
+    assert!(!out.contains("Reviewed-by:"));
+}
+
+#[test]
+fn change_role_advisory_disappears_after_trailer_rewrite() {
+    let repo = contribution_repo("preserve");
+    let wt = open(&repo, "advice");
+    stdout(
+        repo.arc(&wt)
+            .args(["roles", "advice", "--planned-by", "lead:planner"]),
+    );
+    commit_file(&wt, "one", "one");
+    gate_and_approve(&repo, &wt, "advice");
+    let block = stdout(repo.arc(&wt).args(["trailers", "advice"]));
+    assert!(!block.contains("Reviewed-by:"));
+    let report = json_stdout_any_status(repo.arc(&wt).args(["check", "advice", "--json"]));
+    assert!(
+        report["advisories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["code"] == "missing-contribution-trailers"),
+        "{report}"
+    );
+    repo.arc(&wt)
+        .args(["integrate", "advice", "--dry-run"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("arc rewrite trailers"));
+    repo.arc(&wt)
+        .args(["integrate", "advice"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("arc rewrite trailers"));
+    stdout(repo.arc(&wt).args([
+        "rewrite",
+        "trailers",
+        "--from",
+        "HEAD",
+        "--no-sign",
+        "--append",
+        "Planned-by: lead:planner",
+    ]));
+    let report = json_stdout_any_status(repo.arc(&wt).args(["check", "advice", "--json"]));
+    assert!(
+        !report["advisories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["code"] == "missing-contribution-trailers"),
+        "{report}"
+    );
+}
+
+#[test]
+fn begin_and_brief_assert_change_roles() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args([
+                "begin",
+                "shorthand",
+                "--planned-by",
+                "lead:planner",
+                "--orchestrated-by",
+            ])
+            .env("ARC_MODEL", "coordinator#high"),
+    );
+    let wt = repo.home.join(".worktrees/repo-shorthand");
+    fs::write(repo.home.join("brief.md"), "Implement the bounded task.").unwrap();
+    stdout(repo.arc(&wt).args([
+        "brief",
+        "shorthand",
+        "--planned-by",
+        "Person <p@example.invalid>",
+        "--body-file",
+        repo.home.join("brief.md").to_str().unwrap(),
+    ]));
+    let block = stdout(repo.arc(&wt).args(["trailers", "shorthand"]));
+    assert!(block.contains("Planned-by: lead:planner"));
+    assert!(block.contains("Planned-by: Person <p@example.invalid>"));
+    assert!(block.contains("Orchestrated-by: test:coordinator#high"));
+    repo.arc(&repo.root)
+        .args(["begin", "invalid", "--planned-by", "bad"])
+        .assert()
+        .failure();
+    assert!(!git_out(&repo.root, &["branch", "--list", "arc/invalid"]).contains("arc/invalid"));
+    repo.arc(&repo.root)
+        .args(["begin", "unresolved", "--orchestrated-by"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("unresolved"));
+    assert!(git_out(&repo.root, &["branch", "--list", "arc/unresolved"]).is_empty());
+}
+
+#[test]
+fn change_roles_stamp_store_format_on_record_and_import() {
+    let repo = Repo::new();
+    open(&repo, "portable-roles");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["roles", "portable-roles", "--planned-by", "lead:planner"]),
+    );
+    let config = repo.root.join(".git/arc/config.json");
+    let stamp: serde_json::Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+    assert_eq!(stamp["schema_version"], 7, "{stamp}");
+    let bundle = repo.home.join("roles.json");
+    stdout(repo.arc(&repo.root).args([
+        "export",
+        "portable-roles",
+        "--output",
+        bundle.to_str().unwrap(),
+    ]));
+    let other = Repo::new();
+    stdout(other.arc(&other.root).args(["begin", "seed"]));
+    stdout(
+        other
+            .arc(&other.root)
+            .args(["import", bundle.to_str().unwrap()]),
+    );
+    let stamp: serde_json::Value =
+        serde_json::from_slice(&fs::read(other.root.join(".git/arc/config.json")).unwrap())
+            .unwrap();
+    assert_eq!(stamp["schema_version"], 7, "{stamp}");
+    let block = stdout(other.arc(&other.root).args(["trailers", "portable-roles"]));
+    assert_eq!(block, "Planned-by: lead:planner\n");
+}
