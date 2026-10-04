@@ -1,4 +1,5 @@
 use crate::bundle::{Bundle, ValidatedBundle};
+mod accept;
 mod audit;
 mod bundle_io;
 pub(crate) mod candidate;
@@ -48,6 +49,7 @@ use crate::render;
 use crate::state::{self, ChangeState};
 use crate::status::{self, StatusReport};
 use crate::store::{Store, TransitionLock};
+pub use accept::{accept, accept_role_refusal, AcceptArgs};
 use anyhow::{bail, Context, Result};
 pub use audit::{audit, declare_debt, AuditArgs};
 pub use bundle_io::{export_bundle, import_bundle};

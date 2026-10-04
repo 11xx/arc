@@ -536,6 +536,12 @@ RUN A CHANGE
                                      its holder is gone. `harness-status-absent`
                                      and `delegate-exit:<handle>` are the
                                      expected evidence; any text is accepted.
+  arc accept INPUT --branch LOCAL-BRANCH --publisher PRINCIPAL
+      --received-sha256 SHA256 [--worktree PATH] [--key KEY]
+      [--contributors ACTOR,... | --solo] [--dry-run] [--json]
+                                     Prepare a fetched delivery on its paired
+                                     authority, as lead; return readiness and
+                                     the local judgment still owed.
   arc snapshot                       Record the current head as a patchset.
     --verify [--gate <name>...]      Run required gates, or selected gates.
                                      Selected names must be unique and declared;
@@ -988,6 +994,62 @@ RUN A CHANGE
   and answers on stdout: the rendering for a read, and for `--write` the
   complete replacement file, written atomically after it exits 0.
 
+PREPARE A DELIVERED CHANGE
+  Fetch the delivery's Git objects and recorded branch through your transport,
+  then run `arc accept INPUT --branch LOCAL-BRANCH --publisher PRINCIPAL
+  --received-sha256 SHA256`. The branch must exist under the recorded name at
+  the delivered latest patchset head, or its recorded signature-only successor.
+  Acceptance never fetches, creates a branch alias, or overwrites another branch.
+  The receiver must be paired, hold integration authority, and act as lead.
+
+  Acceptance reads and digests the bundle once and uses import admission against
+  held history. It checks authority, objects, attribution, checkout identity,
+  and the delivered patchset's bound brief and resolved base before importing.
+  Admission revalidates under publication locks. If the authoritative target
+  moved beyond that base, acceptance stops with explicit rebase, snapshot, and
+  fresh review guidance; content replay requires the lead's own decision.
+  Provisional ancestry requires canonical prerequisites and explicit replay.
+
+  Acceptance reuses a clean registered checkout of the branch or allocates an
+  owned checkout under the configured worktree root. --worktree selects an
+  existing matching checkout or an absent path, never unrelated content.
+  A ChangeCheckoutBound fact binds the checkout to its recording replica.
+  Only locally allocated ownership grants cleanup rights; relayed paths and
+  tokens grant none. Operational projections choose a local binding and clear
+  foreign paths and ownership.
+
+  In order, acceptance imports, binds the checkout, signs exclusive change
+  commits using Git's configured key (or --key), snapshots, runs required local
+  head gates, evaluates a distinct target tree when needed, and runs each bound
+  probe at baseline and final in declaration order. Baselines use scratch
+  checkouts at the bound brief's base. The snapshot preserves the delivered
+  patchset's resolved base, brief binding, and explicit contributors, including
+  when a foreign actor holds the claim. Insufficient legacy attribution requires
+  --contributors or --solo. Imported passing evidence never suppresses the local
+  head-gate run. A profile without gates evaluates nothing.
+
+  Preparation records evidence and returns readiness; it records no judgment.
+  Signature-only rewrites carry eligible existing approval through the verified
+  rewrite map. They emit no verdict. Genuine eligible verdict forks retain all
+  tip IDs and origins and refuse readiness; the local reviewer resolves them
+  through the explicit superseding verdict path after reading the signed head.
+  A configured foreign-review exception remains visible in verdict assessments.
+  Preparation commonly completes with exit 3 and local review still owed.
+
+  --json emits one arc-accept/1 document containing delivery coordinates,
+  prepared head, worktree, preparation_complete, ordered operation argv/cwd,
+  outcomes, exit codes, recorded event IDs, stopping step, readiness, verdict
+  tips, local_verdict_owed, and next_steps. Human output prints the same actual
+  constituent operations. The first failing step stops the coordinator; earlier
+  import, signing, checkout, snapshot, and evidence effects remain recorded.
+  Retry revalidates the same delivery and reuses admission, local binding,
+  unchanged patchset, and rewrite recovery. Checks may record fresh evidence.
+
+  --dry-run performs admission and local-state preflight and prints conditional
+  steps. It imports nothing, allocates no checkout, creates no Git objects,
+  signs nothing, runs no checks, and records no evidence. Signing and future
+  verification outcomes remain conditional.
+
 PAIR REPLICA STORES
   Import reads received bytes once and checks a supplied --received-sha256
   before parsing. Object availability and publishing authorization are checked
@@ -1050,11 +1112,6 @@ PAIR REPLICA STORES
   operator-named peer by its repository ID; that peer adopts the project only
   by importing the exported pairing event. Replica files contain identities
   and authority events, while checkout paths remain local to their store.
-  ChangeCheckoutBound records a branch's local checkout and allocation owner.
-  Operational projections choose a binding from the local recording replica;
-  foreign checkout paths and owner tokens grant no cleanup rights. An existing
-  checkout binds without ownership; an allocated checkout carries its local
-  administrative owner record.
 
   The first replica holds integration authority. `authority offer` relinquishes
   it when the offer is recorded; the named replica acquires it when it imports
@@ -2269,6 +2326,7 @@ SCHEMAS
     `arc-explain/1`                  arc explain --json
     `arc-watch/1`                    arc watch --json, stdin of arc watch --exec
     `arc-config/1`                   arc config
+    `arc-accept/1`                   arc accept --json
     `arc-integration-plan/1`         arc integrate --dry-run --json
     `arc-brief/2`                    arc brief --json
     `arc-journal-artifact/2`         arc journal show --json

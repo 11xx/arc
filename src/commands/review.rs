@@ -3,6 +3,7 @@
 //! the verdict binds to the exact committed head the reviewer inspected.
 
 use super::*;
+use crate::operation_println as println;
 use crate::state::{FindingState, VerdictEntry};
 use crate::status::{FindingSummary, StatusReport};
 use serde::Serialize;
@@ -414,6 +415,7 @@ pub fn snapshot(
 pub(super) struct SnapshotRequest {
     /// A normalized declaration, as `contributor_declaration` returns it.
     contributors: Option<Vec<String>>,
+    pin_brief: bool,
     journal_refs: Vec<JournalArtifactRef>,
     thread: Option<ExternalThreadRef>,
 }
@@ -424,6 +426,18 @@ impl SnapshotRequest {
     pub(super) fn attributed(contributors: Option<Vec<String>>) -> Self {
         Self {
             contributors,
+            pin_brief: false,
+            journal_refs: Vec::new(),
+            thread: None,
+        }
+    }
+
+    /// Preserve a delivery's explicit attribution and brief binding, including
+    /// a patchset whose contract has no brief.
+    pub(super) fn delivered(contributors: Vec<String>) -> Self {
+        Self {
+            contributors: Some(contributors),
+            pin_brief: true,
             journal_refs: Vec::new(),
             thread: None,
         }
@@ -451,6 +465,7 @@ impl SnapshotRequest {
         }
         Ok(Self {
             contributors,
+            pin_brief: false,
             journal_refs: resolve_journal_refs(ctx, journal_refs)?,
             thread,
         })
@@ -512,6 +527,7 @@ pub(super) fn snapshot_holding(
     let links_supplied = request.links_supplied();
     let SnapshotRequest {
         contributors: requested_contributors,
+        pin_brief,
         journal_refs: flagged_refs,
         thread,
     } = request;
@@ -528,6 +544,7 @@ pub(super) fn snapshot_holding(
                 .get(version - 1)
                 .with_context(|| format!("brief version {version} not found"))?,
         ),
+        None if pin_brief => None,
         None => st.latest_brief(),
     };
     let brief_ref = brief.map(|brief| BriefRef {

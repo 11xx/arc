@@ -1,6 +1,7 @@
 //! Recording a Git history rewrite, and reading a revision forward through it.
 
 use super::*;
+use crate::operation_println as println;
 use crate::rewrite::{parse_commit_map, RewriteMap};
 
 /// Record a rewrite performed elsewhere, from a supplied commit map. The

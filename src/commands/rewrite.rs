@@ -11,6 +11,7 @@
 //! revision forward is `rewrite`, and recording the map is `history`.
 
 use super::*;
+use crate::operation_println as println;
 use crate::rewrite::{RefMove, RewriteIntent};
 use std::collections::BTreeMap;
 

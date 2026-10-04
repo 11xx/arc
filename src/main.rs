@@ -21,6 +21,7 @@ mod integration;
 mod journal;
 mod journal_exchange;
 mod model;
+mod operation_output;
 mod policy;
 mod process_group;
 mod project;
@@ -1101,6 +1102,48 @@ enum Cmd {
         #[arg(long)]
         provenance_only: bool,
     },
+    /// Prepare a delivered change on the paired integration authority (lead only).
+    /// Admission precedes local checkout binding, exclusive scoped signing,
+    /// snapshotting at the delivered base and bound brief, local gates, and
+    /// baseline/final probes. Preparation records evidence and returns readiness;
+    /// it records no judgment. A local review still owed normally exits 3.
+    /// Moved authoritative history requires explicit rebase, snapshot, and review.
+    /// Stops at the first failure and reports retained effects. Retrying the same
+    /// delivery reuses admission, checkout binding, signature recovery, and snapshot.
+    /// Dry-run validates admission and local state without allocating, signing,
+    /// executing checks, creating objects, or recording evidence; future outcomes
+    /// are conditional. JSON emits one arc-accept/1 transcript.
+    Accept {
+        /// Delivered arc-bundle/6 or /5 file ('-' for stdin)
+        input: String,
+        /// Existing local branch matching the delivered change branch and head
+        #[arg(long)]
+        branch: String,
+        /// Authenticated receiving caller's enrolled publishing principal
+        #[arg(long)]
+        publisher: String,
+        /// SHA256 of the exact received bytes
+        #[arg(long)]
+        received_sha256: String,
+        /// Matching clean checkout, or absent path for an owned allocation
+        #[arg(long)]
+        worktree: Option<PathBuf>,
+        /// Signing key override; otherwise use Git's configured key
+        #[arg(long)]
+        key: Option<String>,
+        /// Explicit contributor actors; defaults to the delivered declaration
+        #[arg(long, value_delimiter = ',', conflicts_with = "solo")]
+        contributors: Option<Vec<String>>,
+        /// Declare the acting subject as the sole contributor
+        #[arg(long)]
+        solo: bool,
+        /// Validate and report conditional steps without effects
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit one arc-accept/1 document, including retained effects and readiness
+        #[arg(long)]
+        json: bool,
+    },
     /// Pair independent stores and move integration authority with files.
     /// Checkout paths and ownership belong to the recording replica. Local
     /// checkout bindings take precedence; relayed bindings grant no cleanup rights.
@@ -1227,7 +1270,9 @@ enum Cmd {
         #[command(flatten)]
         attribution: AttributionOpts,
     },
-    /// Record the current branch head as a new patchset
+    /// Record the current branch head as a patchset with explicit base and brief binding.
+    /// Accept preserves the delivered binding and contributor declaration through
+    /// signature-only preparation; snapshots record evidence, never a judgment.
     Snapshot {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1464,7 +1509,9 @@ enum Cmd {
     /// Run a declared gate (or ad hoc command) and record the evidence. Gate
     /// evidence only counts at the change's own head, so the command runs in
     /// the change's recorded worktree whichever checkout it was typed in;
-    /// `--attest` records evidence arc did not run
+    /// `--attest` records evidence arc did not run. Acceptance executes local
+    /// head gates even when imported evidence passed, and selects probes from
+    /// the delivered patchset's bound brief. Baselines run in scratch checkouts.
     Verify {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -3230,6 +3277,7 @@ fn role_refusal(role: ExecutionRole, command: &Cmd) -> Option<(&'static str, &'s
     match role {
         ExecutionRole::Lead => None,
         ExecutionRole::Reviewer => match command {
+            Cmd::Accept { .. } => Some(("accept", "lead")),
             Cmd::Integrate { .. } => Some(("integrate", "lead")),
             Cmd::Debt { .. } => Some(("debt", "lead")),
             Cmd::Close { .. } => Some(("close", "lead")),
@@ -3246,6 +3294,7 @@ fn role_refusal(role: ExecutionRole, command: &Cmd) -> Option<(&'static str, &'s
             Cmd::Audit { .. } => Some(("audit", "reviewer or lead")),
             Cmd::Debt { .. } => Some(("debt", "lead")),
             Cmd::Close { .. } => Some(("close", "lead")),
+            Cmd::Accept { .. } => Some(("accept", "lead")),
             Cmd::Integrate { .. } => Some(("integrate", "lead")),
             _ => None,
         },
@@ -3492,6 +3541,15 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
         return Ok(0);
     };
     if let Some((command, required)) = role_refusal(role, &cmd) {
+        if let Cmd::Accept {
+            publisher,
+            received_sha256,
+            json,
+            ..
+        } = &cmd
+        {
+            return commands::accept_role_refusal(publisher, received_sha256, *json, role.as_str());
+        }
         eprintln!(
             "role refusal: {} may not {command} (requires {required})",
             role.as_str()
@@ -4061,6 +4119,32 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             )?;
             Ok(0)
         }
+        Cmd::Accept {
+            input,
+            branch,
+            publisher,
+            received_sha256,
+            worktree,
+            key,
+            contributors,
+            solo,
+            dry_run,
+            json,
+        } => commands::accept(
+            &ctx,
+            commands::AcceptArgs {
+                input,
+                branch,
+                publisher,
+                received_sha256,
+                worktree,
+                key,
+                contributors,
+                solo,
+                dry_run,
+                json,
+            },
+        ),
         Cmd::Import {
             input,
             dry_run,

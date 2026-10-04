@@ -8,6 +8,7 @@ use super::*;
 use crate::integration::{
     self, Decision, IntegrationFacts, IntegrationPlan, Refusal, TargetCheckout,
 };
+use crate::operation_println as println;
 use std::collections::BTreeMap;
 use std::io;
 use std::os::unix::process::CommandExt;

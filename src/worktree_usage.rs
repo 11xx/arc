@@ -15,6 +15,7 @@
 //! silently omitted it would understate the cost of exactly the checkouts
 //! that persist.
 
+use crate::operation_println as println;
 use crate::state::ChangeState;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};

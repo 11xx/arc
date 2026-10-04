@@ -1,4 +1,5 @@
 use super::*;
+use crate::operation_println as println;
 
 pub fn export_bundle(
     ctx: &Ctx,
@@ -68,6 +69,50 @@ pub fn import_bundle(
     // Parsing validates every path-bearing ID, checksum, envelope, and
     // patchset field before the local store is inspected or created.
     let validated = Bundle::parse(&bytes)?;
+    import_validated(
+        ctx,
+        &bytes,
+        &validated,
+        dry_run,
+        provenance_only,
+        publisher,
+        received_sha256,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn import_validated(
+    ctx: &Ctx,
+    bytes: &[u8],
+    validated: &ValidatedBundle,
+    dry_run: bool,
+    provenance_only: bool,
+    publisher: Option<&str>,
+    received_sha256: Option<&str>,
+) -> Result<crate::import_authorization::ImportResult> {
+    import_validated_guarded(
+        ctx,
+        bytes,
+        validated,
+        dry_run,
+        provenance_only,
+        publisher,
+        received_sha256,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn import_validated_guarded(
+    ctx: &Ctx,
+    bytes: &[u8],
+    validated: &ValidatedBundle,
+    dry_run: bool,
+    provenance_only: bool,
+    publisher: Option<&str>,
+    received_sha256: Option<&str>,
+    before_publish: Option<&dyn Fn() -> Result<()>>,
+) -> Result<crate::import_authorization::ImportResult> {
     if let Some(objects) = &validated.bundle.objects {
         let mut missing = Vec::new();
         for object in objects {
@@ -100,7 +145,7 @@ pub fn import_bundle(
     });
     // A suffix is only meaningful against the prefix it extends, and the
     // checksum of the whole history is what ties the two together.
-    verify_bundle_prefix(local_store.as_ref(), &validated)?;
+    verify_bundle_prefix(local_store.as_ref(), validated)?;
 
     let mut missing_objects = Vec::new();
     let mut pins = Vec::new();
@@ -119,10 +164,10 @@ pub fn import_bundle(
     }
 
     let initial_policy = crate::policy::load(&ctx.cwd)?;
-    let preflight = classify_import_events(&root, &validated)?;
+    let preflight = classify_import_events(&root, validated)?;
     if !preflight.conflicts.is_empty() {
         print_import_report(
-            &validated,
+            validated,
             local_repository_id.as_deref(),
             &preflight.new_events,
             &preflight.skipped_events,
@@ -135,20 +180,20 @@ pub fn import_bundle(
         return Ok(crate::model::OperationResult::unpublished(1));
     }
     if let Some(store) = &local_store {
-        if let Some(contest) = claim_contest_for_import(store, &validated, &preflight.new_events)? {
+        if let Some(contest) = claim_contest_for_import(store, validated, &preflight.new_events)? {
             println!("{}", contest.render(&validated.bundle.change_id));
             println!("aborted: no events or refs written");
             return Ok(crate::model::OperationResult::unpublished(1));
         }
     }
-    validate_import_candidate(local_store.as_ref(), &validated, &preflight.new_events)?;
-    let repository = plan_repository_events(&ctx.cwd, local_store.as_ref(), &validated)?;
+    validate_import_candidate(local_store.as_ref(), validated, &preflight.new_events)?;
+    let repository = plan_repository_events(&ctx.cwd, local_store.as_ref(), validated)?;
     let initial_authorization = authorize_import(
         ctx,
         &initial_policy.replica,
         local_store.as_ref(),
-        &bytes,
-        &validated,
+        bytes,
+        validated,
         &preflight.new_events,
         &repository,
         publisher,
@@ -156,26 +201,26 @@ pub fn import_bundle(
     )?;
 
     if dry_run {
-        let plan = classify_import_events(&root, &validated)?;
+        let plan = classify_import_events(&root, validated)?;
         let mut claim_contest = None;
         if plan.conflicts.is_empty() {
             let store = local_store.as_ref();
             if let Some(store) = store {
-                claim_contest = claim_contest_for_import(store, &validated, &plan.new_events)?;
+                claim_contest = claim_contest_for_import(store, validated, &plan.new_events)?;
             }
             if claim_contest.is_none() {
-                validate_import_candidate(store, &validated, &plan.new_events)?;
+                validate_import_candidate(store, validated, &plan.new_events)?;
             }
             // The same refusals the import makes: a preflight that reports
             // success for a bundle the real path rejects is believed, and
             // wrong. A destination with no store still checks the bundle
             // against itself.
             if claim_contest.is_none() {
-                plan_repository_events(&ctx.cwd, store, &validated)?;
+                plan_repository_events(&ctx.cwd, store, validated)?;
             }
         }
         print_import_report(
-            &validated,
+            validated,
             local_repository_id.as_deref(),
             &plan.new_events,
             &plan.skipped_events,
@@ -230,22 +275,22 @@ pub fn import_bundle(
     }
     // The prefix is judged under the same lock as the replay it authorises,
     // so a concurrent import cannot move the history between the two.
-    verify_bundle_prefix(Some(&store), &validated)?;
+    verify_bundle_prefix(Some(&store), validated)?;
     // Classification and candidate replay must happen after taking the same
     // per-change lock used by claim, release, stage, and snapshot. Otherwise a
     // local transition could land between validation and the raw appends.
-    let plan = classify_import_events(&root, &validated)?;
+    let plan = classify_import_events(&root, validated)?;
     let claim_contest = if plan.conflicts.is_empty() {
-        claim_contest_for_import(&store, &validated, &plan.new_events)?
+        claim_contest_for_import(&store, validated, &plan.new_events)?
     } else {
         None
     };
     if plan.conflicts.is_empty() && claim_contest.is_none() {
-        validate_import_candidate(Some(&store), &validated, &plan.new_events)?;
+        validate_import_candidate(Some(&store), validated, &plan.new_events)?;
     }
 
     print_import_report(
-        &validated,
+        validated,
         local_repository_id.as_deref(),
         &plan.new_events,
         &plan.skipped_events,
@@ -278,7 +323,7 @@ pub fn import_bundle(
     // whole, so two imports of different changes must not interleave between
     // the judgement and the write that makes it true.
     let _repository_events = store.lock_repository_events()?;
-    let incoming = plan_repository_events(&ctx.cwd, Some(&store), &validated)?;
+    let incoming = plan_repository_events(&ctx.cwd, Some(&store), validated)?;
     let current_policy = crate::policy::load(&ctx.cwd)?;
     let changed_input = if current_policy.replica != initial_policy.replica {
         Some("operator replica policy")
@@ -295,12 +340,15 @@ pub fn import_bundle(
         ))
         .into());
     }
+    if let Some(guard) = before_publish {
+        guard()?;
+    }
     let authorization = authorize_import(
         ctx,
         &current_policy.replica,
         Some(&store),
-        &bytes,
-        &validated,
+        bytes,
+        validated,
         &plan.new_events,
         &incoming,
         publisher,
