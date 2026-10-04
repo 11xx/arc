@@ -561,7 +561,11 @@ fn accept_delivery_real_local_verdict_fork_preserves_all_tips() {
         serde_json::from_slice(&fs::read(directory.join(format!("{id}.json"))).unwrap()).unwrap();
     for suffix in ["a", "b"] {
         let mut fork = original.clone();
-        let event = format!("ZZZZ-accept-fork-{suffix}");
+        let event = ulid::Ulid::from_parts(
+            ulid::Ulid::new().timestamp_ms() + 1,
+            if suffix == "a" { 0 } else { 1 },
+        )
+        .to_string();
         fork["event_id"] = event.clone().into();
         fork["relation"] = serde_json::json!({"kind":"supersedes", "observed":[id]});
         fs::write(
@@ -599,7 +603,7 @@ fn accept_delivery_untrusted_foreign_verdict_forks_do_not_displace_authority() {
             .unwrap()
             .clone();
         let mut fork = original.clone();
-        fork["event_id"] = "ZZZZ-foreign-fork".into();
+        fork["event_id"] = ulid::Ulid::new().to_string().into();
         fork["relation"] =
             serde_json::json!({"kind":"supersedes", "observed":[original["event_id"]]});
         bundle["events"].as_array_mut().unwrap().push(fork);
@@ -918,4 +922,150 @@ fn accept_delivery_gate_execution_error_is_not_a_failed_gate() {
     let result = d.result(1);
     assert_eq!(result["stopped_at"], "gate:acceptance");
     assert!(result["next_steps"].to_string().contains("execute"));
+}
+
+fn fixture_events(repo: &Repo, change: &str) -> Vec<serde_json::Value> {
+    stdout(repo.arc(&repo.root).args(["events", "--change", change]))
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+fn transcript_step<'a>(result: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    result["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"] == name)
+        .unwrap()
+}
+
+#[test]
+fn accept_delivery_clock_skew_orders_all_local_events_after_admitted_history() {
+    let d = Delivery::new();
+    d.probe("test -f feature.txt");
+    d.gates("true");
+    let future = chrono::Utc::now() + chrono::TimeDelta::hours(1);
+    let mut floor = String::new();
+    d.mutate_bundle(|bundle| {
+        let mut replacements = std::collections::BTreeMap::new();
+        for (index, event) in bundle["events"].as_array().unwrap().iter().enumerate() {
+            let id =
+                ulid::Ulid::from_parts(future.timestamp_millis() as u64, index as u128).to_string();
+            replacements.insert(event["event_id"].as_str().unwrap().to_string(), id.clone());
+            floor = id;
+        }
+        fn replace(
+            value: &mut serde_json::Value,
+            replacements: &std::collections::BTreeMap<String, String>,
+        ) {
+            match value {
+                serde_json::Value::String(value) => {
+                    if let Some(replacement) = replacements.get(value) {
+                        *value = replacement.clone();
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for item in items {
+                        replace(item, replacements);
+                    }
+                }
+                serde_json::Value::Object(items) => {
+                    for item in items.values_mut() {
+                        replace(item, replacements);
+                    }
+                }
+                _ => {}
+            }
+        }
+        replace(&mut bundle["events"], &replacements);
+        for event in bundle["events"].as_array_mut().unwrap() {
+            event["created_at"] = future.to_rfc3339().into();
+        }
+    });
+    let output = d
+        .command()
+        .args(["--contributors", "worker,helper"])
+        .assert()
+        .code(3)
+        .get_output()
+        .clone();
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["preparation_complete"], true);
+    let events = fixture_events(&d.receiver, &d.change);
+    let receiver_id = json_stdout(
+        d.receiver
+            .arc(&d.receiver.root)
+            .args(["replica", "id", "--json"]),
+    )["repository_id"]
+        .clone();
+    assert_eq!(events[0]["event_type"], "change-opened");
+    for event in events
+        .iter()
+        .filter(|event| event["repository_id"] == receiver_id)
+    {
+        assert!(event["event_id"].as_str().unwrap() > floor.as_str());
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(event["created_at"].as_str().unwrap()).unwrap()
+                < future
+        );
+    }
+    for name in [
+        "checkout-binding",
+        "sign",
+        "snapshot",
+        "gate:acceptance",
+        "probe:discrimination:baseline",
+        "probe:discrimination:final",
+    ] {
+        let ids = transcript_step(&result, name)["event_ids"]
+            .as_array()
+            .unwrap();
+        assert!(!ids.is_empty(), "{name} recorded no evidence");
+        assert!(ids.iter().all(|id| id.as_str().unwrap() > floor.as_str()));
+    }
+    let shown = json_stdout(
+        d.receiver
+            .arc(&d.receiver.root)
+            .args(["show", &d.change, "--json"]),
+    );
+    assert_eq!(shown["verifications"].as_array().unwrap().len(), 3);
+    stdout(
+        d.receiver
+            .arc(&d.receiver.root)
+            .args(["verify", &d.change, "--all"]),
+    );
+    let run_events = fixture_events(&d.receiver, &d.change);
+    let run = run_events
+        .iter()
+        .find(|event| event["event_type"] == "verification-run-started")
+        .unwrap();
+    assert!(run["event_id"].as_str().unwrap() > floor.as_str());
+    let evidence = run_events
+        .iter()
+        .find(|event| event["run_id"] == run["event_id"])
+        .unwrap();
+    assert!(evidence["event_id"].as_str().unwrap() > run["event_id"].as_str().unwrap());
+    json_stdout(
+        d.receiver
+            .arc(&d.receiver.root)
+            .args(["show", &d.change, "--json"]),
+    );
+    let output = d
+        .command()
+        .args(["--contributors", "worker,helper"])
+        .assert()
+        .code(3)
+        .get_output()
+        .clone();
+    let retry: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(retry["prepared_head"], result["prepared_head"]);
+    assert!(transcript_step(&retry, "import")["event_ids"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(transcript_step(&retry, "checkout-binding")["event_ids"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 }

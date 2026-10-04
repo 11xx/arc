@@ -82,6 +82,9 @@ pub fn record_mapping(
             refs,
         },
     );
+    if let Some(previous) = combined.last() {
+        event.event_id = event_id_after(&previous.event_id)?;
+    }
     combined.push(event.clone());
     combined.sort_by(|a, b| a.event_id.cmp(&b.event_id));
     let rewrites = RewriteMap::from_events(combined.iter())

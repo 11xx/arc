@@ -1026,7 +1026,14 @@ fn start_verification_run(
             .collect(),
     };
     ensure_append_allowed(&state, &payload)?;
-    let event = ctx.event(store, change_id, payload);
+    let mut event = ctx.event(store, change_id, payload);
+    let events = store.load_events(change_id)?;
+    event.event_id = event_id_after(
+        &events
+            .last()
+            .context("change has no opening event")?
+            .event_id,
+    )?;
     let run_id = event.event_id.clone();
     store.append_event(&event)?;
     Ok(run_id)

@@ -1015,7 +1015,9 @@ PREPARE A DELIVERED CHANGE
   existing matching checkout or an absent path, never unrelated content.
   A ChangeCheckoutBound fact binds the checkout to its recording replica.
   Only locally allocated ownership grants cleanup rights; relayed paths and
-  tokens grant none. Operational projections choose a local binding and clear
+  tokens grant none. Local facts receive IDs after admitted change and repository
+  events, independently of sender timestamps, and retain their observation times.
+  Operational projections choose a local binding and clear
   foreign paths and ownership.
 
   In order, acceptance imports, binds the checkout, signs exclusive change
