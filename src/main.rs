@@ -2104,13 +2104,16 @@ enum Cmd {
     /// Orient a session: ledger queue, journal backlog, live lanes, and recent
     /// sessions across harnesses. Recent activity without filed artifacts or a
     /// naming handoff/conclusion is marked unfiled. Filing counts include direct
-    /// writes and transition successors, with import and spool provenance.
+    /// writes and published transition successors, with import and spool provenance.
     /// Stale filings name the `journal filed` query; plain reads record no activity.
     /// Project memories precede global memory titles with their ages in days;
     /// bodies are read on demand with journal show --global. An unavailable
     /// journal carries its own warning, including global_memory_error or
     /// project_journal_error in JSON; readable sources remain in the output.
-    /// Recording discovery failures appear in session_discovery_errors.
+    /// Each recording backend is queried once with an unrestricted candidate window.
+    /// Backend scan bounds and failures appear in session_discovery_errors; readable
+    /// rows remain ranked by recorded activity. Pending transitions carry a diagnostic
+    /// and do not count as filings or naming handoffs/conclusions.
     /// Text warns when the running build differs from HEAD in an arc-ledger
     /// checkout: older for an ancestor, differs otherwise, with dirty builds
     /// identified. Other projects and unknown build revisions have no warning.
@@ -2118,7 +2121,8 @@ enum Cmd {
     /// changes remain in the output
     Catchup {
         /// Number of recent sessions, selected after ranking every discovered
-        /// candidate by its last recorded activity rather than file modification time
+        /// candidate by its last recorded activity rather than file modification time.
+        /// Backend scan bounds can hide sessions that would rank inside this limit
         #[arg(long, default_value = "5")]
         sessions: usize,
         /// Cap the changes listed per ledger bucket; the journal queue is

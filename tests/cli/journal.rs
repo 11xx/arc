@@ -15875,3 +15875,177 @@ fn shared_writer_recovers_append_split_inside_utf8() {
         1
     );
 }
+
+#[test]
+fn catchup_keeps_capped_backend_rows_beside_readable_recordings() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = Repo::new();
+    let data = repo.home.join(".local/share/opencode");
+    fs::create_dir_all(&data).unwrap();
+    fs::write(data.join("opencode.db"), b"SQLite format 3\0").unwrap();
+    let rows = repo.home.join("opencode-rows");
+    let now = chrono::Utc::now();
+    let mut contents = String::from("row\n");
+    for index in 0..1_000 {
+        let row = serde_json::json!({
+            "id": format!("ses_capped_{index:04}"), "directory": repo.root,
+            "time_created": 1, "time_updated": now.timestamp_millis() - index,
+        });
+        contents.push_str(&format!("row\t{row}\n"));
+    }
+    fs::write(&rows, contents).unwrap();
+    let bin = repo.home.join("probe-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let program = bin.join("sqlite3");
+    fs::write(
+        &program,
+        "#!/bin/sh\nprintf 'query\n' >> \"$ARC_SCAN_PROBE\"\ncat \"$ARC_SCAN_ROWS\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    let marker = repo.home.join("queries");
+    let store = repo.home.join(".claude/projects/-fixture");
+    fs::create_dir_all(&store).unwrap();
+    let session = "11111111-2222-3333-4444-555555555555";
+    let row = serde_json::json!({"type":"user", "sessionId":session, "cwd":repo.root,
+        "timestamp": (now + chrono::Duration::seconds(1)).to_rfc3339(),
+        "message":{"role":"user", "content":"start"}});
+    fs::write(store.join(format!("{session}.jsonl")), format!("{row}\n")).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let report = json_stdout(
+        repo.arc(&repo.root)
+            .env("PATH", &path)
+            .env("ARC_SCAN_PROBE", &marker)
+            .env("ARC_SCAN_ROWS", &rows)
+            .args(["catchup", "--sessions", "2", "--json"]),
+    );
+    assert_eq!(report["recent_sessions"][0]["session"], session, "{report}");
+    assert_eq!(
+        report["recent_sessions"][1]["session"], "ses_capped_0000",
+        "{report}"
+    );
+    assert_eq!(fs::read_to_string(&marker).unwrap().lines().count(), 1);
+    assert!(
+        report["session_discovery_errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error.as_str().unwrap().contains("ranking may omit")),
+        "{report}"
+    );
+    let text = stdout(
+        repo.arc(&repo.root)
+            .env("PATH", path)
+            .env("ARC_SCAN_PROBE", &marker)
+            .env("ARC_SCAN_ROWS", &rows)
+            .args(["catchup", "--sessions", "2"]),
+    );
+    assert_eq!(
+        text.lines()
+            .filter(|line| line.contains("ranking may omit"))
+            .count(),
+        1,
+        "{text}"
+    );
+}
+
+#[test]
+fn filed_excludes_pending_transition_intent_and_keeps_writer_unfiled() {
+    let repo = Repo::new();
+    let todo = filed_artifact(&repo, "todo", "pending", "work\n");
+    let dir = journal_dir(&repo);
+    let mut intent = journal_events(&dir)
+        .into_iter()
+        .find(|event| event["event"] == "note")
+        .unwrap();
+    let successor = "20261004T120000Z-pending-handoff.md";
+    intent["event"] = serde_json::json!("transition");
+    intent["file"] = serde_json::json!(successor);
+    intent["supersedes"] = serde_json::json!(todo);
+    intent["session"] = serde_json::json!("pending-writer");
+    intent["ts"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
+    use std::io::Write;
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join("events.jsonl"))
+            .unwrap(),
+        "{intent}"
+    )
+    .unwrap();
+    for body in [
+        None,
+        Some(""),
+        Some("supersedes: other-todo.md\n# Handoff\n"),
+    ] {
+        if let Some(body) = body {
+            fs::write(dir.join(successor), body).unwrap();
+        }
+        let report = json_stdout(repo.arc(&repo.root).args([
+            "journal",
+            "filed",
+            "--session",
+            "pending-writer",
+            "--json",
+        ]));
+        assert!(
+            report["sessions"].as_array().unwrap().is_empty(),
+            "{report}"
+        );
+        let report =
+            json_stdout(
+                repo.arc(&repo.root)
+                    .args(["catchup", "--sessions", "10", "--json"]),
+            );
+        let writer = report["recent_sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["session"] == "pending-writer")
+            .unwrap();
+        assert_eq!(writer["journal_items"], 0, "{report}");
+        assert_eq!(writer["handoffs"], serde_json::json!([]), "{report}");
+        assert_eq!(writer["unfiled"], true, "{report}");
+        assert!(
+            report["session_discovery_errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|error| error.as_str().unwrap().contains("transition pending")),
+            "{report}"
+        );
+    }
+    fs::remove_file(dir.join(successor)).unwrap();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "transition", &todo, "--to", "handoff"]),
+    );
+    let report = json_stdout(repo.arc(&repo.root).args([
+        "journal",
+        "filed",
+        "--session",
+        "pending-writer",
+        "--json",
+    ]));
+    assert_eq!(
+        report["sessions"][0]["items"][0]["file"], successor,
+        "{report}"
+    );
+    let report = json_stdout(
+        repo.arc(&repo.root)
+            .args(["catchup", "--sessions", "10", "--json"]),
+    );
+    let writer = report["recent_sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["session"] == "pending-writer")
+        .unwrap();
+    assert_eq!(writer["journal_items"], 1, "{report}");
+    assert_eq!(
+        writer["handoffs"],
+        serde_json::json!([successor]),
+        "{report}"
+    );
+    assert_eq!(writer["unfiled"], false, "{report}");
+}

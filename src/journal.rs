@@ -693,9 +693,10 @@ pub enum JournalCmd {
     },
     /// Filed artifacts grouped by their writing session, with source references,
     /// changes that took them up, and consumption outcomes (arc-journal-filed/1).
-    /// Direct writes and transition successors retain their original writers,
+    /// Direct writes and published transition successors retain their original writers,
     /// including imported and spool-promoted artifacts. Successors name the
-    /// artifact they supersede.
+    /// artifact they supersede. An intent without a readable successor body carrying
+    /// its supersedes link is omitted; journal doctor reports pending transitions.
     /// Open actionable items are stale after the threshold of recorded inactivity;
     /// active claims suppress staleness. Plain reads record no activity.
     /// Records no events; ledger reads do not require a parseable append policy.
@@ -5487,7 +5488,7 @@ pub(crate) fn filed_report_in(
         std::collections::BTreeMap::new();
     let mut seen = HashSet::new();
     let mut stale_count = 0;
-    for event in events.iter().filter(|event| event.creates_artifact()) {
+    for event in events.iter().filter(|event| event.creates_artifact(dir)) {
         let Some(file) = event.file.as_deref() else {
             continue;
         };
@@ -5698,15 +5699,35 @@ pub(crate) fn recent_sessions(
             .or_insert_with(|| RecentSession::new(harness, session));
         row.observe(Some(event.created_at), event.model.as_deref());
     }
-    let events = match resolve_dir(&ctx.cwd).and_then(|dir| read_events(&dir)) {
-        Ok(events) => events,
-        Err(error) => {
-            unavailable.push(format!("journal sessions: {error:#}"));
-            Vec::new()
-        }
-    };
+    let (dir, events) =
+        match resolve_dir(&ctx.cwd).and_then(|dir| read_events(&dir).map(|events| (dir, events))) {
+            Ok((dir, events)) => (Some(dir), events),
+            Err(error) => {
+                unavailable.push(format!("journal sessions: {error:#}"));
+                (None, Vec::new())
+            }
+        };
+    let mut published = HashSet::new();
+    let creations: Vec<_> = events
+        .iter()
+        .map(|event| {
+            let created = dir.as_deref().is_some_and(|dir| event.creates_artifact(dir));
+            if created {
+                if let Some(file) = event.file.as_deref() {
+                    published.insert(file);
+                }
+            } else if event.event == "transition" {
+                unavailable.push(format!(
+                    "journal transition pending: {} → {}; successor body is missing, unreadable, or lacks its supersedes link",
+                    event.supersedes.as_deref().unwrap_or("unknown"),
+                    event.file.as_deref().unwrap_or("unknown")
+                ));
+            }
+            created
+        })
+        .collect();
     let mut filed = HashSet::new();
-    for event in &events {
+    for (event, created) in events.iter().zip(&creations) {
         if present(&event.harness).is_none() || present(&event.session).is_none() {
             continue;
         }
@@ -5714,7 +5735,7 @@ pub(crate) fn recent_sessions(
             .entry((event.harness.clone(), event.session.clone()))
             .or_insert_with(|| RecentSession::new(&event.harness, &event.session));
         row.observe(event.timestamp(), event.model.as_deref());
-        if event.creates_artifact() {
+        if *created {
             if let Some(file) = event
                 .file
                 .as_deref()
@@ -5726,7 +5747,7 @@ pub(crate) fn recent_sessions(
             }
         }
     }
-    for event in &events {
+    for (event, created) in events.iter().zip(&creations) {
         let Some(file) = event.file.as_deref() else {
             continue;
         };
@@ -5734,12 +5755,12 @@ pub(crate) fn recent_sessions(
             continue;
         };
         if !["handoff", "conclusion"].contains(&kind.as_str())
-            || !(event.creates_artifact() || event.event == "source-attach")
+            || !(*created || (event.event == "source-attach" && published.contains(file)))
         {
             continue;
         }
         let mut named = Vec::new();
-        if event.creates_artifact() {
+        if *created {
             named.push((event.harness.as_str(), event.session.as_str()));
         }
         if let Some(source) = &event.source {
@@ -7925,10 +7946,21 @@ impl JournalEvent {
         }
     }
 
-    /// Creation events retain the writer even when the artifact arrives through
-    /// an exchange import or a spool promotion.
-    fn creates_artifact(&self) -> bool {
-        matches!(self.event.as_str(), "note" | "transition")
+    /// A transition intent represents a filing only when a readable successor
+    /// body carries the recorded supersedes link, in hot or archived storage.
+    fn creates_artifact(&self, dir: &Path) -> bool {
+        match self.event.as_str() {
+            "note" => true,
+            "transition" => self.file.as_deref().is_some_and(|file| {
+                self.supersedes.as_deref().is_some_and(|source| {
+                    artifact_body_path(dir, file)
+                        .and_then(|path| artifact_supersedes(&path))
+                        .as_deref()
+                        == Some(source)
+                })
+            }),
+            _ => false,
+        }
     }
 
     fn timestamp(&self) -> Option<DateTime<Utc>> {

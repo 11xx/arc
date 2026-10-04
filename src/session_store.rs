@@ -236,7 +236,7 @@ impl Drop for DiscoveryEnvironment {
 }
 
 /// Discover recordings in the repository's primary checkout and worktrees.
-/// Candidate windows expand until every recording can contribute its activity.
+/// Each backend is queried once; every readable row contributes its activity.
 pub(crate) fn project_sessions(
     cwd: &std::path::Path,
 ) -> anyhow::Result<(Vec<RecentSession>, Vec<String>)> {
@@ -250,9 +250,14 @@ pub(crate) fn project_sessions(
         .into_iter()
         .filter(|backend| backend.available())
     {
-        query.ceiling = 10_000;
-        match complete_listing(&mut query, |query| backend.list(query)) {
+        match discovery_listing(&mut query, |query| backend.list(query)) {
             Ok(listing) => {
+                if listing.scan_truncated {
+                    unavailable.push(format!(
+                        "{}: incomplete session coverage after {} candidates; ranking may omit sessions outside the backend scan bound",
+                        backend.harness(), listing.scanned
+                    ));
+                }
                 unavailable.extend(listing.unavailable);
                 for session in listing.sessions {
                     let mut row = RecentSession::new(backend.harness(), &session.id);
@@ -269,23 +274,15 @@ pub(crate) fn project_sessions(
     Ok((sessions, unavailable))
 }
 
-/// A modification-ordered window cannot establish recorded-activity order until
-/// the backend reports that the candidate scan is complete.
-fn complete_listing(
+/// Request every candidate the backend permits in one scan. Backend bounds
+/// remain explicit in the listing without withholding readable rows.
+fn discovery_listing(
     query: &mut backend::Query<'_>,
     mut list: impl FnMut(&backend::Query<'_>) -> anyhow::Result<backend::Listing>,
 ) -> anyhow::Result<backend::Listing> {
     query.limit = usize::MAX;
-    loop {
-        let listing = list(query)?;
-        if !listing.scan_truncated {
-            return Ok(listing);
-        }
-        if query.ceiling == usize::MAX {
-            anyhow::bail!("session discovery could not complete its candidate scan");
-        }
-        query.ceiling = query.ceiling.saturating_mul(2);
-    }
+    query.ceiling = usize::MAX;
+    list(query)
 }
 
 /// What a store holds for one session, and what arc may report from it.
@@ -495,23 +492,24 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
-    fn discovery_expands_windows_until_recorded_activity_can_be_ranked() {
+    fn discovery_queries_capped_backends_once_and_retains_the_listing() {
         let mut query = backend::Query::unscoped(1);
         query.ceiling = 2;
-        let mut windows = Vec::new();
-        let listing = complete_listing(&mut query, |window| {
-            windows.push(window.ceiling);
+        let mut calls = 0;
+        let listing = discovery_listing(&mut query, |window| {
             assert_eq!(window.limit, usize::MAX);
+            assert_eq!(window.ceiling, usize::MAX);
+            calls += 1;
             Ok(backend::Listing {
-                scan_truncated: window.ceiling < 5,
-                scanned: window.ceiling.min(5),
+                scan_truncated: true,
+                scanned: 1_000,
                 ..Default::default()
             })
-        })
-        .unwrap();
-        assert_eq!(windows, [2, 4, 8]);
-        assert_eq!(listing.scanned, 5);
-        assert!(!listing.scan_truncated);
+        });
+        assert_eq!(calls, 1);
+        let listing = listing.unwrap();
+        assert_eq!(listing.scanned, 1_000);
+        assert!(listing.scan_truncated);
     }
 
     const SESSION: &str = "11111111-2222-3333-4444-555555555555";

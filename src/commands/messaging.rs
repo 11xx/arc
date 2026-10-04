@@ -1096,7 +1096,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
         }
     }
     for error in &session_discovery_errors {
-        println!("  sessions: unavailable ({error})");
+        println!("  sessions: {error}");
     }
     match &filed {
         Ok(report) if report.stale_count > 0 => println!(

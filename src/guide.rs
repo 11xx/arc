@@ -147,14 +147,20 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          unfiled.
                          Recordings span the primary checkout and its worktrees;
                          ledger and journal writers remain visible without a
-                         recording. Candidate scans expand to completion before
-                         ranking; file modification time cannot select the rows.
-                         Discovery failures are reported.
+                         recording. Each backend is queried once with an unrestricted
+                         candidate window; readable rows rank by recorded activity.
+                         A backend scan bound carries a one-line warning that hidden
+                         sessions may rank inside --sessions. Failures are reported.
+                         Pending transitions carry diagnostics and supply neither
+                         filings nor naming handoffs/conclusions.
   arc journal filed [--session ID] [--stale 14] [--json]
                          Filed artifacts grouped by writing session, retaining
                          distillation sources and superseded origins. Direct writes
-                         and transition successors count, including imported and
-                         spool-promoted artifacts with their original writers.
+                         and published transition successors count, including imported
+                         and spool-promoted artifacts with their original writers.
+                         A transition requires a readable successor body carrying its
+                         supersedes link, in hot or archived storage. Pending intents
+                         are omitted; journal doctor reports pending transitions.
                          --session matches the writing or source session id.
                          Fates are open, taken (with change ids), done, superseded,
                          discarded, or stale. Staleness
