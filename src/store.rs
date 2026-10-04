@@ -11,6 +11,11 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
+// A known opening ID locates an immutable event directly when the directory
+// becomes unlistable. The event bytes are still validated before any append.
+static OPENING_IDS: std::sync::Mutex<BTreeMap<(PathBuf, String), String>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
 // Candidate payload variants and wire names share one format barrier.
 macro_rules! candidate_format_barrier {
     ($($variant:ident => $wire:literal),+ $(,)?) => {
@@ -660,24 +665,56 @@ impl Store {
         self.refuse_undeclared_author(event)?;
         ids::validate_id_component(&event.change_id)?;
         ids::validate_id_component(&event.event_id)?;
-        if self
+        let key = (self.root.clone(), event.change_id.clone());
+        let known = OPENING_IDS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+            .cloned();
+        let opening_id = if let Some(id) = known {
+            let path = self.events_dir(&event.change_id).join(format!("{id}.json"));
+            match fs::read(&path) {
+                Ok(bytes) => {
+                    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+                    if value["event_id"] != id
+                        || value["change_id"] != event.change_id
+                        || value["event_type"] != "change-opened"
+                    {
+                        bail!("known opening event changed; refusing append");
+                    }
+                    Some(id)
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => self
+                    .raw_events(&event.change_id)?
+                    .into_iter()
+                    .find(|(_, value)| value["event_type"] == "change-opened")
+                    .map(|(id, _)| id),
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("cannot inspect opening event {}", path.display())
+                    })
+                }
+            }
+        } else if self
             .list_change_ids()?
             .iter()
             .any(|id| id == &event.change_id)
         {
-            if let Some((opening_id, _)) = self
-                .raw_events(&event.change_id)?
-                .iter()
+            self.raw_events(&event.change_id)?
+                .into_iter()
                 .find(|(_, value)| value["event_type"] == "change-opened")
-            {
-                if event.event_id < *opening_id {
-                    bail!(
-                        "event {} sorts before change {} opening {}; nothing was written",
-                        event.event_id,
-                        event.change_id,
-                        opening_id
-                    );
-                }
+                .map(|(id, _)| id)
+        } else {
+            None
+        };
+        if let Some(opening_id) = opening_id {
+            if event.event_id < opening_id {
+                bail!(
+                    "event {} sorts before change {} opening {}; nothing was written",
+                    event.event_id,
+                    event.change_id,
+                    opening_id
+                );
             }
         }
         self.stamp_session_resolution(event.session_resolution)?;
@@ -1128,6 +1165,15 @@ impl Store {
             }
         }
         events.sort_by(|a, b| a.0.cmp(&b.0));
+        if let Some((id, _)) = events
+            .iter()
+            .find(|(_, value)| value["event_type"] == "change-opened")
+        {
+            OPENING_IDS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert((self.root.clone(), change_id.to_string()), id.clone());
+        }
         Ok(events)
     }
 

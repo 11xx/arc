@@ -2406,6 +2406,7 @@ SCHEMAS
 
   Internal:
     store format 7                   .git/arc/config.json and the change ledger
+    `arc-accept-checkout/1`           local administrative allocation recovery
     `arc-import-batch/1`             local atomic change import and authorization
     `arc-replica-import/3`           receipt of an imported replica bundle
     `arc-journal-exchange-import/1`  receipt of an imported journal bundle

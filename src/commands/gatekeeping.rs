@@ -3296,6 +3296,20 @@ fn integrate_one(
         refuse_initialized_gitlink_changes(&wt, &old_target, &approved_head)?;
     }
     let already_contained = actual_shape == crate::model::IntegrationShape::AlreadyContained;
+    let mut ev = ctx.event(
+        &store,
+        &change_id,
+        Payload::ChangeIntegrated {
+            integrated_commit: old_target.clone(),
+            source_patchset_id: approved_patchset_id.clone(),
+            source_head: approved_head.clone(),
+            target_branch: target.clone(),
+            target_before: old_target.clone(),
+            authorization: Some(authorization),
+            already_contained,
+            shape: Some(actual_shape),
+        },
+    )?;
     let merged = (|| -> Result<String> {
         report_untouched(&checkout, &untouched);
         if checkout.switch_from.is_some() {
@@ -3421,20 +3435,13 @@ fn integrate_one(
         Ok(merged)
     })()
     .map_err(|error| transition_failure(&wt, &target, &approved_head, error))?;
-    let ev = ctx.event(
-        &store,
-        &change_id,
-        Payload::ChangeIntegrated {
-            integrated_commit: merged.clone(),
-            source_patchset_id: approved_patchset_id.clone(),
-            source_head: approved_head.clone(),
-            target_branch: target.clone(),
-            target_before: old_target.clone(),
-            authorization: Some(authorization),
-            already_contained,
-            shape: Some(actual_shape),
-        },
-    )?;
+    if let Payload::ChangeIntegrated {
+        integrated_commit, ..
+    } = &mut ev.payload
+    {
+        *integrated_commit = merged.clone();
+    }
+    ev.created_at = chrono::Utc::now();
     if let Err(error) = store.append_event(&ev) {
         let publication = store.event_is_published(&ev);
         let (publication, next) = match publication {
