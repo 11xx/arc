@@ -21,16 +21,16 @@ reads.
   to.
 
 ## Releasing
-- CalVer. A version is its publication date, `YYYY.M.D` with no leading zeros
-  and no fourth field, prerelease, or build metadata. One release per
-  date. `arc --version`, the manifest, and the changelog's top release heading
-  agree.
+- CalVer. A version is its release date, `YYYY.M.D` with no leading zeros,
+  prerelease, or build metadata. Cargo rejects a fourth field, so a second
+  release waits for the next date. `arc --version`, the manifest, and the
+  changelog's top release heading agree.
 - The package is `arc-ledger`; the binary, repository, and command are `arc`.
 - `agent-tapes-core` comes from [tapes](https://github.com/11xx/tapes) by
   `git` and `rev`. The `version` beside the rev is the release that rev
   carries; move both together.
 - `publish = false` stays until the tapes versions it requires are on the
-  registry. `cargo publish` is the operator's act, never a session's.
+  registry. Publish only when the operator asks.
 
 Before tagging a release:
 
