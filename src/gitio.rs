@@ -1773,6 +1773,27 @@ pub fn list_refs(cwd: &Path, prefix: &str) -> Result<Vec<(String, String)>> {
         .collect())
 }
 
+/// Revisions reachable from the included commits but not the excluded tips.
+/// Stdin keeps large ref sets independent of the process argument limit.
+pub fn rev_list_excluding(
+    cwd: &Path,
+    included: &[&str],
+    excluded: &[&str],
+) -> Result<BTreeSet<String>> {
+    let mut input = String::new();
+    for revision in included {
+        input.push_str(&format!("{revision}\n"));
+    }
+    for revision in excluded {
+        input.push_str(&format!("^{revision}\n"));
+    }
+    let out = git_piped(cwd, &["rev-list", "--stdin"], input.as_bytes())?;
+    Ok(String::from_utf8(out)?
+        .lines()
+        .map(str::to_string)
+        .collect())
+}
+
 /// Which of these revisions this repository cannot resolve.
 ///
 /// One `cat-file --batch-check` process answers for every revision at once,

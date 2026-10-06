@@ -22,8 +22,8 @@ pub struct SignArgs {
     /// The oldest commit to recreate, inclusive. Absent searches target..head
     /// on a tracked branch, or the whole history outside a change.
     pub from: Option<String>,
-    /// Permit recreating commits reachable from another branch, using the
-    /// whole history for the default range.
+    /// Permit recreating commits reachable from another branch without
+    /// changing the selected range.
     pub include_shared: bool,
     /// Compute and print the map, then stop.
     pub dry_run: bool,
@@ -56,7 +56,7 @@ pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
         .collect();
     let mut survey = gitio::signature_survey(&cwd, &head)?;
     let mut own = BTreeSet::new();
-    if !targets.is_empty() && !args.include_shared {
+    if !targets.is_empty() {
         let mut revisions = vec![head.clone()];
         for target in &targets {
             revisions.push(format!("^{}", gitio::branch_head(&cwd, target)?));
@@ -71,7 +71,7 @@ pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
         None => match oldest_unsigned(&survey, args.key.as_deref()) {
             Some(from) => from,
             None => {
-                println!("every commit on {branch} is signed by the requested key; nothing to do");
+                println!("every commit in the selected range on {branch} is signed by the requested key; nothing to do");
                 return Ok(0);
             }
         },
@@ -80,16 +80,12 @@ pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
         bail!("{from} is not an ancestor of {branch}");
     }
     let mut range = gitio::commits_from(&cwd, &from, &head)?;
-    if args.from.is_none() && !targets.is_empty() && !args.include_shared {
+    if args.from.is_none() && !targets.is_empty() {
         range.retain(|commit| own.contains(commit));
     }
     if range.is_empty() {
         bail!("{from} is not an ancestor of {branch}");
     }
-    if !args.include_shared {
-        protect_shared(&cwd, &branch, &targets, range.iter())?;
-    }
-
     let sign = (!args.no_sign).then_some(args.key.as_deref());
     let mut walked = Walked::over(&range, branch, from, head, "arc rewrite sign");
     walked.reason = format!("re-signed {} from {}", walked.branch, short(&walked.from));
@@ -97,6 +93,9 @@ pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
         let mut commit = gitio::read_commit(&cwd, old)?;
         commit.parents = map_parents(&cwd, old, &commit.parents, &walked.mapping)?;
         walked.recreated(&cwd, old, &commit, sign)?;
+    }
+    if !args.include_shared {
+        protect_shared(&cwd, &targets, &walked, range.iter(), args.retag)?;
     }
     complete(ctx, &store, walked, sign, args.dry_run, args.retag)
 }
@@ -197,17 +196,23 @@ pub fn trailers(ctx: &Ctx, args: TrailerArgs) -> Result<i32> {
         walked.recreated(&cwd, old, &commit, sign)?;
     }
     if !args.include_shared {
-        protect_shared(&cwd, &walked.branch, &targets, walked.mapping.keys())?;
+        protect_shared(&cwd, &targets, &walked, walked.mapping.keys(), args.retag)?;
     }
     complete(ctx, &store, walked, sign, args.dry_run, args.retag)
 }
 
 fn protect_shared<'a>(
     cwd: &Path,
-    branch: &str,
     targets: &BTreeSet<String>,
+    walked: &Walked,
     commits: impl Iterator<Item = &'a String>,
+    retag: bool,
 ) -> Result<()> {
+    let branch = &walked.branch;
+    let candidates: Vec<&str> = commits.map(String::as_str).collect();
+    if candidates.is_empty() {
+        return Ok(());
+    }
     let mut protected: BTreeMap<String, String> = gitio::local_refs(cwd)?
         .into_iter()
         .filter(|reference| {
@@ -216,24 +221,91 @@ fn protect_shared<'a>(
         })
         .map(|reference| (reference.name, reference.commit))
         .collect();
-    protected.extend(gitio::list_refs(cwd, "refs/remotes/")?);
+    let upstream = gitio::branch_upstream(cwd, branch)?.map(|(_, reference)| reference);
+    let mut target_upstreams = BTreeSet::new();
     for target in targets {
+        if let Some((_, reference)) = gitio::branch_upstream(cwd, target)? {
+            target_upstreams.insert(reference);
+        }
         protected.insert(
             format!("refs/heads/{target}"),
             gitio::branch_head(cwd, target)?,
         );
     }
-    for commit in commits {
-        for (reference, tip) in &protected {
-            if gitio::is_ancestor(cwd, commit, tip)? {
-                bail!(
-                    "refusing to recreate {commit}: reachable from {reference}; \
-                       use --include-shared for a deliberate shared-history rewrite"
-                );
-            }
+    let mut remotes: Vec<String> = gitio::git(cwd, &["remote"])?
+        .lines()
+        .map(str::to_string)
+        .collect();
+    remotes.sort_by_key(|remote| std::cmp::Reverse(remote.len()));
+    for (reference, tip) in gitio::list_refs(cwd, "refs/remotes/")? {
+        let relative = reference.trim_start_matches("refs/remotes/");
+        let tracked = remotes
+            .iter()
+            .find_map(|remote| relative.strip_prefix(&format!("{remote}/")))
+            .or_else(|| relative.split_once('/').map(|(_, tracked)| tracked));
+        let target_ref = tracked.is_some_and(|name| targets.contains(name))
+            || target_upstreams.contains(&reference);
+        let own_ref =
+            tracked == Some(branch.as_str()) || upstream.as_deref() == Some(reference.as_str());
+        if target_ref || !own_ref {
+            protected.insert(reference, tip);
         }
     }
-    Ok(())
+    if protected.is_empty() {
+        return Ok(());
+    }
+    let tips: Vec<&str> = protected.values().map(String::as_str).collect();
+    let exclusive = gitio::rev_list_excluding(cwd, &candidates, &tips)?;
+    let Some(commit) = candidates
+        .iter()
+        .find(|commit| !exclusive.contains(**commit))
+    else {
+        return Ok(());
+    };
+    let containing = gitio::git(
+        cwd,
+        &[
+            "for-each-ref",
+            &format!("--contains={commit}"),
+            "--format=%(refname)",
+            "refs/heads/",
+            "refs/remotes/",
+        ],
+    )?;
+    let refs: Vec<&str> = containing
+        .lines()
+        .filter(|name| protected.contains_key(*name))
+        .collect();
+    if refs.is_empty() {
+        bail!("protected refs changed during shared-history checking; retry the rewrite");
+    }
+    let planned = plan_ref_moves(cwd, branch, &walked.from, &walked.mapping, retag)?;
+    let mut moves: Vec<String> = planned
+        .moves
+        .iter()
+        .map(|(name, moved)| format!("{name}: {} → {}", moved.old, moved.new))
+        .collect();
+    if let Some(Some(new)) = walked.mapping.get(&walked.head) {
+        moves.push(format!("refs/heads/{branch}: {} → {new}", walked.head));
+    }
+    moves.extend(
+        planned
+            .retags
+            .iter()
+            .map(|tag| format!("{}: re-point tag onto {}", tag.name, tag.target)),
+    );
+    let effects = if moves.is_empty() {
+        "no refs would move".to_string()
+    } else {
+        format!("refs this range would move:\n  {}", moves.join("\n  "))
+    };
+    bail!(
+        "refusing to recreate {commit}: reachable from {}; to permit exactly this range, \
+        repeat the same `{}` command with --include-shared --from {}; {effects}",
+        refs.join(", "),
+        walked.tool,
+        walked.from
+    );
 }
 
 /// What a trailer rewrite did, for the record it leaves: which keys went,
@@ -410,7 +482,7 @@ fn complete(
     );
     if dry_run {
         let _repository_events = store.lock_repository_events()?;
-        history::prepare_mapping(
+        let event = history::prepare_mapping(
             ctx,
             store,
             mapping.clone(),
@@ -418,6 +490,7 @@ fn complete(
             Some(tool.to_string()),
             moves.moves.clone(),
         )?;
+        store.ensure_repository_event_allowed(&event)?;
         for (old, new) in &mapping {
             println!("{old} {}", new.as_deref().unwrap_or("dropped"));
         }
@@ -647,9 +720,16 @@ fn apply(ctx: &Ctx, store: &Store, intent: &RewriteIntent, write_intent: bool) -
                         gitio::update_refs(cwd, &rollback).with_context(|| format!(
                             "rewrite publication failed ({error:#}); refs could not be restored; \
                              retain {} for recovery", store.rewrite_intent_path().display()))?;
+                        let effects = if pending.is_empty() {
+                            "no ref moves were made by this attempt; refs remain applied from a previous attempt"
+                        } else if pending.len() == intent.refs.len() {
+                            "ref moves from this attempt were restored"
+                        } else {
+                            "ref moves from this attempt were restored; refs already applied by a previous attempt remain applied"
+                        };
                         return Err(error.context(format!(
-                            "rewrite was not recorded; ref moves from this attempt were restored; \
-                             retain {} and retry to finish", store.rewrite_intent_path().display())));
+                            "rewrite was not recorded; {effects}; retain {} and run `arc rewrite sign` \
+                             in a checkout of {} to finish", store.rewrite_intent_path().display(), intent.branch)));
                     }
                     Ok(true) => return Err(error.context(format!(
                         "rewrite event {} is published and refs are applied; retain {} and retry to finish",

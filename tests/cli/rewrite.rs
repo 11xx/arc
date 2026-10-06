@@ -2231,6 +2231,211 @@ fn including_shared_history_explicitly_rewrites_the_target_merge() {
         .success();
 }
 
+#[test]
+fn pushed_change_branches_can_rewrite_their_own_history() {
+    for mode in ["sign", "trailers"] {
+        for configured_upstream in [false, true] {
+            let repo = repo_with_gates();
+            let key = signing_key(&repo).expect("pushed rewrite acceptance requires a sandbox key");
+            let (_, worktree, old) = change_with_patchset(&repo, "alpha");
+            let target = repo.head(&repo.root);
+            for remote in ["origin", "backup", "nested/backup"] {
+                git(
+                    &worktree,
+                    &["remote", "add", remote, repo.root.to_str().unwrap()],
+                );
+                git(
+                    &worktree,
+                    &[
+                        "update-ref",
+                        &format!("refs/remotes/{remote}/arc/alpha"),
+                        &old,
+                    ],
+                );
+            }
+            if configured_upstream {
+                git(
+                    &worktree,
+                    &["update-ref", "refs/remotes/origin/delivery", &old],
+                );
+                git(
+                    &worktree,
+                    &[
+                        "branch",
+                        "--set-upstream-to",
+                        "origin/delivery",
+                        "arc/alpha",
+                    ],
+                );
+            }
+            let remotes = git_out(
+                &worktree,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname) %(objectname)",
+                    "refs/remotes/",
+                ],
+            );
+            let mut command = arc_signing(&repo, &key, &worktree);
+            command.args(["rewrite", mode, "--key", &key.fingerprint]);
+            if mode == "trailers" {
+                command.args([
+                    "--from",
+                    &old,
+                    "--append",
+                    "Planned-by: Planner <planner@example.invalid>",
+                ]);
+            }
+            command.assert().success();
+            assert_ne!(repo.head(&worktree), old);
+            assert_eq!(repo.head(&repo.root), target);
+            assert_eq!(
+                git_out(
+                    &worktree,
+                    &[
+                        "for-each-ref",
+                        "--format=%(refname) %(objectname)",
+                        "refs/remotes/"
+                    ]
+                ),
+                remotes
+            );
+        }
+    }
+}
+
+#[test]
+fn shared_permission_never_widens_the_default_signing_range() {
+    let repo = repo_with_gates();
+    let key = signing_key(&repo).expect("range acceptance requires a sandbox key");
+    let (worktree, target, _) = change_on_signed_merge(&repo, &key);
+    let own = git_out(&worktree, &["rev-list", &format!("{target}..HEAD")]);
+    arc_signing(&repo, &key, &worktree)
+        .args([
+            "rewrite",
+            "sign",
+            "--include-shared",
+            "--key",
+            &key.fingerprint,
+        ])
+        .assert()
+        .success();
+    assert_eq!(repo.head(&repo.root), target);
+    let event: serde_json::Value =
+        serde_json::from_slice(&fs::read(repository_events(&repo).pop().unwrap()).unwrap())
+            .unwrap();
+    let mapped = event["mapping"].as_object().unwrap();
+    assert_eq!(mapped.len(), 2);
+    assert!(own.lines().all(|old| mapped.contains_key(old)));
+    let after = ref_snapshot(&worktree);
+    arc_signing(&repo, &key, &worktree)
+        .args([
+            "rewrite",
+            "sign",
+            "--include-shared",
+            "--key",
+            &key.fingerprint,
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("nothing to do"));
+    assert_eq!(ref_snapshot(&worktree), after);
+}
+
+#[test]
+fn an_own_upstream_exemption_cannot_bypass_target_protection() {
+    for mode in ["sign", "trailers"] {
+        let repo = repo_with_gates();
+        let key = signing_key(&repo).expect("target upstream acceptance requires a sandbox key");
+        let (_, worktree, old) = change_with_patchset(&repo, "alpha");
+        git(
+            &worktree,
+            &["remote", "add", "origin", repo.root.to_str().unwrap()],
+        );
+        git(
+            &worktree,
+            &["update-ref", "refs/remotes/origin/canonical", &old],
+        );
+        for branch in ["master", "arc/alpha"] {
+            git(
+                &worktree,
+                &["branch", "--set-upstream-to", "origin/canonical", branch],
+            );
+        }
+        let before = ref_snapshot(&worktree);
+        let mut command = arc_signing(&repo, &key, &worktree);
+        command.args(["rewrite", mode, "--key", &key.fingerprint]);
+        if mode == "trailers" {
+            command.args([
+                "--from",
+                &old,
+                "--append",
+                "Planned-by: Planner <planner@example.invalid>",
+            ]);
+        }
+        command
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("refs/remotes/origin/canonical"));
+        assert_eq!(ref_snapshot(&worktree), before);
+        assert!(repository_events(&repo).is_empty());
+    }
+}
+
+#[test]
+fn shared_guard_uses_a_bounded_number_of_ancestry_probes() {
+    let repo = repo_with_gates();
+    let (_, worktree, from) = change_with_patchset(&repo, "alpha");
+    for index in 0..8 {
+        repo.commit(&worktree, "more.txt", &format!("{index}\n"), "feat: more");
+    }
+    let head = repo.head(&worktree);
+    for index in 0..100 {
+        git(
+            &worktree,
+            &[
+                "update-ref",
+                &format!("refs/remotes/origin/shared-{index}"),
+                &head,
+            ],
+        );
+    }
+    let trace = repo.home.join("git-trace.jsonl");
+    repo.arc(&worktree)
+        .env("GIT_TRACE2_EVENT", &trace)
+        .args([
+            "rewrite",
+            "trailers",
+            "--from",
+            &from,
+            "--no-sign",
+            "--append",
+            "Planned-by: Planner <planner@example.invalid>",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "reachable from refs/remotes/origin/shared-",
+        ));
+    let probes = fs::read_to_string(trace)
+        .unwrap()
+        .lines()
+        .filter(|line| {
+            let event: serde_json::Value = serde_json::from_str(line).unwrap();
+            event["event"] == "start"
+                && event["argv"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|arg| arg == "--is-ancestor")
+        })
+        .count();
+    assert!(
+        probes <= 4,
+        "shared guard spawned {probes} individual ancestry probes"
+    );
+}
+
 fn ref_snapshot(cwd: &Path) -> String {
     git_out(cwd, &["for-each-ref", "--format=%(refname) %(objectname)"])
 }
@@ -2241,6 +2446,7 @@ fn trailer_rewrites_refuse_target_and_other_branch_history() {
         "refs/heads/master",
         "refs/heads/shared-work",
         "refs/remotes/origin/shared-work",
+        "refs/remotes/origin/other/arc/alpha",
     ] {
         for dry in [false, true] {
             let repo = repo_with_gates();
@@ -2267,7 +2473,9 @@ fn trailer_rewrites_refuse_target_and_other_branch_history() {
             }
             command.assert().failure().stderr(
                 predicates::str::contains(protected)
-                    .and(predicates::str::contains("--include-shared")),
+                    .and(predicates::str::contains("--include-shared"))
+                    .and(predicates::str::contains(format!("--from {from}")))
+                    .and(predicates::str::contains("refs/heads/arc/alpha:")),
             );
             assert_eq!(ref_snapshot(&worktree), before);
             assert!(repository_events(&repo).is_empty());
@@ -2468,26 +2676,73 @@ fn rewrite_actor_policy_refusals_leave_every_ref_unchanged() {
         let (_, worktree, old) = change_with_patchset(&repo, "alpha");
         repo.declare_gates_locally("[policy]\nrequire_declared_actor = true\n");
         let before = ref_snapshot(&worktree);
-        let mut command = arc_signing(&repo, &key, &worktree);
-        command.env_remove("ARC_ACTOR").args([
-            "rewrite",
-            mode,
-            "--from",
-            &old,
-            "--key",
-            &key.fingerprint,
-        ]);
-        if mode == "trailers" {
-            command.args(["--append", "Planned-by: Planner <planner@example.invalid>"]);
+        for dry in [false, true] {
+            let mut command = arc_signing(&repo, &key, &worktree);
+            command.env_remove("ARC_ACTOR").args([
+                "rewrite",
+                mode,
+                "--from",
+                &old,
+                "--key",
+                &key.fingerprint,
+            ]);
+            if dry {
+                command.arg("--dry-run");
+            }
+            if mode == "trailers" {
+                command.args(["--append", "Planned-by: Planner <planner@example.invalid>"]);
+            }
+            command
+                .assert()
+                .failure()
+                .stderr(predicates::str::contains("requires a declared actor"));
+            assert_eq!(ref_snapshot(&worktree), before);
+            assert!(repository_events(&repo).is_empty());
+            assert!(!intent_path(&repo).exists());
         }
-        command
-            .assert()
-            .failure()
-            .stderr(predicates::str::contains("requires a declared actor"));
-        assert_eq!(ref_snapshot(&worktree), before);
-        assert!(repository_events(&repo).is_empty());
-        assert!(!intent_path(&repo).exists());
     }
+}
+
+#[test]
+fn failed_publication_on_resume_reports_previously_applied_refs() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = repo_with_gates();
+    let (_, worktree, old) = change_with_patchset(&repo, "alpha");
+    let args = [
+        "rewrite",
+        "trailers",
+        "--from",
+        &old,
+        "--no-sign",
+        "--append",
+        "Planned-by: Planner <planner@example.invalid>",
+    ];
+    repo.arc(&worktree)
+        .args(args)
+        .env("ARC_REWRITE_INTERRUPT", "refs")
+        .assert()
+        .failure();
+    let applied = ref_snapshot(&worktree);
+    assert_ne!(repo.head(&worktree), old);
+    let directory = repo.root.join(".git/arc/repository/events");
+    fs::create_dir_all(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o500)).unwrap();
+    let out = repo.arc(&worktree).args(args).output().unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(!out.status.success());
+    let error = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        error.contains("refs remain applied from a previous attempt"),
+        "{error}"
+    );
+    assert!(!error.contains("were restored"), "{error}");
+    assert!(error.contains("arc rewrite sign"), "{error}");
+    assert_eq!(ref_snapshot(&worktree), applied);
+    assert!(intent_path(&repo).exists());
+    repo.arc(&worktree).args(args).assert().success();
+    assert_eq!(ref_snapshot(&worktree), applied);
+    assert_eq!(repository_events(&repo).len(), 1);
+    assert!(!intent_path(&repo).exists());
 }
 
 #[test]

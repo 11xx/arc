@@ -1714,10 +1714,17 @@ HISTORY REWRITES
                        reachable from the target or another local or
                        remote-tracking branch are
                        refused, naming the commit and ref, including in
-                       --dry-run. --include-shared permits them and searches
-                       the whole history by default, naming stranded refs.
+                       --dry-run. The change branch's same-name remote refs,
+                       on any remote, and its configured upstream are its own
+                       work; target refs remain protected. --include-shared
+                       grants permission without changing the default range.
+                       With a target, the default always stays in target..head;
+                       an inclusive shared range requires --from. A refusal
+                       names the exact --include-shared and --from flags to
+                       permit its selected range and the refs it would move.
                        Every moved ref is named with its old and new value.
-                       --dry-run prints the map, every ref it would move, and
+                       --dry-run checks map consistency and append policy,
+                       prints the map, every ref it would move, and
                        the tags it would re-point or leave alone, and stops; --retag
                        recreates the annotated tags whose targets were
                        rewritten, signed like the commits. Run again to
@@ -1737,6 +1744,8 @@ HISTORY REWRITES
                        including in --dry-run. --include-shared permits an
                        intentional shared-history edit. Commits the edit leaves
                        untouched keep their IDs even inside a shared range.
+                       The same own-remote and upstream exemptions apply;
+                       permission never changes the range named by --from.
                        Every moved ref is named with its old and new value.
                        --key, --no-sign, --dry-run and --retag mean what they
                        mean above.
@@ -1803,6 +1812,9 @@ HISTORY REWRITES
   the error names the retained intent for recovery. An event already published,
   or one whose publication cannot be determined, keeps the applied refs and
   intent and reports that state for recovery rather than claiming nothing moved.
+  On resume, refs already applied by a previous attempt stay applied when
+  publication fails. Diagnostics distinguish those refs from moves restored
+  by the current attempt and name the command that finishes the saved intent.
 
   Recorded revisions keep saying what they said; every derived reading follows
   them forward, and `arc doctor` reports `unresolved-revision` where that
@@ -2455,8 +2467,10 @@ FILES
     environment = "<probe command>"     evidence counts only where the probe
                                         prints the same output
 
-  Every reviewed head is pinned by `refs/arc/keep/<change>/<patchset>` so
-  Git's garbage collection cannot take it. A pin is released only once its
+  Every patchset's resolved head is pinned by `refs/arc/keep/<change>/<patchset>`
+  so Git's garbage collection cannot take it. Pins follow recorded rewrites
+  and retain their successors; retaining original commit objects requires
+  separate operator-managed refs. A pin is released only once its
   head is reachable from the integration commit; release any other with
   `git update-ref -d`. A registered candidate's tree is pinned by
   `refs/arc/candidate/<id>` until `arc candidate retire` releases it.

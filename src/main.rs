@@ -2860,11 +2860,15 @@ enum RewriteCmd {
         #[arg(long)]
         from: Option<String>,
         /// Permit recreating commits reachable from the target or another
-        /// local or remote-tracking branch, and default to the whole history. Without this flag
-        /// shared commits are refused before any moves, including --dry-run
+        /// local or remote-tracking branch. Permission never widens the default
+        /// target..head range; use --from to name an inclusive shared range.
+        /// Same-name remote refs and the branch's configured upstream are its
+        /// own work, except for target refs. Shared commits are refused without
+        /// permission before any moves, including --dry-run
         #[arg(long)]
         include_shared: bool,
-        /// Print the map and every ref the rewrite would move, then stop
+        /// For a fresh rewrite, check map consistency and append policy,
+        /// print the map and every ref it would move, then stop
         #[arg(long = "dry-run")]
         dry_run: bool,
         /// Recreate the commits without signing them, for a repository with no
@@ -2903,15 +2907,19 @@ enum RewriteCmd {
         #[arg(long, required = true)]
         from: String,
         /// Permit recreating commits reachable from the target or another
-        /// local or remote-tracking branch. Without this flag shared commits are refused before
-        /// any ref moves, including --dry-run; unchanged commits are left alone
+        /// local or remote-tracking branch. The branch's same-name remote refs
+        /// and configured upstream are its own work, except for target refs.
+        /// Without permission shared commits are refused before any ref moves,
+        /// including --dry-run; unchanged commits are left alone. Permission
+        /// never changes the inclusive range named by --from
         #[arg(long)]
         include_shared: bool,
         /// The key to sign a recreated commit with; Git's configured signing
         /// key by default
         #[arg(long)]
         key: Option<String>,
-        /// Print the map and every ref the rewrite would move, then stop
+        /// For a fresh rewrite, check map consistency and append policy,
+        /// print the map and every ref it would move, then stop
         #[arg(long = "dry-run")]
         dry_run: bool,
         /// Recreate the edited commits without signing them, for a repository
