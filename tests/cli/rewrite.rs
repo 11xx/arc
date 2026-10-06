@@ -1708,6 +1708,204 @@ fn editing_a_trailer_of_an_approved_change_leaves_the_approval_stale() {
         .failure();
 }
 
+fn assert_trailer_reapproval(repo: &Repo, key: Option<&Key>, composed: bool) {
+    let (change_id, worktree, approved) = change_with_patchset(repo, "alpha");
+    repo.declare_gates_locally(
+        "[policy]\nforbid_self_approval = true\n[danger]\npaths = [\"alpha.txt\"]\n",
+    );
+    repo.arc(&worktree)
+        .args(["verify", "alpha", "--all"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "reviewer")
+        .args(["review", "alpha", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["check", "alpha"])
+        .assert()
+        .success();
+    let mut rewrite = repo.arc(&worktree);
+    rewrite.args([
+        "rewrite",
+        "trailers",
+        "--from",
+        &approved,
+        "--append",
+        "Reviewed-by: Reviewer <reviewer@example.invalid>",
+    ]);
+    match key {
+        Some(key) => {
+            rewrite.env("GNUPGHOME", &key.home);
+            rewrite.args(["--key", &key.fingerprint]);
+        }
+        None => {
+            rewrite.arg("--no-sign");
+        }
+    }
+    rewrite.assert().success();
+    let rewritten = repo.head(&worktree);
+    assert_ne!(rewritten, approved);
+    assert_eq!(
+        git_out(&worktree, &["rev-parse", &format!("{approved}^{{tree}}")]),
+        git_out(&worktree, &["rev-parse", "HEAD^{tree}"])
+    );
+    if let Some(key) = key {
+        git_signing(&worktree, key, &["verify-commit", &rewritten]);
+    }
+    let rewrites: Vec<_> = repository_events(repo)
+        .into_iter()
+        .map(|path| {
+            let bytes = fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect();
+    assert!(!rewrites.is_empty());
+    assert_eq!(
+        recorded_map(repo, std::slice::from_ref(&approved))[&approved],
+        rewritten
+    );
+    assert!(!approval_valid(repo, "alpha"));
+    repo.arc(&worktree)
+        .args(["check", "alpha"])
+        .assert()
+        .code(3);
+
+    // Another verdict on the old patchset still names the pre-edit commit.
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "reviewer")
+        .args([
+            "review",
+            "alpha",
+            "--patchset",
+            "ps-01",
+            "--verdict",
+            "approved",
+        ])
+        .assert()
+        .success();
+    assert!(!approval_valid(repo, "alpha"));
+
+    if !composed {
+        repo.arc(&worktree)
+            .args(["snapshot", "alpha"])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains("patchset: ps-02"));
+        assert!(
+            !approval_valid(repo, "alpha"),
+            "a snapshot grants no approval"
+        );
+        repo.arc(&worktree)
+            .args(["check", "alpha"])
+            .assert()
+            .code(3);
+    }
+    let mut review = repo.arc(&worktree);
+    review
+        .env("ARC_ACTOR", "reviewer")
+        .args(["review", "alpha", "--verdict", "approved"]);
+    if composed {
+        review.arg("--snapshot").args(["--contributors", "tester"]);
+    }
+    review.assert().success();
+    let state = json_stdout(repo.arc(&worktree).args(["show", "alpha", "--json"]));
+    assert_eq!(state["patchsets"].as_array().unwrap().len(), 2, "{state}");
+    assert_eq!(state["patchsets"][1]["id"], "ps-02");
+    assert_eq!(state["patchsets"][1]["head"], rewritten);
+    assert_eq!(state["verdicts"].as_array().unwrap().len(), 3);
+    assert_eq!(state["verdicts"][2]["patchset_id"], "ps-02");
+    let status = json_stdout(repo.arc(&worktree).args(["status", "alpha", "--json"]));
+    let assessments = status["verdict_assessments"].as_array().unwrap();
+    assert_eq!(assessments.len(), 3);
+    assert_eq!(assessments[0]["covers_current_head"], false);
+    assert_eq!(assessments[1]["covers_current_head"], false);
+    assert_eq!(assessments[2]["covers_current_head"], true);
+    assert!(approval_valid(repo, "alpha"));
+    repo.arc(&worktree)
+        .args(["check", "alpha"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["snapshot", "alpha"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("patchset: ps-02 (unchanged)"));
+    assert_eq!(
+        git_out(
+            &worktree,
+            &["rev-parse", &format!("refs/arc/keep/{change_id}/ps-02")]
+        ),
+        rewritten
+    );
+    assert_eq!(
+        recorded_map(repo, std::slice::from_ref(&approved))[&approved],
+        rewritten
+    );
+    assert_eq!(repository_events(repo).len(), rewrites.len());
+    for (path, bytes) in rewrites {
+        assert_eq!(
+            fs::read(path).unwrap(),
+            bytes,
+            "rewrite records are immutable"
+        );
+    }
+}
+
+#[test]
+fn unsigned_trailer_rewrite_can_be_reapproved_after_snapshot() {
+    for composed in [false, true] {
+        let repo = repo_with_gates();
+        assert_trailer_reapproval(&repo, None, composed);
+    }
+}
+
+#[test]
+fn signed_trailer_rewrite_can_be_reapproved_after_snapshot() {
+    for composed in [false, true] {
+        let repo = repo_with_gates();
+        let key = signing_key(&repo).expect("reapproval acceptance requires a sandbox signing key");
+        assert_trailer_reapproval(&repo, Some(&key), composed);
+    }
+}
+
+#[test]
+fn trailer_rewrite_before_first_snapshot_can_be_approved() {
+    let repo = repo_with_gates();
+    stdout(repo.arc(&repo.root).args(["begin", "alpha"]));
+    let worktree = repo.home.join(".worktrees/repo-alpha");
+    repo.commit(&worktree, "alpha.txt", "alpha\n", "feat: alpha");
+    repo.arc(&worktree)
+        .args([
+            "rewrite",
+            "trailers",
+            "--from",
+            "HEAD",
+            "--no-sign",
+            "--append",
+            "Reviewed-by: Reviewer <reviewer@example.invalid>",
+        ])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["snapshot", "alpha", "--verify"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "reviewer")
+        .args(["review", "alpha", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["check", "alpha"])
+        .assert()
+        .success();
+    let state = json_stdout(repo.arc(&worktree).args(["show", "alpha", "--json"]));
+    assert_eq!(state["patchsets"].as_array().unwrap().len(), 1);
+    assert_eq!(state["patchsets"][0]["head"], repo.head(&worktree));
+}
+
 /// A recorded map arriving in a bundle is judged against this repository's
 /// objects, whatever the sender claimed about it.
 #[test]

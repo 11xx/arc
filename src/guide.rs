@@ -548,6 +548,10 @@ RUN A CHANGE
                                      authority, as lead; return readiness and
                                      the local judgment still owed.
   arc snapshot                       Record the current head as a patchset.
+                                     A rewrite that invalidated approval
+                                     requires a fresh patchset even when the
+                                     mapped head already matches the branch.
+                                     A snapshot grants no approval.
     --verify [--gate <name>...]      Run required gates, or selected gates.
                                      Selected names must be unique and declared;
                                      invalid names refuse before any write.
@@ -594,6 +598,8 @@ RUN A CHANGE
     --snapshot                       Snapshot the clean worktree first;
       --contributors <a,b> | --solo  attribute that patchset, as on
                                      `arc snapshot`.
+                                     After a rewrite that invalidated approval,
+                                     the verdict names a fresh patchset.
     --cause <c>                      Required with changes-requested, refused
                                      otherwise: brief, executor, or
                                      integration-staleness.
@@ -1782,8 +1788,14 @@ HISTORY REWRITES
   rewrite only when the successor differs from the approved head in nothing but
   its signature — same tree, author, committer and message — which is what
   `arc rewrite sign` produces. Any other successor leaves it stale in `arc
-  status` and `arc check`: re-approve after `arc rewrite trailers`, or a map
-  naming different content. Whether a successor differs by signature alone is
+  status` and `arc check`. To re-approve after `arc rewrite trailers`, or a map
+  naming different content, run `arc snapshot` and record a verdict on the
+  fresh patchset, or use `arc review --snapshot --verdict approved` with the
+  work's contributor attribution. Snapshot records a new patchset whenever
+  the latest patchset's approved head differs from the current branch head,
+  even when its mapped head matches. Earlier verdicts remain bound to their
+  own patchsets and stay stale for the rewritten head; a snapshot or rewrite
+  grants no approval. Whether a successor differs by signature alone is
   judged when the map is recorded or imported, never when a change is read.
 
 THE HISTORY MODEL

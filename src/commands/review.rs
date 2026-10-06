@@ -560,6 +560,7 @@ pub(super) fn snapshot_holding(
         .latest_patchset()
         .filter(|p| {
             !requires_replay_snapshot && p.head == head
+                && p.approved_head == head
                 && p.base == base_rev
                 && p.brief_ref == brief_ref
                 // Links supplied now are part of what the patchset records: a

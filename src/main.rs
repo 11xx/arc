@@ -1294,6 +1294,9 @@ enum Cmd {
     /// Record the current branch head as a patchset with explicit base and brief binding.
     /// Accept preserves the delivered binding and contributor declaration through
     /// signature-only preparation; snapshots record evidence, never a judgment.
+    /// A head whose rewrite invalidated approval requires a fresh patchset,
+    /// even when the latest patchset's mapped head already matches the branch.
+    /// Re-approval requires a verdict on that fresh patchset.
     Snapshot {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1472,7 +1475,9 @@ enum Cmd {
         /// batch and the verdict are validated first, so a refused review
         /// records no patchset. The change stays locked from the snapshot
         /// until the verdict on that patchset is recorded, so a command
-        /// acting on the change in between reports the lock busy
+        /// acting on the change in between reports the lock busy.
+        /// A head whose rewrite invalidated approval gets a fresh patchset;
+        /// the verdict binds to that patchset, leaving older approvals stale
         #[arg(long)]
         snapshot: bool,
         #[command(flatten)]
@@ -2858,6 +2863,10 @@ enum RewriteCmd {
     },
     /// Edit the trailers of every commit message from --from to the branch
     /// head, recreating only the commits that change and what sits on them
+    ///
+    /// A message edit leaves earlier approvals stale. Run `arc snapshot`
+    /// followed by a verdict on the fresh patchset, or `arc review --snapshot`,
+    /// to re-approve the rewritten head. A rewrite grants no approval.
     Trailers {
         /// Remove every trailer with this key, matched without case; repeat
         /// for more than one
