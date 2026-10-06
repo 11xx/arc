@@ -1706,27 +1706,38 @@ HISTORY REWRITES
                        Recreate every commit from --from through the branch
                        head so one key signs them all, move the branch, arc's
                        refs and the local branches and tags that point into
-                       the range, and record the map. --from is inclusive. On
-                       a tracked change branch its default is the oldest
+                       the range, and record the map. The commit named by
+                       --from is itself rewritten. On a tracked change branch
+                       its default is the oldest
                        commit not signed by the key in target..head; outside
                        a change it searches the whole history. Commits
-                       reachable from the target or another local branch are
+                       reachable from the target or another local or
+                       remote-tracking branch are
                        refused, naming the commit and ref, including in
                        --dry-run. --include-shared permits them and searches
                        the whole history by default, naming stranded refs.
-                       --dry-run prints the map, the tags it
-                       would re-point or leave alone, and stops; --retag
+                       Every moved ref is named with its old and new value.
+                       --dry-run prints the map, every ref it would move, and
+                       the tags it would re-point or leave alone, and stops; --retag
                        recreates the annotated tags whose targets were
                        rewritten, signed like the commits. Run again to
                        finish one that was interrupted.
     arc rewrite trailers --from <rev> [--drop <key>] [--append <line>]
+                         [--include-shared]
                        Edit the trailer block of every commit message from
                        --from through the branch head, and carry the result
                        through the same map, refs and record. --drop removes
                        every trailer with that key, matched without case;
                        --append adds a `Key: value` line the block does not
                        already carry; both repeat, and at least one is
-                       required. --from is named rather than inferred.
+                       required. The commit named by --from is itself edited;
+                       it is rewritten when its message or ancestry changes.
+                       Recreating a commit reachable from the target or another
+                       local or remote-tracking branch is refused, naming that commit and ref,
+                       including in --dry-run. --include-shared permits an
+                       intentional shared-history edit. Commits the edit leaves
+                       untouched keep their IDs even inside a shared range.
+                       Every moved ref is named with its old and new value.
                        --key, --no-sign, --dry-run and --retag mean what they
                        mean above.
     arc history rewrite --map <file> --reason <why>
@@ -1777,11 +1788,21 @@ HISTORY REWRITES
   Every ref moves in one Git transaction, so a rewrite leaves the branch and
   arc's evidence refs on one history or leaves them all alone. The map and
   the ref moves are written to `repository/rewrite-intent.json` before any of
-  it is applied, and the file is removed once the map is recorded, so an
-  interrupted rewrite is finished by running it again rather than repeated —
+  it is applied. Map consistency, successor validity, signature-only
+  classification and append policy are checked under the repository-event
+  lock before any ref moves. A contradictory map records no intent and moves
+  no refs. The file is removed once the map is recorded and the checkout
+  index is refreshed, so an interrupted rewrite is finished by running it
+  again rather than repeated —
   repeating it would sign the same commits afresh and record a second
   successor for each. A ref moved by something else in the meantime stops the
   rewrite, named.
+  If publication fails before an event exists, the attempt restores its ref
+  moves in one transaction and retains its intent for retry with the same
+  computed commits. A concurrent ref change can prevent that rollback;
+  the error names the retained intent for recovery. An event already published,
+  or one whose publication cannot be determined, keeps the applied refs and
+  intent and reports that state for recovery rather than claiming nothing moved.
 
   Recorded revisions keep saying what they said; every derived reading follows
   them forward, and `arc doctor` reports `unresolved-revision` where that

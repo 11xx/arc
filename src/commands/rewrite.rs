@@ -87,30 +87,7 @@ pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
         bail!("{from} is not an ancestor of {branch}");
     }
     if !args.include_shared {
-        let mut protected: BTreeMap<String, String> = gitio::local_refs(&cwd)?
-            .into_iter()
-            .filter(|reference| {
-                reference.name.starts_with("refs/heads/")
-                    && reference.name != format!("refs/heads/{branch}")
-            })
-            .map(|reference| (reference.name, reference.commit))
-            .collect();
-        for target in &targets {
-            protected.insert(
-                format!("refs/heads/{target}"),
-                gitio::branch_head(&cwd, target)?,
-            );
-        }
-        for commit in &range {
-            for (reference, tip) in &protected {
-                if gitio::is_ancestor(&cwd, commit, tip)? {
-                    bail!(
-                        "refusing to recreate {commit}: reachable from {reference}; \
-                           use --include-shared for a deliberate shared-history rewrite"
-                    );
-                }
-            }
-        }
+        protect_shared(&cwd, &branch, &targets, range.iter())?;
     }
 
     let sign = (!args.no_sign).then_some(args.key.as_deref());
@@ -128,9 +105,11 @@ pub struct TrailerArgs {
     /// The key to sign a recreated commit with. Absent signs with the key Git
     /// is configured to use.
     pub key: Option<String>,
-    /// The oldest commit whose trailers are edited. The mode has nothing to
+    /// The oldest commit, itself included, whose trailers are edited. The mode has nothing to
     /// infer a range from, so it is named rather than defaulted.
     pub from: String,
+    /// Permit recreating commits reachable from the target or another branch.
+    pub include_shared: bool,
     /// Trailer keys to remove, matched without case.
     pub drop: Vec<String>,
     /// Whole trailer lines to add where the block does not carry them.
@@ -188,6 +167,12 @@ pub fn trailers(ctx: &Ctx, args: TrailerArgs) -> Result<i32> {
         Opened::Branch(branch) => branch,
     };
     let head = gitio::branch_head(&cwd, &branch)?;
+    let targets = ctx
+        .load_all_states(&store)?
+        .values()
+        .filter(|state| state.branch == branch)
+        .map(|state| state.target_branch.clone())
+        .collect();
     let from = gitio::rev_parse(&cwd, &args.from)?;
     let range = gitio::commits_from(&cwd, &from, &head)?;
     if range.is_empty() {
@@ -211,7 +196,44 @@ pub fn trailers(ctx: &Ctx, args: TrailerArgs) -> Result<i32> {
         commit.parents = parents;
         walked.recreated(&cwd, old, &commit, sign)?;
     }
+    if !args.include_shared {
+        protect_shared(&cwd, &walked.branch, &targets, walked.mapping.keys())?;
+    }
     complete(ctx, &store, walked, sign, args.dry_run, args.retag)
+}
+
+fn protect_shared<'a>(
+    cwd: &Path,
+    branch: &str,
+    targets: &BTreeSet<String>,
+    commits: impl Iterator<Item = &'a String>,
+) -> Result<()> {
+    let mut protected: BTreeMap<String, String> = gitio::local_refs(cwd)?
+        .into_iter()
+        .filter(|reference| {
+            reference.name.starts_with("refs/heads/")
+                && reference.name != format!("refs/heads/{branch}")
+        })
+        .map(|reference| (reference.name, reference.commit))
+        .collect();
+    protected.extend(gitio::list_refs(cwd, "refs/remotes/")?);
+    for target in targets {
+        protected.insert(
+            format!("refs/heads/{target}"),
+            gitio::branch_head(cwd, target)?,
+        );
+    }
+    for commit in commits {
+        for (reference, tip) in &protected {
+            if gitio::is_ancestor(cwd, commit, tip)? {
+                bail!(
+                    "refusing to recreate {commit}: reachable from {reference}; \
+                       use --include-shared for a deliberate shared-history rewrite"
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// What a trailer rewrite did, for the record it leaves: which keys went,
@@ -375,7 +397,27 @@ fn complete(
     }
 
     let mut moves = plan_ref_moves(&cwd, &branch, &from, &mapping, retag)?;
+    let new_head = mapping
+        .get(&head)
+        .and_then(|new| new.clone())
+        .unwrap_or_else(|| head.clone());
+    moves.moves.insert(
+        format!("refs/heads/{branch}"),
+        RefMove {
+            old: head.clone(),
+            new: new_head.clone(),
+        },
+    );
     if dry_run {
+        let _repository_events = store.lock_repository_events()?;
+        history::prepare_mapping(
+            ctx,
+            store,
+            mapping.clone(),
+            reason,
+            Some(tool.to_string()),
+            moves.moves.clone(),
+        )?;
         for (old, new) in &mapping {
             println!("{old} {}", new.as_deref().unwrap_or("dropped"));
         }
@@ -383,6 +425,9 @@ fn complete(
             "{} would be rewritten; nothing was moved or recorded",
             plural(mapping.len(), "commit")
         );
+        for (name, moved) in &moves.moves {
+            println!("would move: {name} {} → {}", moved.old, moved.new);
+        }
         // The tags are the half of a rewrite that is a decision rather than a
         // consequence, so a preview that stopped at the map would leave the
         // operator to run the real thing to find out what it does to a
@@ -407,21 +452,10 @@ fn complete(
         return Ok(0);
     }
 
-    let new_head = mapping
-        .get(&head)
-        .and_then(|new| new.clone())
-        .unwrap_or_else(|| head.clone());
     let retagged = write_retags(&cwd, &mut moves, sign)?;
     // The branch moves inside the same transaction as everything else. Moving
     // it last, on its own, is what leaves the refs arc keeps on one history
     // and the branch on another.
-    moves.moves.insert(
-        format!("refs/heads/{branch}"),
-        RefMove {
-            old: head.clone(),
-            new: new_head.clone(),
-        },
-    );
     let intent = RewriteIntent {
         schema_version: crate::model::SCHEMA_VERSION,
         branch: branch.clone(),
@@ -435,9 +469,7 @@ fn complete(
     // Everything above only wrote objects nothing points at, which change
     // nothing about what the repository says. From here the rewrite becomes
     // visible, so what it is about to do is on disk first.
-    store.write_rewrite_intent(&intent)?;
-    interrupted_after("intent")?;
-    let event_id = apply(ctx, store, &intent)?;
+    let event_id = apply(ctx, store, &intent, true)?;
 
     println!(
         "{} rewritten on {branch}; head is now {}",
@@ -445,6 +477,7 @@ fn complete(
         short(&new_head)
     );
     println!("{} moved", plural(intent.refs.len(), "ref"));
+    report_ref_moves(&intent);
     println!("rewrite recorded as {event_id}");
     for retag in &retagged {
         println!(
@@ -505,7 +538,8 @@ fn resume(ctx: &Ctx, store: &Store, branch: &str, intent: &RewriteIntent) -> Res
         short(&intent.from),
         intent.created_at.to_rfc3339()
     );
-    let event_id = apply(ctx, store, intent)?;
+    let event_id = apply(ctx, store, intent, false)?;
+    report_ref_moves(intent);
     println!("rewrite recorded as {event_id}");
     Ok(0)
 }
@@ -515,8 +549,9 @@ fn resume(ctx: &Ctx, store: &Store, branch: &str, intent: &RewriteIntent) -> Res
 ///
 /// Answers with the event holding the map, whether this call recorded it or
 /// an interrupted one already had.
-fn apply(ctx: &Ctx, store: &Store, intent: &RewriteIntent) -> Result<String> {
+fn apply(ctx: &Ctx, store: &Store, intent: &RewriteIntent, write_intent: bool) -> Result<String> {
     let cwd = &ctx.cwd;
+    let _repository_events = store.lock_repository_events()?;
     // A commit the intent names has to still be here. Objects nothing points
     // at are pruned, and a map recorded over pruned successors would name
     // commits no reader can reach.
@@ -565,31 +600,94 @@ fn apply(ctx: &Ctx, store: &Store, intent: &RewriteIntent) -> Result<String> {
             ),
         }
     }
-    gitio::update_refs(cwd, &pending)?;
-    interrupted_after("refs")?;
-
-    let event_id = match recorded_as(store, intent)? {
-        Some(event_id) => event_id,
-        None => history::record_mapping(
+    let recorded = recorded_as(store, intent)?;
+    let event = if recorded.is_none() {
+        let event = history::prepare_mapping(
             ctx,
+            store,
             intent.mapping.clone(),
             intent.reason.clone(),
             intent.tool.clone(),
             intent.refs.clone(),
-        )?,
+        )?;
+        store.ensure_repository_event_allowed(&event)?;
+        Some(event)
+    } else {
+        None
     };
-    // The map is recorded and every ref names a commit it describes, so
-    // nothing is left to finish.
-    store.clear_rewrite_intent()?;
+    if write_intent {
+        store.write_rewrite_intent(intent)?;
+        interrupted_after("intent")?;
+    }
+    gitio::update_refs(cwd, &pending).with_context(|| {
+        format!(
+            "rewrite ref transaction failed; retain {} for recovery",
+            store.rewrite_intent_path().display()
+        )
+    })?;
+    interrupted_after("refs")?;
 
+    let event_id = match event {
+        None => recorded.context("rewrite event disappeared")?,
+        Some(event) => {
+            let publication = super::pause_until_released("ARC_REWRITE_PAUSE")
+                .and_then(|()| store.append_repository_event(&event))
+                .and_then(|()| interrupted_after("record"));
+            if let Err(error) = publication {
+                match store.repository_event_is_published(&event) {
+                    Ok(false) => {
+                        let rollback: Vec<_> = pending
+                            .iter()
+                            .map(|moved| gitio::RefUpdate {
+                                name: moved.name.clone(),
+                                old: moved.new.clone(),
+                                new: moved.old.clone(),
+                            })
+                            .collect();
+                        gitio::update_refs(cwd, &rollback).with_context(|| format!(
+                            "rewrite publication failed ({error:#}); refs could not be restored; \
+                             retain {} for recovery", store.rewrite_intent_path().display()))?;
+                        return Err(error.context(format!(
+                            "rewrite was not recorded; ref moves from this attempt were restored; \
+                             retain {} and retry to finish", store.rewrite_intent_path().display())));
+                    }
+                    Ok(true) => return Err(error.context(format!(
+                        "rewrite event {} is published and refs are applied; retain {} and retry to finish",
+                        event.event_id, store.rewrite_intent_path().display()))),
+                    Err(inspection) => return Err(error.context(format!(
+                        "rewrite publication is uncertain ({inspection:#}); refs are applied; \
+                         retain {} for recovery", store.rewrite_intent_path().display()))),
+                }
+            }
+            println!(
+                "history rewrite recorded: {} revisions",
+                intent.mapping.len()
+            );
+            event.event_id
+        }
+    };
     // The branch moved under the checkout, whose index still describes the
     // commit it moved off. Nothing about the tree changed, so this only
     // teaches the index which commit it is looking at.
     let branch_ref = format!("refs/heads/{}", intent.branch);
     if let Some(new_head) = intent.refs.get(&branch_ref) {
-        gitio::git(cwd, &["reset", "--mixed", "--quiet", &new_head.new])?;
+        gitio::git(cwd, &["reset", "--mixed", "--quiet", &new_head.new]).with_context(|| {
+            format!(
+                "rewrite {event_id} is recorded and refs are applied; \
+                index refresh failed; retry using {}",
+                store.rewrite_intent_path().display()
+            )
+        })?;
     }
+    store.clear_rewrite_intent().with_context(|| format!(
+        "rewrite {event_id} is recorded and refs are applied; intent cleanup failed; retry to finish"))?;
     Ok(event_id)
+}
+
+fn report_ref_moves(intent: &RewriteIntent) {
+    for (name, moved) in &intent.refs {
+        println!("moved: {name} {} → {}", moved.old, moved.new);
+    }
 }
 
 /// The event already holding this intent's map, if an interrupted run

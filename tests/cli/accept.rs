@@ -1034,9 +1034,13 @@ fn accept_delivery_sign_publication_failure_reports_actual_refs_objects_and_inte
     fs::set_permissions(&events, fs::Permissions::from_mode(0o700)).unwrap();
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["stopped_at"], "sign");
-    assert_pending_signing_effects(&d, &result, true);
+    assert_pending_signing_effects(&d, &result, false);
     let prepared = result["prepared_head"].as_str().unwrap();
-    assert_ne!(prepared, d.head);
+    assert_eq!(prepared, d.head);
+    let successor = transcript_step(&result, "sign")["effects"]["pending_rewrite"]["intent"]
+        ["mapping"][&d.head]
+        .as_str()
+        .unwrap();
     assert_eq!(
         git_out(&d.receiver.root, &["rev-parse", &d.branch]),
         prepared
@@ -1051,7 +1055,7 @@ fn accept_delivery_sign_publication_failure_reports_actual_refs_objects_and_inte
         .unwrap()
         .contains(&binding["event_id"]));
     let retry = d.result(3);
-    assert_eq!(retry["prepared_head"], prepared);
+    assert_eq!(retry["prepared_head"], successor);
     assert!(!d
         .receiver
         .root

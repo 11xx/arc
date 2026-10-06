@@ -24,11 +24,8 @@ pub fn record_rewrite(ctx: &Ctx, map: &str, reason: String, tool: Option<String>
 /// Record a mapping as a rewrite of this repository's history, and answer
 /// with the event that holds it.
 ///
-/// Every write path lands here, so a map arc computed and a map an operator
-/// supplied are judged by one set of rules: the successors must be commits in
-/// this repository, and the result must not contradict a rewrite already
-/// recorded. It also records which successors differ from their old commit by
-/// signature alone, the only rewrites an approval follows.
+/// Computed and supplied maps use [`prepare_mapping`] to validate their
+/// successors, consistency and signature-only approval equivalence.
 pub fn record_mapping(
     ctx: &Ctx,
     mapping: std::collections::BTreeMap<String, Option<String>>,
@@ -40,6 +37,23 @@ pub fn record_mapping(
     // The same lock the import path takes: a rewrite recorded here and one
     // arriving in a bundle build the same map, and it is judged as a whole.
     let _repository_events = store.lock_repository_events()?;
+    let count = mapping.len();
+    let event = prepare_mapping(ctx, &store, mapping, reason, tool, refs)?;
+    store.append_repository_event(&event)?;
+    println!("history rewrite recorded: {count} revisions");
+    Ok(event.event_id)
+}
+
+/// Validate and construct a mapping event under the repository-event lock.
+/// Ref-moving callers prepare it before applying their transaction.
+pub(super) fn prepare_mapping(
+    ctx: &Ctx,
+    store: &Store,
+    mapping: BTreeMap<String, Option<String>>,
+    reason: String,
+    tool: Option<String>,
+    refs: BTreeMap<String, crate::rewrite::RefMove>,
+) -> Result<crate::model::Event> {
     // A map from another repository, or with a typo in it, would otherwise be
     // recorded as fact: doctor would report a rewritten revision and suppress
     // the dangling warning, while nothing could resolve the successor. arc
@@ -70,9 +84,8 @@ pub fn record_mapping(
     // Recording is judged against what is already held, for the same reason
     // an import is: two rewrites can disagree about one revision.
     let mut combined = store.load_repository_events()?;
-    let count = mapping.len();
     let mut event = ctx.event(
-        &store,
+        store,
         Store::REPOSITORY_SCOPE,
         Payload::HistoryRewritten {
             mapping,
@@ -96,15 +109,13 @@ pub fn record_mapping(
     {
         *signature_only = crate::provisional::retain_signature_only(
             &ctx.cwd,
-            Some(&store),
+            Some(store),
             &[],
             &rewrites,
             crate::rewrite::signature_only_successors(&ctx.cwd, mapping, &rewrites),
         )?;
     }
-    store.append_repository_event(&event)?;
-    println!("history rewrite recorded: {count} revisions");
-    Ok(event.event_id)
+    Ok(event)
 }
 
 /// Withdraw a map as a repository fact, preserving its record and its Git

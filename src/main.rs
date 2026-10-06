@@ -2844,21 +2844,27 @@ enum HistoryCmd {
 enum RewriteCmd {
     /// Recreate every commit from --from to the branch head so it is signed by
     /// one key, moving the refs and recording the map
+    ///
+    /// Map validation and append policy precede ref movement. Every moved ref
+    /// is named. A recording failure with no published event restores this
+    /// attempt's ref moves and retains its intent for retry. Published or
+    /// uncertain events retain the intent and applied refs for recovery.
     Sign {
         /// The key to sign with; Git's configured signing key by default
         #[arg(long)]
         key: Option<String>,
-        /// Oldest commit to recreate, inclusive. Defaults to the oldest not
-        /// signed by the key in target..head on a tracked change branch, or in
+        /// Oldest commit to recreate; the named commit itself is rewritten.
+        /// Defaults to the oldest not signed by the key in target..head on a
+        /// tracked change branch, or in
         /// the whole history outside a change
         #[arg(long)]
         from: Option<String>,
         /// Permit recreating commits reachable from the target or another
-        /// local branch, and default to the whole history. Without this flag
+        /// local or remote-tracking branch, and default to the whole history. Without this flag
         /// shared commits are refused before any moves, including --dry-run
         #[arg(long)]
         include_shared: bool,
-        /// Print the map the rewrite would record and stop
+        /// Print the map and every ref the rewrite would move, then stop
         #[arg(long = "dry-run")]
         dry_run: bool,
         /// Recreate the commits without signing them, for a repository with no
@@ -2878,6 +2884,10 @@ enum RewriteCmd {
     /// A message edit leaves earlier approvals stale. Run `arc snapshot`
     /// followed by a verdict on the fresh patchset, or `arc review --snapshot`,
     /// to re-approve the rewritten head. A rewrite grants no approval.
+    /// Map validation and append policy precede ref movement. Every moved ref
+    /// is named. A recording failure with no published event restores this
+    /// attempt's ref moves and retains its intent for retry. Published or
+    /// uncertain events retain the intent and applied refs for recovery.
     Trailers {
         /// Remove every trailer with this key, matched without case; repeat
         /// for more than one
@@ -2887,15 +2897,21 @@ enum RewriteCmd {
         /// already there; repeat for more than one
         #[arg(long, value_name = "LINE", required_unless_present = "drop")]
         append: Vec<String>,
-        /// Oldest commit whose trailers are edited; required, since a trailer
-        /// edit has nothing to infer a range from
+        /// Oldest commit whose trailers are edited; the named commit itself
+        /// is edited and rewritten when its message or ancestry changes.
+        /// Required, since a trailer edit has nothing to infer a range from
         #[arg(long, required = true)]
         from: String,
+        /// Permit recreating commits reachable from the target or another
+        /// local or remote-tracking branch. Without this flag shared commits are refused before
+        /// any ref moves, including --dry-run; unchanged commits are left alone
+        #[arg(long)]
+        include_shared: bool,
         /// The key to sign a recreated commit with; Git's configured signing
         /// key by default
         #[arg(long)]
         key: Option<String>,
-        /// Print the map the rewrite would record and stop
+        /// Print the map and every ref the rewrite would move, then stop
         #[arg(long = "dry-run")]
         dry_run: bool,
         /// Recreate the edited commits without signing them, for a repository
@@ -5008,6 +5024,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 drop,
                 append,
                 from,
+                include_shared,
                 key,
                 dry_run,
                 no_sign,
@@ -5017,6 +5034,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 commands::TrailerArgs {
                     key,
                     from,
+                    include_shared,
                     drop,
                     append,
                     dry_run,

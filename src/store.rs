@@ -326,11 +326,9 @@ impl Store {
     pub const REPOSITORY_SCOPE: &'static str = "repository";
 
     pub fn append_repository_event(&self, event: &Event) -> Result<()> {
-        self.refuse_read_only()?;
-        self.refuse_undeclared_author(event)?;
+        self.ensure_repository_event_allowed(event)?;
         self.stamp_session_resolution(event.session_resolution)?;
         self.stamp_format_for(&event.payload)?;
-        ids::validate_id_component(&event.event_id)?;
         let dir = self.repository_events_dir();
         create_private_dir_all(&dir)?;
         let path = dir.join(format!("{}.json", event.event_id));
@@ -338,6 +336,12 @@ impl Store {
         body.push(b'\n');
         write_exclusive(&path, &body)
             .with_context(|| format!("event {} already exists", event.event_id))
+    }
+
+    pub(crate) fn ensure_repository_event_allowed(&self, event: &Event) -> Result<()> {
+        self.refuse_read_only()?;
+        self.refuse_undeclared_author(event)?;
+        ids::validate_id_component(&event.event_id)
     }
 
     /// Repository-scoped events in ID order. A repository that has never had
@@ -812,10 +816,16 @@ impl Store {
     /// ambiguous and must not be treated as an absent event.
     pub fn event_is_published(&self, event: &Event) -> Result<bool> {
         ids::validate_id_component(&event.change_id)?;
+        self.event_is_published_at(event, &self.events_dir(&event.change_id))
+    }
+
+    pub(crate) fn repository_event_is_published(&self, event: &Event) -> Result<bool> {
+        self.event_is_published_at(event, &self.repository_events_dir())
+    }
+
+    fn event_is_published_at(&self, event: &Event, directory: &Path) -> Result<bool> {
         ids::validate_id_component(&event.event_id)?;
-        let path = self
-            .events_dir(&event.change_id)
-            .join(format!("{}.json", event.event_id));
+        let path = directory.join(format!("{}.json", event.event_id));
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -826,7 +836,7 @@ impl Store {
         let published: serde_json::Value = serde_json::from_slice(&bytes)?;
         if published != serde_json::to_value(event)? {
             bail!(
-                "published event {} differs from the attempted closure",
+                "published event {} differs from the attempted event",
                 event.event_id
             );
         }

@@ -226,7 +226,6 @@ fn session_link_stays_out_of_git_messages_trailers_and_changelog() {
     let slug = "private-provenance";
     stdout(repo.arc(&repo.root).args(["begin", slug]));
     let worktree = repo.home.join(".worktrees/repo-private-provenance");
-    let base = git_out(&worktree, &["rev-parse", "HEAD"]);
     repo.commit(&worktree, "private.txt", "content\n", "feat: content");
 
     let rewrite = repo
@@ -235,7 +234,7 @@ fn session_link_stays_out_of_git_messages_trailers_and_changelog() {
             "rewrite",
             "trailers",
             "--from",
-            &base,
+            "HEAD",
             "--append",
             "Implemented-by: fixture",
             "--no-sign",
