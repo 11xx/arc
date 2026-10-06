@@ -1452,6 +1452,10 @@ enum Cmd {
     /// Once a verdict is recorded, review says whether an approval gates. That
     /// is advice about a verdict that already stands: a failure to evaluate it
     /// is a warning naming the recorded verdict, and the review still succeeds.
+    /// An implicit verdict on the latest patchset is refused if a rewrite
+    /// invalidated its review head; run `arc snapshot` or use `--snapshot`.
+    /// Explicit `--patchset` judgments may name historical work; they retain
+    /// that patchset's review head and may be stale for the branch head.
     #[command(group(clap::ArgGroup::new("snapshot_attribution").args(["contributors", "solo"]).requires("snapshot")))]
     /// Verdicts retain observed publication authority. A verified authority refusal
     /// on a provisional delivery remains applicable across authority transfer.
@@ -2038,6 +2042,9 @@ enum Cmd {
         /// patchset, so it has nothing to say about a queue. It stands in
         /// for a verdict nobody recorded — and
         /// for a self-approval policy would reject — in the same invocation.
+        /// The waiver binds to the patchset's review head, following only
+        /// signature-only rewrites; a message or content rewrite requires a
+        /// fresh snapshot and declaration.
         /// It never overrules a reviewer who read this patchset and asked for
         /// changes: that is a verdict, not a missing one. The obligation
         /// survives closure and `arc query --debt` finds it; discharge it
@@ -2054,6 +2061,10 @@ enum Cmd {
         debt_kind: Option<DebtMissing>,
     },
     /// Record a review obligation this change carries but has not discharged
+    ///
+    /// A waiver binds to the patchset's review head, following only
+    /// signature-only rewrites. A message or content rewrite requires a fresh
+    /// snapshot and declaration before debt can waive review of that head.
     Debt {
         /// Change that owes the review
         change: String,

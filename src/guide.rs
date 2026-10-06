@@ -595,6 +595,11 @@ RUN A CHANGE
   arc policy path                    Print the operator policy path for this repo.
   arc policy write --body-file FILE  Replace that local policy from TOML.
   arc review --verdict <v>           Record a verdict (+ --findings-json -).
+                                     An implicit verdict is refused when a
+                                     rewrite invalidated the latest patchset's
+                                     review head; snapshot that head first.
+                                     Explicit --patchset judgments may record
+                                     historical work and stay stale.
     --snapshot                       Snapshot the clean worktree first;
       --contributors <a,b> | --solo  attribute that patchset, as on
                                      `arc snapshot`.
@@ -1508,10 +1513,14 @@ REVIEW COVERAGE AND DEBT
   with `arc integrate <change> --debt "<why>"`. A debt already in force routes to
   integration: status says integrate beside the flagged waiver, check drops
   the review-queue advisory, and the inbox keeps one lead row — until the
-  head moves past the covered patchset, which restores request_review. The debt can stand in for an
-  absent verdict or rescue a self-approval rejected by repository policy. It
-  binds to the exact patchset head declared, so new work needs a new
-  declaration — it does not excuse the rest of the change's life. A refused
+  head moves past the covered patchset, which requires a fresh snapshot. The
+  debt can stand in for an absent verdict or rescue a self-approval rejected
+  by repository policy. It binds to the exact patchset head declared, so new
+  work needs a new
+  declaration — it does not excuse the rest of the change's life. A waiver
+  follows only signature-only rewrites. A message or content rewrite leaves
+  the waiver stale even when the patchset's mapped head matches the branch;
+  a fresh snapshot and declaration are required for that head. A refused
   `arc integrate --debt` keeps the debt it declared; declaring it again with
   the same reason, kind, and declarer against the same patchset and coverage
   records nothing and prints the debt already in force.
@@ -1795,7 +1804,11 @@ HISTORY REWRITES
   the latest patchset's approved head differs from the current branch head,
   even when its mapped head matches. Earlier verdicts remain bound to their
   own patchsets and stay stale for the rewritten head; a snapshot or rewrite
-  grants no approval. Whether a successor differs by signature alone is
+  grants no approval. While the mapped and approved heads differ, status and
+  check direct the caller to snapshot, and an implicit verdict on the latest
+  patchset refuses before recording anything. An explicit --patchset judgment
+  may record historical work, retaining that patchset's review head and its
+  stale coverage. Whether a successor differs by signature alone is
   judged when the map is recorded or imported, never when a change is read.
 
 THE HISTORY MODEL

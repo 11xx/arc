@@ -138,7 +138,8 @@ pub fn decide(facts: &ApprovalFacts) -> ApprovalOutcome {
     // refuses an external approval alone only where independence is owed.
     let external_approval_needs_local = requires_independent_review
         || (facts.danger.dangerous && facts.danger.rule != DangerRule::NotDeclared);
-    let debt_waives_current_head = facts.head_matches && facts.debt_waives_latest_patchset;
+    let debt_waives_current_head =
+        facts.head_matches && facts.approved_head_matches && facts.debt_waives_latest_patchset;
     let names_latest_patchset = |patchset_id: &str| {
         facts
             .latest_patchset

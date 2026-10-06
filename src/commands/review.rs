@@ -555,11 +555,10 @@ pub(super) fn snapshot_holding(
     } else {
         (flagged_refs, Vec::new())
     };
-    let requires_replay_snapshot = crate::provisional::needs_replay_snapshot(&ctx.cwd, store, &st)?;
     let unchanged_patchset = st
         .latest_patchset()
         .filter(|p| {
-            !requires_replay_snapshot && p.head == head
+            p.head == head
                 && p.approved_head == head
                 && p.base == base_rev
                 && p.brief_ref == brief_ref
@@ -1228,6 +1227,18 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
     let events = store.load_events(&change_id)?;
     let mut st = store.project_state(&events, &store.rewrites()?)?;
     crate::replica::localize_change(&store.repository_id, &events, &mut st);
+    if snapshot_patchset.is_none()
+        && patchset.is_none()
+        && st
+            .latest_patchset()
+            .is_some_and(|p| p.head != p.approved_head)
+    {
+        bail!(
+            "the latest patchset's review head was rewritten; run `arc snapshot {change_id}` \
+             before recording a verdict, or use `arc review --snapshot {change_id}` \
+             with the work's contributor attribution"
+        );
+    }
     let patchset_id = match snapshot_patchset {
         Some(patchset_id) => patchset_id,
         None => resolve_patchset_id(&st, patchset)?

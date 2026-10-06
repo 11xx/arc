@@ -1697,7 +1697,7 @@ fn build_report(
             "wait_for:blockers".into()
         } else if needs_rebase {
             "rebase".into()
-        } else if !head_matches {
+        } else if !head_matches || !approved_head_matches {
             "snapshot".into()
         } else if !open_blocking.is_empty() {
             "resolve_findings".into()
@@ -1778,6 +1778,7 @@ fn build_report(
         || dependency_status.blocked
         || needs_rebase
         || !head_matches
+        || !approved_head_matches
         || !open_blocking.is_empty()
         || !state.holds.is_empty()
         || gate_statuses.iter().any(|gate| !gate.green_at_head)

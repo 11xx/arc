@@ -1675,6 +1675,11 @@ fn re_signing_an_approved_change_keeps_the_approval() {
         .args(["check", "alpha"])
         .assert()
         .success();
+    repo.arc(&worktree)
+        .args(["snapshot", "alpha"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("patchset: ps-01 (unchanged)"));
 }
 
 /// A trailer edit keeps the tree and changes the message, and the message is
@@ -1754,6 +1759,8 @@ fn assert_trailer_reapproval(repo: &Repo, key: Option<&Key>, composed: bool) {
     if let Some(key) = key {
         git_signing(&worktree, key, &["verify-commit", &rewritten]);
     }
+    let old_keep_ref = format!("refs/arc/keep/{change_id}/ps-01");
+    let old_keep_head = git_out(&worktree, &["rev-parse", &old_keep_ref]);
     let rewrites: Vec<_> = repository_events(repo)
         .into_iter()
         .map(|path| {
@@ -1772,6 +1779,23 @@ fn assert_trailer_reapproval(repo: &Repo, key: Option<&Key>, composed: bool) {
         .assert()
         .code(3);
 
+    let status = json_stdout(repo.arc(&worktree).args(["status", "alpha", "--json"]));
+    assert_eq!(status["next_action"], "snapshot", "{status}");
+    assert!(status.get("review_options").is_none(), "{status}");
+    let before = event_count(repo, &change_id);
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "reviewer")
+        .args(["review", "alpha", "--verdict", "approved"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("arc snapshot"))
+        .stderr(predicates::str::contains("arc review --snapshot"));
+    assert_eq!(event_count(repo, &change_id), before);
+    repo.arc(&worktree)
+        .args(["review", "alpha"])
+        .assert()
+        .success();
+
     // Another verdict on the old patchset still names the pre-edit commit.
     repo.arc(&worktree)
         .env("ARC_ACTOR", "reviewer")
@@ -1788,8 +1812,14 @@ fn assert_trailer_reapproval(repo: &Repo, key: Option<&Key>, composed: bool) {
     assert!(!approval_valid(repo, "alpha"));
 
     if !composed {
-        repo.arc(&worktree)
-            .args(["snapshot", "alpha"])
+        let advice = stdout_any_status(repo.arc(&worktree).args(["check", "alpha"]));
+        let command = advice
+            .lines()
+            .find_map(|line| line.strip_prefix("Next step: "))
+            .unwrap()
+            .strip_suffix(" (snapshot)")
+            .unwrap();
+        repo.arc_shell(&worktree, command)
             .assert()
             .success()
             .stdout(predicates::str::contains("patchset: ps-02"));
@@ -1808,8 +1838,24 @@ fn assert_trailer_reapproval(repo: &Repo, key: Option<&Key>, composed: bool) {
         .args(["review", "alpha", "--verdict", "approved"]);
     if composed {
         review.arg("--snapshot").args(["--contributors", "tester"]);
+        review.assert().success();
+    } else {
+        let advice = stdout_any_status(repo.arc(&worktree).args(["check", "alpha"]));
+        let command = advice
+            .lines()
+            .find_map(|line| line.strip_prefix("Next step: "))
+            .unwrap()
+            .split_once("to run: ")
+            .unwrap()
+            .1
+            .strip_suffix(" (request_review)")
+            .unwrap()
+            .replace("<verdict>", "approved");
+        repo.arc_shell(&worktree, &command)
+            .env("ARC_ACTOR", "reviewer")
+            .assert()
+            .success();
     }
-    review.assert().success();
     let state = json_stdout(repo.arc(&worktree).args(["show", "alpha", "--json"]));
     assert_eq!(state["patchsets"].as_array().unwrap().len(), 2, "{state}");
     assert_eq!(state["patchsets"][1]["id"], "ps-02");
@@ -1838,6 +1884,10 @@ fn assert_trailer_reapproval(repo: &Repo, key: Option<&Key>, composed: bool) {
             &["rev-parse", &format!("refs/arc/keep/{change_id}/ps-02")]
         ),
         rewritten
+    );
+    assert_eq!(
+        git_out(&worktree, &["rev-parse", &old_keep_ref]),
+        old_keep_head
     );
     assert_eq!(
         recorded_map(repo, std::slice::from_ref(&approved))[&approved],
@@ -1904,6 +1954,84 @@ fn trailer_rewrite_before_first_snapshot_can_be_approved() {
     let state = json_stdout(repo.arc(&worktree).args(["show", "alpha", "--json"]));
     assert_eq!(state["patchsets"].as_array().unwrap().len(), 1);
     assert_eq!(state["patchsets"][0]["head"], repo.head(&worktree));
+}
+
+#[test]
+fn a_trailer_rewrite_does_not_inherit_a_debt_waiver() {
+    for self_approval in [false, true] {
+        let repo = repo_with_gates();
+        let (_, worktree, _) = change_with_patchset(&repo, "alpha");
+        repo.declare_gates_locally(
+            "[policy]\nforbid_self_approval = true\n[danger]\npaths = [\"alpha.txt\"]\n",
+        );
+        repo.arc(&worktree)
+            .args(["verify", "alpha", "--all"])
+            .assert()
+            .success();
+        if self_approval {
+            repo.arc(&worktree)
+                .args(["review", "alpha", "--verdict", "approved"])
+                .assert()
+                .success();
+        }
+        repo.arc(&worktree)
+            .args([
+                "debt",
+                "alpha",
+                "--reason",
+                "no independent reviewer available",
+            ])
+            .assert()
+            .success();
+        repo.arc(&worktree)
+            .args(["check", "alpha"])
+            .assert()
+            .success();
+        repo.arc(&worktree)
+            .args([
+                "rewrite",
+                "trailers",
+                "--from",
+                "HEAD",
+                "--no-sign",
+                "--append",
+                "Planned-by: Planner <planner@example.invalid>",
+            ])
+            .assert()
+            .success();
+        let status = json_stdout(repo.arc(&worktree).args(["status", "alpha", "--json"]));
+        assert_eq!(status["head_matches_latest_patchset"], true);
+        assert!(status.get("approval_waived_by_debt").is_none(), "{status}");
+        assert_eq!(status["next_action"], "snapshot", "{status}");
+        repo.arc(&worktree)
+            .args(["check", "alpha"])
+            .assert()
+            .code(3);
+        repo.arc(&worktree)
+            .args(["snapshot", "alpha"])
+            .assert()
+            .success();
+        let status = json_stdout(repo.arc(&worktree).args(["status", "alpha", "--json"]));
+        assert_eq!(status["debt"]["patchset_id"], "ps-01");
+        assert!(status.get("approval_waived_by_debt").is_none(), "{status}");
+        repo.arc(&worktree)
+            .args(["check", "alpha"])
+            .assert()
+            .code(3);
+        repo.arc(&worktree)
+            .args([
+                "debt",
+                "alpha",
+                "--reason",
+                "no independent reviewer available",
+            ])
+            .assert()
+            .success();
+        repo.arc(&worktree)
+            .args(["check", "alpha"])
+            .assert()
+            .success();
+    }
 }
 
 /// A recorded map arriving in a bundle is judged against this repository's
