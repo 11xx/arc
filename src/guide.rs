@@ -1715,13 +1715,21 @@ HISTORY REWRITES
                        remote-tracking branch are
                        refused, naming the commit and ref, including in
                        --dry-run. The change branch's same-name remote refs,
-                       on any remote, and its configured upstream are its own
-                       work; target refs remain protected. --include-shared
+                       on any remote, are its own work. A configured upstream
+                       qualifies only when its remote source branch has the
+                       change branch's name, even with a fetch-refspec alias;
+                       an upstream of another branch remains protected.
+                       Target refs remain protected. --include-shared
                        grants permission without changing the default range.
                        With a target, the default always stays in target..head;
                        an inclusive shared range requires --from. A refusal
-                       names the exact --include-shared and --from flags to
-                       permit its selected range and the refs it would move.
+                       advises --include-shared alone for a default range and
+                       retains --from only for an explicitly selected range.
+                       Its planned moves use that same range; an explicit
+                       range reaching target history names the protected
+                       target commits and refs as well as the moves.
+                       Explicit --from includes merged ancestry beyond the
+                       named commit's parents, including target history.
                        Every moved ref is named with its old and new value.
                        --dry-run checks map consistency and append policy,
                        prints the map, every ref it would move, and

@@ -2234,7 +2234,7 @@ fn including_shared_history_explicitly_rewrites_the_target_merge() {
 #[test]
 fn pushed_change_branches_can_rewrite_their_own_history() {
     for mode in ["sign", "trailers"] {
-        for configured_upstream in [false, true] {
+        for configured_upstream in ["none", "matching", "fetch-alias"] {
             let repo = repo_with_gates();
             let key = signing_key(&repo).expect("pushed rewrite acceptance requires a sandbox key");
             let (_, worktree, old) = change_with_patchset(&repo, "alpha");
@@ -2253,19 +2253,27 @@ fn pushed_change_branches_can_rewrite_their_own_history() {
                     ],
                 );
             }
-            if configured_upstream {
+            let upstream = if configured_upstream == "fetch-alias" {
+                git(
+                    &worktree,
+                    &[
+                        "config",
+                        "remote.origin.fetch",
+                        "+refs/heads/arc/alpha:refs/remotes/origin/delivery",
+                    ],
+                );
                 git(
                     &worktree,
                     &["update-ref", "refs/remotes/origin/delivery", &old],
                 );
+                "origin/delivery"
+            } else {
+                "origin/arc/alpha"
+            };
+            if configured_upstream != "none" {
                 git(
                     &worktree,
-                    &[
-                        "branch",
-                        "--set-upstream-to",
-                        "origin/delivery",
-                        "arc/alpha",
-                    ],
+                    &["branch", "--set-upstream-to", upstream, "arc/alpha"],
                 );
             }
             let remotes = git_out(
@@ -2343,6 +2351,160 @@ fn shared_permission_never_widens_the_default_signing_range() {
 }
 
 #[test]
+fn refusal_advice_preserves_a_range_after_the_change_merged_its_target() {
+    for (mode, explicit_from) in [("sign", false), ("sign", true), ("trailers", true)] {
+        let repo = repo_with_gates();
+        let key = signing_key(&repo).expect("merged target acceptance requires a sandbox key");
+        let (_, worktree, from) = change_with_patchset(&repo, "alpha");
+        git(&worktree, &["branch", "shared-work", &from]);
+        repo.commit(&repo.root, "target.txt", "target\n", "feat: target");
+        let target = repo.head(&repo.root);
+        git(
+            &worktree,
+            &["merge", "--no-ff", "-m", "merge: target", "master"],
+        );
+        let before = ref_snapshot(&worktree);
+        let mut command = arc_signing(&repo, &key, &worktree);
+        command.args(["rewrite", mode, "--key", &key.fingerprint]);
+        if explicit_from {
+            command.args(["--from", &from]);
+        }
+        if mode == "trailers" {
+            command.args(["--append", "Planned-by: Planner <planner@example.invalid>"]);
+        }
+        let out = command.output().unwrap();
+        assert!(!out.status.success());
+        assert_eq!(ref_snapshot(&worktree), before);
+        let refusal = String::from_utf8(out.stderr).unwrap();
+        let advice = refusal
+            .split("command with ")
+            .nth(1)
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let expected = if explicit_from {
+            format!("--include-shared --from {from}")
+        } else {
+            "--include-shared".to_string()
+        };
+        assert_eq!(advice, expected, "{refusal}");
+        if explicit_from {
+            let targets = refusal
+                .split("protected target commits: ")
+                .nth(1)
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap();
+            assert!(targets.contains(&target), "{refusal}");
+        }
+        let advertised: BTreeMap<String, String> = refusal
+            .lines()
+            .filter_map(|line| {
+                let (name, values) = line.trim().split_once(": ")?;
+                name.starts_with("refs/").then(|| {
+                    (
+                        name.to_string(),
+                        values.split_whitespace().next().unwrap().to_string(),
+                    )
+                })
+            })
+            .collect();
+        assert_eq!(
+            advertised.contains_key("refs/heads/master"),
+            explicit_from,
+            "{refusal}"
+        );
+        let mut permitted = arc_signing(&repo, &key, &worktree);
+        permitted.args(["rewrite", mode, "--key", &key.fingerprint]);
+        permitted.args(advice.split_whitespace());
+        if mode == "trailers" {
+            permitted.args(["--append", "Planned-by: Planner <planner@example.invalid>"]);
+        }
+        permitted.assert().success();
+        let event: serde_json::Value =
+            serde_json::from_slice(&fs::read(repository_events(&repo).pop().unwrap()).unwrap())
+                .unwrap();
+        let actual: BTreeMap<String, String> = event["refs"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(name, moved)| (name.clone(), moved["old"].as_str().unwrap().to_string()))
+            .collect();
+        assert_eq!(
+            actual, advertised,
+            "advice and actual ref effects must agree"
+        );
+        assert_eq!(repo.head(&repo.root) == target, !explicit_from);
+        assert_eq!(
+            event["mapping"].as_object().unwrap().contains_key(&target),
+            explicit_from
+        );
+    }
+}
+
+#[test]
+fn a_differently_named_upstream_remains_protected() {
+    for mode in ["sign", "trailers"] {
+        for (dry, fetch_alias) in [(false, false), (true, false), (false, true), (true, true)] {
+            let repo = repo_with_gates();
+            let key =
+                signing_key(&repo).expect("upstream ownership acceptance requires a sandbox key");
+            let (_, worktree, old) = change_with_patchset(&repo, "alpha");
+            git(
+                &worktree,
+                &["remote", "add", "origin", repo.root.to_str().unwrap()],
+            );
+            let upstream = if fetch_alias {
+                git(
+                    &worktree,
+                    &[
+                        "config",
+                        "remote.origin.fetch",
+                        "+refs/heads/develop:refs/remotes/origin/arc/alpha",
+                    ],
+                );
+                "refs/remotes/origin/arc/alpha"
+            } else {
+                "refs/remotes/origin/develop"
+            };
+            git(&worktree, &["update-ref", upstream, &old]);
+            git(
+                &worktree,
+                &[
+                    "branch",
+                    "--set-upstream-to",
+                    upstream.trim_start_matches("refs/remotes/"),
+                    "arc/alpha",
+                ],
+            );
+            let before = ref_snapshot(&worktree);
+            let mut command = arc_signing(&repo, &key, &worktree);
+            command.args(["rewrite", mode, "--key", &key.fingerprint]);
+            if mode == "trailers" {
+                command.args([
+                    "--from",
+                    &old,
+                    "--append",
+                    "Planned-by: Planner <planner@example.invalid>",
+                ]);
+            }
+            if dry {
+                command.arg("--dry-run");
+            }
+            command
+                .assert()
+                .failure()
+                .stderr(predicates::str::contains(upstream));
+            assert_eq!(ref_snapshot(&worktree), before);
+            assert!(repository_events(&repo).is_empty());
+            assert!(!intent_path(&repo).exists());
+        }
+    }
+}
+
+#[test]
 fn an_own_upstream_exemption_cannot_bypass_target_protection() {
     for mode in ["sign", "trailers"] {
         let repo = repo_with_gates();
@@ -2354,12 +2516,12 @@ fn an_own_upstream_exemption_cannot_bypass_target_protection() {
         );
         git(
             &worktree,
-            &["update-ref", "refs/remotes/origin/canonical", &old],
+            &["update-ref", "refs/remotes/origin/arc/alpha", &old],
         );
         for branch in ["master", "arc/alpha"] {
             git(
                 &worktree,
-                &["branch", "--set-upstream-to", "origin/canonical", branch],
+                &["branch", "--set-upstream-to", "origin/arc/alpha", branch],
             );
         }
         let before = ref_snapshot(&worktree);
@@ -2376,7 +2538,7 @@ fn an_own_upstream_exemption_cannot_bypass_target_protection() {
         command
             .assert()
             .failure()
-            .stderr(predicates::str::contains("refs/remotes/origin/canonical"));
+            .stderr(predicates::str::contains("refs/remotes/origin/arc/alpha"));
         assert_eq!(ref_snapshot(&worktree), before);
         assert!(repository_events(&repo).is_empty());
     }

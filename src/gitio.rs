@@ -1572,6 +1572,13 @@ pub fn branch_upstream(cwd: &Path, branch: &str) -> Result<Option<(String, Strin
     })
 }
 
+/// Source branch name recorded by the upstream's merge ref, before fetch
+/// refspecs translate it into a remote-tracking ref.
+pub fn branch_upstream_branch_name(cwd: &Path, branch: &str) -> Result<Option<String>> {
+    Ok(config_value(cwd, &format!("branch.{branch}.merge"))?
+        .and_then(|reference| reference.strip_prefix("refs/heads/").map(str::to_string)))
+}
+
 /// Modified tracked files and untracked files in a worktree, by count.
 /// `ls-files` reads the index's stat data and lists untracked paths; it does
 /// not hash file contents, so a worktree holding a large dirty file costs

@@ -2856,14 +2856,17 @@ enum RewriteCmd {
         /// Oldest commit to recreate; the named commit itself is rewritten.
         /// Defaults to the oldest not signed by the key in target..head on a
         /// tracked change branch, or in
-        /// the whole history outside a change
+        /// the whole history outside a change. An explicit range includes
+        /// merged ancestry beyond this commit's parents, including target
+        /// history; refusal advice retains the default or explicit selection
         #[arg(long)]
         from: Option<String>,
         /// Permit recreating commits reachable from the target or another
         /// local or remote-tracking branch. Permission never widens the default
         /// target..head range; use --from to name an inclusive shared range.
-        /// Same-name remote refs and the branch's configured upstream are its
-        /// own work, except for target refs. Shared commits are refused without
+        /// Same-name remote refs are its own work, except for target refs.
+        /// A configured upstream qualifies only when its remote source branch
+        /// has this branch's name. Shared commits are refused without
         /// permission before any moves, including --dry-run
         #[arg(long)]
         include_shared: bool,
@@ -2903,12 +2906,15 @@ enum RewriteCmd {
         append: Vec<String>,
         /// Oldest commit whose trailers are edited; the named commit itself
         /// is edited and rewritten when its message or ancestry changes.
-        /// Required, since a trailer edit has nothing to infer a range from
+        /// The range includes merged ancestry beyond this commit's parents,
+        /// including target history. Refusals name protected target commits
+        /// and affected refs. Required, since a trailer edit has no default range
         #[arg(long, required = true)]
         from: String,
         /// Permit recreating commits reachable from the target or another
-        /// local or remote-tracking branch. The branch's same-name remote refs
-        /// and configured upstream are its own work, except for target refs.
+        /// local or remote-tracking branch. Same-name remote refs are its own
+        /// work, except for target refs. A configured upstream qualifies only
+        /// when its remote source branch has this branch's name.
         /// Without permission shared commits are refused before any ref moves,
         /// including --dry-run; unchanged commits are left alone. Permission
         /// never changes the inclusive range named by --from

@@ -87,7 +87,14 @@ pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
         bail!("{from} is not an ancestor of {branch}");
     }
     let sign = (!args.no_sign).then_some(args.key.as_deref());
-    let mut walked = Walked::over(&range, branch, from, head, "arc rewrite sign");
+    let mut walked = Walked::over(
+        &range,
+        branch,
+        from,
+        head,
+        "arc rewrite sign",
+        args.from.is_some(),
+    );
     walked.reason = format!("re-signed {} from {}", walked.branch, short(&walked.from));
     for old in &range {
         let mut commit = gitio::read_commit(&cwd, old)?;
@@ -179,7 +186,7 @@ pub fn trailers(ctx: &Ctx, args: TrailerArgs) -> Result<i32> {
     }
 
     let sign = (!args.no_sign).then_some(args.key.as_deref());
-    let mut walked = Walked::over(&range, branch, from, head, "arc rewrite trailers");
+    let mut walked = Walked::over(&range, branch, from, head, "arc rewrite trailers", true);
     walked.reason = edit_reason(&args, &walked.branch, &walked.from);
     for old in &range {
         let mut commit = gitio::read_commit(&cwd, old)?;
@@ -222,15 +229,18 @@ fn protect_shared<'a>(
         .map(|reference| (reference.name, reference.commit))
         .collect();
     let upstream = gitio::branch_upstream(cwd, branch)?.map(|(_, reference)| reference);
+    let upstream_is_own =
+        gitio::branch_upstream_branch_name(cwd, branch)?.as_deref() == Some(branch.as_str());
+    let mut target_protected = BTreeMap::new();
     let mut target_upstreams = BTreeSet::new();
     for target in targets {
         if let Some((_, reference)) = gitio::branch_upstream(cwd, target)? {
             target_upstreams.insert(reference);
         }
-        protected.insert(
-            format!("refs/heads/{target}"),
-            gitio::branch_head(cwd, target)?,
-        );
+        let reference = format!("refs/heads/{target}");
+        let tip = gitio::branch_head(cwd, target)?;
+        target_protected.insert(reference.clone(), tip.clone());
+        protected.insert(reference, tip);
     }
     let mut remotes: Vec<String> = gitio::git(cwd, &["remote"])?
         .lines()
@@ -245,8 +255,14 @@ fn protect_shared<'a>(
             .or_else(|| relative.split_once('/').map(|(_, tracked)| tracked));
         let target_ref = tracked.is_some_and(|name| targets.contains(name))
             || target_upstreams.contains(&reference);
-        let own_ref =
-            tracked == Some(branch.as_str()) || upstream.as_deref() == Some(reference.as_str());
+        let own_ref = if upstream.as_deref() == Some(reference.as_str()) {
+            upstream_is_own
+        } else {
+            tracked == Some(branch.as_str())
+        };
+        if target_ref {
+            target_protected.insert(reference.clone(), tip.clone());
+        }
         if target_ref || !own_ref {
             protected.insert(reference, tip);
         }
@@ -279,6 +295,30 @@ fn protect_shared<'a>(
     if refs.is_empty() {
         bail!("protected refs changed during shared-history checking; retry the rewrite");
     }
+    let target_notice = if target_protected.is_empty() {
+        String::new()
+    } else {
+        let tips: Vec<&str> = target_protected.values().map(String::as_str).collect();
+        let outside_targets = gitio::rev_list_excluding(cwd, &candidates, &tips)?;
+        let shared: Vec<&str> = candidates
+            .iter()
+            .copied()
+            .filter(|commit| !outside_targets.contains(*commit))
+            .collect();
+        if shared.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; protected target commits: {}; target refs: {}",
+                shared.join(", "),
+                target_protected
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    };
     let planned = plan_ref_moves(cwd, branch, &walked.from, &walked.mapping, retag)?;
     let mut moves: Vec<String> = planned
         .moves
@@ -299,12 +339,16 @@ fn protect_shared<'a>(
     } else {
         format!("refs this range would move:\n  {}", moves.join("\n  "))
     };
+    let permission = if walked.explicit_from {
+        format!("--include-shared --from {}", walked.from)
+    } else {
+        "--include-shared".to_string()
+    };
     bail!(
         "refusing to recreate {commit}: reachable from {}; to permit exactly this range, \
-        repeat the same `{}` command with --include-shared --from {}; {effects}",
+        repeat the same `{}` command with {permission}{target_notice}; {effects}",
         refs.join(", "),
-        walked.tool,
-        walked.from
+        walked.tool
     );
 }
 
@@ -361,6 +405,7 @@ fn open(ctx: &Ctx, store: &Store) -> Result<Opened> {
 struct Walked {
     branch: String,
     from: String,
+    explicit_from: bool,
     head: String,
     /// How many commits the walk read, which is what "changed none of them"
     /// counts.
@@ -380,10 +425,12 @@ impl Walked {
         from: String,
         head: String,
         tool: &'static str,
+        explicit_from: bool,
     ) -> Self {
         Walked {
             branch,
             from,
+            explicit_from,
             head,
             considered: range.len(),
             mapping: BTreeMap::new(),
@@ -452,6 +499,7 @@ fn complete(
         carried,
         reason,
         tool,
+        ..
     } = walked;
     for (old, fields) in &carried {
         println!(
