@@ -393,7 +393,8 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             ProbePhase::Baseline => VerifyResult::Fail,
             ProbePhase::Final => VerifyResult::Pass,
         };
-        let falsification = resolve_falsification(&st, None, &declaration.command, falsified_by)?;
+        let falsification =
+            resolve_falsification(&store, &change_id, None, &declaration.command, falsified_by)?;
         let scratch = match baseline_base {
             Some(base) if !attest && gitio::head(&run_ctx.cwd)? != base => Some(
                 create_baseline_checkout(ctx, &st.slug, base, &probe_name, version)?,
@@ -609,7 +610,8 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         }
         (false, None) => None,
     };
-    let falsification = resolve_falsification(&st, gate.as_deref(), &cmd, falsified_by)?;
+    let falsification =
+        resolve_falsification(&store, &change_id, gate.as_deref(), &cmd, falsified_by)?;
     record_verification(
         run_ctx,
         &store,
@@ -1638,12 +1640,11 @@ fn verify_all_parallel(
 /// Turn `--falsified-by`/`--predicted` into the reference that will be
 /// recorded, or refuse.
 ///
-/// The revision is read from the referenced failure rather than asked for: the
-/// two can then never disagree, and there is no third value for a caller to
-/// get wrong. Refusal happens before the command runs, because a verification
-/// arc will not record is a command nobody should have paid for.
+/// The reference binds to the failure's original recorded revision. Resolve
+/// it before running the command; append replays against the locked ledger.
 fn resolve_falsification(
-    state: &ChangeState,
+    store: &Store,
+    change_id: &str,
     gate: Option<&str>,
     command: &str,
     falsified_by: Option<(String, String)>,
@@ -1651,6 +1652,7 @@ fn resolve_falsification(
     let Some((event_id, predicted_reason)) = falsified_by else {
         return Ok(None);
     };
+    let state = state::reduce_with_rewrites(&store.load_events(change_id)?, &store.rewrites()?)?;
     let revision = state
         .verifications
         .iter()
@@ -1994,8 +1996,10 @@ fn append_verifications(
     // Gates are arbitrary external commands and may legitimately invoke arc.
     // Acquire the append lock only after they return, then re-check closure.
     let _transition = store.lock_transition(change_id)?;
-    let events = store.load_events(change_id)?;
-    let mut st = store.project_state(&events, &store.rewrites()?)?;
+    let _repository_events = store.lock_repository_events()?;
+    let mut events = store.load_events(change_id)?;
+    let rewrites = store.rewrites()?;
+    let mut st = store.project_state(&events, &rewrites)?;
     crate::replica::localize_change(&store.repository_id, &events, &mut st);
     for item in completed {
         let gate_label = item.gate.clone();
@@ -2052,6 +2056,12 @@ fn append_verifications(
         ensure_append_allowed(&st, &payload)?;
         let mut ev = ctx.event(store, change_id, payload)?;
         let event_id = ev.event_id.clone();
+        let mut candidate = events.clone();
+        candidate.push(ev.clone());
+        candidate.sort_by(|a, b| a.event_id.cmp(&b.event_id));
+        store
+            .project_state(&candidate, &rewrites)
+            .context("verification would make the change unreadable; nothing was written")?;
         // A recorded `tested_tree` promises the tree is still there, so the
         // claim is made only once the pin holding it exists. A run whose tree
         // cannot be pinned is recorded without one rather than pointing at
@@ -2084,6 +2094,7 @@ fn append_verifications(
             }
         }
         store.append_event(&ev)?;
+        events.push(ev.clone());
         if let Some(gate) = gate_label {
             let declared_by = ctx
                 .declarations(&st)

@@ -589,7 +589,8 @@ RUN A CHANGE
     --attest --environment <id>      Record a run arc did not perform, naming
                                      the environment it applies to.
     --falsified-by <id> --predicted <why>
-                                     Name the failure this pass answers.
+                                     Name the failure this pass answers,
+                                     storing its original event revision.
   arc done                           Snapshot, run every gate, print check state.
     --contributors <a,b> | --solo    As on `arc snapshot`.
   arc rebase [--verify]              Replay the branch onto its target, snapshot
@@ -1783,6 +1784,11 @@ HISTORY REWRITES
                        map. A delta can carry repository events with an empty
                        change suffix. A correct map can be recorded for the
                        same revisions. Stored events remain intact.
+                       A falsification reference storing a rewritten failure
+                       revision requires an active map proving that successor.
+                       After withdrawal, re-record the actual mapping with
+                       `arc history rewrite --map <file> --reason <why>` to
+                       restore that proof without editing ledger events.
 
   Only the signature and the commit ids change: tree, parents, author,
   committer, dates, encoding, message and any other header the commit carries
@@ -2218,6 +2224,14 @@ RULES THAT CHANGE WHAT YOU DO
     failure as `falsification_inferred`, declared or not: an inference,
     labelled as one, that decides nothing. Acceptance-probe evidence neither
     records one nor serves as the failure one names.
+    The reference stores the failure event's original revision; projections
+    follow active recorded rewrites. A stored rewritten reference is accepted
+    only when an active rewrite chain carries that same failure revision to
+    the exact stored successor. Unrelated revisions, including ones sharing
+    an eventual successor, are refused. Withdrawn maps supply no proof;
+    re-record the actual map with `arc history rewrite` when recovery needs
+    it. Verification replays its candidate event before appending or pinning
+    its tree, refusing evidence that would make the change unreadable.
     A passing gate row is `discriminating` when any passing evidence for that
     gate at the counted tree (or revision when the tree is unresolved) names
     a falsification. A later pass without one does not retract it.

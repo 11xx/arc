@@ -2727,6 +2727,223 @@ fn a_falsified_pass_records_the_failure_it_answers() {
     assert_eq!(recorded["falsification"]["revision"], failed_at.as_str());
 }
 
+fn raw_events(repo: &Repo, change: &str) -> Vec<serde_json::Value> {
+    let mut paths = fs::read_dir(event_dir(repo, change))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|path| serde_json::from_slice(&fs::read(path).unwrap()).unwrap())
+        .collect()
+}
+
+fn rewritten_failure(repo: &Repo, slug: &str) -> (String, String, String, String, String) {
+    repo.declare_gates_locally("[gates.fixable]\ncommand = 'test \"$(cat value)\" = fixed'\n");
+    let change = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        slug,
+        "--no-worktree",
+    ])));
+    repo.commit(&repo.root, "value", "broken", "feat: value");
+    let old = repo.head(&repo.root);
+    repo.arc(&repo.root)
+        .args(["verify", slug, "--gate", "fixable"])
+        .assert()
+        .code(1);
+    let failure = last_verification_event_id(repo, slug, "fail");
+    fs::write(repo.root.join("value"), "fixed").unwrap();
+    git(&repo.root, &["add", "value"]);
+    git(&repo.root, &["commit", "--amend", "--no-edit"]);
+    let new = repo.head(&repo.root);
+    let map_event = record_failure_rewrite(repo, &old, &new);
+    (change, failure, old, new, map_event)
+}
+
+fn record_failure_rewrite(repo: &Repo, old: &str, new: &str) -> String {
+    let map = repo.home.join("failure-map");
+    fs::write(&map, format!("{old} {new}\n")).unwrap();
+    let recorded = stdout(repo.arc(&repo.root).args([
+        "history",
+        "rewrite",
+        "--map",
+        map.to_str().unwrap(),
+        "--reason",
+        "commit amendment",
+    ]));
+    recorded
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap()
+        .to_string()
+}
+
+fn answer_rewritten_failure(repo: &Repo, slug: &str, failure: &str) {
+    repo.arc(&repo.root)
+        .args([
+            "verify",
+            slug,
+            "--gate",
+            "fixable",
+            "--falsified-by",
+            failure,
+            "--predicted",
+            "broken value",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn rewrite_safe_falsification_records_the_original_failure_revision() {
+    let repo = Repo::new();
+    let (change, failure, old, new, map) = rewritten_failure(&repo, "rewrite-failure");
+    answer_rewritten_failure(&repo, "rewrite-failure", &failure);
+    let raw = raw_events(&repo, &change);
+    let passing = raw.iter().find(|event| event["result"] == "pass").unwrap();
+    assert_eq!(passing["revision"], new);
+    assert_eq!(passing["falsification"]["revision"], old);
+    assert_eq!(
+        gate_row(&repo, "rewrite-failure", "fixable")["result"],
+        "pass"
+    );
+    repo.arc(&repo.root)
+        .args(["verify", "rewrite-failure", "--all"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["history", "withdraw", &map, "--reason", "withdraw mapping"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["status", "rewrite-failure"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn rewrite_safe_falsification_recovers_projected_revision_only_with_active_map() {
+    let repo = Repo::new();
+    let (change, failure, old, new, map) = rewritten_failure(&repo, "projected-failure");
+    answer_rewritten_failure(&repo, "projected-failure", &failure);
+    rewrite_event(&repo, &change, "verification-recorded", |event| {
+        event["falsification"]["revision"] = serde_json::json!(new);
+    });
+    repo.arc(&repo.root)
+        .args(["status", "projected-failure"])
+        .assert()
+        .success();
+    let before = raw_events(&repo, &change);
+    repo.arc(&repo.root)
+        .args(["history", "withdraw", &map, "--reason", "withdraw mapping"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["status", "projected-failure"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("was recorded at"));
+    record_failure_rewrite(&repo, &old, &new);
+    assert_eq!(raw_events(&repo, &change), before);
+    repo.arc(&repo.root)
+        .args(["status", "projected-failure"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["verify", "projected-failure", "--all"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn rewrite_safe_falsification_rejects_unrelated_revision_with_same_successor() {
+    let repo = Repo::new();
+    let (change, failure, _, new, _) = rewritten_failure(&repo, "unrelated-failure");
+    answer_rewritten_failure(&repo, "unrelated-failure", &failure);
+    let unrelated = git_out(&repo.root, &["rev-parse", "master"]);
+    record_failure_rewrite(&repo, &unrelated, &new);
+    rewrite_event(&repo, &change, "verification-recorded", |event| {
+        event["falsification"]["revision"] = serde_json::json!(unrelated);
+    });
+    repo.arc(&repo.root)
+        .args(["status", "unrelated-failure"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("was recorded at"));
+}
+
+#[test]
+fn rewrite_safe_falsification_recovers_an_intermediate_successor_in_a_chain() {
+    let repo = Repo::new();
+    let (change, failure, old, middle, _) = rewritten_failure(&repo, "chained-failure");
+    answer_rewritten_failure(&repo, "chained-failure", &failure);
+    rewrite_event(&repo, &change, "verification-recorded", |event| {
+        event["falsification"]["revision"] = serde_json::json!(middle);
+    });
+    git(
+        &repo.root,
+        &["commit", "--amend", "-m", "feat: fixed value"],
+    );
+    let new = repo.head(&repo.root);
+    record_failure_rewrite(&repo, &middle, &new);
+    let shown: serde_json::Value = serde_json::from_str(&stdout(repo.arc(&repo.root).args([
+        "show",
+        "chained-failure",
+        "--json",
+    ])))
+    .unwrap();
+    assert_eq!(shown["verifications"][0]["revision"], new);
+    assert_eq!(shown["verifications"][1]["falsification"]["revision"], new);
+    answer_rewritten_failure(&repo, "chained-failure", &failure);
+    assert_eq!(
+        raw_events(&repo, &change).last().unwrap()["falsification"]["revision"],
+        old
+    );
+    repo.arc(&repo.root)
+        .args(["status", "chained-failure"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn rewrite_safe_falsification_revalidates_before_append_and_tree_pin() {
+    let repo = Repo::new();
+    let (change, failure, failed_at, _, _) = rewritten_failure(&repo, "append-failure");
+    let path = event_dir(&repo, &change).join(format!("{failure}.json"));
+    let command = format!(
+        "sed -i 's/{failed_at}/{}/g' '{}'",
+        "0".repeat(40),
+        path.display()
+    );
+    repo.declare_gates_locally(&format!("[gates.fixable]\ncommand = {command:?}\n"));
+    let count = raw_events(&repo, &change).len();
+    let pins = git_out(&repo.root, &["for-each-ref", "refs/arc/tree"]);
+    repo.arc(&repo.root)
+        .args([
+            "verify",
+            "append-failure",
+            "--gate",
+            "fixable",
+            "--falsified-by",
+            &failure,
+            "--predicted",
+            "marker absent",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("was recorded at"));
+    assert_eq!(raw_events(&repo, &change).len(), count);
+    assert_eq!(
+        git_out(&repo.root, &["for-each-ref", "refs/arc/tree"]),
+        pins
+    );
+    repo.arc(&repo.root)
+        .args(["status", "append-failure"])
+        .assert()
+        .success();
+}
+
 #[test]
 fn a_falsification_reference_to_a_passing_event_is_refused() {
     let repo = Repo::new();

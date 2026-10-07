@@ -1634,7 +1634,7 @@ pub fn resolve_unique_id<'a>(
 /// whose waiver covers a commit nobody can name — all of it derived from a
 /// rewrite that changed no content.
 pub fn reduce_following(events: &[Event], rewrites: &RewriteMap) -> Result<ChangeState> {
-    let mut state = reduce(events)?;
+    let mut state = reduce_with_rewrites(events, rewrites)?;
     state.follow_rewrites(rewrites)?;
     Ok(state)
 }
@@ -1643,6 +1643,12 @@ pub fn reduce_following(events: &[Event], rewrites: &RewriteMap) -> Result<Chang
 /// this receiver. Eligibility belongs to `apply_privilege_scope`; changing
 /// receiver trust cannot invalidate recorded references or later facts.
 pub fn reduce(events: &[Event]) -> Result<ChangeState> {
+    reduce_with_rewrites(events, &RewriteMap::default())
+}
+
+/// Replay at recorded revisions, using active rewrites only to establish a
+/// falsification reference's identity. The failure event remains authoritative.
+pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<ChangeState> {
     let replies = events
         .iter()
         .filter(|event| matches!(event.payload, Payload::ReplyAdded { .. }))
@@ -2621,7 +2627,19 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 falsification_inferred,
                 ..
             } => {
-                if let Some(falsification) = falsification {
+                let mut falsification = falsification.clone();
+                if let Some(falsification) = &mut falsification {
+                    if let Some(failure) = state
+                        .verifications
+                        .iter()
+                        .find(|entry| entry.event_id == falsification.event_id)
+                    {
+                        if falsification.revision != failure.revision
+                            && rewrites.rewrites_to(&failure.revision, &falsification.revision)?
+                        {
+                            falsification.revision = failure.revision.clone();
+                        }
+                    }
                     if let Some(mismatch) = falsification_mismatch(
                         &state.verifications,
                         gate.as_deref(),
@@ -2711,7 +2729,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     hostname: hostname.clone(),
                     runner: runner.clone(),
                     environment: environment.clone(),
-                    falsification: falsification.clone(),
+                    falsification,
                     falsification_inferred: falsification_inferred.clone(),
                     created_at: ev.created_at,
                 });

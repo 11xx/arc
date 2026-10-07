@@ -1638,7 +1638,13 @@ enum Cmd {
         /// A gate that has only ever passed and a gate watched to fail and
         /// then fixed leave the same record. Naming the failure separates
         /// them. The event must be a failing verification of the same gate or
-        /// command on this change; its revision comes from the event itself.
+        /// command on this change; the reference stores the failure event's
+        /// original revision even when a recorded rewrite projects it elsewhere.
+        /// Replay accepts a rewritten reference only along an active recorded
+        /// rewrite chain from that original revision. A withdrawn map supplies
+        /// no proof; restore the actual map with `arc history rewrite` to recover
+        /// such a reference. The candidate event is replayed before append;
+        /// unreadable evidence is refused before recording or pinning its tree.
         /// Requires --predicted, and is advisory: it changes no gate result,
         /// readiness decision, or exit code.
         ///
@@ -2811,7 +2817,10 @@ enum HistoryCmd {
     /// Withdraw a recorded history-rewritten map by event ID; other event
     /// types are refused. Ref moves are not undone; output names recorded
     /// moves, or says when the map has no ref-move information. Withdrawals
-    /// travel with maps in bundles and are honoured by importing replicas
+    /// travel with maps in bundles and are honoured by importing replicas.
+    /// A falsification reference storing a rewritten failure revision needs
+    /// an active map to replay; re-record the actual map with history rewrite
+    /// when that proof is required
     Withdraw {
         /// Exact repository event ID of the history-rewritten map
         event_id: String,
@@ -2820,7 +2829,9 @@ enum HistoryCmd {
         reason: String,
     },
     /// Record a rewrite performed elsewhere, with its commit map. Active
-    /// maps must agree; a withdrawn map does not constrain its replacement
+    /// maps must agree; a withdrawn map does not constrain its replacement.
+    /// Re-recording the actual map restores proof for falsification references
+    /// that store a rewritten failure revision, without editing ledger events
     Rewrite {
         /// Commit map (`<old> <new>` per line, as git filter-repo writes), or
         /// '-' for stdin

@@ -255,6 +255,30 @@ impl RewriteMap {
         })
     }
 
+    /// Whether an active rewrite chain carries `revision` to this exact
+    /// successor, including an intermediate commit. A shared eventual
+    /// successor does not establish this directed relationship.
+    pub fn rewrites_to(&self, revision: &str, successor: &str) -> Result<bool> {
+        let mut visited = BTreeSet::new();
+        let mut current = revision.to_string();
+        let mut reached = false;
+        loop {
+            match self.step(&current)? {
+                Step::Unmapped | Step::Mapped { fate: None, .. } => return Ok(reached),
+                Step::Mapped {
+                    key,
+                    fate: Some(next),
+                } => {
+                    if !visited.insert(key.clone()) {
+                        anyhow::bail!("recorded rewrites lead {revision} back to {key}; the chain names no surviving commit");
+                    }
+                    reached |= next == successor;
+                    current = next;
+                }
+            }
+        }
+    }
+
     /// Follow a recorded revision forward in place.
     pub fn advance(&self, revision: &mut String) -> Result<()> {
         if self.steps.is_empty() {
@@ -523,6 +547,31 @@ mod tests {
             Some(Fate::Rewritten("cccccccccc".into()))
         );
         assert_eq!(map.fate("cccccccccc").unwrap(), None);
+    }
+
+    #[test]
+    fn rewrite_proof_is_directed_and_accepts_intermediate_successors() {
+        let map = map(&[
+            ("aaaaaaaaaa", Some("bbbbbbbbbb")),
+            ("bbbbbbbbbb", Some("cccccccccc")),
+            ("dddddddddd", Some("cccccccccc")),
+        ]);
+        assert!(map.rewrites_to("aaaaaaaaaa", "bbbbbbbbbb").unwrap());
+        assert!(map.rewrites_to("aaaaaaaaaa", "cccccccccc").unwrap());
+        assert!(!map.rewrites_to("aaaaaaaaaa", "dddddddddd").unwrap());
+        assert!(!map.rewrites_to("bbbbbbbbbb", "aaaaaaaaaa").unwrap());
+        assert!(!map.rewrites_to("aaaaaaaaaa", "eeeeeeeeee").unwrap());
+    }
+
+    #[test]
+    fn rewrite_proof_refuses_a_cycle_even_after_reaching_the_claimed_revision() {
+        let map = map(&[
+            ("aaaaaaaaaa", Some("bbbbbbbbbb")),
+            ("bbbbbbbbbb", Some("aaaaaaaaaa")),
+        ]);
+        assert!(map.rewrites_to("aaaaaaaaaa", "bbbbbbbbbb").is_err());
+        let dropped = self::map(&[("aaaaaaaaaa", None)]);
+        assert!(!dropped.rewrites_to("aaaaaaaaaa", "bbbbbbbbbb").unwrap());
     }
 
     /// A map may abbreviate what the ledger records in full, and a caller may
