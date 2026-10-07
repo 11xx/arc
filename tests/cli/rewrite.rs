@@ -79,6 +79,115 @@ fn git_signing(cwd: &Path, key: &Key, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+#[test]
+fn rewrite_safe_falsification_survives_a_signed_amendment_and_is_ready() {
+    let repo = Repo::new();
+    let key = signing_key(&repo).expect("signed amendment requires a sandbox signing key");
+    repo.declare_gates_locally("[gates.value]\ncommand = 'test \"$(cat value)\" = fixed'\n");
+    let change = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "signed-failure",
+        "--no-worktree",
+    ])));
+    repo.commit(&repo.root, "value", "broken", "feat: value");
+    let old = repo.head(&repo.root);
+    repo.arc(&repo.root)
+        .args(["verify", "signed-failure", "--gate", "value"])
+        .assert()
+        .code(1);
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        &change,
+        "--type",
+        "verification-recorded",
+    ]));
+    let failure: serde_json::Value =
+        serde_json::from_str(events.lines().next_back().unwrap()).unwrap();
+    let failure = failure["event_id"].as_str().unwrap();
+    fs::write(repo.root.join("value"), "fixed").unwrap();
+    git(&repo.root, &["add", "value"]);
+    git_signing(
+        &repo.root,
+        &key,
+        &[
+            "-c",
+            &format!("user.signingkey={}", key.fingerprint),
+            "commit",
+            "--amend",
+            "-S",
+            "--no-edit",
+        ],
+    );
+    git_signing(&repo.root, &key, &["verify-commit", "HEAD"]);
+    let new = repo.head(&repo.root);
+    assert_ne!(old, new);
+    let map = repo.home.join("signed-map");
+    fs::write(&map, format!("{old} {new}\n")).unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "history",
+            "rewrite",
+            "--map",
+            map.to_str().unwrap(),
+            "--reason",
+            "signed commit amendment",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "verify",
+            "signed-failure",
+            "--gate",
+            "value",
+            "--falsified-by",
+            failure,
+            "--predicted",
+            "broken value",
+        ])
+        .assert()
+        .success();
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        &change,
+        "--type",
+        "verification-recorded",
+    ]));
+    let pass: serde_json::Value =
+        serde_json::from_str(events.lines().next_back().unwrap()).unwrap();
+    assert_eq!(pass["revision"], new);
+    assert_eq!(pass["falsification"]["revision"], old);
+    repo.arc(&repo.root)
+        .args(["status", "signed-failure"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["verify", "signed-failure", "--all"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["snapshot", "signed-failure"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "review",
+            "signed-failure",
+            "--verdict",
+            "approved",
+            "--actor",
+            "fixture-reviewer",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["check", "signed-failure", "--json"])
+        .assert()
+        .success();
+}
+
 fn repo_with_gates() -> Repo {
     let repo = Repo::new();
     fs::create_dir_all(repo.root.join(".arc")).unwrap();
