@@ -15973,10 +15973,12 @@ fn filed_excludes_pending_transition_intent_and_keeps_writer_unfiled() {
         "{intent}"
     )
     .unwrap();
+    let truncated = format!("supersedes: {todo}\n\n# Handoff\nA truncated ");
     for body in [
         None,
         Some(""),
         Some("supersedes: other-todo.md\n# Handoff\n"),
+        Some(truncated.as_str()),
     ] {
         if let Some(body) = body {
             fs::write(dir.join(successor), body).unwrap();
@@ -16048,4 +16050,349 @@ fn filed_excludes_pending_transition_intent_and_keeps_writer_unfiled() {
         "{report}"
     );
     assert_eq!(writer["unfiled"], false, "{report}");
+}
+
+fn promotion_cleanup_probe(boundary: &str, archive_source: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = Repo::new();
+    let (project, file) = journal_artifact(&repo, "cleanup-crash", "memory", "# Rule\n");
+    let global = repo.home.join(".local/ai/arc/journals/global");
+    let source_log = project.join("events.jsonl");
+    fs::set_permissions(&source_log, fs::Permissions::from_mode(0o400)).unwrap();
+    repo.arc(&repo.root)
+        .args(["journal", "promote", &file, "--global"])
+        .assert()
+        .failure();
+    fs::set_permissions(&source_log, fs::Permissions::from_mode(0o600)).unwrap();
+    let pending_path = global.join("exchange/pending.json");
+    let pending: serde_json::Value =
+        serde_json::from_slice(&fs::read(&pending_path).unwrap()).unwrap();
+    let intent = project.join(".promotions").join(format!("{file}.json"));
+    let destination = pending["promotion"]["prepared"]["promoted"]["file"]
+        .as_str()
+        .unwrap();
+    fs::write(
+        &source_log,
+        pending["promotion"]["events"].as_str().unwrap(),
+    )
+    .unwrap();
+    match boundary {
+        "global-unlink" | "global-sync" => fs::remove_file(&pending_path).unwrap(),
+        "source-unlink" | "source-sync" => fs::remove_file(&intent).unwrap(),
+        "complete" => {
+            fs::remove_file(&intent).unwrap();
+            fs::remove_file(&pending_path).unwrap();
+        }
+        "before-cleanup" => {}
+        _ => unreachable!(),
+    }
+    // The global writer must settle discoverable recovery before normal disposal.
+    stdout(repo.arc(&repo.root).args([
+        "journal",
+        "consume",
+        destination,
+        "--outcome",
+        "done",
+        "--global",
+    ]));
+    stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "archive", destination, "--global"]),
+    );
+    if archive_source {
+        stdout(repo.arc(&repo.root).args(["journal", "archive", &file]));
+    }
+    stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "log", "cleanup-crash", "next write"]),
+    );
+    assert!(!intent.exists(), "{boundary}: stranded source intent");
+    assert!(
+        !pending_path.exists(),
+        "{boundary}: stranded global transaction"
+    );
+    assert!(
+        !global.join(destination).exists(),
+        "{boundary}: hot duplicate"
+    );
+    assert_eq!(
+        fs::read_to_string(
+            PathBuf::from(format!("{}-archive", global.display())).join(destination)
+        )
+        .unwrap(),
+        "# Rule\n"
+    );
+    assert_eq!(
+        journal_events(&global)
+            .iter()
+            .filter(|event| event["event"] == "note")
+            .count(),
+        1
+    );
+    assert_eq!(
+        journal_events(&project)
+            .iter()
+            .filter(|event| event["event"] == "consumed")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn promotion_cleanup_before_cleanup() {
+    promotion_cleanup_probe("before-cleanup", false);
+}
+#[test]
+fn promotion_cleanup_global_unlink() {
+    promotion_cleanup_probe("global-unlink", false);
+}
+#[test]
+fn promotion_cleanup_global_sync() {
+    promotion_cleanup_probe("global-sync", false);
+}
+#[test]
+fn promotion_cleanup_source_unlink() {
+    promotion_cleanup_probe("source-unlink", false);
+}
+#[test]
+fn promotion_cleanup_source_sync() {
+    promotion_cleanup_probe("source-sync", false);
+}
+#[test]
+fn promotion_cleanup_complete() {
+    promotion_cleanup_probe("complete", false);
+}
+#[test]
+fn promotion_cleanup_archived_source() {
+    promotion_cleanup_probe("global-sync", true);
+}
+
+#[test]
+fn transition_short_write_keeps_source_unfiled() {
+    let repo = Repo::new();
+    let source = filed_artifact(&repo, "todo", "short-successor", &"body\n".repeat(4096));
+    stdout(
+        repo.arc(&repo.root)
+            .env("ARC_SESSION", "short-writer")
+            .args(["journal", "log", "short-successor", "starting transition"]),
+    );
+    let mut shell = AssertCommand::new("sh");
+    shell.args([
+        "-c",
+        "ulimit -f 16; exec \"$@\"",
+        "crash-probe",
+        env!("CARGO_BIN_EXE_arc"),
+    ]);
+    repo.fixture_env(shell, &repo.root)
+        .env("ARC_SESSION", "short-writer")
+        .args(["journal", "transition", &source, "--to", "handoff"])
+        .assert()
+        .failure();
+    let dir = journal_dir(&repo);
+    let final_names: Vec<_> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name.to_string_lossy().contains("-handoff"))
+        .collect();
+    assert!(
+        final_names.is_empty(),
+        "short write exposed {final_names:?}"
+    );
+    let filed = json_stdout(repo.arc(&repo.root).args([
+        "journal",
+        "filed",
+        "--session",
+        "short-writer",
+        "--json",
+    ]));
+    assert!(filed["sessions"].as_array().unwrap().is_empty(), "{filed}");
+    let catchup = json_stdout(
+        repo.arc(&repo.root)
+            .args(["catchup", "--sessions", "10", "--json"]),
+    );
+    let writer = catchup["recent_sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["session"] == "short-writer")
+        .unwrap();
+    assert_eq!(writer["unfiled"], true, "{catchup}");
+    assert_eq!(writer["handoffs"], serde_json::json!([]), "{catchup}");
+    let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    assert!(open.to_string().contains(&source), "{open}");
+    stdout(
+        repo.arc(&repo.root)
+            .env("ARC_SESSION", "short-writer")
+            .args(["journal", "transition", &source, "--to", "handoff"]),
+    );
+    let successor = journal_events(&dir)
+        .into_iter()
+        .find(|event| event["event"] == "transition")
+        .unwrap();
+    let text = fs::read_to_string(dir.join(successor["file"].as_str().unwrap())).unwrap();
+    assert!(text.contains(&"body\n".repeat(4096)));
+}
+
+#[test]
+fn transition_retry_verifies_prepared_custom_body_and_preserves_prefix_evidence() {
+    let repo = Repo::new();
+    let source = filed_artifact(&repo, "todo", "prepared-retry", "source work\n");
+    stdout(
+        repo.arc(&repo.root)
+            .env("ARC_SESSION", "prepared-writer")
+            .args([
+                "journal",
+                "transition",
+                &source,
+                "--to",
+                "handoff",
+                "--title",
+                "Saved title",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("The custom body survives retry.\n"),
+    );
+    let dir = journal_dir(&repo);
+    let mut events = journal_events(&dir);
+    let relation = events
+        .iter()
+        .find(|event| event["event"] == "transition")
+        .unwrap()
+        .clone();
+    let successor = relation["file"].as_str().unwrap();
+    let path = dir.join(successor);
+    let complete = fs::read(&path).unwrap();
+    events.retain(|event| !(event["event"] == "consumed" && event["file"] == source));
+    let log = events
+        .iter()
+        .map(|event| format!("{event}\n"))
+        .collect::<String>();
+    fs::write(dir.join("events.jsonl"), &log).unwrap();
+    fs::create_dir_all(dir.join(".transitions")).unwrap();
+    let prepared = dir.join(".transitions").join(successor);
+    fs::write(&prepared, &complete).unwrap();
+    let prefix = format!("supersedes: {source}\n\n# Saved title\nThe custom ");
+    fs::write(&path, &prefix).unwrap();
+    let filed = json_stdout(repo.arc(&repo.root).args([
+        "journal",
+        "filed",
+        "--session",
+        "prepared-writer",
+        "--json",
+    ]));
+    assert!(filed["sessions"].as_array().unwrap().is_empty(), "{filed}");
+    repo.arc(&repo.root)
+        .args(["journal", "doctor"])
+        .assert()
+        .failure()
+        .stdout(predicates::str::contains("complete publication evidence"));
+    repo.arc(&repo.root)
+        .args(["journal", "transition", &source, "--to", "handoff"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("complete prepared body"));
+    assert_eq!(fs::read(&path).unwrap(), prefix.as_bytes());
+    assert_eq!(fs::read(&prepared).unwrap(), complete);
+    assert_eq!(fs::read_to_string(dir.join("events.jsonl")).unwrap(), log);
+    let evidence = dir.join(".truncated-successor-evidence");
+    fs::rename(&path, &evidence).unwrap();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "transition", &source, "--to", "handoff"]),
+    );
+    assert_eq!(fs::read(&path).unwrap(), complete);
+    assert_eq!(fs::read(&evidence).unwrap(), prefix.as_bytes());
+    assert!(!prepared.exists());
+    assert_eq!(
+        journal_events(&dir)
+            .iter()
+            .find(|event| event["event"] == "transition")
+            .unwrap(),
+        &relation
+    );
+    let filed = json_stdout(repo.arc(&repo.root).args([
+        "journal",
+        "filed",
+        "--session",
+        "prepared-writer",
+        "--json",
+    ]));
+    assert_eq!(
+        filed["sessions"][0]["items"][0]["file"], successor,
+        "{filed}"
+    );
+}
+
+#[test]
+fn committed_promotion_cleanup_refuses_changed_bodies_and_relation_identity() {
+    use std::os::unix::fs::PermissionsExt;
+    for changed in ["source", "destination", "relation"] {
+        let repo = Repo::new();
+        let (project, file) = journal_artifact(&repo, "cleanup-identity", "memory", "# Rule\n");
+        let global = repo.home.join(".local/ai/arc/journals/global");
+        let log = project.join("events.jsonl");
+        fs::set_permissions(&log, fs::Permissions::from_mode(0o400)).unwrap();
+        repo.arc(&repo.root)
+            .args(["journal", "promote", &file, "--global"])
+            .assert()
+            .failure();
+        fs::set_permissions(&log, fs::Permissions::from_mode(0o600)).unwrap();
+        let pending_path = global.join("exchange/pending.json");
+        let pending: serde_json::Value =
+            serde_json::from_slice(&fs::read(&pending_path).unwrap()).unwrap();
+        fs::write(&log, pending["promotion"]["events"].as_str().unwrap()).unwrap();
+        fs::remove_file(&pending_path).unwrap();
+        let successor = pending["promotion"]["prepared"]["promoted"]["file"]
+            .as_str()
+            .unwrap();
+        match changed {
+            "source" => fs::write(project.join(&file), "changed source\n").unwrap(),
+            "destination" => fs::write(global.join(successor), "changed destination\n").unwrap(),
+            "relation" => {
+                let mut records = journal_events(&project);
+                records
+                    .iter_mut()
+                    .find(|event| event["event"] == "consumed")
+                    .unwrap()["session"] = serde_json::json!("other-writer");
+                fs::write(
+                    &log,
+                    records
+                        .iter()
+                        .map(|event| format!("{event}\n"))
+                        .collect::<String>(),
+                )
+                .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let before = (
+            fs::read(&log).unwrap(),
+            fs::read(global.join("events.jsonl")).unwrap(),
+            fs::read(project.join(&file)).unwrap(),
+            fs::read(global.join(successor)).unwrap(),
+        );
+        repo.arc(&repo.root)
+            .args(["journal", "log", "cleanup-identity", "next write"])
+            .assert()
+            .failure();
+        assert_eq!(
+            before,
+            (
+                fs::read(&log).unwrap(),
+                fs::read(global.join("events.jsonl")).unwrap(),
+                fs::read(project.join(&file)).unwrap(),
+                fs::read(global.join(successor)).unwrap()
+            ),
+            "{changed}"
+        );
+        assert!(
+            project
+                .join(".promotions")
+                .join(format!("{file}.json"))
+                .exists(),
+            "{changed}"
+        );
+        assert!(!pending_path.exists(), "{changed}");
+    }
 }

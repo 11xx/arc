@@ -2265,6 +2265,8 @@ enum Cmd {
     /// Backend scan bounds and failures appear in session_discovery_errors; readable
     /// rows remain ranked by recorded activity. Pending transitions carry a diagnostic
     /// and do not count as filings or naming handoffs/conclusions.
+    /// Publication requires the supersedes link and a complete staged body match
+    /// or the source's recorded retirement; a readable successor prefix is insufficient.
     /// Text warns when the running build differs from HEAD in an arc-ledger
     /// checkout: older for an ancestor, differs otherwise, with dirty builds
     /// identified. Other projects and unknown build revisions have no warning.

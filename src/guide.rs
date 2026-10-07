@@ -163,8 +163,9 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          distillation sources and superseded origins. Direct writes
                          and published transition successors count, including imported
                          and spool-promoted artifacts with their original writers.
-                         A transition requires a readable successor body carrying its
-                         supersedes link, in hot or archived storage. Pending intents
+                         A transition requires its supersedes link and a complete
+                         staged body match or its source's recorded retirement,
+                         in hot or archived storage. Unverified pending intents
                          are omitted; journal doctor reports pending transitions.
                          --session matches the writing or source session id.
                          Fates are open, taken (with change ids), done, superseded,
@@ -384,6 +385,12 @@ SETTLE A QUESTION (before it is work)
     Change a live artifact's kind as one guarded operation: a typed successor
     with a `supersedes` link, the source retired. Promotion to a code change
     stays with `begin --from-journal`, never a kind conversion.
+    Complete Markdown is staged durably under `.transitions/` before the
+    relation event, then published exclusively and verified before retirement.
+    Retry uses the prepared bytes, including a supplied body and title. A
+    legacy pending successor is verified against the original body and title;
+    a mismatch preserves the artifact and refuses retirement. A readable
+    supersedes prefix alone supplies no publication evidence.
   arc journal <kind> <topic> --body-file -   One verb per kind; `arc journal
                                        --help` is the registry. `arc fr` is
                                        the top-level alias for one of them.
@@ -1339,6 +1346,10 @@ END A SESSION (what the next one reads)
   recoverable transaction. Complete bodies publish without replacing a file.
   Subsequent journal writes finish interrupted promotions; retrying promotion
   verifies the body and replays both relation records before reporting success.
+  Global recovery remains discoverable until source intent removal is durable.
+  A remaining source intent whose exact relation records are committed in both
+  journals needs only metadata cleanup after verifying both bodies in hot or
+  archived storage. Recovery preserves their storage and subsequent events.
   Changed prepared bodies, event logs or a different global journal refuse
   recovery. Open claims must be released with
   `arc release-claim <file> --outcome paused|abandoned|expired`.
@@ -2558,6 +2569,10 @@ SCHEMAS
   current export formats. Journal imports accept
   `arc-journal-bundle/1`.
   Their absent model provenance stays absent.
+
+  Private successor preparation uses complete Markdown at
+  `.transitions/<successor>`, retained until source retirement. These files
+  are recovery evidence, separate from versioned journal events.
 
   Internal:
     store format 7                   .git/arc/config.json and the change ledger

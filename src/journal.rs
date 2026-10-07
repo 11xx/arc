@@ -542,6 +542,8 @@ pub enum JournalCmd {
     /// Exits 0 when the journal is clean or carries only advice, and 1 when it
     /// reports a problem. A journal that cannot be read at all also exits 1,
     /// with the error on stderr and no report; a usage error exits 2.
+    /// Transition checks include complete successor publication evidence and
+    /// source retirement, with both hot and archived bodies considered.
     /// Records no events; ledger reads do not require a parseable append policy.
     Doctor {
         /// Emit structured JSON instead of text
@@ -695,8 +697,9 @@ pub enum JournalCmd {
     /// changes that took them up, and consumption outcomes (arc-journal-filed/1).
     /// Direct writes and published transition successors retain their original writers,
     /// including imported and spool-promoted artifacts. Successors name the
-    /// artifact they supersede. An intent without a readable successor body carrying
-    /// its supersedes link is omitted; journal doctor reports pending transitions.
+    /// artifact they supersede. A successor must carry its supersedes link and
+    /// match the complete staged body or have its source's recorded retirement.
+    /// Unverified intents are omitted; journal doctor reports pending transitions.
     /// Open actionable items are stale after the threshold of recorded inactivity;
     /// active claims suppress staleness. Plain reads record no activity.
     /// Records no events; ledger reads do not require a parseable append policy.
@@ -1154,6 +1157,10 @@ pub enum JournalCmd {
     /// as one guarded operation rather than hand-composed by every caller.
     /// Promotion to a code change stays with `begin --from-journal`, which
     /// is implementation authorization and never a kind conversion.
+    /// The complete body is staged durably before the relation is recorded and
+    /// published exclusively. Retry uses those staged bytes. A legacy pending
+    /// successor requires verification against the original body and title;
+    /// a mismatch preserves the artifact and refuses retirement.
     Transition {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
@@ -1198,6 +1205,9 @@ pub enum JournalCmd {
     /// Complete staged bodies publish exclusively; success requires body and
     /// event replay verification. Changed bodies or a different global journal
     /// refuse recovery. Open claims require release-claim.
+    /// Cleanup keeps global recovery discoverable until the source intent is
+    /// durably removed. A committed relation with a remaining source intent
+    /// is verified in hot or archived storage and needs only metadata cleanup.
     Promote {
         /// Project memory filename (a name, not a path).
         filename: String,
@@ -2265,6 +2275,14 @@ fn finish_exchange_transaction(hot: &Path) -> Result<()> {
     {
         bail!("invalid body baselines in pending journal exchange");
     }
+    if let Some(commit) = &pending.promotion {
+        if commit.prepared.global != hot {
+            bail!("promotion destination scope changed; recovery refuses");
+        }
+        if committed_memory_promotion(&commit.project, &commit.filename, &commit.prepared)? {
+            return cleanup_exchange_transaction(&path, pending.promotion.as_ref(), |_| Ok(()));
+        }
+    }
     for (index, artifact) in pending.bodies.iter().enumerate() {
         let current = exchange_body_digest(hot, artifact)?;
         if current.is_none() {
@@ -2347,15 +2365,30 @@ fn finish_exchange_transaction(hot: &Path) -> Result<()> {
             exchange_imports_dir(hot).join(format!("{}.json", receipt.bundle_sha256));
         publish_exchange_file(&receipt_path, &serde_json::to_vec_pretty(receipt)?)?;
     }
-    std::fs::remove_file(&path)?;
-    File::open(path.parent().context("pending exchange has no parent")?)?.sync_all()?;
-    if let Some(commit) = &pending.promotion {
+    cleanup_exchange_transaction(&path, pending.promotion.as_ref(), |_| Ok(()))
+}
+
+fn cleanup_exchange_transaction(
+    path: &Path,
+    promotion: Option<&PromotionCommit>,
+    mut after_step: impl FnMut(&str) -> Result<()>,
+) -> Result<()> {
+    // The destination record keeps recovery discoverable until source cleanup is durable.
+    if let Some(commit) = promotion {
         let intent = promotion_intent(&commit.project, &commit.filename);
         if intent.try_exists()? {
             std::fs::remove_file(&intent)?;
-            File::open(intent.parent().context("promotion intent has no parent")?)?.sync_all()?;
         }
+        after_step("source-unlink")?;
+        File::open(intent.parent().context("promotion intent has no parent")?)?.sync_all()?;
+        after_step("source-sync")?;
     }
+    if path.try_exists()? {
+        std::fs::remove_file(path)?;
+    }
+    after_step("global-unlink")?;
+    File::open(path.parent().context("pending exchange has no parent")?)?.sync_all()?;
+    after_step("global-sync")?;
     Ok(())
 }
 
@@ -2415,7 +2448,7 @@ fn verify_prepared_log(hot: &Path, expected: &str) -> Result<()> {
 fn publish_exclusive_body(path: &Path, bytes: &[u8]) -> Result<()> {
     if path.try_exists()? {
         if std::fs::read(path)? != bytes {
-            bail!("destination body changed after promotion preparation; recovery refuses");
+            bail!("destination body changed after preparation; recovery refuses");
         }
         return Ok(());
     }
@@ -2560,6 +2593,11 @@ fn recover_memory_promotion(project: &Path, filename: &str) -> Result<()> {
         return Ok(());
     }
     if !exchange_pending_path(&prepared.global).try_exists()? {
+        if committed_memory_promotion(project, filename, &prepared)? {
+            std::fs::remove_file(&intent)?;
+            File::open(intent.parent().context("promotion intent has no parent")?)?.sync_all()?;
+            return Ok(());
+        }
         stage_memory_promotion(project, filename, &prepared)?;
     } else {
         let pending: ExchangeTransaction =
@@ -2573,6 +2611,52 @@ fn recover_memory_promotion(project: &Path, filename: &str) -> Result<()> {
         }
     }
     finish_exchange_transaction(&prepared.global)
+}
+
+/// Exact committed relations need only metadata cleanup, even after archival.
+fn committed_memory_promotion(
+    project: &Path,
+    filename: &str,
+    prepared: &MemoryPromotion,
+) -> Result<bool> {
+    let successor = prepared
+        .promoted
+        .file
+        .as_deref()
+        .context("promotion has no destination")?;
+    if filename.contains(['/', '\\'])
+        || parse_artifact_name(filename).is_none()
+        || successor.contains(['/', '\\'])
+        || parse_artifact_name(successor).is_none()
+        || prepared.consumed.file.as_deref() != Some(filename)
+    {
+        bail!("invalid pending memory promotion; recovery refuses");
+    }
+    for dir in [project, prepared.global.as_path()] {
+        let bytes = event_log_raw(dir)?;
+        if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+            return Ok(false);
+        }
+    }
+    let source_events = read_events(project)?;
+    let destination_events = read_events(&prepared.global)?;
+    if !promotion_event_recorded(&source_events, &prepared.consumed)?
+        || !promotion_event_recorded(&destination_events, &prepared.promoted)?
+    {
+        return Ok(false);
+    }
+    for (dir, file, events) in [
+        (project, filename, source_events),
+        (prepared.global.as_path(), successor, destination_events),
+    ] {
+        ensure_storage_settled(dir, &events, file)?;
+        let path = artifact_body_path(dir, file)
+            .context("recorded promotion body is missing; recovery refuses")?;
+        if std::fs::read(path)? != prepared.body.as_bytes() {
+            bail!("committed promotion body changed after preparation; recovery refuses");
+        }
+    }
+    Ok(true)
 }
 
 /// Ordinary writers settle prepared appends and promotions before taking their lock.
@@ -3444,6 +3528,9 @@ fn inspect_transition_integrity(
             None => issues.push("the successor artifact is missing"),
             Some(path) if artifact_supersedes(&path).as_deref() != Some(source) => {
                 issues.push("the successor does not carry the supersedes link")
+            }
+            Some(_) if !event.creates_artifact(dir, events) => {
+                issues.push("the successor body has no complete publication evidence")
             }
             Some(_) => {}
         }
@@ -5490,7 +5577,10 @@ pub(crate) fn filed_report_in(
         std::collections::BTreeMap::new();
     let mut seen = HashSet::new();
     let mut stale_count = 0;
-    for event in events.iter().filter(|event| event.creates_artifact(dir)) {
+    for event in events
+        .iter()
+        .filter(|event| event.creates_artifact(dir, &events))
+    {
         let Some(file) = event.file.as_deref() else {
             continue;
         };
@@ -5713,14 +5803,14 @@ pub(crate) fn recent_sessions(
     let creations: Vec<_> = events
         .iter()
         .map(|event| {
-            let created = dir.as_deref().is_some_and(|dir| event.creates_artifact(dir));
+            let created = dir.as_deref().is_some_and(|dir| event.creates_artifact(dir, &events));
             if created {
                 if let Some(file) = event.file.as_deref() {
                     published.insert(file);
                 }
             } else if event.event == "transition" {
                 unavailable.push(format!(
-                    "journal transition pending: {} → {}; successor body is missing, unreadable, or lacks its supersedes link",
+                    "journal transition pending: {} → {}; successor body is missing, unreadable, or unverified",
                     event.supersedes.as_deref().unwrap_or("unknown"),
                     event.file.as_deref().unwrap_or("unknown")
                 ));
@@ -7948,17 +8038,35 @@ impl JournalEvent {
         }
     }
 
-    /// A transition intent represents a filing only when a readable successor
-    /// body carries the recorded supersedes link, in hot or archived storage.
-    fn creates_artifact(&self, dir: &Path) -> bool {
+    /// Publication requires a complete prepared body or a recorded retirement.
+    fn creates_artifact(&self, dir: &Path, events: &[JournalEvent]) -> bool {
         match self.event.as_str() {
             "note" => true,
             "transition" => self.file.as_deref().is_some_and(|file| {
                 self.supersedes.as_deref().is_some_and(|source| {
-                    artifact_body_path(dir, file)
-                        .and_then(|path| artifact_supersedes(&path))
-                        .as_deref()
-                        == Some(source)
+                    let Some(path) = artifact_body_path(dir, file) else {
+                        return false;
+                    };
+                    if artifact_supersedes(&path).as_deref() != Some(source) {
+                        return false;
+                    }
+                    match std::fs::read(transition_body_path(dir, file)) {
+                        Ok(prepared) => {
+                            artifact_supersedes(&transition_body_path(dir, file)).as_deref()
+                                == Some(source)
+                                && std::fs::read(path).is_ok_and(|body| body.starts_with(&prepared))
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            events.iter().any(|event| {
+                                event.event == "consumed"
+                                    && event.file.as_deref() == Some(source)
+                                    && event.outcome.as_deref() == Some("superseded")
+                                    && event.note.as_deref()
+                                        == Some(&format!("transitioned to {file}"))
+                            })
+                        }
+                        Err(_) => false,
+                    }
                 })
             }),
             _ => false,
@@ -14668,19 +14776,30 @@ fn find_transition_artifact(
 }
 
 fn write_successor(path: &Path, contents: &str) -> Result<()> {
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .with_context(|| {
-            format!(
-                "cannot create {} (an artifact with this second's timestamp already exists)",
-                path.display()
-            )
-        })?;
-    file.write_all(contents.as_bytes())
-        .with_context(|| format!("cannot write {}", path.display()))
+    publish_exclusive_body(path, contents.as_bytes())?;
+    verify_successor(path, contents)
+}
+
+fn transition_body_path(dir: &Path, successor: &str) -> PathBuf {
+    dir.join(".transitions").join(successor)
+}
+
+fn verify_successor(path: &Path, contents: &str) -> Result<()> {
+    if !std::fs::read(path)?.starts_with(contents.as_bytes()) {
+        bail!("transition successor {} does not match its complete prepared body; preserve it and supply the original body and title when retrying a legacy transition", path.display());
+    }
+    File::open(path)?.sync_all()?;
+    File::open(path.parent().context("successor has no parent")?)?.sync_all()?;
+    Ok(())
+}
+
+fn cleanup_transition_body(dir: &Path, successor: &str) -> Result<()> {
+    let path = transition_body_path(dir, successor);
+    if path.try_exists()? {
+        std::fs::remove_file(&path)?;
+        File::open(path.parent().context("prepared successor has no parent")?)?.sync_all()?;
+    }
+    Ok(())
 }
 
 fn append_transition_retirement(
@@ -14697,11 +14816,9 @@ fn append_transition_retirement(
     append_event(ctx, dir, &consumed)
 }
 
-/// Change a live artifact's kind as one guarded operation: record the relation,
-/// create the successor, and retire the source. The relation is written first,
-/// so an interruption leaves the source actionable with a pending fact rather
-/// than silently creating an untracked second queue item. A retry completes a
-/// pending relation, while the journal doctor reports every incomplete pair.
+/// Stage a complete body, record the relation, publish the successor, and retire
+/// the source. A pending relation retains its prepared bytes for a retry;
+/// publication verifies the whole body before the source can leave its queue.
 #[allow(clippy::too_many_arguments)]
 fn transition(
     ctx: &Ctx,
@@ -14875,16 +14992,27 @@ fn transition(
         // interrupted transition and this retry. Resolving it across both
         // stores is what stops the retry recreating a hot duplicate that
         // shadows the real one.
+        let prepared = match std::fs::read_to_string(transition_body_path(&dir, successor)) {
+            Ok(body) => body,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                format!("{supersession}{contents}")
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if prepared.lines().next() != Some(&format!("supersedes: {filename}")) {
+            bail!("prepared successor does not match its source; recovery refuses");
+        }
         match artifact_body_path(&dir, successor) {
             Some(path) if artifact_supersedes(&path).as_deref() != Some(filename) => bail!(
                 "transition successor {} exists without the supersedes link to {}",
                 path.display(),
                 filename
             ),
-            Some(_) => {}
-            None => write_successor(&dir.join(successor), &format!("{supersession}{contents}"))?,
+            Some(path) => verify_successor(&path, &prepared)?,
+            None => write_successor(&dir.join(successor), &prepared)?,
         }
         append_transition_retirement(ctx, &dir, &topic, filename, successor)?;
+        cleanup_transition_body(&dir, successor)?;
         println!(
             "completed transition: {filename} → {successor} ({} superseded)",
             from_kind
@@ -14899,6 +15027,18 @@ fn transition(
         None => allocate_artifact_name(&dir, &derived_name)?,
     };
     let successor_path = dir.join(&successor_name);
+    let prepared = format!("{supersession}{contents}");
+    if successor_path.try_exists()? {
+        verify_successor(&successor_path, &prepared)?;
+    }
+    let prepared_path = transition_body_path(&dir, &successor_name);
+    std::fs::create_dir_all(
+        prepared_path
+            .parent()
+            .context("prepared successor has no parent")?,
+    )?;
+    File::open(&dir)?.sync_all()?;
+    publish_exclusive_body(&prepared_path, prepared.as_bytes())?;
 
     // The relation is the durable intent. If the next write is interrupted,
     // the journal doctor can name it and a retry can finish it without
@@ -14910,9 +15050,10 @@ fn transition(
     event.note = reason.map(str::to_string);
     append_event(ctx, &dir, &event)?;
     if !successor_path.exists() {
-        write_successor(&successor_path, &format!("{supersession}{contents}"))?;
+        write_successor(&successor_path, &prepared)?;
     }
     append_transition_retirement(ctx, &dir, &topic, filename, &successor_name)?;
+    cleanup_transition_body(&dir, &successor_name)?;
     println!(
         "transitioned: {filename} → {successor_name} ({} superseded)",
         from_kind
@@ -15078,6 +15219,125 @@ fn change_annotation(changes: &[ChangeState], topic: &str, filename: &str) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transition_prefix_is_not_publication_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let source = "20261004T120000Z-prefix-todo.md";
+        let successor = "20261004T120001Z-prefix-handoff.md";
+        let event: JournalEvent = serde_json::from_value(serde_json::json!({
+            "schema": JOURNAL_SCHEMA, "ts": "2026-10-04T12:00:01Z",
+            "harness": "test", "session": "writer", "topic": "prefix",
+            "event": "transition", "file": successor, "supersedes": source
+        }))
+        .unwrap();
+        std::fs::write(root.path().join(source), "# Work\n").unwrap();
+        std::fs::write(
+            root.path().join(successor),
+            format!("supersedes: {source}\n\n# Short "),
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("events.jsonl"),
+            format!("{}\n", serde_json::to_string(&event).unwrap()),
+        )
+        .unwrap();
+        assert!(!event.creates_artifact(root.path(), std::slice::from_ref(&event)));
+    }
+
+    #[test]
+    fn promotion_cleanup_interruptions_keep_recovery_discoverable() {
+        for boundary in [
+            "source-unlink",
+            "source-sync",
+            "global-unlink",
+            "global-sync",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let project = root.path().join("project");
+            let global = root.path().join("global");
+            let filename = "20261004T120000Z-cleanup-memory.md";
+            let successor = "20261004T120001Z-cleanup-memory.md";
+            let promoted: JournalEvent = serde_json::from_value(serde_json::json!({
+                "schema": JOURNAL_SCHEMA, "ts": "2026-10-04T12:00:01Z",
+                "harness": "test", "session": "writer", "topic": "cleanup",
+                "event": "note", "file": successor
+            }))
+            .unwrap();
+            let consumed: JournalEvent = serde_json::from_value(serde_json::json!({
+                "schema": JOURNAL_SCHEMA, "ts": "2026-10-04T12:00:01Z",
+                "harness": "test", "session": "writer", "topic": "cleanup",
+                "event": "consumed", "file": filename, "outcome": "superseded"
+            }))
+            .unwrap();
+            let commit = PromotionCommit {
+                project: project.clone(),
+                filename: filename.to_string(),
+                prepared: MemoryPromotion {
+                    global: global.clone(),
+                    body: "# Rule\n".to_string(),
+                    promoted,
+                    consumed,
+                },
+                events: String::new(),
+                events_basis: String::new(),
+            };
+            let intent = promotion_intent(&project, filename);
+            let pending = exchange_pending_path(&global);
+            publish_exchange_file(&intent, b"intent").unwrap();
+            publish_exchange_file(&pending, b"pending").unwrap();
+            let failure = cleanup_exchange_transaction(&pending, Some(&commit), |step| {
+                if step == boundary {
+                    bail!("injected cleanup interruption at {step}");
+                }
+                Ok(())
+            });
+            assert!(failure.is_err(), "{boundary}");
+            assert!(
+                !intent.exists(),
+                "{boundary}: source cleanup must precede global release"
+            );
+            assert_eq!(
+                pending.exists(),
+                matches!(boundary, "source-unlink" | "source-sync"),
+                "{boundary}"
+            );
+            cleanup_exchange_transaction(&pending, Some(&commit), |_| Ok(())).unwrap();
+            assert!(!intent.exists() && !pending.exists(), "{boundary}");
+        }
+    }
+
+    #[test]
+    fn prepared_successor_verification_covers_the_whole_body() {
+        let root = tempfile::tempdir().unwrap();
+        let source = "20261004T120000Z-verified-todo.md";
+        let successor = "20261004T120001Z-verified-handoff.md";
+        let event: JournalEvent = serde_json::from_value(serde_json::json!({
+            "schema": JOURNAL_SCHEMA, "ts": "2026-10-04T12:00:01Z",
+            "harness": "test", "session": "writer", "topic": "verified",
+            "event": "transition", "file": successor, "supersedes": source
+        }))
+        .unwrap();
+        let body = format!("supersedes: {source}\n\n# Handoff\nThe entire body.\n");
+        let prepared = transition_body_path(root.path(), successor);
+        publish_exclusive_body(&prepared, body.as_bytes()).unwrap();
+        let path = root.path().join(successor);
+        for length in [0, body.find("# Handoff").unwrap(), body.len() - 1] {
+            std::fs::write(&path, &body[..length]).unwrap();
+            assert!(!event.creates_artifact(root.path(), std::slice::from_ref(&event)));
+            assert!(verify_successor(&path, &body).is_err());
+        }
+        std::fs::remove_file(&path).unwrap();
+        write_successor(&path, &body).unwrap();
+        assert!(event.creates_artifact(root.path(), std::slice::from_ref(&event)));
+        std::fs::write(
+            &path,
+            format!("{body}\n### Position\nAdditional evidence.\n"),
+        )
+        .unwrap();
+        verify_successor(&path, &body).unwrap();
+        assert!(event.creates_artifact(root.path(), std::slice::from_ref(&event)));
+    }
 
     #[test]
     fn topic_validation() {
