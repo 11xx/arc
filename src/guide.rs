@@ -1804,14 +1804,19 @@ HISTORY REWRITES
                        rewritten, signed like the commits. Run again to
                        finish one that was interrupted.
     arc rewrite trailers --from <rev> [--drop <key>] [--append <line>]
-                         [--include-shared]
+                         [--edits <file>] [--include-shared]
                        Edit the trailer block of every commit message from
                        --from through the branch head, and carry the result
                        through the same map, refs and record. --drop removes
                        every trailer with that key, matched without case;
                        --append adds a `Key: value` line the block does not
-                       already carry; both repeat, and at least one is
-                       required. A role line whose value is no fresh
+                       already carry; both repeat and apply to every commit
+                       in the range. --edits <file> replaces or drops one
+                       exact trailer line of one named commit (below); it
+                       repeats, and at least one of the three is required.
+                       Edits apply first, reading each commit's block as the
+                       commit carries it, then --drop, then --append.
+                       A role line whose value is no fresh
                        coordinate (malformed, carrying a placeholder or a
                        session id, or a person without an email) refuses
                        before any commit is recreated, including in
@@ -1857,6 +1862,28 @@ HISTORY REWRITES
   names each commit that carried such a header. Trees are identical either
   way, which is why tree-keyed gate evidence counts the same on both sides of
   a signing rewrite.
+
+  An edits file is `arc-trailer-edits/1`, one edit per line, the fields
+  separated by tabs:
+
+    # arc-trailer-edits/1
+    <full commit sha>  replace|drop  <exact old trailer line>  <new trailer line, empty for drop>
+
+  Blank lines and `#` comments are skipped; a comment naming another
+  `arc-trailer-edits` version refuses, and a drop may leave out its empty
+  last field. An edit applies only to the named commit, which has to be in
+  the --from range, and only to a trailer line of that commit's trailer block
+  whose trimmed text equals the old line exactly. That line occurs once in the
+  block, is not the head of a value continuing below it, and is named by no
+  other edit. `replace` puts the new line where the old one was and `drop`
+  removes it. A new line on `Planned-by`, `Implemented-by`, `Reviewed-by` or
+  `Orchestrated-by` is a fresh coordinate, and on `Assisted-by` so is its
+  value without a trailing `(role)`. Any violation refuses before a commit is
+  recreated, `--dry-run` included, naming the file and line. `--dry-run`
+  lists each edit as `<short sha> <action> <old line> -> <new line>` with the
+  map. A recreated commit keeps its tree, author, committer and both dates;
+  `--key` signs it, and pins, retained commits and `--retag` tags move as for
+  any rewrite.
 
   A trailer edit recreates a commit only when it reached that commit or its
   ancestry moved: a message the edit leaves alone, under commits it left
@@ -2600,10 +2627,11 @@ SCHEMAS
   version is a promise. An internal shape is arc's own on-disk bookkeeping;
   parsing one means tracking arc's implementation.
 
-  A stored input format is versioned from the reader's side: its version
-  marks what a reader must accept, so a new optional field that leaves every
-  older file valid keeps the version, and removing a field or making one
-  required takes the next. `journal-events/1` is one.
+  An input format, stored or supplied, is versioned from the reader's side:
+  its version marks what a reader must accept, so a new optional field that
+  leaves every older file valid keeps the version, and removing a field or
+  making one required takes the next. `journal-events/1` and
+  `arc-trailer-edits/1` are two.
 
   Commitments, derived views:
     `arc-state/3`                    arc show --json
@@ -2661,6 +2689,7 @@ SCHEMAS
     `arc-journal-bundle/2`           arc journal export / import
     `journal-events/1`               events.jsonl, streamed by arc journal events
     `arc-journal-spool/1`            .arc/outbox/<ts>-<kind>-<topic>.json
+    `arc-trailer-edits/1`            arc rewrite trailers --edits
 
   Imports accept `arc-bundle/5` and `arc-replica-bundle/2` alongside
   current export formats. Journal imports accept

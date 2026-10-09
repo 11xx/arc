@@ -2967,6 +2967,12 @@ enum RewriteCmd {
     /// Edit the trailers of every commit message from --from to the branch
     /// head, recreating only the commits that change and what sits on them
     ///
+    /// --drop and --append apply to every commit in the range; --edits
+    /// replaces or drops one exact trailer line of one named commit, which is
+    /// how a placeholder line is corrected without touching the valid lines
+    /// under the same key. A recreated commit keeps its tree, author,
+    /// committer and both dates, and is signed with --key unless --no-sign.
+    ///
     /// A message edit leaves earlier approvals stale. Run `arc snapshot`
     /// followed by a verdict on the fresh patchset, or `arc review --snapshot`,
     /// to re-approve the rewritten head. A rewrite grants no approval.
@@ -2983,9 +2989,32 @@ enum RewriteCmd {
     /// recording, and named by the event's `retained` map. The keep pin moves
     /// to the successor; a retention ref never moves. --dry-run lists them
     Trailers {
+        /// Replace or drop one exact trailer line of one named commit, from
+        /// FILE in `arc-trailer-edits/1`; repeat for more than one file. A
+        /// file's lines are `<full commit sha>`, `replace` or `drop`, the
+        /// exact old trailer line and the new trailer line (empty for a drop),
+        /// separated by tabs; blank lines and `#` comments are skipped, and a
+        /// comment naming another `arc-trailer-edits` version refuses. An edit
+        /// applies only to its commit, which has to be in the --from range,
+        /// and only to a trailer line of that commit's trailer block whose
+        /// trimmed text equals the old line; the old line occurs there exactly
+        /// once. `replace` puts the new line in the old one's place and `drop`
+        /// removes the old line. A new line on Planned-by, Implemented-by,
+        /// Reviewed-by or Orchestrated-by has to be a fresh coordinate, and on
+        /// Assisted-by so does its value without a trailing `(role)`. Any
+        /// violation refuses before any commit is recreated, --dry-run
+        /// included, naming the file and line. Combined with --drop and
+        /// --append, edits apply first, then --drop, then --append; the edits
+        /// read each commit's trailer block as the commit carries it
+        #[arg(long = "edits", value_name = "FILE", required_unless_present_any = ["drop", "append"])]
+        edits: Vec<PathBuf>,
         /// Remove every trailer with this key, matched without case; repeat
         /// for more than one
-        #[arg(long = "drop", value_name = "KEY", required_unless_present = "append")]
+        #[arg(
+            long = "drop",
+            value_name = "KEY",
+            required_unless_present_any = ["append", "edits"]
+        )]
         drop: Vec<String>,
         /// Add this `Key: value` line to the trailer block where it is not
         /// already there; repeat for more than one. A Planned-by,
@@ -2993,7 +3022,11 @@ enum RewriteCmd {
         /// fresh coordinate (malformed, carrying a placeholder or a session
         /// id, or a person without an email) refuses before any commit is
         /// recreated, --dry-run included
-        #[arg(long, value_name = "LINE", required_unless_present = "drop")]
+        #[arg(
+            long,
+            value_name = "LINE",
+            required_unless_present_any = ["drop", "edits"]
+        )]
         append: Vec<String>,
         /// Oldest commit whose trailers are edited; the named commit itself
         /// is edited and rewritten when its message or ancestry changes.
@@ -3016,7 +3049,8 @@ enum RewriteCmd {
         #[arg(long)]
         key: Option<String>,
         /// For a fresh rewrite, check map consistency and append policy,
-        /// print the map, every ref it would move and every commit it would
+        /// print each edit as `<short sha> <action> <old line> -> <new line>`,
+        /// the map, every ref it would move and every commit it would
         /// retain, then stop
         #[arg(long = "dry-run")]
         dry_run: bool,
@@ -5140,6 +5174,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 },
             ),
             RewriteCmd::Trailers {
+                edits,
                 drop,
                 append,
                 from,
@@ -5154,6 +5189,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     key,
                     from,
                     include_shared,
+                    edits,
                     drop,
                     append,
                     dry_run,

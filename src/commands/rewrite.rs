@@ -116,6 +116,9 @@ pub struct TrailerArgs {
     pub from: String,
     /// Permit recreating commits reachable from the target or another branch.
     pub include_shared: bool,
+    /// Files of per-commit trailer edits, in `arc-trailer-edits/1`: each
+    /// replaces or drops one exact trailer line of one named commit.
+    pub edits: Vec<PathBuf>,
     /// Trailer keys to remove, matched without case.
     pub drop: Vec<String>,
     /// Whole trailer lines to add where the block does not carry them.
@@ -167,6 +170,10 @@ pub fn instructions_git(check: Option<&str>) -> Result<i32> {
 /// is left exactly as it is: no new object, and no entry in the map. That is
 /// what separates this from re-signing, where every commit in range is
 /// recreated because the one below it was.
+///
+/// The per-commit edits read each message as the commit carries it and apply
+/// first; `--drop` then removes keys from the result, and `--append` adds
+/// lines last.
 pub fn trailers(ctx: &Ctx, args: TrailerArgs) -> Result<i32> {
     // An appended role line is a fresh write: a value that is no fresh
     // coordinate is refused before any commit is read, let alone recreated.
@@ -177,6 +184,17 @@ pub fn trailers(ctx: &Ctx, args: TrailerArgs) -> Result<i32> {
             issue.value,
             issue.detail
         );
+    }
+    // Everything an edit file says by itself is judged here for the same
+    // reason: the format, and whether a replacement is a coordinate.
+    let mut edits = Vec::new();
+    for path in &args.edits {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("cannot read edits file {}", path.display()))?;
+        edits.extend(crate::trailers::parse_edits(
+            &text,
+            &path.display().to_string(),
+        )?);
     }
     let cwd = ctx.cwd.clone();
     let store = ctx.store()?;
@@ -197,12 +215,28 @@ pub fn trailers(ctx: &Ctx, args: TrailerArgs) -> Result<i32> {
         bail!("{from} is not an ancestor of {branch}");
     }
 
+    // What the edits make of each commit they name, found before any commit
+    // is recreated so that one that cannot be applied leaves nothing behind.
+    let edited = apply_edits(&cwd, &edits, &range, &branch, &from)?;
+    if args.dry_run {
+        for edit in &edits {
+            println!(
+                "{} {} {} -> {}",
+                short(&edit.commit),
+                edit.action.as_str(),
+                edit.old,
+                edit.new
+            );
+        }
+    }
+
     let sign = (!args.no_sign).then_some(args.key.as_deref());
     let mut walked = Walked::over(&range, branch, from, head, "arc rewrite trailers", true);
-    walked.reason = edit_reason(&args, &walked.branch, &walked.from);
+    walked.reason = edit_reason(&args, edits.len(), &walked.branch, &walked.from);
     for old in &range {
         let mut commit = gitio::read_commit(&cwd, old)?;
-        let message = crate::trailers::edit(&commit.message, &args.drop, &args.append);
+        let named = edited.get(old).unwrap_or(&commit.message);
+        let message = crate::trailers::edit(named, &args.drop, &args.append);
         let parents = map_parents(&cwd, old, &commit.parents, &walked.mapping)?;
         // Nothing to say differently and nowhere else to say it from: this is
         // the commit it already is, and recreating it would sign a fresh
@@ -218,6 +252,42 @@ pub fn trailers(ctx: &Ctx, args: TrailerArgs) -> Result<i32> {
         protect_shared(&cwd, &targets, &walked, walked.mapping.keys(), args.retag)?;
     }
     complete(ctx, &store, walked, sign, args.dry_run, args.retag)
+}
+
+/// Each commit the edits name, with the message the edits make of it.
+///
+/// An edit has to name a commit of the range, and the range's own commits are
+/// the only ones a rewrite recreates: a commit below it would be an edit to
+/// history this run does not touch.
+fn apply_edits(
+    cwd: &Path,
+    edits: &[crate::trailers::LineEdit],
+    range: &[String],
+    branch: &str,
+    from: &str,
+) -> Result<BTreeMap<String, Vec<u8>>> {
+    let in_range: BTreeSet<&str> = range.iter().map(String::as_str).collect();
+    let mut by_commit: BTreeMap<&str, Vec<&crate::trailers::LineEdit>> = BTreeMap::new();
+    for edit in edits {
+        if !in_range.contains(edit.commit.as_str()) {
+            bail!(
+                "{}: {} is not in the range {}..{branch} this rewrite recreates",
+                edit.origin,
+                edit.commit,
+                short(from)
+            );
+        }
+        by_commit.entry(&edit.commit).or_default().push(edit);
+    }
+    let mut edited = BTreeMap::new();
+    for (commit, named) in by_commit {
+        let message = gitio::read_commit(cwd, commit)?.message;
+        edited.insert(
+            commit.to_string(),
+            crate::trailers::edit_lines(&message, &named)?,
+        );
+    }
+    Ok(edited)
 }
 
 fn protect_shared<'a>(
@@ -366,8 +436,11 @@ fn protect_shared<'a>(
 
 /// What a trailer rewrite did, for the record it leaves: which keys went,
 /// how many lines arrived, and over what.
-fn edit_reason(args: &TrailerArgs, branch: &str, from: &str) -> String {
+fn edit_reason(args: &TrailerArgs, lines: usize, branch: &str, from: &str) -> String {
     let mut edits: Vec<String> = Vec::new();
+    if lines > 0 {
+        edits.push(format!("edited {}", plural(lines, "line")));
+    }
     if !args.drop.is_empty() {
         edits.push(format!("dropped {}", args.drop.join(", ")));
     }

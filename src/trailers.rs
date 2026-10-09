@@ -146,6 +146,68 @@ fn line_issue(line: &[u8]) -> Option<ContributionIssue> {
     }
 }
 
+/// A message cut into lines, with where its trailer block sits.
+struct Parts<'a> {
+    lines: Vec<&'a [u8]>,
+    block: Option<std::ops::Range<usize>>,
+    ends_with_newline: bool,
+}
+
+impl<'a> Parts<'a> {
+    fn of(message: &'a [u8]) -> Self {
+        let ends_with_newline = message.ends_with(b"\n");
+        let body = match ends_with_newline {
+            true => &message[..message.len() - 1],
+            false => message,
+        };
+        let lines: Vec<&[u8]> = match body.is_empty() {
+            true => Vec::new(),
+            false => body.split(|byte| *byte == b'\n').collect(),
+        };
+        let block = block_of(&lines);
+        Parts {
+            lines,
+            block,
+            ends_with_newline,
+        }
+    }
+
+    /// The message holding `kept` as its trailer block, and every other line
+    /// as it was. It equals `original` exactly when the block is unchanged.
+    fn assemble(&self, original: &[u8], kept: Vec<Vec<u8>>) -> Vec<u8> {
+        let (before, after) = match &self.block {
+            Some(block) => (&self.lines[..block.start], &self.lines[block.end..]),
+            // A message with no block grows one after everything it says, with
+            // the blank line that separates a paragraph.
+            None => (&self.lines[..], &self.lines[self.lines.len()..]),
+        };
+        if self.block.is_none() && kept.is_empty() {
+            return original.to_vec();
+        }
+
+        let mut out: Vec<Vec<u8>> = before.iter().map(|line| line.to_vec()).collect();
+        if kept.is_empty() {
+            // Dropping every trailer leaves an empty paragraph, and the blank
+            // line that opened it separates nothing.
+            while out.last().is_some_and(|line| is_blank(line)) {
+                out.pop();
+            }
+        } else {
+            if self.block.is_none() && out.last().is_some_and(|line| !is_blank(line)) {
+                out.push(Vec::new());
+            }
+            out.extend(kept);
+        }
+        out.extend(after.iter().map(|line| line.to_vec()));
+
+        let mut edited = out.join(&b'\n');
+        if self.ends_with_newline && !edited.is_empty() {
+            edited.push(b'\n');
+        }
+        edited
+    }
+}
+
 /// Edit a message's trailers: drop every trailer whose key is one of `drop`,
 /// then add each line of `append` the block does not already carry verbatim.
 ///
@@ -153,23 +215,14 @@ fn line_issue(line: &[u8]) -> Option<ContributionIssue> {
 /// exactly when the edit had nothing to do, which is how a caller tells a
 /// commit it must recreate from one it must leave alone.
 pub fn edit(message: &[u8], drop: &[String], append: &[String]) -> Vec<u8> {
-    let ends_with_newline = message.ends_with(b"\n");
-    let body = match ends_with_newline {
-        true => &message[..message.len() - 1],
-        false => message,
-    };
-    let lines: Vec<&[u8]> = match body.is_empty() {
-        true => Vec::new(),
-        false => body.split(|byte| *byte == b'\n').collect(),
-    };
-    let block = block_of(&lines);
+    let parts = Parts::of(message);
 
     let mut kept: Vec<Vec<u8>> = Vec::new();
-    if let Some(block) = &block {
+    if let Some(block) = &parts.block {
         // A continuation line says nothing on its own, so it goes wherever
         // the trailer above it went.
         let mut dropping = false;
-        for line in &lines[block.clone()] {
+        for line in &parts.lines[block.clone()] {
             if let Some(key) = trailer_key(line) {
                 dropping = drop.iter().any(|wanted| same_key(&key, wanted));
             }
@@ -184,37 +237,234 @@ pub fn edit(message: &[u8], drop: &[String], append: &[String]) -> Vec<u8> {
             kept.push(line.to_vec());
         }
     }
+    parts.assemble(message, kept)
+}
 
-    let (before, after) = match &block {
-        Some(block) => (&lines[..block.start], &lines[block.end..]),
-        // A message with no block grows one after everything it says, with
-        // the blank line that separates a paragraph.
-        None => (&lines[..], &lines[lines.len()..]),
-    };
-    if block.is_none() && kept.is_empty() {
-        return message.to_vec();
-    }
+/// The version of the per-line edit file format [`parse_edits`] reads.
+pub const EDITS_SCHEMA: &str = "arc-trailer-edits/1";
 
-    let mut out: Vec<Vec<u8>> = before.iter().map(|line| line.to_vec()).collect();
-    if kept.is_empty() {
-        // Dropping every trailer leaves an empty paragraph, and the blank
-        // line that opened it separates nothing.
-        while out.last().is_some_and(|line| is_blank(line)) {
-            out.pop();
+/// What an edit does to the line it names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditAction {
+    Replace,
+    Drop,
+}
+
+impl EditAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EditAction::Replace => "replace",
+            EditAction::Drop => "drop",
         }
+    }
+}
+
+/// One edit of one trailer line of one commit.
+#[derive(Debug, Clone)]
+pub struct LineEdit {
+    /// Where the edit was written, as `file:line`, for the refusals that
+    /// concern it.
+    pub origin: String,
+    /// The full commit id the edit applies to, in lower case.
+    pub commit: String,
+    pub action: EditAction,
+    /// The trailer line to find, as a commit carries it.
+    pub old: String,
+    /// The line that takes its place; empty for a drop.
+    pub new: String,
+}
+
+/// Read an `arc-trailer-edits/1` file: one tab-separated edit per line, as
+/// `<commit>`, `replace` or `drop`, the old trailer line and the new one.
+///
+/// Blank lines and `#` comments are skipped, and a comment naming another
+/// `arc-trailer-edits` version is refused. A drop may leave out its empty last
+/// field, which editors strip. Every refusal names `source` and the line.
+pub fn parse_edits(text: &str, source: &str) -> anyhow::Result<Vec<LineEdit>> {
+    let mut edits = Vec::new();
+    for (index, raw) in text.lines().enumerate() {
+        let origin = format!("{source}:{}", index + 1);
+        let raw = raw.strip_suffix('\r').unwrap_or(raw);
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(comment) = line.strip_prefix('#') {
+            let comment = comment.trim();
+            if comment.starts_with("arc-trailer-edits/") && comment != EDITS_SCHEMA {
+                anyhow::bail!("{origin}: this file is {comment}; this arc reads {EDITS_SCHEMA}");
+            }
+            continue;
+        }
+        let fields: Vec<&str> = raw.split('\t').map(str::trim).collect();
+        let (commit, action, old, new) = match fields[..] {
+            [commit, action, old] => (commit, action, old, ""),
+            [commit, action, old, new] => (commit, action, old, new),
+            _ => anyhow::bail!(
+                "{origin}: expected <commit>, replace|drop, the old line and the new line \
+                 separated by tabs, found {} fields",
+                fields.len()
+            ),
+        };
+        if !matches!(commit.len(), 40 | 64) || !commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            anyhow::bail!("{origin}: {commit:?} is not a full commit sha");
+        }
+        let action = match action {
+            "replace" => EditAction::Replace,
+            "drop" => EditAction::Drop,
+            other => anyhow::bail!("{origin}: the action is replace or drop, not {other:?}"),
+        };
+        if trailer_key(old.as_bytes()).is_none() {
+            anyhow::bail!("{origin}: the old line {old:?} is not a `Key: value` trailer line");
+        }
+        match action {
+            EditAction::Drop if !new.is_empty() => {
+                anyhow::bail!("{origin}: a drop names no new line, found {new:?}")
+            }
+            EditAction::Replace if new.is_empty() => {
+                anyhow::bail!("{origin}: a replace needs the new line; use drop to remove one")
+            }
+            EditAction::Replace => {
+                if trailer_key(new.as_bytes()).is_none() {
+                    anyhow::bail!(
+                        "{origin}: the new line {new:?} is not a `Key: value` trailer line"
+                    );
+                }
+                if let Some(issue) = unrecordable_line(new) {
+                    anyhow::bail!(
+                        "{origin}: the new line {new:?} is no fresh coordinate: {}; write a \
+                         fresh coordinate or drop the line",
+                        issue
+                    );
+                }
+            }
+            EditAction::Drop => {}
+        }
+        edits.push(LineEdit {
+            origin,
+            commit: commit.to_ascii_lowercase(),
+            action,
+            old: old.to_string(),
+            new: new.to_string(),
+        });
+    }
+    Ok(edits)
+}
+
+/// Why a trailer line a write would record is no fresh coordinate, when its
+/// key says it holds one: a role key's value, or an `Assisted-by` value read
+/// without its trailing `(role)`.
+fn unrecordable_line(line: &str) -> Option<&'static str> {
+    let key = String::from_utf8_lossy(&trailer_key(line.as_bytes())?).into_owned();
+    let value = line[key.len() + 1..].trim();
+    let value = if key.eq_ignore_ascii_case(LEGACY_DISCLOSURE) {
+        match value.rsplit_once(" (") {
+            Some((coordinate, role)) if role.ends_with(')') => coordinate.trim(),
+            _ => value,
+        }
+    } else if CONTRIBUTION_ROLES
+        .iter()
+        .any(|role| role.eq_ignore_ascii_case(&key))
+    {
+        value
     } else {
-        if block.is_none() && out.last().is_some_and(|line| !is_blank(line)) {
-            out.push(Vec::new());
-        }
-        out.extend(kept);
-    }
-    out.extend(after.iter().map(|line| line.to_vec()));
+        return None;
+    };
+    crate::coordinate::coordinate_defect(value, None).map(crate::coordinate::Defect::reason)
+}
 
-    let mut edited = out.join(&b'\n');
-    if ends_with_newline && !edited.is_empty() {
-        edited.push(b'\n');
+/// Apply the edits that name one commit to its message, or say which edit
+/// cannot be applied.
+///
+/// Every edit reads the block as the commit carries it, so the order of the
+/// edits does not matter. An old line has to be one trailer line of the block,
+/// once, and not the head of a value continuing below it; two edits cannot name
+/// one line.
+pub fn edit_lines(message: &[u8], edits: &[&LineEdit]) -> anyhow::Result<Vec<u8>> {
+    let parts = Parts::of(message);
+    let Some(block) = parts.block.clone() else {
+        if let Some(edit) = edits.first() {
+            anyhow::bail!(
+                "{}: {} has no trailer block to edit",
+                edit.origin,
+                short(&edit.commit)
+            );
+        }
+        return Ok(message.to_vec());
+    };
+    let lines = &parts.lines[block.clone()];
+    let mut named: std::collections::BTreeMap<usize, &LineEdit> = Default::default();
+    for edit in edits {
+        let found: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| trailer_key(line).is_some() && trimmed(line) == edit.old.as_bytes())
+            .map(|(index, _)| index)
+            .collect();
+        let index = match found[..] {
+            [index] => index,
+            [] => anyhow::bail!(
+                "{}: {:?} is not a trailer line in the trailer block of {}",
+                edit.origin,
+                edit.old,
+                short(&edit.commit)
+            ),
+            _ => anyhow::bail!(
+                "{}: {:?} occurs {} times in the trailer block of {}; an edit names one line",
+                edit.origin,
+                edit.old,
+                found.len(),
+                short(&edit.commit)
+            ),
+        };
+        if lines
+            .get(index + 1)
+            .is_some_and(|next| is_continuation(next))
+        {
+            anyhow::bail!(
+                "{}: {:?} continues on the next line; an edit replaces or drops one whole line",
+                edit.origin,
+                edit.old
+            );
+        }
+        if let Some(earlier) = named.insert(index, edit) {
+            anyhow::bail!(
+                "{}: {:?} is also edited at {}; one line takes one edit",
+                edit.origin,
+                edit.old,
+                earlier.origin
+            );
+        }
     }
-    edited
+    let mut kept: Vec<Vec<u8>> = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        match named.get(&index) {
+            Some(edit) if edit.action == EditAction::Replace => {
+                kept.push(edit.new.as_bytes().to_vec())
+            }
+            Some(_) => {}
+            None => kept.push(line.to_vec()),
+        }
+    }
+    Ok(parts.assemble(message, kept))
+}
+
+fn short(commit: &str) -> &str {
+    &commit[..commit.len().min(8)]
+}
+
+/// A line without the whitespace around it.
+fn trimmed(line: &[u8]) -> &[u8] {
+    let start = line
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(line.len());
+    let end = line
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map_or(start, |end| end + 1);
+    &line[start..end]
 }
 
 /// Which lines hold the trailer block, if the message has one.
@@ -629,5 +879,154 @@ mod tests {
     fn an_empty_message_grows_only_what_is_appended() {
         assert_eq!(edited("", &["foo"], &[]), "");
         assert_eq!(edited("", &[], &["Foo: x"]), "Foo: x");
+    }
+
+    const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn parsed(text: &str) -> anyhow::Result<Vec<LineEdit>> {
+        parse_edits(text, "edits")
+    }
+
+    fn edit_of(action: &str, old: &str, new: &str) -> LineEdit {
+        parsed(&format!("{SHA}\t{action}\t{old}\t{new}\n"))
+            .unwrap()
+            .remove(0)
+    }
+
+    fn applied(message: &str, edits: &[LineEdit]) -> anyhow::Result<String> {
+        let edits: Vec<&LineEdit> = edits.iter().collect();
+        Ok(String::from_utf8(edit_lines(message.as_bytes(), &edits)?).unwrap())
+    }
+
+    #[test]
+    fn an_edit_names_one_line_of_one_commit_and_keeps_its_place() {
+        let message = "feat: one\n\nbody\n\nPlanned-by: codex:unknown\nReviewed-by: R <r@example.invalid>\nPlanned-by: codex:gpt-6\n";
+        assert_eq!(
+            applied(
+                message,
+                &[edit_of(
+                    "replace",
+                    "Planned-by: codex:unknown",
+                    "Planned-by: codex:gpt-6.1#high"
+                )]
+            )
+            .unwrap(),
+            "feat: one\n\nbody\n\nPlanned-by: codex:gpt-6.1#high\nReviewed-by: R <r@example.invalid>\nPlanned-by: codex:gpt-6\n"
+        );
+        assert_eq!(
+            applied(message, &[edit_of("drop", "Planned-by: codex:unknown", "")]).unwrap(),
+            "feat: one\n\nbody\n\nReviewed-by: R <r@example.invalid>\nPlanned-by: codex:gpt-6\n"
+        );
+    }
+
+    #[test]
+    fn dropping_the_only_trailer_leaves_no_empty_paragraph() {
+        assert_eq!(
+            applied(
+                "feat: one\n\nPlanned-by: codex:unknown\n",
+                &[edit_of("drop", "Planned-by: codex:unknown", "")]
+            )
+            .unwrap(),
+            "feat: one\n"
+        );
+    }
+
+    #[test]
+    fn a_line_must_match_after_trimming_and_occur_once_as_a_whole_line() {
+        let message = "feat: one\n\nPlanned-by: codex:unknown  \nPlanned-by: codex:unknown-too\n";
+        assert!(applied(message, &[edit_of("drop", "Planned-by: codex:unknown", "")]).is_ok());
+        let error = applied(message, &[edit_of("drop", "Planned-by: codex:unk", "")]).unwrap_err();
+        assert!(error.to_string().contains("edits:1"), "{error}");
+        let twice = "feat: one\n\nA: x\nA: x\n";
+        let error = applied(twice, &[edit_of("drop", "A: x", "")]).unwrap_err();
+        assert!(error.to_string().contains("2 times"), "{error}");
+    }
+
+    #[test]
+    fn a_value_continuing_below_its_line_is_refused() {
+        let error = applied(
+            "feat: one\n\nFoo: first\n  and more of it\nBar: second\n",
+            &[edit_of("drop", "Foo: first", "")],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("continues"), "{error}");
+    }
+
+    #[test]
+    fn a_message_with_no_trailer_block_has_nothing_to_edit() {
+        let error = applied(
+            "feat: one\n\njust a body\n",
+            &[edit_of("drop", "Planned-by: codex:unknown", "")],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("no trailer block"), "{error}");
+    }
+
+    #[test]
+    fn two_edits_cannot_name_one_line() {
+        let edits = [
+            edit_of("drop", "A: x", ""),
+            edit_of("replace", "A: x", "A: y"),
+        ];
+        assert!(applied("feat: one\n\nA: x\nB: z\n", &edits).is_err());
+    }
+
+    #[test]
+    fn the_file_is_read_by_the_fields_and_never_by_position_alone() {
+        assert!(parsed("").unwrap().is_empty());
+        assert!(parsed("# arc-trailer-edits/1\n\n  \n# a note\n")
+            .unwrap()
+            .is_empty());
+        let upper = SHA.to_ascii_uppercase();
+        let edits = parsed(&format!("{upper}\tdrop\tA: x\r\n")).unwrap();
+        assert_eq!(edits[0].commit, SHA, "a sha is kept in lower case");
+        assert_eq!(edits[0].origin, "edits:1");
+        let wide = "a".repeat(64);
+        assert!(parsed(&format!("{wide}\tdrop\tA: x\t\n")).is_ok());
+        for bad in [
+            format!("{SHA}\tdrop\n"),
+            format!("{SHA}\tdrop\tA: x\t\textra\n"),
+            format!("{}\tdrop\tA: x\t\n", &SHA[..39]),
+            format!("{SHA}\tkeep\tA: x\t\n"),
+            format!("{SHA}\tdrop\tnot a trailer\t\n"),
+            format!("{SHA}\tdrop\tA: x\tB: y\n"),
+            format!("{SHA}\treplace\tA: x\t\n"),
+            format!("{SHA}\treplace\tA: x\tprose\n"),
+            "# arc-trailer-edits/2\n".to_string(),
+        ] {
+            assert!(parsed(&bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_replacement_on_a_role_key_is_a_fresh_coordinate() {
+        for key in [
+            "Planned-by",
+            "implemented-by",
+            "Reviewed-by",
+            "Orchestrated-by",
+        ] {
+            for bad in ["codex:unknown", "codex", "Name <name>", "?:model"] {
+                let line = format!("{SHA}\treplace\t{key}: codex:x\t{key}: {bad}\n");
+                assert!(parsed(&line).is_err(), "{line:?}");
+            }
+            let line = format!("{SHA}\treplace\t{key}: codex:x\t{key}: codex:gpt-6.1#high\n");
+            assert!(parsed(&line).is_ok(), "{line:?}");
+        }
+        // Other keys are not judged, and an Assisted-by value is judged
+        // without the role in brackets.
+        assert!(parsed(&format!("{SHA}\treplace\tA: x\tSigned-off-by: nobody\n")).is_ok());
+        assert!(parsed(&format!(
+            "{SHA}\treplace\tAssisted-by: a:b\tAssisted-by: codex:gpt-6 (review)\n"
+        ))
+        .is_ok());
+        assert!(parsed(&format!(
+            "{SHA}\treplace\tAssisted-by: a:b\tAssisted-by: codex:unknown (review)\n"
+        ))
+        .is_err());
+        assert!(parsed(&format!(
+            "{SHA}\treplace\tAssisted-by: a:b\tAssisted-by: codex:unknown\n"
+        ))
+        .is_err());
     }
 }

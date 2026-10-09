@@ -68,7 +68,7 @@ pub(crate) fn arc_signing(repo: &Repo, key: &Key, cwd: &Path) -> AssertCommand {
 
 /// Git, with the fixture keyring in scope, for the reads that verify a
 /// signature rather than merely notice one.
-fn git_signing(cwd: &Path, key: &Key, args: &[&str]) -> String {
+pub(crate) fn git_signing(cwd: &Path, key: &Key, args: &[&str]) -> String {
     let out = Command::new("git")
         .args(args)
         .current_dir(cwd)
@@ -774,7 +774,7 @@ fn a_commit_carrying_another_header_keeps_it() {
 
 /// Git, with the fixture keyring in scope, for the writes that make a
 /// signature rather than read one.
-fn git_signing_write(repo: &Repo, key: &Key, args: &[&str]) {
+pub(crate) fn git_signing_write(repo: &Repo, key: &Key, args: &[&str]) {
     let out = Command::new("git")
         .args(args)
         .current_dir(&repo.root)
