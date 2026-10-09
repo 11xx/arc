@@ -1705,12 +1705,24 @@ CONTRIBUTION TRAILERS
                        or the snapshot subject when none are listed, in
                        convention order. Duplicate lines print once.
                        The subject is --on-behalf-of when set, else the actor.
-                       A declared harness:model[#effort] or Name <email>
-                       supplies its own identity. Recorder harness and model
-                       evidence applies only to that recorder's contribution.
-                       Unresolved contributors are omitted and named in notes;
-                       no coordinate is guessed. Review snapshots and squash
-                       use the same rule; rewrites retain patchset attribution.
+                       A subject that is a fresh harness:model[#effort] or
+                       Name <email> supplies itself. The recorder's harness
+                       and model apply only to the recorder's own work, on a
+                       snapshot that declared its attribution: a declared
+                       actor, --solo, --contributors or --on-behalf-of. A
+                       derived or git-config recorder is not credited, since
+                       who ran snapshot is not proof of who wrote the diff.
+                       No line carries a placeholder or a session id. What
+                       cannot be attributed is omitted and named in a note
+                       with the value, why (placeholder, session id,
+                       unresolved, undeclared) and the remedy; no coordinate
+                       is guessed. A note on a session-form contributor may
+                       name the one model this change's own records by that
+                       actor carry, as a suggestion that is never projected.
+                       An asserted role that is no fresh coordinate becomes
+                       a note naming arc roles --withdraw.
+                       Review snapshots and squash use the same rule;
+                       rewrites retain patchset attribution.
                        Review credit stays in the ledger: Reviewed-by is
                        never projected or backfilled into commits.
                        --json emits arc-trailers/1 with trailers and notes.

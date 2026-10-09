@@ -264,8 +264,19 @@ fn a_historical_placeholder_assertion_can_still_be_withdrawn() {
         }
     }
     assert!(seeded);
-    let trailers = stdout(repo.arc(&repo.root).args(["trailers", &change]));
-    assert!(trailers.contains("Planned-by: pi:unknown"), "{trailers}");
+    let projection = json_stdout(repo.arc(&repo.root).args(["trailers", &change, "--json"]));
+    assert_eq!(
+        projection["trailers"],
+        serde_json::json!([]),
+        "{projection}"
+    );
+    assert!(
+        projection["notes"][0]
+            .as_str()
+            .unwrap()
+            .contains("--withdraw 'Planned-by=pi:unknown'"),
+        "{projection}"
+    );
 
     repo.arc(&repo.root)
         .args(["roles", &change, "--withdraw", "Planned-by=pi:unknown"])

@@ -294,6 +294,12 @@ pub(crate) struct ChangeTrailers {
     pub notes: Vec<String>,
 }
 
+/// The trailer block a change projects, and a note for every contribution it
+/// cannot attribute.
+///
+/// A line carries a fresh coordinate or nothing: a placeholder, a session id
+/// or an unresolved identity is named in a note, with the value and why, and
+/// never written as a coordinate.
 pub(crate) fn for_change(state: &crate::state::ChangeState) -> ChangeTrailers {
     let mut trailers = Vec::new();
     let mut notes = Vec::new();
@@ -309,7 +315,7 @@ pub(crate) fn for_change(state: &crate::state::ChangeState) -> ChangeTrailers {
                     patchset.contributors.iter().map(String::as_str).collect()
                 };
                 for subject in subjects {
-                    match implementation_identity(patchset, subject) {
+                    match implementation_identity(state, patchset, subject) {
                         Ok(value) => {
                             let line = format!("{role}: {value}");
                             if !trailers.contains(&line) {
@@ -325,7 +331,17 @@ pub(crate) fn for_change(state: &crate::state::ChangeState) -> ChangeTrailers {
             }
         } else if let Some(values) = state.contribution_roles.get(role) {
             for value in values {
-                trailers.push(format!("{role}: {value}"));
+                match crate::coordinate::coordinate_defect(value, None) {
+                    None => trailers.push(format!("{role}: {value}")),
+                    Some(defect) => notes.push(format!(
+                        "{role} omitted for {value}; {}: withdraw it with `arc roles {} \
+                         --withdraw {}`, and assert the coordinate that did the work where \
+                         one is known",
+                        defect.reason(),
+                        state.change_id,
+                        crate::context::shell_quote(&format!("{role}={value}")),
+                    )),
+                }
             }
         }
     }
@@ -337,42 +353,148 @@ pub(crate) fn for_change(state: &crate::state::ChangeState) -> ChangeTrailers {
     }
 }
 
-/// Recorder coordinates belong only to a subject that names the recorder.
+/// The coordinate `subject` is credited with on `patchset`, or why none is.
+///
+/// A subject that is a fresh coordinate supplies itself. The recorder's
+/// harness and model belong only to the recorder's own contribution, and only
+/// when the recorder declared who wrote the work: who ran `snapshot` is not
+/// proof of who wrote the diff.
 fn implementation_identity(
+    state: &crate::state::ChangeState,
     patchset: &crate::state::Patchset,
     subject: &str,
 ) -> Result<String, String> {
+    use crate::coordinate::Defect;
     let declared = !patchset.contributors.is_empty()
         || patchset.on_behalf_of.is_some()
         || patchset
             .actor_source
             .is_some_and(crate::model::ActorSource::declared);
     if !declared {
-        return Err("unresolved declared identity".to_string());
+        return Err(undeclared_recorder(patchset));
     }
-    if value_is_readable(subject) {
-        return Ok(subject.trim().to_string());
+    let defect = match crate::coordinate::coordinate_defect(subject, patchset.session.as_deref()) {
+        None => return Ok(subject.trim().to_string()),
+        Some(defect) => defect,
+    };
+    // A person's own form names a person, whose work no recorder's model
+    // describes.
+    if subject != patchset.actor || defect == Defect::NotAnAddress {
+        let reason = match defect {
+            Defect::Unreadable => "unresolved subject harness and model",
+            defect => defect.reason(),
+        };
+        return Err(match recorded_coordinate(state, subject) {
+            Some(suggestion) => format!(
+                "{reason}; this change's records by that actor name {suggestion}, a \
+                 suggestion to confirm and never projected"
+            ),
+            None => reason.to_string(),
+        });
     }
-    if subject != patchset.actor {
-        return Err("unresolved subject harness and model".to_string());
-    }
-    let mut unresolved = Vec::new();
-    let harness = patchset.harness.as_deref().unwrap_or_default();
-    let model = patchset.model.as_deref().unwrap_or_default();
-    if harness.trim().is_empty() {
-        unresolved.push("harness");
-    }
-    if model.trim().is_empty() {
-        unresolved.push("model");
-    }
+    recorder_coordinate(patchset).map_err(|recorder| match defect {
+        Defect::Unreadable => recorder,
+        defect => format!("{}, and {recorder}", defect.reason()),
+    })
+}
+
+/// Why a recorder that declared nobody is credited with nothing, what it
+/// recorded, and how to declare the author.
+fn undeclared_recorder(patchset: &crate::state::Patchset) -> String {
+    use crate::model::ActorSource;
+    let source = match patchset.actor_source {
+        Some(ActorSource::Derived) => "derived from the harness session",
+        Some(ActorSource::GitFallback) => "assumed from git config",
+        _ => "recorded without its provenance",
+    };
+    let recorded = match recorder_coordinate(patchset) {
+        Ok(coordinate) => format!("the recorder's model is {coordinate}"),
+        Err(reason) => reason,
+    };
+    format!(
+        "undeclared identity ({source}): who ran snapshot is not proof of who wrote the \
+         diff; {recorded}; declare the author with `arc snapshot --solo` or `--contributors \
+         <actor>`, and before any verdict `arc snapshot --amend {} --contributors <actor>` \
+         repairs this patchset",
+        patchset.id
+    )
+}
+
+/// The recorder's `harness:model` when it is a fresh coordinate, or why not.
+fn recorder_coordinate(patchset: &crate::state::Patchset) -> Result<String, String> {
+    use crate::coordinate::{coordinate_defect, is_placeholder, model_defect};
+    let session = patchset.session.as_deref();
+    let harness = patchset.harness.as_deref().unwrap_or_default().trim();
+    let model = patchset.model.as_deref().unwrap_or_default().trim();
+    let unresolved: Vec<&str> = [("harness", harness), ("model", model)]
+        .into_iter()
+        .filter(|(_, value)| value.is_empty())
+        .map(|(name, _)| name)
+        .collect();
     if !unresolved.is_empty() {
         return Err(format!("unresolved {}", unresolved.join(", ")));
     }
-    let value = format!("{harness}:{model}");
-    if !value_is_readable(&value) {
-        return Err("invalid recorded coordinates".to_string());
+    if is_placeholder(harness) {
+        return Err(format!(
+            "the recorded harness {harness:?} is no fallback: a placeholder is not a coordinate"
+        ));
     }
-    Ok(value)
+    if let Some(defect) = model_defect(model, session) {
+        return Err(format!(
+            "the recorded model {model:?} is no fallback: {}",
+            defect.reason()
+        ));
+    }
+    let coordinate = format!("{harness}:{model}");
+    match coordinate_defect(&coordinate, session) {
+        None => Ok(coordinate),
+        Some(defect) => Err(format!(
+            "the recorded coordinate {coordinate:?} is no fallback: {}",
+            defect.reason()
+        )),
+    }
+}
+
+/// The one fresh `harness:model` this change's own records by `actor` name,
+/// when they name exactly one.
+fn recorded_coordinate(state: &crate::state::ChangeState, actor: &str) -> Option<String> {
+    let opening = (
+        state.opened_by.as_str(),
+        state.opened_harness.as_deref(),
+        state.opened_model.as_deref(),
+        state.opened_session.as_deref(),
+    );
+    let patchsets = state.patchsets.iter().map(|patchset| {
+        (
+            patchset.actor.as_str(),
+            patchset.harness.as_deref(),
+            patchset.model.as_deref(),
+            patchset.session.as_deref(),
+        )
+    });
+    let briefs = state.briefs.iter().map(|brief| {
+        (
+            brief.actor.as_str(),
+            brief.harness.as_deref(),
+            brief.model.as_deref(),
+            brief.session.as_deref(),
+        )
+    });
+    let coordinates: std::collections::BTreeSet<String> = std::iter::once(opening)
+        .chain(patchsets)
+        .chain(briefs)
+        .filter(|(recorder, ..)| *recorder == actor)
+        .filter_map(|(_, harness, model, session)| {
+            let coordinate = format!("{}:{}", harness?.trim(), model?.trim());
+            crate::coordinate::coordinate_defect(&coordinate, session)
+                .is_none()
+                .then_some(coordinate)
+        })
+        .collect();
+    match coordinates.len() {
+        1 => coordinates.into_iter().next(),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

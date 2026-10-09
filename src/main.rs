@@ -381,9 +381,12 @@ enum Cmd {
     /// Print a change's portable trailer block in convention order.
     /// Planning and orchestration come from assertions, implementation from
     /// declared patchset contributors, or the snapshot subject when none are listed.
-    /// A subject supplies harness:model[#effort] or Name <email>; recorder
-    /// harness and model evidence applies only to that recorder's contribution.
-    /// Unresolved contributor coordinates are omitted and named in notes.
+    /// A subject that is a fresh harness:model[#effort] or Name <email>
+    /// supplies itself. The recorder's harness and model apply only to the
+    /// recorder's own work on a snapshot that declared its attribution; a
+    /// derived or git-config recorder is not credited.
+    /// No line carries a placeholder or a session id: what cannot be
+    /// attributed is omitted and named in a note with its reason and remedy.
     /// Review credit stays in the ledger; Reviewed-by is never projected.
     Trailers {
         /// Change whose attributed contribution trailers to print
