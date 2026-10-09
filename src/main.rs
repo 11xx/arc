@@ -1779,7 +1779,10 @@ enum Cmd {
     /// 50 ms for up to 1 second to allow the model-bearing record to reach disk.
     /// Other store answers return immediately. A missing recording and a
     /// recording still without a model after the wait each receive an explicit
-    /// diagnostic.
+    /// diagnostic. A recorded model that is a placeholder (unknown,
+    /// <synthetic>, ...) or a session id names no model: the diagnostic names
+    /// the value and no write records it, and a live Pi value of that kind
+    /// leaves the recording to answer.
     /// Launch configuration does not establish an observed acting model. Not every
     /// harness exports a session variable, and a harness that
     /// does may not in every mode. OpenCode v2 exports none and is recognized

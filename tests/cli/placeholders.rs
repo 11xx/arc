@@ -286,8 +286,110 @@ fn an_omitted_role_value_refuses_a_placeholder_observed_model() {
             .env("CODEX_HOME", repo.home.join("codex-state"))
             .args(["begin", "observed", "--orchestrated-by"]),
     );
-    assert!(stderr.contains("codex:unknown"), "{stderr}");
+    assert!(stderr.contains("unresolved harness or model"), "{stderr}");
+    assert!(!stderr.contains("codex:unknown"), "{stderr}");
     assert!(git_out(&repo.root, &["branch", "--list", "arc/observed"]).is_empty());
+}
+
+/// `arc env` run inside the fixture as the given harness session, with every
+/// other harness's session variable cleared.
+fn env_as(repo: &Repo, variable: &str, session: &str) -> String {
+    let mut command = repo.arc(&repo.root);
+    command.arg("env");
+    for other in [
+        "CLAUDE_SESSION_ID",
+        "CODEX_THREAD_ID",
+        "OPENCODE_SESSION",
+        "PI_SESSION_ID",
+    ] {
+        command.env_remove(other);
+    }
+    command
+        .env(variable, session)
+        .env("CODEX_HOME", repo.home.join("codex-state"))
+        .env("PI_CODING_AGENT_SESSION_DIR", repo.home.join("pi-sessions"));
+    stdout(&mut command)
+}
+
+#[test]
+fn an_observed_placeholder_model_is_unavailable_in_env() {
+    let repo = Repo::new();
+    for (session, model) in [
+        (UUID, "unknown"),
+        ("019f0000-0000-7000-8000-00000000000b", "<synthetic>"),
+    ] {
+        codex_recording(&repo, session, model);
+        let env = env_as(&repo, "CODEX_THREAD_ID", session);
+        assert!(!env.contains("# model:"), "{model}: {env}");
+        assert!(
+            env.contains(&format!(
+                "# export ARC_MODEL=<model[#effort]>  # unavailable: the recording names \"{model}#high\""
+            )),
+            "{model}: {env}"
+        );
+        assert!(env.contains("a placeholder is not a coordinate"), "{env}");
+        assert!(env.contains("session corroborated"), "{env}");
+    }
+}
+
+#[test]
+fn an_observed_placeholder_model_is_never_recorded() {
+    let repo = Repo::new();
+    codex_recording(&repo, UUID, "unknown");
+    let out = stdout(
+        repo.arc(&repo.root)
+            .env("ARC_HARNESS", "codex")
+            .env("ARC_SESSION", UUID)
+            .env("CODEX_HOME", repo.home.join("codex-state"))
+            .args(["begin", "observed"]),
+    );
+    let change = opened_change_id(&out);
+    let events = stdout(repo.arc(&repo.root).args(["events", "--change", &change]));
+    assert!(!events.trim().is_empty());
+    for line in events.lines() {
+        let event: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert!(event.get("model").is_none(), "{event}");
+        assert!(event.get("model_observation").is_none(), "{event}");
+        assert!(event.get("model_source").is_none(), "{event}");
+        assert_eq!(event["session_resolution"], "corroborated", "{event}");
+    }
+
+    // A fresh recorded model is still observed and recorded.
+    let session = "019f0000-0000-7000-8000-00000000000c";
+    codex_recording(&repo, session, "gpt-6.1-sol");
+    let out = stdout(
+        repo.arc(&repo.root)
+            .env("ARC_HARNESS", "codex")
+            .env("ARC_SESSION", session)
+            .env("CODEX_HOME", repo.home.join("codex-state"))
+            .args(["begin", "observed-control"]),
+    );
+    let change = opened_change_id(&out);
+    let events = stdout(repo.arc(&repo.root).args(["events", "--change", &change]));
+    assert!(
+        events.contains("\"model\":\"gpt-6.1-sol#high\""),
+        "{events}"
+    );
+}
+
+#[test]
+fn a_live_placeholder_pi_model_leaves_the_recording_to_answer() {
+    let repo = Repo::new();
+    let session = "019f0000-0000-7000-8000-00000000000d";
+    pi_recording(&repo, session, "gpt-5.6-recorded", "low");
+    let mut command = repo.arc(&repo.root);
+    command
+        .arg("env")
+        .env_remove("CLAUDE_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("OPENCODE_SESSION")
+        .env("PI_SESSION_ID", session)
+        .env("PI_CODING_AGENT_SESSION_DIR", repo.home.join("pi-sessions"))
+        .env("PI_MODEL", "unknown")
+        .env("PI_REASONING_LEVEL", "high");
+    let env = stdout(&mut command);
+    assert!(env.contains("# model: gpt-5.6-recorded#low\n"), "{env}");
+    assert!(!env.contains("unknown#"), "{env}");
 }
 
 #[test]

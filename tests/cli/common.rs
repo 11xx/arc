@@ -187,6 +187,35 @@ pub(crate) fn codex_recording(repo: &Repo, session: &str, model: &str) -> PathBu
     path
 }
 
+/// A Pi recording in the fixture's store: the header, the thinking level in
+/// effect, and one assistant turn naming the model. Returns the file, so a
+/// caller can also name it as the live recording.
+pub(crate) fn pi_recording(repo: &Repo, session: &str, model: &str, level: &str) -> PathBuf {
+    let sessions = repo.home.join("pi-sessions/project");
+    fs::create_dir_all(&sessions).unwrap();
+    let path = sessions.join(format!("2026-07-18T12-07-52Z_{session}.jsonl"));
+    fs::write(
+        &path,
+        format!(
+            concat!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"{session}\",",
+                "\"timestamp\":\"2026-07-18T12:07:52Z\",\"cwd\":\"/fixture\"}}\n",
+                "{{\"type\":\"thinking_level_change\",\"id\":\"thinking-1\",\"parentId\":null,",
+                "\"timestamp\":\"2026-07-18T12:07:53Z\",\"thinkingLevel\":\"{level}\"}}\n",
+                "{{\"type\":\"message\",\"id\":\"assistant-1\",\"parentId\":\"thinking-1\",",
+                "\"timestamp\":\"2026-07-18T12:07:54Z\",\"message\":{{\"role\":\"assistant\",",
+                "\"timestamp\":1767261604000,\"provider\":\"openai-codex\",\"model\":\"{model}\",",
+                "\"content\":[{{\"type\":\"text\",\"text\":\"The recording's answer.\"}}]}}}}\n",
+            ),
+            session = session,
+            model = model,
+            level = level,
+        ),
+    )
+    .unwrap();
+    path
+}
+
 /// Git's editor, for every command this suite runs and every command the
 /// binary under test runs beneath it. A fixture that reaches the operator's
 /// editor stops the whole suite on a modal window it cannot answer, and

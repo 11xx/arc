@@ -349,8 +349,11 @@ fn opencode_witness() -> Detection {
     Detection::None
 }
 
+/// The store's and the live values' answer for one session. A recorded model
+/// that is a placeholder or a session id names no model, so it is reported
+/// unavailable with the value it names, and no observation carries it.
 fn resolved(harness: &str, session: &str) -> DetectedIdentity {
-    let (verdict, mut model, model_observation, mut model_unavailable) =
+    let (verdict, mut model, mut model_observation, mut model_unavailable) =
         match session_store::session_identity(harness, session) {
             session_store::SessionIdentity::Named { model, observation } => {
                 (SessionVerdict::Corroborated, Some(model), observation, None)
@@ -376,6 +379,18 @@ fn resolved(harness: &str, session: &str) -> DetectedIdentity {
                 )),
             ),
         };
+    if let Some(recorded) = model.take() {
+        match crate::coordinate::model_defect(&recorded, Some(session)) {
+            None => model = Some(recorded),
+            Some(defect) => {
+                model_observation = None;
+                model_unavailable = Some(format!(
+                    "the recording names {recorded:?} where a model belongs; {}",
+                    defect.reason()
+                ));
+            }
+        }
+    }
     if let Some(live) = live_pi_model(harness, session) {
         model = Some(live);
         model_unavailable = None;
@@ -455,7 +470,8 @@ pub fn model_attribution(
 /// is the one being recorded. Pi re-sets `PI_MODEL` and `PI_REASONING_LEVEL`
 /// for every tool call, so they describe the turn in flight; the recording is
 /// the fallback. A reasoning level without a live model says nothing about
-/// which model it belongs to, so the recording answers both then.
+/// which model it belongs to, so the recording answers both then, and so it
+/// does when the live value is a placeholder or a session id.
 fn live_pi_model(harness: &str, session: &str) -> Option<String> {
     if harness != "pi" {
         return None;
@@ -470,10 +486,13 @@ fn live_pi_model(harness: &str, session: &str) -> Option<String> {
     if model.is_empty() {
         return None;
     }
-    match std::env::var("PI_REASONING_LEVEL") {
-        Ok(level) if !level.trim().is_empty() => Some(format!("{model}#{}", level.trim())),
-        _ => Some(model),
-    }
+    let live = match std::env::var("PI_REASONING_LEVEL") {
+        Ok(level) if !level.trim().is_empty() => format!("{model}#{}", level.trim()),
+        _ => model,
+    };
+    crate::coordinate::model_defect(&live, Some(session))
+        .is_none()
+        .then_some(live)
 }
 
 const EXPORT_TEMPLATE: &str = concat!(

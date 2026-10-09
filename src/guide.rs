@@ -106,7 +106,9 @@ SAY WHO YOU ARE (before the first write)
   50 ms for up to 1 second to allow the model-bearing record to reach disk.
   Other store answers return immediately. A missing recording and a
   recording still without a model after the wait each receive an explicit
-  diagnostic.
+  diagnostic. A recorded model that is a placeholder or a session id names no
+  model: the diagnostic names the value and no write records it, and a live
+  Pi value of that kind leaves the recording to answer.
   Launch configuration does not establish an observed acting model.
   OpenCode v2 (`opencode2`) is recognized without one — by
   `OPENCODE_TERMINAL` or its process ancestry — and prints the harness
