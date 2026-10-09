@@ -241,8 +241,9 @@ impl Bundle {
             // an imported map says something no recorded map could — a
             // rewrite to the zero object, where "dropped" is spelled as no
             // successor at all.
-            if let Some(crate::model::Payload::HistoryRewritten { mapping, .. }) =
-                typed.as_ref().map(|event| &event.payload)
+            if let Some(crate::model::Payload::HistoryRewritten {
+                mapping, retained, ..
+            }) = typed.as_ref().map(|event| &event.payload)
             {
                 crate::rewrite::validate_mapping(mapping).with_context(|| {
                     format!(
@@ -250,6 +251,18 @@ impl Bundle {
                         envelope.event_id
                     )
                 })?;
+                // An import writes refs from what this names, so a name that
+                // is no retention ref is refused before anything is written.
+                for (name, commit) in retained {
+                    if !name.starts_with(crate::gitio::RETAINED_PREFIX) || !valid_object_id(commit)
+                    {
+                        bail!(
+                            "bundled repository event {} retains {name:?} at {commit:?}, which \
+                             is not a retention ref holding a commit",
+                            envelope.event_id
+                        );
+                    }
+                }
             }
         }
         if bundle.event_count != bundle.events.len() {
@@ -438,7 +451,13 @@ fn exported_objects(
                 insert_object(cwd, &mut objects, &oid, "retention-commit")?;
             }
         }
-        if let Payload::HistoryRewritten { mapping, refs, .. } = &event.payload {
+        if let Payload::HistoryRewritten {
+            mapping,
+            refs,
+            retained,
+            ..
+        } = &event.payload
+        {
             for (old, new) in mapping {
                 insert_object(cwd, &mut objects, old, "rewrite-source")?;
                 if let Some(new) = new {
@@ -449,9 +468,41 @@ fn exported_objects(
                 insert_object(cwd, &mut objects, &moved.old, "rewrite-source")?;
                 insert_object(cwd, &mut objects, &moved.new, "rewrite-successor")?;
             }
+            for (_, commit) in retained_for(retained, change_id) {
+                insert_object(cwd, &mut objects, &commit, "retention-commit")?;
+            }
         }
     }
     Ok(objects.into_iter().collect())
+}
+
+/// The retention refs a rewrite event names for one change, each as the name
+/// this repository gives it and the commit it holds.
+///
+/// The name is rebuilt from the change, the subject and the commit rather than
+/// taken as written: an import writes these refs, and a name that merely
+/// begins like a retention ref could end anywhere.
+pub fn retained_for(
+    retained: &std::collections::BTreeMap<String, String>,
+    change_id: &str,
+) -> Vec<(String, String)> {
+    let prefix = crate::gitio::retained_prefix(change_id);
+    retained
+        .iter()
+        .filter_map(|(name, commit)| {
+            let (subject, named) = name.strip_prefix(&prefix)?.rsplit_once('/')?;
+            if named != commit
+                || !valid_object_id(commit)
+                || ids::validate_id_component(subject).is_err()
+            {
+                return None;
+            }
+            Some((
+                crate::gitio::retained_ref(change_id, subject, commit),
+                commit.clone(),
+            ))
+        })
+        .collect()
 }
 
 fn insert_object(

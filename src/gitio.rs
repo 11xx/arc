@@ -1768,6 +1768,10 @@ pub fn retained_ref(change_id: &str, subject: &str, commit: &str) -> String {
     format!("{RETAINED_PREFIX}{change_id}/{subject}/{commit}")
 }
 
+pub fn retained_prefix(change_id: &str) -> String {
+    format!("{RETAINED_PREFIX}{change_id}/")
+}
+
 /// The object id a ref has when it does not exist, in the width of `like`.
 /// A ref transaction created from it creates the ref, and one moving to it
 /// deletes the ref.

@@ -183,6 +183,21 @@ pub(super) fn import_validated_guarded(
             }
         }
     }
+    // The commits a rewrite recorded as replaced stay held here as they were
+    // where the rewrite ran, for as many of them as this repository has.
+    for value in &validated.bundle.repository_events {
+        let Some(event) = crate::bundle::parse_typed_event(value)? else {
+            continue;
+        };
+        let Payload::HistoryRewritten { retained, .. } = &event.payload else {
+            continue;
+        };
+        for (name, commit) in crate::bundle::retained_for(retained, &validated.bundle.change_id) {
+            if gitio::commit_exists(&ctx.cwd, &commit)? {
+                pins.push((name, commit));
+            }
+        }
+    }
     let initial_policy = crate::policy::load(&ctx.cwd)?;
     let preflight = classify_import_events(&root, validated)?;
     if !preflight.conflicts.is_empty() {

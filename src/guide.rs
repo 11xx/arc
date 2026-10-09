@@ -663,13 +663,18 @@ RUN A CHANGE
   events (only the suffix under --since) and bundled repository events.
   Roles are `patchset-base`, `patchset-head`, `evaluated-tree`,
   `retention-commit` (objects held by refs/arc/tree for exported evidence,
-  including direct tree pins), `synthesized-merge` (verify --against),
+  including direct tree pins, and the commits refs/arc/retained holds for the
+  exported change), `synthesized-merge` (verify --against),
   `disposition-commit`, `integration-commit`, `target-commit`, `content-tree`,
   `cited-blob`, `cited-commit`, `rewrite-source`, and `rewrite-successor`.
   Unknown event payloads remain opaque. A transport publishes the listed
   objects and their Git reachability closure through scoped refs or a Git
   bundle before announcing the result. Bundles without the objects field
   retain advisory patchset-commit checks; /6 accepts that absent field.
+  A bundle's rewrite events carry the retention refs the exporter created; an
+  import holds each one it names for the imported change under
+  `refs/arc/retained/` when the commit is here, and refuses a name that is no
+  retention ref. Bundles whose rewrite events name none import unchanged.
 
   arc replica id --json              Read this store's repository ID for pairing.
   arc replica init <name>             Start a logical project and hold authority.

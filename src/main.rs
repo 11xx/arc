@@ -1074,6 +1074,8 @@ enum Cmd {
     /// Includes a role-labelled Git object list derived from the exported
     /// events, including a delta's suffix and repository events. The summary
     /// counts objects by role; transports must deliver them before import.
+    /// The commits a recorded rewrite replaced and retained for this change
+    /// are listed with the role `retention-commit`.
     /// Records no events; ledger reads do not require a parseable append policy.
     Export {
         /// Change to export as a versioned bundle
@@ -1097,6 +1099,9 @@ enum Cmd {
     /// Unless --provenance-only is selected, every listed Git object must
     /// exist locally before any events or refs are written. Availability checks never fetch from a promisor remote.
     /// Bundles without an objects field retain advisory commit checks.
+    /// A rewrite event's retention refs are held under `refs/arc/retained/`
+    /// for the imported change where the commit is here; a name that is no
+    /// retention ref is refused, and events naming none import unchanged.
     /// Paired stores and receivers with enrollments require a transport-asserted
     /// publisher and exact received-byte SHA256. Operator enrollment authorizes
     /// each introduced origin and capability; actor strings remain claims.

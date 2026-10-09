@@ -477,3 +477,124 @@ fn doctor_reports_a_patchset_head_no_ref_reaches() {
         "the report names the command that retains it: {detail}"
     );
 }
+
+#[test]
+fn an_export_lists_the_retained_commit_and_an_import_retains_it() {
+    let source = repo_with_gates();
+    let (worktree, old) = approved_change(&source, "alpha");
+    let change = only_change(&source);
+    rewrite_trailers(&source, &worktree, &old);
+    let bundle = source.home.join("bundle.json");
+    let objects = source.home.join("objects.json");
+    source
+        .arc(&worktree)
+        .args([
+            "export",
+            "alpha",
+            "--output",
+            bundle.to_str().unwrap(),
+            "--objects-json",
+            objects.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let listed: serde_json::Value = serde_json::from_slice(&fs::read(&objects).unwrap()).unwrap();
+    assert!(
+        listed["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|object| object["oid"] == old.as_str() && object["role"] == "retention-commit"),
+        "{listed}"
+    );
+
+    let receiver = Repo::new();
+    deliver_git_objects(&source, &receiver);
+    receiver
+        .arc(&receiver.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+
+    assert_eq!(
+        retained(&receiver),
+        vec![format!("{} {old}", retention_ref(&change, "ps-01", &old))]
+    );
+}
+
+#[test]
+fn an_import_without_retention_still_works() {
+    let source = repo_with_gates();
+    let (worktree, old) = approved_change(&source, "alpha");
+    rewrite_trailers(&source, &worktree, &old);
+    let bundle = source.home.join("bundle.json");
+    source
+        .arc(&worktree)
+        .args(["export", "alpha", "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    value["objects"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|object| object["role"] != "retention-commit");
+    for event in value["repository_events"].as_array_mut().unwrap() {
+        event.as_object_mut().unwrap().remove("retained");
+    }
+    fs::write(&bundle, json_file_bytes(&value)).unwrap();
+
+    let receiver = Repo::new();
+    deliver_git_objects(&source, &receiver);
+    receiver
+        .arc(&receiver.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+
+    assert!(retained(&receiver).is_empty());
+}
+
+#[test]
+fn an_import_writes_no_ref_a_bundle_names_outside_retention() {
+    let source = repo_with_gates();
+    let (worktree, old) = approved_change(&source, "alpha");
+    let change = only_change(&source);
+    rewrite_trailers(&source, &worktree, &old);
+    let bundle = source.home.join("bundle.json");
+    source
+        .arc(&worktree)
+        .args(["export", "alpha", "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    let original: serde_json::Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    let receiver = Repo::new();
+    deliver_git_objects(&source, &receiver);
+
+    let mut hostile = original.clone();
+    hostile["repository_events"][0]["retained"] = serde_json::json!({
+        "refs/heads/master": old,
+    });
+    fs::write(&bundle, json_file_bytes(&hostile)).unwrap();
+    let before = ref_snapshot(&receiver.root);
+    receiver
+        .arc(&receiver.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not a retention ref"));
+    assert_eq!(ref_snapshot(&receiver.root), before);
+
+    // A name that is under the change but does not say the commit it holds is
+    // not a ref this repository would have made, and is not made.
+    let mut mismatched = original.clone();
+    mismatched["repository_events"][0]["retained"] = serde_json::json!({
+        format!("refs/arc/retained/{change}/ps-01/{}", "a".repeat(40)): old,
+    });
+    fs::write(&bundle, json_file_bytes(&mismatched)).unwrap();
+    receiver
+        .arc(&receiver.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    assert!(retained(&receiver).is_empty());
+}
