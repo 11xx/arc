@@ -95,6 +95,19 @@ fn recorded_retention(repo: &Repo) -> serde_json::Value {
     event["retained"].clone()
 }
 
+fn doctor(repo: &Repo) -> serde_json::Value {
+    json_stdout_any_status(repo.arc(&repo.root).args(["doctor", "--json"]))
+}
+
+fn finding<'a>(report: &'a serde_json::Value, list: &str, code: &str) -> Option<&'a str> {
+    report[list]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["code"] == code)
+        .map(|finding| finding["detail"].as_str().unwrap())
+}
+
 #[test]
 fn a_trailer_rewrite_keeps_the_reviewed_commit_reachable() {
     let repo = repo_with_gates();
@@ -405,4 +418,62 @@ fn a_cited_commit_already_gone_is_reported_not_retained() {
     assert!(out.contains("not retained"), "{out}");
     assert!(out.contains(&old[..8]), "{out}");
     assert!(retained(&repo).is_empty());
+}
+
+#[test]
+fn doctor_names_a_retained_commit_whose_object_is_gone() {
+    let repo = repo_with_gates();
+    let (worktree, old) = approved_change(&repo, "alpha");
+    let change = only_change(&repo);
+    rewrite_trailers(&repo, &worktree, &old);
+    let clean = doctor(&repo);
+    assert!(
+        finding(&clean, "problems", "retained-object-missing").is_none(),
+        "{clean}"
+    );
+
+    fs::remove_file(
+        repo.root
+            .join(format!(".git/objects/{}/{}", &old[..2], &old[2..])),
+    )
+    .unwrap();
+
+    let report = doctor(&repo);
+    let detail = finding(&report, "problems", "retained-object-missing")
+        .unwrap_or_else(|| panic!("{report}"));
+    assert!(
+        detail.contains(&retention_ref(&change, "ps-01", &old)),
+        "{detail}"
+    );
+    repo.arc(&repo.root).args(["doctor"]).assert().code(1);
+}
+
+#[test]
+fn doctor_reports_a_patchset_head_no_ref_reaches() {
+    let repo = repo_with_gates();
+    let (change, worktree, head) = change_with_patchset(&repo, "alpha");
+    let clean = doctor(&repo);
+    assert!(
+        finding(&clean, "advice", "unretained-commit").is_none(),
+        "{clean}"
+    );
+
+    git(&worktree, &["reset", "--hard", "HEAD~1"]);
+    git(
+        &repo.root,
+        &["update-ref", "-d", &format!("refs/arc/keep/{change}/ps-01")],
+    );
+
+    let report = doctor(&repo);
+    let detail =
+        finding(&report, "advice", "unretained-commit").unwrap_or_else(|| panic!("{report}"));
+    assert!(detail.contains(&head[..8]), "{detail}");
+    assert!(detail.contains("ps-01 head"), "{detail}");
+    assert!(
+        detail.contains(&format!(
+            "git update-ref {}",
+            retention_ref(&change, "ps-01", &head)
+        )),
+        "the report names the command that retains it: {detail}"
+    );
 }

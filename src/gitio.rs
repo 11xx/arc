@@ -1775,6 +1775,32 @@ pub fn absent_oid(like: &str) -> String {
     "0".repeat(like.len())
 }
 
+/// Which of these commits no ref reaches. Reflogs are not refs: a commit
+/// only a reflog holds is one the next garbage collection takes.
+///
+/// One walk from every candidate that stops at whatever any ref already
+/// reaches, so the cost follows the unreachable part of the history rather
+/// than the whole of it. Every candidate has to be a commit this repository
+/// holds; [`commits_among`] says which are.
+pub fn unreachable_from_refs(cwd: &Path, commits: &[&str]) -> Result<BTreeSet<String>> {
+    let candidates: BTreeSet<&str> = commits.iter().copied().collect();
+    let mut unreachable = BTreeSet::new();
+    // Argument length bounds a single walk, so a long ledger is asked in
+    // slices. Each slice's answer is independent of the others.
+    for slice in commits.chunks(1000) {
+        let mut args = vec!["rev-list"];
+        args.extend(slice.iter().copied());
+        args.extend(["--not", "--all"]);
+        unreachable.extend(
+            git(cwd, &args)?
+                .lines()
+                .filter(|line| candidates.contains(line))
+                .map(str::to_string),
+        );
+    }
+    Ok(unreachable)
+}
+
 /// Every object reachable from a revision.
 ///
 /// One walk answers for every pin at once. A tree recorded as evidence may be

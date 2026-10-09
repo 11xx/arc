@@ -1888,7 +1888,9 @@ HISTORY REWRITES
   with them on resume, and named by the event's `retained` map; `--dry-run`
   lists them. `arc history rewrite --map` moves no refs: it holds each cited
   commit the map replaces that this repository still has, and names each it
-  cannot.
+  cannot. `arc doctor` reports a retention ref whose object is gone as the
+  problem `retained-object-missing`, and a cited commit no ref reaches as the
+  advice `unretained-commit`, naming the `git update-ref` that holds it.
 
   Every ref moves in one Git transaction, so a rewrite leaves the branch and
   arc's evidence refs on one history or leaves them all alone. The map and

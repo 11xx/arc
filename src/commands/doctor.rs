@@ -146,6 +146,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     inspect_repository_events(&store, &mut problems);
     inspect_dangling_revisions(&ctx.cwd, &store, &states, &mut problems, &mut advice)?;
     inspect_refs(ctx, &states, &known_patchsets, &mut advice)?;
+    inspect_retention(ctx, &store, &mut problems, &mut advice)?;
     inspect_candidates(ctx, &store, &mut problems, &mut advice)?;
     // Doctor diagnoses the invoking checkout, including uncommitted
     // declarations and tracked files. A change's target would hide local
@@ -583,6 +584,60 @@ fn inspect_refs(
                 detail: reference,
             });
         }
+    }
+    Ok(())
+}
+
+/// The commits the ledger cites as read against the refs that hold them.
+///
+/// A retention ref whose object is gone is evidence the ledger claims and
+/// Git no longer has, which is a problem. A cited commit no ref reaches is
+/// one the next garbage collection takes: nothing is lost yet, so it is
+/// advice, with the command that holds it.
+fn inspect_retention(
+    ctx: &Ctx,
+    store: &Store,
+    problems: &mut Vec<Finding>,
+    advice: &mut Vec<Finding>,
+) -> Result<()> {
+    let retained = gitio::list_refs(&ctx.cwd, gitio::RETAINED_PREFIX)?;
+    let missing: BTreeSet<String> =
+        gitio::missing_objects(&ctx.cwd, retained.iter().map(|(_, oid)| oid.as_str()))?
+            .into_iter()
+            .collect();
+    for (reference, oid) in &retained {
+        if missing.contains(oid) {
+            problems.push(Finding {
+                code: "retained-object-missing",
+                detail: format!("{reference} holds {oid}, which is not in this repository"),
+            });
+        }
+    }
+    // A change that cannot be read is reported where its events are
+    // inspected, and has no commits to answer for here.
+    let Ok(cited) = crate::retention::cited(store) else {
+        return Ok(());
+    };
+    let present: Vec<String> =
+        gitio::commits_among(&ctx.cwd, cited.iter().map(|cited| cited.commit.as_str()))?;
+    let present: Vec<&str> = present.iter().map(String::as_str).collect();
+    let unreachable = gitio::unreachable_from_refs(&ctx.cwd, &present)?;
+    for cited in cited
+        .iter()
+        .filter(|cited| unreachable.contains(&cited.commit))
+    {
+        advice.push(Finding {
+            code: "unretained-commit",
+            detail: format!(
+                "{} is recorded ({} of {}) and no ref reaches it, so Git may collect it; \
+                 hold it with `git update-ref {} {}`",
+                &cited.commit[..cited.commit.len().min(8)],
+                cited.what,
+                cited.change_id,
+                cited.retained_ref(),
+                cited.commit
+            ),
+        });
     }
     Ok(())
 }
