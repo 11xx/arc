@@ -2361,7 +2361,6 @@ fn missing_role_trailers_advisory(
 /// as `placeholder`.
 fn placeholder_role_trailers_advisory(messages: &[(String, Vec<u8>)]) -> Option<Advisory> {
     let mut found = Vec::new();
-    let mut keys = std::collections::BTreeSet::new();
     let mut first = None;
     for (commit, message) in messages {
         for issue in crate::trailers::check_contribution(message) {
@@ -2373,21 +2372,20 @@ fn placeholder_role_trailers_advisory(messages: &[(String, Vec<u8>)]) -> Option<
                 "{commit}: {}: {} ({})",
                 issue.key, issue.value, issue.detail
             ));
-            keys.insert(issue.key);
         }
     }
     let first = first?;
-    let drop = keys
-        .iter()
-        .map(|key| format!(" --drop {key}"))
-        .collect::<String>();
     Some(Advisory {
         code: "placeholder-contribution-trailers",
         detail: format!(
             "commit role trailers carry values that are no coordinate: {}; an unestablished \
              value is omitted, never written: before integration run `arc rewrite trailers \
-             --from {first}{drop}`, appending each real coordinate that is known; message \
-             rewrites require a fresh snapshot and approval or declared debt",
+             --from {first} --edits <file>`, where <file> opens with `# arc-trailer-edits/1` \
+             and holds, for each line named above, one line of tab-separated fields: the \
+             commit, `drop` and the exact line to omit it, or the commit, `replace`, the \
+             exact line and the real coordinate that is known; the other lines under the \
+             same key stay; message rewrites require a fresh snapshot and approval or \
+             declared debt",
             found.join("; ")
         ),
     })
@@ -2500,9 +2498,9 @@ mod tests {
         assert!(advisory.detail.contains(
             "c2: Implemented-by: codex:019f0000-0000-7000-8000-00000000000a (a session id is not a model)"
         ));
-        assert!(advisory
-            .detail
-            .contains("--from c2 --drop Implemented-by --drop Orchestrated-by"));
+        assert!(advisory.detail.contains("--from c2 --edits <file>"));
+        assert!(advisory.detail.contains("arc-trailer-edits/1"));
+        assert!(!advisory.detail.contains("--drop"), "{}", advisory.detail);
         assert!(!advisory.detail.contains("c1"), "{}", advisory.detail);
         assert!(placeholder_role_trailers_advisory(&messages[..1]).is_none());
     }

@@ -704,6 +704,54 @@ fn a_signed_annotated_tag_in_range_is_recreated_signed() {
 }
 
 #[test]
+fn the_placeholder_advisory_names_the_edit_form() {
+    let repo = Repo::new();
+    repo.declare_gates_locally("[gates.smoke]\ncommand = \"true\"\n");
+    let change = opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", "advice"])));
+    let worktree = repo.home.join(".worktrees/repo-advice");
+    repo.commit(
+        &worktree,
+        "advice.txt",
+        "advice\n",
+        &format!(
+            "feat: tainted\n\n{ORCHESTRATOR_UNKNOWN}\nImplemented-by: codex:gpt-6.1-sol#xhigh\n"
+        ),
+    );
+    let tainted = repo.head(&worktree);
+    stdout(repo.arc(&worktree).args(["snapshot", &change, "--solo"]));
+    repo.arc(&worktree)
+        .args(["verify", &change, "--gate", "smoke"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["review", &change, "--verdict", "approved"])
+        .env("ARC_ACTOR", "reviewer")
+        .assert()
+        .success();
+
+    let report = json_stdout(repo.arc(&worktree).args(["check", &change, "--json"]));
+
+    let detail = report["advisories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|advisory| advisory["code"] == "placeholder-contribution-trailers")
+        .map(|advisory| advisory["detail"].as_str().unwrap().to_string())
+        .unwrap_or_else(|| panic!("{report}"));
+    assert!(
+        detail.contains(&format!("rewrite trailers --from {tainted} --edits <file>")),
+        "{detail}"
+    );
+    assert!(detail.contains("arc-trailer-edits/1"), "{detail}");
+    assert!(detail.contains("drop"), "{detail}");
+    assert!(detail.contains("replace"), "{detail}");
+    assert!(
+        !detail.contains("--drop"),
+        "dropping the key would drop the valid lines under it too: {detail}"
+    );
+}
+
+#[test]
 fn the_help_states_the_format_and_the_order() {
     let repo = Repo::new();
     let help = stdout(repo.arc(&repo.root).args(["rewrite", "trailers", "--help"]));

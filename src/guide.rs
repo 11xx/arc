@@ -1747,7 +1747,9 @@ CONTRIBUTION TRAILERS
     coordinate is advised. They advise when a commit's role line carries a
     placeholder or a session id, or a person without an email, under
     placeholder-contribution-trailers, naming each commit and line and arc
-    rewrite trailers --from <rev> --drop <key>. Neither advice blocks
+    rewrite trailers --from <rev> --edits <file>, whose `arc-trailer-edits/1`
+    lines drop or replace exactly those lines and leave the valid lines under
+    the same key. Neither advice blocks
     integration or changes ready or the exit code; rewrite before
     integration. A message rewrite requires fresh snapshot and approval or
     declared debt; post-integration audits stay in the ledger.

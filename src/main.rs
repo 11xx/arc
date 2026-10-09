@@ -1201,7 +1201,8 @@ enum Cmd {
     /// Contribution-trailer advice never changes readiness or the exit code:
     /// a commit lacking an asserted line names arc rewrite trailers --from
     /// <rev> --append <line>, and a role line carrying a placeholder or a
-    /// session id names --drop <key>, to run before integration.
+    /// session id names arc rewrite trailers --from <rev> --edits <file>, to
+    /// run before integration.
     ///
     /// Unreadable neighboring changes are named with their errors on stderr;
     /// an unreadable selected change fails and an unreadable prerequisite
