@@ -722,6 +722,7 @@ mod tests {
             session: None,
             session_link: None,
             session_resolution: None,
+            session_resolution_reason: None,
             on_behalf_of: None,
             model: None,
             model_provenance: Default::default(),

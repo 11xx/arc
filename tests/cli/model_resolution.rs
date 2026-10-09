@@ -1,9 +1,9 @@
 use crate::common::*;
 use serde_json::{json, Value};
 
-const SESSION: &str = "11111111-2222-3333-4444-555555555555";
+pub(crate) const SESSION: &str = "11111111-2222-3333-4444-555555555555";
 
-fn recording(repo: &Repo, rows: &[Value]) -> PathBuf {
+pub(crate) fn recording(repo: &Repo, rows: &[Value]) -> PathBuf {
     let project = repo.home.join(".claude/projects/-fixture");
     fs::create_dir_all(&project).unwrap();
     let path = project.join(format!("{SESSION}.jsonl"));
@@ -17,17 +17,17 @@ fn recording(repo: &Repo, rows: &[Value]) -> PathBuf {
     path
 }
 
-fn prompt(id: &str, ts: &str) -> Value {
+pub(crate) fn prompt(id: &str, ts: &str) -> Value {
     json!({"type":"user", "promptSource":"typed", "uuid":id, "timestamp":ts,
         "message":{"role":"user", "content":"operator prompt"}})
 }
 
-fn assistant(id: &str, ts: &str, effort: &str) -> Value {
+pub(crate) fn assistant(id: &str, ts: &str, effort: &str) -> Value {
     json!({"type":"assistant", "uuid":id, "timestamp":ts, "perTurnEffort":effort,
         "message":{"role":"assistant", "model":"m", "content":"answer"}})
 }
 
-fn acting(repo: &Repo) -> AssertCommand {
+pub(crate) fn acting(repo: &Repo) -> AssertCommand {
     let mut cmd = repo.arc(&repo.root);
     cmd.env("ARC_HARNESS", "claude")
         .env("ARC_SESSION", SESSION)

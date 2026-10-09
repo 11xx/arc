@@ -350,8 +350,8 @@ fn an_undeclared_actor_with_a_known_session_is_derived_from_it() {
 /// An identity nobody declared is derived from detection, so what detection
 /// claimed about the session is part of the record. A session id the harness's
 /// own store does not hold is marked as such rather than left to be inferred
-/// from an absent model; a session the caller declared is never looked up and
-/// makes no claim.
+/// from an absent model; a session the caller declared is looked up when the
+/// write resolves its model and carries the same report.
 #[test]
 fn an_event_records_whether_the_harness_store_backed_the_session() {
     let repo = Repo::new();
@@ -398,7 +398,7 @@ fn an_event_records_whether_the_harness_store_backed_the_session() {
     assert_eq!(event["session_resolution"], "corroborated", "{event}");
 
     // The harness and session come from the declared environment here, so
-    // detection never ran and nothing was asked of any store.
+    // detection never ran; the write still asks the declared harness's store.
     assert!(repo
         .arc(&repo.root)
         .args(["begin", "declared-session"])
@@ -415,9 +415,10 @@ fn an_event_records_whether_the_harness_store_backed_the_session() {
     ]));
     let event: serde_json::Value = serde_json::from_str(events.trim()).unwrap();
     assert_eq!(event["session"], "session-a", "{event}");
-    assert!(
-        event.get("session_resolution").is_none(),
-        "a declared session's events carry no store report: {event}"
+    assert_eq!(event["session_resolution"], "uncorroborated", "{event}");
+    assert_eq!(
+        event["session_resolution_reason"], "arc reads no session store for the test harness",
+        "a declared session's events carry the store's report: {event}"
     );
 }
 

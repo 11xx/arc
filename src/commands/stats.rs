@@ -1009,6 +1009,7 @@ mod tests {
             session: Some("s".into()),
             session_link: None,
             session_resolution: None,
+            session_resolution_reason: None,
             created_at: DateTime::<Utc>::from_timestamp(1_000_000 + seconds, 0).unwrap(),
             payload,
         }

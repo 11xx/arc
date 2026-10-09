@@ -82,8 +82,10 @@ SAY WHO YOU ARE (before the first write)
   store does not hold is uncorroborated. An ambiguous or unreadable lookup,
   one that resolves to a recording under another id, and an unread subagent
   lineage are unresolved and name their reason: a failed lookup is never
-  reported as absence, nor as the absence of subagents. Events record that
-  verdict beside the session they carry. It exports the
+  reported as absence, nor as the absence of subagents. Every event naming a
+  harness and session records the store's verdict, with its reason unless
+  corroborated, whether detection supplied that identity or the caller
+  declared it. It exports the
   harness, session, and session link it establishes and explicitly unsets
   each it does not; the model is a comment and ARC_MODEL is always unset. Pi re-sets its
   live recording file, model, and reasoning level for each tool call, so those

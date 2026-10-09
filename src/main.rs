@@ -1744,9 +1744,11 @@ enum Cmd {
     /// unreadable lookup, one that resolves to a recording under another id,
     /// and an unread subagent lineage are unresolved, and the report names
     /// the reason. A failed lookup is never reported as absence, nor as the
-    /// absence of subagents. Events carry that verdict. Every established
-    /// harness, session, and session link is exported; absent fields are
-    /// explicitly unset. The resolved model is a comment and
+    /// absence of subagents. Every event naming a harness and session carries
+    /// the store's verdict, with its reason unless corroborated, whether the
+    /// session was detected or declared. Every established harness, session,
+    /// and session link is exported; absent fields are explicitly unset.
+    /// The resolved model is a comment and
     /// ARC_MODEL is always unset, so each write resolves its own model. Pi re-sets
     /// `PI_SESSION_FILE`, `PI_MODEL`, and `PI_REASONING_LEVEL` for every tool
     /// call, so those answer in preference to the recording while
@@ -3735,7 +3737,6 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
         };
     let mut harness = cli.harness;
     let mut session = cli.session;
-    let mut session_resolution = None;
     // An empty --model is the same as absent.
     let from_env = std::env::var("ARC_MODEL")
         .ok()
@@ -3767,12 +3768,12 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 // of the detection, not a partial failure.
                 if let Some(detected_session) = &detected.session {
                     if session.is_none() {
-                        // The store's answer is about the session detection
-                        // supplied; a session the caller declared was never
-                        // asked about, so it carries no report.
-                        session_resolution = Some(detected_session.verdict.resolution());
                         session = Some(detected_session.id.clone());
                     }
+                    // Detection's store answer, verdict included, is this
+                    // invocation's attribution when it is about the session
+                    // the invocation records. A declared session that differs
+                    // gets its own store answer at the first write.
                     if session.as_deref() == Some(detected_session.id.as_str()) {
                         let _ = model_attribution.set(context::model_attribution(
                             model.as_deref(),
@@ -3805,7 +3806,6 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
         harness,
         session,
         session_link: cli.session_link.filter(|value| !value.trim().is_empty()),
-        session_resolution,
         model,
         model_source,
         model_attribution,

@@ -249,12 +249,19 @@ pub struct Event {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_link: Option<String>,
     /// What the harness's own store said about `session` when the event was
-    /// detected. A detected session id arrives from the environment and can
-    /// name no session the harness ever wrote; this is the record that the
-    /// store backed it, or did not. Absent when detection did not establish
-    /// the session, which says nothing about write-time model resolution.
+    /// written, whether detection supplied the session or the caller declared
+    /// it. A session id arrives from the environment or a flag and can name
+    /// no session the harness ever wrote; this is the record that the store
+    /// backed it, or did not. Absent when the event names no harness and
+    /// session, and on events from builds that recorded it only for detected
+    /// sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_resolution: Option<SessionResolution>,
+    /// Why the store did not corroborate `session`, as one bounded line.
+    /// Present exactly beside an `uncorroborated` or `unresolved` verdict, so
+    /// a failed lookup is never read as a recording the store lacks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_resolution_reason: Option<String>,
     pub created_at: DateTime<Utc>,
     #[serde(flatten)]
     pub payload: Payload,
@@ -267,6 +274,13 @@ pub struct ModelAttribution {
     pub model: Option<String>,
     #[serde(flatten)]
     pub provenance: ModelProvenance,
+    /// The store's verdict on the session the model was resolved against, as
+    /// the resolving write saw it; `None` when no harness and session were
+    /// asked about. An event keeps the verdict in its own session fields, so
+    /// it is no part of this value's serialized form and a value rebuilt
+    /// from an event carries none.
+    #[serde(skip)]
+    pub session_verdict: Option<SessionVerdict>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -377,6 +391,14 @@ impl SessionVerdict {
             Self::Corroborated => SessionResolution::Corroborated,
             Self::Uncorroborated(_) => SessionResolution::Uncorroborated,
             Self::Unresolved(_) => SessionResolution::Unresolved,
+        }
+    }
+
+    /// Why the store did not corroborate the id; `None` when it did.
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            Self::Corroborated => None,
+            Self::Uncorroborated(reason) | Self::Unresolved(reason) => Some(reason),
         }
     }
 }

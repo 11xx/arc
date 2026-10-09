@@ -203,10 +203,6 @@ pub struct Ctx {
     pub session: Option<String>,
     /// Private session link stored in events, never in Git-published text.
     pub session_link: Option<String>,
-    /// What the harness's own store said about `session` when detection
-    /// resolved it. `None` when the session was declared or detection did not
-    /// run. Model resolution at event creation is a separate observation.
-    pub session_resolution: Option<SessionResolution>,
     /// Declared model slug with optional `#effort`. An absent declaration
     /// leaves the invocation to resolve its model from the acting session store.
     pub model: Option<String>,
@@ -394,7 +390,6 @@ impl Ctx {
             harness: self.harness.clone(),
             session: self.session.clone(),
             session_link: self.session_link.clone(),
-            session_resolution: self.session_resolution,
             model: self.model.clone(),
             model_source: self.model_source,
             model_attribution: self.model_attribution.clone(),
@@ -563,6 +558,17 @@ impl Ctx {
     ) -> Result<Event> {
         self.announce_assumed_identity();
         let attribution = self.resolve_model();
+        // The store's verdict on the session this event names, whether
+        // detection supplied it or the caller declared it.
+        let session_resolution = attribution
+            .session_verdict
+            .as_ref()
+            .map(SessionVerdict::resolution);
+        let session_resolution_reason = attribution
+            .session_verdict
+            .as_ref()
+            .and_then(SessionVerdict::reason)
+            .map(str::to_string);
         let latest = if change_id == Store::REPOSITORY_SCOPE {
             store
                 .raw_repository_events_unseen(&BTreeSet::new())?
@@ -599,7 +605,8 @@ impl Ctx {
             harness: self.harness.clone(),
             session: self.session.clone(),
             session_link: self.session_link.clone(),
-            session_resolution: self.session_resolution,
+            session_resolution,
+            session_resolution_reason,
             created_at,
             payload,
         })

@@ -407,11 +407,17 @@ pub fn resolve_model(
 }
 
 /// Attach one observed identity to a declaration without reading the store.
+/// The store's verdict on the identity's session travels with it, so a write
+/// records that verdict whether the session was detected or declared.
 pub fn model_attribution(
     declared: Option<&str>,
     source: Option<ModelSource>,
     detected: Option<DetectedIdentity>,
 ) -> ModelAttribution {
+    let session_verdict = detected
+        .as_ref()
+        .and_then(|identity| identity.session.as_ref())
+        .map(|session| session.verdict.clone());
     let observed = detected
         .as_ref()
         .and_then(|identity| identity.model.clone());
@@ -441,6 +447,7 @@ pub fn model_attribution(
             model_observation: detected.and_then(|identity| identity.model_observation),
             model_disagreement: disagreement,
         },
+        session_verdict,
     }
 }
 

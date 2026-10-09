@@ -1752,6 +1752,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 ModelAttribution {
                     model: event.model.clone(),
                     provenance: event.model_provenance.clone(),
+                    session_verdict: None,
                 },
             )
         })
@@ -3550,6 +3551,7 @@ mod tests {
             session: None,
             session_link: None,
             session_resolution: None,
+            session_resolution_reason: None,
             created_at: Utc::now(),
             payload,
         }
