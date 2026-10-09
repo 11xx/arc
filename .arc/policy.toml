@@ -119,6 +119,10 @@ paths = [
   # belongs. A defect lets a placeholder or a session id into an append-only
   # history as attribution.
   "src/coordinate.rs",
+  # Decides which commits a rewrite keeps reachable as evidence. A defect
+  # lets the commit a verdict read be collected after a rewrite moves its
+  # pin, and the approval loses the object it judged.
+  "src/retention.rs",
   # Artifact storage operations move the only copy of journal history.
   "src/journal.rs",
   # Bundle import writes foreign artifact bodies and events into the journal.
