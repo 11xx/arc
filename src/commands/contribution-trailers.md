@@ -1,6 +1,6 @@
 # Contribution trailers
 
-Convention version: `arc-contribution-trailers/1`.
+Convention version: `arc-contribution-trailers/2`.
 
 Git commit messages may name who materially contributed what through trailers:
 `Key: value` lines at the end of the message, which
@@ -56,6 +56,15 @@ prove that a reviewer was independent of an author.
 Values must be a single line. Reject a value containing a line feed or carriage
 return, and reject an agent value whose harness, model, or effort is empty.
 
+A placeholder or a session id is not a coordinate, and its line is omitted
+rather than written. A placeholder is a harness, model, or effort that reads,
+ignoring case and surrounding space, as `unknown`, `unset`, `none`, `null`,
+`n/a`, `na`, `tbd`, `undefined`, `?`, `-`, `<synthetic>`, or `synthetic`. A
+session id in the model's place is UUID-shaped (8-4-4-4-12 hex digits) or
+the recording session's own id. A human value names a person: its name
+carries no `:` and its address an `@`, so `claude:<synthetic>` is an agent
+value with a placeholder model, not a person.
+
 ## What does not belong in a commit
 
 Session identifiers, local filesystem paths, private evidence locations,
@@ -107,13 +116,16 @@ own order and are not moved.
 
     arc instructions git --check <message-file>
 
-reports two different things: a value a role key cannot read (malformed), and a
-key outside this convention (unsupported, retained untouched). It never
-rewrites a message, and exits 1 when a role key carries a malformed value.
+reports three different things: a value a role key cannot read (malformed), a
+readable value that is no coordinate because it carries a placeholder or a
+session id, or is a person without an email (placeholder), and a key outside
+this convention (unsupported, retained untouched). It never rewrites a
+message, and exits 1 when a role key carries a malformed or placeholder
+value.
 `arc instructions git` prints this specification.
 
 ## Not in this convention
 
-A `Review-deferred:` marker is deliberately not part of version 1. Its scope and
+A `Review-deferred:` marker is deliberately not part of the convention. Its scope and
 reason would need a second obligation lifecycle to be useful, and absence of an
 assertion must not read as an outstanding obligation.

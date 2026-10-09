@@ -1709,14 +1709,18 @@ CONTRIBUTION TRAILERS
     and approval or declared debt; post-integration audits stay in the ledger.
     arc instructions git [--check <file>]
                        Print the portable contribution-trailer convention
-                       `arc-contribution-trailers/1`: `Planned-by`,
+                       `arc-contribution-trailers/2`: `Planned-by`,
                        `Implemented-by`, `Reviewed-by`, and `Orchestrated-by`
                        name material contributions in agent
                        `harness:model[#effort]` or human `Name <email>` form.
-                       `--check <file>` reports malformed role values and
-                       keys outside the convention. It never rewrites a
-                       message, and exits 1 when a role key carries a
-                       malformed value.
+                       A placeholder or a session id is not a coordinate;
+                       its line is omitted.
+                       `--check <file>` reports malformed role values,
+                       placeholder role values (a placeholder or session-id
+                       segment, or a person without an email), and keys
+                       outside the convention. It never rewrites a message,
+                       and exits 1 when a role key carries a malformed or
+                       placeholder value.
 
 HISTORY REWRITES
     arc rewrite sign [--key <id>] [--from <rev>] [--include-shared]

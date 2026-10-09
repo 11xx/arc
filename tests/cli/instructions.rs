@@ -96,6 +96,51 @@ fn instructions_git_check_separates_malformed_from_unsupported() {
     let report = String::from_utf8_lossy(&output.stdout);
     assert!(report.contains("unsupported: Custom-by"), "{report}");
     assert!(!report.contains("malformed"), "{report}");
+
+    // A readable value that is no fresh coordinate is a placeholder, which
+    // fails the check like a malformed one.
+    for value in [
+        "codex:unknown",
+        "codex:019f0000-0000-7000-8000-00000000000a",
+        "claude:<synthetic>",
+    ] {
+        fs::write(&path, format!("feat: one\n\nImplemented-by: {value}\n")).unwrap();
+        let output = repo
+            .arc(&repo.root)
+            .args(["instructions", "git", "--check", path.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{value}: {output:?}");
+        let report = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            report.contains(&format!("placeholder: Implemented-by: {value}")),
+            "{report}"
+        );
+        assert!(!report.contains("malformed"), "{report}");
+    }
+
+    // Legacy disclosure keeps its treatment whatever it carries.
+    fs::write(&path, "feat: one\n\nAssisted-by: codex:unknown\n").unwrap();
+    let output = repo
+        .arc(&repo.root)
+        .args(["instructions", "git", "--check", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+
+    fs::write(
+        &path,
+        "feat: one\n\nImplemented-by: codex:gpt-6.1-sol#xhigh\n",
+    )
+    .unwrap();
+    let output = repo
+        .arc(&repo.root)
+        .args(["instructions", "git", "--check", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
 }
 
 /// The specification's example spellings parse with no configuration, which

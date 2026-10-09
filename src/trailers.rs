@@ -28,8 +28,8 @@ const CONTRIBUTION_ROLES: [&str; 4] = [
 const LEGACY_DISCLOSURE: &str = "Assisted-by";
 
 /// One thing a contribution check found in a message. `kind` separates a
-/// value a role key cannot read from a key outside the convention; neither
-/// changes the message.
+/// value a role key cannot read, a readable value that is no fresh
+/// coordinate, and a key outside the convention; none changes the message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContributionIssue {
     pub kind: &'static str,
@@ -77,10 +77,12 @@ pub(crate) fn value_is_readable(value: &str) -> bool {
 /// order the lines appear. The message is read, never written: the answer is
 /// a report, not an edit.
 ///
-/// A role key with a value the convention cannot read is `malformed`. A key
-/// outside the convention is `unsupported` and travels through untouched;
-/// [`LEGACY_DISCLOSURE`] is defined, so an older `Assisted-by` is not
-/// reported as either.
+/// A role key with a value the convention cannot read is `malformed`, and one
+/// whose readable value carries a placeholder or a session id, or is a
+/// `Name <address>` without an email, is `placeholder`: a coordinate nobody
+/// established is omitted, never written. A key outside the convention is
+/// `unsupported` and travels through untouched; [`LEGACY_DISCLOSURE`] is
+/// defined, so an older `Assisted-by` is reported as none of these.
 pub fn check_contribution(message: &[u8]) -> Vec<ContributionIssue> {
     let ends_with_newline = message.ends_with(b"\n");
     let body = match ends_with_newline {
@@ -94,37 +96,44 @@ pub fn check_contribution(message: &[u8]) -> Vec<ContributionIssue> {
     let Some(block) = block_of(&lines) else {
         return Vec::new();
     };
-    let mut issues = Vec::new();
-    for line in &lines[block] {
-        let Some(key) = trailer_key(line) else {
-            continue;
+    lines[block]
+        .iter()
+        .filter_map(|line| line_issue(line))
+        .collect()
+}
+
+/// What the convention says about one trailer line, if anything.
+fn line_issue(line: &[u8]) -> Option<ContributionIssue> {
+    let key = trailer_key(line)?;
+    let key = String::from_utf8_lossy(&key).into_owned();
+    let value = String::from_utf8_lossy(&line[key.len() + 1..])
+        .trim()
+        .to_string();
+    if CONTRIBUTION_ROLES
+        .iter()
+        .any(|role| role.eq_ignore_ascii_case(&key))
+    {
+        let defect = crate::coordinate::coordinate_defect(&value, None)?;
+        let kind = match defect {
+            crate::coordinate::Defect::Unreadable => "malformed",
+            _ => "placeholder",
         };
-        let key = String::from_utf8_lossy(&key).into_owned();
-        let value = String::from_utf8_lossy(&line[key.len() + 1..])
-            .trim()
-            .to_string();
-        if CONTRIBUTION_ROLES
-            .iter()
-            .any(|role| role.eq_ignore_ascii_case(&key))
-        {
-            if !value_is_readable(&value) {
-                issues.push(ContributionIssue {
-                    kind: "malformed",
-                    key,
-                    value,
-                    detail: "expected harness:model[#effort] or Name <email> on one line",
-                });
-            }
-        } else if !key.eq_ignore_ascii_case(LEGACY_DISCLOSURE) {
-            issues.push(ContributionIssue {
-                kind: "unsupported",
-                key,
-                value,
-                detail: "outside arc-contribution-trailers/1; retained untouched",
-            });
-        }
+        Some(ContributionIssue {
+            kind,
+            key,
+            value,
+            detail: defect.reason(),
+        })
+    } else if !key.eq_ignore_ascii_case(LEGACY_DISCLOSURE) {
+        Some(ContributionIssue {
+            kind: "unsupported",
+            key,
+            value,
+            detail: "outside arc-contribution-trailers/2; retained untouched",
+        })
+    } else {
+        None
     }
-    issues
 }
 
 /// Edit a message's trailers: drop every trailer whose key is one of `drop`,

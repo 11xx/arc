@@ -8,6 +8,7 @@ mod changelog_render;
 mod commands;
 mod config;
 mod context;
+mod coordinate;
 mod declarations;
 mod explain;
 mod forge;
@@ -348,7 +349,7 @@ enum Cmd {
         iterating: bool,
     },
     /// Record explicit planning and orchestration assertions on an open change.
-    /// Values follow arc-contribution-trailers/1; ancestry grants no credit.
+    /// Values follow arc-contribution-trailers/2; ancestry grants no credit.
     Roles {
         /// Open change whose contribution assertions to record
         change: String,
@@ -2496,8 +2497,11 @@ enum InstructionsCmd {
     /// Git contribution trailers and commit provenance, with no arc state
     /// Records no events; ledger reads do not require a parseable append policy.
     Git {
-        /// Report malformed role values and keys outside the convention in a
-        /// commit message file ('-' for stdin); never rewrites it
+        /// Report malformed role values, placeholder role values (a
+        /// placeholder or session-id segment, or a person without an email),
+        /// and keys outside the convention in a commit message file ('-' for
+        /// stdin); never rewrites it. Exits 1 on a malformed or placeholder
+        /// role value
         #[arg(long, value_name = "FILE")]
         check: Option<String>,
     },

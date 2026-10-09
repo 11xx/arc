@@ -151,11 +151,13 @@ pub fn instructions_git(check: Option<&str>) -> Result<i32> {
         std::fs::read(source).with_context(|| format!("cannot read {source}"))?
     };
     let issues = crate::trailers::check_contribution(&message);
-    let malformed = issues.iter().any(|issue| issue.kind == "malformed");
+    let failed = issues
+        .iter()
+        .any(|issue| matches!(issue.kind, "malformed" | "placeholder"));
     for issue in &issues {
         println!("{}", issue.line());
     }
-    Ok(if malformed { 1 } else { 0 })
+    Ok(if failed { 1 } else { 0 })
 }
 
 /// Edit the trailers of this branch's commit messages, carrying every
