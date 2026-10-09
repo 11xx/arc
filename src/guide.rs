@@ -1737,10 +1737,15 @@ CONTRIBUTION TRAILERS
                        never projected or backfilled into commits.
                        --json emits arc-trailers/1 with trailers and notes.
     check and integrate advise when a commit in target..head lacks an
-    asserted line, under missing-contribution-trailers. The advice never
-    blocks integration and names arc rewrite trailers --from <rev> --append
-    <line>, before integration. A message rewrite requires fresh snapshot
-    and approval or declared debt; post-integration audits stay in the ledger.
+    asserted line, under missing-contribution-trailers, naming arc rewrite
+    trailers --from <rev> --append <line>; only an assertion that is a fresh
+    coordinate is advised. They advise when a commit's role line carries a
+    placeholder or a session id, or a person without an email, under
+    placeholder-contribution-trailers, naming each commit and line and arc
+    rewrite trailers --from <rev> --drop <key>. Neither advice blocks
+    integration or changes ready or the exit code; rewrite before
+    integration. A message rewrite requires fresh snapshot and approval or
+    declared debt; post-integration audits stay in the ledger.
     arc instructions git [--check <file>]
                        Print the portable contribution-trailer convention
                        `arc-contribution-trailers/2`: `Planned-by`,

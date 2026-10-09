@@ -1119,10 +1119,10 @@ pub fn build_at_with_shape(
             .transpose()?
     };
     let danger = DangerScope::resolve(state, policy, cwd, current_head.as_deref());
-    let role_advisory = if state.is_closed() {
-        None
+    let role_advisories = if state.is_closed() {
+        Vec::new()
     } else {
-        missing_role_trailers_advisory(state, cwd, target_head.as_deref(), current_head.as_deref())
+        role_trailer_advisories(state, cwd, target_head.as_deref(), current_head.as_deref())
     };
     let mut report = build_report(
         state,
@@ -1141,7 +1141,7 @@ pub fn build_at_with_shape(
         danger,
         fork,
     )?;
-    report.advisories.extend(role_advisory);
+    report.advisories.extend(role_advisories);
     Ok(report)
 }
 
@@ -2271,45 +2271,68 @@ fn reviewed_only_by_brief_author<'a>(
     }
 }
 
-/// Missing asserted lines are advice only; they do not alter integration authorization.
-pub(crate) fn missing_role_trailers_advisory(
+/// Advice on the contribution trailers of the commits in `target..head`:
+/// asserted lines a commit lacks, and role lines whose value is no fresh
+/// coordinate. Advice only; neither alters integration authorization, `ready`
+/// or the exit code.
+pub(crate) fn role_trailer_advisories(
     state: &ChangeState,
     cwd: &Path,
     target: Option<&str>,
     head: Option<&str>,
-) -> Option<Advisory> {
-    if state.contribution_roles.is_empty() {
-        return None;
-    }
-    let (target, head) = (target?, head?);
+) -> Vec<Advisory> {
+    let (Some(target), Some(head)) = (target, head) else {
+        return Vec::new();
+    };
+    let unreadable = |detail: String| {
+        vec![Advisory {
+            code: "contribution-trailers-unreadable",
+            detail,
+        }]
+    };
     let commits = match gitio::git(
         cwd,
         &["rev-list", "--reverse", &format!("{target}..{head}")],
     ) {
         Ok(commits) => commits,
         Err(error) => {
-            return Some(Advisory {
-                code: "contribution-trailers-unreadable",
-                detail: format!("could not inspect contribution trailers: {error}"),
-            })
+            return unreadable(format!("could not inspect contribution trailers: {error}"))
         }
     };
-    let mut missing = BTreeMap::<String, Vec<String>>::new();
+    let mut messages = Vec::new();
     for commit in commits.lines() {
-        let message = match gitio::read_commit(cwd, commit) {
-            Ok(commit) => commit.message,
+        match gitio::read_commit(cwd, commit) {
+            Ok(read) => messages.push((commit.to_string(), read.message)),
             Err(error) => {
-                return Some(Advisory {
-                    code: "contribution-trailers-unreadable",
-                    detail: format!("could not inspect contribution trailers on {commit}: {error}"),
-                })
+                return unreadable(format!(
+                    "could not inspect contribution trailers on {commit}: {error}"
+                ))
             }
-        };
+        }
+    }
+    missing_role_trailers_advisory(state, &messages)
+        .into_iter()
+        .chain(placeholder_role_trailers_advisory(&messages))
+        .collect()
+}
+
+/// Asserted lines a commit lacks. Only an assertion that is a fresh
+/// coordinate is advised: the others are notes in `arc trailers`, and no
+/// remedy appends a line that names nobody.
+fn missing_role_trailers_advisory(
+    state: &ChangeState,
+    messages: &[(String, Vec<u8>)],
+) -> Option<Advisory> {
+    let mut missing = BTreeMap::<String, Vec<String>>::new();
+    for (commit, message) in messages {
         for (role, values) in &state.contribution_roles {
             for value in values {
+                if crate::coordinate::coordinate_defect(value, None).is_some() {
+                    continue;
+                }
                 let line = format!("{role}: {value}");
-                if !crate::trailers::contains(&message, &line) {
-                    missing.entry(line).or_default().push(commit.to_string());
+                if !crate::trailers::contains(message, &line) {
+                    missing.entry(line).or_default().push(commit.clone());
                 }
             }
         }
@@ -2317,7 +2340,7 @@ pub(crate) fn missing_role_trailers_advisory(
     if missing.is_empty() {
         return None;
     }
-    let first = commits.lines().next()?;
+    let first = &messages.first()?.0;
     let details = missing
         .iter()
         .map(|(line, commits)| format!("{line} (missing on {})", commits.join(", ")))
@@ -2330,6 +2353,43 @@ pub(crate) fn missing_role_trailers_advisory(
     Some(Advisory {
         code: "missing-contribution-trailers",
         detail: format!("asserted contribution trailers missing: {details}; before integration run `arc rewrite trailers --from {first}{append}`; message rewrites require a fresh snapshot and approval or declared debt"),
+    })
+}
+
+/// Commit role lines whose value carries a placeholder or a session id, or
+/// is a person without an email: what `arc instructions git --check` reports
+/// as `placeholder`.
+fn placeholder_role_trailers_advisory(messages: &[(String, Vec<u8>)]) -> Option<Advisory> {
+    let mut found = Vec::new();
+    let mut keys = std::collections::BTreeSet::new();
+    let mut first = None;
+    for (commit, message) in messages {
+        for issue in crate::trailers::check_contribution(message) {
+            if issue.kind != "placeholder" {
+                continue;
+            }
+            first.get_or_insert(commit.as_str());
+            found.push(format!(
+                "{commit}: {}: {} ({})",
+                issue.key, issue.value, issue.detail
+            ));
+            keys.insert(issue.key);
+        }
+    }
+    let first = first?;
+    let drop = keys
+        .iter()
+        .map(|key| format!(" --drop {key}"))
+        .collect::<String>();
+    Some(Advisory {
+        code: "placeholder-contribution-trailers",
+        detail: format!(
+            "commit role trailers carry values that are no coordinate: {}; an unestablished \
+             value is omitted, never written: before integration run `arc rewrite trailers \
+             --from {first}{drop}`, appending each real coordinate that is known; message \
+             rewrites require a fresh snapshot and approval or declared debt",
+            found.join("; ")
+        ),
     })
 }
 
@@ -2412,5 +2472,38 @@ mod tests {
             serde_json::to_string(&Readiness::new(vec![Blocker::HoldActive])).unwrap(),
             r#"{"ready_to_integrate":false,"integrate_ready":false,"blockers":["hold-active"]}"#
         );
+    }
+
+    /// The advice names placeholder role lines only: a fresh coordinate is
+    /// what a line should carry, and a malformed value is `--check`'s own
+    /// report, not a coordinate somebody failed to establish.
+    #[test]
+    fn placeholder_advice_names_each_commit_and_placeholder_line() {
+        let messages = vec![
+            (
+                "c1".to_string(),
+                b"feat: one\n\nImplemented-by: codex:gpt-6.1-sol#xhigh\nPlanned-by: codex\n"
+                    .to_vec(),
+            ),
+            (
+                "c2".to_string(),
+                b"feat: two\n\nOrchestrated-by: codex:unknown\nImplemented-by: \
+                  codex:019f0000-0000-7000-8000-00000000000a\n"
+                    .to_vec(),
+            ),
+        ];
+        let advisory = placeholder_role_trailers_advisory(&messages).unwrap();
+        assert_eq!(advisory.code, "placeholder-contribution-trailers");
+        assert!(advisory
+            .detail
+            .contains("c2: Orchestrated-by: codex:unknown (a placeholder is not a coordinate)"));
+        assert!(advisory.detail.contains(
+            "c2: Implemented-by: codex:019f0000-0000-7000-8000-00000000000a (a session id is not a model)"
+        ));
+        assert!(advisory
+            .detail
+            .contains("--from c2 --drop Implemented-by --drop Orchestrated-by"));
+        assert!(!advisory.detail.contains("c1"), "{}", advisory.detail);
+        assert!(placeholder_role_trailers_advisory(&messages[..1]).is_none());
     }
 }

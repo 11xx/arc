@@ -49,8 +49,9 @@ struct CheckOutput<'a> {
     blockers: Vec<CheckBlocker>,
     /// What a lead should know and arc will not refuse for. Never affects
     /// `ready` or the exit code; a change may legitimately ship with one
-    /// reviewer, and an orchestrator's review is a valid review unless a
-    /// project's policy says otherwise.
+    /// reviewer, an orchestrator's review is a valid review unless a
+    /// project's policy says otherwise, and contribution trailers, missing
+    /// or carrying a placeholder or a session id, never block integration.
     #[serde(skip_serializing_if = "<[crate::status::Advisory]>::is_empty")]
     advisories: &'a [crate::status::Advisory],
 }
@@ -4371,7 +4372,9 @@ fn advise_role_trailers(report: &StatusReport) {
     for advisory in &report.advisories {
         if matches!(
             advisory.code,
-            "missing-contribution-trailers" | "contribution-trailers-unreadable"
+            "missing-contribution-trailers"
+                | "placeholder-contribution-trailers"
+                | "contribution-trailers-unreadable"
         ) {
             eprintln!("advice: {}", advisory.detail);
         }

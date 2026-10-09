@@ -348,3 +348,89 @@ fn a_bare_role_flag_refuses_what_it_cannot_resolve_and_records_nothing() {
 
     assert_eq!(event_count(&repo, &change), before);
 }
+
+fn gate_and_approve(repo: &Repo, worktree: &Path, change: &str) {
+    stdout(repo.arc(worktree).args(["snapshot", change, "--solo"]));
+    repo.arc(worktree)
+        .args(["verify", change, "--gate", "smoke"])
+        .assert()
+        .success();
+    repo.arc(worktree)
+        .args(["review", change, "--verdict", "approved"])
+        .env("ARC_ACTOR", "reviewer")
+        .assert()
+        .success();
+}
+
+fn advisory<'a>(report: &'a serde_json::Value, code: &str) -> Option<&'a str> {
+    report["advisories"]
+        .as_array()?
+        .iter()
+        .find(|advisory| advisory["code"] == code)
+        .map(|advisory| advisory["detail"].as_str().unwrap())
+}
+
+#[test]
+fn placeholder_role_trailers_are_advised_and_never_block() {
+    let repo = Repo::new();
+    repo.declare_gates_locally("[gates.smoke]\ncommand = \"true\"\n");
+    let (change, wt) = open(&repo, "placeholder-advice");
+    commit_file(&wt, "clean", "feat: clean");
+    commit_file(
+        &wt,
+        "tainted",
+        "feat: tainted\n\nOrchestrated-by: codex:unknown\nImplemented-by: codex:gpt-6.1-sol#xhigh\n",
+    );
+    let tainted = repo.head(&wt);
+    gate_and_approve(&repo, &wt, &change);
+
+    let check = repo
+        .arc(&wt)
+        .args(["check", &change, "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(check.status.code(), Some(0), "{check:?}");
+    let report: serde_json::Value = serde_json::from_slice(&check.stdout).unwrap();
+    assert_eq!(report["ready"], true, "{report}");
+    let detail = advisory(&report, "placeholder-contribution-trailers")
+        .unwrap_or_else(|| panic!("no placeholder advisory: {report}"));
+    assert!(detail.contains(&tainted), "{detail}");
+    assert!(
+        detail.contains("Orchestrated-by: codex:unknown"),
+        "{detail}"
+    );
+    assert!(!detail.contains("Implemented-by"), "{detail}");
+
+    repo.arc(&wt)
+        .args(["integrate", &change, "--dry-run"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains(
+            "advice: commit role trailers carry values that are no coordinate",
+        ))
+        .stderr(predicates::str::contains("Orchestrated-by: codex:unknown"));
+}
+
+#[test]
+fn missing_trailer_advice_never_suggests_a_placeholder_line() {
+    let repo = Repo::new();
+    repo.declare_gates_locally("[gates.smoke]\ncommand = \"true\"\n");
+    let (change, wt) = open(&repo, "missing-advice");
+    stdout(repo.arc(&wt).args([
+        "roles",
+        &change,
+        "--planned-by",
+        "codex:seed-model",
+        "--planned-by",
+        "lead:planner#high",
+    ]));
+    seed_history(&repo, &change, "codex:seed-model", "codex:unknown");
+    commit_file(&wt, "one", "feat: one");
+    gate_and_approve(&repo, &wt, &change);
+
+    let report = json_stdout_any_status(repo.arc(&wt).args(["check", &change, "--json"]));
+    let detail = advisory(&report, "missing-contribution-trailers")
+        .unwrap_or_else(|| panic!("no missing-trailer advisory: {report}"));
+    assert!(detail.contains("Planned-by: lead:planner#high"), "{detail}");
+    assert!(!detail.contains("codex:unknown"), "{detail}");
+}

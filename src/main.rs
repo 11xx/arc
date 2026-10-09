@@ -1188,12 +1188,14 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ReplicaCmd,
     },
-    /// Integration preflight under the resolved target shape or --shape; exit code identifies the first blocker
-    /// Missing asserted contribution trailers are advisory only. The remedy
-    /// is arc rewrite trailers --from <rev> --append <line> before integration
     /// Integration preflight under the resolved target shape or --shape; exit code identifies the first blocker.
+    ///
     /// arc-check/4 reports recorded origins, admission provenance, content
     /// coverage, gating eligibility, and the selected authorizing verdict.
+    /// Contribution-trailer advice never changes readiness or the exit code:
+    /// a commit lacking an asserted line names arc rewrite trailers --from
+    /// <rev> --append <line>, and a role line carrying a placeholder or a
+    /// session id names --drop <key>, to run before integration.
     ///
     /// Unreadable neighboring changes are named with their errors on stderr;
     /// an unreadable selected change fails and an unreadable prerequisite
@@ -1928,7 +1930,8 @@ enum Cmd {
     /// Style and history constraints are validated under the target and change
     /// locks against each authorization policy reading, retaining the original
     /// flags and enforcing the destination's declared actor requirement.
-    /// Missing asserted contribution trailers are advisory only; append them
+    /// Contribution trailers are advisory only: a missing asserted line, or a
+    /// role line carrying a placeholder or a session id, is advice to rewrite
     /// with arc rewrite trailers before integration. Review credit stays in the ledger.
     /// Destination declarations are pinned to the transition's observed revision;
     /// their actor requirement and agreement with authorization are required.
