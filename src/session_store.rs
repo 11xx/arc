@@ -106,6 +106,33 @@ fn harness_backends(harness: &str) -> Vec<Box<dyn Backend>> {
         .collect()
 }
 
+/// The lines tapes appends to a failed lookup to say how much of the store
+/// set it covered. They describe the search, not the failure, and would push
+/// the failure's cause out of a bounded reason.
+const COVERAGE_PREFIXES: [&str; 3] = [
+    "incomplete harness stores: ",
+    "completely searched harness stores: ",
+    "use the full ID or --harness",
+];
+
+/// `failures` without tapes' coverage lines, unless nothing else is left.
+fn without_coverage(failures: Vec<String>) -> Vec<String> {
+    let causes: Vec<String> = failures
+        .iter()
+        .filter(|line| {
+            !COVERAGE_PREFIXES
+                .iter()
+                .any(|prefix| line.starts_with(prefix))
+        })
+        .cloned()
+        .collect();
+    if causes.is_empty() {
+        failures
+    } else {
+        causes
+    }
+}
+
 /// Tapes resolves exact IDs and useful prefixes. Arc attributes an acting
 /// session only when the resolved record names the entire claimed ID; a
 /// record under another id is a recording arc cannot attribute, not an
@@ -131,6 +158,13 @@ fn resolve_exact(
         }
         Err(error @ ResolveError::Ambiguous { .. }) => {
             return Err(LookupIssue::Ambiguous(error.to_string()));
+        }
+        Err(ResolveError::BackendFailed { query, failures }) => {
+            let error = ResolveError::BackendFailed {
+                query,
+                failures: without_coverage(failures),
+            };
+            return Err(LookupIssue::Unreadable(error.to_string()));
         }
         Err(error) => return Err(LookupIssue::Unreadable(error.to_string())),
     };
@@ -714,6 +748,22 @@ mod tests {
             reason,
             "arc reads no session store for the fixture-harness harness"
         );
+    }
+
+    #[test]
+    fn coverage_lines_do_not_displace_the_failure() {
+        let cause = "codex: /store/file.jsonl: open file failed (PermissionDenied)".to_string();
+        let coverage = [
+            "completely searched harness stores: none",
+            "incomplete harness stores: codex",
+            "use the full ID or --harness <h> to scope native lookup",
+        ];
+        let mixed: Vec<String> = std::iter::once(cause.clone())
+            .chain(coverage.map(String::from))
+            .collect();
+        assert_eq!(without_coverage(mixed), vec![cause]);
+        let only: Vec<String> = coverage.map(String::from).to_vec();
+        assert_eq!(without_coverage(only.clone()), only);
     }
 
     #[test]
