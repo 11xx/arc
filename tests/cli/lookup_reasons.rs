@@ -122,6 +122,31 @@ fn a_prefix_match_is_unresolved_and_names_both_ids() {
 }
 
 #[test]
+fn a_recording_named_for_another_session_is_unresolved_and_names_both_ids() {
+    let repo = Repo::new();
+    let other = "019f0000-0000-7000-8000-00000000000b";
+    let path = codex_recording(&repo, CODEX_SESSION, "gpt-fixture");
+    let text = fs::read_to_string(&path).unwrap();
+    fs::write(&path, text.replacen(CODEX_SESSION, other, 1)).unwrap();
+
+    let output = codex_env(&repo, CODEX_SESSION);
+    let reason = reason_after(&output, UNRESOLVED_SESSION);
+    assert!(
+        reason.contains(&format!("named for session {CODEX_SESSION}"))
+            && reason.contains(&format!("records session {other}")),
+        "{output}"
+    );
+    assert_eq!(reason_after(&output, UNRESOLVED_MODEL), reason);
+    assert!(!output.contains("no recording"), "{output}");
+    assert!(!output.contains("gpt-fixture"), "{output}");
+
+    let event = begin_declared_codex(&repo, "mismatched-recording", CODEX_SESSION);
+    assert_eq!(event["session_resolution"], "unresolved", "{event}");
+    assert_eq!(event["session_resolution_reason"], reason, "{event}");
+    assert!(event.get("model").is_none(), "{event}");
+}
+
+#[test]
 fn declared_identity_records_the_store_verdict_on_every_write() {
     let repo = Repo::new();
 

@@ -1759,10 +1759,11 @@ enum Cmd {
     /// answer for the exact canonical session id is reported with the exports:
     /// an id the store does not hold is uncorroborated; an ambiguous or
     /// unreadable lookup, one that resolves to a recording under another id,
-    /// and an unread subagent lineage are unresolved, and the report names
-    /// the reason. A failed lookup is never reported as absence, nor as the
-    /// absence of subagents. Every event naming a harness and session carries
-    /// the store's verdict, with its reason unless corroborated, whether the
+    /// a recording file named for one session that records another, and an
+    /// unread subagent lineage are unresolved, and the report names the
+    /// reason, both ids included. A failed lookup is never reported as
+    /// absence, nor as the absence of subagents. Every event naming a harness
+    /// and session carries the store's verdict, with its reason unless corroborated, whether the
     /// session was detected or declared. Every established harness, session,
     /// and session link is exported; absent fields are explicitly unset.
     /// The resolved model is a comment and

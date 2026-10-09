@@ -86,9 +86,10 @@ SAY WHO YOU ARE (before the first write)
   `PI_CODING_AGENT_DIR` — before the default under `$HOME`, and reports
   whether the store corroborates the exact canonical session id. An id the
   store does not hold is uncorroborated. An ambiguous or unreadable lookup,
-  one that resolves to a recording under another id, and an unread subagent
-  lineage are unresolved and name their reason: a failed lookup is never
-  reported as absence, nor as the absence of subagents. Every event naming a
+  one that resolves to a recording under another id, a recording file named
+  for one session that records another, and an unread subagent lineage are
+  unresolved and name their reason, both ids included: a failed lookup is
+  never reported as absence, nor as the absence of subagents. Every event naming a
   harness and session records the store's verdict, with its reason unless
   corroborated, whether detection supplied that identity or the caller
   declared it. An unreadable arc configuration leaves ambient detection off
