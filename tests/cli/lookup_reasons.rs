@@ -167,3 +167,96 @@ fn declared_identity_records_the_store_verdict_on_every_write() {
         assert_eq!(event["model"], "m#high", "{event}");
     }
 }
+
+#[test]
+fn a_broken_config_warns_once_and_continues_without_detection() {
+    let repo = Repo::new();
+    codex_recording(&repo, CODEX_SESSION, "gpt-fixture");
+    let change = opened_change_id(&stdout(
+        repo.arc(&repo.root).args(["begin", "broken-config"]),
+    ));
+    fs::write(
+        repo.home.join(".local/ai/arc/config.toml"),
+        "[identity]\ndetect = tru\n",
+    )
+    .unwrap();
+
+    let output = repo
+        .arc(&repo.root)
+        .env_remove("ARC_HARNESS")
+        .env_remove("ARC_SESSION")
+        .env("ARC_DATA_DIR", repo.root.join(".git/arc"))
+        .env("CODEX_HOME", repo.home.join("codex-state"))
+        .env("CODEX_THREAD_ID", CODEX_SESSION)
+        .args(["events", "--change", &change])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(
+        stderr.matches("warning: identity detection is off").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(stderr.contains("config.toml"), "{stderr}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("change-opened"),
+        "{output:?}"
+    );
+
+    // A policy that settles the Git identity mode lets a write proceed
+    // without the configuration; detection stays off for it as well.
+    fs::write(
+        repo.root.join(".git/arc/operator-policy.toml"),
+        "[provenance]\ngit_identity = \"shared\"\n",
+    )
+    .unwrap();
+    let output = repo
+        .arc(&repo.root)
+        .env_remove("ARC_HARNESS")
+        .env_remove("ARC_SESSION")
+        .env("ARC_DATA_DIR", repo.root.join(".git/arc"))
+        .env("CODEX_HOME", repo.home.join("codex-state"))
+        .env("CODEX_THREAD_ID", CODEX_SESSION)
+        .args([
+            "comment",
+            &change,
+            "--body",
+            "written without a configuration",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(
+        stderr.matches("warning: identity detection is off").count(),
+        1,
+        "{stderr}"
+    );
+    let events = stdout(
+        repo.arc(&repo.root)
+            .env("ARC_DATA_DIR", repo.root.join(".git/arc"))
+            .args(["events", "--change", &change, "--type", "comment-added"]),
+    );
+    let event: Value = serde_json::from_str(events.trim()).unwrap();
+    assert!(event.get("harness").is_none(), "{event}");
+    assert!(event.get("session").is_none(), "{event}");
+    assert!(event.get("session_resolution").is_none(), "{event}");
+
+    // `arc env` detects whatever the configuration says, so it has nothing
+    // to warn about.
+    let output = repo
+        .arc(&repo.root)
+        .env("CODEX_HOME", repo.home.join("codex-state"))
+        .env("CODEX_THREAD_ID", CODEX_SESSION)
+        .arg("env")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(!stderr.contains("warning"), "{stderr}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("# session corroborated"),
+        "{output:?}"
+    );
+}

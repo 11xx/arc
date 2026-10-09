@@ -85,7 +85,8 @@ SAY WHO YOU ARE (before the first write)
   reported as absence, nor as the absence of subagents. Every event naming a
   harness and session records the store's verdict, with its reason unless
   corroborated, whether detection supplied that identity or the caller
-  declared it. It exports the
+  declared it. An unreadable arc configuration leaves ambient detection off
+  and says why on stderr. It exports the
   harness, session, and session link it establishes and explicitly unsets
   each it does not; the model is a comment and ARC_MODEL is always unset. Pi re-sets its
   live recording file, model, and reasoning level for each tool call, so those

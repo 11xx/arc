@@ -3748,11 +3748,21 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
         _ => (None, None),
     };
     let model_attribution = std::rc::Rc::new(std::cell::OnceCell::new());
-    if (harness.is_none() || session.is_none())
-        && config::load()
-            .map(|config| config.identity_detect)
-            .unwrap_or(false)
-    {
+    // `arc env` detects for itself whatever the configuration says. Anywhere
+    // else a configuration that cannot be loaded leaves detection off, and
+    // says why on stderr.
+    let detect = (harness.is_none() || session.is_none())
+        && !matches!(cmd, Cmd::Env)
+        && match config::load() {
+            Ok(config) => config.identity_detect,
+            Err(error) => {
+                eprintln!(
+                    "warning: identity detection is off: cannot load the arc configuration: {error:#}"
+                );
+                false
+            }
+        };
+    if detect {
         // A process carrying several harnesses' session variables and no
         // ancestry that names the owner records no identity at all: picking
         // one by list position is how work gets attributed to a thread that
