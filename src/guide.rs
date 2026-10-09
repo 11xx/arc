@@ -1776,10 +1776,11 @@ HISTORY REWRITES
                        every trailer with that key, matched without case;
                        --append adds a `Key: value` line the block does not
                        already carry; both repeat, and at least one is
-                       required. A role line whose value carries a
-                       placeholder or a session id, or names a person
-                       without an email, refuses before any commit is
-                       recreated, including in --dry-run.
+                       required. A role line whose value is no fresh
+                       coordinate (malformed, carrying a placeholder or a
+                       session id, or a person without an email) refuses
+                       before any commit is recreated, including in
+                       --dry-run.
                        The commit named by --from is itself edited;
                        it is rewritten when its message or ancestry changes.
                        Recreating a commit reachable from the target or another

@@ -482,6 +482,8 @@ fn appended_role_trailers_refuse_placeholders_before_any_commit_moves() {
         session_line.as_str(),
         "Orchestrated-by: claude:<synthetic>",
         "reviewed-by: Ada <ada>",
+        "Implemented-by: fixture",
+        "Planned-by: codex:",
     ] {
         for dry_run in [true, false] {
             let mut command = repo.arc(&worktree);
@@ -498,11 +500,8 @@ fn appended_role_trailers_refuse_placeholders_before_any_commit_moves() {
                 command.arg("--dry-run");
             }
             let stderr = refused(&mut command);
-            assert!(
-                stderr.contains(line.split_once(": ").unwrap().1),
-                "{stderr}"
-            );
-            assert!(stderr.contains("omit"), "{stderr}");
+            assert!(stderr.contains(line), "{stderr}");
+            assert!(stderr.contains("omit the line"), "{stderr}");
         }
     }
     assert_eq!(repo.head(&worktree), head);

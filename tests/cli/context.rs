@@ -240,7 +240,7 @@ fn session_link_stays_out_of_git_messages_trailers_and_changelog() {
             "--from",
             "HEAD",
             "--append",
-            "Implemented-by: fixture",
+            "Implemented-by: test:fixture-model#high",
             "--no-sign",
             "--dry-run",
         ])

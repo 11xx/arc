@@ -102,14 +102,14 @@ pub fn check_contribution(message: &[u8]) -> Vec<ContributionIssue> {
         .collect()
 }
 
-/// The first of `lines` whose role key carries a readable value that is no
-/// fresh coordinate: the line [`check_contribution`] would report as
-/// `placeholder`.
-pub(crate) fn first_placeholder(lines: &[String]) -> Option<ContributionIssue> {
+/// The first of `lines` whose role key carries a value that is no fresh
+/// coordinate: a line [`check_contribution`] reports as `malformed` or
+/// `placeholder`, and so a line no write records.
+pub(crate) fn first_unrecordable_role(lines: &[String]) -> Option<ContributionIssue> {
     lines
         .iter()
         .filter_map(|line| line_issue(line.as_bytes()))
-        .find(|issue| issue.kind == "placeholder")
+        .find(|issue| issue.kind != "unsupported")
 }
 
 /// What the convention says about one trailer line, if anything.
