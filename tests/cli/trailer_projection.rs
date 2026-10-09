@@ -262,3 +262,89 @@ fn a_historical_placeholder_role_assertion_is_a_note_with_its_remedy() {
     let text = stdout(repo.arc(&repo.root).args(["trailers", &change]));
     assert!(!text.contains("codex:unknown"), "{text}");
 }
+
+#[test]
+fn bare_role_flags_under_a_derived_actor_assert_the_invoking_coordinate() {
+    let repo = Repo::new();
+    let (change, wt) = open(&repo, "bare-roles");
+    codex_recording(&repo, RECORDER, "gpt-6.1-sol");
+    let mut roles = repo.arc(&repo.root);
+    roles
+        .args(["roles", &change, "--planned-by", "--orchestrated-by"])
+        .env("CODEX_HOME", repo.home.join("codex-state"));
+    as_derived_codex(&mut roles, RECORDER);
+    stdout(&mut roles);
+
+    let brief = repo.home.join("brief.md");
+    fs::write(&brief, "Implement the bounded task.").unwrap();
+    let mut write_brief = repo.arc(&wt);
+    write_brief
+        .args(["brief", &change, "--planned-by", "--body-file"])
+        .arg(&brief)
+        .args(["--model", "gpt-6.1-sol#xhigh"]);
+    as_derived_codex(&mut write_brief, EXECUTOR);
+    stdout(&mut write_brief);
+
+    let (trailers, notes) = trailers(&repo, &change);
+    assert_eq!(
+        trailers,
+        vec![
+            "Planned-by: codex:gpt-6.1-sol#high".to_string(),
+            "Planned-by: codex:gpt-6.1-sol#xhigh".to_string(),
+            "Orchestrated-by: codex:gpt-6.1-sol#high".to_string(),
+        ],
+        "{notes:#?}"
+    );
+    for line in &trailers {
+        assert!(
+            !line.contains(RECORDER) && !line.contains(EXECUTOR),
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn a_bare_role_flag_keeps_a_declared_person_in_their_own_form() {
+    let repo = Repo::new();
+    let (change, _) = open(&repo, "bare-person");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["roles", &change, "--planned-by"])
+            .env("ARC_ACTOR", "Person <p@example.invalid>")
+            .args(["--model", "unused#high"]),
+    );
+    let (trailers, _) = trailers(&repo, &change);
+    assert_eq!(
+        trailers,
+        vec!["Planned-by: Person <p@example.invalid>".to_string()]
+    );
+}
+
+#[test]
+fn a_bare_role_flag_refuses_what_it_cannot_resolve_and_records_nothing() {
+    let repo = Repo::new();
+    let (change, _) = open(&repo, "bare-unresolved");
+    let before = event_count(&repo, &change);
+
+    let mut unresolved = repo.arc(&repo.root);
+    unresolved.args(["roles", &change, "--planned-by"]);
+    as_derived_codex(&mut unresolved, RECORDER);
+    unresolved
+        .env("CODEX_HOME", repo.home.join("no-codex-state"))
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("unresolved"))
+        .stderr(predicates::str::contains("omit"));
+
+    repo.arc(&repo.root)
+        .args(["roles", &change, "--orchestrated-by"])
+        .env_remove("ARC_ACTOR")
+        .env_remove("ARC_HARNESS")
+        .env_remove("ARC_SESSION")
+        .args(["--model", "gpt-6.1-sol#xhigh"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("declared"));
+
+    assert_eq!(event_count(&repo, &change), before);
+}

@@ -15,7 +15,7 @@ pub(crate) fn assertions(
     ] {
         for value in values {
             let value = if value.is_empty() {
-                invoking_identity(ctx)?
+                invoking_identity(ctx, role)?
             } else {
                 value.trim().to_string()
             };
@@ -41,17 +41,37 @@ pub(crate) fn assertions(
     Ok(roles)
 }
 
-fn invoking_identity(ctx: &Ctx) -> Result<String> {
-    if !ctx.actor_source.declared() {
-        bail!("role assertion requires a declared invoking identity; pass --actor or an explicit role value");
+/// The coordinate a role flag given without a value stands for: a declared
+/// person's own `Name <email>`, or else the invocation's resolved harness and
+/// model, under a declared actor or one arc derived from the harness session.
+/// A role assertion is no approval, so a derived actor may make one; an
+/// identity assumed from git config is nobody's claim and stands for none.
+fn invoking_identity(ctx: &Ctx, role: &str) -> Result<String> {
+    const REMEDY: &str = "omit the role, or pass a real coordinate as its value";
+    if ctx.actor_source.declared()
+        && ctx.actor.contains('<')
+        && crate::trailers::value_is_readable(&ctx.actor)
+    {
+        return Ok(ctx.actor.trim().to_string());
     }
-    if ctx.actor.contains('<') && crate::trailers::value_is_readable(&ctx.actor) {
-        return Ok(ctx.actor.clone());
+    if ctx.actor_source == ActorSource::GitFallback {
+        bail!(
+            "{role} without a value requires a declared invoking identity or one derived from \
+             the harness session (`eval \"$(arc env)\"`); pass --actor, or {REMEDY}"
+        );
     }
     let model = ctx.resolve_model().model;
     let (Some(harness), Some(model)) = (ctx.harness.as_deref(), model) else {
-        bail!("role assertion has unresolved harness or model; pass an explicit role value or declare --harness and --model");
+        bail!("{role} without a value has unresolved harness or model; {REMEDY}");
     };
+    if let Some(defect) =
+        crate::coordinate::coordinate_defect(&format!("{harness}:{model}"), ctx.session.as_deref())
+    {
+        bail!(
+            "{role} without a value resolves harness {harness:?} and model {model:?}: {}; {REMEDY}",
+            defect.reason()
+        );
+    }
     Ok(format!("{harness}:{model}"))
 }
 

@@ -533,10 +533,11 @@ SETTLE A QUESTION (before it is work)
 
 RUN A CHANGE
   arc begin <slug> --profile <p>     Open a change: branch + checkout + record.
-    --planned-by [<value>]          Assert planning credit (repeatable).
+    --planned-by [<value>]           Assert planning credit (repeatable).
     --orchestrated-by [<value>]      Assert orchestration credit (repeatable).
-                                     With no value, use the declared invoking
-                                     identity; unresolved coordinates refuse.
+                                     With no value, use the invoking identity
+                                     as `arc roles` does; unresolved
+                                     coordinates refuse.
     --from-journal <file>            Open it from a journal item, consuming it.
     --blocked-by <change> --tag <t>  Declare a chain up front, at planning time.
     --worktree [<path>]              Force a worktree, at the path or under worktrees_dir.
@@ -552,7 +553,8 @@ RUN A CHANGE
     --base <intended-base> --target <target>`. Repair the target deliberately;
     do not reset it.
   arc brief --body-file <f>          Record the next contract version.
-    --planned-by <value>             Assert planning credit on the change.
+    --planned-by [<value>]           Assert planning credit on the change;
+                                     with no value, as on `arc begin`.
     --caused-by <kind:ref>           Why it changed. v1 refuses a cause; every
     --cause-note <text>              later version requires one of these.
   arc claim / stage / release-claim  Advisory liveness while implementing.
@@ -1687,18 +1689,26 @@ REVIEW AND REPAIR
   the diff.
 
 CONTRIBUTION TRAILERS
-    arc roles <change> --planned-by <value> --orchestrated-by <value>
+    arc roles <change> --planned-by [<value>] --orchestrated-by [<value>]
                        Assert roles on an open change. Both flags repeat;
                        at least one assertion or withdrawal is required.
                        --withdraw <role>=<value> withdraws an exact assertion.
                        Values use the convention's agent or person form.
-                       A value, typed or resolved from the invoking
-                       identity, that carries a placeholder or a session id
-                       refuses; withdrawal takes any recorded value.
+                       A flag with no value stands for the invoking
+                       identity: a declared Name <email> actor's own form,
+                       else harness:model from the resolved harness and
+                       model, under a declared actor or one derived from the
+                       harness session. A role assertion is no approval, so
+                       a derived actor may make one. An identity assumed
+                       from git config, or an unresolved harness or model,
+                       refuses: omit the role or pass a real coordinate.
+                       A value, typed or resolved, that carries a
+                       placeholder or a session id refuses; withdrawal takes
+                       any recorded value.
                        Assertions are explicit; event ancestry grants none.
-                       begin's two role flags record the assertions directly
-                       after opening; brief --planned-by records them when
-                       writing a contract.
+                       begin's two role flags and brief --planned-by take the
+                       same forms: begin records the assertions directly
+                       after opening, brief when writing a contract.
     arc trailers <change> [--json]
                        Print Planned-by and Orchestrated-by assertions and
                        Implemented-by from declared patchset contributors,

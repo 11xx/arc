@@ -286,13 +286,14 @@ enum Cmd {
     /// no warning.
     Begin {
         /// Assert a planner: harness:model[#effort] or Name <email>; repeatable.
-        /// Without a value, use the declared invoking identity. Unresolved
-        /// coordinates, placeholders and session ids refuse
+        /// Without a value, the invoking identity: a declared Name <email>
+        /// actor's own form, else the resolved harness:model under a declared
+        /// or session-derived actor. Unresolved coordinates, placeholders and
+        /// session ids refuse
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
         planned_by: Vec<String>,
-        /// Assert an orchestrator in the same form; repeatable.
-        /// Without a value, use the declared invoking identity. Unresolved
-        /// coordinates, placeholders and session ids refuse
+        /// Assert an orchestrator in the same form; repeatable. Without a
+        /// value, the invoking identity, as for --planned-by
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
         orchestrated_by: Vec<String>,
         /// Kebab-case slug naming the outcome (also the ID prefix)
@@ -366,12 +367,15 @@ enum Cmd {
         /// Open change whose contribution assertions to record
         change: String,
         /// Assert a planner (repeatable harness:model[#effort] or Name <email>).
-        /// A placeholder or a session id refuses
-        #[arg(long)]
+        /// Without a value, the invoking identity: a declared Name <email>
+        /// actor's own form, else the resolved harness:model under a declared
+        /// or session-derived actor. Unresolved coordinates, placeholders and
+        /// session ids refuse
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
         planned_by: Vec<String>,
         /// Assert an orchestrator (repeatable harness:model[#effort] or Name <email>).
-        /// A placeholder or a session id refuses
-        #[arg(long)]
+        /// Without a value, the invoking identity, as for --planned-by
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
         orchestrated_by: Vec<String>,
         /// Withdraw an exact assertion (repeatable Planned-by=VALUE or
         /// Orchestrated-by=VALUE), whatever value it recorded
@@ -652,9 +656,10 @@ enum Cmd {
     /// A body or scaffold records a replacement contract.
     Brief {
         /// Assert a planner on the change when writing a brief (repeatable).
-        /// Value: harness:model[#effort] or Name <email>; a placeholder or a
-        /// session id refuses
-        #[arg(long)]
+        /// Value: harness:model[#effort] or Name <email>. Without a value,
+        /// the invoking identity, as for `arc roles --planned-by`.
+        /// Unresolved coordinates, placeholders and session ids refuse
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
         planned_by: Vec<String>,
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
