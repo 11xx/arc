@@ -1835,8 +1835,9 @@ HISTORY REWRITES
     arc history withdraw <event-id> --reason <why>
                        Withdraw one history-rewritten repository event. Its
                        map does not participate in resolution or readiness;
-                       refs are not moved back. Output names recorded ref
-                       moves, or says when that information is absent.
+                       refs are not moved back and retention refs are kept.
+                       Output names recorded ref moves and retention refs,
+                       or says when that information is absent.
                        Other event types are refused. A withdrawal travels
                        with the map in full and delta exports, and importing
                        replicas honour it even when they already hold the

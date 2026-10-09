@@ -157,7 +157,7 @@ pub fn withdraw_rewrite(ctx: &Ctx, event_id: &str, reason: String) -> Result<()>
         .iter()
         .find(|event| event.event_id == event_id)
         .with_context(|| format!("{event_id} is not a history-rewritten repository event"))?;
-    let Payload::HistoryRewritten { refs, .. } = &target.payload else {
+    let Payload::HistoryRewritten { refs, retained, .. } = &target.payload else {
         bail!("{event_id} is not a history-rewritten repository event");
     };
     if target.change_id != Store::REPOSITORY_SCOPE {
@@ -190,6 +190,11 @@ pub fn withdraw_rewrite(ctx: &Ctx, event_id: &str, reason: String) -> Result<()>
         for (name, moved) in refs {
             println!("withdrawn map moved: {name} {} → {}", moved.old, moved.new);
         }
+    }
+    // The commits the map replaced stay held: whether the map was right does
+    // not change that the ledger cited them.
+    for (name, commit) in retained {
+        println!("withdrawn map retained: {name} {commit}; kept");
     }
     Ok(())
 }

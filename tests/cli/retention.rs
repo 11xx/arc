@@ -678,3 +678,27 @@ fn a_retained_commit_the_integration_reaches_is_released() {
         ""
     );
 }
+
+#[test]
+fn withdrawing_a_map_keeps_what_it_retained() {
+    let repo = repo_with_gates();
+    let (worktree, old) = approved_change(&repo, "alpha");
+    let change = only_change(&repo);
+    rewrite_trailers(&repo, &worktree, &old);
+    let event = repository_events(&repo)[0]
+        .file_stem()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let name = retention_ref(&change, "ps-01", &old);
+
+    repo.arc(&repo.root)
+        .args(["history", "withdraw", &event, "--reason", "wrong map"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(format!(
+            "withdrawn map retained: {name} {old}"
+        )));
+
+    assert_eq!(retained(&repo), vec![format!("{name} {old}")]);
+}

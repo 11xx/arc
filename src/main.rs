@@ -2866,8 +2866,9 @@ enum ForgeCmd {
 #[derive(Subcommand)]
 enum HistoryCmd {
     /// Withdraw a recorded history-rewritten map by event ID; other event
-    /// types are refused. Ref moves are not undone; output names recorded
-    /// moves, or says when the map has no ref-move information. Withdrawals
+    /// types are refused. Ref moves are not undone and retention refs are
+    /// kept; output names recorded moves and retention refs, or says when the
+    /// map has no ref-move information. Withdrawals
     /// travel with maps in bundles and are honoured by importing replicas.
     /// A falsification reference storing a rewritten failure revision needs
     /// an active map to replay; re-record the actual map with history rewrite
