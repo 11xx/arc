@@ -16,6 +16,8 @@ use std::time::{Duration, Instant};
 
 const CLAUDE_MODEL_WAIT: Duration = Duration::from_secs(1);
 const CLAUDE_MODEL_POLL: Duration = Duration::from_millis(50);
+/// The most characters a lookup reason keeps, its elision marker included.
+const REASON_LIMIT: usize = 240;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Turn {
@@ -61,14 +63,38 @@ pub enum SessionAnswer {
     NoRecording,
     /// More than one recording matches the claimed id.
     Ambiguous(String),
-    /// A store holds something it could not read; the reason is tapes' own.
+    /// The store could not establish or read a recording for the exact id.
     Unreadable(String),
 }
 
 enum LookupIssue {
-    Missing,
+    /// No recording answers for the id, with what was asked.
+    Missing(String),
     Ambiguous(String),
+    /// No recording could be established for the exact id, with the reason.
     Unreadable(String),
+}
+
+/// A lookup reason as one line an operator and an event can carry: control
+/// characters become spaces and whitespace runs collapse. Text past
+/// `REASON_LIMIT` characters loses its middle to an elision marker, because
+/// an error chain names what was asked first and the root cause last.
+fn bounded_reason(text: &str) -> String {
+    let line = text
+        .split(char::is_control)
+        .flat_map(str::split_whitespace)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let length = line.chars().count();
+    if length <= REASON_LIMIT {
+        return line;
+    }
+    let head = (REASON_LIMIT - 1) / 2;
+    let tail = REASON_LIMIT - 1 - head;
+    let mut kept: String = line.chars().take(head).collect();
+    kept.push('…');
+    kept.extend(line.chars().skip(length - tail));
+    kept
 }
 
 /// The backends of one harness. Asking only the harness a session belongs to
@@ -81,26 +107,38 @@ fn harness_backends(harness: &str) -> Vec<Box<dyn Backend>> {
 }
 
 /// Tapes resolves exact IDs and useful prefixes. Arc attributes an acting
-/// session only when the resolved record names the entire claimed ID.
+/// session only when the resolved record names the entire claimed ID; a
+/// record under another id is a recording arc cannot attribute, not an
+/// absent one.
 fn resolve_exact(
+    harness: &str,
     backends: &[Box<dyn Backend>],
     session: &str,
 ) -> Result<agent_tapes_core::ResolvedSession, LookupIssue> {
     if backends.is_empty() {
-        return Err(LookupIssue::Missing);
+        return Err(LookupIssue::Missing(format!(
+            "arc reads no session store for the {harness} harness"
+        )));
     }
     let resolved = match agent_tapes_core::resolve_session(backends, session) {
         Ok(resolved) => resolved,
         Err(ResolveError::NotFound {
             truncated: false, ..
-        }) => return Err(LookupIssue::Missing),
+        }) => {
+            return Err(LookupIssue::Missing(
+                "no recording for this session in the configured store".to_string(),
+            ))
+        }
         Err(error @ ResolveError::Ambiguous { .. }) => {
             return Err(LookupIssue::Ambiguous(error.to_string()));
         }
         Err(error) => return Err(LookupIssue::Unreadable(error.to_string())),
     };
     if resolved.session.id != session {
-        return Err(LookupIssue::Missing);
+        return Err(LookupIssue::Unreadable(format!(
+            "session {session} resolves to the recording of a different id, {}",
+            resolved.session.id
+        )));
     }
     Ok(resolved)
 }
@@ -109,9 +147,9 @@ fn resolve_exact(
 /// the bounded read window tapes applies to every recording.
 pub fn read_session(harness: &str, session: &str) -> SessionAnswer {
     let backends = harness_backends(harness);
-    let resolved = match resolve_exact(&backends, session) {
+    let resolved = match resolve_exact(harness, &backends, session) {
         Ok(resolved) => resolved,
-        Err(LookupIssue::Missing) => return SessionAnswer::NoRecording,
+        Err(LookupIssue::Missing(_)) => return SessionAnswer::NoRecording,
         Err(LookupIssue::Ambiguous(reason)) => return SessionAnswer::Ambiguous(reason),
         Err(LookupIssue::Unreadable(reason)) => return SessionAnswer::Unreadable(reason),
     };
@@ -296,10 +334,12 @@ pub enum SessionIdentity {
     /// The store holds a recording whose model arc will not report, with the
     /// reason.
     Unnamed(ModelUnavailable),
-    /// No store of the harness holds a recording for the id.
-    NoRecording,
-    /// Store resolution or transcript reading could not establish identity.
-    Unresolved,
+    /// No store of the harness holds a recording for the id, with what was
+    /// asked.
+    NoRecording(String),
+    /// Store resolution, transcript reading, or the subagent lineage read
+    /// could not establish identity, with the reason as one bounded line.
+    Unresolved(String),
 }
 
 /// Why a recording arc found names no model it may report.
@@ -342,11 +382,13 @@ fn session_identity_with_backends(
     session: &str,
     backends: &[Box<dyn Backend>],
 ) -> SessionIdentity {
-    let resolved = match resolve_exact(backends, session) {
+    let resolved = match resolve_exact(harness, backends, session) {
         Ok(resolved) => resolved,
-        Err(LookupIssue::Missing) => return SessionIdentity::NoRecording,
-        Err(LookupIssue::Ambiguous(_) | LookupIssue::Unreadable(_)) => {
-            return SessionIdentity::Unresolved;
+        Err(LookupIssue::Missing(reason)) => {
+            return SessionIdentity::NoRecording(bounded_reason(&reason));
+        }
+        Err(LookupIssue::Ambiguous(reason) | LookupIssue::Unreadable(reason)) => {
+            return SessionIdentity::Unresolved(bounded_reason(&reason));
         }
     };
     let backend = backends[resolved.backend_index].as_ref();
@@ -389,10 +431,24 @@ fn recording_identity(
     };
     let transcript = match backend.transcript(session, turns) {
         Ok(transcript) => transcript,
-        Err(_) => return SessionIdentity::Unresolved,
+        Err(error) => {
+            return SessionIdentity::Unresolved(bounded_reason(&format!(
+                "cannot read the recording: {error:#}"
+            )))
+        }
     };
-    if harness == "claude" && subagent_may_be_acting(backend, session) {
-        return SessionIdentity::Unnamed(ModelUnavailable::SubagentActivity);
+    if harness == "claude" {
+        match subagent_may_be_acting(backend, session) {
+            Ok(false) => {}
+            Ok(true) => return SessionIdentity::Unnamed(ModelUnavailable::SubagentActivity),
+            // An unread lineage cannot rule out the subagent whose shell
+            // this may be, so it names no model rather than the parent's.
+            Err(error) => {
+                return SessionIdentity::Unresolved(bounded_reason(&format!(
+                    "cannot read the recording's subagent lineage: {error:#}"
+                )))
+            }
+        }
     }
     let head_read = transcript
         .session
@@ -455,13 +511,12 @@ fn model_name(model: &agent_tapes_core::model::Model) -> String {
 fn subagent_may_be_acting(
     backend: &dyn Backend,
     session: &agent_tapes_core::model::Session,
-) -> bool {
-    backend.lineage(session).is_ok_and(|lineage| {
-        lineage
-            .children
-            .iter()
-            .any(|child| child.resolved && child.completed_at.is_none())
-    })
+) -> anyhow::Result<bool> {
+    Ok(backend
+        .lineage(session)?
+        .children
+        .iter()
+        .any(|child| child.resolved && child.completed_at.is_none()))
 }
 
 /// The operator's view of a transcript: what they asked, plus where the
@@ -570,9 +625,108 @@ mod tests {
         ));
         assert!(matches!(
             session_identity_with_backends("claude", "missing", &backends),
-            SessionIdentity::NoRecording
+            SessionIdentity::NoRecording(_)
         ));
         assert!(start.elapsed() < Duration::from_millis(500));
+    }
+
+    /// A Claude store whose lineage read fails while every other read works.
+    struct LineageFails(ClaudeBackend);
+
+    impl Backend for LineageFails {
+        fn harness(&self) -> &'static str {
+            self.0.harness()
+        }
+        fn available(&self) -> bool {
+            self.0.available()
+        }
+        fn list(&self, query: &backend::Query) -> anyhow::Result<backend::Listing> {
+            self.0.list(query)
+        }
+        fn locate(&self, id: &str) -> anyhow::Result<Option<agent_tapes_core::model::Session>> {
+            self.0.locate(id)
+        }
+        fn transcript(
+            &self,
+            session: &agent_tapes_core::model::Session,
+            tail: usize,
+        ) -> anyhow::Result<agent_tapes_core::model::Transcript> {
+            self.0.transcript(session, tail)
+        }
+        fn kinds(&self) -> agent_tapes_core::model::KindDeclaration {
+            self.0.kinds()
+        }
+        fn lineage(
+            &self,
+            _session: &agent_tapes_core::model::Session,
+        ) -> anyhow::Result<agent_tapes_core::lineage::Lineage> {
+            anyhow::bail!("fixture lineage\nfailure")
+        }
+    }
+
+    fn with_model(path: &std::path::Path) {
+        let assistant = json!({"type":"assistant", "uuid":"a1", "timestamp":"2026-01-01T10:00:01Z",
+            "message":{"role":"assistant", "model":"parent-model", "content":"answer"}});
+        let mut recording = OpenOptions::new().append(true).open(path).unwrap();
+        writeln!(recording, "{assistant}").unwrap();
+    }
+
+    #[test]
+    fn a_failed_lineage_read_is_unresolved_rather_than_no_subagent() {
+        let (root, path, _) = claude_fixture();
+        with_model(&path);
+        let backends: Vec<Box<dyn Backend>> = vec![Box::new(LineageFails(ClaudeBackend::new(
+            root.path().join("projects"),
+        )))];
+        let SessionIdentity::Unresolved(reason) =
+            session_identity_with_backends("claude", SESSION, &backends)
+        else {
+            panic!("a lineage read failure must not name the parent's model");
+        };
+        assert_eq!(
+            reason,
+            "cannot read the recording's subagent lineage: fixture lineage failure"
+        );
+    }
+
+    #[test]
+    fn a_prefix_resolution_names_the_claimed_and_resolved_ids() {
+        let (_root, path, backends) = claude_fixture();
+        with_model(&path);
+        let SessionIdentity::Unresolved(reason) =
+            session_identity_with_backends("claude", "11111111", &backends)
+        else {
+            panic!("a prefix of a recorded id is not that recording");
+        };
+        assert_eq!(
+            reason,
+            format!("session 11111111 resolves to the recording of a different id, {SESSION}")
+        );
+    }
+
+    #[test]
+    fn a_storeless_harness_is_named_as_such() {
+        let SessionIdentity::NoRecording(reason) = session_identity("fixture-harness", SESSION)
+        else {
+            panic!("no store answers for an unknown harness");
+        };
+        assert_eq!(
+            reason,
+            "arc reads no session store for the fixture-harness harness"
+        );
+    }
+
+    #[test]
+    fn reasons_are_one_bounded_line() {
+        assert_eq!(bounded_reason("a\nb\tc\u{7}d  e"), "a b c d e");
+        let long = format!("asked{}cause", "x".repeat(REASON_LIMIT));
+        let bounded = bounded_reason(&long);
+        assert_eq!(bounded.chars().count(), REASON_LIMIT);
+        assert!(bounded.starts_with("askedx"), "{bounded}");
+        assert!(bounded.ends_with("xcause"), "{bounded}");
+        assert_eq!(bounded.matches('…').count(), 1, "{bounded}");
+        let exact = "y".repeat(REASON_LIMIT);
+        assert_eq!(bounded_reason(&exact), exact);
     }
 
     #[test]

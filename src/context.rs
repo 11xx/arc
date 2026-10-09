@@ -10,7 +10,7 @@ use crate::gitio;
 use crate::journal;
 use crate::model::{
     ModelAttribution, ModelDisagreement, ModelObservation, ModelProvenance, ModelSource,
-    SessionResolution,
+    SessionVerdict,
 };
 use crate::session_store;
 use crate::state::ChangeState;
@@ -236,10 +236,11 @@ fn ambiguous<T>(cwd: &Path, matches: &[&ChangeState]) -> Result<T> {
 /// store said about it.
 pub struct DetectedSession {
     pub id: String,
-    /// The store's answer for `id`. Most events carry nothing else about who
-    /// wrote them, so whether the store knows the id is part of the identity
-    /// report rather than a fact inferred later from a missing model.
-    pub resolution: SessionResolution,
+    /// The store's answer for `id`, with why it fell short of corroboration.
+    /// Most events carry nothing else about who wrote them, so whether the
+    /// store knows the id is part of the identity report rather than a fact
+    /// inferred later from a missing model.
+    pub verdict: SessionVerdict,
 }
 
 pub struct DetectedIdentity {
@@ -252,7 +253,7 @@ pub struct DetectedIdentity {
     pub model_observation: Option<ModelObservation>,
     /// Why no model is named, where the store answered without one. `None`
     /// beside an absent model means the model was never asked for.
-    pub model_unavailable: Option<&'static str>,
+    pub model_unavailable: Option<String>,
 }
 
 /// One harness's session variable, as this process carries it.
@@ -265,7 +266,7 @@ pub struct SessionClaim {
 /// What identity detection found.
 pub enum Detection {
     /// One harness owns this process, or stands alone in it.
-    Resolved(DetectedIdentity),
+    Resolved(Box<DetectedIdentity>),
     /// Several harnesses' session variables are set and the ancestry names no
     /// single owner. Recording nothing is the honest answer: picking one by
     /// list position would attribute the work to a thread that may only have
@@ -301,7 +302,7 @@ pub fn detect_identity() -> Detection {
     let claims = session_claims();
     match claims.as_slice() {
         [] => opencode_witness(),
-        [claim] => Detection::Resolved(resolved(claim.harness, &claim.session)),
+        [claim] => Detection::Resolved(Box::new(resolved(claim.harness, &claim.session))),
         _ => {
             let origins = claims
                 .iter()
@@ -327,7 +328,7 @@ pub fn detect_identity() -> Detection {
             if winners.next().is_some() {
                 return Detection::Ambiguous(claims);
             }
-            Detection::Resolved(resolved(claim.harness, &claim.session))
+            Detection::Resolved(Box::new(resolved(claim.harness, &claim.session)))
         }
     }
 }
@@ -337,40 +338,44 @@ pub fn detect_identity() -> Detection {
 /// PPID chain.
 fn opencode_witness() -> Detection {
     if detect_opencode_harness() {
-        return Detection::Resolved(DetectedIdentity {
+        return Detection::Resolved(Box::new(DetectedIdentity {
             harness: "opencode".to_string(),
             session: None,
             model: None,
             model_observation: None,
             model_unavailable: None,
-        });
+        }));
     }
     Detection::None
 }
 
 fn resolved(harness: &str, session: &str) -> DetectedIdentity {
-    let identity = session_store::session_identity(harness, session);
-    let resolution = match identity {
-        session_store::SessionIdentity::NoRecording => SessionResolution::Uncorroborated,
-        session_store::SessionIdentity::Unresolved => SessionResolution::Unresolved,
-        _ => SessionResolution::Corroborated,
-    };
-    let (mut model, model_observation, mut model_unavailable) = match identity {
-        session_store::SessionIdentity::Named { model, observation } => {
-            (Some(model), observation, None)
-        }
-        session_store::SessionIdentity::Unnamed(reason) => (None, None, Some(reason.line())),
-        session_store::SessionIdentity::NoRecording => (
-            None,
-            None,
-            Some("no recording for this session in the configured store"),
-        ),
-        session_store::SessionIdentity::Unresolved => (
-            None,
-            None,
-            Some("the session store could not resolve or read this id"),
-        ),
-    };
+    let (verdict, mut model, model_observation, mut model_unavailable) =
+        match session_store::session_identity(harness, session) {
+            session_store::SessionIdentity::Named { model, observation } => {
+                (SessionVerdict::Corroborated, Some(model), observation, None)
+            }
+            session_store::SessionIdentity::Unnamed(reason) => (
+                SessionVerdict::Corroborated,
+                None,
+                None,
+                Some(reason.line().to_string()),
+            ),
+            session_store::SessionIdentity::NoRecording(reason) => (
+                SessionVerdict::Uncorroborated(reason.clone()),
+                None,
+                None,
+                Some(reason),
+            ),
+            session_store::SessionIdentity::Unresolved(reason) => (
+                SessionVerdict::Unresolved(reason.clone()),
+                None,
+                None,
+                Some(format!(
+                    "the session store could not resolve or read this id: {reason}"
+                )),
+            ),
+        };
     if let Some(live) = live_pi_model(harness, session) {
         model = Some(live);
         model_unavailable = None;
@@ -379,7 +384,7 @@ fn resolved(harness: &str, session: &str) -> DetectedIdentity {
         harness: harness.to_string(),
         session: Some(DetectedSession {
             id: session.to_string(),
-            resolution,
+            verdict,
         }),
         model,
         model_observation,
@@ -496,7 +501,7 @@ fn claude_session_link() -> Option<String> {
 pub fn print_env() -> i32 {
     println!("# arc build: {}", build_revision().label());
     let identity = match detect_identity() {
-        Detection::Resolved(identity) => identity,
+        Detection::Resolved(identity) => *identity,
         Detection::Ambiguous(claims) => {
             println!("{EXPORT_TEMPLATE}");
             println!(
@@ -537,7 +542,7 @@ pub fn print_env() -> i32 {
     if let Some(observation) = &identity.model_observation {
         println!("# {}", crate::render::one_line(&observation.line()));
     }
-    if let Some(reason) = identity.model_unavailable {
+    if let Some(reason) = &identity.model_unavailable {
         println!("# export ARC_MODEL=<model[#effort]>  # unavailable: {reason}");
     }
     match identity.harness.as_str() {
@@ -549,7 +554,7 @@ pub fn print_env() -> i32 {
     }
     println!(
         "# {}",
-        session_resolution_line(&identity.harness, session.resolution)
+        session_resolution_line(&identity.harness, &session.verdict)
     );
     0
 }
@@ -571,17 +576,18 @@ fn ambiguity_report(claims: &[SessionClaim]) -> String {
 
 /// What `arc env` says about a detected session's backing. The store is
 /// asked once, at detection time, so this is a fact the report carries rather
-/// than something a caller infers from an absent model.
-fn session_resolution_line(harness: &str, resolution: SessionResolution) -> String {
-    match resolution {
-        SessionResolution::Corroborated => format!(
+/// than something a caller infers from an absent model. An unresolved lookup
+/// names its reason, so it never reads as a recording the store lacks.
+fn session_resolution_line(harness: &str, verdict: &SessionVerdict) -> String {
+    match verdict {
+        SessionVerdict::Corroborated => format!(
             "session corroborated: the {harness} session store resolved a recording for this id"
         ),
-        SessionResolution::Uncorroborated => format!(
+        SessionVerdict::Uncorroborated(_) => format!(
             "session uncorroborated: the {harness} session store resolved no recording for this id"
         ),
-        SessionResolution::Unresolved => format!(
-            "session unresolved: the {harness} session store could not establish whether this id has a readable recording"
+        SessionVerdict::Unresolved(reason) => format!(
+            "session unresolved: the {harness} session store could not establish whether this id has a readable recording: {reason}"
         ),
     }
 }

@@ -362,6 +362,25 @@ pub enum SessionResolution {
     Unresolved,
 }
 
+/// The store's answer for one session id, carrying why it fell short of
+/// corroboration wherever it did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionVerdict {
+    Corroborated,
+    Uncorroborated(String),
+    Unresolved(String),
+}
+
+impl SessionVerdict {
+    pub fn resolution(&self) -> SessionResolution {
+        match self {
+            Self::Corroborated => SessionResolution::Corroborated,
+            Self::Uncorroborated(_) => SessionResolution::Uncorroborated,
+            Self::Unresolved(_) => SessionResolution::Unresolved,
+        }
+    }
+}
+
 /// How the acting identity on an event was determined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

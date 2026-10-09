@@ -27,6 +27,7 @@ mod integrate;
 mod journal;
 mod journal_exchange;
 mod lifecycle;
+mod lookup_reasons;
 mod messaging;
 mod metadata;
 mod model_resolution;

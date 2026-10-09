@@ -44,11 +44,15 @@ fn uncorroborated(harness: &str) -> String {
     )
 }
 
-fn unresolved(harness: &str) -> String {
+/// `arc env`'s lines for a lookup that could not settle, with its reason.
+fn unresolved(harness: &str, reason: &str) -> String {
     format!(
-        "unset ARC_SESSION_LINK\n# session unresolved: the {harness} session store could not establish whether this id has a readable recording\n"
+        "# export ARC_MODEL=<model[#effort]>  # unavailable: the session store could not resolve or read this id: {reason}\nunset ARC_SESSION_LINK\n# session unresolved: the {harness} session store could not establish whether this id has a readable recording: {reason}\n"
     )
 }
+
+/// The reason tapes gives for an OpenCode row whose transcript it cannot read.
+const OPENCODE_UNREADABLE: &str = "cannot read the recording: opencode record has no message_id";
 
 #[test]
 fn no_arg_snapshot_stage_and_show_work_inside_change_worktree() {
@@ -683,7 +687,13 @@ fn env_requires_the_canonical_codex_id_before_using_its_model() {
     );
     assert!(partial.contains("ARC_SESSION='019f0000'"), "{partial}");
     assert!(partial.contains("unset ARC_MODEL"), "{partial}");
-    assert!(partial.contains("session uncorroborated"), "{partial}");
+    assert!(
+        partial.contains(&format!(
+            "session unresolved: the codex session store could not establish whether this id has a readable recording: session {prefix} resolves to the recording of a different id, {full}\n"
+        )),
+        "{partial}"
+    );
+    assert!(!partial.contains("uncorroborated"), "{partial}");
     assert!(!partial.contains("gpt-fixture"), "{partial}");
 }
 
@@ -822,8 +832,8 @@ fn env_does_not_use_an_opencode_listing_model_when_the_read_fails() {
         .assert()
         .success()
         .stdout(env_output(format!(
-            "export ARC_HARNESS='opencode' ARC_SESSION='{session}'\nunset ARC_MODEL\n# export ARC_MODEL=<model[#effort]>  # unavailable: the session store could not resolve or read this id\n{}",
-            unresolved("opencode")
+            "export ARC_HARNESS='opencode' ARC_SESSION='{session}'\nunset ARC_MODEL\n{}",
+            unresolved("opencode", OPENCODE_UNREADABLE)
         )));
 }
 
@@ -1593,15 +1603,8 @@ fn env_marks_an_unreadable_opencode_recording_unresolved() {
         .assert()
         .success()
         .stdout(env_output(format!(
-            concat!(
-                "export ARC_HARNESS='opencode' ARC_SESSION='{session}'\n",
-                "unset ARC_MODEL\n",
-                "# export ARC_MODEL=<model[#effort]>  # unavailable: the session store ",
-                "could not resolve or read this id\n",
-                "{}"
-            ),
-            unresolved("opencode"),
-            session = session
+            "export ARC_HARNESS='opencode' ARC_SESSION='{session}'\nunset ARC_MODEL\n{}",
+            unresolved("opencode", OPENCODE_UNREADABLE)
         )));
 }
 

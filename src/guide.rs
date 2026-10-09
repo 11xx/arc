@@ -78,9 +78,12 @@ SAY WHO YOU ARE (before the first write)
   session store for the model, honouring the store's own override —
   `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `PI_CODING_AGENT_SESSION_DIR`,
   `PI_CODING_AGENT_DIR` — before the default under `$HOME`, and reports
-  whether the store corroborates the exact canonical session id. An
-  ambiguous or unreadable lookup remains unresolved rather than absent.
-  Events record that verdict beside the session they carry. It exports the
+  whether the store corroborates the exact canonical session id. An id the
+  store does not hold is uncorroborated. An ambiguous or unreadable lookup,
+  one that resolves to a recording under another id, and an unread subagent
+  lineage are unresolved and name their reason: a failed lookup is never
+  reported as absence, nor as the absence of subagents. Events record that
+  verdict beside the session they carry. It exports the
   harness, session, and session link it establishes and explicitly unsets
   each it does not; the model is a comment and ARC_MODEL is always unset. Pi re-sets its
   live recording file, model, and reasoning level for each tool call, so those

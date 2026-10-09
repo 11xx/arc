@@ -1741,9 +1741,12 @@ enum Cmd {
     /// `PI_CODING_AGENT_DIR` — before its default under `$HOME`. The store's
     /// answer for the exact canonical session id is reported with the exports:
     /// an id the store does not hold is uncorroborated; an ambiguous or
-    /// unreadable lookup is unresolved. Events carry that verdict. Every
-    /// established harness, session, and session link is exported; absent
-    /// fields are explicitly unset. The resolved model is a comment and
+    /// unreadable lookup, one that resolves to a recording under another id,
+    /// and an unread subagent lineage are unresolved, and the report names
+    /// the reason. A failed lookup is never reported as absence, nor as the
+    /// absence of subagents. Events carry that verdict. Every established
+    /// harness, session, and session link is exported; absent fields are
+    /// explicitly unset. The resolved model is a comment and
     /// ARC_MODEL is always unset, so each write resolves its own model. Pi re-sets
     /// `PI_SESSION_FILE`, `PI_MODEL`, and `PI_REASONING_LEVEL` for every tool
     /// call, so those answer in preference to the recording while
@@ -3767,14 +3770,14 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                         // The store's answer is about the session detection
                         // supplied; a session the caller declared was never
                         // asked about, so it carries no report.
-                        session_resolution = Some(detected_session.resolution);
+                        session_resolution = Some(detected_session.verdict.resolution());
                         session = Some(detected_session.id.clone());
                     }
                     if session.as_deref() == Some(detected_session.id.as_str()) {
                         let _ = model_attribution.set(context::model_attribution(
                             model.as_deref(),
                             model_source,
-                            Some(detected),
+                            Some(*detected),
                         ));
                     }
                 }

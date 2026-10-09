@@ -353,7 +353,12 @@ fn codex_rescue_requires_the_canonical_session_id() {
     ))
     .unwrap();
     assert_eq!(prefix["transcript"]["count"], 0, "{prefix}");
-    assert_eq!(prefix["transcript"]["cause"], "no-recording", "{prefix}");
+    assert_eq!(prefix["transcript"]["cause"], "unreadable", "{prefix}");
+    assert_eq!(
+        prefix["transcript"]["reason"],
+        format!("session 019f0000 resolves to the recording of a different id, {full}"),
+        "{prefix}"
+    );
     assert!(prefix["transcript"]["turns"].as_array().unwrap().is_empty());
     assert!(
         !prefix.to_string().contains("private full-id prompt"),
