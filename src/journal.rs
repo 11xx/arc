@@ -506,7 +506,9 @@ pub struct KindWrite {
     /// absent or null field records nothing, and at least one field must be
     /// a string. Effort is not a field: it rides in `model` as
     /// `<model>#<effort>`. Values join the body's `planned-by:` headers;
-    /// omitted, a plan records those headers, or else the invoking identity
+    /// omitted, a plan records those headers, or else the invoking identity.
+    /// A planner it records with a placeholder harness, session, actor or
+    /// model, or a session id as its model, refuses: omit the field
     #[arg(
         long = "planned-by",
         value_name = "JSON",
@@ -933,9 +935,11 @@ pub enum JournalCmd {
         #[arg(long)]
         target: String,
         /// The field to replace. Which fields exist depends on the target:
-        /// `title` on the artifact; `stance`, `option`, `ref`, `actor`, and
-        /// `model` on a position; `option`, `actor`, and `model` on an answer;
-        /// `actor` and `model` on a question
+        /// `title` and, on a plan, `planners` on the artifact; `stance`,
+        /// `option`, `ref`, `actor`, and `model` on a position; `option`,
+        /// `actor`, and `model` on an answer; `actor` and `model` on a
+        /// question. A corrected actor, model or planner is held to what a
+        /// write records: a placeholder or a session id model refuses
         #[arg(long, value_parser = CORRECTABLE_FIELDS)]
         field: String,
         /// What the field should have said
@@ -987,7 +991,9 @@ pub enum JournalCmd {
         /// supported and anything else is refused by name
         #[arg(long, default_value = "note")]
         event: String,
-        /// Replacement actor; absent leaves the recorded actor alone
+        /// Replacement actor; absent leaves the recorded actor alone. Every
+        /// replacement is held to what a write records: a placeholder, or a
+        /// session id as the model, refuses, under --dry-run too
         #[arg(long = "set-actor", value_name = "ACTOR")]
         set_actor: Option<String>,
         /// Replacement harness; absent leaves the recorded harness alone
@@ -1190,7 +1196,11 @@ pub enum JournalCmd {
         acknowledge_claim: Vec<String>,
         /// Assert an additional material planner on a plan successor
         /// (repeatable): a one-line JSON object in the shape `arc journal
-        /// plan --help` states for --planned-by
+        /// plan --help` states for --planned-by. A planner the successor would
+        /// record, asserted or inherited, that carries a placeholder or a
+        /// session id model refuses, under --dry-run too; correct an inherited
+        /// one with `arc journal correct <file> --target artifact --field
+        /// planners`, or pass --no-planner
         #[arg(long = "planned-by", conflicts_with = "no_planner")]
         planned_by: Vec<String>,
         /// Preserve unknown authorship on a plan successor.
@@ -5029,7 +5039,60 @@ fn apply_planner_headers(body: &str, planners: &[PlannerIdentity]) -> String {
     out
 }
 
+/// Refuse a planner a write would record with a placeholder harness, session,
+/// actor or model, or with a session id as its model, whether it was typed,
+/// carried in a body header, or inherited. A coordinate nobody established is
+/// omitted, never recorded. Reading a recorded planner stays as lenient as
+/// [`planner_from_value`].
+fn ensure_fresh_planners(
+    planners: &[PlannerIdentity],
+    acting_session: Option<&str>,
+    remedy: &str,
+) -> Result<()> {
+    use crate::coordinate::{actor_defect, is_placeholder, model_defect};
+    for planner in planners {
+        let defect = [("harness", &planner.harness), ("session", &planner.session)]
+            .into_iter()
+            .find_map(|(field, value)| {
+                value
+                    .as_deref()
+                    .filter(|value| is_placeholder(value))
+                    .map(|value| (field, value, "a placeholder is not a coordinate"))
+            })
+            .or_else(|| {
+                let actor = planner.actor.as_deref()?;
+                actor_defect(actor).map(|defect| ("actor", actor, defect.reason()))
+            })
+            .or_else(|| {
+                let model = planner.model.as_deref()?;
+                model_defect(model, planner.session.as_deref())
+                    .or_else(|| model_defect(model, acting_session))
+                    .map(|defect| ("model", model, defect.reason()))
+            });
+        if let Some((field, value, reason)) = defect {
+            bail!(
+                "planner {}: {field} {value:?}: {reason}; {remedy}",
+                planner_header(planner)
+            );
+        }
+    }
+    Ok(())
+}
+
 fn planners_for_write(
+    ctx: &Ctx,
+    kind: JournalKind,
+    write: &KindWrite,
+    body: &str,
+) -> Result<Option<Vec<PlannerIdentity>>> {
+    let planners = planners_named(ctx, kind, write, body)?;
+    if let Some(planners) = &planners {
+        ensure_fresh_planners(planners, ctx.session.as_deref(), "omit the field")?;
+    }
+    Ok(planners)
+}
+
+fn planners_named(
     ctx: &Ctx,
     kind: JournalKind,
     write: &KindWrite,
@@ -6907,6 +6970,18 @@ fn correct(
     if field == "stance" && PositionStance::parse(value).is_none() {
         bail!("--field stance takes for, against, or amend, not {value:?}");
     }
+    // A corrected identity is recorded as fresh as any other write's.
+    let defect = match field {
+        "model" => crate::coordinate::model_defect(value, ctx.session.as_deref()),
+        "actor" => crate::coordinate::actor_defect(value),
+        _ => None,
+    };
+    if let Some(defect) = defect {
+        bail!(
+            "--field {field} {value:?}: {}; name the value the entry should carry",
+            defect.reason()
+        );
+    }
     if field == "planners" {
         if check_artifact_name(ctx, filename)?.1 != "plan" {
             bail!("planner corrections apply only to plans");
@@ -6916,9 +6991,11 @@ fn correct(
         }
         let values: Vec<serde_json::Value> = serde_json::from_str(value)
             .context("--field planners takes a JSON array of planner objects")?;
-        for planner in &values {
-            planner_from_value(planner)?;
-        }
+        let planners = values
+            .iter()
+            .map(planner_from_value)
+            .collect::<Result<Vec<_>>>()?;
+        ensure_fresh_planners(&planners, ctx.session.as_deref(), "omit the field")?;
     }
     let note = note.map(str::trim).filter(|note| !note.is_empty());
 
@@ -11388,6 +11465,19 @@ fn reattribute(
         if value.trim().is_empty() {
             bail!("--set-{field} must not be empty; provenance is never cleared by this operation");
         }
+        // A repair records a value as fresh as any other write's.
+        let session = replacement.session.or(ctx.session.as_deref());
+        let reason = match *field {
+            "actor" => crate::coordinate::actor_defect(value).map(|defect| defect.reason()),
+            "model" => {
+                crate::coordinate::model_defect(value, session).map(|defect| defect.reason())
+            }
+            _ => crate::coordinate::is_placeholder(value)
+                .then_some("a placeholder is not a coordinate"),
+        };
+        if let Some(reason) = reason {
+            bail!("--set-{field} {value:?}: {reason}; name the value the record should carry");
+        }
     }
 
     let dir = resolve_dir(&ctx.cwd)?;
@@ -14936,6 +15026,14 @@ fn transition(
         }
         planners.sort_by(|a, b| a.key().cmp(&b.key()));
         planners.dedup();
+        ensure_fresh_planners(
+            &planners,
+            ctx.session.as_deref(),
+            &format!(
+                "omit the field, correct an inherited planner with `arc journal correct \
+                 {filename} --target artifact --field planners`, or pass --no-planner"
+            ),
+        )?;
         if no_planner || !planned_by.is_empty() || !planners.is_empty() {
             contents = apply_planner_headers(&contents, &planners);
         }

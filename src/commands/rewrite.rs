@@ -168,6 +168,16 @@ pub fn instructions_git(check: Option<&str>) -> Result<i32> {
 /// what separates this from re-signing, where every commit in range is
 /// recreated because the one below it was.
 pub fn trailers(ctx: &Ctx, args: TrailerArgs) -> Result<i32> {
+    // An appended role line is a fresh write: a placeholder or a session id is
+    // refused before any commit is read, let alone recreated.
+    if let Some(issue) = crate::trailers::first_placeholder(&args.append) {
+        bail!(
+            "--append \"{}: {}\": {}; omit the line",
+            issue.key,
+            issue.value,
+            issue.detail
+        );
+    }
     let cwd = ctx.cwd.clone();
     let store = ctx.store()?;
     let branch = match open(ctx, &store)? {

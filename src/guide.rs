@@ -35,6 +35,12 @@ SAY WHO YOU ARE (before the first write)
   recorded with any observed disagreement. `arc show --json` and `arc log`
   show the model evidence.
 
+  Omit a value nobody established; never declare a placeholder. A write
+  refuses a harness, session, actor or on-behalf-of subject that is one
+  (unknown, unset, none, null, n/a, na, tbd, undefined, ?, -, <synthetic>,
+  synthetic), an actor of the form harness:model carrying one, and a model
+  that is one or is a session id. Reads and Git hooks never refuse.
+
   Local change and repository events receive IDs after the newest stored event
   in their scope, even in fresh processes and after imports from a clock ahead.
   Observation timestamps retain the recording clock. The store refuses an
@@ -1683,6 +1689,9 @@ CONTRIBUTION TRAILERS
                        at least one assertion or withdrawal is required.
                        --withdraw <role>=<value> withdraws an exact assertion.
                        Values use the convention's agent or person form.
+                       A value, typed or resolved from the invoking
+                       identity, that carries a placeholder or a session id
+                       refuses; withdrawal takes any recorded value.
                        Assertions are explicit; event ancestry grants none.
                        begin's two role flags record the assertions directly
                        after opening; brief --planned-by records them when
@@ -1767,7 +1776,11 @@ HISTORY REWRITES
                        every trailer with that key, matched without case;
                        --append adds a `Key: value` line the block does not
                        already carry; both repeat, and at least one is
-                       required. The commit named by --from is itself edited;
+                       required. A role line whose value carries a
+                       placeholder or a session id, or names a person
+                       without an email, refuses before any commit is
+                       recreated, including in --dry-run.
+                       The commit named by --from is itself edited;
                        it is rewritten when its message or ancestry changes.
                        Recreating a commit reachable from the target or another
                        local or remote-tracking branch is refused, naming that commit and ref,

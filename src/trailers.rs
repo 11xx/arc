@@ -102,6 +102,16 @@ pub fn check_contribution(message: &[u8]) -> Vec<ContributionIssue> {
         .collect()
 }
 
+/// The first of `lines` whose role key carries a readable value that is no
+/// fresh coordinate: the line [`check_contribution`] would report as
+/// `placeholder`.
+pub(crate) fn first_placeholder(lines: &[String]) -> Option<ContributionIssue> {
+    lines
+        .iter()
+        .filter_map(|line| line_issue(line.as_bytes()))
+        .find(|issue| issue.kind == "placeholder")
+}
+
 /// What the convention says about one trailer line, if anything.
 fn line_issue(line: &[u8]) -> Option<ContributionIssue> {
     let key = trailer_key(line)?;

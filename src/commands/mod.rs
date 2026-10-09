@@ -372,6 +372,60 @@ impl Ctx {
             .clone()
     }
 
+    /// Refuse a declared identity no write may record: a placeholder harness,
+    /// session, actor or on-behalf-of subject, an actor of the
+    /// `harness:model` form carrying a placeholder, or a declared model that
+    /// is a placeholder or a session id. A value nobody established is
+    /// omitted, never declared, and an undeclared model is the one arc
+    /// observes. Every command outside `READ_ONLY_COMMANDS` asks this before
+    /// it acts, `--dry-run` included, except the Git hook entry point, which
+    /// records no identity; a read is never refused.
+    pub(crate) fn ensure_fresh_identity(&self) -> Result<()> {
+        use crate::coordinate::{actor_defect, is_placeholder, model_defect};
+        if let Some(model) = self.model.as_deref() {
+            if let Some(defect) = model_defect(model, self.session.as_deref()) {
+                let remedy = match self.model_source {
+                    Some(ModelSource::Flag) => "drop --model",
+                    _ => "unset ARC_MODEL",
+                };
+                bail!(
+                    "declared model {model:?}: {}; {remedy}, and arc records the observed model",
+                    defect.reason()
+                );
+            }
+        }
+        for (name, value) in [
+            ("--harness/ARC_HARNESS", &self.harness),
+            ("--session/ARC_SESSION", &self.session),
+        ] {
+            if let Some(value) = value.as_deref().filter(|value| is_placeholder(value)) {
+                bail!(
+                    "{name} {value:?}: a placeholder is not an identity; unset it, and omit a \
+                     value nobody established (`eval \"$(arc env)\"` exports what it detects)"
+                );
+            }
+        }
+        let actor = match self.actor_source {
+            ActorSource::Flag => Some(("--actor", &self.actor)),
+            ActorSource::Env => Some(("ARC_ACTOR", &self.actor)),
+            ActorSource::GitFallback | ActorSource::Derived => None,
+        };
+        let subject = self
+            .on_behalf_of
+            .as_ref()
+            .map(|subject| ("--on-behalf-of/ARC_ON_BEHALF_OF", subject));
+        for (name, value) in actor.into_iter().chain(subject) {
+            if let Some(defect) = actor_defect(value) {
+                bail!(
+                    "{name} {value:?}: {}; declare the actor who is acting, or leave it \
+                     undeclared",
+                    defect.reason()
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// The same invocation pointed at another checkout.
     ///
     /// Identity travels with the command, not with the directory, so a run

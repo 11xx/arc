@@ -294,6 +294,9 @@ fn review_verdict<'a>(
     }
 }
 
+/// The contributors a patchset write declares. Contributors are actors, so a
+/// session-form actor is one and a placeholder, or a `harness:model` form
+/// carrying one, names nobody and refuses.
 pub(crate) fn contributor_declaration(
     ctx: &Ctx,
     contributors: Option<Vec<String>>,
@@ -307,6 +310,13 @@ pub(crate) fn contributor_declaration(
         if actor.is_empty() {
             bail!("--solo requires a nonempty invoking actor");
         }
+        if let Some(defect) = crate::coordinate::actor_defect(actor) {
+            bail!(
+                "--solo records the invoking actor {actor:?} as the contributor: {}; \
+                 pass --actor or set ARC_ACTOR",
+                defect.reason()
+            );
+        }
         return Ok(Some(vec![actor.to_string()]));
     }
     let Some(contributors) = contributors else {
@@ -317,6 +327,12 @@ pub(crate) fn contributor_declaration(
         let contributor = contributor.trim();
         if contributor.is_empty() {
             bail!("--contributors must name nonempty actors");
+        }
+        if let Some(defect) = crate::coordinate::actor_defect(contributor) {
+            bail!(
+                "contributor {contributor:?}: {}; name the actor who wrote the work",
+                defect.reason()
+            );
         }
         normalized.insert(contributor.to_string());
     }

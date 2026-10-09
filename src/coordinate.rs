@@ -88,6 +88,28 @@ pub(crate) fn model_defect(value: &str, session: Option<&str>) -> Option<Defect>
     is_session_id(model, session).then_some(Defect::SessionId)
 }
 
+/// What is wrong with an actor, if anything.
+///
+/// Actors are free-form: a person's name, an agent label, or the
+/// `harness:session` form arc derives, so a session id in the second segment
+/// is an actor and not a defect. A value that is itself a placeholder names
+/// nobody, and so does a `harness:model` form carrying one.
+pub(crate) fn actor_defect(value: &str) -> Option<Defect> {
+    if is_placeholder(value) {
+        return Some(Defect::Placeholder);
+    }
+    if is_human(value) {
+        return None;
+    }
+    let (harness, rest) = value.split_once(':')?;
+    let (model, effort) = match rest.split_once('#') {
+        Some((model, effort)) => (model, Some(effort)),
+        None => (rest, None),
+    };
+    (is_placeholder(harness) || is_placeholder(model) || effort.is_some_and(is_placeholder))
+        .then_some(Defect::Placeholder)
+}
+
 /// What keeps a role value from being a fresh coordinate; `None` when it is
 /// one.
 ///
@@ -193,6 +215,30 @@ mod tests {
             "unknown-harness#low",
         ] {
             assert_eq!(model_defect(value, Some("session-a")), None, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn actors_refuse_placeholders_and_keep_session_forms() {
+        for value in [
+            "unknown",
+            " None ",
+            "pi:unknown",
+            "unknown:gpt-6",
+            "codex:gpt-6#tbd",
+            "claude:<synthetic>",
+        ] {
+            assert_eq!(actor_defect(value), Some(Defect::Placeholder), "{value:?}");
+        }
+        for value in [
+            "tester",
+            "opus-implementer",
+            &format!("codex:{UUID}"),
+            "test:session-a",
+            "codex:gpt-6.1-sol#xhigh",
+            "Ada Lovelace <ada@example.org>",
+        ] {
+            assert_eq!(actor_defect(value), None, "{value:?}");
         }
     }
 

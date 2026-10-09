@@ -11945,6 +11945,10 @@ fn a_takeover_checkpoint_converges_a_tip_from_the_previous_claim() {
 }
 
 /// File one artifact whose creation event records the given identity.
+///
+/// A write refuses a placeholder identity, so the artifact is filed under
+/// stand-in values and its creation event then edited to carry the history
+/// being repaired, the way an older log records it.
 fn artifact_with_identity(
     repo: &Repo,
     topic: &str,
@@ -11958,10 +11962,10 @@ fn artifact_with_identity(
     fs::write(&body, format!("# {topic}\n")).unwrap();
     let out = stdout(
         repo.arc(&repo.root)
-            .env("ARC_HARNESS", harness)
-            .env("ARC_SESSION", session)
-            .env("ARC_ACTOR", actor)
-            .env("ARC_MODEL", model)
+            .env("ARC_HARNESS", "seed-harness")
+            .env("ARC_SESSION", "seed-session")
+            .env("ARC_ACTOR", "seed-actor")
+            .env("ARC_MODEL", "seed-model")
             .args([
                 "journal",
                 "note",
@@ -11972,11 +11976,39 @@ fn artifact_with_identity(
                 body.to_str().unwrap(),
             ]),
     );
-    PathBuf::from(out.trim())
+    let file = PathBuf::from(out.trim())
         .file_name()
         .unwrap()
         .to_string_lossy()
-        .to_string()
+        .to_string();
+    let path = journal_dir(repo).join("events.jsonl");
+    let log = fs::read_to_string(&path).unwrap();
+    let seeded: String = log
+        .split_inclusive('\n')
+        .map(|line| {
+            let event: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+            if event["event"] != "note" || event["file"] != file.as_str() {
+                return line.to_string();
+            }
+            [
+                ("harness", "seed-harness", harness),
+                ("session", "seed-session", session),
+                ("actor", "seed-actor", actor),
+                ("model", "seed-model", model),
+            ]
+            .into_iter()
+            .fold(line.to_string(), |line, (field, seed, value)| {
+                let recorded = format!("\"{field}\":\"{seed}\"");
+                assert!(line.contains(&recorded), "{recorded} missing from {line}");
+                line.replace(
+                    &recorded,
+                    &format!("\"{field}\":{}", serde_json::json!(value)),
+                )
+            })
+        })
+        .collect();
+    fs::write(&path, seeded).unwrap();
+    file
 }
 
 /// The event log's lines, so a test can say exactly which one moved.

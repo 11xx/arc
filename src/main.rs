@@ -68,13 +68,17 @@ use std::path::{Path, PathBuf};
 struct Cli {
     /// Acting identity, from ARC_ACTOR when the flag is absent. Falls back to
     /// <harness>:<session> when both are known, else git user.name; arc
-    /// records either as an identity nobody declared
+    /// records either as an identity nobody declared. A write refuses a
+    /// declared placeholder (unknown, none, n/a, ...) or a harness:model form
+    /// carrying one; a harness:session form is an actor
     #[arg(long, global = true)]
     actor: Option<String>,
-    /// Harness label, e.g. claude, codex, opencode
+    /// Harness label, e.g. claude, codex, opencode. A write refuses a
+    /// placeholder such as unknown; omit a harness nobody established
     #[arg(long, global = true, env = "ARC_HARNESS")]
     harness: Option<String>,
-    /// Native session ID of the acting harness thread
+    /// Native session ID of the acting harness thread. A write refuses a
+    /// placeholder such as unknown; omit a session nobody established
     #[arg(long, global = true, env = "ARC_SESSION")]
     session: Option<String>,
     /// Private web link for the acting session; recorded only in arc events
@@ -85,10 +89,14 @@ struct Cli {
     /// it writes. A corroborated Claude recording without a model selection
     /// is re-read every 50 ms for up to 1 second; other store answers return
     /// immediately. Declarations retain any observed disagreement and its
-    /// coordinate
+    /// coordinate. A write refuses a placeholder model or effort (unknown,
+    /// none, n/a, ...) and a session id as the model, whether flagged or in
+    /// ARC_MODEL: drop the declaration and arc records the observed model
     #[arg(long, global = true)]
     model: Option<String>,
-    /// Subject a lead runs delegated ceremony for; recorded beside the invoker
+    /// Subject a lead runs delegated ceremony for; recorded beside the
+    /// invoker. A write refuses a placeholder or a harness:model form carrying
+    /// one
     #[arg(long = "on-behalf-of", global = true, env = "ARC_ON_BEHALF_OF")]
     on_behalf_of: Option<String>,
     /// Execution boundary: implementer | reviewer | lead
@@ -183,7 +191,8 @@ struct BodyOpts {
 struct AttributionOpts {
     /// Explicitly set the contributors for this patchset. Recording a
     /// patchset while another actor holds a live claim on the change requires
-    /// this or --solo
+    /// this or --solo. Each is an actor: a harness:session form is one, and a
+    /// placeholder or a harness:model form carrying one refuses
     #[arg(
         long = "contributors",
         value_name = "ACTOR[,ACTOR...]",
@@ -191,7 +200,8 @@ struct AttributionOpts {
         conflicts_with = "solo"
     )]
     contributors: Option<Vec<String>>,
-    /// Record the invoking actor as the sole contributor
+    /// Record the invoking actor as the sole contributor; a placeholder actor
+    /// refuses
     #[arg(long, conflicts_with = "contributors")]
     solo: bool,
 }
@@ -276,11 +286,13 @@ enum Cmd {
     /// no warning.
     Begin {
         /// Assert a planner: harness:model[#effort] or Name <email>; repeatable.
-        /// Without a value, use the declared invoking identity; unresolved coordinates refuse
+        /// Without a value, use the declared invoking identity. Unresolved
+        /// coordinates, placeholders and session ids refuse
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
         planned_by: Vec<String>,
         /// Assert an orchestrator in the same form; repeatable.
-        /// Without a value, use the declared invoking identity; unresolved coordinates refuse
+        /// Without a value, use the declared invoking identity. Unresolved
+        /// coordinates, placeholders and session ids refuse
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
         orchestrated_by: Vec<String>,
         /// Kebab-case slug naming the outcome (also the ID prefix)
@@ -353,13 +365,16 @@ enum Cmd {
     Roles {
         /// Open change whose contribution assertions to record
         change: String,
-        /// Assert a planner (repeatable harness:model[#effort] or Name <email>)
+        /// Assert a planner (repeatable harness:model[#effort] or Name <email>).
+        /// A placeholder or a session id refuses
         #[arg(long)]
         planned_by: Vec<String>,
-        /// Assert an orchestrator (repeatable harness:model[#effort] or Name <email>)
+        /// Assert an orchestrator (repeatable harness:model[#effort] or Name <email>).
+        /// A placeholder or a session id refuses
         #[arg(long)]
         orchestrated_by: Vec<String>,
-        /// Withdraw an exact assertion (repeatable Planned-by=VALUE or Orchestrated-by=VALUE)
+        /// Withdraw an exact assertion (repeatable Planned-by=VALUE or
+        /// Orchestrated-by=VALUE), whatever value it recorded
         #[arg(long)]
         withdraw: Vec<String>,
     },
@@ -634,7 +649,8 @@ enum Cmd {
     /// A body or scaffold records a replacement contract.
     Brief {
         /// Assert a planner on the change when writing a brief (repeatable).
-        /// Value: harness:model[#effort] or Name <email>
+        /// Value: harness:model[#effort] or Name <email>; a placeholder or a
+        /// session id refuses
         #[arg(long)]
         planned_by: Vec<String>,
         /// Change to act on. Omitted, it is inferred from the current branch,
@@ -1780,10 +1796,11 @@ enum Cmd {
     ///
     /// The model comment includes the newest selection's timestamp and native
     /// id, and whether it is inside or before the recording's newest operator
-    /// turn. An earlier observation may predate an effort change. Leave
-    /// ARC_MODEL is always unset for write-time resolution; declare a model
-    /// by hand with ARC_MODEL or --model. Missing boundaries and incomplete
-    /// head coverage are reported.
+    /// turn. An earlier observation may predate an effort change. ARC_MODEL
+    /// stays unset so each write resolves its own model; declare one by hand
+    /// with ARC_MODEL or --model only when it is known, since a write refuses
+    /// a placeholder or a session id. Missing boundaries and incomplete head
+    /// coverage are reported.
     /// Records no events; ledger reads do not require a parseable append policy.
     /// Prints the build commit and tracked-tree clean/dirty state as a comment;
     /// builds outside Git report unknown.
@@ -2923,7 +2940,10 @@ enum RewriteCmd {
         #[arg(long = "drop", value_name = "KEY", required_unless_present = "append")]
         drop: Vec<String>,
         /// Add this `Key: value` line to the trailer block where it is not
-        /// already there; repeat for more than one
+        /// already there; repeat for more than one. A Planned-by,
+        /// Implemented-by, Reviewed-by or Orchestrated-by value that carries a
+        /// placeholder or a session id, or names a person without an email,
+        /// refuses before any commit is recreated, --dry-run included
         #[arg(long, value_name = "LINE", required_unless_present = "drop")]
         append: Vec<String>,
         /// Oldest commit whose trailers are edited; the named commit itself
@@ -3863,6 +3883,11 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             .transpose()
             .map(Option::flatten)
     };
+    // A hook records no identity and never fails a commit, so it is the one
+    // writer the placeholder refusal leaves alone.
+    if !reads_only && !matches!(cmd, Cmd::HookRun { .. }) {
+        ctx.ensure_fresh_identity()?;
+    }
 
     match cmd {
         Cmd::Begin {

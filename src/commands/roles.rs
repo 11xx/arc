@@ -1,5 +1,8 @@
 use super::*;
 
+/// The role assertions a write records. Each value, typed or resolved from
+/// the invoking identity, is a fresh coordinate: a placeholder or a session id
+/// refuses, and the assertion is omitted instead.
 pub(crate) fn assertions(
     ctx: &Ctx,
     planned_by: Vec<String>,
@@ -23,6 +26,18 @@ pub(crate) fn assertions(
         }
     }
     crate::trailers::validate_roles(&roles)?;
+    for (role, values) in &roles {
+        for value in values {
+            if let Some(defect) =
+                crate::coordinate::coordinate_defect(value, ctx.session.as_deref())
+            {
+                bail!(
+                    "{role} value {value:?}: {}; omit the assertion",
+                    defect.reason()
+                );
+            }
+        }
+    }
     Ok(roles)
 }
 

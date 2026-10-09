@@ -35,6 +35,7 @@ mod observe;
 mod orchestrate;
 mod pass;
 mod paths;
+mod placeholders;
 mod planners;
 mod policy;
 mod provenance;
