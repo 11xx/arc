@@ -1324,7 +1324,7 @@ fn env_corroborates_a_pi_session_recorded_at_the_live_file() {
 fn env_withholds_the_model_while_a_subagent_recording_is_live() {
     let repo = Repo::new();
     let session = "4074d881-1111-2222-3333-444444444444";
-    claude_with_subagent(&repo, session, "aef42352478f33196", false);
+    claude_with_subagent(&repo, session, "a0000000000000001", false);
 
     repo.arc(&repo.root)
         .arg("env")
@@ -1350,7 +1350,7 @@ fn env_withholds_the_model_while_a_subagent_recording_is_live() {
 
     // A subagent the session recorded as finished leaves the session's own
     // model in place.
-    claude_with_subagent(&repo, session, "aef42352478f33196", true);
+    claude_with_subagent(&repo, session, "a0000000000000001", true);
     repo.arc(&repo.root)
         .arg("env")
         .env("CLAUDE_CODE_SESSION_ID", session)
@@ -1370,7 +1370,7 @@ fn env_withholds_the_model_while_a_subagent_recording_is_live() {
 fn env_reports_shell_ambiguity_even_when_the_parent_recording_is_newer() {
     let repo = Repo::new();
     let session = "4074d881-1111-2222-3333-444444444444";
-    claude_with_subagent(&repo, session, "aef42352478f33196", false);
+    claude_with_subagent(&repo, session, "a0000000000000001", false);
     let path = repo
         .home
         .join(".claude/projects/-test-repo")
