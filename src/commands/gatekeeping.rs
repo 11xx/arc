@@ -3499,9 +3499,10 @@ fn integrate_one(
     println!("event: {}", ev.event_id);
     if let Err(error) = release_retention_refs(ctx, &change_id, Some(&merged)) {
         eprintln!(
-            "warning: integration recorded; retention cleanup failed: {error:#}. Remaining refs under {} and {} stay pinned",
+            "warning: integration recorded; retention cleanup failed: {error:#}. Remaining refs under {}, {} and {} stay pinned",
             gitio::retention_prefix(&change_id),
             gitio::tree_retention_prefix(&change_id),
+            gitio::retained_prefix(&change_id),
         );
     }
     if let Some(advisory) = crate::status::missing_changelog_advisory(&st) {
@@ -4770,9 +4771,10 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
     println!("event: {}", ev.event_id);
     if let Err(error) = release_retention_refs(ctx, &change_id, integrated_rev.as_deref()) {
         eprintln!(
-            "warning: closure recorded; retention cleanup failed: {error:#}. Remaining refs under {} and {} stay pinned",
+            "warning: closure recorded; retention cleanup failed: {error:#}. Remaining refs under {}, {} and {} stay pinned",
             gitio::retention_prefix(&change_id),
             gitio::tree_retention_prefix(&change_id),
+            gitio::retained_prefix(&change_id),
         );
     }
     crate::journal::auto_log(ctx, &st.slug, &format!("closed change {change_id}"));
@@ -4952,17 +4954,27 @@ fn check_tagged(ctx: &Ctx, tags: Vec<String>, shape: Option<integration::Shape>)
 /// externally rewritten (squash/rebase) work must never become
 /// GC-collectable through arc. Unpinning by hand remains possible with
 /// `git update-ref -d refs/arc/keep/<change>/<patchset>`.
+///
+/// The commits held under `refs/arc/retained/<change>/` follow the same rule.
+/// The ledger goes on citing them after the change closes, and the commit a
+/// rewrite replaced is on no branch, so it is almost never one the
+/// integration reaches; where one is, history holds it and the ref is
+/// redundant.
 fn release_retention_refs(ctx: &Ctx, change_id: &str, integrated: Option<&str>) -> Result<()> {
-    let refs = gitio::list_refs(&ctx.cwd, &gitio::retention_prefix(change_id))?;
-    for (name, oid) in refs {
-        let reachable = match integrated {
-            Some(rev) => gitio::is_ancestor(&ctx.cwd, &oid, rev)?,
-            None => false,
-        };
-        if reachable {
-            gitio::delete_ref(&ctx.cwd, &name)?;
-        } else {
-            println!("kept {name}: head {oid} is not reachable from the integrated commit");
+    for (prefix, what) in [
+        (gitio::retention_prefix(change_id), "head"),
+        (gitio::retained_prefix(change_id), "commit"),
+    ] {
+        for (name, oid) in gitio::list_refs(&ctx.cwd, &prefix)? {
+            let reachable = match integrated {
+                Some(rev) => gitio::is_ancestor(&ctx.cwd, &oid, rev)?,
+                None => false,
+            };
+            if reachable {
+                gitio::delete_ref(&ctx.cwd, &name)?;
+            } else {
+                println!("kept {name}: {what} {oid} is not reachable from the integrated commit");
+            }
         }
     }
     // A tree pinned by verification is evidence about a change that is now

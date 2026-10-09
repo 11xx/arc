@@ -2583,9 +2583,11 @@ FILES
   and hold their successors. The commit a pin held, and any other commit the
   ledger cites as a patchset head or a verdict's revision, is held under
   `refs/arc/retained/<change>/<subject>/<commit>` by `arc rewrite` and
-  `arc history rewrite --map`, and stays held while the ledger cites it. A pin
-  is released only once its head is reachable from the integration commit;
-  release any other with `git update-ref -d`. A registered candidate's tree is pinned by
+  `arc history rewrite --map`. A pin or a retention ref is released only once
+  its commit is reachable from the integration commit, where history holds it;
+  a replaced commit is on no branch, so its ref stays while the ledger cites
+  it, and closing a change without integrating it releases nothing. Release
+  any other with `git update-ref -d`. A registered candidate's tree is pinned by
   `refs/arc/candidate/<id>` until `arc candidate retire` releases it.
 
 SCHEMAS

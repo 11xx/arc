@@ -598,3 +598,83 @@ fn an_import_writes_no_ref_a_bundle_names_outside_retention() {
         .success();
     assert!(retained(&receiver).is_empty());
 }
+
+#[test]
+fn integration_releases_the_pin_and_keeps_the_retained_commit() {
+    let repo = repo_with_gates();
+    let key = signing_key(&repo).expect("signing acceptance requires a sandbox signing key");
+    let (worktree, old) = approved_change(&repo, "alpha");
+    let change = only_change(&repo);
+    arc_signing(&repo, &key, &worktree)
+        .args(["rewrite", "sign", "--key", &key.fingerprint])
+        .assert()
+        .success();
+
+    repo.arc(&repo.root)
+        .args(["integrate", "alpha"])
+        .assert()
+        .success();
+
+    assert_eq!(
+        git_out(
+            &repo.root,
+            &["for-each-ref", "--format=%(refname)", "refs/arc/keep/"]
+        ),
+        "",
+        "the pin is released once its head reaches the integration commit"
+    );
+    assert_eq!(
+        retained(&repo),
+        vec![format!("{} {old}", retention_ref(&change, "ps-01", &old))],
+        "the commit the verdict read is on no branch and stays held"
+    );
+    collect_garbage(&repo.root);
+    assert!(has_object(&repo.root, &old));
+}
+
+#[test]
+fn closing_without_integration_releases_nothing() {
+    let repo = repo_with_gates();
+    let (worktree, old) = approved_change(&repo, "alpha");
+    let change = only_change(&repo);
+    rewrite_trailers(&repo, &worktree, &old);
+    let before = ref_snapshot(&repo.root);
+
+    repo.arc(&repo.root)
+        .args(["close", "alpha", "--abandoned"])
+        .assert()
+        .success();
+
+    assert_eq!(ref_snapshot(&repo.root), before);
+    assert_eq!(
+        retained(&repo),
+        vec![format!("{} {old}", retention_ref(&change, "ps-01", &old))]
+    );
+}
+
+/// A retained commit that integration reaches is held by history, so its ref
+/// is released with the pins whose heads integration reaches.
+#[test]
+fn a_retained_commit_the_integration_reaches_is_released() {
+    let repo = repo_with_gates();
+    let (worktree, old) = approved_change(&repo, "alpha");
+    rewrite_trailers(&repo, &worktree, &old);
+    let new = repo.head(&worktree);
+    git(&repo.root, &["merge", "--ff-only", &old]);
+    git(&repo.root, &["merge", "--no-edit", &new]);
+    let merged = repo.head(&repo.root);
+
+    repo.arc(&repo.root)
+        .args(["close", "alpha", "--assert-integrated", &merged])
+        .assert()
+        .success();
+
+    assert!(retained(&repo).is_empty(), "{:?}", retained(&repo));
+    assert_eq!(
+        git_out(
+            &repo.root,
+            &["for-each-ref", "--format=%(refname)", "refs/arc/keep/"]
+        ),
+        ""
+    );
+}
