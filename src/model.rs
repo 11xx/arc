@@ -1358,6 +1358,12 @@ pub enum Payload {
         /// without this field have no recorded ref-move information.
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         refs: BTreeMap<String, crate::rewrite::RefMove>,
+        /// The refs the rewrite created to keep a replaced commit reachable
+        /// — each a patchset head or a commit a verdict was recorded on —
+        /// with the commit it holds. Records without this field retained
+        /// nothing.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        retained: BTreeMap<String, String>,
     },
     /// Withdraw one repository rewrite map without undoing any Git ref moves.
     HistoryRewriteWithdrawn {

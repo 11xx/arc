@@ -46,6 +46,7 @@ mod relations;
 mod release;
 mod replicas;
 mod rescue;
+mod retention;
 mod review;
 mod rewrite;
 mod roles;

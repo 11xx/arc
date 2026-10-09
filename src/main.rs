@@ -31,6 +31,7 @@ mod registry;
 mod relations;
 mod render;
 mod replica;
+mod retention;
 mod rewrite;
 mod selection;
 mod session_store;
@@ -2872,7 +2873,12 @@ enum HistoryCmd {
     /// Record a rewrite performed elsewhere, with its commit map. Active
     /// maps must agree; a withdrawn map does not constrain its replacement.
     /// Re-recording the actual map restores proof for falsification references
-    /// that store a rewritten failure revision, without editing ledger events
+    /// that store a rewritten failure revision, without editing ledger events.
+    /// Moves no refs, but holds each commit the ledger cites as a patchset
+    /// head or a verdict's revision that the map replaces and this repository
+    /// still has under `refs/arc/retained/<change>/<subject>/<commit>`, named
+    /// by the event's `retained` map; a cited commit already gone is named
+    /// and cannot be held
     Rewrite {
         /// Commit map (`<old> <new>` per line, as git filter-repo writes), or
         /// '-' for stdin
@@ -2903,6 +2909,14 @@ enum RewriteCmd {
     /// is named. A recording failure with no published event restores this
     /// attempt's ref moves and retains its intent for retry. Published or
     /// uncertain events retain the intent and applied refs for recovery.
+    ///
+    /// A commit that any recorded verdict or audit read, or that a patchset
+    /// recorded as its head, stays reachable: each one the map replaces is
+    /// held by `refs/arc/retained/<change>/<subject>/<commit>` (the subject
+    /// is the patchset, or the event that recorded the verdict), created in
+    /// the transaction that moves the refs, restored with them on a failed
+    /// recording, and named by the event's `retained` map. The keep pin moves
+    /// to the successor; a retention ref never moves. --dry-run lists them
     Sign {
         /// The key to sign with; Git's configured signing key by default
         #[arg(long)]
@@ -2925,7 +2939,8 @@ enum RewriteCmd {
         #[arg(long)]
         include_shared: bool,
         /// For a fresh rewrite, check map consistency and append policy,
-        /// print the map and every ref it would move, then stop
+        /// print the map, every ref it would move and every commit it would
+        /// retain, then stop
         #[arg(long = "dry-run")]
         dry_run: bool,
         /// Recreate the commits without signing them, for a repository with no
@@ -2949,6 +2964,14 @@ enum RewriteCmd {
     /// is named. A recording failure with no published event restores this
     /// attempt's ref moves and retains its intent for retry. Published or
     /// uncertain events retain the intent and applied refs for recovery.
+    ///
+    /// A commit that any recorded verdict or audit read, or that a patchset
+    /// recorded as its head, stays reachable: each one the map replaces is
+    /// held by `refs/arc/retained/<change>/<subject>/<commit>` (the subject
+    /// is the patchset, or the event that recorded the verdict), created in
+    /// the transaction that moves the refs, restored with them on a failed
+    /// recording, and named by the event's `retained` map. The keep pin moves
+    /// to the successor; a retention ref never moves. --dry-run lists them
     Trailers {
         /// Remove every trailer with this key, matched without case; repeat
         /// for more than one
@@ -2983,7 +3006,8 @@ enum RewriteCmd {
         #[arg(long)]
         key: Option<String>,
         /// For a fresh rewrite, check map consistency and append policy,
-        /// print the map and every ref it would move, then stop
+        /// print the map, every ref it would move and every commit it would
+        /// retain, then stop
         #[arg(long = "dry-run")]
         dry_run: bool,
         /// Recreate the edited commits without signing them, for a repository

@@ -529,6 +529,7 @@ fn complete(
     }
 
     let mut moves = plan_ref_moves(&cwd, &branch, &from, &mapping, retag)?;
+    let retention = crate::retention::plan(&cwd, store, &mapping, &moves.moves)?;
     let new_head = mapping
         .get(&head)
         .and_then(|new| new.clone())
@@ -549,6 +550,7 @@ fn complete(
             reason,
             Some(tool.to_string()),
             moves.moves.clone(),
+            retention.retain.clone(),
         )?;
         store.ensure_repository_event_allowed(&event)?;
         for (old, new) in &mapping {
@@ -561,6 +563,10 @@ fn complete(
         for (name, moved) in &moves.moves {
             println!("would move: {name} {} → {}", moved.old, moved.new);
         }
+        for (name, commit) in &retention.retain {
+            println!("would retain: {name} {commit}");
+        }
+        report_unretained(&retention.gone);
         // The tags are the half of a rewrite that is a decision rather than a
         // consequence, so a preview that stopped at the map would leave the
         // operator to run the real thing to find out what it does to a
@@ -597,6 +603,7 @@ fn complete(
         tool: Some(tool.to_string()),
         mapping: mapping.clone(),
         refs: moves.moves.clone(),
+        retained: retention.retain.clone(),
         created_at: chrono::Utc::now(),
     };
     // Everything above only wrote objects nothing points at, which change
@@ -611,6 +618,7 @@ fn complete(
     );
     println!("{} moved", plural(intent.refs.len(), "ref"));
     report_ref_moves(&intent);
+    report_unretained(&retention.gone);
     println!("rewrite recorded as {event_id}");
     for retag in &retagged {
         println!(
@@ -733,6 +741,15 @@ fn apply(ctx: &Ctx, store: &Store, intent: &RewriteIntent, write_intent: bool) -
             ),
         }
     }
+    let pending_moves = pending.len();
+    // The commits the rewrite replaces are held in the transaction that moves
+    // the refs, so there is no instant at which a pin has moved off a commit
+    // nothing else reaches.
+    let (retentions, unheld) = crate::retention::creations(cwd, &intent.retained)?;
+    for name in &unheld {
+        eprintln!("warning: {name} is not created: its commit is no longer in this repository");
+    }
+    pending.extend(retentions);
     let recorded = recorded_as(store, intent)?;
     let event = if recorded.is_none() {
         let event = history::prepare_mapping(
@@ -742,6 +759,7 @@ fn apply(ctx: &Ctx, store: &Store, intent: &RewriteIntent, write_intent: bool) -
             intent.reason.clone(),
             intent.tool.clone(),
             intent.refs.clone(),
+            intent.retained.clone(),
         )?;
         store.ensure_repository_event_allowed(&event)?;
         Some(event)
@@ -780,9 +798,9 @@ fn apply(ctx: &Ctx, store: &Store, intent: &RewriteIntent, write_intent: bool) -
                         gitio::update_refs(cwd, &rollback).with_context(|| format!(
                             "rewrite publication failed ({error:#}); refs could not be restored; \
                              retain {} for recovery", store.rewrite_intent_path().display()))?;
-                        let effects = if pending.is_empty() {
+                        let effects = if pending_moves == 0 {
                             "no ref moves were made by this attempt; refs remain applied from a previous attempt"
-                        } else if pending.len() == intent.refs.len() {
+                        } else if pending_moves == intent.refs.len() {
                             "ref moves from this attempt were restored"
                         } else {
                             "ref moves from this attempt were restored; refs already applied by a previous attempt remain applied"
@@ -827,6 +845,26 @@ fn apply(ctx: &Ctx, store: &Store, intent: &RewriteIntent, write_intent: bool) -
 fn report_ref_moves(intent: &RewriteIntent) {
     for (name, moved) in &intent.refs {
         println!("moved: {name} {} → {}", moved.old, moved.new);
+    }
+    if !intent.retained.is_empty() {
+        println!("{} retained", plural(intent.retained.len(), "commit"));
+    }
+    for (name, commit) in &intent.retained {
+        println!("retained: {name} {commit}");
+    }
+}
+
+/// Cited commits the rewrite replaces that this repository no longer holds:
+/// nothing can keep an object that is gone, and saying so is what separates a
+/// rewrite that retained everything from one that retained what survived.
+pub(super) fn report_unretained(gone: &[crate::retention::Cited]) {
+    for cited in gone {
+        println!(
+            "not retained: {} ({} of {}) is not in this repository",
+            short(&cited.commit),
+            cited.what,
+            cited.change_id
+        );
     }
 }
 
@@ -982,7 +1020,8 @@ struct Retag {
 ///
 /// arc's own refs pin evidence — reviewed patchset heads, evaluated trees,
 /// synthesized merges — and evidence that stops being reachable stops being
-/// evidence, so they all move. Branches and tags move too, since a rewrite
+/// evidence, so they all move, except the retention refs that exist to hold
+/// what a rewrite replaced. Branches and tags move too, since a rewrite
 /// nobody's branch survived is a rewrite that stranded the work.
 ///
 /// An annotated tag is re-pointed only when asked for: re-pointing one means
@@ -1009,6 +1048,11 @@ fn plan_ref_moves(
     };
     let successor = |old: &str| mapping.get(old).and_then(|new| new.clone());
     for (name, value) in gitio::list_refs(cwd, "refs/arc/")? {
+        // A retention ref holds a commit because a rewrite replaced it. Moving
+        // it onto its successor would give the commit up a second time.
+        if name.starts_with(gitio::RETAINED_PREFIX) {
+            continue;
+        }
         if let Some(new) = successor(&value) {
             moves.moves.insert(name, RefMove { old: value, new });
         }

@@ -6,12 +6,12 @@ use std::collections::BTreeMap;
 
 /// A throwaway signing key in a keyring of its own, so the suite never reads
 /// or writes the machine's.
-struct Key {
-    home: PathBuf,
-    fingerprint: String,
+pub(crate) struct Key {
+    pub(crate) home: PathBuf,
+    pub(crate) fingerprint: String,
 }
 
-fn signing_key(repo: &Repo) -> Option<Key> {
+pub(crate) fn signing_key(repo: &Repo) -> Option<Key> {
     let home = repo.home.join("gnupg");
     fs::create_dir_all(&home).unwrap();
     // gpg refuses a keyring directory anybody else can read.
@@ -60,7 +60,7 @@ fn signing_key(repo: &Repo) -> Option<Key> {
 }
 
 /// `arc`, with the fixture keyring in scope.
-fn arc_signing(repo: &Repo, key: &Key, cwd: &Path) -> AssertCommand {
+pub(crate) fn arc_signing(repo: &Repo, key: &Key, cwd: &Path) -> AssertCommand {
     let mut cmd = repo.arc(cwd);
     cmd.env("GNUPGHOME", &key.home);
     cmd
@@ -188,7 +188,7 @@ fn rewrite_safe_falsification_survives_a_signed_amendment_and_is_ready() {
         .success();
 }
 
-fn repo_with_gates() -> Repo {
+pub(crate) fn repo_with_gates() -> Repo {
     let repo = Repo::new();
     fs::create_dir_all(repo.root.join(".arc")).unwrap();
     fs::write(
@@ -1068,7 +1068,7 @@ fn no_sign_recreates_a_signed_tag_unsigned() {
 
 /// Every repository-scoped event file, oldest first. A repository that has
 /// recorded none has no directory, which is an answer rather than an error.
-fn repository_events(repo: &Repo) -> Vec<PathBuf> {
+pub(crate) fn repository_events(repo: &Repo) -> Vec<PathBuf> {
     let dir = repo.root.join(".git/arc/repository/events");
     let Ok(entries) = fs::read_dir(&dir) else {
         return Vec::new();
@@ -1219,7 +1219,7 @@ fn an_ambiguous_abbreviation_is_refused_rather_than_resolved() {
 }
 
 /// Where a rewrite writes down what it is about to do.
-fn intent_path(repo: &Repo) -> PathBuf {
+pub(crate) fn intent_path(repo: &Repo) -> PathBuf {
     repo.root.join(".git/arc/repository/rewrite-intent.json")
 }
 
@@ -1699,7 +1699,7 @@ fn a_trailer_rewrite_without_a_range_or_an_edit_is_refused() {
 
 /// An open change with a gate green and an approval on its only patchset, the
 /// worktree it lives in, and the commit it approved.
-fn approved_change(repo: &Repo, slug: &str) -> (PathBuf, String) {
+pub(crate) fn approved_change(repo: &Repo, slug: &str) -> (PathBuf, String) {
     let (_, worktree, head) = change_with_patchset(repo, slug);
     repo.arc(&worktree)
         .args(["verify", slug, "--all"])
@@ -2707,7 +2707,7 @@ fn shared_guard_uses_a_bounded_number_of_ancestry_probes() {
     );
 }
 
-fn ref_snapshot(cwd: &Path) -> String {
+pub(crate) fn ref_snapshot(cwd: &Path) -> String {
     git_out(cwd, &["for-each-ref", "--format=%(refname) %(objectname)"])
 }
 
@@ -2852,6 +2852,16 @@ fn contradictory_rewrites_leave_every_ref_unchanged() {
         for line in before.lines() {
             let (name, value) = line.split_once(' ').unwrap();
             git(&worktree, &["update-ref", name, value]);
+        }
+        // The first rewrite also created refs; the repository the second
+        // starts from is the one before it.
+        for created in git_out(
+            &worktree,
+            &["for-each-ref", "--format=%(refname)", "refs/arc/retained/"],
+        )
+        .lines()
+        {
+            git(&worktree, &["update-ref", "-d", created]);
         }
         git(&worktree, &["reset", "--hard", &old]);
         let mut command = arc_signing(&repo, &key, &worktree);

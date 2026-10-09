@@ -48,7 +48,7 @@ enum Step {
 /// Seven hex digits is what Git itself considers abbreviated, and short of it
 /// a prefix stops naming a commit: six digits collide across sixteen million
 /// objects, and one names a sixteenth of every object in the repository.
-const ABBREVIATION_FLOOR: usize = 7;
+pub(crate) const ABBREVIATION_FLOOR: usize = 7;
 
 /// One ref move a rewrite has planned: the value the ref held when the
 /// rewrite read it, and the value it is to hold instead.
@@ -85,6 +85,10 @@ pub struct RewriteIntent {
     pub mapping: BTreeMap<String, Option<String>>,
     /// Every ref the rewrite moves, the rewritten branch included.
     pub refs: BTreeMap<String, RefMove>,
+    /// The refs created to keep the commits the rewrite replaces reachable,
+    /// each with the commit it holds.
+    #[serde(default)]
+    pub retained: BTreeMap<String, String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -733,6 +737,7 @@ mod tests {
                 tool: None,
                 signature_only: judged.iter().map(|old| old.to_string()).collect(),
                 refs: BTreeMap::new(),
+                retained: BTreeMap::new(),
             },
         }
     }

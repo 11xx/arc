@@ -285,6 +285,7 @@ pub(super) fn effects(
             let ref_states = intent
                 .refs
                 .keys()
+                .chain(intent.retained.keys())
                 .map(|name| {
                     (
                         name.clone(),

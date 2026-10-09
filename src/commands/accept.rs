@@ -573,6 +573,7 @@ fn validate_recovery(
             tool: intent.tool.clone(),
             signature_only: Vec::new(),
             refs: intent.refs.clone(),
+            retained: intent.retained.clone(),
         },
     )?);
     let mapped = RewriteMap::from_events(combined.iter())?;
@@ -1456,6 +1457,16 @@ fn render_acceptance(result: &AcceptanceResult, json: bool) -> Result<()> {
                         "    planned ref: {name} {} -> {}; current {}",
                         moved.old,
                         moved.new,
+                        pending
+                            .ref_states
+                            .get(name)
+                            .and_then(|value| value.as_deref())
+                            .unwrap_or("absent or unobserved")
+                    );
+                }
+                for (name, commit) in &pending.intent.retained {
+                    println!(
+                        "    planned retention: {name} {commit}; current {}",
                         pending
                             .ref_states
                             .get(name)

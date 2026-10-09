@@ -1873,6 +1873,23 @@ HISTORY REWRITES
   `--no-sign` leaves them unsigned. `--dry-run` says which tags would be
   signed.
 
+  A commit that any recorded verdict or audit read, or that a patchset
+  recorded as its head, stays reachable after any rewrite arc performs or
+  records. Each such commit a rewrite replaces is held by
+  `refs/arc/retained/<change>/<subject>/<commit>`: the subject is the
+  patchset the commit was the head of, or the event that recorded a verdict
+  on it, and a change holds a commit once. A `refs/arc/keep/<change>/<patchset>`
+  pin the rewrite moves is held the same way, whether or not a verdict cites
+  its commit. The pin follows the successor, which is what projections and
+  signature-only approvals stand on; a retention ref holds the commit that
+  was read and never follows a rewrite, so it never makes a replaced commit
+  look like the head of anything. The refs are created in the transaction
+  that moves the others, restored with them when publication fails, finished
+  with them on resume, and named by the event's `retained` map; `--dry-run`
+  lists them. `arc history rewrite --map` moves no refs: it holds each cited
+  commit the map replaces that this repository still has, and names each it
+  cannot.
+
   Every ref moves in one Git transaction, so a rewrite leaves the branch and
   arc's evidence refs on one history or leaves them all alone. The map and
   the ref moves are written to `repository/rewrite-intent.json` before any of
@@ -2556,10 +2573,12 @@ FILES
 
   Every patchset's resolved head is pinned by `refs/arc/keep/<change>/<patchset>`
   so Git's garbage collection cannot take it. Pins follow recorded rewrites
-  and retain their successors; retaining original commit objects requires
-  separate operator-managed refs. A pin is released only once its
-  head is reachable from the integration commit; release any other with
-  `git update-ref -d`. A registered candidate's tree is pinned by
+  and hold their successors. The commit a pin held, and any other commit the
+  ledger cites as a patchset head or a verdict's revision, is held under
+  `refs/arc/retained/<change>/<subject>/<commit>` by `arc rewrite` and
+  `arc history rewrite --map`, and stays held while the ledger cites it. A pin
+  is released only once its head is reachable from the integration commit;
+  release any other with `git update-ref -d`. A registered candidate's tree is pinned by
   `refs/arc/candidate/<id>` until `arc candidate retire` releases it.
 
 SCHEMAS

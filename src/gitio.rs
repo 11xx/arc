@@ -1720,14 +1720,17 @@ pub fn delete_ref(cwd: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Where the pins that hold each patchset's head live.
+pub const KEEP_PREFIX: &str = "refs/arc/keep/";
+
 /// One retention ref per patchset: reviewed heads must stay reachable
 /// individually, including across branch rewinds.
 pub fn retention_ref(change_id: &str, patchset_id: &str) -> String {
-    format!("refs/arc/keep/{change_id}/{patchset_id}")
+    format!("{KEEP_PREFIX}{change_id}/{patchset_id}")
 }
 
 pub fn retention_prefix(change_id: &str) -> String {
-    format!("refs/arc/keep/{change_id}/")
+    format!("{KEEP_PREFIX}{change_id}/")
 }
 
 /// The ref that keeps a recorded tree reachable. A tree named only in the
@@ -1748,6 +1751,28 @@ pub fn tree_retention_prefix(change_id: &str) -> String {
 /// ref per run.
 pub fn merge_retention_ref(change_id: &str, commit: &str) -> String {
     format!("refs/arc/tree/{change_id}/merge-{commit}")
+}
+
+/// Where every commit arc holds as evidence of what was read lives.
+pub const RETAINED_PREFIX: &str = "refs/arc/retained/";
+
+/// The ref that keeps a commit the ledger cites reachable once a rewrite has
+/// replaced it.
+///
+/// A pin names the commit a change is at now; this names one it was at when
+/// something read it. The commit is part of the name, so one subject can hold
+/// several and a retry that finds the ref already there has nothing to do.
+/// `subject` is the patchset the commit was the head of, or the event that
+/// recorded a verdict on it.
+pub fn retained_ref(change_id: &str, subject: &str, commit: &str) -> String {
+    format!("{RETAINED_PREFIX}{change_id}/{subject}/{commit}")
+}
+
+/// The object id a ref has when it does not exist, in the width of `like`.
+/// A ref transaction created from it creates the ref, and one moving to it
+/// deletes the ref.
+pub fn absent_oid(like: &str) -> String {
+    "0".repeat(like.len())
 }
 
 /// Every object reachable from a revision.
@@ -1810,6 +1835,30 @@ pub fn missing_objects<'a>(
     cwd: &Path,
     revisions: impl Iterator<Item = &'a str>,
 ) -> Result<Vec<String>> {
+    Ok(batch_check(cwd, revisions)?
+        .into_iter()
+        .filter(|(_, answer)| answer.ends_with(" missing") || answer.ends_with(" ambiguous"))
+        .map(|(revision, _)| revision)
+        .collect())
+}
+
+/// Which of these revisions name a commit this repository holds.
+pub fn commits_among<'a>(
+    cwd: &Path,
+    revisions: impl Iterator<Item = &'a str>,
+) -> Result<Vec<String>> {
+    Ok(batch_check(cwd, revisions)?
+        .into_iter()
+        .filter(|(_, answer)| answer.ends_with(" commit"))
+        .map(|(revision, _)| revision)
+        .collect())
+}
+
+/// Each revision with the `cat-file --batch-check` answer for it, in order.
+fn batch_check<'a>(
+    cwd: &Path,
+    revisions: impl Iterator<Item = &'a str>,
+) -> Result<Vec<(String, String)>> {
     use std::io::Write;
     use std::process::Stdio;
 
@@ -1868,13 +1917,11 @@ pub fn missing_objects<'a>(
 
     // One answer line per query line, in order. A resolvable revision answers
     // with its object; anything else names why it could not be resolved.
-    let mut missing = Vec::new();
-    for (revision, answer) in revisions.iter().zip(&answers) {
-        if answer.ends_with(" missing") || answer.ends_with(" ambiguous") {
-            missing.push((*revision).to_string());
-        }
-    }
-    Ok(missing)
+    Ok(revisions
+        .into_iter()
+        .map(str::to_string)
+        .zip(answers)
+        .collect())
 }
 
 pub fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> Result<bool> {

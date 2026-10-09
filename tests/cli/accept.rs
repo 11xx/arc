@@ -992,8 +992,24 @@ fn assert_pending_signing_effects(d: &Delivery, result: &serde_json::Value, appl
             assert_eq!(observed["after"], moved["new"]);
         }
     }
+    // The commits the rewrite replaces are held in the same transaction, so
+    // the refs that hold them are effects of it too.
+    let retained = pending["retained"].as_object().unwrap();
+    assert!(!retained.is_empty());
+    for (name, commit) in retained {
+        if applied {
+            let actual = git_out(&d.receiver.root, &["rev-parse", name]);
+            assert_eq!(&actual, commit.as_str().unwrap());
+            assert_eq!(effects["pending_rewrite"]["ref_states"][name], actual);
+        } else {
+            assert!(effects["pending_rewrite"]["ref_states"][name].is_null());
+        }
+    }
     if applied {
-        assert_eq!(effects["refs"].as_array().unwrap().len(), refs.len());
+        assert_eq!(
+            effects["refs"].as_array().unwrap().len(),
+            refs.len() + retained.len()
+        );
     } else {
         assert!(effects["refs"].as_array().unwrap().is_empty());
     }

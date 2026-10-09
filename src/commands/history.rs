@@ -6,6 +6,9 @@ use crate::rewrite::{parse_commit_map, RewriteMap};
 
 /// Record a rewrite performed elsewhere, from a supplied commit map. The
 /// ledger is annotated rather than migrated: nothing already written changes.
+/// The commits the ledger cites that the map replaces are held by retention
+/// refs while they are still here, since the tool that rewrote the history
+/// has already moved what held them.
 pub fn record_rewrite(ctx: &Ctx, map: &str, reason: String, tool: Option<String>) -> Result<()> {
     let text = if map == "-" {
         let mut buf = String::new();
@@ -38,9 +41,29 @@ pub fn record_mapping(
     // arriving in a bundle build the same map, and it is judged as a whole.
     let _repository_events = store.lock_repository_events()?;
     let count = mapping.len();
-    let event = prepare_mapping(ctx, &store, mapping, reason, tool, refs)?;
-    store.append_repository_event(&event)?;
+    let retention = crate::retention::plan(&ctx.cwd, &store, &mapping, &refs)?;
+    let event = prepare_mapping(
+        ctx,
+        &store,
+        mapping,
+        reason,
+        tool,
+        refs,
+        retention.retain.clone(),
+    )?;
+    // Held before the map is recorded, and released again if recording
+    // fails: a rewrite that did not happen must not leave refs saying it did.
+    let (held, _) = crate::retention::creations(&ctx.cwd, &retention.retain)?;
+    gitio::update_refs(&ctx.cwd, &held)?;
+    if let Err(error) = store.append_repository_event(&event) {
+        let _ = gitio::update_refs(&ctx.cwd, &crate::retention::withdrawals(&held));
+        return Err(error);
+    }
     println!("history rewrite recorded: {count} revisions");
+    for (name, commit) in &retention.retain {
+        println!("retained: {name} {commit}");
+    }
+    super::rewrite::report_unretained(&retention.gone);
     Ok(event.event_id)
 }
 
@@ -53,6 +76,7 @@ pub(super) fn prepare_mapping(
     reason: String,
     tool: Option<String>,
     refs: BTreeMap<String, crate::rewrite::RefMove>,
+    retained: BTreeMap<String, String>,
 ) -> Result<crate::model::Event> {
     // A map from another repository, or with a typo in it, would otherwise be
     // recorded as fact: doctor would report a rewritten revision and suppress
@@ -93,6 +117,7 @@ pub(super) fn prepare_mapping(
             tool,
             signature_only: Vec::new(),
             refs,
+            retained,
         },
     )?;
     combined.push(event.clone());
