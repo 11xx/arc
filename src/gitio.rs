@@ -1787,22 +1787,25 @@ pub fn absent_oid(like: &str) -> String {
 /// than the whole of it. Every candidate has to be a commit this repository
 /// holds; [`commits_among`] says which are.
 pub fn unreachable_from_refs(cwd: &Path, commits: &[&str]) -> Result<BTreeSet<String>> {
-    let candidates: BTreeSet<&str> = commits.iter().copied().collect();
-    let mut unreachable = BTreeSet::new();
-    // Argument length bounds a single walk, so a long ledger is asked in
-    // slices. Each slice's answer is independent of the others.
-    for slice in commits.chunks(1000) {
-        let mut args = vec!["rev-list"];
-        args.extend(slice.iter().copied());
-        args.extend(["--not", "--all"]);
-        unreachable.extend(
-            git(cwd, &args)?
-                .lines()
-                .filter(|line| candidates.contains(line))
-                .map(str::to_string),
-        );
+    if commits.is_empty() {
+        return Ok(BTreeSet::new());
     }
-    Ok(unreachable)
+    let candidates: BTreeSet<&str> = commits.iter().copied().collect();
+    // Stdin keeps a long ledger independent of the process argument limit.
+    let input = commits
+        .iter()
+        .map(|commit| format!("{commit}\n"))
+        .collect::<String>();
+    let out = git_piped(
+        cwd,
+        &["rev-list", "--stdin", "--not", "--all"],
+        input.as_bytes(),
+    )?;
+    Ok(String::from_utf8(out)?
+        .lines()
+        .filter(|line| candidates.contains(line))
+        .map(str::to_string)
+        .collect())
 }
 
 /// Every object reachable from a revision.
