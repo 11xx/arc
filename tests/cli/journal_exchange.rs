@@ -444,6 +444,168 @@ fn a_mixed_bundle_admits_known_artifacts_and_retries_held_back_artifacts() {
 }
 
 #[test]
+fn partial_retries_deduplicate_a_delivery_rejected_after_a_local_answer() {
+    let source = Repo::new();
+    let recipient = Repo::new();
+    pair(&source, &recipient, "origin", "peer");
+    let file = write_artifact(
+        &source,
+        "shared-question",
+        "discussion",
+        "# Shared question\n",
+    );
+    source
+        .arc(&source.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "closing",
+            "--option",
+            "yes",
+            "--option",
+            "no",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Proceed?\n")
+        .assert()
+        .success();
+    let question = events_for(&journal_dir(&source), &file)
+        .into_iter()
+        .find(|event| event["event"] == "question")
+        .unwrap()["question_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let initial = bundle_file(&source, "initial-question");
+    export(&source, &[&file], &initial);
+    assert!(import(&recipient, &initial, false).status.success());
+    recipient
+        .arc(&recipient.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &question,
+            "--option",
+            "yes",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Proceed.\n")
+        .assert()
+        .success();
+    source
+        .arc(&source.root)
+        .args([
+            "journal",
+            "delivered",
+            &file,
+            "--question",
+            &question,
+            "--to",
+            "person",
+        ])
+        .assert()
+        .success();
+    let held = write_artifact(&source, "future-artifact", "todo", "# Future artifact\n");
+    let path = bundle_file(&source, "partial-question");
+    export(&source, &[&file, &held], &path);
+    let mut bundle: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let artifact = bundle["artifacts"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|artifact| artifact["file"] == held)
+        .unwrap();
+    artifact["events"][0]["event"] = "future-observation".into();
+    artifact["events"][0]["schema"] = "journal-events/99".into();
+    rewrite_bundle_checksum(&mut bundle);
+    fs::write(&path, serde_json::to_vec_pretty(&bundle).unwrap()).unwrap();
+    let first = import(&recipient, &path, false);
+    assert!(first.status.success(), "{first:?}");
+    assert!(
+        String::from_utf8_lossy(&first.stdout).contains("events: 1 imported"),
+        "{first:?}"
+    );
+    let dir = journal_dir(&recipient);
+    let before = journal_events_dir(&dir);
+    assert_eq!(
+        events_for(&dir, &file)
+            .iter()
+            .filter(|event| event["event"] == "question-delivered")
+            .count(),
+        1
+    );
+    // The physical delivery survives even though question replay rejects it.
+    let questions = json_stdout(recipient.arc(&recipient.root).args([
+        "journal",
+        "discussion",
+        &file,
+        "--json",
+    ]));
+    assert_eq!(questions["questions"][0]["delivery"], "answered");
+    assert!(questions["questions"][0]["deliveries"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let receipt = fs::read_dir(dir.join("exchange/imports"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            let value: serde_json::Value =
+                serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            value["artifacts"][0]["events"] == 1
+        })
+        .unwrap();
+    let receipt_before: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
+    for dry_run in [true, false, false] {
+        let retry = import(&recipient, &path, dry_run);
+        assert!(retry.status.success(), "{retry:?}");
+        let output = String::from_utf8_lossy(&retry.stdout);
+        assert!(output.contains(&format!("held back: {held}")), "{output}");
+        let expected = if dry_run {
+            "and 0 event(s)"
+        } else {
+            "events: 0 imported"
+        };
+        assert!(output.contains(expected), "{output}");
+        assert_eq!(journal_events_dir(&dir), before);
+        let receipt_after: serde_json::Value =
+            serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
+        assert_eq!(receipt_after["artifacts"], receipt_before["artifacts"]);
+        assert!(!dir.join(&held).exists());
+    }
+}
+
+#[test]
+fn journal_bundle_guide_and_help_describe_artifact_admission() {
+    let repo = Repo::new();
+    let normalize = |text: String| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let guide = normalize(stdout(&mut repo.arc(&repo.root)));
+    let schemas = guide.split("SCHEMAS").last().unwrap();
+    assert!(!schemas.contains("an import refuses a bundle carrying one"));
+    assert!(schemas.contains("journal import holds back each artifact carrying an unsupported event and its dependents"), "{schemas}");
+    let help = normalize(stdout(
+        repo.arc(&repo.root).args(["journal", "import", "--help"]),
+    ));
+    assert!(help.contains("Artifacts carrying unsupported events are held back as a unit"));
+    assert!(help.contains("their dependent artifacts are held back too"));
+    for text in [&guide, &help] {
+        assert!(
+            text.contains(
+                "Deduplication includes understood physical log records rejected by state replay"
+            ),
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn a_partial_receipt_allows_the_remaining_artifact_to_be_admitted() {
     let source = Repo::new();
     let recipient = Repo::new();

@@ -1334,6 +1334,8 @@ pub enum JournalCmd {
     /// with the event kind and schema; their dependent artifacts are held back
     /// too. Admitted artifacts retain their provenance. Receipts cover only
     /// admitted artifacts, so held-back artifacts are retried on every import.
+    /// Deduplication includes understood physical log records rejected by
+    /// state replay.
     /// Events replay at their receiving append positions.
     /// A completely admitted bundle changes nothing on a repeated import.
     /// Interrupted writes retain a prepared transaction; an import completes
@@ -2056,11 +2058,12 @@ fn import_artifacts(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
         let _events = lock_journal_file_for_exchange(&hot, JOURNAL_EVENTS_LOCK, "events")?;
         finish_exchange_transaction(&hot)?;
     }
-    let local_events = read_events(&hot)?;
+    let local_records = read_understood_records(&hot)?;
     let mut held = BTreeSet::new();
-    for event in &local_events {
+    for event in &local_records {
         held.insert(serde_json::to_vec(event)?);
     }
+    let local_events = replay_events(local_records);
     let now = Utc::now();
     let mut plan = Vec::with_capacity(bundle.artifacts.len());
     for artifact in &bundle.artifacts {
@@ -9168,6 +9171,11 @@ fn parse_lane_marker(message: &str) -> Option<LaneMarker> {
 
 /// Replay understood events in the order the append lock published them.
 pub(crate) fn read_events(dir: &Path) -> Result<Vec<JournalEvent>> {
+    Ok(replay_events(read_understood_records(dir)?))
+}
+
+/// Understood physical records include events that state replay rejects.
+fn read_understood_records(dir: &Path) -> Result<Vec<JournalEvent>> {
     let mut events = Vec::new();
     let jsonl = dir.join("events.jsonl");
     if jsonl.is_file() {
@@ -9181,11 +9189,15 @@ pub(crate) fn read_events(dir: &Path) -> Result<Vec<JournalEvent>> {
             event.known().then_some(event)
         }));
     }
+    Ok(events)
+}
+
+fn replay_events(events: Vec<JournalEvent>) -> Vec<JournalEvent> {
     let mut machine = QuestionMachine::default();
-    Ok(events
+    events
         .into_iter()
         .filter(|event| machine.accept(event))
-        .collect())
+        .collect()
 }
 
 fn event_message(event: &JournalEvent) -> String {

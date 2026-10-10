@@ -1433,6 +1433,8 @@ PAIR REPLICA STORES
   reference a held-back artifact are held back too, retaining the reference
   closure. Other artifacts are admitted. A receipt covers only admitted
   artifacts; every import retries the held-back artifacts.
+  Deduplication includes understood physical log records rejected by state
+  replay.
   Storage tiers must agree for a held artifact. Appended sections are keyed
   by their recorded event identities. Each answer append has its own identity,
   including answers to reopened questions that repeat a choice. A prefix
@@ -2935,8 +2937,9 @@ SCHEMAS
   `unknown` in either reads as absent. A journal bundle and a journal spool
   (`arc-journal-spool/1` or current) carry events of either version. A reader
   of an older version skips an event it does not know, `journal doctor`
-  reports that event as `unknown-jsonl-event`, and an import refuses a bundle
-  carrying one.
+  reports that event as `unknown-jsonl-event`, and journal import holds back
+  each artifact carrying an unsupported event and its dependents while
+  admitting unrelated understood artifacts.
 
   Private successor preparation uses complete Markdown at
   `.transitions/<successor>`, retained until source retirement. These files
