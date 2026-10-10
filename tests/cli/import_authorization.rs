@@ -1947,22 +1947,8 @@ fn imported_findings_replay_after_receiver_integration_and_trust_revocation() {
     );
 }
 
-/// How many times one command derived the privilege scope, and what it printed.
-fn derivations(receiver: &Repo, args: &[&str]) -> (usize, String) {
-    let marker = receiver.home.join("scope-derived");
-    let _ = fs::remove_file(&marker);
-    let output = stdout(
-        receiver
-            .arc(&receiver.root)
-            .env("ARC_SCOPE_COMPUTED", &marker)
-            .args(args),
-    );
-    let derived = fs::read(&marker).map_or(0, |bytes| bytes.len());
-    (derived, output)
-}
-
 #[test]
-fn an_aggregate_read_derives_the_privilege_scope_once() {
+fn aggregate_reads_preserve_imported_authorization() {
     let (source, path, bundle) = exported_review();
     let receiver = Repo::new();
     deliver_git_objects(&source, &receiver);
@@ -1975,23 +1961,15 @@ fn an_aggregate_read_derives_the_privilege_scope_once() {
     received(&receiver, &path, false).assert().success();
     let imported = bundle["change_id"].as_str().unwrap();
 
-    let (derived, listing) = derivations(&receiver, &["list"]);
-    assert_eq!(derived, 1, "{listing}");
-    let unmeasured = stdout(receiver.arc(&receiver.root).args(["list"]));
-    assert_eq!(listing, unmeasured, "the hook leaves the output untouched");
+    let listing = stdout(receiver.arc(&receiver.root).args(["list"]));
     for slug in local {
         assert!(listing.contains(slug), "{slug} missing from:\n{listing}");
     }
     assert!(listing.contains(imported), "{listing}");
 
-    let (derived, output) = derivations(&receiver, &["list", "--json"]);
-    assert_eq!(derived, 1, "{output}");
-    // These read the ledger twice, once to select changes and once to read
-    // them, and each read derives the scope once however many changes the
-    // ledger holds.
+    stdout(receiver.arc(&receiver.root).args(["list", "--json"]));
     for args in [vec!["stats"], vec!["doctor"]] {
-        let (derived, output) = derivations(&receiver, &args);
-        assert!(derived <= 2, "{args:?} derived {derived} times:\n{output}");
+        stdout(receiver.arc(&receiver.root).args(&args));
     }
 
     // The admission still holds for the imported change.
@@ -2001,4 +1979,39 @@ fn an_aggregate_read_derives_the_privilege_scope_once() {
         "{state}"
     );
     assert_eq!(state["has_valid_approval"], false, "{state}");
+}
+
+#[test]
+fn production_scope_reads_never_write_instrumentation_paths() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "read-boundary"]));
+    let ledger = repo.root.join(".git/arc/config.json");
+    let original = fs::read(&ledger).unwrap();
+    for args in [
+        vec!["list"],
+        vec!["list", "--json"],
+        vec!["stats"],
+        vec!["doctor"],
+        vec!["show", "read-boundary", "--json"],
+        vec!["status", "read-boundary", "--json"],
+    ] {
+        stdout(
+            repo.arc(&repo.root)
+                .env_remove("ARC_ACTOR")
+                .env("ARC_SCOPE_COMPUTED", &ledger)
+                .args(&args),
+        );
+        assert_eq!(
+            fs::read(&ledger).unwrap(),
+            original,
+            "{args:?} modified the ledger"
+        );
+    }
+    let absent = repo.home.join("diagnostic-marker");
+    stdout(
+        repo.arc(&repo.root)
+            .env("ARC_SCOPE_COMPUTED", &absent)
+            .args(["list"]),
+    );
+    assert!(!absent.exists());
 }

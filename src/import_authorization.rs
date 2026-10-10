@@ -492,21 +492,10 @@ enum EventHolder {
     Repository,
 }
 
-/// Records one derivation of the scope for the test suite, which reads how
-/// many a command made. `ARC_SCOPE_COMPUTED` names a file that gains one byte
-/// per derivation. Unset, which is every run that is not a test, this does
-/// nothing.
+/// Count scope derivations within the unit-test thread.
+#[cfg(test)]
 fn note_scope_derived() {
-    #[cfg(test)]
     DERIVATIONS.with(|count| count.set(count.get() + 1));
-    if let Some(path) = std::env::var_os("ARC_SCOPE_COMPUTED") {
-        use std::io::Write;
-        let _ = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .and_then(|mut file| file.write_all(b"."));
-    }
 }
 
 #[cfg(test)]
@@ -603,6 +592,7 @@ impl PrivilegeScope {
     /// to the bytes it admitted is computed for those events alone. The cost
     /// grows with the admissions, not with the ledger.
     pub fn for_store(store: &crate::store::Store) -> Result<Self> {
+        #[cfg(test)]
         note_scope_derived();
         let policy = match &store.operator_policy_path {
             Some(path) => crate::policy::replica_at(path)?,

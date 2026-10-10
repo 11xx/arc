@@ -60,8 +60,8 @@ SAY WHO YOU ARE (before the first write)
   afresh before each member's preparation and landing. An unparseable append
   policy refuses the command. These commands record nothing, in any form or flag:
 {READ_ONLY_COMMANDS}
-  They read the ledger through a handle that never parses that policy and
-  refuses any append. Entries name complete leaf paths. Output files,
+  They read the ledger through a handle that never parses that policy,
+  refuses any append, and leaves ledger files byte-identical. Entries name complete leaf paths. Output files,
   generated manuals, hook commands and writability probes retain their
   declared effects. Policy inspection parses the policy it reports.
   `config` parses its style inputs, including repository policy.
