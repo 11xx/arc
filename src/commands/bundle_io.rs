@@ -214,19 +214,6 @@ pub(super) fn import_validated_guarded(
         println!("aborted: no events or refs written");
         return Ok(crate::model::OperationResult::unpublished(1));
     }
-    if let Some(store) = &local_store {
-        if let Some(contest) = claim_contest_for_import(store, validated, &preflight.new_events)? {
-            println!("{}", contest.render(&validated.bundle.change_id));
-            println!("aborted: no events or refs written");
-            return Ok(crate::model::OperationResult::unpublished(1));
-        }
-    }
-    validate_import_candidate(
-        &ctx.cwd,
-        local_store.as_ref(),
-        validated,
-        &preflight.new_events,
-    )?;
     let repository = plan_repository_events(&ctx.cwd, local_store.as_ref(), validated)?;
     let initial_authorization = authorize_import(
         ctx,
@@ -239,6 +226,28 @@ pub(super) fn import_validated_guarded(
         publisher,
         received_sha256,
     )?;
+    let rewrites = admitted_rewrites(
+        local_store.as_ref(),
+        &repository,
+        initial_authorization.as_ref(),
+    )?;
+    validated.validate_replay(&rewrites)?;
+    if let Some(store) = &local_store {
+        if let Some(contest) =
+            claim_contest_for_import(store, validated, &preflight.new_events, &rewrites)?
+        {
+            println!("{}", contest.render(&validated.bundle.change_id));
+            println!("aborted: no events or refs written");
+            return Ok(crate::model::OperationResult::unpublished(1));
+        }
+    }
+    validate_import_candidate(
+        local_store.as_ref(),
+        validated,
+        &preflight.new_events,
+        &repository,
+        &rewrites,
+    )?;
 
     if dry_run {
         let plan = classify_import_events(&root, validated)?;
@@ -246,10 +255,17 @@ pub(super) fn import_validated_guarded(
         if plan.conflicts.is_empty() {
             let store = local_store.as_ref();
             if let Some(store) = store {
-                claim_contest = claim_contest_for_import(store, validated, &plan.new_events)?;
+                claim_contest =
+                    claim_contest_for_import(store, validated, &plan.new_events, &rewrites)?;
             }
             if claim_contest.is_none() {
-                validate_import_candidate(&ctx.cwd, store, validated, &plan.new_events)?;
+                validate_import_candidate(
+                    store,
+                    validated,
+                    &plan.new_events,
+                    &repository,
+                    &rewrites,
+                )?;
             }
             // The same refusals the import makes: a preflight that reports
             // success for a bundle the real path rejects is believed, and
@@ -321,12 +337,18 @@ pub(super) fn import_validated_guarded(
     // local transition could land between validation and the raw appends.
     let plan = classify_import_events(&root, validated)?;
     let claim_contest = if plan.conflicts.is_empty() {
-        claim_contest_for_import(&store, validated, &plan.new_events)?
+        claim_contest_for_import(&store, validated, &plan.new_events, &rewrites)?
     } else {
         None
     };
     if plan.conflicts.is_empty() && claim_contest.is_none() {
-        validate_import_candidate(&ctx.cwd, Some(&store), validated, &plan.new_events)?;
+        validate_import_candidate(
+            Some(&store),
+            validated,
+            &plan.new_events,
+            &repository,
+            &rewrites,
+        )?;
     }
 
     print_import_report(
@@ -393,6 +415,21 @@ pub(super) fn import_validated_guarded(
         &incoming,
         publisher,
         received_sha256,
+    )?;
+    let rewrites = admitted_rewrites(Some(&store), &incoming, authorization.as_ref())?;
+    validated.validate_replay(&rewrites)?;
+    if let Some(contest) = claim_contest_for_import(&store, validated, &plan.new_events, &rewrites)?
+    {
+        println!("{}", contest.render(&validated.bundle.change_id));
+        println!("aborted: no events or refs written");
+        return Ok(crate::model::OperationResult::unpublished(1));
+    }
+    validate_import_candidate(
+        Some(&store),
+        validated,
+        &plan.new_events,
+        &incoming,
+        &rewrites,
     )?;
     ctx.ensure_declared_actor(&store)?;
     let rewrites = incoming.len();
@@ -602,19 +639,81 @@ fn claim_contest_for_import(
     store: &Store,
     validated: &ValidatedBundle,
     new_event_ids: &[String],
+    rewrites: &crate::rewrite::RewriteMap,
 ) -> Result<Option<crate::replica::ClaimContest>> {
-    let incoming = validated
+    let mut incoming = validated
         .events
         .iter()
         .filter_map(|event| event.typed.clone())
         .collect::<Vec<_>>();
+    if let Some(prefix) = &validated.bundle.since {
+        for (_, value) in store
+            .raw_events(&validated.bundle.change_id)?
+            .into_iter()
+            .take(prefix.event_count)
+        {
+            if let Some(event) = crate::bundle::parse_typed_event(&value)? {
+                incoming.push(event);
+            }
+        }
+    }
     let new_event_ids = new_event_ids.iter().cloned().collect::<BTreeSet<_>>();
     crate::replica::live_claim_contest(
         store,
         &validated.bundle.change_id,
         &incoming,
         &new_event_ids,
+        rewrites,
     )
+}
+
+fn combined_repository_events(
+    store: Option<&Store>,
+    incoming: &BTreeMap<String, Vec<u8>>,
+) -> Result<Vec<Event>> {
+    let mut events = store
+        .map(Store::load_repository_events)
+        .transpose()?
+        .unwrap_or_default();
+    for bytes in incoming.values() {
+        events.push(serde_json::from_slice(bytes)?);
+    }
+    events.sort_by(|a, b| a.event_id.cmp(&b.event_id));
+    Ok(events)
+}
+
+/// Stored assertions require bound admission; introduced assertions require
+/// the authorization this publication will record. Legacy transport grants
+/// no rewrite capability for falsification identity.
+fn admitted_rewrites(
+    store: Option<&Store>,
+    incoming: &BTreeMap<String, Vec<u8>>,
+    authorization: Option<&crate::import_authorization::ImportAuthorization>,
+) -> Result<crate::rewrite::RewriteMap> {
+    let events = combined_repository_events(store, incoming)?;
+    let scope = store.map(Store::privilege_scope).transpose()?;
+    crate::rewrite::RewriteMap::from_permitted_events(events.iter(), |event| {
+        if incoming.contains_key(&event.event_id) {
+            authorization.is_some_and(|authorization| {
+                authorization.events.iter().any(|receipt| {
+                    receipt.event_id == event.event_id
+                        && receipt.scope == "repository"
+                        && receipt.origin_replica_id == event.repository_id
+                        && receipt
+                            .authorized_roles
+                            .contains(&crate::import_authorization::Role::Rewrite)
+                })
+            })
+        } else {
+            scope.as_ref().is_some_and(|scope| {
+                scope.permits(
+                    &event.event_id,
+                    &event.repository_id,
+                    crate::import_authorization::Role::Rewrite,
+                )
+            })
+        }
+    })
 }
 
 /// The repository events an import would write, refusing every contradiction
@@ -765,10 +864,11 @@ fn classify_import_events(root: &Path, validated: &ValidatedBundle) -> Result<Im
 /// stand on its own — otherwise a dry run against a fresh destination reports
 /// success for an import that will fail.
 fn validate_import_candidate(
-    cwd: &Path,
     store: Option<&Store>,
     validated: &ValidatedBundle,
     new_events: &[String],
+    repository: &BTreeMap<String, Vec<u8>>,
+    rewrites: &crate::rewrite::RewriteMap,
 ) -> Result<()> {
     let mut candidate = Vec::new();
     if let Some(store) = store {
@@ -793,22 +893,9 @@ fn validate_import_candidate(
             .filter_map(|event| event.typed.clone()),
     );
     candidate.sort_by(|a, b| a.event_id.cmp(&b.event_id));
-    let mut projected = state::reduce(&candidate)
+    let mut projected = state::reduce_with_rewrites(&candidate, rewrites)
         .context("combined local and bundled known events are not replayable")?;
-    let mut repository_events = store
-        .map(Store::load_repository_events)
-        .transpose()?
-        .unwrap_or_default();
-    let held: BTreeSet<_> = repository_events
-        .iter()
-        .map(|event| event.event_id.clone())
-        .collect();
-    for bytes in plan_repository_events(cwd, store, validated)?.values() {
-        let event: Event = serde_json::from_slice(bytes)?;
-        if !held.contains(&event.event_id) {
-            repository_events.push(event);
-        }
-    }
+    let repository_events = combined_repository_events(store, repository)?;
     projected.follow_rewrites(&crate::rewrite::RewriteMap::from_events(
         repository_events.iter(),
     )?)?;

@@ -38,29 +38,9 @@ struct Report {
 struct ChangeInspection<'a> {
     cwd: &'a Path,
     local_repository_id: &'a str,
-    /// Derived on the first change that needs it and shared by the rest: the
-    /// inspection only reads, so every change is judged by one scope.
-    scope: std::cell::RefCell<
-        Option<Option<std::sync::Arc<crate::import_authorization::PrivilegeScope>>>,
-    >,
-}
-
-impl ChangeInspection<'_> {
-    /// The scope of the store at `root`, or none when there is no store.
-    fn scope(
-        &self,
-        root: &Path,
-    ) -> Result<Option<std::sync::Arc<crate::import_authorization::PrivilegeScope>>> {
-        if let Some(held) = self.scope.borrow().as_ref() {
-            return Ok(held.clone());
-        }
-        let derived = match Store::open_at_for(root, self.cwd)? {
-            Some(store) => Some(store.privilege_scope()?),
-            None => None,
-        };
-        *self.scope.borrow_mut() = Some(derived.clone());
-        Ok(derived)
-    }
+    rewrites: crate::rewrite::RewriteMap,
+    /// Every inspected change shares the receiver permissions of this read.
+    scope: std::sync::Arc<crate::import_authorization::PrivilegeScope>,
 }
 
 /// Where this invocation reads and writes. Every other diagnostic here is a
@@ -131,11 +111,27 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
 
     let mut states = BTreeMap::new();
     let mut known_patchsets = BTreeMap::<String, Vec<String>>::new();
+    let store = ctx.store()?;
+    let scope = store.privilege_scope()?;
+    // Repository diagnostics report unreadable maps independently of changes.
+    let rewrites = store
+        .load_repository_events()
+        .and_then(|events| {
+            crate::rewrite::RewriteMap::from_permitted_events(events.iter(), |event| {
+                scope.permits(
+                    &event.event_id,
+                    &event.repository_id,
+                    crate::import_authorization::Role::Rewrite,
+                )
+            })
+        })
+        .unwrap_or_default();
     inspect_changes(
         ChangeInspection {
             cwd: &ctx.cwd,
             local_repository_id: &local_repository_id,
-            scope: Default::default(),
+            rewrites,
+            scope,
         },
         &root,
         &mut problems,
@@ -147,7 +143,6 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     // reported as the problem it is, not surface as a fatal error inside
     // whatever happened to read it first — which is what doctor exists to
     // prevent for every other kind of event.
-    let store = ctx.store()?;
     let unfinished_provisional_integrations =
         match super::provisional::pending_transitions(&ctx.cwd, &store) {
             Ok(transitions) => {
@@ -539,12 +534,9 @@ fn inspect_change(
         });
         return Ok(());
     }
-    // Deliberately the unresolved reduction. Doctor's job includes reporting
-    // which recorded revisions no longer resolve, and a view that had already
-    // followed them forward would have nothing left to report. A failure here
-    // is structural, never a dangling revision, and no reader can load the
-    // change.
-    let mut state = match state::reduce(&events) {
+    // Recorded revisions remain unresolved for dangling-object diagnostics;
+    // admitted rewrites prove only the falsification's failure identity.
+    let mut state = match state::reduce_with_rewrites(&events, &inspection.rewrites) {
         Ok(state) => state,
         Err(error) => {
             problems.push(Finding {
@@ -554,11 +546,7 @@ fn inspect_change(
             return Ok(());
         }
     };
-    if let Some(root) = change_dir.parent().and_then(Path::parent) {
-        if let Some(scope) = inspection.scope(root)? {
-            state.apply_privilege_scope(scope, &events);
-        }
-    }
+    state.apply_privilege_scope(std::sync::Arc::clone(&inspection.scope), &events);
     crate::replica::localize_change(inspection.local_repository_id, &events, &mut state);
     if state.closure.is_none() && !gitio::branch_exists(inspection.cwd, &state.branch) {
         advice.push(Finding {

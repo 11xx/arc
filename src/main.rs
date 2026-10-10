@@ -1106,6 +1106,10 @@ enum Cmd {
     /// A rewrite event's retention refs are held under `refs/arc/retained/`
     /// for the imported change where the commit is here; a name that is no
     /// retention ref is refused, and events naming none import unchanged.
+    /// A projected falsification revision requires an active, uncontradicted
+    /// rewrite admitted with rewrite authority. Legacy transport without an
+    /// authorization receipt supplies no such identity proof. Full and delta
+    /// histories replay with the same admitted proof before publication.
     /// Paired stores and receivers with enrollments require a transport-asserted
     /// publisher and exact received-byte SHA256. Operator enrollment authorizes
     /// each introduced origin and capability; actor strings remain claims.
@@ -2278,7 +2282,9 @@ enum Cmd {
     /// A failed reachability walk is the problem `retention-reachability-failed`;
     /// the report retains all findings collected before that failure.
     /// A change whose events fail to reduce is the problem `unreplayable-change`,
-    /// naming the change with the reduction error; no reader can load it.
+    /// naming the change with the reduction error. Admitted active rewrites
+    /// prove falsification identity without advancing recorded revisions;
+    /// dangling revision diagnostics still inspect the recorded objects.
     ///
     /// Exits 0 when the ledger is clean or carries only advice, and 1 when it
     /// reports a problem. A ledger that cannot be read at all also exits 1,

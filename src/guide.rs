@@ -723,6 +723,14 @@ RUN A CHANGE
   import holds each one it names for the imported change under
   `refs/arc/retained/` when the commit is here, and refuses a name that is no
   retention ref. Bundles whose rewrite events name none import unchanged.
+  Full and delta histories use active, uncontradicted rewrites admitted with
+  rewrite authority to prove a falsification's failure identity. A publisher
+  lacking rewrite authority is refused; legacy transport without an
+  authorization receipt supplies no such proof. Absent, withdrawn, unrelated
+  maps and revisions that merely converge on one successor prove nothing.
+  Claim-contest replay uses the same admitted proof, or strict identity when
+  there is none. Doctor uses the store's admitted proof while leaving recorded
+  revisions unresolved for dangling-object diagnostics.
 
   arc replica id --json              Read this store's repository ID for pairing.
   arc replica init <name>             Start a logical project and hold authority.
@@ -2032,8 +2040,11 @@ HISTORY REWRITES
   by the current attempt and name the command that finishes the saved intent.
 
   Recorded revisions keep saying what they said; every derived reading follows
-  them forward, and `arc doctor` reports `unresolved-revision` where that
-  leads nowhere. A recorded revision resolves on an exact match, or on an
+  them forward. `arc doctor` inspects the recorded revisions and reports
+  `dangling-revision` for missing objects without a recorded rewrite, or
+  `unresolved-revision` when a recorded successor is missing.
+  Admitted rewrite proof can recover falsification identity without
+  advancing those revisions. A recorded revision resolves on an exact match, or on an
   abbreviation of seven hex digits or more that exactly one recorded revision
   answers; an ambiguous one is refused naming the candidates. Rewrite records
   that contradict each other make the map unreadable, which every projection

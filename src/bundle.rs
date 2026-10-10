@@ -378,17 +378,6 @@ impl Bundle {
             });
         }
 
-        let typed_events = events
-            .iter()
-            .filter_map(|event| event.typed.clone())
-            .collect::<Vec<_>>();
-        // A full bundle is a complete ledger and replays on its own. A delta
-        // bundle begins mid-history, so its replay is judged at import
-        // against the prefix the receiving store holds.
-        if bundle.since.is_none() {
-            state::reduce(&typed_events).context("bundled known events are not replayable")?;
-        }
-
         Ok(ValidatedBundle {
             bundle,
             events,
@@ -585,6 +574,27 @@ pub struct ValidatedBundle {
     pub events: Vec<ValidatedEvent>,
     pub patchsets: Vec<PatchsetObject>,
     pub unknown_event_types: Vec<(String, String)>,
+}
+
+impl ValidatedBundle {
+    /// A full history replays with the receiver's admitted identity proof.
+    /// Delta histories require the receiver's prefix and replay at import.
+    pub fn validate_replay(&self, rewrites: &crate::rewrite::RewriteMap) -> Result<()> {
+        if self.bundle.since.is_none() {
+            let events = self
+                .events
+                .iter()
+                .filter_map(|event| event.typed.clone())
+                .collect::<Vec<_>>();
+            let replay = if rewrites.is_empty() {
+                state::reduce(&events)
+            } else {
+                state::reduce_with_rewrites(&events, rewrites)
+            };
+            replay.context("bundled known events are not replayable")?;
+        }
+        Ok(())
+    }
 }
 
 pub struct ValidatedEvent {

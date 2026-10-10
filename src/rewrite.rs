@@ -141,12 +141,28 @@ impl RewriteMap {
     /// here — two events with different IDs can still disagree about one
     /// revision, which no per-event check can see.
     pub fn from_events<'a>(events: impl Iterator<Item = &'a crate::model::Event>) -> Result<Self> {
+        Self::from_permitted_events(events, |_| true)
+    }
+
+    /// Only permitted rewrite assertions supply identity proof. Withdrawal
+    /// targets are checked against all held facts, including unadmitted maps.
+    pub fn from_permitted_events<'a>(
+        events: impl Iterator<Item = &'a crate::model::Event>,
+        permits: impl Fn(&crate::model::Event) -> bool,
+    ) -> Result<Self> {
         let events: Vec<_> = events.collect();
-        let withdrawn = withdrawn_event_ids(&events)?;
+        let active_withdrawals: Vec<_> = events
+            .iter()
+            .copied()
+            .filter(|event| {
+                !matches!(event.payload, Payload::HistoryRewriteWithdrawn { .. }) || permits(event)
+            })
+            .collect();
+        let withdrawn = withdrawn_event_ids(&active_withdrawals)?;
         let mut steps: BTreeMap<String, Option<String>> = BTreeMap::new();
         let mut signature_only: BTreeSet<String> = BTreeSet::new();
         for event in events {
-            if withdrawn.contains(event.event_id.as_str()) {
+            if !permits(event) || withdrawn.contains(event.event_id.as_str()) {
                 continue;
             }
             if let Payload::HistoryRewritten {
