@@ -128,10 +128,12 @@ SAY WHO YOU ARE (before the first write)
   one that resolves to a recording under another id, a recording file named
   for one session that records another, and an unread subagent lineage are
   unresolved and name their reason, both ids included: a failed lookup is
-  never reported as absence, nor as the absence of subagents. Every event naming a
-  harness and session records the store's verdict, with its reason unless
-  corroborated, whether detection supplied that identity or the caller
-  declared it. An unreadable arc configuration leaves ambient detection off
+  never reported as absence, nor as the absence of subagents. An unreadable
+  Claude subagent directory or child ending leaves the model unresolved and
+  reports the read failure in `arc env` and events such as `arc begin`.
+  Every event naming a harness and session records the store's verdict,
+  with its reason unless corroborated, whether detection supplied that
+  identity or the caller declared it. An unreadable arc configuration leaves ambient detection off
   and says why on stderr. It exports the
   harness, session, and session link it establishes and explicitly unsets
   each it does not; the model is a comment and ARC_MODEL is always unset. Pi re-sets its

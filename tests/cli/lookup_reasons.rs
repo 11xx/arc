@@ -333,3 +333,41 @@ fn a_config_path_that_is_a_directory_is_not_default_settings() {
         .failure()
         .stderr(predicates::str::contains("config.toml"));
 }
+
+#[test]
+fn unreadable_claude_subagent_enumeration_names_no_parent_model() {
+    let uid = std::process::Command::new("id").arg("-u").output().unwrap();
+    assert!(uid.status.success(), "{uid:?}");
+    if String::from_utf8_lossy(&uid.stdout).trim() == "0" {
+        eprintln!("skipping unreadable subagent enumeration: root bypasses directory permissions");
+        return;
+    }
+    let repo = Repo::new();
+    let path = recording(
+        &repo,
+        &[
+            prompt("u1", "2026-01-01T10:00:00Z"),
+            assistant("a1", "2026-01-01T10:00:01Z", "high"),
+        ],
+    );
+    let children = path.with_extension("").join("subagents");
+    fs::create_dir_all(&children).unwrap();
+    fs::set_permissions(&children, fs::Permissions::from_mode(0o000)).unwrap();
+    let env = acting(&repo).arg("env").output().unwrap();
+    let begin = acting(&repo)
+        .args(["begin", "unreadable-lineage"])
+        .output()
+        .unwrap();
+    fs::set_permissions(&children, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(env.status.success(), "{env:?}");
+    assert!(begin.status.success(), "{begin:?}");
+    let output = String::from_utf8_lossy(&env.stdout);
+    let event = opened(&repo, "unreadable-lineage");
+    assert_eq!(event["session_resolution"], "unresolved", "{event}");
+    assert!(event.get("model").is_none(), "{event}");
+    assert!(
+        output.contains("subagent lineage") && output.contains("Permission denied"),
+        "{output}"
+    );
+    assert!(!output.contains("# model: m#high"), "{output}");
+}
