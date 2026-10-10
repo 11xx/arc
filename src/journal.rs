@@ -1308,7 +1308,9 @@ pub enum JournalCmd {
     /// replica. --global exports the operator journal without Git pairing.
     /// The bundle carries each artifact body, the events recorded
     /// about it, its body digest, the exporting replica, and every artifact
-    /// the selection references by filename. Exports arc-journal-bundle/2
+    /// the selection references by filename. Exports arc-journal-bundle/2.
+    /// Checksums retain event field order and opaque payload tokens, excluding
+    /// formatting whitespace.
     /// Records no events; ledger reads do not require a parseable append policy.
     Export {
         /// Artifact filenames inside the journal dir (names, not paths); the
@@ -1326,6 +1328,8 @@ pub enum JournalCmd {
     /// reopened question retain distinct append identities.
     /// Edits to the base or a shared block refuse the entire bundle, naming
     /// both digests and the first differing block. Storage tiers must agree.
+    /// Checksums retain event field order and opaque payload tokens, excluding
+    /// formatting whitespace.
     /// Artifacts carrying unsupported events are held back as a unit, reported
     /// with the event kind and schema; their dependent artifacts are held back
     /// too. Admitted artifacts retain their provenance. Receipts cover only
@@ -1878,7 +1882,7 @@ fn collect_exchange_artifacts(
         let recorded = events
             .iter()
             .filter(|event| event.file.as_deref() == Some(file.as_str()))
-            .map(serde_json::to_value)
+            .map(serde_json::value::to_raw_value)
             .collect::<Result<Vec<_>, _>>()?;
         artifacts.push(crate::journal_exchange::BundledArtifact {
             file,
@@ -2662,7 +2666,7 @@ fn stage_memory_promotion(
         storage: crate::journal_exchange::HOT_STORAGE.to_string(),
         digest: crate::journal_exchange::body_digest(&prepared.body),
         body: prepared.body.clone(),
-        events: vec![serde_json::to_value(&prepared.promoted)?],
+        events: vec![serde_json::value::to_raw_value(&prepared.promoted)?],
     };
     let current = exchange_body_digest(global, &artifact)?;
     if current

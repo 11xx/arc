@@ -316,7 +316,22 @@ fn rewrite_bundle_checksum(bundle: &mut serde_json::Value) {
     use sha2::{Digest, Sha256};
     let mut digest = Sha256::new();
     for artifact in bundle["artifacts"].as_array().unwrap() {
-        digest.update(serde_json::to_vec(artifact).unwrap());
+        #[derive(serde::Serialize)]
+        struct Artifact<'a> {
+            file: &'a serde_json::Value,
+            storage: &'a serde_json::Value,
+            body: &'a serde_json::Value,
+            digest: &'a serde_json::Value,
+            events: &'a serde_json::Value,
+        }
+        let artifact = Artifact {
+            file: &artifact["file"],
+            storage: &artifact["storage"],
+            body: &artifact["body"],
+            digest: &artifact["digest"],
+            events: &artifact["events"],
+        };
+        digest.update(serde_json::to_vec(&artifact).unwrap());
         digest.update(b"\n");
     }
     bundle["artifacts_sha256"] = hex::encode(digest.finalize()).into();
@@ -668,6 +683,7 @@ fn journal_exchange_requires_replicas_paired_with_each_other() {
     let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
     value["source_replica"]["name"] = serde_json::json!("stranger");
     value["source_replica"]["repository_id"] = serde_json::json!("01STRANGER0000000000000000");
+    rewrite_bundle_checksum(&mut value);
     fs::write(&bundle, json_file_bytes(&value)).unwrap();
     recipient
         .arc(&recipient.root)
@@ -773,6 +789,7 @@ fn previous_journal_bundles_import_without_model_provenance() {
     assert!(bundle["artifacts"][0]["events"][0]
         .get("model_source")
         .is_none());
+    rewrite_bundle_checksum(&mut bundle);
     fs::write(&path, serde_json::to_vec(&bundle).unwrap()).unwrap();
     let result = import(&recipient, &path, false);
     assert!(

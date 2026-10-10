@@ -835,3 +835,22 @@ fn split_at_prefix(events: &[Value], prefix_sha256: &str) -> Result<(usize, Vec<
     }
     Ok((event_count, events[event_count..].to_vec()))
 }
+
+#[cfg(test)]
+mod checksum_tests {
+    use super::*;
+
+    #[test]
+    fn struct_ordered_events_use_sorted_key_checksum_and_prefix() {
+        let mut events: Vec<Value> = serde_json::from_str(
+            r#"[{"schema_version":7,"event_id":"event-1","repository_id":"repo-1","payload":{"event_type":"opened","title":"Example"}}]"#,
+        ).unwrap();
+        // SHA-256 of compact, sorted-key event JSON followed by a newline.
+        let expected = "2d361771d797e82bd92ac1cd8dd1a952132fbdbada8d77a0c330917ac63cec37";
+        assert_eq!(checksum(&events).unwrap(), expected);
+        events.push(serde_json::json!({"event_id": "event-2"}));
+        let (count, suffix) = split_at_prefix(&events, expected).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(suffix, events[1..]);
+    }
+}

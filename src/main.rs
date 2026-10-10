@@ -1107,6 +1107,8 @@ enum Cmd {
         json: bool,
     },
     /// Export one change as a deterministic, versioned JSON bundle.
+    /// History checksums hash compact JSON with recursively sorted object keys
+    /// and a newline after each event, independent of stored field order.
     /// Exporter/project metadata is distinct from the preserved event origins.
     /// Includes a role-labelled Git object list derived from the exported
     /// events, including a delta's suffix and repository events. The summary

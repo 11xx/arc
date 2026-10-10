@@ -14,7 +14,8 @@ use crate::journal::{artifact_references, parse_artifact_name, ArtifactReference
 use crate::replica::{validate_identity, ReplicaIdentity};
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -36,7 +37,8 @@ pub(crate) struct BundledArtifact {
     pub(crate) digest: String,
     /// Opaque payloads retain their fields and serialization order for checksum
     /// validation even when this reader cannot understand them.
-    pub(crate) events: Vec<serde_json::Value>,
+    #[serde(deserialize_with = "deserialize_events")]
+    pub(crate) events: Vec<Box<RawValue>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,12 +75,49 @@ pub(crate) struct ImportReceipt {
     pub(crate) artifacts: Vec<ImportedArtifact>,
 }
 
+/// Formatting whitespace is excluded from bundle checksums; event tokens,
+/// including object key order and string escapes, retain their bytes.
+fn deserialize_events<'de, D>(deserializer: D) -> std::result::Result<Vec<Box<RawValue>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Vec::<Box<RawValue>>::deserialize(deserializer)?
+        .into_iter()
+        .map(|raw| {
+            let mut in_string = false;
+            let mut escaped = false;
+            let compact: String = raw
+                .get()
+                .chars()
+                .filter(|&character| {
+                    if in_string {
+                        if escaped {
+                            escaped = false;
+                        } else if character == '\\' {
+                            escaped = true;
+                        } else if character == '"' {
+                            in_string = false;
+                        }
+                        true
+                    } else if character == '"' {
+                        in_string = true;
+                        true
+                    } else {
+                        !matches!(character, ' ' | '\t' | '\r' | '\n')
+                    }
+                })
+                .collect();
+            RawValue::from_string(compact).map_err(serde::de::Error::custom)
+        })
+        .collect()
+}
+
 impl BundledArtifact {
     pub(crate) fn understood_events(&self) -> Result<Vec<JournalEvent>> {
         self.events
             .iter()
             .map(|value| {
-                let event: JournalEvent = serde_json::from_value(value.clone())?;
+                let event: JournalEvent = serde_json::from_str(value.get())?;
                 if !event.known() {
                     bail!("{} carries an unsupported journal event", self.file);
                 }
@@ -91,10 +130,12 @@ impl BundledArtifact {
         self.events
             .iter()
             .filter(|value| {
-                serde_json::from_value::<JournalEvent>((*value).clone())
+                serde_json::from_str::<JournalEvent>(value.get())
                     .map_or(true, |event| !event.known())
             })
-            .map(|value| {
+            .map(|raw| {
+                let value: serde_json::Value =
+                    serde_json::from_str(raw.get()).expect("raw journal events contain valid JSON");
                 format!(
                     "unsupported event kind {:?} in schema {:?}",
                     value["event"].as_str().unwrap_or_default(),
@@ -219,7 +260,7 @@ impl JournalBundle {
 /// does not hold.
 fn validate_references(artifact: &BundledArtifact, files: &BTreeSet<&str>) -> Result<()> {
     for event in &artifact.events {
-        let Ok(event) = serde_json::from_value::<JournalEvent>(event.clone()) else {
+        let Ok(event) = serde_json::from_str::<JournalEvent>(event.get()) else {
             continue;
         };
         if !event.known() {
@@ -269,7 +310,8 @@ fn validate_artifact(artifact: &BundledArtifact) -> Result<()> {
         );
     }
     let mut seen = BTreeSet::new();
-    for event in &artifact.events {
+    for raw in &artifact.events {
+        let event: serde_json::Value = serde_json::from_str(raw.get())?;
         if !event["event"].is_string() || !event["schema"].is_string() {
             bail!(
                 "journal bundle artifact {} carries an event without a kind or schema",
@@ -283,7 +325,7 @@ fn validate_artifact(artifact: &BundledArtifact) -> Result<()> {
                 event["file"].as_str().unwrap_or("no artifact")
             );
         }
-        if !seen.insert(serde_json::to_vec(event)?) {
+        if !seen.insert(serde_json::to_vec(&event)?) {
             bail!(
                 "journal bundle artifact {} carries a duplicate event",
                 artifact.file
@@ -466,4 +508,93 @@ pub(crate) fn merge_revision(
         merged.push_str(block.body);
     }
     Ok(merged)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn struct_ordered_legacy_bundle_validates() {
+        let bytes = br###"{
+  "schema": "arc-journal-bundle/1",
+  "project_id": "project-fixture",
+  "source_replica": {
+    "name": "origin",
+    "repository_id": "repo-fixture"
+  },
+  "artifacts_sha256": "95057253866f506d57905839db1e8c8861165a2e8b6ed414a141ddabf349a378",
+  "artifacts": [
+    {
+      "file": "20261010T120000Z-example-todo.md",
+      "storage": "hot",
+      "body": "# Example\n",
+      "digest": "sha256:8ef0b048ad51a9d2ccaf9177716d7c83159a1d8c22fd37aa2b7d03c11b21b40d",
+      "events": [
+        {
+          "schema": "journal-events/1",
+          "ts": "2026-10-10T12:00:00Z",
+          "harness": "codex",
+          "session": "fixture-session",
+          "topic": "example",
+          "event": "note",
+          "file": "20261010T120000Z-example-todo.md"
+        }
+      ]
+    }
+  ]
+}"###;
+        let bundle = JournalBundle::parse(bytes).unwrap();
+        assert_eq!(
+            serde_json::to_string(&bundle.artifacts[0].events[0]).unwrap(),
+            r###"{"schema":"journal-events/1","ts":"2026-10-10T12:00:00Z","harness":"codex","session":"fixture-session","topic":"example","event":"note","file":"20261010T120000Z-example-todo.md"}"###
+        );
+        let returned = JournalBundle::parse(&bundle.to_bytes().unwrap()).unwrap();
+        assert_eq!(bundle.digest().unwrap(), returned.digest().unwrap());
+        assert!(bundle.held_back().unwrap().is_empty());
+    }
+
+    #[test]
+    fn opaque_future_bundle_validates() {
+        let bytes = br###"{
+  "schema": "arc-journal-bundle/2",
+  "project_id": "project-fixture",
+  "source_replica": {
+    "name": "origin",
+    "repository_id": "repo-fixture"
+  },
+  "artifacts_sha256": "7911de98ac458d023ce455ca2a7e0471fa8f64b95fe7e4c7524b16bb768fff55",
+  "artifacts": [
+    {
+      "file": "20261010T120000Z-example-todo.md",
+      "storage": "hot",
+      "body": "# Example\n",
+      "digest": "sha256:8ef0b048ad51a9d2ccaf9177716d7c83159a1d8c22fd37aa2b7d03c11b21b40d",
+      "events": [
+        {
+          "schema": "journal-events/99",
+          "event": "future-observation",
+          "file": "20261010T120000Z-example-todo.md",
+          "payload": {
+            "z": "space \\\" quote and \\ slash",
+            "a": [
+              1,
+              true,
+              null
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}"###;
+        let bundle = JournalBundle::parse(bytes).unwrap();
+        assert_eq!(
+            serde_json::to_string(&bundle.artifacts[0].events[0]).unwrap(),
+            r###"{"schema":"journal-events/99","event":"future-observation","file":"20261010T120000Z-example-todo.md","payload":{"z":"space \\\" quote and \\ slash","a":[1,true,null]}}"###
+        );
+        let returned = JournalBundle::parse(&bundle.to_bytes().unwrap()).unwrap();
+        assert_eq!(bundle.digest().unwrap(), returned.digest().unwrap());
+        assert_eq!(bundle.held_back().unwrap().len(), 1);
+    }
 }

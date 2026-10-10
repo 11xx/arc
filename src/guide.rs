@@ -755,6 +755,10 @@ RUN A CHANGE
     --provenance-only                Import events despite missing objects,
                                      reporting the unavailable evidence.
 
+  Change history checksums hash compact JSON with recursively sorted object
+  keys and a newline after each event. The checksum names the same prefix
+  regardless of stored event field order.
+
   Availability checks never fetch from a promisor remote. A dry run writes
   no files, Git objects, events, or refs. The --objects-json file is an
   envelope with `schema: "arc-bundle-objects/1"` and an `objects` array.
@@ -1422,8 +1426,10 @@ PAIR REPLICA STORES
   each body, the events recorded about it, its digest, the exporting replica,
   and every artifact the selection references by filename. An import is
   all-or-nothing within each artifact: bundle integrity is validated before
-  anything is written. An artifact with an unsupported event is held back in
-  full, naming the event kind and its journal-events schema. Artifacts that
+  anything is written. Journal bundle checksums retain event field order and
+  opaque payload tokens, excluding formatting whitespace.
+  An artifact with an unsupported event is held back in full, naming the event
+  kind and its journal-events schema. Artifacts that
   reference a held-back artifact are held back too, retaining the reference
   closure. Other artifacts are admitted. A receipt covers only admitted
   artifacts; every import retries the held-back artifacts.
