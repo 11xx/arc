@@ -641,7 +641,9 @@ impl Ctx {
                 let floor = id.parse::<ulid::Ulid>().with_context(|| {
                     format!("cannot issue a local event after non-ULID history {id:?}")
                 })?;
-                ids::new_event_id_after(floor).to_string()
+                ids::new_event_id_after(floor)
+                    .with_context(|| format!("cannot issue a local event after {id:?}"))?
+                    .to_string()
             }
             None => ids::new_event_id(),
         };

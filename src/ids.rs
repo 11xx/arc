@@ -6,16 +6,37 @@ use anyhow::{bail, Result};
 /// after a recorded event also continue this one sequence.
 static LAST_EVENT_ID: std::sync::Mutex<Option<ulid::Ulid>> = std::sync::Mutex::new(None);
 
+/// The largest timestamp a ULID's 48-bit time part holds.
+const MAX_TIMESTAMP_MS: u64 = (1 << 48) - 1;
+
 pub fn new_event_id() -> String {
-    next_event_id(None).to_string()
+    // Only a sequence already at the maximum id leaves nothing later to
+    // issue; a fresh clock id is the best remaining.
+    next_event_id(None)
+        .unwrap_or_else(|_| ulid::Ulid::new())
+        .to_string()
 }
 
 /// An event id later than `previous` and than every id this process issued.
-pub fn new_event_id_after(previous: ulid::Ulid) -> ulid::Ulid {
+/// Refuses when no later id exists.
+pub fn new_event_id_after(previous: ulid::Ulid) -> Result<ulid::Ulid> {
     next_event_id(Some(previous))
 }
 
-fn next_event_id(floor: Option<ulid::Ulid>) -> ulid::Ulid {
+/// The smallest id after `floor` that is at least `candidate`. An exhausted
+/// random part moves to the next millisecond, which still sorts after the
+/// floor. None when `floor` is the last id of the last millisecond.
+fn after_floor(candidate: ulid::Ulid, floor: ulid::Ulid) -> Option<ulid::Ulid> {
+    if candidate > floor {
+        return Some(candidate);
+    }
+    floor.increment().or_else(|| {
+        let next = floor.timestamp_ms() + 1;
+        (next <= MAX_TIMESTAMP_MS).then(|| ulid::Ulid::from_parts(next, 0))
+    })
+}
+
+fn next_event_id(floor: Option<ulid::Ulid>) -> Result<ulid::Ulid> {
     let mut last = LAST_EVENT_ID
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -25,15 +46,12 @@ fn next_event_id(floor: Option<ulid::Ulid>) -> ulid::Ulid {
     };
     let candidate = ulid::Ulid::new();
     let id = match floor {
-        // An exhausted random part moves to the next millisecond, which
-        // still sorts after the floor.
-        Some(floor) if candidate <= floor => floor
-            .increment()
-            .unwrap_or_else(|| ulid::Ulid::from_parts(floor.timestamp_ms() + 1, 0)),
-        _ => candidate,
+        Some(floor) => after_floor(candidate, floor)
+            .ok_or_else(|| anyhow::anyhow!("no event id sorts after {floor}"))?,
+        None => candidate,
     };
     *last = Some(id);
-    id
+    Ok(id)
 }
 
 pub fn new_finding_id() -> String {
@@ -91,10 +109,26 @@ mod tests {
         // id moves to the following millisecond, never far ahead of the
         // clock other tests in this process read.
         let floor = ulid::Ulid::from_parts(ulid::Ulid::new().timestamp_ms(), u128::MAX >> 48);
-        let after = new_event_id_after(floor);
+        let after = new_event_id_after(floor).unwrap();
         assert!(after > floor);
         let next = new_event_id();
         assert!(next > after.to_string());
+    }
+
+    #[test]
+    fn an_exhausted_random_part_rolls_to_the_next_millisecond() {
+        let floor = ulid::Ulid::from_parts(1_000, u128::MAX >> 48);
+        let after = after_floor(ulid::Ulid::from_parts(999, 7), floor).unwrap();
+        assert_eq!(after, ulid::Ulid::from_parts(1_001, 0));
+    }
+
+    #[test]
+    fn a_floor_at_the_maximum_id_refuses_instead_of_wrapping() {
+        let max = ulid::Ulid::from_parts(u64::MAX, u128::MAX);
+        assert_eq!(after_floor(ulid::Ulid::new(), max), None);
+        assert!(new_event_id_after(max).is_err());
+        // A refusal leaves the sequence untouched.
+        assert!(new_event_id_after(ulid::Ulid::new()).is_ok());
     }
 
     #[test]
