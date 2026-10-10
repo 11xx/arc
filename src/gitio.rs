@@ -1,7 +1,7 @@
 use crate::commands::fork::is_fork_branch;
 use anyhow::{bail, Context, Result};
 use std::cell::Cell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -1051,6 +1051,26 @@ fn config_value(cwd: &Path, key: &str) -> Result<Option<String>> {
     Ok((!value.is_empty()).then_some(value))
 }
 
+/// Every Git configuration entry whose key matches `key_pattern`, as
+/// `(key, value)`. Nothing matching, or a configuration Git cannot read, is
+/// no entries.
+fn config_entries(cwd: &Path, key_pattern: &str) -> Result<Vec<(String, String)>> {
+    let mut command = git_command();
+    command
+        .args(["config", "-z", "--get-regexp", key_pattern])
+        .current_dir(cwd);
+    let out = command_output(&mut command)
+        .with_context(|| format!("failed to read git config in {}", cwd.display()))?;
+    if !out.status.success() {
+        return Ok(Vec::new());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter_map(|entry| entry.split_once('\n'))
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect())
+}
+
 /// Run a program with `input` on its standard input, answering with its
 /// standard output.
 ///
@@ -1578,6 +1598,100 @@ pub fn branch_upstream(cwd: &Path, branch: &str) -> Result<Option<(String, Strin
 pub fn branch_upstream_branch_name(cwd: &Path, branch: &str) -> Result<Option<String>> {
     Ok(config_value(cwd, &format!("branch.{branch}.merge"))?
         .and_then(|reference| reference.strip_prefix("refs/heads/").map(str::to_string)))
+}
+
+/// One remote's fetch refspecs: where its refs are written, and which of its
+/// refs a negative refspec leaves out.
+#[derive(Default)]
+struct RemoteFetch {
+    /// `(source, destination)` of each positive refspec.
+    mapped: Vec<(String, String)>,
+    /// Source patterns of the negative refspecs.
+    excluded: Vec<String>,
+}
+
+/// Every remote's `remote.<name>.fetch` refspecs, to read a remote-tracking
+/// ref back to the ref a fetch writes it from.
+pub struct FetchMap(BTreeMap<String, RemoteFetch>);
+
+impl FetchMap {
+    /// The refspecs the repository's configuration gives its remotes.
+    pub fn read(cwd: &Path) -> Result<Self> {
+        let entries = config_entries(cwd, r"^remote\..+\.fetch$")?;
+        Ok(Self::from_refspecs(entries.iter().filter_map(
+            |(key, refspec)| {
+                let remote = key.strip_prefix("remote.")?.strip_suffix(".fetch")?;
+                Some((remote, refspec.as_str()))
+            },
+        )))
+    }
+
+    /// The refspecs as `(remote, refspec)` pairs. A refspec Git would reject
+    /// or that fetches into no ref maps nothing: one with an empty side, more
+    /// than one `*` in a side, or a `*` in one side only.
+    pub fn from_refspecs<'a>(refspecs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Self {
+        let mut remotes: BTreeMap<String, RemoteFetch> = BTreeMap::new();
+        for (remote, refspec) in refspecs {
+            let fetch = remotes.entry(remote.to_string()).or_default();
+            if let Some(pattern) = refspec.strip_prefix('^') {
+                if pattern.matches('*').count() <= 1 && !pattern.contains(':') {
+                    fetch.excluded.push(pattern.to_string());
+                }
+                continue;
+            }
+            let refspec = refspec.strip_prefix('+').unwrap_or(refspec);
+            let Some((source, destination)) = refspec.split_once(':') else {
+                continue;
+            };
+            let globs = destination.matches('*').count();
+            if !source.is_empty()
+                && !destination.is_empty()
+                && globs <= 1
+                && source.matches('*').count() == globs
+            {
+                fetch
+                    .mapped
+                    .push((source.to_string(), destination.to_string()));
+            }
+        }
+        Self(remotes)
+    }
+
+    /// The `(remote, source ref)` pairs whose fetch writes `reference`: a
+    /// remote's refspec maps the ref through its destination, and no negative
+    /// refspec of that remote excludes the source. Several pairs when several
+    /// refspecs write the one ref; none when no refspec does, as for a ref
+    /// left by an earlier configuration or made by hand.
+    pub fn sources(&self, reference: &str) -> Vec<(&str, String)> {
+        let mut found = Vec::new();
+        for (remote, fetch) in &self.0 {
+            for (source, destination) in &fetch.mapped {
+                let Some(captured) = glob_capture(destination, reference) else {
+                    continue;
+                };
+                let source = source.replacen('*', captured, 1);
+                let excluded = fetch
+                    .excluded
+                    .iter()
+                    .any(|pattern| glob_capture(pattern, &source).is_some());
+                if !excluded {
+                    found.push((remote.as_str(), source));
+                }
+            }
+        }
+        found.sort();
+        found.dedup();
+        found
+    }
+}
+
+/// What the `*` of a refspec pattern stands for in `name` (empty for a
+/// pattern without one), or None where the pattern does not match it.
+fn glob_capture<'a>(pattern: &str, name: &'a str) -> Option<&'a str> {
+    match pattern.split_once('*') {
+        None => (pattern == name).then_some(""),
+        Some((head, tail)) => name.strip_prefix(head)?.strip_suffix(tail),
+    }
 }
 
 /// Modified tracked files and untracked files in a worktree, by count.
@@ -2342,5 +2456,167 @@ mod tests {
             .expect("missing_objects failed");
         // Every one of them is fabricated, so every one is unresolvable.
         assert_eq!(answered, 20_000);
+    }
+
+    /// The sources of `reference` as `remote → source` strings.
+    fn sources(map: &FetchMap, reference: &str) -> Vec<String> {
+        map.sources(reference)
+            .into_iter()
+            .map(|(remote, source)| format!("{remote} → {source}"))
+            .collect()
+    }
+
+    #[test]
+    fn a_fetch_refspec_maps_a_tracking_ref_to_its_source() {
+        let map = FetchMap::from_refspecs([
+            ("origin", "+refs/heads/*:refs/remotes/origin/*"),
+            ("pinned", "refs/heads/main:refs/remotes/pinned/trunk"),
+            ("alias", "+refs/heads/develop:refs/remotes/alias/delivery"),
+            ("mirror", "+refs/heads/*:refs/remotes/shadow/*"),
+            ("suffixed", "+refs/heads/f*o:refs/remotes/suffixed/f*o"),
+        ]);
+        let cases = [
+            ("refs/remotes/origin/main", vec!["origin → refs/heads/main"]),
+            (
+                "refs/remotes/origin/arc/alpha",
+                vec!["origin → refs/heads/arc/alpha"],
+            ),
+            (
+                "refs/remotes/pinned/trunk",
+                vec!["pinned → refs/heads/main"],
+            ),
+            ("refs/remotes/pinned/main", vec![]),
+            (
+                "refs/remotes/alias/delivery",
+                vec!["alias → refs/heads/develop"],
+            ),
+            (
+                "refs/remotes/shadow/arc/alpha",
+                vec!["mirror → refs/heads/arc/alpha"],
+            ),
+            (
+                "refs/remotes/suffixed/fizzo",
+                vec!["suffixed → refs/heads/fizzo"],
+            ),
+            ("refs/remotes/suffixed/fizz", vec![]),
+            ("refs/remotes/unknown/main", vec![]),
+        ];
+        for (reference, expected) in cases {
+            assert_eq!(sources(&map, reference), expected, "{reference}");
+        }
+    }
+
+    #[test]
+    fn several_fetch_lines_and_nested_remote_names_each_contribute() {
+        let map = FetchMap::from_refspecs([
+            ("origin", "+refs/heads/*:refs/remotes/origin/*"),
+            ("origin", "+refs/heads/develop:refs/remotes/origin/x/foo"),
+            ("origin/x", "+refs/heads/*:refs/remotes/origin/x/*"),
+        ]);
+        assert_eq!(
+            sources(&map, "refs/remotes/origin/main"),
+            ["origin → refs/heads/main"]
+        );
+        assert_eq!(
+            sources(&map, "refs/remotes/origin/x/foo"),
+            [
+                "origin → refs/heads/develop",
+                "origin → refs/heads/x/foo",
+                "origin/x → refs/heads/foo",
+            ]
+        );
+        assert_eq!(
+            sources(&map, "refs/remotes/origin/x/bar"),
+            ["origin → refs/heads/x/bar", "origin/x → refs/heads/bar"]
+        );
+    }
+
+    #[test]
+    fn a_negative_refspec_excludes_its_own_remotes_sources() {
+        let map = FetchMap::from_refspecs([
+            ("origin", "+refs/heads/*:refs/remotes/origin/*"),
+            ("origin", "^refs/heads/secret"),
+            ("origin", "^refs/heads/wip/*"),
+            ("backup", "+refs/heads/*:refs/remotes/backup/*"),
+        ]);
+        assert!(map.sources("refs/remotes/origin/secret").is_empty());
+        assert!(map.sources("refs/remotes/origin/wip/a/b").is_empty());
+        assert_eq!(
+            sources(&map, "refs/remotes/origin/secrets"),
+            ["origin → refs/heads/secrets"]
+        );
+        assert_eq!(
+            sources(&map, "refs/remotes/backup/secret"),
+            ["backup → refs/heads/secret"]
+        );
+    }
+
+    #[test]
+    fn a_refspec_git_would_reject_or_that_fetches_nowhere_maps_nothing() {
+        let map = FetchMap::from_refspecs([
+            ("origin", "refs/heads/main"),
+            ("origin", "refs/heads/main:"),
+            ("origin", ":refs/remotes/origin/main"),
+            ("origin", "refs/heads/*:refs/remotes/origin/fixed"),
+            ("origin", "refs/heads/fixed:refs/remotes/origin/*"),
+            ("origin", "refs/heads/*/*:refs/remotes/origin/*/*"),
+            ("origin", "^refs/heads/a:refs/remotes/origin/a"),
+            ("origin", ""),
+        ]);
+        for reference in [
+            "refs/remotes/origin/main",
+            "refs/remotes/origin/fixed",
+            "refs/remotes/origin/a",
+            "refs/remotes/origin/x/y",
+        ] {
+            assert!(map.sources(reference).is_empty(), "{reference}");
+        }
+    }
+
+    #[test]
+    fn the_fetch_map_reads_every_remotes_configured_refspecs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = fixture(&tmp, &[]);
+        for remote in ["origin", "nested/mirror"] {
+            git(
+                &root,
+                &["remote", "add", remote, "https://example.invalid/r"],
+            )
+            .unwrap();
+        }
+        git(
+            &root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.fetch",
+                "^refs/heads/hidden",
+            ],
+        )
+        .unwrap();
+        git(
+            &root,
+            &[
+                "config",
+                "--add",
+                "remote.origin.fetch",
+                "+refs/heads/x:refs/remotes/origin/y",
+            ],
+        )
+        .unwrap();
+        let map = FetchMap::read(&root).unwrap();
+        assert_eq!(
+            sources(&map, "refs/remotes/origin/main"),
+            ["origin → refs/heads/main"]
+        );
+        assert!(map.sources("refs/remotes/origin/hidden").is_empty());
+        assert_eq!(
+            sources(&map, "refs/remotes/origin/y"),
+            ["origin → refs/heads/x", "origin → refs/heads/y"]
+        );
+        assert_eq!(
+            sources(&map, "refs/remotes/nested/mirror/main"),
+            ["nested/mirror → refs/heads/main"]
+        );
     }
 }

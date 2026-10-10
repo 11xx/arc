@@ -324,23 +324,23 @@ fn protect_shared<'a>(
         target_protected.insert(reference.clone(), tip.clone());
         protected.insert(reference, tip);
     }
-    let mut remotes: Vec<String> = gitio::git(cwd, &["remote"])?
-        .lines()
-        .map(str::to_string)
-        .collect();
-    remotes.sort_by_key(|remote| std::cmp::Reverse(remote.len()));
+    let fetches = gitio::FetchMap::read(cwd)?;
+    let own_source = format!("refs/heads/{branch}");
     for (reference, tip) in gitio::list_refs(cwd, "refs/remotes/")? {
-        let relative = reference.trim_start_matches("refs/remotes/");
-        let tracked = remotes
-            .iter()
-            .find_map(|remote| relative.strip_prefix(&format!("{remote}/")))
-            .or_else(|| relative.split_once('/').map(|(_, tracked)| tracked));
-        let target_ref = tracked.is_some_and(|name| targets.contains(name))
-            || target_upstreams.contains(&reference);
+        let sources: Vec<String> = fetches
+            .sources(&reference)
+            .into_iter()
+            .map(|(_, source)| source)
+            .collect();
+        let target_ref = sources.iter().any(|source| {
+            source
+                .strip_prefix("refs/heads/")
+                .is_some_and(|name| targets.contains(name))
+        }) || target_upstreams.contains(&reference);
         let own_ref = if upstream.as_deref() == Some(reference.as_str()) {
             upstream_is_own
         } else {
-            tracked == Some(branch.as_str())
+            !sources.is_empty() && sources.iter().all(|source| *source == own_source)
         };
         if target_ref {
             target_protected.insert(reference.clone(), tip.clone());

@@ -1825,12 +1825,24 @@ HISTORY REWRITES
                        reachable from the target or another local or
                        remote-tracking branch are
                        refused, naming the commit and ref, including in
-                       --dry-run. The change branch's same-name remote refs,
-                       on any remote, are its own work. A configured upstream
-                       qualifies only when its remote source branch has the
-                       change branch's name, even with a fetch-refspec alias;
-                       an upstream of another branch remains protected.
-                       Target refs remain protected. --include-shared
+                       --dry-run. A remote-tracking ref is the change
+                       branch's own work only when its fetch source is a
+                       branch with the change branch's name. The source comes
+                       from the `remote.<name>.fetch` refspecs of every
+                       remote (exact or `*` globs, `+` or not, several lines,
+                       negative `^` refspecs excluding a source), whatever
+                       the tracking ref is called: a branch fetched onto the
+                       change branch's name is that branch's. A ref no
+                       refspec writes, from an older configuration or made by
+                       hand, has no known source and stays protected, as does
+                       one written from a source outside refs/heads/. Where
+                       several refspecs write one ref, each must name the
+                       change branch. A configured upstream qualifies only
+                       when its remote source branch has the change branch's
+                       name, even with a fetch-refspec alias; an upstream of
+                       another branch remains protected. Target refs remain
+                       protected, a remote-tracking ref fetched from a target
+                       branch among them. --include-shared
                        grants permission without changing the default range.
                        With a target, the default always stays in target..head;
                        an inclusive shared range requires --from. A refusal

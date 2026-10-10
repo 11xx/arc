@@ -2375,6 +2375,11 @@ fn pushed_change_branches_can_rewrite_their_own_history() {
                     &worktree,
                     &["update-ref", "refs/remotes/origin/delivery", &old],
                 );
+                // The alias is the only name the remote fetches the branch to.
+                git(
+                    &worktree,
+                    &["update-ref", "-d", "refs/remotes/origin/arc/alpha"],
+                );
                 "origin/delivery"
             } else {
                 "origin/arc/alpha"
@@ -2611,6 +2616,176 @@ fn a_differently_named_upstream_remains_protected() {
             assert!(!intent_path(&repo).exists());
         }
     }
+}
+
+/// A change `alpha` whose remote `origin` fetches through exactly `fetch`,
+/// with one remote-tracking ref `tracking` at the change's head.
+fn change_fetched_through(fetch: &[&str], tracking: &str) -> (Repo, PathBuf, String) {
+    let repo = repo_with_gates();
+    let (_, worktree, old) = change_with_patchset(&repo, "alpha");
+    git(
+        &worktree,
+        &["remote", "add", "origin", repo.root.to_str().unwrap()],
+    );
+    git(&worktree, &["config", "--unset-all", "remote.origin.fetch"]);
+    for line in fetch {
+        git(&worktree, &["config", "--add", "remote.origin.fetch", line]);
+    }
+    git(&worktree, &["update-ref", tracking, &old]);
+    (repo, worktree, old)
+}
+
+/// The trailer rewrite of a change whose remote-tracking refs are in play,
+/// from `from` through the branch head.
+fn rewrite_trailers_from(repo: &Repo, worktree: &Path, from: &str) -> AssertCommand {
+    let mut command = repo.arc(worktree);
+    command.args([
+        "rewrite",
+        "trailers",
+        "--from",
+        from,
+        "--no-sign",
+        "--append",
+        "Planned-by: Planner <planner@example.invalid>",
+    ]);
+    command
+}
+
+#[test]
+fn a_remote_ref_is_the_changes_own_only_when_its_fetch_source_is_the_change_branch() {
+    let tracking = "refs/remotes/origin/arc/alpha";
+    let cases: [(&str, &[&str], &str, bool); 9] = [
+        (
+            "default refspec",
+            &["+refs/heads/*:refs/remotes/origin/*"],
+            tracking,
+            true,
+        ),
+        (
+            "exact refspec without force",
+            &["refs/heads/arc/alpha:refs/remotes/origin/arc/alpha"],
+            tracking,
+            true,
+        ),
+        (
+            "glob into another namespace",
+            &["+refs/heads/*:refs/remotes/mirror/*"],
+            "refs/remotes/mirror/arc/alpha",
+            true,
+        ),
+        (
+            "several fetch lines",
+            &[
+                "+refs/heads/master:refs/remotes/origin/master",
+                "+refs/heads/arc/alpha:refs/remotes/origin/arc/alpha",
+            ],
+            tracking,
+            true,
+        ),
+        (
+            "another branch fetched onto the change's name",
+            &["+refs/heads/develop:refs/remotes/origin/arc/alpha"],
+            tracking,
+            false,
+        ),
+        (
+            "the target fetched onto the change's name",
+            &["+refs/heads/master:refs/remotes/origin/arc/alpha"],
+            tracking,
+            false,
+        ),
+        (
+            "no refspec maps the ref",
+            &["+refs/heads/master:refs/remotes/origin/master"],
+            tracking,
+            false,
+        ),
+        (
+            "a negative refspec excludes the source",
+            &[
+                "+refs/heads/*:refs/remotes/origin/*",
+                "^refs/heads/arc/alpha",
+            ],
+            tracking,
+            false,
+        ),
+        (
+            "a source outside refs/heads",
+            &["+refs/tags/*:refs/remotes/origin/*"],
+            tracking,
+            false,
+        ),
+    ];
+    for (label, fetch, tracking, own) in cases {
+        for dry in [false, true] {
+            let (repo, worktree, old) = change_fetched_through(fetch, tracking);
+            let before = ref_snapshot(&worktree);
+            let mut command = rewrite_trailers_from(&repo, &worktree, &old);
+            if dry {
+                command.arg("--dry-run");
+            }
+            if own {
+                command.assert().success();
+                if !dry {
+                    assert_ne!(repo.head(&worktree), old, "{label}");
+                }
+                assert_eq!(
+                    git_out(&worktree, &["rev-parse", tracking]),
+                    old,
+                    "{label}: the remote ref stays where it was"
+                );
+            } else {
+                command
+                    .assert()
+                    .failure()
+                    .stderr(predicates::str::contains(tracking));
+                assert_eq!(ref_snapshot(&worktree), before, "{label}");
+                assert!(repository_events(&repo).is_empty(), "{label}");
+                assert!(!intent_path(&repo).exists(), "{label}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_fetch_alias_onto_the_change_branch_name_refuses_a_signing_rewrite() {
+    for dry in [false, true] {
+        let (repo, worktree, _) = change_fetched_through(
+            &["+refs/heads/develop:refs/remotes/origin/arc/alpha"],
+            "refs/remotes/origin/arc/alpha",
+        );
+        let key = signing_key(&repo).expect("fetch alias acceptance requires a sandbox key");
+        let before = ref_snapshot(&worktree);
+        let mut command = arc_signing(&repo, &key, &worktree);
+        command.args(["rewrite", "sign", "--key", &key.fingerprint]);
+        if dry {
+            command.arg("--dry-run");
+        }
+        command
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("refs/remotes/origin/arc/alpha"));
+        assert_eq!(ref_snapshot(&worktree), before);
+        assert!(repository_events(&repo).is_empty());
+    }
+}
+
+#[test]
+fn a_target_fetched_under_another_tracking_name_is_protected_as_the_target() {
+    let tracking = "refs/remotes/origin/trunk";
+    let (repo, worktree, _) =
+        change_fetched_through(&["+refs/heads/master:refs/remotes/origin/trunk"], tracking);
+    let target = repo.head(&repo.root);
+    git(&worktree, &["update-ref", tracking, &target]);
+    let before = ref_snapshot(&worktree);
+    rewrite_trailers_from(&repo, &worktree, &target)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "target refs: refs/heads/master, refs/remotes/origin/trunk",
+        ));
+    assert_eq!(ref_snapshot(&worktree), before);
+    assert!(repository_events(&repo).is_empty());
 }
 
 #[test]

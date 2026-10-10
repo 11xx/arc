@@ -2965,7 +2965,9 @@ enum RewriteCmd {
         /// Permit recreating commits reachable from the target or another
         /// local or remote-tracking branch. Permission never widens the default
         /// target..head range; use --from to name an inclusive shared range.
-        /// Same-name remote refs are its own work, except for target refs.
+        /// A remote-tracking ref is its own work only when its fetch source,
+        /// read from `remote.<name>.fetch`, is a branch with this branch's
+        /// name; a ref no refspec writes stays protected, as do target refs.
         /// A configured upstream qualifies only when its remote source branch
         /// has this branch's name. Shared commits are refused without
         /// permission before any moves, including --dry-run
@@ -3059,8 +3061,10 @@ enum RewriteCmd {
         #[arg(long, required = true)]
         from: String,
         /// Permit recreating commits reachable from the target or another
-        /// local or remote-tracking branch. Same-name remote refs are its own
-        /// work, except for target refs. A configured upstream qualifies only
+        /// local or remote-tracking branch. A remote-tracking ref is its own
+        /// work only when its fetch source, read from `remote.<name>.fetch`,
+        /// is a branch with this branch's name; a ref no refspec writes stays
+        /// protected, as do target refs. A configured upstream qualifies only
         /// when its remote source branch has this branch's name.
         /// Without permission shared commits are refused before any ref moves,
         /// including --dry-run; unchanged commits are left alone. Permission
