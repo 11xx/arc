@@ -553,7 +553,9 @@ pub enum JournalCmd {
     /// Transition checks include complete successor publication evidence and
     /// source retirement, with both hot and archived bodies considered. Position
     /// and evidence blocks are matched to their typed events for every artifact
-    /// kind in both storage tiers; either missing half is a problem.
+    /// kind in both storage tiers; either missing half is a problem. Indented
+    /// code and unrecorded fenced entry examples are prose; recorded position
+    /// and evidence markers terminate an open fence.
     /// Records no events; ledger reads do not require a parseable append policy.
     Doctor {
         /// Emit arc-journal-open/1 JSON, including the pending recovery bucket
@@ -1141,7 +1143,9 @@ pub enum JournalCmd {
         /// correction in force. Positions and evidence carry their ID, heading,
         /// body, recorded identity, corrected fields, and retraction status;
         /// unmatched blocks have null recorded identity and detached events
-        /// have null heading and body. Corrections and retractions list typed
+        /// have null heading and body. Indented code and unrecorded fenced
+        /// entry examples are prose; recorded position and evidence markers
+        /// terminate an open fence. Corrections and retractions list typed
         /// amendment events in log order. A correction that fails validation reads
         /// `planner_status: malformed` and credits no planner.
         #[arg(long)]
@@ -1169,7 +1173,9 @@ pub enum JournalCmd {
     /// Derived summary of a discussion: stance tally, participants, replies,
     /// age, and resolution with a resolver-participation flag (read-only).
     /// The tally counts `Position: for | against | amend` lines inside
-    /// `### Position` blocks, and flags blocks that state no stance. Reports
+    /// `### Position` blocks, and flags blocks that state no stance. Indented
+    /// code and unrecorded fenced entry examples are prose; recorded position
+    /// and evidence markers terminate an open fence. Reports
     /// each open question with the positions argued under every option, so a
     /// branch nobody explored is visible before the question is answered.
     /// Resolve a discussion with `journal consume --outcome done --decision
@@ -3989,20 +3995,17 @@ fn amend_target_exists(
 ) -> bool {
     match target {
         AmendTarget::Artifact => true,
-        AmendTarget::Position(id) => {
+        AmendTarget::Position(id) | AmendTarget::Evidence(id) => {
+            let kind = if matches!(target, AmendTarget::Position(_)) {
+                "position"
+            } else {
+                "evidence"
+            };
             target.record(events, filename).is_some()
                 || body.is_some_and(|body| {
-                    body.lines()
-                        .filter_map(position_heading_id)
-                        .any(|heading| &heading == id)
-                })
-        }
-        AmendTarget::Evidence(id) => {
-            target.record(events, filename).is_some()
-                || body.is_some_and(|body| {
-                    artifact_entry_blocks(body)
+                    artifact_entry_blocks(body, events, filename)
                         .iter()
-                        .any(|block| block.kind == "evidence" && block.id.as_deref() == Some(id))
+                        .any(|block| block.kind == kind && block.id.as_deref() == Some(id))
                 })
         }
         AmendTarget::Question(_) | AmendTarget::Answer(_) => {
@@ -7530,8 +7533,7 @@ fn question_text(path: &Path, question_id: &str) -> Option<String> {
     // wrong question.
     let mut fence: Option<(u8, usize)> = None;
     let mut lines = text.lines().skip_while(|line| {
-        let trimmed = line.trim_start();
-        match (fence, fence_marker(trimmed)) {
+        match (fence, fence_marker(line)) {
             (None, Some((marker, run, _))) => {
                 fence = Some((marker, run));
                 return true;
@@ -13227,6 +13229,7 @@ struct ArtifactEntryBlock<'a> {
 }
 
 fn entry_heading(line: &str) -> Option<(&'static str, Option<String>)> {
+    let line = markdown_syntax_line(line)?;
     for (kind, heading, valid) in [
         (
             "position",
@@ -13239,7 +13242,7 @@ fn entry_heading(line: &str) -> Option<(&'static str, Option<String>)> {
             valid_evidence_id as fn(&str) -> bool,
         ),
     ] {
-        if let Some(rest) = line.trim_start().strip_prefix(heading) {
+        if let Some(rest) = line.strip_prefix(heading) {
             if rest.is_empty() || rest.starts_with(char::is_whitespace) {
                 let id = rest.split_whitespace().next().filter(|id| valid(id));
                 return Some((kind, id.map(str::to_string)));
@@ -13249,31 +13252,24 @@ fn entry_heading(line: &str) -> Option<(&'static str, Option<String>)> {
     None
 }
 
-/// Fenced examples are prose, including headings with entry IDs.
-fn artifact_entry_blocks(body: &str) -> Vec<ArtifactEntryBlock<'_>> {
+/// Quoted examples are prose; recorded entry markers terminate an open fence.
+fn artifact_entry_blocks<'a>(
+    body: &'a str,
+    events: &[JournalEvent],
+    filename: &str,
+) -> Vec<ArtifactEntryBlock<'a>> {
     let mut blocks = Vec::new();
     let mut open: Option<(&str, Option<String>, &str, usize)> = None;
     let mut fence = None;
     let mut offset = 0;
     for line in body.split_inclusive('\n') {
-        let trimmed = line.trim_start();
         let heading = entry_heading(line);
         let start = offset;
         offset += line.len();
-        match (fence, fence_marker(trimmed)) {
-            (None, Some((marker, run, _))) => {
-                fence = Some((marker, run));
-                continue;
-            }
-            (Some((marker, opened)), Some((closing, run, bare)))
-                if marker == closing && run >= opened && bare =>
-            {
-                fence = None;
-                continue;
-            }
-            (Some(_), _) => continue,
-            (None, None) => {}
+        if quoted_entry_line(line, &mut fence, events, filename) {
+            continue;
         }
+        let trimmed = markdown_syntax_line(line).unwrap_or("");
         let boundary = heading.is_some()
             || [
                 "### Question",
@@ -13355,7 +13351,7 @@ fn inspect_entry_blocks(
             .transpose()?;
         let blocks = body
             .as_deref()
-            .map(artifact_entry_blocks)
+            .map(|body| artifact_entry_blocks(body, events, &file))
             .unwrap_or_default();
         let recorded: Vec<_> = events
             .iter()
@@ -13502,7 +13498,7 @@ fn show(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         let metadata = planner_metadata(&body, &events, filename);
         let recorded = recorded_identity(&events, filename);
         let amendments = Amendments::collect(&events, filename);
-        let blocks = artifact_entry_blocks(&body);
+        let blocks = artifact_entry_blocks(&body, &events, filename);
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
@@ -14456,6 +14452,25 @@ fn is_horizontal_rule(trimmed: &str) -> bool {
         && marks.iter().all(|b| *b == marks[0])
 }
 
+/// Block syntax permits at most three columns of indentation. Tabs advance
+/// to the next four-column stop, so a leading tab belongs to indented code.
+fn markdown_syntax_line(line: &str) -> Option<&str> {
+    let mut columns = 0;
+    let mut bytes = 0;
+    for byte in line.bytes() {
+        match byte {
+            b' ' => columns += 1,
+            b'\t' => columns += 4 - columns % 4,
+            _ => break,
+        }
+        if columns >= 4 {
+            return None;
+        }
+        bytes += 1;
+    }
+    Some(&line[bytes..])
+}
+
 /// A fence marker: its character, the length of its run, and whether anything
 /// follows it.
 ///
@@ -14463,7 +14478,8 @@ fn is_horizontal_rule(trimmed: &str) -> bool {
 /// the one that opened it, and only when nothing follows the run — an opener
 /// may carry an info string, and a closer may not, so a `` ```rust `` line
 /// inside a fence is content rather than its end.
-fn fence_marker(trimmed: &str) -> Option<(u8, usize, bool)> {
+fn fence_marker(line: &str) -> Option<(u8, usize, bool)> {
+    let trimmed = markdown_syntax_line(line)?;
     let first = trimmed.as_bytes().first().copied()?;
     if !matches!(first, b'`' | b'~') {
         return None;
@@ -14473,25 +14489,51 @@ fn fence_marker(trimmed: &str) -> Option<(u8, usize, bool)> {
     (run >= 3).then_some((first, run, bare))
 }
 
-fn is_position_heading(line: &str) -> bool {
-    let Some(rest) = line.trim_start().strip_prefix("### Position") else {
-        return false;
-    };
-    rest.is_empty() || rest.starts_with(char::is_whitespace)
+/// Whether a line is quoted rather than entry structure. Only a typed entry
+/// recorded on this artifact can recover from an unterminated fence.
+fn quoted_entry_line(
+    line: &str,
+    fence: &mut Option<(u8, usize)>,
+    events: &[JournalEvent],
+    filename: &str,
+) -> bool {
+    match (*fence, fence_marker(line)) {
+        (None, Some((marker, run, _))) => {
+            *fence = Some((marker, run));
+            true
+        }
+        (Some((marker, opened)), Some((closing, run, bare)))
+            if marker == closing && run >= opened && bare =>
+        {
+            *fence = None;
+            true
+        }
+        (Some(_), _) => {
+            let recorded = entry_heading(line).is_some_and(|(kind, id)| {
+                id.is_some()
+                    && events.iter().any(|event| {
+                        event.known()
+                            && event.file.as_deref() == Some(filename)
+                            && event.event == kind
+                            && entry_id(event) == id.as_deref()
+                    })
+            });
+            if recorded {
+                *fence = None;
+            }
+            !recorded
+        }
+        (None, None) => false,
+    }
 }
 
-/// The `pos-…` id a position heading carries, when it carries one. A heading
-/// written by hand may carry none, and one written before ids existed carries
-/// none either; both are headings the reply graph has no way to name.
+fn is_position_heading(line: &str) -> bool {
+    matches!(entry_heading(line), Some(("position", _)))
+}
+
+/// The complete `pos-…` token on a Markdown position heading, if valid.
 fn position_heading_id(line: &str) -> Option<String> {
-    let rest = line.trim_start().strip_prefix("### Position")?.trim_start();
-    // Take the whole word and require all of it to be an id, rather than
-    // reading up to the first character that cannot be one. Stopping early
-    // turns `pos-punct!` into `pos-punct`, which then matches a recorded
-    // position the heading does not name — and a false match here hides an
-    // unplaceable heading, which is the one thing this count exists to show.
-    let token = rest.split_whitespace().next()?;
-    valid_position_id(token).then(|| token.to_string())
+    entry_heading(line).and_then(|(kind, id)| (kind == "position").then_some(id).flatten())
 }
 
 fn position_stance_value(line: &str) -> Option<&str> {
@@ -14506,7 +14548,7 @@ fn position_stance_value(line: &str) -> Option<&str> {
 /// as `unstated`, so a tally that undercounts says so instead of reading as a
 /// settled result — and a `Position:` line anywhere else, including inside a
 /// fenced example, is prose.
-fn position_blocks(body: &str) -> Vec<PositionBlock> {
+fn position_blocks(body: &str, events: &[JournalEvent], filename: &str) -> Vec<PositionBlock> {
     let mut blocks: Vec<PositionBlock> = Vec::new();
     // A block ends at the next heading, at a horizontal rule, or at the end of
     // the file, and one that ended without stating a stance keeps the
@@ -14515,37 +14557,16 @@ fn position_blocks(body: &str) -> Vec<PositionBlock> {
     let mut decided = false;
     let mut fence: Option<(u8, usize)> = None;
     for line in body.lines() {
-        // A fenced block quotes the conventions rather than exercising them —
-        // the scaffold that teaches the stance line is itself such a quote.
-        let trimmed = line.trim_start();
-        match (fence, fence_marker(trimmed)) {
-            (None, Some((marker, run, _))) => {
-                fence = Some((marker, run));
-                // A block that opens with a quotation has not opened with a
-                // stance, whatever it says once the quotation ends.
-                decided = true;
-                continue;
-            }
-            (Some((marker, opened)), Some((closing, run, bare)))
-                if marker == closing && run >= opened && bare =>
-            {
-                fence = None;
-                continue;
-            }
-            // An attributed heading ends the block it belongs to, fence or no
-            // fence. A body that opens a fence and never closes it — a stray
-            // closing marker with no opener is the common way — would
-            // otherwise swallow every position after it, and the tally would
-            // quietly report the smaller number. One participant's malformed
-            // Markdown must not hide another participant's stance.
-            //
-            // Only a heading carrying a recorded id does this, so a fenced
-            // example quoting the conventions stays prose: the scaffold that
-            // teaches the stance line is exactly such a quote.
-            (Some(_), _) if position_heading_id(line).is_some() => fence = None,
-            (Some(_), _) => continue,
-            (None, None) => {}
+        if quoted_entry_line(line, &mut fence, events, filename) {
+            decided = true;
+            continue;
         }
+        let Some(trimmed) = markdown_syntax_line(line) else {
+            if !line.trim().is_empty() {
+                decided = true;
+            }
+            continue;
+        };
         if is_horizontal_rule(trimmed) {
             open_block = false;
             continue;
@@ -14653,7 +14674,7 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
     let events = read_events(&dir)?;
 
     let amendments = Amendments::collect(&events, filename);
-    let blocks = position_blocks(&body);
+    let blocks = position_blocks(&body, &events, filename);
     let heading_ids: Vec<Option<String>> = blocks.iter().map(|block| block.id.clone()).collect();
     let (positions, stances) = stance_tally(&blocks, &amendments);
     let (unrecorded_question_blocks, unrecorded_answer_blocks) =
@@ -16584,6 +16605,19 @@ mod question_text_tests {
         );
     }
 
+    #[test]
+    fn indented_fence_markers_do_not_hide_a_question() {
+        for indent in ["    ", "\t", "   \t"] {
+            let file = fixture(&format!(
+                "{indent}```md\n\n### Question q-a (opening, t) - x | y\n\nThe real one.\n"
+            ));
+            assert_eq!(
+                question_text(file.path(), "q-a").as_deref(),
+                Some("The real one.")
+            );
+        }
+    }
+
     /// A block that was hand-edited away degrades to absent rather than to
     /// the next block's prose.
     #[test]
@@ -16596,6 +16630,22 @@ mod question_text_tests {
 #[cfg(test)]
 mod heading_id_tests {
     use super::position_heading_id;
+
+    #[test]
+    fn heading_indentation_respects_markdown_columns() {
+        for indent in ["", " ", "  ", "   "] {
+            assert_eq!(
+                position_heading_id(&format!("{indent}### Position pos-example")).as_deref(),
+                Some("pos-example")
+            );
+        }
+        for indent in ["    ", "\t", "   \t"] {
+            assert_eq!(
+                position_heading_id(&format!("{indent}### Position pos-example")),
+                None
+            );
+        }
+    }
 
     /// The id is the whole word or nothing. Reading up to the first character
     /// that cannot be in an id would turn a malformed heading into a valid one,

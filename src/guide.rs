@@ -496,6 +496,11 @@ SETTLE A QUESTION (before it is work)
                          status. Unrecorded blocks have null recorded identity;
                          detached events have null heading and body. Corrections
                          and retractions list typed events in log order.
+                         Headings and fence markers permit up to three columns
+                         of indentation; indented code is prose. Unrecorded
+                         fenced entry examples are prose; recorded position and
+                         evidence markers terminate an open fence. Discussion
+                         tallies and doctor use the same entry quotation rules.
   arc journal doctor
                          Matches position and evidence blocks with typed events
                          for every artifact kind in hot and cold storage. Either

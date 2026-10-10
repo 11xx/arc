@@ -3797,7 +3797,7 @@ fn journal_discussion_handles_mixed_fences_and_spaced_rules() {
     let src = repo.home.join("open.md");
     fs::write(
         &src,
-        "### Position pos-a\n\n```markdown\n~~~\nPosition: for\n```\n\n         ### Position pos-b\n\nno stance here\n\n* * *\n\nPosition: against\n",
+        "### Position pos-a\n\n```markdown\n~~~\nPosition: for\n```\n\n   ### Position pos-b\n\nno stance here\n\n* * *\n\nPosition: against\n",
     )
     .unwrap();
     let file = stdout(repo.arc(&repo.root).args([
@@ -3837,7 +3837,7 @@ fn journal_discussion_does_not_read_a_stance_out_of_a_quotation() {
     let src = repo.home.join("open.md");
     fs::write(
         &src,
-        "### Position pos-a\n\n```text\nquoted\n```\nPosition: for\n\n         ````markdown\n```\n### Position fake\n\nPosition: against\n````\n",
+        "### Position pos-a\n\n```text\nquoted\n```\nPosition: for\n\n   ````markdown\n```\n### Position fake\n\nPosition: against\n````\n",
     )
     .unwrap();
     let file = stdout(repo.arc(&repo.root).args([
@@ -17407,4 +17407,113 @@ fn sentinel_hostname_fallback_is_a_documented_host_fact() {
     assert!(guide.contains("A hostname arc could not read is recorded as `unknown`"));
     let help = stdout(repo.arc(&repo.root).args(["verify", "--help"]));
     assert!(help.contains("hostname") && help.contains("unknown"));
+}
+
+#[test]
+fn journal_entries_ignore_indented_headings_and_fences() {
+    for indent in ["    ", "\t", "   \t"] {
+        let repo = Repo::new();
+        let file = discussion_named(&repo, "indented-entries", "# Examples\n");
+        let body = format!("Position: for\n\nExample:\n\n{indent}### Evidence evd-example\n{indent}### Position pos-example\n{indent}Position: against\n{indent}### Correction example\n{indent}```md\n\nTail.\n");
+        for kind in ["position", "evidence"] {
+            stdout(
+                repo.arc(&repo.root)
+                    .args(["journal", kind, &file, "--body-file", "-"])
+                    .write_stdin(body.as_str()),
+            );
+        }
+        let shown = json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "show", &file, "--json"]),
+        );
+        for kind in ["positions", "evidence"] {
+            assert_eq!(shown[kind].as_array().unwrap().len(), 1, "{shown}");
+            assert_eq!(shown[kind][0]["body"], body.trim(), "{shown}");
+        }
+        let discussion =
+            json_stdout(
+                repo.arc(&repo.root)
+                    .args(["journal", "discussion", &file, "--json"]),
+            );
+        assert_eq!(discussion["positions"], 1, "{discussion}");
+        repo.arc(&repo.root)
+            .args(["journal", "doctor"])
+            .assert()
+            .success();
+    }
+}
+
+#[test]
+fn journal_entries_recover_recorded_markers_after_unclosed_fences() {
+    for fence in ["```md", "~~~md"] {
+        let repo = Repo::new();
+        let file = discussion_named(&repo, "unclosed-entries", "# Recovery\n");
+        let first = format!("Position: for\n\n{fence}\n### Position pos-example\nPosition: against\n### Evidence evd-example\nLiteral example.\n");
+        for (kind, body) in [
+            ("position", first.as_str()),
+            ("evidence", first.as_str()),
+            ("position", "Position: against\nSecond argument.\n"),
+            ("evidence", "Second finding.\n"),
+        ] {
+            stdout(
+                repo.arc(&repo.root)
+                    .args(["journal", kind, &file, "--body-file", "-"])
+                    .write_stdin(body),
+            );
+        }
+        let shown = json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "show", &file, "--json"]),
+        );
+        for kind in ["positions", "evidence"] {
+            assert_eq!(shown[kind].as_array().unwrap().len(), 2, "{shown}");
+            assert_eq!(shown[kind][0]["body"], first.trim(), "{shown}");
+            assert!(shown[kind][1]["heading"].is_string(), "{shown}");
+            assert!(
+                shown[kind][1]["body"].as_str().unwrap().contains("Second"),
+                "{shown}"
+            );
+        }
+        let discussion = stdout(repo.arc(&repo.root).args(["journal", "discussion", &file]));
+        assert!(
+            discussion.contains("positions: 2 — for 1, against 1"),
+            "{discussion}"
+        );
+        assert!(!discussion.contains("detached:"), "{discussion}");
+        repo.arc(&repo.root)
+            .args(["journal", "doctor"])
+            .assert()
+            .success();
+    }
+}
+
+#[test]
+fn journal_entry_examples_cannot_be_amendment_targets() {
+    for example in [
+        "    ### Position pos-example\n",
+        "```md\n### Position pos-example\n```\n",
+    ] {
+        let repo = Repo::new();
+        let file = discussion_named(&repo, "quoted-target", "# Examples\n");
+        stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "position", &file, "--body-file", "-"])
+                .write_stdin(format!("Position: for\n\n{example}")),
+        );
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "correct",
+                &file,
+                "--target",
+                "pos-example",
+                "--field",
+                "stance",
+                "--value",
+                "against",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("no pos-example on"));
+    }
 }
