@@ -1946,3 +1946,59 @@ fn imported_findings_replay_after_receiver_integration_and_trust_revocation() {
             .args(["export", change, "--output", "-"]),
     );
 }
+
+/// How many times one command derived the privilege scope, and what it printed.
+fn derivations(receiver: &Repo, args: &[&str]) -> (usize, String) {
+    let marker = receiver.home.join("scope-derived");
+    let _ = fs::remove_file(&marker);
+    let output = stdout(
+        receiver
+            .arc(&receiver.root)
+            .env("ARC_SCOPE_COMPUTED", &marker)
+            .args(args),
+    );
+    let derived = fs::read(&marker).map_or(0, |bytes| bytes.len());
+    (derived, output)
+}
+
+#[test]
+fn an_aggregate_read_derives_the_privilege_scope_once() {
+    let (source, path, bundle) = exported_review();
+    let receiver = Repo::new();
+    deliver_git_objects(&source, &receiver);
+    bind_branch(&receiver, &source, &bundle);
+    enroll(&receiver, &bundle, &["facts", "review-input"], &[], false);
+    let local = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
+    for slug in local {
+        stdout(receiver.arc(&receiver.root).args(["begin", slug]));
+    }
+    received(&receiver, &path, false).assert().success();
+    let imported = bundle["change_id"].as_str().unwrap();
+
+    let (derived, listing) = derivations(&receiver, &["list"]);
+    assert_eq!(derived, 1, "{listing}");
+    let unmeasured = stdout(receiver.arc(&receiver.root).args(["list"]));
+    assert_eq!(listing, unmeasured, "the hook leaves the output untouched");
+    for slug in local {
+        assert!(listing.contains(slug), "{slug} missing from:\n{listing}");
+    }
+    assert!(listing.contains(imported), "{listing}");
+
+    let (derived, output) = derivations(&receiver, &["list", "--json"]);
+    assert_eq!(derived, 1, "{output}");
+    // These read the ledger twice, once to select changes and once to read
+    // them, and each read derives the scope once however many changes the
+    // ledger holds.
+    for args in [vec!["stats"], vec!["doctor"]] {
+        let (derived, output) = derivations(&receiver, &args);
+        assert!(derived <= 2, "{args:?} derived {derived} times:\n{output}");
+    }
+
+    // The admission still holds for the imported change.
+    let state = status(&receiver, &bundle);
+    assert_eq!(
+        state["verdict_assessments"][0]["admission_provenance"], "transport-asserted",
+        "{state}"
+    );
+    assert_eq!(state["has_valid_approval"], false, "{state}");
+}

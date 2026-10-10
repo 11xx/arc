@@ -306,9 +306,10 @@ fn provenance(store: &Store, change_ids: &[String], json: bool) -> Result<()> {
 
     let mut passes = 0;
     let mut none_after_failure = 0;
+    let mut scope = store.lazy_scope();
     for change_id in change_ids {
         let events = store.load_events(change_id)?;
-        let state = store.project_state(&events, &rewrites)?;
+        let state = store.project_state_in(scope.get()?, &events, &rewrites)?;
 
         for (index, entry) in state.verifications.iter().enumerate() {
             if entry.result != VerifyResult::Pass || entry.probe.is_some() {
@@ -473,9 +474,10 @@ pub fn stats(ctx: &Ctx, selection: StatsSelection, json: bool, view: StatsView) 
     // Per-gate run durations across the selection, for aggregate percentiles.
     let mut gate_runs: BTreeMap<String, Vec<u64>> = BTreeMap::new();
     let rewrites = store.rewrites()?;
+    let mut scope = store.lazy_scope();
     for change_id in change_ids {
         let events = store.load_events(&change_id)?;
-        let mut state = store.project_state(&events, &rewrites)?;
+        let mut state = store.project_state_in(scope.get()?, &events, &rewrites)?;
         crate::replica::localize_change(&store.repository_id, &events, &mut state);
         for (gate, seconds) in observed_gate_runs(&events) {
             gate_runs.entry(gate).or_default().push(seconds);

@@ -681,9 +681,11 @@ impl Ctx {
     pub(crate) fn load_all_states(&self, store: &Store) -> Result<BTreeMap<String, ChangeState>> {
         let mut states = BTreeMap::new();
         let rewrites = store.rewrites()?;
-        for change_id in store.list_change_ids()? {
-            let events = store.load_events(&change_id)?;
-            let mut state = store.project_state(&events, &rewrites)?;
+        let batches = crate::store::import_batches(&store.root)?;
+        let mut scope = store.lazy_scope();
+        for change_id in store.list_change_ids_in(&batches)? {
+            let events = store.load_events_in(&change_id, &batches)?;
+            let mut state = store.project_state_in(scope.get()?, &events, &rewrites)?;
             crate::replica::localize_change(&store.repository_id, &events, &mut state);
             states.insert(change_id, state);
         }
@@ -773,9 +775,7 @@ impl Ctx {
             shape,
         )?;
         report.require_provisional_replay(crate::provisional::obsolete_ancestry(
-            &self.cwd,
-            state,
-            &store.readable_states()?,
+            &self.cwd, state, &states,
         )?);
         report.require_replay_snapshot(crate::provisional::needs_replay_snapshot(
             &self.cwd, store, state,
@@ -846,9 +846,7 @@ impl Ctx {
             fork::fork_slug_for_branch(&self.cwd, &state.branch)?,
         )?;
         report.require_provisional_replay(crate::provisional::obsolete_ancestry(
-            &self.cwd,
-            state,
-            &store.readable_states()?,
+            &self.cwd, state, &states,
         )?);
         report.require_replay_snapshot(crate::provisional::needs_replay_snapshot(
             &self.cwd, store, state,

@@ -74,9 +74,10 @@ pub fn begin(
     let mut open_change_branches: Vec<String> = Vec::new();
     let mut closed_in_place_target: Option<(String, String)> = None;
     let rewrites = store.rewrites()?;
+    let mut scope = store.lazy_scope();
     for existing in store.list_change_ids()? {
         let events = store.load_events(&existing)?;
-        let mut st = store.project_state(&events, &rewrites)?;
+        let mut st = store.project_state_in(scope.get()?, &events, &rewrites)?;
         crate::replica::localize_change(&store.repository_id, &events, &mut st);
         if st.is_closed() {
             let belongs_to_primary_in_place_change = primary_branch

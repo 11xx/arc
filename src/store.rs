@@ -1,5 +1,6 @@
 use crate::gitio;
 use crate::ids;
+use crate::import_authorization::PrivilegeScope;
 use crate::model::{ActorSource, Event, Payload};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -8,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -73,6 +75,21 @@ pub struct Store {
     /// Opened for reading only: the append policy was never parsed, so this
     /// handle refuses every append.
     pub read_only: bool,
+}
+
+/// A privilege scope derived at most once, the first time a read needs it.
+pub struct LazyScope<'a> {
+    store: &'a Store,
+    held: Option<Arc<PrivilegeScope>>,
+}
+
+impl LazyScope<'_> {
+    pub fn get(&mut self) -> Result<&Arc<PrivilegeScope>> {
+        if self.held.is_none() {
+            self.held = Some(self.store.privilege_scope()?);
+        }
+        Ok(self.held.as_ref().expect("derived above"))
+    }
 }
 
 /// A process-scoped transition guard. The lock file is intentionally
@@ -1182,42 +1199,79 @@ impl Store {
         events: &[Event],
         rewrites: &crate::rewrite::RewriteMap,
     ) -> Result<crate::state::ChangeState> {
+        self.project_state_in(&self.privilege_scope()?, events, rewrites)
+    }
+
+    /// `project_state` judged by a scope the caller derived for this read.
+    pub fn project_state_in(
+        &self,
+        scope: &Arc<PrivilegeScope>,
+        events: &[Event],
+        rewrites: &crate::rewrite::RewriteMap,
+    ) -> Result<crate::state::ChangeState> {
         let mut state = crate::state::reduce_following(events, rewrites)?;
-        state.apply_privilege_scope(
-            crate::import_authorization::PrivilegeScope::for_store(self)?,
-            events,
-        );
+        state.apply_privilege_scope(Arc::clone(scope), events);
         crate::replica::localize_change(&self.repository_id, events, &mut state);
         Ok(state)
     }
 
     pub fn state(&self, change_id: &str) -> Result<crate::state::ChangeState> {
+        self.state_in(&self.privilege_scope()?, change_id)
+    }
+
+    /// `state` judged by a scope the caller derived for this read.
+    pub fn state_in(
+        &self,
+        scope: &Arc<PrivilegeScope>,
+        change_id: &str,
+    ) -> Result<crate::state::ChangeState> {
         let events = self.load_events(change_id)?;
-        let mut state = crate::state::reduce_following(&events, &self.rewrites()?)?;
-        state.apply_privilege_scope(
-            crate::import_authorization::PrivilegeScope::for_store(self)?,
-            &events,
-        );
-        crate::replica::localize_change(&self.repository_id, &events, &mut state);
-        Ok(state)
+        self.project_state_in(scope, &events, &self.rewrites()?)
+    }
+
+    /// What the receiver permits, derived from the ledger as it stands.
+    ///
+    /// The scope is a value the caller holds for one read, never state kept on
+    /// the store: an import, an append or a replica change made through any
+    /// handle in the process changes what the next derivation answers, and a
+    /// scope kept past that would judge events by permissions that no longer
+    /// hold. A reader of several changes derives it once and passes it to
+    /// `state_in` and `project_state_in`; a reader that writes between reads
+    /// derives a fresh one for each.
+    pub fn privilege_scope(&self) -> Result<Arc<PrivilegeScope>> {
+        Ok(Arc::new(PrivilegeScope::for_store(self)?))
+    }
+
+    /// The scope for one read, derived when the read first judges a change.
+    /// A read that finds nothing to judge never derives it, and one that
+    /// cannot derive it fails at each change that needs it.
+    pub fn lazy_scope(&self) -> LazyScope<'_> {
+        LazyScope {
+            store: self,
+            held: None,
+        }
     }
 
     /// Readable changes for an aggregate view. A per-change failure is named
     /// on stderr; failures reading the shared ledger or rewrite map refuse
     /// the observation because they cannot be attributed to one change.
+    ///
+    /// The scope is derived once for the whole view, so the cost of an
+    /// aggregate read does not multiply by the number of changes.
     pub fn readable_states(&self) -> Result<BTreeMap<String, crate::state::ChangeState>> {
         let rewrites = self.rewrites()?;
+        let batches = import_batches(&self.root)?;
+        let mut scope = self.lazy_scope();
         let mut states = BTreeMap::new();
-        for change_id in self.list_change_ids()? {
-            let result = self.load_events(&change_id).and_then(|events| {
-                let mut state = crate::state::reduce_following(&events, &rewrites)?;
-                state.apply_privilege_scope(
-                    crate::import_authorization::PrivilegeScope::for_store(self)?,
-                    &events,
-                );
-                crate::replica::localize_change(&self.repository_id, &events, &mut state);
-                Ok(state)
-            });
+        for change_id in self.list_change_ids_in(&batches)? {
+            let result = self
+                .load_events_in(&change_id, &batches)
+                .and_then(|events| {
+                    let mut state = crate::state::reduce_following(&events, &rewrites)?;
+                    state.apply_privilege_scope(Arc::clone(scope.get()?), &events);
+                    crate::replica::localize_change(&self.repository_id, &events, &mut state);
+                    Ok(state)
+                });
             match result {
                 Ok(state) => {
                     states.insert(change_id, state);
@@ -1239,6 +1293,11 @@ impl Store {
     /// All events of one change in ULID (i.e. chronological) order.
     pub fn load_events(&self, change_id: &str) -> Result<Vec<Event>> {
         typed_events(self.raw_events(change_id)?)
+    }
+
+    /// `load_events` over import batches the caller already holds.
+    pub fn load_events_in(&self, change_id: &str, batches: &[ImportBatch]) -> Result<Vec<Event>> {
+        typed_events(self.raw_events_in(change_id, batches)?)
     }
 
     /// Raw JSON events of one change. Export deliberately bypasses the
@@ -1865,6 +1924,64 @@ mod tests {
             serde_json::from_slice(&fs::read(dir.path().join("config.json")).unwrap()).unwrap();
         assert_eq!(stored.schema_version, 3);
     }
+    fn open_change(store: &Store, change: &str) {
+        let opening: Event = serde_json::from_value(serde_json::json!({
+            "schema_version": crate::model::SCHEMA_VERSION, "event_id": ids::new_event_id(), "repository_id":"repo", "change_id": change, "actor":"writer", "created_at":"2026-10-04T00:00:00Z",
+            "event_type":"change-opened", "slug": change, "title":"Change", "profile":"local", "target_branch":"master", "branch": format!("arc/{change}"), "base":"base"
+        })).unwrap();
+        store.append_event(&opening).unwrap();
+    }
+
+    #[test]
+    fn an_aggregate_read_derives_the_privilege_scope_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let changes = ["one", "two", "three", "four", "five"];
+        for change in changes {
+            open_change(&store, change);
+        }
+        let derivations = crate::import_authorization::scope_derivations;
+        let before = derivations();
+        assert_eq!(store.readable_states().unwrap().len(), changes.len());
+        assert_eq!(derivations() - before, 1);
+
+        let before = derivations();
+        let scope = store.privilege_scope().unwrap();
+        for change in changes {
+            store.state_in(&scope, change).unwrap();
+        }
+        assert_eq!(
+            derivations() - before,
+            1,
+            "reading a change with a held scope derives nothing"
+        );
+    }
+
+    #[test]
+    fn a_read_that_finds_no_change_derives_no_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let before = crate::import_authorization::scope_derivations();
+        assert!(store.readable_states().unwrap().is_empty());
+        assert_eq!(crate::import_authorization::scope_derivations(), before);
+    }
+
+    #[test]
+    fn a_scope_is_derived_after_a_write_not_kept_across_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        open_change(&store, "one");
+        assert_eq!(store.readable_states().unwrap().len(), 1);
+        open_change(&store, "two");
+        let before = crate::import_authorization::scope_derivations();
+        assert_eq!(store.readable_states().unwrap().len(), 2);
+        assert_eq!(
+            crate::import_authorization::scope_derivations() - before,
+            1,
+            "a read after a write derives afresh"
+        );
+    }
+
     #[test]
     fn append_refuses_an_event_before_the_change_opening_without_writes() {
         let dir = tempfile::tempdir().unwrap();

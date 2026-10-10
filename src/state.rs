@@ -1016,7 +1016,7 @@ pub enum IntegrationKind {
 #[derive(Debug, Clone, Serialize)]
 pub struct ChangeState {
     #[serde(skip)]
-    pub privilege_scope: Option<crate::import_authorization::PrivilegeScope>,
+    pub privilege_scope: Option<std::sync::Arc<crate::import_authorization::PrivilegeScope>>,
     pub schema: &'static str,
     #[serde(skip)]
     pub provisional_signature_successors: BTreeMap<String, String>,
@@ -1431,7 +1431,7 @@ impl ChangeState {
 
     pub fn apply_privilege_scope(
         &mut self,
-        scope: crate::import_authorization::PrivilegeScope,
+        scope: std::sync::Arc<crate::import_authorization::PrivilegeScope>,
         events: &[Event],
     ) {
         for finding in self

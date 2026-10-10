@@ -1478,8 +1478,9 @@ fn is_working_branch(cwd: &Path, branch: &str) -> bool {
         let Some(store) = crate::store::Store::open_at_for(&root, cwd)? else {
             return Ok(false);
         };
+        let mut scope = store.lazy_scope();
         for id in store.list_change_ids()? {
-            if store.state(&id)?.branch == branch {
+            if store.state_in(scope.get()?, &id)?.branch == branch {
                 return Ok(true);
             }
         }

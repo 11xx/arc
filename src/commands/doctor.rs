@@ -38,6 +38,29 @@ struct Report {
 struct ChangeInspection<'a> {
     cwd: &'a Path,
     local_repository_id: &'a str,
+    /// Derived on the first change that needs it and shared by the rest: the
+    /// inspection only reads, so every change is judged by one scope.
+    scope: std::cell::RefCell<
+        Option<Option<std::sync::Arc<crate::import_authorization::PrivilegeScope>>>,
+    >,
+}
+
+impl ChangeInspection<'_> {
+    /// The scope of the store at `root`, or none when there is no store.
+    fn scope(
+        &self,
+        root: &Path,
+    ) -> Result<Option<std::sync::Arc<crate::import_authorization::PrivilegeScope>>> {
+        if let Some(held) = self.scope.borrow().as_ref() {
+            return Ok(held.clone());
+        }
+        let derived = match Store::open_at_for(root, self.cwd)? {
+            Some(store) => Some(store.privilege_scope()?),
+            None => None,
+        };
+        *self.scope.borrow_mut() = Some(derived.clone());
+        Ok(derived)
+    }
 }
 
 /// Where this invocation reads and writes. Every other diagnostic here is a
@@ -112,6 +135,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
         ChangeInspection {
             cwd: &ctx.cwd,
             local_repository_id: &local_repository_id,
+            scope: Default::default(),
         },
         &root,
         &mut problems,
@@ -522,11 +546,8 @@ fn inspect_change(
         return Ok(());
     };
     if let Some(root) = change_dir.parent().and_then(Path::parent) {
-        if let Some(store) = Store::open_at_for(root, inspection.cwd)? {
-            state.apply_privilege_scope(
-                crate::import_authorization::PrivilegeScope::for_store(&store)?,
-                &events,
-            );
+        if let Some(scope) = inspection.scope(root)? {
+            state.apply_privilege_scope(scope, &events);
         }
     }
     crate::replica::localize_change(inspection.local_repository_id, &events, &mut state);

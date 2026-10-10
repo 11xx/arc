@@ -12088,15 +12088,18 @@ fn all_changes_in(
     store: &Store,
     rewrites: &crate::rewrite::RewriteMap,
 ) -> Result<Vec<ChangeState>> {
-    store
-        .list_change_ids()?
-        .into_iter()
-        .map(|id| {
-            store
-                .project_state(&store.load_events(&id)?, rewrites)
-                .with_context(|| format!("cannot read change {id}"))
-        })
-        .collect()
+    let mut scope = store.lazy_scope();
+    let mut changes = Vec::new();
+    for id in store.list_change_ids()? {
+        let events = store.load_events(&id)?;
+        changes.push(
+            scope
+                .get()
+                .and_then(|scope| store.project_state_in(scope, &events, rewrites))
+                .with_context(|| format!("cannot read change {id}"))?,
+        );
+    }
+    Ok(changes)
 }
 
 /// The promotion state a plan's row carries: `Closed` once at least one
@@ -12232,28 +12235,47 @@ fn foreign_promotions(
         .collect()
 }
 
-/// Promoting ledgers read once per anchor for one observation.
+/// Promoting ledgers read once per anchor for one observation, each judged by
+/// one privilege scope for the whole observation.
 #[derive(Default)]
 struct ForeignLedgers {
-    stores: HashMap<String, Option<Store>>,
+    stores: HashMap<String, Option<ForeignLedger>>,
+}
+
+struct ForeignLedger {
+    store: Store,
+    scope: std::cell::OnceCell<Option<std::sync::Arc<crate::import_authorization::PrivilegeScope>>>,
 }
 
 impl ForeignLedgers {
     fn change(&mut self, promotion: &ForeignPromotion) -> Option<ChangeState> {
         let anchor = promotion.anchor.as_deref()?;
-        let store = self
+        let ledger = self
             .stores
             .entry(anchor.to_string())
             .or_insert_with(|| {
                 Store::resolve_root(Path::new(anchor))
                     .ok()
                     .and_then(|root| Store::open_at_for(&root, Path::new(anchor)).ok().flatten())
+                    .map(|store| ForeignLedger {
+                        store,
+                        scope: Default::default(),
+                    })
             })
             .as_ref()
-            .filter(|store| store.repository_id == promotion.repository_id)?;
+            .filter(|ledger| ledger.store.repository_id == promotion.repository_id)?;
+        let store = &ledger.store;
         let rewrites = store.rewrites().ok()?;
+        let scope = ledger
+            .scope
+            .get_or_init(|| store.privilege_scope().ok())
+            .as_ref()?;
         store
-            .project_state(&store.load_events(&promotion.change_id).ok()?, &rewrites)
+            .project_state_in(
+                scope,
+                &store.load_events(&promotion.change_id).ok()?,
+                &rewrites,
+            )
             .ok()
     }
 }
