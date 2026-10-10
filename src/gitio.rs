@@ -1285,7 +1285,8 @@ pub fn worktree_tree(cwd: &Path) -> Result<String> {
     // Inside the Git directory rather than the system temp dir: the index has
     // to be on the same filesystem as the object store it feeds, and this one
     // is already private to the repository.
-    let index_path = git_path(cwd, "arc-scratch-index")?.with_extension(crate::ids::new_event_id());
+    let index_path =
+        git_path(cwd, "arc-scratch-index")?.with_extension(crate::ids::new_identifier());
     let index = index_path.display().to_string();
 
     // From the top of the worktree, so `add -A` means the whole worktree

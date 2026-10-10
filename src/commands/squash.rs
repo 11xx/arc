@@ -209,7 +209,7 @@ fn preserve_obstructions(worktree: &Path, head: &str) -> Result<()> {
         builder.mode(0o700);
     }
     builder.create(&root)?;
-    let saved = root.join(crate::ids::new_event_id());
+    let saved = root.join(crate::ids::new_identifier());
     builder.recursive(false).create(&saved)?;
     eprintln!(
         "squash recovery: preserving obstructing paths under {}",

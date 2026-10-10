@@ -330,7 +330,7 @@ impl Store {
             Err(_) => {
                 let cfg = StoreConfig {
                     schema_version: 1,
-                    repository_id: ids::new_event_id(),
+                    repository_id: ids::new_identifier(),
                     created_at: chrono::Utc::now(),
                 };
                 write_exclusive(&config_path, &serde_json::to_vec_pretty(&cfg)?).or_else(|_| {
@@ -1196,7 +1196,7 @@ impl Store {
         }
         cfg.schema_version = introduced_in;
         let body = serde_json::to_vec_pretty(&cfg)?;
-        let temporary = config_path.with_extension(format!("json.{}", ids::new_event_id()));
+        let temporary = config_path.with_extension(format!("json.{}", ids::new_identifier()));
         fs::write(&temporary, &body)?;
         fs::rename(&temporary, &config_path)
             .with_context(|| format!("cannot stamp store format in {}", config_path.display()))
@@ -1767,7 +1767,7 @@ impl Store {
             published: false,
             message: format!("batch directory preparation failed: {error:#}"),
         })?;
-        let path = dir.join(format!("{}.json", ids::new_event_id()));
+        let path = dir.join(format!("{}.json", ids::new_identifier()));
         crate::replica::write_exclusive(&path, &serde_json::to_vec_pretty(batch)?).context(
             "import admission publication failed; inspect the published batch before retrying",
         )?;
@@ -1916,7 +1916,8 @@ fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<()> {
         .file_name()
         .context("exclusive-write path has no file name")?
         .to_string_lossy();
-    let temporary = path.with_file_name(format!(".{file_name}.{}.tmp", crate::ids::new_event_id()));
+    let temporary =
+        path.with_file_name(format!(".{file_name}.{}.tmp", crate::ids::new_identifier()));
 
     let publish = (|| -> Result<()> {
         let mut f = fs::OpenOptions::new()
@@ -2189,7 +2190,7 @@ mod tests {
     }
     fn open_change(store: &Store, change: &str) {
         let opening: Event = serde_json::from_value(serde_json::json!({
-            "schema_version": crate::model::SCHEMA_VERSION, "event_id": ids::new_event_id(), "repository_id":"repo", "change_id": change, "actor":"writer", "created_at":"2026-10-04T00:00:00Z",
+            "schema_version": crate::model::SCHEMA_VERSION, "event_id": ids::new_event_id().unwrap(), "repository_id":"repo", "change_id": change, "actor":"writer", "created_at":"2026-10-04T00:00:00Z",
             "event_type":"change-opened", "slug": change, "title":"Change", "profile":"local", "target_branch":"master", "branch": format!("arc/{change}"), "base":"base"
         })).unwrap();
         store.append_event(&opening).unwrap();

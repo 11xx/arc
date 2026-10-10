@@ -48,6 +48,8 @@ SAY WHO YOU ARE (before the first write)
   in their scope, even in fresh processes and after imports from a clock ahead.
   Observation timestamps retain the recording clock. The store refuses an
   append that would sort before a change's opening event.
+  Event issuance refuses sequence exhaustion. Non-event identifiers and scratch
+  names use an independent random ULID generator.
 
   Every event records who wrote it. Most writes accept an undeclared
   identity. In that case arc records an actor nobody claimed:

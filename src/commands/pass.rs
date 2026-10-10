@@ -70,7 +70,7 @@ pub fn open_pass(ctx: &Ctx, raw_members: Vec<String>, note: Option<String>) -> R
     let store = ctx.store()?;
     let _repository_events = store.lock_repository_events()?;
     let members = validate_members(&store, raw_members)?;
-    let pass_id = ids::new_event_id();
+    let pass_id = ids::new_identifier();
     let event = ctx.event(
         &store,
         Store::REPOSITORY_SCOPE,

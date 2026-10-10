@@ -355,7 +355,7 @@ pub fn init(ctx: &Ctx, store: &Store, name: &str) -> Result<()> {
     if !load_events(store)?.is_empty() {
         bail!("this store already belongs to a replica project; import its pairing record");
     }
-    let project_id = ids::new_event_id();
+    let project_id = ids::new_identifier();
     let identity = ReplicaIdentity {
         name: name.to_string(),
         repository_id: store.repository_id.clone(),
@@ -366,7 +366,7 @@ pub fn init(ctx: &Ctx, store: &Store, name: &str) -> Result<()> {
         &project_id,
         identity,
         ReplicaPayload::Initialized,
-    );
+    )?;
     write_local_event(store, &event)?;
     println!("replica: {name}");
     println!("project: {project_id}");
@@ -413,7 +413,7 @@ pub fn pair(ctx: &Ctx, store: &Store, name: &str, repository_id: &str) -> Result
                 repository_id: repository_id.to_string(),
             },
         },
-    );
+    )?;
     write_local_event(store, &event)?;
     println!("paired: {name} ({repository_id})");
     println!("export the pairing record with `arc replica export`");
@@ -588,7 +588,7 @@ pub fn import(
                 project_id,
                 local.clone(),
                 ReplicaPayload::AuthorityAcquired { offer_id },
-            );
+            )?;
             candidate.push(event.clone());
             added.push(event);
             acquired = Some(true);
@@ -725,7 +725,7 @@ pub fn offer(ctx: &Ctx, store: &Store, recipient: &str) -> Result<()> {
         );
     }
     let parent_event_id = active_grant(&events, &current.project_id, &store.repository_id)?;
-    let event_id = ids::new_event_id();
+    let event_id = ids::new_event_id()?;
     let event = make_event_with_id(
         ctx,
         store,
@@ -803,7 +803,7 @@ pub fn reclaim(ctx: &Ctx, store: &Store, reason: &str) -> Result<()> {
             offer_id: offer.offer_id.clone(),
             reason: reason.to_string(),
         },
-    );
+    )?;
     write_local_event(store, &event)?;
     println!("authority return requested for offer: {}", offer.offer_id);
     println!("reason: {reason}");
@@ -865,7 +865,7 @@ pub fn confirm_return(ctx: &Ctx, store: &Store) -> Result<()> {
             offer_id: offer_id.clone(),
             request_id: request.event_id.clone(),
         },
-    );
+    )?;
     let mut candidate = events;
     candidate.push(event.clone());
     snapshot(&candidate, &store.repository_id)?;
@@ -992,8 +992,15 @@ fn make_event(
     project_id: &str,
     actor: ReplicaIdentity,
     payload: ReplicaPayload,
-) -> ReplicaEvent {
-    make_event_with_id(ctx, store, project_id, actor, ids::new_event_id(), payload)
+) -> Result<ReplicaEvent> {
+    Ok(make_event_with_id(
+        ctx,
+        store,
+        project_id,
+        actor,
+        ids::new_event_id()?,
+        payload,
+    ))
 }
 
 fn make_event_with_id(
@@ -1644,7 +1651,7 @@ pub(crate) fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<()> {
         .file_name()
         .context("replica event path has no file name")?
         .to_string_lossy();
-    let temporary = path.with_file_name(format!(".{file_name}.{}.tmp", ids::new_event_id()));
+    let temporary = path.with_file_name(format!(".{file_name}.{}.tmp", ids::new_identifier()));
     let mut published = false;
     let publish = (|| -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt;

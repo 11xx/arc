@@ -653,7 +653,7 @@ impl Ctx {
                     .with_context(|| format!("cannot issue a local event after {id:?}"))?
                     .to_string()
             }
-            None => ids::new_event_id(),
+            None => ids::new_event_id()?,
         };
         Ok(Event {
             schema_version: SCHEMA_VERSION,
@@ -1129,7 +1129,7 @@ pub fn write_atomically(path: &Path, contents: &[u8], mode: FileMode) -> Result<
     let temp = parent.join(format!(
         ".{}-{}.tmp",
         name.to_string_lossy(),
-        crate::ids::new_event_id()
+        crate::ids::new_identifier()
     ));
     let publish = (|| -> Result<()> {
         let mut file = std::fs::OpenOptions::new()

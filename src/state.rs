@@ -3538,7 +3538,7 @@ mod tests {
     fn ev(change: &str, payload: Payload) -> Event {
         Event {
             schema_version: SCHEMA_VERSION,
-            event_id: crate::ids::new_event_id(),
+            event_id: crate::ids::new_event_id().unwrap(),
             repository_id: "repo".into(),
             change_id: change.into(),
             actor: "tester".into(),

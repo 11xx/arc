@@ -9,12 +9,14 @@ static LAST_EVENT_ID: std::sync::Mutex<Option<ulid::Ulid>> = std::sync::Mutex::n
 /// The largest timestamp a ULID's 48-bit time part holds.
 const MAX_TIMESTAMP_MS: u64 = (1 << 48) - 1;
 
-pub fn new_event_id() -> String {
-    // Only a sequence already at the maximum id leaves nothing later to
-    // issue; a fresh clock id is the best remaining.
-    next_event_id(None)
-        .unwrap_or_else(|_| ulid::Ulid::new())
-        .to_string()
+/// An ordered event identity. Exhaustion leaves the sequence unchanged.
+pub fn new_event_id() -> Result<String> {
+    next_event_id(None).map(|id| id.to_string())
+}
+
+/// A random ULID for identifiers and temporary names outside the event sequence.
+pub fn new_identifier() -> String {
+    ulid::Ulid::new().to_string()
 }
 
 /// An event id later than `previous` and than every id this process issued.
@@ -26,7 +28,7 @@ pub fn new_event_id_after(previous: ulid::Ulid) -> Result<ulid::Ulid> {
 /// The smallest id after `floor` that is at least `candidate`. An exhausted
 /// random part moves to the next millisecond, which still sorts after the
 /// floor. None when `floor` is the last id of the last millisecond.
-fn after_floor(candidate: ulid::Ulid, floor: ulid::Ulid) -> Option<ulid::Ulid> {
+pub(crate) fn after_floor(candidate: ulid::Ulid, floor: ulid::Ulid) -> Option<ulid::Ulid> {
     if candidate > floor {
         return Some(candidate);
     }
@@ -104,6 +106,33 @@ pub fn validate_id_component(id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn unfloored_issuer_refuses_after_the_last_event_id() {
+        const CHILD: &str = "ARC_TEST_EXHAUSTED_ISSUER";
+        if std::env::var_os(CHILD).is_some() {
+            let issued = new_event_id_after(ulid::Ulid::from(u128::MAX - 1)).unwrap();
+            assert_eq!(issued, ulid::Ulid::from(u128::MAX));
+            assert!(new_event_id().is_err());
+            assert!(new_event_id_after(ulid::Ulid::new()).is_err());
+            assert!(new_identifier().parse::<ulid::Ulid>().is_ok());
+            return;
+        }
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "ids::tests::unfloored_issuer_refuses_after_the_last_event_id",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "{}",
+            String::from_utf8_lossy(&child.stdout)
+        );
+    }
+
+    #[test]
     fn ids_after_a_floor_stay_in_one_sequence() {
         // The current millisecond with its random part exhausted: the next
         // id moves to the following millisecond, never far ahead of the
@@ -111,7 +140,7 @@ mod tests {
         let floor = ulid::Ulid::from_parts(ulid::Ulid::new().timestamp_ms(), u128::MAX >> 48);
         let after = new_event_id_after(floor).unwrap();
         assert!(after > floor);
-        let next = new_event_id();
+        let next = new_event_id().unwrap();
         assert!(next > after.to_string());
     }
 
@@ -133,7 +162,9 @@ mod tests {
 
     #[test]
     fn event_ids_sort_in_issue_order() {
-        let ids = (0..10_000).map(|_| new_event_id()).collect::<Vec<_>>();
+        let ids = (0..10_000)
+            .map(|_| new_event_id().unwrap())
+            .collect::<Vec<_>>();
         assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
     }
 

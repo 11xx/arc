@@ -58,7 +58,7 @@ pub fn take(ctx: &Ctx, tags: Vec<String>, ttl: Option<String>, json: bool) -> Re
         now,
         &owner,
         Payload::ClaimSet {
-            claim_id: ids::new_event_id(),
+            claim_id: ids::new_identifier(),
             ttl_seconds,
             stage_budgets: default_stage_budgets(),
             displaced,
@@ -204,7 +204,7 @@ fn claim_inner(
             displaced.is_none() && claim.owner == owner && state::claim_timing_at(claim, now).active
         })
         .map(|claim| claim.claim_id.clone())
-        .unwrap_or_else(ids::new_event_id);
+        .unwrap_or_else(ids::new_identifier);
 
     let payload = Payload::ClaimSet {
         claim_id,
@@ -322,7 +322,7 @@ pub fn stage(
         } else {
             None
         };
-        let claim_id = ids::new_event_id();
+        let claim_id = ids::new_identifier();
         let payload = Payload::ClaimSet {
             claim_id,
             ttl_seconds: 2 * 60 * 60,

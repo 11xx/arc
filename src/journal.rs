@@ -1755,7 +1755,7 @@ fn ensure_global_replica(hot: &Path) -> Result<crate::replica::ReplicaIdentity> 
     }
     let identity = crate::replica::ReplicaIdentity {
         name: "global".to_string(),
-        repository_id: crate::ids::new_event_id(),
+        repository_id: crate::ids::new_identifier(),
     };
     std::fs::create_dir_all(hot)?;
     let staged = hot.join(".replica.json.pending");
@@ -2026,7 +2026,7 @@ fn import_artifacts(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
         }
         global_replica(&hot)?.unwrap_or(crate::replica::ReplicaIdentity {
             name: "global".to_string(),
-            repository_id: crate::ids::new_event_id(),
+            repository_id: crate::ids::new_identifier(),
         })
     };
     let receipt_path = exchange_imports_dir(&hot).join(format!("{digest}.json"));
@@ -3283,7 +3283,7 @@ fn promoting_actor(ctx: &Ctx) -> Option<String> {
 pub fn writability(cwd: &Path) -> Result<(PathBuf, Option<PathBuf>)> {
     let dir = resolve_dir(cwd)?;
     let probe = std::fs::create_dir_all(&dir).and_then(|()| {
-        let path = dir.join(format!(".probe-{}.tmp", crate::ids::new_event_id()));
+        let path = dir.join(format!(".probe-{}.tmp", crate::ids::new_identifier()));
         std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -12041,7 +12041,7 @@ fn replace_file(path: &Path, bytes: &[u8], staging: &Path) -> Result<()> {
         .unwrap_or_else(|| "file".to_string());
     std::fs::create_dir_all(staging)
         .with_context(|| format!("cannot create {}", staging.display()))?;
-    let temporary = staging.join(format!(".{name}.{}.tmp", crate::ids::new_event_id()));
+    let temporary = staging.join(format!(".{name}.{}.tmp", crate::ids::new_identifier()));
     let publish = (|| -> Result<()> {
         let mut file = std::fs::OpenOptions::new()
             .write(true)

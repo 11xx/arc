@@ -313,7 +313,7 @@ pub(super) fn import_validated_guarded(
         root: root.clone(),
         repository_id: local_repository_id
             .clone()
-            .unwrap_or_else(crate::ids::new_event_id),
+            .unwrap_or_else(crate::ids::new_identifier),
         operator_policy_path: Some(crate::policy::operator_path(&ctx.cwd)?),
         require_declared_actor: initial_policy.policy.require_declared_actor,
         require_declared_actor_sources: initial_policy

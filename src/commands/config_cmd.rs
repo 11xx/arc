@@ -121,7 +121,7 @@ fn probe_journal(ctx: &Ctx) -> WritabilityCheck {
 }
 
 fn probe_file(dir: &Path) -> Result<String> {
-    let path = dir.join(format!(".probe-{}.tmp", ids::new_event_id()));
+    let path = dir.join(format!(".probe-{}.tmp", ids::new_identifier()));
     fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -146,7 +146,7 @@ fn probe_ref(ctx: &Ctx) -> Result<String> {
     let Some(head) = gitio::head_if_present(&ctx.cwd)? else {
         return Ok("skipped: unborn HEAD".into());
     };
-    let name = format!("refs/arc/probe-{}", ids::new_event_id());
+    let name = format!("refs/arc/probe-{}", ids::new_identifier());
     gitio::update_ref(&ctx.cwd, &name, &head)?;
     if let Err(error) = gitio::delete_ref(&ctx.cwd, &name) {
         return Err(error).context(format!("cannot remove probe ref {name}"));
@@ -197,7 +197,8 @@ fn probe_signing(ctx: &Ctx) -> WritabilityCheck {
 /// Make one probe commit in a repository that is deleted either way, so the
 /// target repository gains nothing from having been asked.
 fn probe_commit_throwaway(ctx: &Ctx, signed: bool) -> Result<()> {
-    let dir = crate::config::temp_dir()?.join(format!("arc-commit-probe-{}", ids::new_event_id()));
+    let dir =
+        crate::config::temp_dir()?.join(format!("arc-commit-probe-{}", ids::new_identifier()));
     fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
     let result = probe_commit_in(&dir, ctx, signed);
     let _ = fs::remove_dir_all(&dir);
