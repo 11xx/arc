@@ -778,7 +778,7 @@ int fsync(int fd) {
 #[test]
 fn external_map_publication_failure_withdraws_only_confirmed_absent_retention() {
     use std::os::unix::fs::PermissionsExt;
-    for mode in ["published", "uncertain", "absent"] {
+    for mode in ["published", "uncertain", "absent", "unissued"] {
         let repo = repo_with_gates();
         let (worktree, old) = approved_change(&repo, "alpha");
         let change = only_change(&repo);
@@ -798,6 +798,17 @@ fn external_map_publication_failure_withdraws_only_confirmed_absent_retention() 
             &["update-ref", &format!("refs/arc/keep/{change}/ps-01"), &new],
         );
         let library = history_publication_fault(&repo);
+        let id_lock = if mode == "unissued" {
+            let lock = fs::File::options()
+                .read(true)
+                .write(true)
+                .open(repo.root.join(".git/arc/locks/event-ids.lock"))
+                .unwrap();
+            lock.lock().unwrap();
+            Some(lock)
+        } else {
+            None
+        };
         let failed = repo
             .arc(&repo.root)
             .args([
@@ -814,11 +825,26 @@ fn external_map_publication_failure_withdraws_only_confirmed_absent_retention() 
             .output()
             .unwrap();
         assert!(!failed.status.success(), "{mode}: {failed:?}");
-        assert!(
-            String::from_utf8_lossy(&failed.stderr).contains("Input/output error"),
-            "{failed:?}"
-        );
-        if mode == "absent" {
+        drop(id_lock);
+        let stderr = String::from_utf8_lossy(&failed.stderr);
+        if mode == "unissued" {
+            assert!(
+                stderr.contains("ledger event IDs lock") && stderr.contains("is busy"),
+                "{failed:?}"
+            );
+        } else {
+            assert!(stderr.contains("Input/output error"), "{failed:?}");
+        }
+        let publication = match mode {
+            "absent" | "unissued" => {
+                "event is absent; retention refs from this attempt were withdrawn"
+            }
+            "published" => "is published; retention refs are preserved",
+            "uncertain" => "publication is uncertain",
+            _ => unreachable!(),
+        };
+        assert!(stderr.contains(publication), "{failed:?}");
+        if mode == "absent" || mode == "unissued" {
             assert!(repository_events(&repo).is_empty());
             assert!(retained(&repo).is_empty());
         } else {
