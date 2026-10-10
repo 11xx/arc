@@ -374,18 +374,24 @@ pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<i32> {
 /// contributes no store. Claiming "nothing is registered" there would replace
 /// silence with something worse — a confident false statement.
 fn nothing_found() -> String {
-    let registered = crate::config::load().ok().and_then(|cfg| {
-        let root = crate::registry::journals_root(&cfg).display().to_string();
-        crate::registry::projects(&cfg)
-            .ok()
-            .map(|projects| (projects.len(), root))
-    });
+    nothing_found_message(registered_projects())
+}
+
+/// How many projects the registry holds and the journal root it was read
+/// from, or why it could not be read.
+fn registered_projects() -> Result<(usize, String)> {
+    let cfg = crate::config::load()?;
+    let root = crate::registry::journals_root(&cfg).display().to_string();
+    Ok((crate::registry::projects(&cfg)?.len(), root))
+}
+
+fn nothing_found_message(registered: Result<(usize, String)>) -> String {
     match registered {
-        Some((0, root)) => format!("no projects found: nothing is registered under {root}"),
-        Some((count, _)) => {
+        Ok((0, root)) => format!("no projects found: nothing is registered under {root}"),
+        Ok((count, _)) => {
             format!("no open changes: {count} project(s) registered, none with a ledger to report")
         }
-        None => "no projects found".to_string(),
+        Err(error) => format!("no projects found: the registry could not be read: {error:#}"),
     }
 }
 
@@ -3984,5 +3990,31 @@ mod report {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_rollup_names_what_it_counted() {
+        assert_eq!(
+            nothing_found_message(Ok((0, "/journals".to_string()))),
+            "no projects found: nothing is registered under /journals"
+        );
+        assert_eq!(
+            nothing_found_message(Ok((2, "/journals".to_string()))),
+            "no open changes: 2 project(s) registered, none with a ledger to report"
+        );
+    }
+
+    #[test]
+    fn an_empty_rollup_names_why_it_could_not_count() {
+        let failure = anyhow::anyhow!("malformed config.toml").context("cannot read the file");
+        assert_eq!(
+            nothing_found_message(Err(failure)),
+            "no projects found: the registry could not be read: cannot read the file: malformed config.toml"
+        );
     }
 }
