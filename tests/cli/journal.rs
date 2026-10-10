@@ -17546,3 +17546,84 @@ fn historical_show_producer_json_marks_missing_models() {
         );
     }
 }
+
+#[test]
+fn historical_entry_producer_json_marks_missing_models() {
+    for detached in [false, true] {
+        let repo = Repo::new();
+        let file = evidence_artifact(&repo, "discussion", "entry-producers", "# Entries\n");
+        stdout(
+            repo.arc(&repo.root)
+                .args([
+                    "journal",
+                    "position",
+                    &file,
+                    "--stance",
+                    "for",
+                    "--body-file",
+                    "-",
+                ])
+                .write_stdin("Position finding.\n"),
+        );
+        stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "evidence", &file, "--body-file", "-"])
+                .write_stdin("Evidence finding.\n"),
+        );
+        let dir = journal_dir(&repo);
+        if detached {
+            fs::write(dir.join(&file), "# Entries\n").unwrap();
+        }
+        for model in [
+            None,
+            Some("unknown"),
+            Some(""),
+            Some("m#none"),
+            Some("fixture-recording#high"),
+            Some("m#high"),
+        ] {
+            let mut events = journal_events(&dir);
+            for event in &mut events {
+                if ["position", "evidence"]
+                    .iter()
+                    .any(|kind| event["event"] == *kind)
+                {
+                    event["harness"] = "codex".into();
+                    event["session"] = "fixture-recording".into();
+                    match model {
+                        Some(model) => {
+                            event["model"] = model.into();
+                        }
+                        None => {
+                            event.as_object_mut().unwrap().remove("model");
+                        }
+                    }
+                }
+            }
+            fs::write(
+                dir.join("events.jsonl"),
+                events
+                    .iter()
+                    .map(|event| event.to_string() + "\n")
+                    .collect::<String>(),
+            )
+            .unwrap();
+            let shown = json_stdout(
+                repo.arc(&repo.root)
+                    .args(["journal", "show", &file, "--json"]),
+            );
+            for kind in ["positions", "evidence"] {
+                let rows = shown[kind].as_array().unwrap();
+                assert_eq!(rows.len(), 1, "{kind}: {shown}");
+                let identity = &rows[0]["recorded_by"];
+                assert_eq!(identity["model"].as_str(), model, "{kind}: {identity}");
+                assert_eq!(
+                    identity.get("model_recorded"),
+                    (model != Some("m#high")).then_some(&serde_json::Value::Bool(false)),
+                    "{kind}: {identity}"
+                );
+                assert_eq!(rows[0]["body"].is_null(), detached);
+            }
+        }
+    }
+}

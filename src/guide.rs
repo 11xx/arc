@@ -48,12 +48,13 @@ SAY WHO YOU ARE (before the first write)
   or a session id prints as `<harness> (model not recorded)`, or
   `model not recorded` when no harness is established. Valid model and effort
   spellings retain their coordinates. JSON production identities, journal
-  artifact writers, filed and recent sessions, suggestions, verification
-  stamps, and review coverage retain the raw model value and carry
-  `model_recorded: false` when it names no model; valid models omit that flag. Workspace report debt rows retain the raw
-  implementer value with the same optional flag. Review coverage retains the
-  originating session and validates the model against it. Audit and verdict
-  detail text validates models against their recorded sessions.
+  artifact and entry writers, filed and recent sessions, suggestions,
+  verification stamps, and review coverage retain the raw model value and carry
+  `model_recorded: false` when it names no model; valid models omit that flag.
+  Workspace report debt rows retain the raw implementer value with the same
+  optional flag. Review coverage retains the originating session and validates
+  the model against it. Audit and verdict detail text validates models against
+  their recorded sessions.
 
   Local change, repository and replica IDs are totally ordered by issuance
   across processes sharing one ledger. Ordinary issuance and publication use
@@ -508,7 +509,10 @@ SETTLE A QUESTION (before it is work)
   arc journal show <file> --json
                          Positions and evidence list IDs, headings, bodies,
                          recorded identities, corrected fields, and withdrawal
-                         status. Unrecorded blocks have null recorded identity;
+                         status. Recorded identity models retain raw values with
+                         `model_recorded: false` when missing, placeholders or
+                         session ids; valid models omit the flag.
+                         Unrecorded blocks have null recorded identity;
                          detached events have null heading and body. Corrections
                          and retractions list typed events in log order.
                          Headings and fence markers permit up to three columns

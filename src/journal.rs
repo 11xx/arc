@@ -1158,8 +1158,9 @@ pub enum JournalCmd {
     /// argument is a filename, never a path; `arc journal discussion <file.md>`
     /// reads the same artifact's stances and open questions.
     /// Records no events; ledger reads do not require a parseable append policy.
-    /// JSON recorded_by retains the raw model with model_recorded: false when
-    /// it is missing, a placeholder or a session id; valid models omit the flag.
+    /// JSON artifact and entry recorded_by objects retain the raw model with
+    /// model_recorded: false when missing, a placeholder or a session id;
+    /// valid models omit the flag.
     Show {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
@@ -11800,6 +11801,17 @@ pub(crate) struct RecordedIdentity {
     pub(crate) model: Option<String>,
 }
 
+impl From<&JournalEvent> for RecordedIdentity {
+    fn from(event: &JournalEvent) -> Self {
+        Self {
+            harness: event.harness().map(str::to_string),
+            session: event.session().map(str::to_string),
+            actor: event.actor.clone(),
+            model: event.model.clone(),
+        }
+    }
+}
+
 impl Serialize for RecordedIdentity {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
@@ -11830,15 +11842,10 @@ pub(crate) fn recorded_identity(
     events: &[JournalEvent],
     filename: &str,
 ) -> Option<RecordedIdentity> {
-    let event = events
+    events
         .iter()
-        .find(|event| event.file.as_deref() == Some(filename))?;
-    Some(RecordedIdentity {
-        harness: event.harness().map(str::to_string),
-        session: event.session().map(str::to_string),
-        actor: event.actor.clone(),
-        model: event.model.clone(),
-    })
+        .find(|event| event.file.as_deref() == Some(filename))
+        .map(RecordedIdentity::from)
 }
 
 /// The identity fields one provenance repair replaces. Absent means the
@@ -13533,12 +13540,7 @@ fn structured_entries(
             "id": id,
             "heading": block.map(|block| block.heading),
             "body": block.map(|block| block.body),
-            "recorded_by": event.map(|event| serde_json::json!({
-                "actor": event.actor,
-                "harness": event.harness(),
-                "session": event.session(),
-                "model": event.model,
-            })),
+            "recorded_by": event.map(RecordedIdentity::from),
             "actor": field("actor", event.and_then(|event| event.actor.as_deref())),
             "model": field("model", event.and_then(|event| event.model.as_deref())),
             "retracted": id.is_some_and(|id| amendments.is_retracted(id)),
