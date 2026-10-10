@@ -2241,7 +2241,8 @@ RULES THAT CHANGE WHAT YOU DO
     and `arc rescue <change> --transcript` reads the exact claimed session's
     latest operator turns through the linked tapes library, taking the newest
     4 MiB of a recording file as its window. It names the reader and the read
-    bound, or the cause and reason when lookup or reading cannot finish.
+    bound, or the cause and reason when lookup or reading cannot finish; the
+    reason is one bounded line, as an identity lookup's is.
   - `arc watch <file.md> --until stalled` arms the wait over an artifact
     claim, whose stages carry no budget, so it stalls when its lease runs out,
     and `arc rescue <file.md> [--take]` reports where the work stopped and

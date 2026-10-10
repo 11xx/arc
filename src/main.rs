@@ -1866,8 +1866,8 @@ enum Cmd {
         #[arg(long)]
         json: bool,
         /// Include an exact claimed session's sensitive transcript, or a
-        /// cause and reason when its recording cannot be read; file reads take
-        /// the newest 4 MiB
+        /// cause and reason (one bounded line) when its recording cannot be
+        /// read; file reads take the newest 4 MiB
         #[arg(long)]
         transcript: bool,
         /// Maximum operator turns to include from the operator projection

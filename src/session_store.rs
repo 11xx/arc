@@ -61,9 +61,11 @@ pub enum SessionAnswer {
     Read(SessionRead),
     /// No store of the harness holds a recording for the id.
     NoRecording,
-    /// More than one recording matches the claimed id.
+    /// More than one recording matches the claimed id, with the reason as one
+    /// bounded line.
     Ambiguous(String),
-    /// The store could not establish or read a recording for the exact id.
+    /// The store could not establish or read a recording for the exact id,
+    /// with the reason as one bounded line.
     Unreadable(String),
 }
 
@@ -180,17 +182,28 @@ fn resolve_exact(
 /// Read one session's recording through tapes, matched by its exact id, with
 /// the bounded read window tapes applies to every recording.
 pub fn read_session(harness: &str, session: &str) -> SessionAnswer {
-    let backends = harness_backends(harness);
-    let resolved = match resolve_exact(harness, &backends, session) {
+    read_session_with_backends(harness, session, &harness_backends(harness))
+}
+
+fn read_session_with_backends(
+    harness: &str,
+    session: &str,
+    backends: &[Box<dyn Backend>],
+) -> SessionAnswer {
+    let resolved = match resolve_exact(harness, backends, session) {
         Ok(resolved) => resolved,
         Err(LookupIssue::Missing(_)) => return SessionAnswer::NoRecording,
-        Err(LookupIssue::Ambiguous(reason)) => return SessionAnswer::Ambiguous(reason),
-        Err(LookupIssue::Unreadable(reason)) => return SessionAnswer::Unreadable(reason),
+        Err(LookupIssue::Ambiguous(reason)) => {
+            return SessionAnswer::Ambiguous(bounded_reason(&reason))
+        }
+        Err(LookupIssue::Unreadable(reason)) => {
+            return SessionAnswer::Unreadable(bounded_reason(&reason))
+        }
     };
     let backend = &backends[resolved.backend_index];
     let transcript = match backend.transcript(&resolved.session, usize::MAX) {
         Ok(transcript) => transcript,
-        Err(error) => return SessionAnswer::Unreadable(format!("{error:#}")),
+        Err(error) => return SessionAnswer::Unreadable(bounded_reason(&format!("{error:#}"))),
     };
     let turns = transcript
         .turns
@@ -720,6 +733,69 @@ mod tests {
         assert_eq!(
             reason,
             "cannot read the recording's subagent lineage: fixture lineage failure"
+        );
+    }
+
+    /// A Claude store whose transcript read fails with a multi-line, oversized
+    /// error while every other read works.
+    struct TranscriptFails(ClaudeBackend);
+
+    impl Backend for TranscriptFails {
+        fn harness(&self) -> &'static str {
+            self.0.harness()
+        }
+        fn available(&self) -> bool {
+            self.0.available()
+        }
+        fn list(&self, query: &backend::Query) -> anyhow::Result<backend::Listing> {
+            self.0.list(query)
+        }
+        fn locate(&self, id: &str) -> anyhow::Result<Option<agent_tapes_core::model::Session>> {
+            self.0.locate(id)
+        }
+        fn transcript(
+            &self,
+            _session: &agent_tapes_core::model::Session,
+            _tail: usize,
+        ) -> anyhow::Result<agent_tapes_core::model::Transcript> {
+            Err(anyhow::anyhow!("fixture\ntranscript failure")
+                .context(format!("asked{}", "x".repeat(REASON_LIMIT))))
+        }
+        fn kinds(&self) -> agent_tapes_core::model::KindDeclaration {
+            self.0.kinds()
+        }
+    }
+
+    #[test]
+    fn an_unreadable_transcript_reads_as_one_bounded_line() {
+        let (root, path, _) = claude_fixture();
+        with_model(&path);
+        let backends: Vec<Box<dyn Backend>> = vec![Box::new(TranscriptFails(ClaudeBackend::new(
+            root.path().join("projects"),
+        )))];
+        let SessionAnswer::Unreadable(reason) =
+            read_session_with_backends("claude", SESSION, &backends)
+        else {
+            panic!("a failed transcript read is unreadable");
+        };
+        assert!(!reason.contains('\n'), "{reason}");
+        assert_eq!(reason.chars().count(), REASON_LIMIT, "{reason}");
+        assert!(reason.starts_with("askedx"), "{reason}");
+        assert!(reason.ends_with("transcript failure"), "{reason}");
+    }
+
+    #[test]
+    fn a_prefix_resolution_is_unreadable_to_a_reader_and_names_both_ids() {
+        let (_root, path, backends) = claude_fixture();
+        with_model(&path);
+        let SessionAnswer::Unreadable(reason) =
+            read_session_with_backends("claude", "11111111", &backends)
+        else {
+            panic!("a prefix of a recorded id is not that recording");
+        };
+        assert_eq!(
+            reason,
+            format!("session 11111111 resolves to the recording of a different id, {SESSION}")
         );
     }
 
