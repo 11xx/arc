@@ -1561,3 +1561,53 @@ fn provenance_text_masks_session_ids_in_derived_recording_actors() {
         assert!(text.contains("actor=test:[session]"), "{text}");
     }
 }
+
+#[test]
+fn provenance_masking_preserves_labels_for_overlapping_sessions() {
+    for session in ["actor", "provenance", "at", "test"] {
+        let repo = Repo::new();
+        begin(&repo, "masked-values");
+        let worktree = repo.home.join(".worktrees/repo-masked-values");
+        repo.arc(&worktree)
+            .env_remove("ARC_ACTOR")
+            .env("ARC_SESSION", session)
+            .args([
+                "changelog",
+                "masked-values",
+                "--category",
+                "fixed",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("- preserve recording privacy\n")
+            .assert()
+            .success();
+        integrate(&repo, "masked-values");
+        for args in [
+            vec!["changelog", "masked-values", "--provenance"],
+            vec!["changelog", "--provenance"],
+        ] {
+            let text = stdout(repo.arc(&repo.root).args(args));
+            let line = text
+                .lines()
+                .find(|line| line.starts_with("> arc provenance: "))
+                .unwrap_or_else(|| panic!("{text}"));
+            for label in [
+                "change=",
+                "event=",
+                "actor=",
+                "on_behalf_of=",
+                "harness=",
+                "created_at=",
+            ] {
+                assert!(line.contains(label), "{line}");
+            }
+            let actor = if session == "test" {
+                "[session]:[session]"
+            } else {
+                "test:[session]"
+            };
+            assert!(line.contains(&format!("actor={actor}")), "{line}");
+        }
+    }
+}

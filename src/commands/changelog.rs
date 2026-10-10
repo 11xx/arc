@@ -876,16 +876,20 @@ fn print_entry(change: &str, entry: &ChangelogEntry, provenance: bool) {
         if !entry.body.ends_with('\n') && entry.is_entry() {
             println!();
         }
-        let provenance = format!(
-            "> arc provenance: change={} event={} actor={} on_behalf_of={} harness={} created_at={}",
-            change,
-            entry.event_id,
-            entry.actor,
-            entry.on_behalf_of.as_deref().unwrap_or("-"),
-            entry.harness.as_deref().unwrap_or("-"),
-            entry.created_at,
+        println!(
+            "{}",
+            provenance_text(
+                [
+                    change,
+                    &entry.event_id,
+                    &entry.actor,
+                    entry.on_behalf_of.as_deref().unwrap_or("-"),
+                    entry.harness.as_deref().unwrap_or("-"),
+                    &entry.created_at.to_string(),
+                ],
+                entry.session.as_deref(),
+            )
         );
-        println!("{}", provenance_text(provenance, entry.session.as_deref()));
     }
 }
 
@@ -909,23 +913,29 @@ fn validate_category(category: &str) -> Result<String> {
 }
 
 fn provenance_line(entry: &ProjectedEntry<'_>) -> String {
-    let provenance = format!(
-        "> arc provenance: change={} event={} actor={} on_behalf_of={} harness={} created_at={}",
-        entry.change,
-        entry.recorded.event_id,
-        entry.recorded.actor,
-        entry.recorded.on_behalf_of.unwrap_or("-"),
-        entry.recorded.harness.unwrap_or("-"),
-        entry.recorded.created_at,
-    );
-    provenance_text(provenance, entry.recorded.session)
+    provenance_text(
+        [
+            entry.change,
+            entry.recorded.event_id,
+            entry.recorded.actor,
+            entry.recorded.on_behalf_of.unwrap_or("-"),
+            entry.recorded.harness.unwrap_or("-"),
+            &entry.recorded.created_at.to_string(),
+        ],
+        entry.recorded.session,
+    )
 }
 
-fn provenance_text(line: String, session: Option<&str>) -> String {
-    match session.filter(|session| !session.is_empty()) {
-        Some(session) => line.replace(session, "[session]"),
-        None => line,
-    }
+fn provenance_text(values: [&str; 6], session: Option<&str>) -> String {
+    let [change, event, actor, on_behalf_of, harness, created_at] = values.map(
+        |value| match session.filter(|session| !session.is_empty()) {
+            Some(session) => value.replace(session, "[session]"),
+            None => value.to_owned(),
+        },
+    );
+    format!(
+        "> arc provenance: change={change} event={event} actor={actor} on_behalf_of={on_behalf_of} harness={harness} created_at={created_at}"
+    )
 }
 
 fn read_changelog_config(cwd: &Path) -> Result<ChangelogConfig> {

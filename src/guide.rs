@@ -1157,7 +1157,8 @@ RUN A CHANGE
   `--none --reason` remains valid and is unnecessary; reads remain available.
   Without the file, the target is `CHANGELOG.md`.
   Text --provenance omits the session field and masks its id as [session]
-  wherever it occurs in the provenance metadata, including derived actors.
+  wherever it occurs in metadata values, including derived actors. The
+  provenance prefix and field names retain their literal text.
   --json retains full session provenance. --provenance refuses with --write.
   The built-in renderer replaces the `## [Unreleased]` block of the target
   `.arc/changelog.toml` names, `CHANGELOG.md` by default. Prose is refilled;
