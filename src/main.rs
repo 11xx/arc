@@ -2126,7 +2126,8 @@ enum Cmd {
         /// changes: that is a verdict, not a missing one. The obligation
         /// survives closure and `arc query --debt` finds it; discharge it
         /// with `arc audit`. A refused integration keeps the debt it
-        /// declared, and a retry with the same reason reuses it. Divergence
+        /// declared, and a retry with the same reason reuses it, including a debt
+        /// held in an import batch. Reuse confirms its backing publication. Divergence
         /// observed under the target and change locks refuses before declaration.
         /// External Git moving the target after that observation can retain debt
         #[arg(long = "debt", value_name = "REASON")]
@@ -2147,7 +2148,8 @@ enum Cmd {
         change: String,
         /// What review is owed, and why it could not run. The debt already
         /// in force, declared again unchanged, is reused rather than recorded
-        /// twice
+        /// twice. Imported obligations are reused by confirming the matching
+        /// event in its backing import batch.
         #[arg(long)]
         reason: String,
         /// What kind of deficit this records. Omitted, arc derives it from the

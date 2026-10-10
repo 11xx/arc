@@ -35,7 +35,8 @@ pub(super) struct DebtReceipt {
     /// `written` or `reused` once the event is durable; `attempted` for a new
     /// event whose publication did not complete.
     pub disposition: &'static str,
-    /// `durable` when the event file and its directory entry were synced;
+    /// `durable` when the backing event file or import batch and its directory
+    /// entry were synced;
     /// `visible-unconfirmed` when the event is readable but the sync failed;
     /// `absent` when it is not in the ledger; `unknown` when the ledger could
     /// not be read to tell.
@@ -125,11 +126,28 @@ pub(super) fn declare_debt_locked(
     let (verb, receipt) = match st.debt.as_ref().filter(|debt| debt.restated_by(&event)) {
         Some(existing) => {
             // An earlier attempt may have left its event visible without a
-            // confirmed sync; a retry that answers with it confirms it.
+            // confirmed sync; a retry confirms its exact backing publication,
+            // including the batch that holds an imported obligation.
             let mut receipt = receipt(&existing.event_id, "reused", "durable", None);
             receipt.origin_replica_id = existing.origin_replica_id.clone();
             receipt.declared_by = existing.actor.clone();
-            if let Err(error) = store.sync_published_event(change_id, &existing.event_id) {
+            let confirmation = (|| -> Result<()> {
+                let expected = store
+                    .raw_events(change_id)?
+                    .into_iter()
+                    .find(|(id, _)| id == &existing.event_id)
+                    .map(|(_, value)| value)
+                    .context("debt event has no backing publication")?;
+                let published: Event = serde_json::from_value(expected.clone())?;
+                if published.repository_id != existing.origin_replica_id
+                    || published.created_at != existing.declared_at
+                    || !existing.restated_by(&published)
+                {
+                    bail!("debt event changed before durability confirmation");
+                }
+                store.sync_published_event(&expected)
+            })();
+            if let Err(error) = confirmation {
                 receipt.publication = "visible-unconfirmed";
                 receipt.publication_error = Some(format!("{error:#}"));
                 return Err(DebtPublicationFailure(receipt).into());

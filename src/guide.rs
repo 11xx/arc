@@ -1627,7 +1627,10 @@ REVIEW COVERAGE AND DEBT
   directory before moving them.
 
   A debt is declared with `arc debt <change> --reason <why>`, or at the merge
-  with `arc integrate <change> --debt "<why>"`. A debt already in force routes to
+  with `arc integrate <change> --debt "<why>"`. An equivalent declaration
+  reuses the obligation by syncing its exact backing publication, whether a
+  loose event file or an import batch, without copying an imported event.
+  A debt already in force routes to
   integration: status says integrate beside the flagged waiver, check drops
   the review-queue advisory, and the inbox keeps one lead row — until the
   head moves past the covered patchset, which requires a fresh snapshot. The

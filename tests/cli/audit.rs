@@ -4434,3 +4434,64 @@ fn an_audit_refuses_a_finding_with_a_misspelled_blocking_field() {
     let log = stdout(repo.arc(&repo.root).args(["log", "misspelled"]));
     assert!(!log.contains("audit-verdict-recorded"), "{log}");
 }
+
+#[test]
+fn equivalent_imported_debt_reuses_its_backing_publication() {
+    let source = repo_forbidding_self_approval();
+    let worktree = unreviewed_change(&source, "imported-debt");
+    stdout(source.arc(&worktree).args([
+        "debt",
+        "imported-debt",
+        "--reason",
+        "review obligation retained",
+    ]));
+    let bundle = source.home.join("debt-bundle.json");
+    stdout(source.arc(&source.root).args([
+        "export",
+        "imported-debt",
+        "--output",
+        bundle.to_str().unwrap(),
+    ]));
+    let receiver = Repo::new();
+    deliver_git_objects(&source, &receiver);
+    stdout(
+        receiver
+            .arc(&receiver.root)
+            .args(["import", bundle.to_str().unwrap()]),
+    );
+    let before =
+        json_stdout(
+            receiver
+                .arc(&receiver.root)
+                .args(["show", "imported-debt", "--json"]),
+        );
+    let id = before["debt"]["event_id"].as_str().unwrap();
+    let loose = receiver
+        .root
+        .join(".git/arc/changes")
+        .join(before["change_id"].as_str().unwrap())
+        .join("events")
+        .join(format!("{id}.json"));
+    assert!(!loose.exists());
+    for _ in 0..2 {
+        receiver
+            .arc(&receiver.root)
+            .args([
+                "debt",
+                "imported-debt",
+                "--reason",
+                "review obligation retained",
+            ])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains("debt already declared"));
+        let after =
+            json_stdout(
+                receiver
+                    .arc(&receiver.root)
+                    .args(["show", "imported-debt", "--json"]),
+            );
+        assert_eq!(after["debt"]["event_id"], id);
+        assert!(!loose.exists());
+    }
+}

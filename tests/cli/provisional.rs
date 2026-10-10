@@ -3000,3 +3000,70 @@ fn execution_json_preserves_durable_debt_after_a_ledger_read_failure() {
         .unwrap()
         .contains("debt declared"));
 }
+
+#[test]
+fn provisional_retries_reuse_a_debt_held_in_an_import_batch() {
+    let (_authority, worker) = worker();
+    let change = prepared(&worker);
+    stdout(worker.arc(&worker.root).args([
+        "debt",
+        &change,
+        "--reason",
+        "review obligation retained",
+    ]));
+    let state = json_stdout(worker.arc(&worker.root).args(["show", &change, "--json"]));
+    let id = state["debt"]["event_id"].as_str().unwrap();
+    let bundle_path = worker.home.join("debt-bundle.json");
+    stdout(worker.arc(&worker.root).args([
+        "export",
+        &change,
+        "--output",
+        bundle_path.to_str().unwrap(),
+    ]));
+    let bytes = fs::read(&bundle_path).unwrap();
+    let bundle: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let origin = bundle["repository_id"].as_str().unwrap();
+    let policy = worker.root.join(".git/arc/operator-policy.toml");
+    let mut policy_body = fs::read_to_string(&policy).unwrap_or_default();
+    policy_body.push_str(&format!("\n[[replica.publishers]]\nprincipal='debt-transfer'\nsource_replica_id='{origin}'\n[[replica.publishers.origins]]\nreplica_id='{origin}'\nroles=['facts','review-input','debt-input']\nactors=['tester']\n"));
+    fs::write(&policy, policy_body).unwrap();
+    let loose = worker
+        .root
+        .join(".git/arc/changes")
+        .join(&change)
+        .join("events")
+        .join(format!("{id}.json"));
+    fs::remove_file(&loose).unwrap();
+    stdout(worker.arc(&worker.root).args([
+        "import",
+        bundle_path.to_str().unwrap(),
+        "--publisher",
+        "debt-transfer",
+        "--received-sha256",
+        &hex::encode(Sha256::digest(&bytes)),
+    ]));
+    assert!(!loose.exists());
+    let mut policy_body = fs::read_to_string(&policy).unwrap();
+    policy_body.push_str("\n[gates.required]\ncommand='false'\n");
+    fs::write(&policy, policy_body).unwrap();
+    for _ in 0..2 {
+        let refused = worker
+            .arc(&worker.root)
+            .args([
+                "integrate",
+                &change,
+                "--provisional",
+                "--json",
+                "--debt",
+                "review obligation retained",
+            ])
+            .assert()
+            .code(5);
+        let output: serde_json::Value =
+            serde_json::from_slice(&refused.get_output().stdout).unwrap();
+        assert_eq!(output["debt"]["event_id"], id, "{output}");
+        assert_eq!(output["debt"]["disposition"], "reused");
+        assert_eq!(output["debt"]["publication"], "durable");
+        assert!(!loose.exists());
+    }
+}

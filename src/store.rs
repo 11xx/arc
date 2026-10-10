@@ -155,6 +155,13 @@ pub struct ImportBatch {
 
 /// Only published JSON records participate in ledger reads.
 pub fn import_batches(root: &Path) -> Result<Vec<ImportBatch>> {
+    Ok(import_batches_with_paths(root)?
+        .into_iter()
+        .map(|(_, batch)| batch)
+        .collect())
+}
+
+fn import_batches_with_paths(root: &Path) -> Result<Vec<(PathBuf, ImportBatch)>> {
     let dir = root.join("imports");
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -201,7 +208,7 @@ pub fn import_batches(root: &Path) -> Result<Vec<ImportBatch>> {
                 .collect();
             crate::import_authorization::validate_receipt_events(receipt, &values)?;
         }
-        batches.push(batch);
+        batches.push((path, batch));
     }
     Ok(batches)
 }
@@ -505,17 +512,22 @@ impl Store {
         if !self.event_is_published(event)? {
             self.append_event(event)?;
         }
-        self.sync_published_event(&event.change_id, &event.event_id)
+        self.sync_published_event(&serde_json::to_value(event)?)
     }
 
-    /// Flush a visible event file and its directory entry to stable storage.
-    /// A publication whose directory sync failed becomes durable only when
-    /// this succeeds.
-    pub(crate) fn sync_published_event(&self, change_id: &str, event_id: &str) -> Result<()> {
+    /// Confirm the exact event's backing publication, loose or imported, by
+    /// syncing its file and directory entry to stable storage.
+    pub(crate) fn sync_published_event(&self, expected: &serde_json::Value) -> Result<()> {
+        let change_id = expected["change_id"]
+            .as_str()
+            .context("event has no change ID")?;
+        let event_id = expected["event_id"].as_str().context("event has no ID")?;
         ids::validate_id_component(change_id)?;
         ids::validate_id_component(event_id)?;
-        let directory = self.events_dir(change_id);
-        File::open(directory.join(format!("{event_id}.json")))?.sync_all()?;
+        let (file, directory) = self
+            .published_event_file(expected, &self.events_dir(change_id), false)?
+            .with_context(|| format!("published event {event_id} has no backing publication"))?;
+        file.sync_all()?;
         File::open(directory)?.sync_all()?;
         Ok(())
     }
@@ -924,7 +936,7 @@ impl Store {
     /// ambiguous and must not be treated as an absent event.
     pub fn event_is_published(&self, event: &Event) -> Result<bool> {
         ids::validate_id_component(&event.change_id)?;
-        self.event_is_published_at(event, &self.events_dir(&event.change_id))
+        self.event_is_published_at(event, &self.events_dir(&event.change_id), false)
     }
 
     /// Where an event stands after its append reported an error: `visible-unconfirmed`
@@ -940,27 +952,75 @@ impl Store {
     }
 
     pub(crate) fn repository_event_is_published(&self, event: &Event) -> Result<bool> {
-        self.event_is_published_at(event, &self.repository_events_dir())
+        self.event_is_published_at(event, &self.repository_events_dir(), true)
     }
 
-    fn event_is_published_at(&self, event: &Event, directory: &Path) -> Result<bool> {
-        ids::validate_id_component(&event.event_id)?;
-        let path = directory.join(format!("{}.json", event.event_id));
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+    fn event_is_published_at(
+        &self,
+        event: &Event,
+        directory: &Path,
+        repository: bool,
+    ) -> Result<bool> {
+        Ok(self
+            .published_event_file(&serde_json::to_value(event)?, directory, repository)?
+            .is_some())
+    }
+
+    /// Retain the descriptor whose complete content was checked, so durability
+    /// confirmation flushes that publication rather than reopening its name.
+    fn published_event_file(
+        &self,
+        expected: &serde_json::Value,
+        directory: &Path,
+        repository: bool,
+    ) -> Result<Option<(File, PathBuf)>> {
+        let id = expected["event_id"].as_str().context("event has no ID")?;
+        ids::validate_id_component(id)?;
+        let path = directory.join(format!("{id}.json"));
+        let mut backing = None;
+        match File::open(&path) {
+            Ok(file) => {
+                let published: serde_json::Value = serde_json::from_reader(&file)?;
+                if &published != expected {
+                    bail!("published event {id} differs from the attempted event");
+                }
+                backing = Some((file, directory.to_path_buf()));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
                 return Err(error).with_context(|| format!("cannot inspect {}", path.display()))
             }
-        };
-        let published: serde_json::Value = serde_json::from_slice(&bytes)?;
-        if published != serde_json::to_value(event)? {
-            bail!(
-                "published event {} differs from the attempted event",
-                event.event_id
-            );
         }
-        Ok(true)
+        for (path, batch) in import_batches_with_paths(&self.root)? {
+            let values = if repository {
+                &batch.repository_events
+            } else if expected["change_id"].as_str() == Some(batch.change_id.as_str()) {
+                &batch.events
+            } else {
+                continue;
+            };
+            let mut matching = values
+                .iter()
+                .filter(|value| value["event_id"].as_str() == Some(id));
+            let Some(published) = matching.next() else {
+                continue;
+            };
+            if published != expected || matching.any(|value| value != expected) {
+                bail!("published event {id} differs from the attempted event");
+            }
+            if backing.is_none() {
+                let file = File::open(&path)?;
+                let held: ImportBatch = serde_json::from_reader(&file)?;
+                if serde_json::to_value(&held)? != serde_json::to_value(&batch)? {
+                    bail!("import backing event {id} changed during confirmation");
+                }
+                backing = Some((
+                    file,
+                    path.parent().context("import has no parent")?.to_path_buf(),
+                ));
+            }
+        }
+        Ok(backing)
     }
 
     /// Record that this store now holds events an older build would skip.
@@ -1940,11 +2000,91 @@ mod tests {
             "visible-unconfirmed"
         );
         store
-            .sync_published_event(&event.change_id, &event.event_id)
+            .sync_published_event(&serde_json::to_value(&event).unwrap())
             .unwrap();
         let mut different = event.clone();
         different.actor = "other".into();
         assert_eq!(store.publication_after_failed_append(&different), "unknown");
+    }
+
+    #[test]
+    fn imported_publications_are_visible_and_confirmable_in_both_scopes() {
+        for repository in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let event: Event = serde_json::from_value(serde_json::json!({
+                "schema_version": 1,
+                "event_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                "repository_id": "repo", "change_id": "change",
+                "actor": "tester", "created_at": chrono::Utc::now(),
+                "event_type": "candidate-retired", "candidate_id": "candidate",
+            }))
+            .unwrap();
+            let value = serde_json::to_value(&event).unwrap();
+            let batch = ImportBatch {
+                schema: "arc-import-batch/1".into(),
+                change_id: "change".into(),
+                events: if repository {
+                    Vec::new()
+                } else {
+                    vec![value.clone()]
+                },
+                repository_events: if repository { vec![value] } else { Vec::new() },
+                authorization: None,
+            };
+            let imports = dir.path().join("imports");
+            fs::create_dir(&imports).unwrap();
+            fs::write(
+                imports.join("batch.json"),
+                serde_json::to_vec(&batch).unwrap(),
+            )
+            .unwrap();
+            let visible = |event: &Event| {
+                if repository {
+                    store.repository_event_is_published(event)
+                } else {
+                    store.event_is_published(event)
+                }
+            };
+            assert!(visible(&event).unwrap());
+            if !repository {
+                store
+                    .sync_published_event(&serde_json::to_value(&event).unwrap())
+                    .unwrap();
+                store.publish_provisional_event(&event).unwrap();
+                assert!(!store.events_dir(&event.change_id).exists());
+            }
+            let mut different = event.clone();
+            different.actor = "other".into();
+            assert!(visible(&different).is_err());
+            let conflicting = ImportBatch {
+                schema: "arc-import-batch/1".into(),
+                change_id: "change".into(),
+                events: if repository {
+                    Vec::new()
+                } else {
+                    vec![serde_json::to_value(&different).unwrap()]
+                },
+                repository_events: if repository {
+                    vec![serde_json::to_value(&different).unwrap()]
+                } else {
+                    Vec::new()
+                },
+                authorization: None,
+            };
+            let conflict = imports.join("conflict.json");
+            fs::write(&conflict, serde_json::to_vec(&conflicting).unwrap()).unwrap();
+            assert!(
+                visible(&event).is_err(),
+                "conflicting backing publications were accepted"
+            );
+            fs::remove_file(conflict).unwrap();
+            let mut absent = event.clone();
+            absent.event_id = "01ARZ3NDEKTSV4RRFFQ69G5FAW".into();
+            assert!(!visible(&absent).unwrap());
+            fs::write(imports.join("batch.json"), b"broken").unwrap();
+            assert!(visible(&event).is_err());
+        }
     }
 
     #[test]
