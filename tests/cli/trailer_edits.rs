@@ -709,15 +709,21 @@ fn the_placeholder_advisory_names_the_edit_form() {
     repo.declare_gates_locally("[gates.smoke]\ncommand = \"true\"\n");
     let change = opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", "advice"])));
     let worktree = repo.home.join(".worktrees/repo-advice");
+    let unknown = "Implemented-by: codex:unknown";
+    let valid = "Implemented-by: codex:gpt-6.1-sol#xhigh";
     repo.commit(
         &worktree,
         "advice.txt",
         "advice\n",
-        &format!(
-            "feat: tainted\n\n{ORCHESTRATOR_UNKNOWN}\nImplemented-by: codex:gpt-6.1-sol#xhigh\n"
-        ),
+        &format!("feat: tainted\n\n{unknown}\n{valid}\n"),
     );
     let tainted = repo.head(&worktree);
+    repo.commit(
+        &worktree,
+        "later.txt",
+        "later\n",
+        &format!("feat: later\n\n{valid}\n"),
+    );
     stdout(repo.arc(&worktree).args(["snapshot", &change, "--solo"]));
     repo.arc(&worktree)
         .args(["verify", &change, "--gate", "smoke"])
@@ -749,6 +755,29 @@ fn the_placeholder_advisory_names_the_edit_form() {
         !detail.contains("--drop"),
         "dropping the key would drop the valid lines under it too: {detail}"
     );
+    let edits = repo.home.join("edits");
+    fs::write(
+        &edits,
+        format!("# arc-trailer-edits/1\n{tainted}\tdrop\t{unknown}\n"),
+    )
+    .unwrap();
+    repo.arc(&worktree)
+        .args([
+            "rewrite",
+            "trailers",
+            "--from",
+            &tainted,
+            "--no-sign",
+            "--edits",
+        ])
+        .arg(&edits)
+        .assert()
+        .success();
+    for revision in ["HEAD", "HEAD~1"] {
+        let message = git_out(&worktree, &["show", "-s", "--format=%B", revision]);
+        assert!(message.contains(valid), "{revision}: {message}");
+        assert!(!message.contains(unknown), "{revision}: {message}");
+    }
 }
 
 #[test]
