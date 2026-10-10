@@ -80,7 +80,8 @@ SAY WHO YOU ARE (before the first write)
   ancestor that exported one that owns this process: a pi run inside a Claude
   Code tool shell reports pi, not the shell's claude. Where the ancestry names
   no single owner the ambiguity is reported and no harness, session, or model
-  is set, rather than choosing by variable order. It reads that harness's own
+  is set, rather than choosing by variable order; an ancestry that cannot be
+  read, or that shows no exporter, says why beside the ambiguity. It reads that harness's own
   session store for the model, honouring the store's own override —
   `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `PI_CODING_AGENT_SESSION_DIR`,
   `PI_CODING_AGENT_DIR` — before the default under `$HOME`, and reports

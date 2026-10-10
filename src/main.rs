@@ -1770,7 +1770,8 @@ enum Cmd {
     /// Claude Code tool shell reports pi, not the shell's claude. Where the
     /// ancestry names no single owner the ambiguity is reported and no
     /// harness, session, or model is set, rather than choosing by variable
-    /// order. The store root is the harness's own override —
+    /// order; an ancestry that cannot be read, or that shows no exporter,
+    /// says why beside the ambiguity. The store root is the harness's own override —
     /// `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `PI_CODING_AGENT_SESSION_DIR`, or
     /// `PI_CODING_AGENT_DIR` — before its default under `$HOME`. The store's
     /// answer for the exact canonical session id is reported with the exports:

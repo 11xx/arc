@@ -56,45 +56,73 @@ const OPENCODE_COMMS: [&str; 2] = ["opencode", "opencode2"];
 /// bounded rather than trusting it to terminate.
 const ANCESTRY_DEPTH: usize = 32;
 
-/// The environment a process was started with, or `None` when it is gone or
-/// is not this user's to read. Runtime changes to a process's environment do
-/// not reach this file, so it holds what the process inherited at exec.
-fn process_environ(pid: u32) -> Option<Vec<u8>> {
-    std::fs::read(format!("/proc/{pid}/environ")).ok()
+/// The environment a process was started with, or why it cannot be read: the
+/// process is gone or is not this user's to read. Runtime changes to a
+/// process's environment do not reach this file, so it holds what the process
+/// inherited at exec.
+fn process_environ(pid: u32) -> Result<Vec<u8>, String> {
+    std::fs::read(format!("/proc/{pid}/environ"))
+        .map_err(|error| format!("cannot read the environment of process {pid}: {error}"))
 }
 
-/// The parent of `pid`, or `None` at the top of the chain or when `/proc`
-/// keeps no such answer.
-fn parent_pid(pid: u32) -> Option<u32> {
-    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
-    status
+/// The parent of `pid`, `None` at the top of the chain, or why `/proc` keeps
+/// no answer.
+fn parent_pid(pid: u32) -> Result<Option<u32>, String> {
+    let path = format!("/proc/{pid}/status");
+    let status =
+        std::fs::read_to_string(&path).map_err(|error| format!("cannot read {path}: {error}"))?;
+    let parent = status
         .lines()
         .find_map(|line| line.strip_prefix("PPid:"))
         .and_then(|rest| rest.trim().parse::<u32>().ok())
-        .filter(|parent| *parent != pid && *parent != 0)
+        .ok_or_else(|| format!("{path} names no parent process"))?;
+    Ok(Some(parent).filter(|parent| *parent != pid && *parent != 0))
 }
 
 /// How far above this process the process that exported `variable` with this
 /// exact value sits, where 1 is the immediate parent. A harness exports its
 /// session id into the environment of the processes it starts, so the
 /// process that put the variable into this chain is the harness that owns
-/// this one. `None` means the chain could not be read, or every ancestor
-/// already carried the entry.
-fn export_depth(variable: &str, value: &str) -> Option<usize> {
+/// this one. The error says why no exporter is established: the chain could
+/// not be read, or every ancestor already carried the entry.
+fn export_depth(variable: &str, value: &str) -> Result<usize, String> {
+    export_depth_in(
+        variable,
+        value,
+        std::process::id(),
+        parent_pid,
+        process_environ,
+    )
+}
+
+/// `export_depth` over a chain the caller reads, starting at `start`.
+fn export_depth_in(
+    variable: &str,
+    value: &str,
+    start: u32,
+    parent_pid: impl Fn(u32) -> Result<Option<u32>, String>,
+    process_environ: impl Fn(u32) -> Result<Vec<u8>, String>,
+) -> Result<usize, String> {
     let entry = format!("{variable}={value}");
-    let mut pid = std::process::id();
+    let mut pid = start;
     for depth in 1..=ANCESTRY_DEPTH {
-        let parent = parent_pid(pid)?;
+        let Some(parent) = parent_pid(pid)? else {
+            return Err(format!(
+                "the process chain ends at process {pid} with every ancestor still carrying {variable}"
+            ));
+        };
         let environ = process_environ(parent)?;
         let carried = environ
             .split(|byte| *byte == 0)
             .any(|line| line == entry.as_bytes());
         if !carried {
-            return Some(depth);
+            return Ok(depth);
         }
         pid = parent;
     }
-    None
+    Err(format!(
+        "every one of the {ANCESTRY_DEPTH} nearest ancestors still carries {variable}"
+    ))
 }
 
 /// Whether the process ancestry carries an OpenCode marker. Reads `/proc`
@@ -109,8 +137,8 @@ fn detect_opencode_ancestry() -> bool {
             return true;
         }
         match parent_pid(pid) {
-            Some(parent) => pid = parent,
-            None => return false,
+            Ok(Some(parent)) => pid = parent,
+            Ok(None) | Err(_) => return false,
         }
     }
     false
@@ -271,9 +299,18 @@ pub enum Detection {
     /// single owner. Recording nothing is the honest answer: picking one by
     /// list position would attribute the work to a thread that may only have
     /// been supervising.
-    Ambiguous(Vec<SessionClaim>),
+    Ambiguous(Ambiguity),
     /// No harness evidence at all.
     None,
+}
+
+/// Several harnesses' claims on one process, and why the ancestry could not
+/// choose between them.
+pub struct Ambiguity {
+    pub claims: Vec<SessionClaim>,
+    /// Each claim whose ancestry could not be established, as `VARIABLE:
+    /// cause`. Empty when the ancestry read cleanly and the claims tied.
+    pub unread: Vec<String>,
 }
 
 /// The session variable each harness present in this process exports, in the
@@ -308,29 +345,51 @@ pub fn detect_identity() -> Detection {
                 .iter()
                 .map(|claim| export_depth(claim.variable, &claim.session))
                 .collect::<Vec<_>>();
-            // A chain that cannot be read is not evidence of distance: an
-            // unknown origin could sit nearer than every known one, so it
-            // leaves ownership undecided rather than losing by default.
-            if origins.iter().any(Option::is_none) {
-                return Detection::Ambiguous(claims);
+            match owner_by_ancestry(&claims, &origins) {
+                Ok(claim) => Detection::Resolved(Box::new(resolved(claim.harness, &claim.session))),
+                Err(unread) => Detection::Ambiguous(Ambiguity { claims, unread }),
             }
-            let nearest = origins
-                .iter()
-                .flatten()
-                .min()
-                .copied()
-                .expect("claims exist and every origin is known");
-            let mut winners = origins
-                .iter()
-                .zip(&claims)
-                .filter(|(origin, _)| **origin == Some(nearest));
-            let claim = winners.next().expect("the minimum has a claim").1;
-            if winners.next().is_some() {
-                return Detection::Ambiguous(claims);
-            }
-            Detection::Resolved(Box::new(resolved(claim.harness, &claim.session)))
         }
     }
+}
+
+/// The claim whose exporter sits nearest this process. A chain that cannot
+/// be read is not evidence of distance: an unknown origin could sit nearer
+/// than every known one, so it leaves ownership undecided rather than losing
+/// by default, and the error names each such claim's cause. A tie between
+/// readable origins is an error with no cause to name.
+fn owner_by_ancestry<'a>(
+    claims: &'a [SessionClaim],
+    origins: &[Result<usize, String>],
+) -> Result<&'a SessionClaim, Vec<String>> {
+    let unread = claims
+        .iter()
+        .zip(origins)
+        .filter_map(|(claim, origin)| {
+            origin
+                .as_ref()
+                .err()
+                .map(|cause| format!("{}: {cause}", claim.variable))
+        })
+        .collect::<Vec<_>>();
+    if !unread.is_empty() {
+        return Err(unread);
+    }
+    let nearest = origins
+        .iter()
+        .flatten()
+        .min()
+        .copied()
+        .expect("claims exist and every origin is known");
+    let mut winners = claims
+        .iter()
+        .zip(origins)
+        .filter(|(_, origin)| origin.as_ref().ok() == Some(&nearest));
+    let owner = winners.next().expect("the minimum has a claim").0;
+    if winners.next().is_some() {
+        return Err(Vec::new());
+    }
+    Ok(owner)
 }
 
 /// A harness recognized without a session variable: OpenCode v2 exports none,
@@ -528,11 +587,11 @@ pub fn print_env() -> i32 {
     println!("# arc build: {}", build_revision().label());
     let identity = match detect_identity() {
         Detection::Resolved(identity) => *identity,
-        Detection::Ambiguous(claims) => {
+        Detection::Ambiguous(ambiguity) => {
             println!("{EXPORT_TEMPLATE}");
             println!(
-                "# ambiguous: {}; set ARC_HARNESS and ARC_SESSION by hand",
-                ambiguity_report(&claims)
+                "# ambiguous: {}",
+                crate::render::one_line(&ambiguity_line(&ambiguity))
             );
             println!("unset {IDENTITY_VARIABLES}");
             return 1;
@@ -586,7 +645,19 @@ pub fn print_env() -> i32 {
 }
 
 /// Name every harness whose session variable this process carries, so an
-/// operator can see which variables to unset or override.
+/// operator can see which variables to unset or override, and what kept the
+/// ancestry from choosing among them.
+fn ambiguity_line(ambiguity: &Ambiguity) -> String {
+    let claims = ambiguity_report(&ambiguity.claims);
+    if ambiguity.unread.is_empty() {
+        return format!("{claims}; set ARC_HARNESS and ARC_SESSION by hand");
+    }
+    format!(
+        "{claims}; the process ancestry cannot decide it ({}); set ARC_HARNESS and ARC_SESSION by hand",
+        ambiguity.unread.join("; ")
+    )
+}
+
 fn ambiguity_report(claims: &[SessionClaim]) -> String {
     let named = claims
         .iter()
@@ -1031,6 +1102,162 @@ pub(crate) fn render_build_warning(cwd: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What `/proc` answers for one process.
+    struct Process {
+        pid: u32,
+        parent: Result<Option<u32>, String>,
+        environ: Result<Vec<u8>, String>,
+    }
+
+    /// A process chain as a table.
+    struct Chain(Vec<Process>);
+
+    impl Chain {
+        fn depth(&self, entry: (&str, &str), start: u32) -> Result<usize, String> {
+            let find = |pid: u32| {
+                self.0
+                    .iter()
+                    .find(|process| process.pid == pid)
+                    .expect("known pid")
+            };
+            export_depth_in(
+                entry.0,
+                entry.1,
+                start,
+                |pid| find(pid).parent.clone(),
+                |pid| find(pid).environ.clone(),
+            )
+        }
+    }
+
+    fn process(
+        pid: u32,
+        parent: Result<Option<u32>, String>,
+        environ: Result<Vec<u8>, String>,
+    ) -> Process {
+        Process {
+            pid,
+            parent,
+            environ,
+        }
+    }
+
+    fn environ(entries: &[&str]) -> Result<Vec<u8>, String> {
+        Ok(entries.join("\0").into_bytes())
+    }
+
+    #[test]
+    fn export_depth_is_the_distance_to_the_nearest_exporter() {
+        let chain = Chain(vec![
+            process(30, Ok(Some(20)), environ(&["X=1"])),
+            process(20, Ok(Some(10)), environ(&["V=s", "X=1"])),
+            process(10, Ok(None), environ(&["X=1"])),
+        ]);
+        assert_eq!(chain.depth(("V", "s"), 30), Ok(2));
+    }
+
+    #[test]
+    fn export_depth_names_why_the_chain_cannot_be_read() {
+        let denied = "cannot read the environment of process 20: Permission denied (os error 13)";
+        let chain = Chain(vec![
+            process(30, Ok(Some(20)), environ(&[])),
+            process(20, Ok(Some(10)), Err(denied.to_string())),
+        ]);
+        assert_eq!(chain.depth(("V", "s"), 30), Err(denied.to_string()));
+
+        let gone = "cannot read /proc/30/status: No such file or directory (os error 2)";
+        let chain = Chain(vec![process(30, Err(gone.to_string()), environ(&[]))]);
+        assert_eq!(chain.depth(("V", "s"), 30), Err(gone.to_string()));
+    }
+
+    #[test]
+    fn export_depth_says_when_no_ancestor_is_shown_to_have_exported() {
+        let chain = Chain(vec![
+            process(30, Ok(Some(20)), environ(&[])),
+            process(20, Ok(Some(10)), environ(&["V=s"])),
+            process(10, Ok(None), environ(&["V=s"])),
+        ]);
+        assert_eq!(
+            chain.depth(("V", "s"), 30),
+            Err(
+                "the process chain ends at process 10 with every ancestor still carrying V"
+                    .to_string()
+            )
+        );
+    }
+
+    fn claim(harness: &'static str, variable: &'static str) -> SessionClaim {
+        SessionClaim {
+            harness,
+            variable,
+            session: format!("{harness}-session"),
+        }
+    }
+
+    #[test]
+    fn the_nearest_exporter_owns_the_process() {
+        let claims = [
+            claim("claude", "CLAUDE_CODE_SESSION_ID"),
+            claim("pi", "PI_SESSION_ID"),
+        ];
+        let owner = owner_by_ancestry(&claims, &[Ok(3), Ok(1)]).unwrap();
+        assert_eq!(owner.harness, "pi");
+    }
+
+    #[test]
+    fn a_tie_the_ancestry_read_cleanly_has_no_reason_to_give() {
+        let claims = [
+            claim("claude", "CLAUDE_CODE_SESSION_ID"),
+            claim("pi", "PI_SESSION_ID"),
+        ];
+        assert_eq!(
+            owner_by_ancestry(&claims, &[Ok(1), Ok(1)]).err(),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn an_unreadable_origin_leaves_ownership_undecided_and_names_its_cause() {
+        let claims = [
+            claim("claude", "CLAUDE_CODE_SESSION_ID"),
+            claim("pi", "PI_SESSION_ID"),
+        ];
+        let origins = [Err("cannot read process 1".to_string()), Ok(1)];
+        assert_eq!(
+            owner_by_ancestry(&claims, &origins).err(),
+            Some(vec![
+                "CLAUDE_CODE_SESSION_ID: cannot read process 1".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn the_ambiguity_report_names_what_the_ancestry_could_not_read() {
+        let claims = vec![
+            claim("claude", "CLAUDE_CODE_SESSION_ID"),
+            claim("pi", "PI_SESSION_ID"),
+        ];
+        let tie = Ambiguity {
+            claims,
+            unread: Vec::new(),
+        };
+        assert_eq!(
+            ambiguity_line(&tie),
+            "CLAUDE_CODE_SESSION_ID (claude) and PI_SESSION_ID (pi); set ARC_HARNESS and ARC_SESSION by hand"
+        );
+        let unread = Ambiguity {
+            claims: tie.claims,
+            unread: vec![
+                "CLAUDE_CODE_SESSION_ID: cannot read process 1".to_string(),
+                "PI_SESSION_ID: cannot read process 1".to_string(),
+            ],
+        };
+        assert_eq!(
+            ambiguity_line(&unread),
+            "CLAUDE_CODE_SESSION_ID (claude) and PI_SESSION_ID (pi); the process ancestry cannot decide it (CLAUDE_CODE_SESSION_ID: cannot read process 1; PI_SESSION_ID: cannot read process 1); set ARC_HARNESS and ARC_SESSION by hand"
+        );
+    }
 
     #[test]
     fn build_revision_comparison() {
