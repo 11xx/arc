@@ -9792,7 +9792,10 @@ pub(crate) fn artifact_subject(cwd: &Path, reference: &str) -> Result<Option<Str
     if dir.join(reference).is_file() {
         return Ok(Some(reference.to_string()));
     }
-    if !journals_holding(&dir, reference).is_empty() {
+    // Another journal that holds the file, or a search that could not say
+    // whether one does, is a refusal; only a clean search that finds nothing
+    // leaves the subject to name something else.
+    if !journals_holding(&dir, reference).is_ok_and(|holders| holders.is_empty()) {
         return Err(missing_write_target(&dir, reference));
     }
     Ok(None)
@@ -13185,26 +13188,34 @@ fn path_refusal(path: &str, spelled: Option<&str>) -> anyhow::Error {
 /// `<journal-dir>::<file>` form of each other known journal that holds it, or,
 /// when none does, the qualified form is named.
 pub(crate) fn missing_artifact(location: &ArtifactLocation, searched: &str) -> anyhow::Error {
-    let file = &location.file;
-    let refusal = format!("no such artifact {file} in {searched}");
     if location.foreign {
-        return anyhow::anyhow!(refusal);
+        return anyhow::anyhow!("no such artifact {} in {searched}", location.file);
     }
-    let holders = journals_holding(&location.hot, file);
-    if holders.is_empty() {
-        anyhow::anyhow!(
+    artifact_refusal(
+        &location.file,
+        searched,
+        journals_holding(&location.hot, &location.file),
+    )
+}
+
+fn artifact_refusal(file: &str, searched: &str, holders: Result<Vec<PathBuf>>) -> anyhow::Error {
+    let refusal = format!("no such artifact {file} in {searched}");
+    match holders {
+        Err(error) => anyhow::anyhow!("{refusal}; {}", unsearched(&error)),
+        Ok(holders) if holders.is_empty() => anyhow::anyhow!(
             "{refusal}; an artifact in another project's journal is named \
              <journal-dir>::{file}"
-        )
-    } else {
-        let qualified = holders
-            .iter()
-            .map(|dir| format!("{}{REFERENCE_SEPARATOR}{file}", dir.display()))
-            .collect::<Vec<_>>();
-        anyhow::anyhow!(
-            "{refusal}; another project's journal holds it: {}",
-            qualified.join(", ")
-        )
+        ),
+        Ok(holders) => {
+            let qualified = holders
+                .iter()
+                .map(|dir| format!("{}{REFERENCE_SEPARATOR}{file}", dir.display()))
+                .collect::<Vec<_>>();
+            anyhow::anyhow!(
+                "{refusal}; another project's journal holds it: {}",
+                qualified.join(", ")
+            )
+        }
     }
 }
 
@@ -13213,8 +13224,15 @@ pub(crate) fn missing_artifact(location: &ArtifactLocation, searched: &str) -> a
 /// journal holds, so each other known journal holding the filename is named
 /// with its project, as the place the write runs from.
 fn missing_write_target(own: &Path, file: &str) -> anyhow::Error {
+    write_target_refusal(own, file, journals_holding(own, file))
+}
+
+fn write_target_refusal(own: &Path, file: &str, holders: Result<Vec<PathBuf>>) -> anyhow::Error {
     let refusal = format!("no such artifact {file} in {}", own.display());
-    let holders = journals_holding(own, file);
+    let holders = match holders {
+        Ok(holders) => holders,
+        Err(error) => return anyhow::anyhow!("{refusal}; {}", unsearched(&error)),
+    };
     if holders.is_empty() {
         return anyhow::anyhow!(refusal);
     }
@@ -13228,20 +13246,25 @@ fn missing_write_target(own: &Path, file: &str) -> anyhow::Error {
     )
 }
 
+/// What a refusal says when the other known journals could not be listed, so
+/// an absent owner is not read as no owner.
+fn unsearched(error: &anyhow::Error) -> String {
+    format!("other projects' journals were not searched: {error:#}")
+}
+
 /// Each known journal other than `own` whose hot directory or cold archive
-/// holds `file`, canonical and in order.
-fn journals_holding(own: &Path, file: &str) -> Vec<PathBuf> {
-    let Ok(journals) = config::load().and_then(|cfg| crate::registry::known_journals(&cfg)) else {
-        return Vec::new();
-    };
+/// holds `file`, canonical and in order; or why the known journals could not
+/// be listed.
+fn journals_holding(own: &Path, file: &str) -> Result<Vec<PathBuf>> {
+    let journals = config::load().and_then(|cfg| crate::registry::known_journals(&cfg))?;
     let own = canonical_dir(own);
-    journals
+    Ok(journals
         .into_iter()
         .map(|(_, dir)| canonical_dir(&dir))
         .filter(|dir| *dir != own && artifact_body_path(dir, file).is_some())
         .collect::<BTreeSet<_>>()
         .into_iter()
-        .collect()
+        .collect())
 }
 
 /// ` (project <anchor>)` for a journal that recorded the project it belongs
@@ -15385,6 +15408,30 @@ fn change_annotation(changes: &[ChangeState], topic: &str, filename: &str) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refusal_names_why_other_journals_were_not_searched() {
+        let failure = || anyhow::anyhow!("malformed config.toml").context("cannot read the file");
+        let message = write_target_refusal(
+            Path::new("/journal"),
+            "20260101T000000Z-a-todo.md",
+            Err(failure()),
+        )
+        .to_string();
+        assert_eq!(
+            message,
+            "no such artifact 20260101T000000Z-a-todo.md in /journal; other projects' journals were not searched: cannot read the file: malformed config.toml"
+        );
+        let file = "20260101T000000Z-a-todo.md";
+        let message = artifact_refusal(file, "/journal", Err(failure())).to_string();
+        assert!(
+            message.ends_with("; other projects' journals were not searched: cannot read the file: malformed config.toml"),
+            "{message}"
+        );
+        // A clean search that finds no holder keeps the qualified-form hint.
+        let message = artifact_refusal(file, "/journal", Ok(Vec::new())).to_string();
+        assert!(message.contains("is named <journal-dir>::"), "{message}");
+    }
 
     #[test]
     fn auto_log_names_why_it_is_off_when_the_configuration_cannot_be_loaded() {

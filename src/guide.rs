@@ -2307,7 +2307,8 @@ RULES THAT CHANGE WHAT YOU DO
     naming both. These references and a `brief --must-read` artifact refuse a
     path by naming the reference that resolves it, and a filename this
     project's journal does not hold by naming each other known journal that
-    holds it as `<journal-dir>::<file>`, or that form when none does. The
+    holds it as `<journal-dir>::<file>`, or that form when none does; when
+    the known journals cannot be listed the refusal says why instead. The
     change records the reference as given, with digests read from the owning
     journal. A cross-project `begin --from-journal` or `brief
     --plan-ref` appends a `promoted` event to the owning journal naming this
