@@ -696,3 +696,23 @@ fn config_path_slug(path: &Path) -> String {
         .map(|c| if c == '/' || c == '.' { '-' } else { c })
         .collect()
 }
+
+/// A host that exports a session-store override must not steer a fixture's
+/// lookup: the fixture reads only the stores a test names itself.
+#[test]
+fn the_fixture_clears_every_session_store_override() {
+    let repo = Repo::new();
+    for variable in [
+        "CODEX_HOME",
+        "CLAUDE_CONFIG_DIR",
+        "PI_CODING_AGENT_SESSION_DIR",
+        "PI_CODING_AGENT_DIR",
+    ] {
+        let mut shell = AssertCommand::new("sh");
+        shell
+            .args(["-c", &format!("printf '%s' \"${{{variable}-unset}}\"")])
+            .env(variable, "/host/store");
+        let seen = stdout(&mut repo.fixture_env(shell, &repo.root));
+        assert_eq!(seen, "unset", "{variable} reached the fixture");
+    }
+}

@@ -367,7 +367,7 @@ fn codex_rescue_requires_the_canonical_session_id() {
 }
 
 #[test]
-fn ambiguous_codex_rescue_names_the_unreadable_lookup() {
+fn ambiguous_codex_rescue_names_the_ambiguous_lookup() {
     let repo = Repo::new();
     codex_recording(&repo, "019f0000-0000-7000-8000-000000000002", "first-model");
     codex_recording(

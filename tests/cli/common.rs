@@ -111,7 +111,14 @@ impl Repo {
             .env_remove("PI_SESSION_ID")
             .env_remove("PI_SESSION_FILE")
             .env_remove("PI_MODEL")
-            .env_remove("PI_REASONING_LEVEL");
+            .env_remove("PI_REASONING_LEVEL")
+            // Session lookup honours each store override before `$HOME`, so a
+            // host that exports one would otherwise have the fixture read its
+            // real store. A test that needs one sets it explicitly.
+            .env_remove("CODEX_HOME")
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("PI_CODING_AGENT_SESSION_DIR")
+            .env_remove("PI_CODING_AGENT_DIR");
         cmd
     }
 
