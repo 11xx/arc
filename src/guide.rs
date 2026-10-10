@@ -1893,7 +1893,11 @@ CONTRIBUTION TRAILERS
                        any recorded value.
                        Assertions are explicit; event ancestry grants none.
                        begin's two role flags and brief --planned-by take the
-                       same forms: begin records the assertions directly
+                       same forms. Put the change first when a role flag has
+                       no value, or attach an explicit coordinate with
+                       --planned-by=<value> or --orchestrated-by=<value>.
+                       A role value resolving to a repository change refuses.
+                       begin records the assertions directly
                        after opening, brief when writing a contract.
     arc trailers <change> [--json]
                        Print Planned-by and Orchestrated-by assertions and

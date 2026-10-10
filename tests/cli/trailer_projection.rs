@@ -434,3 +434,64 @@ fn missing_trailer_advice_never_suggests_a_placeholder_line() {
     assert!(detail.contains("Planned-by: lead:planner#high"), "{detail}");
     assert!(!detail.contains("codex:unknown"), "{detail}");
 }
+
+fn check_optional_role_flag(command: &str, flag: &str) {
+    let repo = Repo::new();
+    let (id, _) = open(&repo, "role-order");
+    let (_, closed_worktree) = open(&repo, "closed-role-order");
+    repo.arc(&closed_worktree)
+        .args(["close", "closed-role-order", "--abandoned"])
+        .assert()
+        .success();
+    for reference in [&id[..], "role-order", "closed-role-order"] {
+        let mut cmd = repo.arc(&repo.root);
+        cmd.args([command, flag, reference]);
+        if command == "begin" {
+            cmd.arg("another-change");
+        } else if command == "brief" {
+            cmd.args(["--body-file", "-"]).write_stdin("# Contract\n");
+        }
+        cmd.assert()
+            .failure()
+            .stderr(predicates::str::contains("put the change first"))
+            .stderr(predicates::str::contains(format!("{flag}=<value>")));
+    }
+    let mut cmd = repo.arc(&repo.root);
+    let subject = if command == "begin" {
+        format!("attached-{}", flag.trim_start_matches('-'))
+    } else {
+        "role-order".to_string()
+    };
+    cmd.args([
+        command,
+        &format!("{flag}=codex:fixture-model#high"),
+        &subject,
+    ]);
+    if command == "brief" {
+        cmd.args(["--body-file", "-"]).write_stdin("# Contract\n");
+    }
+    cmd.assert().success();
+}
+
+macro_rules! role_flag_test {
+    ($name:ident, $command:literal, $flag:literal) => {
+        #[test]
+        fn $name() {
+            check_optional_role_flag($command, $flag);
+        }
+    };
+}
+
+role_flag_test!(optional_role_flags_roles_planner, "roles", "--planned-by");
+role_flag_test!(
+    optional_role_flags_roles_orchestrator,
+    "roles",
+    "--orchestrated-by"
+);
+role_flag_test!(optional_role_flags_begin_planner, "begin", "--planned-by");
+role_flag_test!(
+    optional_role_flags_begin_orchestrator,
+    "begin",
+    "--orchestrated-by"
+);
+role_flag_test!(optional_role_flags_brief_planner, "brief", "--planned-by");

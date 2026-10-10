@@ -299,12 +299,16 @@ enum Cmd {
         /// Assert a planner: harness:model[#effort] or Name <email>; repeatable.
         /// Without a value, the invoking identity: a declared Name <email>
         /// actor's own form, else the resolved harness:model under a declared
-        /// or session-derived actor. Empty segments, unresolved coordinates,
-        /// placeholders and session ids refuse
+        /// or session-derived actor. Empty segments, unresolved coordinates, placeholders and
+        /// session ids refuse. Put the change first when omitting the value;
+        /// values naming a repository change refuse. Use --planned-by=<value>
+        /// for an explicit coordinate
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
         planned_by: Vec<String>,
         /// Assert an orchestrator in the same form; repeatable. Without a
-        /// value, the invoking identity, as for --planned-by
+        /// value, the invoking identity, as for --planned-by. Put the change
+        /// first when omitting the value; values naming a repository change
+        /// refuse. Use --orchestrated-by=<value> for an explicit coordinate
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
         orchestrated_by: Vec<String>,
         /// Kebab-case slug naming the outcome (also the ID prefix)
@@ -381,12 +385,16 @@ enum Cmd {
         /// Assert a planner (repeatable harness:model[#effort] or Name <email>).
         /// Without a value, the invoking identity: a declared Name <email>
         /// actor's own form, else the resolved harness:model under a declared
-        /// or session-derived actor. Empty segments, unresolved coordinates,
-        /// placeholders and session ids refuse
+        /// or session-derived actor. Empty segments, unresolved coordinates, placeholders and
+        /// session ids refuse. Put the change first when omitting the value;
+        /// values naming a repository change refuse. Use --planned-by=<value>
+        /// for an explicit coordinate
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
         planned_by: Vec<String>,
         /// Assert an orchestrator (repeatable harness:model[#effort] or Name <email>).
-        /// Without a value, the invoking identity, as for --planned-by
+        /// Without a value, the invoking identity, as for --planned-by. Put
+        /// the change first when omitting the value; values naming a repository
+        /// change refuse. Use --orchestrated-by=<value> for an explicit coordinate
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
         orchestrated_by: Vec<String>,
         /// Withdraw an exact assertion (repeatable Planned-by=VALUE or
@@ -673,8 +681,9 @@ enum Cmd {
         /// Assert a planner on the change when writing a brief (repeatable).
         /// Value: harness:model[#effort] or Name <email>. Without a value,
         /// the invoking identity, as for `arc roles --planned-by`.
-        /// Empty segments, unresolved coordinates, placeholders and session
-        /// ids refuse
+        /// Empty segments, unresolved coordinates, placeholders and session ids refuse.
+        /// Put the change first when omitting the value; values naming a
+        /// repository change refuse. Use --planned-by=<value> for an explicit coordinate
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
         planned_by: Vec<String>,
         /// Change to act on. Omitted, it is inferred from the current branch,
@@ -3751,7 +3760,17 @@ fn cli_command() -> clap::Command {
 /// Whether the command is read-only is answered here, from the complete
 /// subcommand path, so the table the guide prints is the one dispatch obeys.
 fn parse_cli() -> Result<(Cli, bool), clap::Error> {
-    let matches = cli_command().try_get_matches()?;
+    let matches = match cli_command().try_get_matches() {
+        Ok(matches) => matches,
+        Err(error) => {
+            if error.kind() == clap::error::ErrorKind::MissingRequiredArgument {
+                let partial = cli_command().ignore_errors(true).try_get_matches()?;
+                refuse_change_role_values(&partial)?;
+            }
+            return Err(error);
+        }
+    };
+    refuse_change_role_values(&matches)?;
     let reads_only = commands::READ_ONLY_COMMANDS.contains(&command_path(&matches).as_str());
     let mut cli = Cli::from_arg_matches(&matches)?;
     if let Some(Cmd::Query { actor, harness, .. }) = cli.cmd.as_mut() {
@@ -3835,6 +3854,62 @@ fn attach_hyphenated_value_tip(error: &mut clap::Error) {
         ContextKind::Usage,
         ContextValue::StyledStr(command.render_usage()),
     );
+}
+
+/// A contribution flag must not consume a repository change reference as
+/// its identity value, including when that leaves a required positional empty.
+fn refuse_change_role_values(matches: &ArgMatches) -> Result<(), clap::Error> {
+    let Some((command, options)) = matches.subcommand() else {
+        return Ok(());
+    };
+    if !matches!(command, "begin" | "roles" | "brief") {
+        return Ok(());
+    }
+    let names: &[&str] = if command == "brief" {
+        &["planned_by"]
+    } else {
+        &["planned_by", "orchestrated_by"]
+    };
+    let values: Vec<_> = names
+        .iter()
+        .flat_map(|name| {
+            options
+                .get_many::<String>(name)
+                .into_iter()
+                .flatten()
+                .map(move |value| (*name, value))
+        })
+        .filter(|(_, value)| ids::validate_id_component(value.trim()).is_ok())
+        .collect();
+    if values.is_empty() {
+        return Ok(());
+    }
+    if let Some(prefix) = matches
+        .get_one::<String>("sandbox")
+        .filter(|p| !p.is_empty())
+    {
+        std::env::set_var(config::SANDBOX_VAR, prefix);
+    }
+    let store = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| store::Store::resolve_root(&cwd).ok())
+        .and_then(|root| store::Store::open_at(&root).ok().flatten());
+    let Some(store) = store else {
+        return Ok(());
+    };
+    for (name, value) in values {
+        if store.resolve_change(value.trim()).is_ok() {
+            let flag = name.replace('_', "-");
+            return Err(clap::Error::raw(
+                clap::error::ErrorKind::ValueValidation,
+                format!(
+                    "--{flag} value {value:?} names a change of this repository; \
+                     put the change first, or write --{flag}=<value> with a contribution coordinate"
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn typed_on_command_line(matches: Option<&ArgMatches>, id: &str) -> bool {
