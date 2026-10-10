@@ -155,7 +155,9 @@ SAY WHO YOU ARE (before the first write)
   Pi value of that kind leaves the recording to answer. A live Pi variable
   that is set but not valid Unicode is unreadable, not absent: no model is
   named, since the recording may predate the turn in flight, and the
-  diagnostic names the variable.
+  diagnostic names the variable. Lookup reasons omit tapes' debug-quoted
+  native-query failure prefix before the one-line, 240-character bound,
+  preserving space for the failure cause.
   Launch configuration does not establish an observed acting model.
   OpenCode v2 (`opencode2`) is recognized without one — by
   `OPENCODE_TERMINAL` or its process ancestry — and prints the harness

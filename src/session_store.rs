@@ -77,12 +77,55 @@ enum LookupIssue {
     Unreadable(String),
 }
 
-/// A lookup reason as one line an operator and an event can carry: control
+/// A lookup reason omits tapes' debug-quoted native-query failure prefix.
+/// As one line an operator and an event can carry: control
 /// characters become spaces and whitespace runs collapse. Text past
 /// `REASON_LIMIT` characters loses its middle to an elision marker, because
 /// an error chain names what was asked first and the root cause last.
 pub(crate) fn bounded_reason(text: &str) -> String {
-    bounded_line(text, REASON_LIMIT)
+    bounded_line(
+        without_query_failure_prefix(text).unwrap_or(text),
+        REASON_LIMIT,
+    )
+}
+
+fn without_query_failure_prefix(text: &str) -> Option<&str> {
+    let quoted = text.strip_prefix("native session query \"")?;
+    let mut chars = quoted.char_indices();
+    while let Some((offset, character)) = chars.next() {
+        match character {
+            '"' => return quoted[offset + 1..].strip_prefix(" could not be completed: "),
+            '\\' => match chars.next()?.1 {
+                '"' | '\\' | 'n' | 'r' | 't' | '0' => {}
+                'u' => {
+                    if chars.next()?.1 != '{' {
+                        return None;
+                    }
+                    let mut codepoint = 0;
+                    let mut digits = 0;
+                    loop {
+                        let character = chars.next()?.1;
+                        if character == '}' {
+                            if digits == 0 {
+                                return None;
+                            }
+                            char::from_u32(codepoint)?;
+                            break;
+                        }
+                        if digits == 6 {
+                            return None;
+                        }
+                        codepoint = codepoint * 16 + character.to_digit(16)?;
+                        digits += 1;
+                    }
+                }
+                _ => return None,
+            },
+            character if character.is_control() => return None,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// `text` as one line of at most `limit` characters, with the elision
@@ -1009,6 +1052,31 @@ mod tests {
         assert_eq!(without_coverage(mixed), vec![cause]);
         let only: Vec<String> = coverage.map(String::from).to_vec();
         assert_eq!(without_coverage(only.clone()), only);
+    }
+
+    #[test]
+    fn reasons_strip_only_the_debug_quoted_query_failure_prefix() {
+        let cause = "x".repeat(REASON_LIMIT);
+        for query in [
+            "fixture-query",
+            "fixture\"query",
+            "fixture\\query",
+            "fixture\nquery",
+            "fixture\u{7}query",
+        ] {
+            let text = format!("native session query {query:?} could not be completed: {cause}");
+            assert_eq!(bounded_reason(&text), cause);
+        }
+        for text in [
+            "permission denied",
+            "native session query unquoted could not be completed: cause",
+            "native session query \"query\" is ambiguous among 2 candidates",
+            "context: native session query \"query\" could not be completed: cause",
+            "native session query \"query\" could not be completed:cause",
+            r#"native session query "bad\q" could not be completed: cause"#,
+        ] {
+            assert_eq!(bounded_reason(text), text);
+        }
     }
 
     #[test]
