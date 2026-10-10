@@ -7,7 +7,8 @@ reads.
 
 - A behaviour change updates the guide and every affected `--help` in the
   same change.
-- A shape change takes the next schema version.
+- A shape change follows the SCHEMAS rule in the guide (`arc`): one new
+  version per release, counted from the last release.
 
 ## Working on arc
 
