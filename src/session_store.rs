@@ -495,6 +495,28 @@ fn session_identity_with_backends(
     session: &str,
     backends: &[Box<dyn Backend>],
 ) -> SessionIdentity {
+    session_identity_with_retry(harness, session, backends, |deadline| {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return false;
+        };
+        // Debug test runners publish a model only after this model-less read.
+        #[cfg(debug_assertions)]
+        if std::env::var_os("ARC_TEST_CLAUDE_MODEL_WAIT_TRACE").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+        {
+            eprintln!("arc test: Claude model lookup has no model; retrying");
+        }
+        std::thread::sleep(CLAUDE_MODEL_POLL.min(remaining));
+        true
+    })
+}
+
+fn session_identity_with_retry(
+    harness: &str,
+    session: &str,
+    backends: &[Box<dyn Backend>],
+    mut retry: impl FnMut(Instant) -> bool,
+) -> SessionIdentity {
     let resolved = match resolve_exact(harness, backends, session) {
         Ok(resolved) => resolved,
         Err(LookupIssue::Missing(reason)) => {
@@ -516,17 +538,9 @@ fn session_identity_with_backends(
         {
             return identity;
         }
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+        if !retry(deadline) {
             return SessionIdentity::Unnamed(ModelUnavailable::NotRecordedAfterWait);
-        };
-        // Debug test runners publish a model only after this model-less read.
-        #[cfg(debug_assertions)]
-        if std::env::var_os("ARC_TEST_CLAUDE_MODEL_WAIT_TRACE").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
-        {
-            eprintln!("arc test: Claude model lookup has no model; retrying");
         }
-        std::thread::sleep(CLAUDE_MODEL_POLL.min(remaining));
     }
 }
 
@@ -701,15 +715,27 @@ mod tests {
     #[test]
     fn claude_model_wait_reads_an_assistant_line_flushed_after_lookup() {
         let (_root, path, backends) = claude_fixture();
+        let (lookup, after_lookup) = std::sync::mpsc::channel();
+        let (flushed, after_flush) = std::sync::mpsc::channel();
         let writer = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(150));
+            after_lookup.recv().unwrap();
             let assistant = json!({"type":"assistant", "uuid":"a1", "timestamp":"2026-01-01T10:00:01Z",
                 "perTurnEffort":"medium", "message":{"role":"assistant", "model":"fixture-model", "content":"answer"}});
             let mut recording = OpenOptions::new().append(true).open(path).unwrap();
             writeln!(recording, "{assistant}").unwrap();
+            flushed.send(()).unwrap();
         });
-        let identity = session_identity_with_backends("claude", SESSION, &backends);
+        let mut retries = 0;
+        let identity = session_identity_with_retry("claude", SESSION, &backends, |_| {
+            retries += 1;
+            assert_eq!(retries, 1, "the flushed model must answer the next read");
+            lookup.send(()).unwrap();
+            after_flush.recv().unwrap();
+            true
+        });
+        drop(lookup);
         writer.join().unwrap();
+        assert_eq!(retries, 1, "the initial read must have no model");
         assert!(
             matches!(identity, SessionIdentity::Named { model, observation: Some(_) } if model == "fixture-model#medium")
         );

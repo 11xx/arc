@@ -321,6 +321,8 @@ pub(super) fn import_validated_guarded(
             .sources_for("policy.require_declared_actor=true"),
         read_only: false,
     };
+    #[cfg(debug_assertions)]
+    crate::import_authorization::test_rendezvous("authorized")?;
     let _replica_state = crate::replica::lock(&store)?;
     let transition = store.lock_transition(&validated.bundle.change_id)?;
     if Store::repository_id_at(&root)? != local_repository_id {

@@ -747,6 +747,24 @@ pub fn scope_derivations() -> usize {
     DERIVATIONS.with(std::cell::Cell::get)
 }
 
+/// Pause an import at an authorization boundary until its test releases it.
+#[cfg(debug_assertions)]
+pub(crate) fn test_rendezvous(phase: &str) -> anyhow::Result<()> {
+    use std::io::{Read, Write};
+
+    if std::env::var("ARC_TEST_IMPORT_RENDEZVOUS").as_deref() != Ok(phase) {
+        return Ok(());
+    }
+    let mut stderr = std::io::stderr().lock();
+    writeln!(stderr, "arc test: import {phase}")?;
+    stderr.flush()?;
+    drop(stderr);
+    let mut release = [0];
+    std::io::stdin().read_exact(&mut release)?;
+    anyhow::ensure!(release == *b"+", "invalid import rendezvous release");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

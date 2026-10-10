@@ -995,6 +995,7 @@ fn forged_signature_only_rewrite_cannot_carry_a_trusted_approval() {
 }
 
 #[test]
+#[cfg(debug_assertions)]
 fn authorization_movement_before_publication_preserves_admitted_state() {
     let (source, path, bundle) = exported_review();
     let receiver = Repo::new();
@@ -1018,40 +1019,8 @@ fn authorization_movement_before_publication_preserves_admitted_state() {
         .unwrap();
     locked.lock().unwrap();
     let config = fs::read(receiver.root.join(".git/arc/config.json")).unwrap();
-    let template = received(&receiver, &path, false);
-    let mut command = Command::new(template.get_program());
-    command
-        .args(template.get_args())
-        .current_dir(template.get_current_dir().unwrap())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    for (key, value) in template.get_envs() {
-        match value {
-            Some(value) => {
-                command.env(key, value);
-            }
-            None => {
-                command.env_remove(key);
-            }
-        }
-    }
-    let child = command.spawn().unwrap();
-    let descriptors = PathBuf::from(format!("/proc/{}/fd", child.id()));
-    let start = Instant::now();
-    loop {
-        let waiting = fs::read_dir(&descriptors)
-            .unwrap()
-            .filter_map(|entry| fs::read_link(entry.ok()?.path()).ok())
-            .any(|path| path == lock_path);
-        if waiting {
-            break;
-        }
-        assert!(
-            start.elapsed() < Duration::from_secs(1),
-            "import never reached its publication lock"
-        );
-        thread::sleep(Duration::from_millis(5));
-    }
+    let mut child = spawn_received(&receiver, &path, "authorized");
+    await_import_rendezvous(&mut child, "authorized");
     enroll(
         &receiver,
         &bundle,
@@ -1060,6 +1029,7 @@ fn authorization_movement_before_publication_preserves_admitted_state() {
         false,
     );
     locked.unlock().unwrap();
+    release_import(&mut child);
     let output = child.wait_with_output().unwrap();
     assert_eq!(output.status.code(), Some(18), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stderr).contains("authorization configuration moved"));
@@ -1435,12 +1405,15 @@ fn untrusted_disposition_cannot_release_a_local_blocker() {
         .code(2);
 }
 
-fn spawn_received(receiver: &Repo, input: &Path) -> Child {
+#[cfg(debug_assertions)]
+fn spawn_received(receiver: &Repo, input: &Path, phase: &str) -> Child {
     let template = received(receiver, input, false);
     let mut command = Command::new(template.get_program());
     command
         .args(template.get_args())
         .current_dir(template.get_current_dir().unwrap())
+        .env("ARC_TEST_IMPORT_RENDEZVOUS", phase)
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     for (key, value) in template.get_envs() {
@@ -1453,7 +1426,22 @@ fn spawn_received(receiver: &Repo, input: &Path) -> Child {
     command.spawn().unwrap()
 }
 
+#[cfg(debug_assertions)]
+fn await_import_rendezvous(child: &mut Child, phase: &str) {
+    let mut stderr = BufReader::new(child.stderr.as_mut().unwrap());
+    let mut line = String::new();
+    stderr.read_line(&mut line).unwrap();
+    assert_eq!(line, format!("arc test: import {phase}\n"));
+}
+
+#[cfg(debug_assertions)]
+fn release_import(child: &mut Child) {
+    use std::io::Write;
+    child.stdin.take().unwrap().write_all(b"+").unwrap();
+}
+
 #[test]
+#[cfg(debug_assertions)]
 fn policy_revocation_during_format_wait_refuses_without_writes() {
     let (source, input, bundle) = exported_review();
     let receiver = Repo::new();
@@ -1478,20 +1466,8 @@ fn policy_revocation_during_format_wait_refuses_without_writes() {
         .open(&lock_path)
         .unwrap();
     locked.lock().unwrap();
-    let child = spawn_received(&receiver, &input);
-    let fds = PathBuf::from(format!("/proc/{}/fd", child.id()));
-    let start = Instant::now();
-    loop {
-        let waiting = fs::read_dir(&fds)
-            .unwrap()
-            .filter_map(|entry| fs::read_link(entry.ok()?.path()).ok())
-            .any(|path| path == lock_path);
-        if waiting {
-            break;
-        }
-        assert!(start.elapsed() < Duration::from_secs(1));
-        thread::sleep(Duration::from_millis(5));
-    }
+    let mut child = spawn_received(&receiver, &input, "format");
+    await_import_rendezvous(&mut child, "format");
     let policy = receiver.home.join("revoked.toml");
     fs::write(&policy,format!("[[replica.publishers]]\nprincipal='channel'\nsource_replica_id='{}'\n[[replica.publishers.origins]]\nreplica_id='{}'\nroles=['facts','review-input']\nactors=[]\n",bundle["source_replica_id"].as_str().unwrap(),bundle["repository_id"].as_str().unwrap())).unwrap();
     stdout(receiver.arc(&receiver.root).args([
@@ -1501,6 +1477,7 @@ fn policy_revocation_during_format_wait_refuses_without_writes() {
         policy.to_str().unwrap(),
     ]));
     locked.unlock().unwrap();
+    release_import(&mut child);
     let output = child.wait_with_output().unwrap();
     assert_eq!(output.status.code(), Some(18), "{output:?}");
     assert_eq!(

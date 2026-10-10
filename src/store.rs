@@ -1725,6 +1725,8 @@ impl Store {
 
     pub fn publish_import(&self, batch: &ImportBatch) -> Result<()> {
         self.refuse_read_only()?;
+        #[cfg(debug_assertions)]
+        crate::import_authorization::test_rendezvous("format")?;
         let _format = self.lock_format()?;
         let policy_path = self
             .operator_policy_path
