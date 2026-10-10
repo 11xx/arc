@@ -733,6 +733,76 @@ fn concurrent_appends_converge_in_timestamp_and_identity_order() {
 }
 
 #[test]
+fn concurrent_evidence_on_a_live_item_converges_between_replicas() {
+    let a = Repo::new();
+    let b = Repo::new();
+    pair(&a, &b, "a", "b");
+    let file = write_artifact(&a, "evidence-exchange", "feature-request", "# Shared\n");
+    let initial = bundle_file(&a, "initial");
+    export(&a, &[&file], &initial);
+    assert!(import(&b, &initial, false).status.success());
+    for (repo, body) in [(&b, "B found this.\n"), (&a, "A found this.\n")] {
+        repo.arc(&repo.root)
+            .args(["journal", "evidence", &file, "--body-file", "-"])
+            .write_stdin(body)
+            .assert()
+            .success();
+    }
+    let from_a = bundle_file(&a, "from-a");
+    let from_b = bundle_file(&b, "from-b");
+    export(&a, &[&file], &from_a);
+    export(&b, &[&file], &from_b);
+    let result = import(&a, &from_b, false);
+    assert!(result.status.success(), "{result:?}");
+    let result = import(&b, &from_a, false);
+    assert!(result.status.success(), "{result:?}");
+    let body = fs::read_to_string(journal_dir(&a).join(&file)).unwrap();
+    assert_eq!(
+        body,
+        fs::read_to_string(journal_dir(&b).join(&file)).unwrap()
+    );
+    assert_eq!(body.matches("### Evidence evd-").count(), 2, "{body}");
+    assert!(body.contains("A found this.") && body.contains("B found this."));
+    let kinds: Vec<_> = events_for(&journal_dir(&a), &file)
+        .into_iter()
+        .filter(|event| event["event"] == "evidence")
+        .collect();
+    assert_eq!(kinds.len(), 2);
+    assert!(import(&a, &from_b, false).status.success());
+    assert_eq!(
+        body,
+        fs::read_to_string(journal_dir(&a).join(&file)).unwrap()
+    );
+}
+
+#[test]
+fn edited_evidence_blocks_are_refused_like_any_shared_block() {
+    let a = Repo::new();
+    let b = Repo::new();
+    pair(&a, &b, "a", "b");
+    let file = write_artifact(&a, "evidence-edit", "todo", "# Shared\n");
+    a.arc(&a.root)
+        .args(["journal", "evidence", &file, "--body-file", "-"])
+        .write_stdin("Original finding.\n")
+        .assert()
+        .success();
+    let initial = bundle_file(&a, "initial");
+    export(&a, &[&file], &initial);
+    assert!(import(&b, &initial, false).status.success());
+    let path = journal_dir(&a).join(&file);
+    let body = fs::read_to_string(&path).unwrap();
+    fs::write(
+        &path,
+        body.replace("Original finding.", "Rewritten finding."),
+    )
+    .unwrap();
+    let modified = bundle_file(&a, "modified");
+    export(&a, &[&file], &modified);
+    let result = import(&b, &modified, false);
+    assert!(!result.status.success(), "{result:?}");
+}
+
+#[test]
 fn edited_shared_blocks_are_refused_by_identity_and_both_digests() {
     let a = Repo::new();
     let b = Repo::new();
@@ -1229,7 +1299,7 @@ fn assert_pending_writer_refused(writer: &str) {
 }
 
 #[test]
-fn pending_exchange_refuses_body_creation_positions_and_spool_promotion() {
+fn pending_exchange_refuses_body_creation_positions_evidence_and_spool_promotion() {
     let (a, _b, file, incoming) = receipt_failure_fixture();
     let dir = journal_dir(&a);
     a.arc(&a.root)
@@ -1253,7 +1323,7 @@ fn pending_exchange_refuses_body_creation_positions_and_spool_promotion() {
         .map(|entry| entry.unwrap().path())
         .collect();
     before.sort();
-    for writer in ["note", "position", "spool"] {
+    for writer in ["note", "position", "evidence", "spool"] {
         let mut cmd = a.arc(&a.root);
         match writer {
             "note" => {
@@ -1271,6 +1341,10 @@ fn pending_exchange_refuses_body_creation_positions_and_spool_promotion() {
             "position" => {
                 cmd.args(["journal", writer, &file, "--body-file", "-"])
                     .write_stdin("Position: against\n\nMust not append a body\n");
+            }
+            "evidence" => {
+                cmd.args(["journal", writer, &file, "--body-file", "-"])
+                    .write_stdin("Must not append evidence\n");
             }
             _ => {
                 cmd.args(["journal", writer, "--promote"]);

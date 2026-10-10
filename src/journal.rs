@@ -3,7 +3,7 @@
 //! The ledger is authoritative and gating; the journal is advisory and
 //! contextual. Artifacts stay freeform Markdown and remain readable and
 //! writable by a tool-less agent; the append-only event log is versioned
-//! JSONL (`journal-events/1` in `events.jsonl`). `arc journal` only encodes
+//! JSONL (`journal-events/2` in `events.jsonl`). `arc journal` only encodes
 //! the invariants that drift in practice — directory resolution, timestamped
 //! filenames, position identity and lifecycle, and journal event semantics.
 //! It is a convenience and
@@ -752,6 +752,21 @@ pub enum JournalCmd {
         #[arg(long)]
         archived: bool,
     },
+    /// Append an evidence block to a live artifact of any kind and emit a typed
+    /// `evidence` event. Use it to add a finding, an option, or a revised
+    /// section to a todo, feature request, plan, or other live item instead of
+    /// filing a successor. The block is append-only, states no stance, and
+    /// never enters a stance tally: argue a discussion with `arc journal
+    /// position`, and replace a recorded field with `arc journal correct`. A
+    /// consumed artifact refuses; file a successor. `show` prints the block
+    Evidence {
+        /// Artifact filename inside the journal dir (a name, not a path)
+        filename: String,
+        /// Body source: a file path, or '-' for stdin (written verbatim below
+        /// a tool-computed `### Evidence` heading)
+        #[arg(long)]
+        body_file: String,
+    },
     /// Record that an artifact was checked against the project's source at the
     /// current anchor revision. The revision is omitted when the anchor has no
     /// Git head; the stamp appears on the open queue until the artifact is
@@ -1492,6 +1507,10 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd, global: bool) -> Result<i32> {
             option.as_deref(),
             archived,
         ),
+        JournalCmd::Evidence {
+            filename,
+            body_file,
+        } => evidence(ctx, &filename, &body_file),
         JournalCmd::Verified { filename, note } => verified(ctx, &filename, note.as_deref()),
         JournalCmd::Question {
             filename,
@@ -1900,6 +1919,7 @@ impl JournalEvent {
     pub(crate) fn exchange_block(&self) -> Option<(String, String, &str, Option<&str>)> {
         let (heading, id) = match self.event.as_str() {
             "position" => ("Position", self.position_id.as_deref()?),
+            "evidence" => ("Evidence", self.evidence_id.as_deref()?),
             "question" => ("Question", self.question_id.as_deref()?),
             "answer" => ("Answer", self.question_id.as_deref()?),
             "correction" => ("Correction", self.amendment_id.as_deref()?),
@@ -6190,6 +6210,46 @@ fn position(
     Ok(0)
 }
 
+/// Append evidence to a live artifact of any kind and emit a typed `evidence`
+/// event. The block adds to what an item says without replacing it, which is
+/// what makes it the way to extend a live todo, feature request, or plan
+/// rather than filing a successor. It carries no stance and no reply edge, so
+/// it never enters a stance tally; the event supplies the stable id, the
+/// activity time, and the writer.
+fn evidence(ctx: &Ctx, filename: &str, body_file: &str) -> Result<i32> {
+    // Refuse a malformed name before the body is read: with `--body-file -`
+    // the read waits on stdin, and a caller who mistyped the filename would
+    // wait with it rather than being told.
+    check_artifact_name(ctx, filename)?;
+    let body = read_body_verbatim(body_file)?;
+    if body.trim().is_empty() {
+        bail!("evidence needs a body: say what was found");
+    }
+
+    let dir = resolve_dir(&ctx.cwd)?;
+    let _transition = lock_journal_transition(&dir)?;
+    let (dir, path, topic, _kind) = open_artifact(ctx, filename)?;
+
+    let now = Utc::now();
+    let ts = now.to_rfc3339_opts(SecondsFormat::Secs, true);
+    let evidence_id = format!("evd-{}", ulid::Ulid::new().to_string().to_ascii_lowercase());
+    let (harness, _) = identity(ctx);
+    let heading = format!(
+        "### Evidence {evidence_id} ({}, {ts})",
+        attribution(ctx, &harness)
+    );
+    append_block(&path, &heading, &body)?;
+
+    let mut event = JournalEvent::base(ctx, now, &topic, "evidence");
+    event.schema = JOURNAL_SCHEMA_EVIDENCE.to_string();
+    event.file = Some(filename.to_string());
+    event.evidence_id = Some(evidence_id);
+    event.storage_at_write = Some("hot".to_string());
+    append_event(ctx, &dir, &event)?;
+    println!("{}", path.display());
+    Ok(0)
+}
+
 /// The syntactic half of the artifact preflight, separable because it writes
 /// nothing: a caller who mistyped a name learns so before a body is read from
 /// stdin. A path to a journal artifact's file is refused naming the reference
@@ -6221,8 +6281,13 @@ fn open_artifact(ctx: &Ctx, filename: &str) -> Result<(PathBuf, PathBuf, String,
         return Err(missing_write_target(&dir, filename));
     }
     if is_consumed(&read_events(&dir)?, filename) {
+        let successor = if kind == JournalKind::Discussion.as_str() {
+            "open a successor discussion".to_string()
+        } else {
+            format!("file a successor {kind}")
+        };
         bail!(
-            "cannot append to consumed artifact {filename}; open a successor discussion, \
+            "cannot append to consumed artifact {filename}; {successor}, \
              or amend the record with `journal correct` or `journal retract`"
         );
     }
@@ -7660,7 +7725,13 @@ fn events(ctx: &Ctx, limit: Option<usize>) -> Result<i32> {
     Ok(0)
 }
 
+/// The version an event carries when every reader of the format knows its
+/// kind and shape.
 const JOURNAL_SCHEMA: &str = "journal-events/1";
+/// The version of an event whose kind a reader of `journal-events/1` does not
+/// know. A line carries the lowest version that describes it, so an older
+/// reader keeps every event it knows and skips only these.
+const JOURNAL_SCHEMA_EVIDENCE: &str = "journal-events/2";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct JournalEvent {
@@ -7769,6 +7840,9 @@ pub(crate) struct JournalEvent {
     /// remain valid `journal-events/1` input.
     #[serde(skip_serializing_if = "Option::is_none")]
     position_id: Option<String>,
+    /// Stable ID of an `evidence` event and the block its heading carries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    evidence_id: Option<String>,
     /// Stance explicitly written by `journal position --stance`. Optional so
     /// position events written before the flag remain valid `journal-events/1`
     /// input.
@@ -8150,6 +8224,7 @@ impl JournalEvent {
             name: None,
             revision: None,
             position_id: None,
+            evidence_id: None,
             stance: None,
             reference: None,
             question_id: None,
@@ -8220,7 +8295,9 @@ impl JournalEvent {
     }
 
     pub(crate) fn known(&self) -> bool {
-        if self.schema != JOURNAL_SCHEMA || self.timestamp().is_none() || !valid_topic(&self.topic)
+        if ![JOURNAL_SCHEMA, JOURNAL_SCHEMA_EVIDENCE].contains(&self.schema.as_str())
+            || self.timestamp().is_none()
+            || !valid_topic(&self.topic)
         {
             return false;
         }
@@ -8281,6 +8358,20 @@ impl JournalEvent {
                         }
                         _ => false,
                     }
+            }
+            // Evidence adds to an item and argues nothing, so it carries
+            // none of the fields that describe an argument: a stance, a reply
+            // edge, or a branch.
+            "evidence" => {
+                self.artifact_file()
+                    && self.evidence_id.as_deref().is_some_and(valid_evidence_id)
+                    && self.stance.is_none()
+                    && self.reference.is_none()
+                    && self.position_id.is_none()
+                    && self.question_id.is_none()
+                    && self.option.is_none()
+                    && self.placement.is_none()
+                    && self.options.is_none()
             }
             "consumed" => {
                 self.file.is_some()
@@ -8528,6 +8619,10 @@ fn parse_claim_stage(value: &str) -> Option<ClaimStage> {
     ]
     .into_iter()
     .find(|stage| stage.as_str() == value)
+}
+
+fn valid_evidence_id(value: &str) -> bool {
+    prefixed_id(value, "evd-")
 }
 
 fn valid_position_id(value: &str) -> bool {
@@ -8993,6 +9088,10 @@ fn event_message(event: &JournalEvent) -> String {
             .title
             .clone()
             .unwrap_or_else(|| "wrote artifact".into()),
+        "evidence" => format!(
+            "added evidence to {}",
+            event.file.as_deref().unwrap_or_default()
+        ),
         "verified" => format!(
             "verified {}{}{}{}",
             event.file.as_deref().unwrap_or_default(),

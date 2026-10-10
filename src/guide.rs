@@ -293,6 +293,16 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          `--blocker` carry the structured half; `--supersedes
                          <checkpoint-id>` corrects an earlier one without
                          hiding it.
+  arc journal evidence <file.md> --body-file -
+                         Add a finding, an option, or a revised section to a
+                         live item of any kind instead of filing a successor:
+                         an append-only block under a heading naming its id,
+                         writer, and time, recorded as an `evidence` event.
+                         `arc journal show` prints it. It states no
+                         stance and never enters a stance tally; argue a
+                         discussion with `journal position`, and replace a
+                         recorded field with `journal correct`. A consumed
+                         item is closed: file a successor.
   arc journal verified <file> [--note <text>]
                          Record a source check at the head of the checkout it
                          was made in: the project anchor, or a fork's own
@@ -1444,7 +1454,9 @@ END A SESSION (what the next one reads)
   the reasoning that produced it is still recoverable. A filed claim found
   wrong is corrected in the same breath as learning so (`journal correct`, or
   `journal retract` where the entry should stand withdrawn), because a false
-  artifact read as authoritative is worse than no artifact. A round that
+  artifact read as authoritative is worse than no artifact. More evidence for
+  an item that stands is appended with `journal evidence`, not filed as a
+  second item. A round that
   closes having deliberately left work records what it left (`run end
   --note`), since a deferral living only in a transcript was dropped rather
   than deferred. A session stopping midstream writes a handoff (`journal
@@ -2695,7 +2707,7 @@ SCHEMAS
   An input format, stored or supplied, is versioned from the reader's side:
   its version marks what a reader must accept, so a new optional field that
   leaves every older file valid keeps the version, and removing a field or
-  making one required takes the next. `journal-events/1` and
+  making one required takes the next. `journal-events/2` and
   `arc-trailer-edits/1` are two.
 
   Commitments, derived views:
@@ -2752,7 +2764,7 @@ SCHEMAS
     `arc-replica-bundle/3`           arc replica export / import
     `arc-replica-event/3`            one event inside an arc-replica-bundle
     `arc-journal-bundle/2`           arc journal export / import
-    `journal-events/1`               events.jsonl, streamed by arc journal events
+    `journal-events/2`               events.jsonl, streamed by arc journal events
     `arc-journal-spool/1`            .arc/outbox/<ts>-<kind>-<topic>.json
     `arc-trailer-edits/1`            arc rewrite trailers --edits
 
@@ -2760,6 +2772,12 @@ SCHEMAS
   current export formats. Journal imports accept
   `arc-journal-bundle/1`.
   Their absent model provenance stays absent.
+
+  An event line carries the lowest version that describes it:
+  `journal-events/2` marks an `evidence` event, and every other event is
+  `journal-events/1`. A reader accepts both. It skips an event it does not
+  know, `journal doctor` reports that event as `unknown-jsonl-event`, and an
+  import refuses a bundle carrying one.
 
   Private successor preparation uses complete Markdown at
   `.transitions/<successor>`, retained until source retirement. These files

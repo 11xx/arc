@@ -5011,6 +5011,292 @@ fn journal_position_rejects_consumed_artifact() {
     );
 }
 
+/// An artifact of `kind` filed through the CLI, named by the file it reports.
+fn evidence_artifact(repo: &Repo, kind: &str, topic: &str, body: &str) -> String {
+    let seed = stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "note", topic, "--kind", kind, "--body-file", "-"])
+            .write_stdin(body.to_string()),
+    );
+    PathBuf::from(seed.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string()
+}
+
+#[test]
+fn journal_evidence_appends_a_block_to_a_todo_and_a_feature_request() {
+    let repo = Repo::new();
+    let todo = evidence_artifact(&repo, "todo", "evidence-todo", "# Fix the loader\n");
+    let request = evidence_artifact(
+        &repo,
+        "feature-request",
+        "evidence-request",
+        "# Bulk submit\n\nOptions: A.\n",
+    );
+
+    for (file, text) in [
+        (&todo, "Reproduced on a cold cache."),
+        (&request, "Option B: a fallback submitter."),
+    ] {
+        repo.arc(&repo.root)
+            .args(["journal", "evidence", file, "--body-file", "-"])
+            .env("ARC_HARNESS", "opencode")
+            .env("ARC_MODEL", "kimi-k3#high")
+            .write_stdin(format!("{text}\n"))
+            .assert()
+            .success()
+            .stdout(predicates::str::contains(file.as_str()));
+
+        let shown = stdout(repo.arc(&repo.root).args(["journal", "show", file]));
+        assert!(
+            shown.contains("### Evidence evd-")
+                && shown.contains("(kimi-k3#high via opencode, 20")
+                && shown.contains(text),
+            "{shown}"
+        );
+        // The block follows the original body and leaves it untouched.
+        assert!(shown.starts_with("# "), "{shown}");
+        let heading = shown
+            .lines()
+            .find(|line| line.starts_with("### Evidence "))
+            .unwrap();
+        assert!(heading.ends_with("Z)"), "{heading}");
+    }
+
+    // Without a model, the declared actor is who acted.
+    repo.arc(&repo.root)
+        .args(["journal", "evidence", &todo, "--body-file", "-"])
+        .env_remove("ARC_MODEL")
+        .write_stdin("A second finding.\n")
+        .assert()
+        .success();
+    let shown = stdout(repo.arc(&repo.root).args(["journal", "show", &todo]));
+    assert_eq!(shown.matches("### Evidence evd-").count(), 2, "{shown}");
+    assert!(shown.contains("(tester, 20"), "{shown}");
+    assert!(
+        shown.find("Reproduced on a cold cache.").unwrap()
+            < shown.find("A second finding.").unwrap(),
+        "{shown}"
+    );
+
+    repo.arc(&repo.root)
+        .args(["journal", "doctor"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("unknown-jsonl-event").not());
+}
+
+#[test]
+fn journal_evidence_records_a_typed_event_with_its_identity() {
+    let repo = Repo::new();
+    let file = evidence_artifact(&repo, "todo", "evidence-event", "# Loader\n");
+    repo.arc(&repo.root)
+        .args(["journal", "evidence", &file, "--body-file", "-"])
+        .env("ARC_HARNESS", "opencode")
+        .env("ARC_MODEL", "kimi-k3#high")
+        .write_stdin("Measured twice.\n")
+        .assert()
+        .success();
+
+    let dir = journal_dir(&repo);
+    let body = fs::read_to_string(dir.join(&file)).unwrap();
+    let events = journal_events(&dir);
+    let evidence: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|event| event["event"] == "evidence")
+        .collect();
+    assert_eq!(evidence.len(), 1, "{events:?}");
+    let event = evidence[0];
+    assert_eq!(event["schema"], "journal-events/2");
+    assert_eq!(event["topic"], "evidence-event");
+    assert_eq!(event["file"], file);
+    assert_eq!(event["harness"], "opencode");
+    assert_eq!(event["model"], "kimi-k3#high");
+    assert_eq!(event["actor"], "tester");
+    assert_eq!(event["storage_at_write"], "hot");
+    let id = event["evidence_id"].as_str().unwrap();
+    assert!(id.starts_with("evd-") && id.len() == 30, "{id}");
+    assert!(body.contains(&format!("### Evidence {id} (")), "{body}");
+    // Evidence argues nothing: no stance, reply edge or branch.
+    for field in ["stance", "ref", "question_id", "option", "position_id"] {
+        assert!(event.get(field).is_none(), "{field}: {event}");
+    }
+    // The activity time is the heading's.
+    let ts = event["ts"].as_str().unwrap();
+    assert!(body.contains(&format!(", {ts})")), "{ts}: {body}");
+
+    // The event kind is listed by `journal events` like any other.
+    let listed = stdout(repo.arc(&repo.root).args(["journal", "events"]));
+    assert!(listed.contains("\"event\":\"evidence\""), "{listed}");
+}
+
+#[test]
+fn journal_evidence_refuses_a_consumed_artifact_and_names_the_successor() {
+    let repo = Repo::new();
+    let file = evidence_artifact(&repo, "feature-request", "evidence-closed", "# Closed\n");
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &file, "--outcome", "done"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["journal", "evidence", &file, "--body-file", "-"])
+        .write_stdin("Too late.\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("consumed artifact"))
+        .stderr(predicates::str::contains("successor"));
+
+    let dir = journal_dir(&repo);
+    assert!(!fs::read_to_string(dir.join(&file))
+        .unwrap()
+        .contains("Too late"));
+    assert!(journal_events(&dir)
+        .iter()
+        .all(|event| event["event"] != "evidence"));
+}
+
+#[test]
+fn journal_evidence_rejects_paths_missing_files_and_non_artifacts_before_reading_stdin() {
+    let repo = Repo::new();
+    let todo = evidence_artifact(&repo, "todo", "evidence-names", "# Names\n");
+    // `--body-file -` would block on stdin; the refusal must precede the read.
+    for target in ["../escape-todo.md", "not-an-artifact.md"] {
+        repo.arc(&repo.root)
+            .args(["journal", "evidence", target, "--body-file", "-"])
+            .timeout(std::time::Duration::from_secs(20))
+            .write_stdin("")
+            .assert()
+            .failure();
+    }
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "evidence",
+            "20200101T000000Z-missing-todo.md",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Nothing to attach to.\n")
+        .assert()
+        .failure();
+    repo.arc(&repo.root)
+        .args(["journal", "evidence", &todo, "--body-file", "/no/such/body"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cannot read body file"));
+    repo.arc(&repo.root)
+        .args(["journal", "evidence", &todo, "--body-file", "-"])
+        .write_stdin("  \n\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("evidence needs a body"));
+
+    let dir = journal_dir(&repo);
+    assert_eq!(fs::read_to_string(dir.join(&todo)).unwrap(), "# Names\n");
+    assert!(journal_events(&dir)
+        .iter()
+        .all(|event| event["event"] != "evidence"));
+}
+
+#[test]
+fn journal_evidence_never_enters_a_discussions_stance_tally() {
+    let repo = Repo::new();
+    let file = discussion_fixture(&repo, "evidence-tally");
+    repo.arc(&repo.root)
+        .args(["journal", "position", &file, "--body-file", "-"])
+        .write_stdin("Position: for\n\nShip it.\n")
+        .assert()
+        .success();
+    // A stance line inside evidence is prose, whether the block opens with it
+    // or follows a position block.
+    repo.arc(&repo.root)
+        .args(["journal", "evidence", &file, "--body-file", "-"])
+        .write_stdin("Position: against\n\nA benchmark that disagrees.\n")
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["journal", "evidence", &file, "--body-file", "-"])
+        .write_stdin("A second measurement.\n\nPosition: amend\n")
+        .assert()
+        .success();
+
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+    assert_eq!(summary["positions"], 1, "{summary}");
+    assert_eq!(summary["stances"]["for"], 1, "{summary}");
+    assert_eq!(summary["stances"]["against"], 0, "{summary}");
+    assert_eq!(summary["stances"]["amend"], 0, "{summary}");
+    assert_eq!(summary["stances"]["other"], 0, "{summary}");
+    assert_eq!(summary["stances"]["unstated"], 0, "{summary}");
+    assert_eq!(summary["participants"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn journal_evidence_after_a_position_does_not_disturb_the_position_block() {
+    let repo = Repo::new();
+    let file = discussion_fixture(&repo, "evidence-after");
+    repo.arc(&repo.root)
+        .args(["journal", "position", &file, "--body-file", "-"])
+        .write_stdin("Argues without voting.\n")
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["journal", "evidence", &file, "--body-file", "-"])
+        .write_stdin("Position: for\n")
+        .assert()
+        .success();
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+    assert_eq!(summary["positions"], 1, "{summary}");
+    assert_eq!(summary["stances"]["unstated"], 1, "{summary}");
+    assert_eq!(summary["stances"]["for"], 0, "{summary}");
+}
+
+#[test]
+fn journal_events_carry_the_lowest_version_that_describes_them() {
+    let repo = Repo::new();
+    let file = evidence_artifact(&repo, "todo", "evidence-versions", "# Versions\n");
+    repo.arc(&repo.root)
+        .args(["journal", "evidence", &file, "--body-file", "-"])
+        .write_stdin("Appended beside earlier events.\n")
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["journal", "log", "evidence-versions", "after the evidence"])
+        .assert()
+        .success();
+    let versions: Vec<(String, String)> = journal_events(&journal_dir(&repo))
+        .iter()
+        .map(|event| {
+            (
+                event["event"].as_str().unwrap().to_string(),
+                event["schema"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        versions,
+        [
+            ("note", "journal-events/1"),
+            ("evidence", "journal-events/2"),
+            ("log", "journal-events/1"),
+        ]
+        .map(|(kind, schema)| (kind.to_string(), schema.to_string())),
+    );
+    repo.arc(&repo.root)
+        .args(["journal", "doctor"])
+        .assert()
+        .success();
+}
+
 #[test]
 fn journal_verified_records_anchor_revision_and_provenance() {
     let repo = Repo::new();
@@ -5685,7 +5971,7 @@ fn journal_discussion_ignores_unknown_schema_positions() {
     let file = discussion_fixture(&repo, "future-position");
     let dir = journal_dir(&repo);
     let event = serde_json::json!({
-        "schema": "journal-events/2",
+        "schema": "journal-events/3",
         "ts": "2026-01-01T00:00:01Z",
         "harness": "future",
         "session": "future",
