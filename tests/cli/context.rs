@@ -1274,6 +1274,56 @@ fn env_reports_the_live_pi_values_for_the_acting_session() {
         )));
 }
 
+/// A live Pi value that is not Unicode cannot be read, which is not the same
+/// as an unset one: the recording may predate the turn in flight, so no model
+/// is named and the unreadable variable is.
+#[test]
+fn env_names_a_live_pi_value_that_is_not_unicode() {
+    use std::os::unix::ffi::OsStrExt;
+    let repo = Repo::new();
+    let session = "019f0000-0000-7000-8000-000000000001";
+    pi_recording(&repo, session, "gpt-5.6-recorded", "low");
+    let unreadable = std::ffi::OsStr::from_bytes(b"gpt-\xff");
+
+    for variable in ["PI_MODEL", "PI_REASONING_LEVEL"] {
+        let mut command = repo.arc(&repo.root);
+        command
+            .arg("env")
+            .env("PI_SESSION_ID", session)
+            .env("PI_CODING_AGENT_SESSION_DIR", repo.home.join("pi-sessions"))
+            .env("PI_MODEL", "gpt-5.6-live")
+            .env("PI_REASONING_LEVEL", "high")
+            .env_remove("CLAUDE_SESSION_ID")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("OPENCODE_SESSION");
+        command.env(variable, unreadable);
+        let output = stdout(&mut command);
+        assert!(
+            output.contains(&format!(
+                "# export ARC_MODEL=<model[#effort]>  # unavailable: {variable} is not valid Unicode; "
+            )),
+            "{output}"
+        );
+        assert!(!output.contains("# model:"), "{output}");
+    }
+
+    // An unset live model leaves the recording to answer, and a level without
+    // a model is not read at all.
+    let output = stdout(
+        repo.arc(&repo.root)
+            .arg("env")
+            .env("PI_SESSION_ID", session)
+            .env("PI_CODING_AGENT_SESSION_DIR", repo.home.join("pi-sessions"))
+            .env("PI_REASONING_LEVEL", unreadable)
+            .env_remove("PI_MODEL")
+            .env_remove("CLAUDE_SESSION_ID")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("OPENCODE_SESSION"),
+    );
+    assert!(output.contains("# model: gpt-5.6-recorded#low"), "{output}");
+    assert!(!output.contains("not valid Unicode"), "{output}");
+}
+
 /// A session opened with `--session`/`--session-dir` lives outside the
 /// configured store; `PI_SESSION_FILE` names its recording, so the session is
 /// corroborated from there.

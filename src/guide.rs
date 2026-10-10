@@ -112,7 +112,10 @@ SAY WHO YOU ARE (before the first write)
   recording still without a model after the wait each receive an explicit
   diagnostic. A recorded model that is a placeholder or a session id names no
   model: the diagnostic names the value and no write records it, and a live
-  Pi value of that kind leaves the recording to answer.
+  Pi value of that kind leaves the recording to answer. A live Pi variable
+  that is set but not valid Unicode is unreadable, not absent: no model is
+  named, since the recording may predate the turn in flight, and the
+  diagnostic names the variable.
   Launch configuration does not establish an observed acting model.
   OpenCode v2 (`opencode2`) is recognized without one — by
   `OPENCODE_TERMINAL` or its process ancestry — and prints the harness

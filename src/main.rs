@@ -1803,7 +1803,10 @@ enum Cmd {
     /// diagnostic. A recorded model that is a placeholder (unknown,
     /// <synthetic>, ...) or a session id names no model: the diagnostic names
     /// the value and no write records it, and a live Pi value of that kind
-    /// leaves the recording to answer.
+    /// leaves the recording to answer. A live Pi variable that is set but not
+    /// valid Unicode is unreadable, not absent: no model is named, since the
+    /// recording may predate the turn in flight, and the diagnostic names the
+    /// variable.
     /// Launch configuration does not establish an observed acting model. Not every
     /// harness exports a session variable, and a harness that
     /// does may not in every mode. OpenCode v2 exports none and is recognized

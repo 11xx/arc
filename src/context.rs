@@ -450,9 +450,24 @@ fn resolved(harness: &str, session: &str) -> DetectedIdentity {
             }
         }
     }
-    if let Some(live) = live_pi_model(harness, session) {
-        model = Some(live);
-        model_unavailable = None;
+    match live_pi_model(harness, session) {
+        Ok(Some(live)) => {
+            model = Some(live);
+            model_unavailable = None;
+        }
+        Ok(None) => {}
+        // The turn in flight is unreadable, so the recording's newest model
+        // may belong to an earlier turn: none is named, and the cause is.
+        Err(cause) => {
+            model = None;
+            model_observation = None;
+            model_unavailable = Some(match model_unavailable {
+                Some(reason) => format!("{reason}; {cause}"),
+                None => format!(
+                    "{cause}; the live model cannot be read and the recording may predate the turn in flight"
+                ),
+            });
+        }
     }
     DetectedIdentity {
         harness: harness.to_string(),
@@ -530,28 +545,39 @@ pub fn model_attribution(
 /// for every tool call, so they describe the turn in flight; the recording is
 /// the fallback. A reasoning level without a live model says nothing about
 /// which model it belongs to, so the recording answers both then, and so it
-/// does when the live value is a placeholder or a session id.
-fn live_pi_model(harness: &str, session: &str) -> Option<String> {
+/// does when the live value is a placeholder or a session id. A value that is
+/// set but not Unicode is an error rather than an absence: the live turn
+/// exists and cannot be read.
+fn live_pi_model(harness: &str, session: &str) -> Result<Option<String>, String> {
     if harness != "pi" {
-        return None;
+        return Ok(None);
     }
-    let acting = std::env::var("PI_SESSION_ID")
-        .ok()
-        .is_some_and(|id| id == session);
-    if !acting {
-        return None;
+    if live_var("PI_SESSION_ID")?.as_deref() != Some(session) {
+        return Ok(None);
     }
-    let model = std::env::var("PI_MODEL").ok()?.trim().to_string();
-    if model.is_empty() {
-        return None;
-    }
-    let live = match std::env::var("PI_REASONING_LEVEL") {
-        Ok(level) if !level.trim().is_empty() => format!("{model}#{}", level.trim()),
+    let Some(model) = live_var("PI_MODEL")?
+        .map(|model| model.trim().to_string())
+        .filter(|model| !model.is_empty())
+    else {
+        return Ok(None);
+    };
+    let live = match live_var("PI_REASONING_LEVEL")? {
+        Some(level) if !level.trim().is_empty() => format!("{model}#{}", level.trim()),
         _ => model,
     };
-    crate::coordinate::model_defect(&live, Some(session))
+    Ok(crate::coordinate::model_defect(&live, Some(session))
         .is_none()
-        .then_some(live)
+        .then_some(live))
+}
+
+/// One live variable: `None` when unset, an error when its bytes are not
+/// Unicode.
+fn live_var(name: &str) -> Result<Option<String>, String> {
+    match std::env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} is not valid Unicode")),
+    }
 }
 
 const EXPORT_TEMPLATE: &str = concat!(
