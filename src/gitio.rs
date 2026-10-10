@@ -2,7 +2,7 @@ use crate::commands::fork::is_fork_branch;
 use anyhow::{bail, Context, Result};
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
@@ -83,19 +83,55 @@ fn command_output(command: &mut Command) -> Result<Output> {
     };
 
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = command.spawn()?;
-    loop {
-        if child.try_wait()?.is_some() {
-            return Ok(child.wait_with_output()?);
+    wait_for_output(command.spawn()?, deadline)
+}
+
+fn drain_output(
+    mut pipe: impl Read + Send + 'static,
+) -> thread::JoinHandle<std::io::Result<Vec<u8>>> {
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        pipe.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    })
+}
+
+/// Drain both pipes while waiting, so a full output buffer cannot hide exit
+/// or keep a deadline-bound Git process alive.
+fn wait_for_output(mut child: std::process::Child, deadline: Instant) -> Result<Output> {
+    let stdout = drain_output(child.stdout.take().context("child has no stdout")?);
+    let stderr = drain_output(child.stderr.take().context("child has no stderr")?);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(10)),
+                );
+            }
+            answer => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break match answer {
+                    Err(error) => Err(error.into()),
+                    _ => Err(anyhow::anyhow!("git probe timed out")),
+                };
+            }
         }
-        let now = Instant::now();
-        if now >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("git probe timed out");
-        }
-        thread::sleep((deadline - now).min(Duration::from_millis(10)));
-    }
+    };
+    let stdout = stdout
+        .join()
+        .map_err(|_| anyhow::anyhow!("stdout reader panicked"));
+    let stderr = stderr
+        .join()
+        .map_err(|_| anyhow::anyhow!("stderr reader panicked"));
+    Ok(Output {
+        status: status?,
+        stdout: stdout??,
+        stderr: stderr??,
+    })
 }
 
 /// The common Git directory shared by every worktree of one repository.
@@ -647,6 +683,52 @@ pub fn read_commit(cwd: &Path, rev: &str) -> Result<RawCommit> {
         .with_context(|| format!("cannot read commit {rev} in {}", cwd.display()))
 }
 
+/// Read commit objects in query order through one `cat-file --batch` process.
+/// Annotated tags are peeled to commits, as with `read_commit`.
+pub fn read_commits(cwd: &Path, revisions: &[&str]) -> Result<Vec<RawCommit>> {
+    if revisions.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut query = String::new();
+    for revision in revisions {
+        if revision.is_empty() || revision.contains(['\n', '\r', '\0']) {
+            bail!("invalid commit revision {revision:?}");
+        }
+        query.push_str(revision);
+        query.push_str("^{commit}\n");
+    }
+    let output = git_piped(cwd, &["cat-file", "--batch"], query.as_bytes())?;
+    let mut remaining = output.as_slice();
+    let mut commits = Vec::with_capacity(revisions.len());
+    for revision in revisions {
+        let commit = (|| -> Result<RawCommit> {
+            let newline = remaining
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .context("batch response has no header")?;
+            let header = std::str::from_utf8(&remaining[..newline])?;
+            let fields: Vec<_> = header.split_whitespace().collect();
+            if fields.len() != 3 || fields[1] != "commit" {
+                bail!("unexpected batch response: {header}");
+            }
+            let size: usize = fields[2].parse().context("invalid batch object size")?;
+            remaining = &remaining[newline + 1..];
+            if remaining.get(size) != Some(&b'\n') {
+                bail!("batch response has a truncated object or missing terminator");
+            }
+            let raw = &remaining[..size];
+            remaining = &remaining[size + 1..];
+            parse_commit_object(raw)
+        })()
+        .with_context(|| format!("cannot read commit {revision} in {}", cwd.display()))?;
+        commits.push(commit);
+    }
+    if !remaining.is_empty() {
+        bail!("batch response contains extra objects");
+    }
+    Ok(commits)
+}
+
 /// Split a commit object into its headers and its message.
 ///
 /// A header value may continue onto following lines, each indented by one
@@ -1108,12 +1190,15 @@ fn piped_output_with(
         .with_context(|| format!("{program} has no stdin"))?;
     let input = input.to_vec();
     let writer = thread::spawn(move || stdin.write_all(&input));
-    let out = child
-        .wait_with_output()
-        .with_context(|| format!("{program} failed"))?;
-    writer
+    let output = match COMMAND_DEADLINE.get() {
+        Some(deadline) => wait_for_output(child, deadline),
+        None => child.wait_with_output().map_err(anyhow::Error::from),
+    };
+    let written = writer
         .join()
-        .map_err(|_| anyhow::anyhow!("the {program} writer thread panicked"))??;
+        .map_err(|_| anyhow::anyhow!("the {program} writer thread panicked"));
+    let out = output.with_context(|| format!("{program} failed"))?;
+    written??;
     if !out.status.success() {
         bail!(
             "{program} {} failed: {}",
@@ -2271,6 +2356,65 @@ mod tests {
         root
     }
 
+    #[test]
+    fn batched_commits_match_individual_reads_across_a_merge() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = fixture(&tmp, &[]);
+        let base = git(&root, &["rev-parse", "HEAD"]).unwrap();
+        git(&root, &["checkout", "-b", "side"]).unwrap();
+        git(
+            &root,
+            &[
+                "commit",
+                "--allow-empty",
+                "-m",
+                "side\n\nmultiple lines\nbody",
+            ],
+        )
+        .unwrap();
+        git(&root, &["checkout", "master"]).unwrap();
+        git(&root, &["commit", "--allow-empty", "-m", "main"]).unwrap();
+        git(
+            &root,
+            &["merge", "--no-ff", "side", "-m", "merge\n\nmerge body"],
+        )
+        .unwrap();
+        let range = git(&root, &["rev-list", "--reverse", &format!("{base}..HEAD")]).unwrap();
+        let revisions: Vec<_> = range.lines().collect();
+        let batched = read_commits(&root, &revisions).unwrap();
+        assert_eq!(batched.len(), 3);
+        assert_eq!(batched.last().unwrap().parents.len(), 2);
+        for (revision, commit) in revisions.iter().zip(batched) {
+            let individual = read_commit(&root, revision).unwrap();
+            assert_eq!(commit.tree, individual.tree);
+            assert_eq!(commit.parents, individual.parents);
+            assert_eq!(commit.author, individual.author);
+            assert_eq!(commit.committer, individual.committer);
+            assert_eq!(commit.encoding, individual.encoding);
+            assert_eq!(commit.headers, individual.headers);
+            assert_eq!(commit.message, individual.message);
+        }
+        assert!(read_commits(&root, &[]).unwrap().is_empty());
+        assert!(read_commits(&root, &["absent"]).is_err());
+        assert!(read_commits(&root, &["HEAD^{tree}"]).is_err());
+        assert!(read_commits(&root, &["HEAD\nHEAD"]).is_err());
+        git(&root, &["tag", "-a", "fixture-tag", "-m", "fixture"]).unwrap();
+        let tagged = read_commits(&root, &["fixture-tag"]).unwrap();
+        assert_eq!(
+            tagged[0].message,
+            read_commit(&root, "fixture-tag").unwrap().message
+        );
+        with_deadline(Some(Instant::now() + Duration::from_secs(30)), || {
+            let repeated = read_commits(&root, &vec!["HEAD"; 20_000])?;
+            assert_eq!(repeated.len(), 20_000);
+            assert!(repeated
+                .iter()
+                .all(|commit| commit.message == tagged[0].message));
+            Ok(())
+        })
+        .unwrap();
+    }
+
     /// A Git command that wants a message must take the one it already has
     /// rather than reach for an editor, whatever the repository or the
     /// environment names as one. `git commit --amend` is the shortest command
@@ -2412,6 +2556,18 @@ mod tests {
         let signed = commit_object_text(&commit, Some(b"-----BEGIN PGP SIGNATURE-----\n\nabc\n"));
         assert!(String::from_utf8_lossy(&signed)
             .contains("gpgsig -----BEGIN PGP SIGNATURE-----\n \n abc\n\nthe message\n"));
+    }
+
+    #[test]
+    fn piped_probe_respects_the_git_deadline() {
+        let started = Instant::now();
+        with_deadline(Some(started + Duration::from_millis(50)), || {
+            let error = piped_output("sleep", &["5".to_string()], &[], |_| {}).unwrap_err();
+            assert!(format!("{error:#}").contains("timed out"));
+            Ok(())
+        })
+        .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

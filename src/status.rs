@@ -2304,17 +2304,20 @@ pub(crate) fn role_trailer_advisories(
             return unreadable(format!("could not inspect contribution trailers: {error}"))
         }
     };
-    let mut messages = Vec::new();
-    for commit in commits.lines() {
-        match gitio::read_commit(cwd, commit) {
-            Ok(read) => messages.push((commit.to_string(), read.message)),
-            Err(error) => {
-                return unreadable(format!(
-                    "could not inspect contribution trailers on {commit}: {error}"
-                ))
-            }
+    let revisions: Vec<_> = commits.lines().collect();
+    let read = match gitio::read_commits(cwd, &revisions) {
+        Ok(read) => read,
+        Err(error) => {
+            return unreadable(format!(
+                "could not inspect contribution trailers: {error:#}"
+            ))
         }
-    }
+    };
+    let messages: Vec<_> = revisions
+        .into_iter()
+        .zip(read)
+        .map(|(revision, commit)| (revision.to_string(), commit.message))
+        .collect();
     missing_role_trailers_advisory(state, &messages)
         .into_iter()
         .chain(placeholder_role_trailers_advisory(&messages))

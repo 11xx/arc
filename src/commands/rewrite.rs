@@ -96,8 +96,8 @@ pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
         args.from.is_some(),
     );
     walked.reason = format!("re-signed {} from {}", walked.branch, short(&walked.from));
-    for old in &range {
-        let mut commit = gitio::read_commit(&cwd, old)?;
+    let revisions: Vec<_> = range.iter().map(String::as_str).collect();
+    for (old, mut commit) in range.iter().zip(gitio::read_commits(&cwd, &revisions)?) {
         commit.parents = map_parents(&cwd, old, &commit.parents, &walked.mapping)?;
         walked.recreated(&cwd, old, &commit, sign)?;
     }
@@ -236,8 +236,8 @@ pub fn trailers(ctx: &Ctx, args: TrailerArgs) -> Result<i32> {
     let sign = (!args.no_sign).then_some(args.key.as_deref());
     let mut walked = Walked::over(&range, branch, from, head, "arc rewrite trailers", true);
     walked.reason = edit_reason(&args, edits.len(), &walked.branch, &walked.from);
-    for old in &range {
-        let mut commit = gitio::read_commit(&cwd, old)?;
+    let revisions: Vec<_> = range.iter().map(String::as_str).collect();
+    for (old, mut commit) in range.iter().zip(gitio::read_commits(&cwd, &revisions)?) {
         let named = edited.get(old).unwrap_or(&commit.message);
         let message = crate::trailers::edit(named, &args.drop, &args.append);
         let parents = map_parents(&cwd, old, &commit.parents, &walked.mapping)?;
@@ -283,11 +283,14 @@ fn apply_edits(
         by_commit.entry(&edit.commit).or_default().push(edit);
     }
     let mut edited = BTreeMap::new();
-    for (commit, named) in by_commit {
-        let message = gitio::read_commit(cwd, commit)?.message;
+    let revisions: Vec<_> = by_commit.keys().copied().collect();
+    for ((commit, named), read) in by_commit
+        .into_iter()
+        .zip(gitio::read_commits(cwd, &revisions)?)
+    {
         edited.insert(
             commit.to_string(),
-            crate::trailers::edit_lines(&message, &named)?,
+            crate::trailers::edit_lines(&read.message, &named)?,
         );
     }
     Ok(edited)
