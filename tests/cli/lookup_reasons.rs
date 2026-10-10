@@ -1,6 +1,6 @@
 use crate::common::*;
 use crate::model_resolution::{acting, assistant, prompt, recording};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::os::unix::fs::PermissionsExt;
 
 const CODEX_SESSION: &str = "019f0000-0000-7000-8000-000000000002";
@@ -370,4 +370,69 @@ fn unreadable_claude_subagent_enumeration_names_no_parent_model() {
         "{output}"
     );
     assert!(!output.contains("# model: m#high"), "{output}");
+}
+
+fn plugin_child(repo: &Repo) -> PathBuf {
+    let path = recording(
+        repo,
+        &[
+            prompt("u1", "2026-01-01T10:00:00Z"),
+            assistant("a1", "2026-01-01T10:00:01Z", "high"),
+        ],
+    );
+    let children = path.with_extension("").join("subagents");
+    fs::create_dir_all(&children).unwrap();
+    fs::write(
+        children.join("agent-child.meta.json"),
+        json!({"agentType":"fixture", "pluginSteered":true}).to_string(),
+    )
+    .unwrap();
+    children.join("agent-child.jsonl")
+}
+
+#[test]
+fn foreign_plugin_child_ending_names_no_parent_model() {
+    let repo = Repo::new();
+    let path = plugin_child(&repo);
+    let foreign = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    fs::write(
+        path,
+        format!(
+            "{}\n",
+            json!({"type":"assistant", "sessionId":foreign, "uuid":"child-a1",
+                "timestamp":"2026-01-01T10:00:02Z",
+                "message":{"role":"assistant", "model":"child-model",
+                    "content":"answer", "stop_reason":"end_turn"}})
+        ),
+    )
+    .unwrap();
+    let output = stdout(acting(&repo).arg("env"));
+    assert!(!output.contains("# model: m#high"), "{output}");
+    assert!(output.contains("subagent lineage"), "{output}");
+    assert!(
+        output.contains("different or invalid native parent ID"),
+        "{output}"
+    );
+    stdout(acting(&repo).args(["begin", "foreign-lineage"]));
+    let event = opened(&repo, "foreign-lineage");
+    assert_eq!(event["session_resolution"], "unresolved", "{event}");
+    assert!(event.get("model").is_none(), "{event}");
+    let reason = event["session_resolution_reason"].as_str().unwrap();
+    assert!(reason.contains("subagent lineage"), "{event}");
+    assert!(
+        reason.contains("different or invalid native parent ID"),
+        "{event}"
+    );
+}
+
+#[test]
+fn fifo_child_transcript_does_not_block_identity_resolution() {
+    let repo = Repo::new();
+    let path = plugin_child(&repo);
+    let fifo = Command::new("mkfifo").arg(&path).output().unwrap();
+    assert!(fifo.status.success(), "{fifo:?}");
+    let output = stdout(acting(&repo).arg("env").timeout(Duration::from_secs(5)));
+    assert!(!output.contains("# model: m#high"), "{output}");
+    assert!(output.contains("subagent lineage"), "{output}");
+    assert!(output.contains("regular file"), "{output}");
 }

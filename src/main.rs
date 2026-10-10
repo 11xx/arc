@@ -266,6 +266,10 @@ enum Cmd {
     /// The opening event records session-store resolution. An unreadable
     /// Claude subagent directory or child ending records an unresolved
     /// session with the read failure and names no resolved model.
+    /// Recordings and child metadata must be regular files; FIFOs are refused
+    /// without waiting for writers. A plugin child's ending must name the
+    /// parent's native session; a foreign or absent identity records an
+    /// unresolved session with the identity failure and no resolved model.
     ///
     /// New branches use [change] checkout (built-in: in-place), overridden by
     /// --worktree or --no-worktree. --adopt records the branch's existing
@@ -1858,7 +1862,14 @@ enum Cmd {
     /// reason, both ids included. A failed lookup is never reported as
     /// absence, nor as the absence of subagents. An unreadable Claude subagent
     /// directory or child ending leaves the model unresolved and reports the
-    /// read failure. Every event naming a harness and session carries the
+    /// read failure.
+    ///
+    /// Recordings and child metadata must be regular files; FIFOs are refused
+    /// without waiting for writers. A plugin child's ending must name the
+    /// parent's native session; a foreign or absent identity leaves lineage
+    /// unresolved and reports the identity failure.
+    ///
+    /// Every event naming a harness and session carries the
     /// store's verdict, with its reason unless corroborated, whether the
     /// session was detected or declared. Every established harness, session,
     /// and session link is exported; absent fields are explicitly unset.

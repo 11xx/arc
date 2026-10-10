@@ -131,6 +131,10 @@ SAY WHO YOU ARE (before the first write)
   never reported as absence, nor as the absence of subagents. An unreadable
   Claude subagent directory or child ending leaves the model unresolved and
   reports the read failure in `arc env` and events such as `arc begin`.
+  Recordings and child metadata must be regular files; a FIFO is refused
+  without waiting for a writer. A plugin child's ending must name the
+  parent's native session; a foreign or absent identity leaves lineage
+  unresolved and reports the identity failure.
   Every event naming a harness and session records the store's verdict,
   with its reason unless corroborated, whether detection supplied that
   identity or the caller declared it. An unreadable arc configuration leaves ambient detection off
