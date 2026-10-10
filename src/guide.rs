@@ -349,7 +349,9 @@ ORIENT INSIDE A PROJECT (start here, in this order)
   keeps unreadable prerequisites unresolved, so they cannot authorize
   integration. Operations that require the complete dependency graph refuse
   an incomplete read. A changelog file write requires every change to be
-  readable so a failed reduction cannot silently remove an entry.
+  readable so a failed reduction cannot silently remove an entry. `arc doctor`
+  reports each change whose events fail to reduce as `unreplayable-change`,
+  with the reduction error, and exits 1.
 
   Every command in the project orientation answers for the project you are
   standing in. Some

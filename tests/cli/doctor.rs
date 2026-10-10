@@ -951,3 +951,55 @@ fn catchup_build_warning_is_scoped_to_arc_checkouts() {
         assert!(report.get("warnings").is_none(), "{report}");
     }
 }
+
+/// A change whose events cannot be replayed is one no reader can load. Doctor
+/// is the command that reports damaged state, so it names the change with the
+/// reduction error and fails, while the changes around it stay inspected.
+#[test]
+fn doctor_reports_a_change_whose_events_cannot_be_replayed() {
+    let repo = Repo::new();
+    let good = begin_without_checkout(&repo, "doctor-replayable", &[]);
+    let bad = begin_without_checkout(&repo, "doctor-unreplayable", &[]);
+    let dir = event_dir(&repo, &bad);
+    let opened = fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find_map(|path| {
+            let value: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            (value["event_type"] == "change-opened").then_some(value)
+        })
+        .expect("a begun change records its opening");
+    // A second opening is well-formed on its own and names no missing field,
+    // so only the replay can tell it cannot stand.
+    let mut duplicate = opened;
+    duplicate["event_id"] = "7ZZZZZZZZZZZZZZZZZZZZZZZZZ".into();
+    fs::write(
+        dir.join("7ZZZZZZZZZZZZZZZZZZZZZZZZZ.json"),
+        json_file_bytes(&duplicate),
+    )
+    .unwrap();
+
+    let out = json_stdout_any_status(repo.arc(&repo.root).args(["doctor", "--json"]));
+    let findings = out["problems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|finding| finding["code"] == "unreplayable-change")
+        .collect::<Vec<_>>();
+    assert_eq!(findings.len(), 1, "{out}");
+    let detail = findings[0]["detail"].as_str().unwrap();
+    assert!(detail.contains(&bad), "{detail}");
+    assert!(
+        detail.contains("duplicate change-opened event 7ZZZZZZZZZZZZZZZZZZZZZZZZZ"),
+        "the reduction error is the finding's reason: {detail}"
+    );
+    assert!(!out.to_string().contains(&format!("{good}\"")), "{out}");
+
+    repo.arc(&repo.root)
+        .args(["doctor"])
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicates::str::contains("unreplayable-change"));
+}

@@ -2269,6 +2269,8 @@ enum Cmd {
     /// `retained-object-missing`; a commit the ledger cites as a patchset head
     /// or a verdict's revision that no ref reaches is the advice
     /// `unretained-commit`, with the `git update-ref` that holds it.
+    /// A change whose events fail to reduce is the problem `unreplayable-change`,
+    /// naming the change with the reduction error; no reader can load it.
     ///
     /// Exits 0 when the ledger is clean or carries only advice, and 1 when it
     /// reports a problem. A ledger that cannot be read at all also exits 1,

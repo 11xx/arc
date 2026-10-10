@@ -541,9 +541,18 @@ fn inspect_change(
     }
     // Deliberately the unresolved reduction. Doctor's job includes reporting
     // which recorded revisions no longer resolve, and a view that had already
-    // followed them forward would have nothing left to report.
-    let Ok(mut state) = state::reduce(&events) else {
-        return Ok(());
+    // followed them forward would have nothing left to report. A failure here
+    // is structural, never a dangling revision, and no reader can load the
+    // change.
+    let mut state = match state::reduce(&events) {
+        Ok(state) => state,
+        Err(error) => {
+            problems.push(Finding {
+                code: "unreplayable-change",
+                detail: format!("{}: {error:#}", change_dir.display()),
+            });
+            return Ok(());
+        }
     };
     if let Some(root) = change_dir.parent().and_then(Path::parent) {
         if let Some(scope) = inspection.scope(root)? {
