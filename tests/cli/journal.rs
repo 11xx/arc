@@ -9950,7 +9950,7 @@ fn journal_doctor_reports_an_amendment_naming_no_recorded_entry() {
 }
 
 #[test]
-fn journal_doctor_flags_same_stamp_corrections_of_one_field() {
+fn journal_doctor_accepts_same_stamp_corrections_in_append_order() {
     let repo = Repo::new();
     let file = discussion_fixture(&repo, "ambiguous-amendment");
     let position = add_discussion_position(&repo, &file, None, "test");
@@ -9974,10 +9974,9 @@ fn journal_doctor_flags_same_stamp_corrections_of_one_field() {
 
     let advice = doctor_findings(&repo, "advice");
     assert!(
-        advice
+        !advice
             .iter()
-            .any(|finding| finding.starts_with("ambiguous-correction")
-                && finding.contains("2 corrections of stance")),
+            .any(|finding| finding.starts_with("ambiguous-correction")),
         "{advice:?}"
     );
     let problems = doctor_findings(&repo, "problems");
@@ -16965,4 +16964,111 @@ fn the_guide_and_help_teach_reading_a_known_artifact_without_a_filesystem_search
         let flat = help.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(flat.contains(expected), "journal {verb} --help: {help}");
     }
+}
+
+#[test]
+fn separate_writers_replay_delayed_spool_events_in_append_order() {
+    let repo = Repo::new();
+    let spooled = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "log",
+        "writer-order",
+        "delayed writer",
+        "--spool",
+    ]));
+    let path = PathBuf::from(spooled.trim().strip_prefix("spooled: ").unwrap());
+    let mut spool: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    spool["event"]["ts"] = "2026-01-01T00:00:00Z".into();
+    fs::write(&path, serde_json::to_vec(&spool).unwrap()).unwrap();
+    repo.arc(&repo.root)
+        .env("ARC_SESSION", "writer-b")
+        .args(["journal", "log", "writer-order", "fresh writer"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .env("ARC_SESSION", "writer-c")
+        .args(["journal", "spool", "--promote"])
+        .assert()
+        .success();
+    let dir = journal_dir(&repo);
+    let append_order = journal_events(&dir);
+    assert_eq!(append_order[0]["message"], "fresh writer");
+    assert_eq!(append_order[1]["message"], "delayed writer");
+    let replay = stdout(repo.arc(&repo.root).args(["journal", "events"]));
+    let replay: Vec<serde_json::Value> = replay
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(replay, append_order);
+}
+
+#[test]
+fn journal_doctor_and_question_state_follow_append_order() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "clock-order", "# Clock order\n");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "opening",
+            "--option",
+            "yes",
+            "--option",
+            "no",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Proceed?\n")
+        .assert()
+        .success();
+    let question = question_id(&repo, &file);
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &question,
+            "--option",
+            "yes",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Proceed.\n")
+        .assert()
+        .success();
+    let dir = journal_dir(&repo);
+    let mut records = journal_events(&dir);
+    for record in &mut records {
+        if record["event"] == "question" {
+            record["ts"] = "2026-01-01T00:00:01Z".into();
+        } else if record["event"] == "answer" {
+            record["ts"] = "2026-01-01T00:00:00Z".into();
+        }
+    }
+    fs::write(
+        dir.join("events.jsonl"),
+        records
+            .into_iter()
+            .map(|record| record.to_string() + "\n")
+            .collect::<String>(),
+    )
+    .unwrap();
+    let problems = doctor_findings(&repo, "problems");
+    assert!(
+        !problems
+            .iter()
+            .any(|finding| finding.starts_with("invalid-question-state")),
+        "{problems:?}"
+    );
+    let questions = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "questions", "--json"]),
+    );
+    assert!(
+        questions["questions"].as_array().unwrap().is_empty(),
+        "{questions}"
+    );
 }

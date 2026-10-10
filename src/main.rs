@@ -2438,6 +2438,7 @@ enum Cmd {
         write: journal::KindWrite,
     },
     /// Cross-harness project and operator journals over plain Markdown.
+    /// Events replay in append order; timestamps record observation time.
     /// Project reads also resolve from their journal directory; project writes
     /// name the checkout they need. --global works from any directory.
     Journal {

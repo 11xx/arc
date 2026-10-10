@@ -2573,6 +2573,13 @@ RULES THAT CHANGE WHAT YOU DO
     the live directory, so archiving the first never frees its name for a
     second that would then collide with it. The suffix names no part of the
     artifact: its timestamp, topic and kind read exactly as written.
+  - Journal events replay in their events.jsonl append order, established by
+    the journal append lock. Equal or reversed observation timestamps keep
+    that order. Imported and spool-promoted events take their receiving
+    append positions and retain their recorded timestamps. Question state,
+    corrections, claims, and storage transitions use the same replay order;
+    journal doctor checks question state in that order too. Concurrent body
+    sections exchanged between replicas merge by timestamp and event ID.
   - A spool made inside a change's worktree is deleted with that worktree, so
     `snapshot` and `integrate` file it from the change's recorded worktree
     first and print what they promoted; one they cannot file is named and left

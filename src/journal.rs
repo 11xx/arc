@@ -549,6 +549,7 @@ pub enum JournalCmd {
     /// Exits 0 when the journal is clean or carries only advice, and 1 when it
     /// reports a problem. A journal that cannot be read at all also exits 1,
     /// with the error on stderr and no report; a usage error exits 2.
+    /// Question state and corrections follow event-log append order.
     /// Transition checks include complete successor publication evidence and
     /// source retirement, with both hot and archived bodies considered.
     /// Records no events; ledger reads do not require a parseable append policy.
@@ -562,8 +563,8 @@ pub enum JournalCmd {
     /// ownership keeps the checkout after promotion
     Spool {
         /// File each spooled write into the journal, oldest first, keeping
-        /// the identity it was spooled with and naming this caller as the
-        /// one that promoted it
+        /// the identity and timestamp it was spooled with and naming this caller
+        /// as its promoter. Events replay at their promotion append positions
         #[arg(long)]
         promote: bool,
     },
@@ -1044,15 +1045,15 @@ pub enum JournalCmd {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Dump the journal event log as newline-delimited JSON.
+    /// Dump understood journal events as newline-delimited JSON in append order.
     /// A trailing line without its newline refuses with a recovery diagnostic.
     /// Records no events; ledger reads do not require a parseable append policy.
     Events {
-        /// Cap the number of events (oldest first)
+        /// Cap the number of events (first appended first)
         #[arg(long)]
         limit: Option<usize>,
     },
-    /// Newest-first listing of artifacts plus the journal tail (read-only)
+    /// Newest-first artifacts plus the most recently appended journal tail (read-only)
     /// Incomplete successors carry availability `pending-transition` in
     /// arc-journal-catchup/9.
     /// Text warns when the running build revision differs from an arc checkout.
@@ -1329,6 +1330,7 @@ pub enum JournalCmd {
     /// with the event kind and schema; their dependent artifacts are held back
     /// too. Admitted artifacts retain their provenance. Receipts cover only
     /// admitted artifacts, so held-back artifacts are retried on every import.
+    /// Events replay at their receiving append positions.
     /// A completely admitted bundle changes nothing on a repeated import.
     /// Interrupted writes retain a prepared transaction; an import completes
     /// it before comparing revisions. Every journal write, including provenance
@@ -3989,15 +3991,9 @@ fn amend_target_exists(
 ///
 /// An amendment naming an entry its artifact never recorded resolves to
 /// nothing and is invisible in every derived view, which is exactly how a
-/// correction that never took would otherwise be discovered. Two corrections
-/// of one field of one entry sharing a timestamp leave which is in force
-/// decided by log order alone, which is a weaker claim than the record makes.
-fn inspect_amendments(
-    dir: &Path,
-    events: &[JournalEvent],
-    problems: &mut Vec<DoctorFinding>,
-    advice: &mut Vec<DoctorFinding>,
-) {
+/// correction that never took would otherwise be discovered. Corrections
+/// take effect in append order.
+fn inspect_amendments(dir: &Path, events: &[JournalEvent], problems: &mut Vec<DoctorFinding>) {
     let mut files: Vec<&str> = Vec::new();
     for event in events.iter().filter(|event| {
         event.known() && matches!(event.event.as_str(), "correction" | "retraction")
@@ -4029,37 +4025,6 @@ fn inspect_amendments(
                 });
             }
         }
-    }
-
-    let mut stamps: HashMap<(&str, &str, &str, &str), usize> = HashMap::new();
-    for event in events
-        .iter()
-        .filter(|event| event.known() && event.event == "correction")
-    {
-        let (Some(file), Some(target), Some(field)) = (
-            event.file.as_deref(),
-            event.target.as_deref(),
-            event.field.as_deref(),
-        ) else {
-            continue;
-        };
-        *stamps
-            .entry((file, target, field, event.ts.as_str()))
-            .or_insert(0) += 1;
-    }
-    let mut ambiguous: Vec<String> = stamps
-        .into_iter()
-        .filter(|(_, count)| *count > 1)
-        .map(|((file, target, field, ts), count)| {
-            format!("{file}: {count} corrections of {field} on {target} at {ts}")
-        })
-        .collect();
-    ambiguous.sort();
-    for detail in ambiguous {
-        advice.push(DoctorFinding {
-            code: "ambiguous-correction",
-            detail,
-        });
     }
 }
 
@@ -4094,7 +4059,6 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
                 }),
             }
         }
-        question_events.sort_by_key(|(_, event)| event.timestamp());
         let mut machine = QuestionMachine::default();
         for (line, event) in question_events {
             if !machine.accept(&event) {
@@ -4230,7 +4194,7 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
     }
     inspect_transition_integrity(&dir, &cold, &hot_files, &events, &mut problems)?;
     inspect_fork_marker_paths(&dir, &hot_files, &mut problems)?;
-    inspect_amendments(&dir, &events, &mut problems, &mut advice);
+    inspect_amendments(&dir, &events, &mut problems);
 
     // A journal is addressed by the slugged path of its project. When that
     // path stops existing the journal becomes unreachable from anywhere, and
@@ -9198,6 +9162,7 @@ fn parse_lane_marker(message: &str) -> Option<LaneMarker> {
     None
 }
 
+/// Replay understood events in the order the append lock published them.
 pub(crate) fn read_events(dir: &Path) -> Result<Vec<JournalEvent>> {
     let mut events = Vec::new();
     let jsonl = dir.join("events.jsonl");
@@ -9212,7 +9177,6 @@ pub(crate) fn read_events(dir: &Path) -> Result<Vec<JournalEvent>> {
             event.known().then_some(event)
         }));
     }
-    events.sort_by_key(JournalEvent::timestamp);
     let mut machine = QuestionMachine::default();
     Ok(events
         .into_iter()
@@ -16435,5 +16399,47 @@ mod exchange_refusal_tests {
         assert!(project.contains("ARC_JOURNAL_DIR="));
         assert!(project.contains(" arc journal log recovery "));
         assert!(!project.contains("--global"));
+    }
+}
+
+#[cfg(test)]
+mod append_order_tests {
+    use super::{read_events, write_event, JournalEvent, JOURNAL_SCHEMA};
+    use std::sync::mpsc;
+
+    #[test]
+    fn two_writers_replay_in_append_order_despite_reversed_observation_times() {
+        let root = tempfile::tempdir().unwrap();
+        let (appended, ready) = mpsc::channel();
+        let event = |message: &str, ts: &str| -> JournalEvent {
+            serde_json::from_value(serde_json::json!({
+                "schema": JOURNAL_SCHEMA, "topic": "ordering", "event": "log",
+                "ts": ts, "message": message
+            }))
+            .unwrap()
+        };
+        let delayed = event("prepared first, appended last", "2026-01-01T00:00:00Z");
+        let first = event("appended first", "2026-01-01T00:00:01Z");
+        std::thread::scope(|scope| {
+            let dir = root.path();
+            scope.spawn(move || {
+                ready.recv().unwrap();
+                write_event(dir, &delayed).unwrap();
+            });
+            scope.spawn(move || {
+                write_event(dir, &first).unwrap();
+                appended.send(()).unwrap();
+            });
+        });
+        let raw = std::fs::read_to_string(root.path().join("events.jsonl")).unwrap();
+        let appended: Vec<JournalEvent> = raw
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let replay = read_events(root.path()).unwrap();
+        assert_eq!(
+            serde_json::to_value(replay).unwrap(),
+            serde_json::to_value(appended).unwrap()
+        );
     }
 }
