@@ -59,6 +59,7 @@ pub use audit::{audit, declare_debt, AuditArgs};
 pub use bundle_io::{export_bundle, import_bundle};
 pub use chain::chain;
 pub use changelog::changelog;
+pub(crate) use changelog::repository_changelog_none;
 pub use claims::{claim, release_claim, stage, take};
 use clap::ValueEnum;
 pub use config_cmd::check_writable;

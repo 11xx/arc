@@ -1101,6 +1101,17 @@ RUN A CHANGE
   never as a blocker, and `arc integrate` prints that advice once it has
   merged such a change. Recording `--none --reason` that the change needs
   no entry answers the advice and projects nothing; the latest record wins.
+  A repository that keeps no changelog declares `none = "<reason>"` in
+  `.arc/changelog.toml`. The reason must be non-empty and not a placeholder;
+  `none` conflicts with every explicit `target`, `renderer`,
+  `renderer_command`, or `renderer_timeout` key. The declaration silences
+  `no-changelog-entry`, including integration advice. Like debt advisory
+  thresholds, it is read from the invoking checkout, not the change's target
+  branch. `arc check` prints the declaration and its reason; `--json` includes
+  the optional `changelog_none` reason in `arc-check/4`. `arc changelog`
+  refuses entry recording and `--write` under the declaration. Per-change
+  `--none --reason` remains valid and is unnecessary; reads remain available.
+  Without the file, the target is `CHANGELOG.md`.
   The built-in renderer replaces the `## [Unreleased]` block of the target
   `.arc/changelog.toml` names, `CHANGELOG.md` by default. Prose is refilled;
   fenced and indented code retain their lines and container-relative columns.

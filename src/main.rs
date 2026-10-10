@@ -764,6 +764,15 @@ enum Cmd {
     /// the change needs none, answers it. The latest record wins, and a
     /// --none record projects nothing.
     ///
+    /// A repository declares that it keeps no changelog with `none = "<reason>"`
+    /// in `.arc/changelog.toml`. The reason must be non-empty and not a
+    /// placeholder. `none` conflicts with explicit target, renderer,
+    /// renderer_command, and renderer_timeout keys. The invoking checkout's
+    /// declaration silences the advisory, including integration advice, and
+    /// refuses entry recording and --write. Per-change --none --reason remains
+    /// valid and is unnecessary; reads remain available. Without the file,
+    /// the target is CHANGELOG.md.
+    ///
     /// The projection is rendered by the renderer `.arc/changelog.toml`
     /// selects: the built-in `keep-a-changelog`, or `command`, whose
     /// `renderer_command` argv runs from the repository root without a shell,
@@ -1210,6 +1219,11 @@ enum Cmd {
     ///
     /// arc-check/4 reports recorded origins, admission provenance, content
     /// coverage, gating eligibility, and the selected authorizing verdict.
+    /// A `none = "<reason>"` declaration in the invoking checkout's
+    /// .arc/changelog.toml silences no-changelog-entry and prints its reason;
+    /// JSON includes the optional changelog_none reason. This declaration
+    /// uses the invoking checkout, like debt advisory thresholds, rather than
+    /// the change's target branch.
     /// Contribution-trailer advice never changes readiness or the exit code:
     /// a commit lacking an asserted line names arc rewrite trailers --from
     /// <rev> --append <line>, and a role line carrying a placeholder or a

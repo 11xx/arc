@@ -25,24 +25,14 @@ const DEFAULT_RENDERER_TIMEOUT: &str = "60s";
 /// carry them forward unchanged.
 const UNRECORDED_MARKER: &str = "<!-- unrecorded -->";
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct ChangelogConfig {
-    target: String,
-    renderer: String,
-    renderer_command: Vec<String>,
+    none: Option<String>,
+    target: Option<String>,
+    renderer: Option<String>,
+    renderer_command: Option<Vec<String>>,
     renderer_timeout: Option<String>,
-}
-
-impl Default for ChangelogConfig {
-    fn default() -> Self {
-        Self {
-            target: DEFAULT_CHANGELOG_TARGET.into(),
-            renderer: CHANGELOG_RENDERER.into(),
-            renderer_command: Vec::new(),
-            renderer_timeout: None,
-        }
-    }
 }
 
 /// A validated `.arc/changelog.toml`: the target, the renderer's name as the
@@ -142,10 +132,13 @@ pub fn changelog(
             return Ok(9);
         }
         let (category, body) = match entry {
-            Some((category, body_file)) => (
-                validate_category(&category)?,
-                super::read_body_file_verbatim(&body_file)?,
-            ),
+            Some((category, body_file)) => {
+                refuse_declared_none_write(&ctx.cwd)?;
+                (
+                    validate_category(&category)?,
+                    super::read_body_file_verbatim(&body_file)?,
+                )
+            }
             None => (String::new(), String::new()),
         };
         let store = ctx.store()?;
@@ -179,6 +172,9 @@ pub fn changelog(
         return Ok(0);
     }
 
+    if write {
+        refuse_declared_none_write(&ctx.cwd)?;
+    }
     let config = load_changelog_config(ctx)?;
 
     if let Some(reference) = reference {
@@ -925,18 +921,65 @@ fn provenance_line(entry: &ProjectedEntry<'_>) -> String {
     )
 }
 
-fn load_changelog_config(ctx: &Ctx) -> Result<Changelog> {
-    let root = gitio::toplevel(&ctx.cwd)?;
+fn read_changelog_config(cwd: &Path) -> Result<ChangelogConfig> {
+    let root = gitio::toplevel(cwd)?;
     let path = root.join(CHANGELOG_CONFIG);
-    let config = match fs::read_to_string(&path) {
+    let mut config = match fs::read_to_string(&path) {
         Ok(contents) => toml::from_str::<ChangelogConfig>(&contents)
             .with_context(|| format!("parse {}", path.display()))?,
         Err(error) if error.kind() == ErrorKind::NotFound => ChangelogConfig::default(),
         Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
-    let command = match config.renderer.as_str() {
+    if let Some(reason) = config.none.as_mut() {
+        let conflicts = [
+            ("target", config.target.is_some()),
+            ("renderer", config.renderer.is_some()),
+            ("renderer_command", config.renderer_command.is_some()),
+            ("renderer_timeout", config.renderer_timeout.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(key, present)| present.then_some(key))
+        .collect::<Vec<_>>();
+        if !conflicts.is_empty() {
+            bail!(
+                "{CHANGELOG_CONFIG}: none conflicts with {}",
+                conflicts.join(", ")
+            );
+        }
+        let trimmed = reason.trim();
+        if trimmed.is_empty()
+            || crate::coordinate::is_placeholder(trimmed)
+            || trimmed.eq_ignore_ascii_case("todo")
+        {
+            bail!("{CHANGELOG_CONFIG}: none must say why the repository keeps no changelog; an empty reason or placeholder is not a declaration");
+        }
+        *reason = trimmed.to_owned();
+    }
+    Ok(config)
+}
+
+/// The invoking checkout's declaration that the repository keeps no changelog.
+pub(crate) fn repository_changelog_none(cwd: &Path) -> Result<Option<String>> {
+    Ok(read_changelog_config(cwd)?.none)
+}
+
+fn refuse_declared_none_write(cwd: &Path) -> Result<()> {
+    if let Some(reason) = repository_changelog_none(cwd)? {
+        bail!("{CHANGELOG_CONFIG} declares none = {reason:?}; changelog writes are disabled");
+    }
+    Ok(())
+}
+
+fn load_changelog_config(ctx: &Ctx) -> Result<Changelog> {
+    let config = read_changelog_config(&ctx.cwd)?;
+    let target = config
+        .target
+        .unwrap_or_else(|| DEFAULT_CHANGELOG_TARGET.into());
+    let renderer = config.renderer.unwrap_or_else(|| CHANGELOG_RENDERER.into());
+    let renderer_command = config.renderer_command.unwrap_or_default();
+    let command = match renderer.as_str() {
         CHANGELOG_RENDERER => {
-            if !config.renderer_command.is_empty() {
+            if !renderer_command.is_empty() {
                 bail!("{CHANGELOG_CONFIG}: renderer_command applies only to renderer `{COMMAND_RENDERER}`");
             }
             if config.renderer_timeout.is_some() {
@@ -945,7 +988,7 @@ fn load_changelog_config(ctx: &Ctx) -> Result<Changelog> {
             None
         }
         COMMAND_RENDERER => {
-            if config.renderer_command.first().is_none_or(String::is_empty) {
+            if renderer_command.first().is_none_or(String::is_empty) {
                 bail!(
                     "{CHANGELOG_CONFIG}: renderer `{COMMAND_RENDERER}` requires a non-empty \
                      renderer_command, the argv of the program that renders the target"
@@ -958,7 +1001,7 @@ fn load_changelog_config(ctx: &Ctx) -> Result<Changelog> {
             let timeout = parse_duration(timeout)
                 .with_context(|| format!("{CHANGELOG_CONFIG}: renderer_timeout"))?;
             Some(CommandRenderer {
-                argv: config.renderer_command,
+                argv: renderer_command,
                 timeout: Duration::from_secs(timeout),
             })
         }
@@ -967,10 +1010,10 @@ fn load_changelog_config(ctx: &Ctx) -> Result<Changelog> {
              `{CHANGELOG_RENDERER}` or `{COMMAND_RENDERER}`"
         ),
     };
-    normalize_target(&config.target)?;
+    normalize_target(&target)?;
     Ok(Changelog {
-        target: config.target,
-        renderer: config.renderer,
+        target,
+        renderer,
         command,
     })
 }

@@ -47,6 +47,8 @@ struct CheckOutput<'a> {
     ready: bool,
     exit_code: i32,
     blockers: Vec<CheckBlocker>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    changelog_none: Option<&'a str>,
     /// What a lead should know and arc will not refuse for. Never affects
     /// `ready` or the exit code; a change may legitimately ship with one
     /// reviewer, an orchestrator's review is a valid review unless a
@@ -3505,7 +3507,7 @@ fn integrate_one(
             gitio::retained_prefix(&change_id),
         );
     }
-    if let Some(advisory) = crate::status::missing_changelog_advisory(&st) {
+    if let Some(advisory) = crate::status::missing_changelog_advisory(&st, Some(&ctx.cwd)) {
         eprintln!("advice: {}", advisory.detail);
     }
     crate::journal::auto_log(
@@ -4807,6 +4809,7 @@ fn check(
     json: bool,
     shape: Option<integration::Shape>,
 ) -> Result<i32> {
+    let changelog_none = super::repository_changelog_none(&ctx.cwd)?;
     let store = ctx.store()?;
     let (change_id, st) = ctx.load_state(&store, reference)?;
     let shape =
@@ -4868,6 +4871,7 @@ fn check(
                 })
                 .collect(),
             advisories: &report.advisories,
+            changelog_none: changelog_none.as_deref(),
         };
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(code);
@@ -4892,11 +4896,13 @@ fn check(
     if let Some(queue) = &review_queue {
         queue.render();
     }
+    render_changelog_none(changelog_none.as_deref());
     render::advisories(&report);
     Ok(code)
 }
 
 fn check_tagged(ctx: &Ctx, tags: Vec<String>, shape: Option<integration::Shape>) -> Result<i32> {
+    let changelog_none = super::repository_changelog_none(&ctx.cwd)?;
     let store = ctx.store()?;
     let states = store.readable_states()?;
     let selected = states
@@ -4906,6 +4912,7 @@ fn check_tagged(ctx: &Ctx, tags: Vec<String>, shape: Option<integration::Shape>)
     if selected.is_empty() {
         bail!("no changes match tags {}", tags.join(", "));
     }
+    render_changelog_none(changelog_none.as_deref());
     let mut aggregate = 0;
     for state in selected {
         if state.is_closed() {
@@ -4947,6 +4954,12 @@ fn check_tagged(ctx: &Ctx, tags: Vec<String>, shape: Option<integration::Shape>)
         render::advisories(&report);
     }
     Ok(aggregate)
+}
+
+fn render_changelog_none(reason: Option<&str>) {
+    if let Some(reason) = reason {
+        println!(".arc/changelog.toml: none = {reason:?}");
+    }
 }
 
 /// Drop a change's retention refs only for heads proven reachable from

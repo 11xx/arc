@@ -1332,7 +1332,7 @@ fn build_report(
         mut advisories,
     } = approval;
     if !state.is_closed() {
-        advisories.extend(missing_changelog_advisory(state));
+        advisories.extend(missing_changelog_advisory(state, cwd));
     }
     // Computed before the report takes ownership of the head it is compared
     // against. A waiver covers exactly the revision it names.
@@ -2217,16 +2217,21 @@ pub struct Advisory {
     pub detail: String,
 }
 
-/// Advice that the change has no changelog record: neither release copy nor
-/// the record that it needs none.
-///
-/// Advice, not policy: arc holds no opinion about which changes deserve a
-/// release line. A change that closes with nothing recorded is where the file
-/// and the ledger start disagreeing about what shipped, and recording that it
-/// needs no entry answers the advice without inventing copy.
-pub fn missing_changelog_advisory(state: &ChangeState) -> Option<Advisory> {
+/// Advise a changelog record unless the change has one or the invoking
+/// checkout declares that the repository keeps no changelog. An unreadable
+/// declaration retains the advice and warns; advice never blocks integration.
+pub fn missing_changelog_advisory(state: &ChangeState, cwd: Option<&Path>) -> Option<Advisory> {
     if state.changelog.is_some() {
         return None;
+    }
+    if let Some(cwd) = cwd {
+        match crate::commands::repository_changelog_none(cwd) {
+            Ok(Some(_)) => return None,
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("warning: could not read repository changelog declaration: {error:#}")
+            }
+        }
     }
     Some(Advisory {
         code: "no-changelog-entry",

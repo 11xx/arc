@@ -838,6 +838,190 @@ fn has_code(advisories: &[serde_json::Value], code: &str) -> bool {
     advisories.iter().any(|advisory| advisory["code"] == code)
 }
 
+fn repository_changelog_config(repo: &Repo, cwd: &Path, config: &str) {
+    fs::create_dir_all(cwd.join(".arc")).unwrap();
+    repo.commit(
+        cwd,
+        ".arc/changelog.toml",
+        config,
+        "chore: declare changelog policy",
+    );
+}
+
+#[test]
+fn repository_none_silences_advice_from_the_invoking_checkout() {
+    let repo = Repo::new();
+    begin(&repo, "repository-none");
+    let worktree = repo.home.join(".worktrees/repo-repository-none");
+    repository_changelog_config(
+        &repo,
+        &worktree,
+        "none = 'Release notes live in the issue tracker'\n",
+    );
+    assert!(!has_code(
+        &check_advisories(&repo, &worktree, "repository-none"),
+        "no-changelog-entry"
+    ));
+    assert!(has_code(
+        &check_advisories(&repo, &repo.root, "repository-none"),
+        "no-changelog-entry"
+    ));
+    repo.arc(&worktree)
+        .args(["status", "repository-none"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no changelog entry").not());
+}
+
+#[test]
+fn repository_none_is_visible_in_check_text_json_and_tagged_output() {
+    let repo = Repo::new();
+    repository_changelog_config(
+        &repo,
+        &repo.root,
+        "none = 'Release notes live in the issue tracker'\n",
+    );
+    begin(&repo, "visible-none");
+    let out = repo
+        .arc(&repo.root)
+        .args(["check", "visible-none", "--json"])
+        .output()
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["schema"], "arc-check/4");
+    assert_eq!(
+        value["changelog_none"],
+        "Release notes live in the issue tracker"
+    );
+    for args in [
+        vec!["check", "visible-none"],
+        vec!["check", "visible-none", "--explain"],
+    ] {
+        repo.arc(&repo.root)
+            .args(args)
+            .assert()
+            .stdout(predicate::str::contains(".arc/changelog.toml: none"))
+            .stdout(predicate::str::contains(
+                "Release notes live in the issue tracker",
+            ));
+    }
+    repo.arc(&repo.root)
+        .args(["metadata", "visible-none", "--tag", "release-notes"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["check", "--tag", "release-notes"])
+        .assert()
+        .stdout(predicate::str::contains(".arc/changelog.toml: none"))
+        .stdout(predicate::str::contains(
+            "Release notes live in the issue tracker",
+        ));
+}
+
+#[test]
+fn repository_none_silences_integration_advice() {
+    let repo = Repo::new();
+    repository_changelog_config(
+        &repo,
+        &repo.root,
+        "none = 'Release notes live in the issue tracker'\n",
+    );
+    begin(&repo, "integrated-none");
+    let advice = integrate(&repo, "integrated-none");
+    assert!(!advice.contains("advice: no changelog entry"), "{advice}");
+}
+
+#[test]
+fn repository_none_conflicts_with_each_explicit_renderer_key() {
+    for (key, value) in [
+        ("target", "'CHANGELOG.md'"),
+        ("renderer", "'keep-a-changelog'"),
+        ("renderer_command", "[]"),
+        ("renderer_timeout", "'60s'"),
+    ] {
+        let repo = Repo::new();
+        repository_changelog_config(
+            &repo,
+            &repo.root,
+            &format!("none = 'Release notes live elsewhere'\n{key} = {value}\n"),
+        );
+        repo.arc(&repo.root)
+            .args(["changelog"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(".arc/changelog.toml"))
+            .stderr(predicate::str::contains(format!(
+                "none conflicts with {key}"
+            )));
+    }
+}
+
+#[test]
+fn repository_none_requires_a_nonempty_nonplaceholder_reason() {
+    for reason in ["", "  ", "TODO", "unknown", "n/a", "?"] {
+        let repo = Repo::new();
+        repository_changelog_config(&repo, &repo.root, &format!("none = '{reason}'\n"));
+        repo.arc(&repo.root)
+            .args(["changelog"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(".arc/changelog.toml"))
+            .stderr(predicate::str::contains("none must say why"));
+    }
+}
+
+#[test]
+fn repository_none_refuses_writes_and_keeps_per_change_none_valid() {
+    let repo = Repo::new();
+    repository_changelog_config(
+        &repo,
+        &repo.root,
+        "none = 'Release notes live in the issue tracker'\n",
+    );
+    begin(&repo, "write-none");
+    let original = "## [Unreleased]\n\n";
+    fs::write(repo.root.join("CHANGELOG.md"), original).unwrap();
+    repo.arc(&repo.root)
+        .args(["changelog", "--write"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(".arc/changelog.toml"))
+        .stderr(predicate::str::contains("declares none"))
+        .stderr(predicate::str::contains(
+            "Release notes live in the issue tracker",
+        ));
+    assert_eq!(
+        fs::read_to_string(repo.root.join("CHANGELOG.md")).unwrap(),
+        original
+    );
+    repo.arc(&repo.root)
+        .args([
+            "changelog",
+            "write-none",
+            "--category",
+            "added",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Release copy")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(".arc/changelog.toml"))
+        .stderr(predicate::str::contains(
+            "Release notes live in the issue tracker",
+        ));
+    repo.arc(&repo.root)
+        .args([
+            "changelog",
+            "write-none",
+            "--none",
+            "--reason",
+            "Internal refactoring",
+        ])
+        .assert()
+        .success();
+}
+
 #[test]
 fn an_open_change_without_an_entry_is_advised_in_check_and_status() {
     let repo = Repo::new();
