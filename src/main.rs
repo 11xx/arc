@@ -1095,7 +1095,9 @@ enum Cmd {
         /// still working from one that answered.
         #[arg(long, value_enum, value_delimiter = ',', required = true)]
         until: Vec<commands::WatchUntil>,
-        /// Fail with exit 2 after this many seconds
+        /// Fail with exit 2 after this many seconds. Git probes and their pipe
+        /// cleanup share this deadline; unfinished pipe workers are detached
+        /// after terminating the probe process group
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         timeout: Option<u64>,
         /// Run `sh -c <cmd>` once when a condition is reached, with the

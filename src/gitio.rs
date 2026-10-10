@@ -3,6 +3,7 @@ use anyhow::{bail, Context, Result};
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
@@ -82,7 +83,10 @@ fn command_output(command: &mut Command) -> Result<Output> {
         return Ok(command.output()?);
     };
 
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
     wait_for_output(command.spawn()?, deadline)
 }
 
@@ -121,17 +125,41 @@ fn wait_for_output(mut child: std::process::Child, deadline: Instant) -> Result<
             }
         }
     };
-    let stdout = stdout
+    let output = (|| {
+        Ok(Output {
+            status: status?,
+            stdout: join_before_deadline(stdout, Some(deadline), "stdout reader")??,
+            stderr: join_before_deadline(stderr, Some(deadline), "stderr reader")??,
+        })
+    })();
+    if output.is_err() {
+        crate::process_group::kill_process_group(child.id())?;
+    }
+    output
+}
+
+/// Workers own their pipes and buffers; dropping an unfinished handle detaches
+/// it without borrowing caller state or extending the probe deadline.
+fn join_before_deadline<T>(
+    worker: thread::JoinHandle<T>,
+    deadline: Option<Instant>,
+    name: &str,
+) -> Result<T> {
+    if let Some(deadline) = deadline {
+        while !worker.is_finished() {
+            if Instant::now() >= deadline {
+                bail!("git probe timed out waiting for {name}");
+            }
+            thread::sleep(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(1)),
+            );
+        }
+    }
+    worker
         .join()
-        .map_err(|_| anyhow::anyhow!("stdout reader panicked"));
-    let stderr = stderr
-        .join()
-        .map_err(|_| anyhow::anyhow!("stderr reader panicked"));
-    Ok(Output {
-        status: status?,
-        stdout: stdout??,
-        stderr: stderr??,
-    })
+        .map_err(|_| anyhow::anyhow!("{name} panicked"))
 }
 
 /// The common Git directory shared by every worktree of one repository.
@@ -1181,23 +1209,29 @@ fn piped_output_with(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    let deadline = COMMAND_DEADLINE.get();
+    if deadline.is_some() {
+        command.process_group(0);
+    }
     let mut child = command
         .spawn()
         .with_context(|| format!("cannot run {program}"))?;
+    let child_id = child.id();
     let mut stdin = child
         .stdin
         .take()
         .with_context(|| format!("{program} has no stdin"))?;
     let input = input.to_vec();
     let writer = thread::spawn(move || stdin.write_all(&input));
-    let output = match COMMAND_DEADLINE.get() {
+    let output = match deadline {
         Some(deadline) => wait_for_output(child, deadline),
         None => child.wait_with_output().map_err(anyhow::Error::from),
     };
-    let written = writer
-        .join()
-        .map_err(|_| anyhow::anyhow!("the {program} writer thread panicked"));
     let out = output.with_context(|| format!("{program} failed"))?;
+    let written = join_before_deadline(writer, deadline, &format!("{program} writer"));
+    if written.is_err() && deadline.is_some() {
+        crate::process_group::kill_process_group(child_id)?;
+    }
     written??;
     if !out.status.success() {
         bail!(
@@ -2556,6 +2590,46 @@ mod tests {
         let signed = commit_object_text(&commit, Some(b"-----BEGIN PGP SIGNATURE-----\n\nabc\n"));
         assert!(String::from_utf8_lossy(&signed)
             .contains("gpgsig -----BEGIN PGP SIGNATURE-----\n \n abc\n\nthe message\n"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_probe_pipes_obey_the_deadline() {
+        for script in ["sleep 2 & wait", "sleep 2 & exit 0"] {
+            let started = Instant::now();
+            with_deadline(Some(started + Duration::from_millis(100)), || {
+                let mut command = Command::new("sh");
+                command.args(["-c", script]);
+                let result = command_output(&mut command);
+                assert!(started.elapsed() < Duration::from_secs(1));
+                assert!(format!("{:#}", result.unwrap_err()).contains("timed out"));
+                Ok(())
+            })
+            .unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_piped_probe_streams_obey_the_deadline() {
+        for script in [
+            "sleep 2 & wait",
+            "sleep 2 <&0 >/dev/null 2>/dev/null & exit 0",
+        ] {
+            let started = Instant::now();
+            with_deadline(Some(started + Duration::from_millis(100)), || {
+                let result = piped_output(
+                    "sh",
+                    &["-c".into(), script.into()],
+                    &vec![b'x'; 1024 * 1024],
+                    |_| {},
+                );
+                assert!(started.elapsed() < Duration::from_secs(1));
+                assert!(format!("{:#}", result.unwrap_err()).contains("timed out"));
+                Ok(())
+            })
+            .unwrap();
+        }
     }
 
     #[test]

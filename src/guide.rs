@@ -2470,6 +2470,9 @@ RULES THAT CHANGE WHAT YOU DO
     verdict, including a provisional approval and its recorded reason;
     `gates-green` checks every required gate at the current head; `blocked`
     and `brief-recorded` name the events that recorded those facts.
+    --timeout bounds Git probes and their pipe cleanup. At the deadline,
+    the probe process group is terminated and unfinished pipe workers are
+    detached.
   - Gate evidence binds to a tree, not to a commit. A change sitting behind
     its target merges to content neither branch committed, and evidence at the
     head says nothing about it: `check` refuses with `merged-tree-unevaluated`
