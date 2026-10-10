@@ -59,6 +59,10 @@ use std::path::{Path, PathBuf};
 /// work in progress, decisions, next steps, and what is safe to integrate.
 /// Git owns content and history; arc owns the journal, change ledger,
 /// review findings, verification evidence, and guarded integration.
+///
+/// `--version` prints the release on its first line and the compiled build as
+/// `build: <commit> (clean|dirty)`, or `build: unknown`, on a second; `-V`
+/// prints the release line alone.
 #[derive(Parser)]
 #[command(
     name = "arc",
@@ -3633,6 +3637,16 @@ fn command_path(matches: &clap::ArgMatches) -> String {
     names.join(" ")
 }
 
+/// The command tree. `--version` prints the release and, on a second line,
+/// the build; `-V` prints the release alone.
+fn cli_command() -> clap::Command {
+    Cli::command().long_version(format!(
+        "{}\nbuild: {}",
+        env!("CARGO_PKG_VERSION"),
+        context::build_revision().label()
+    ))
+}
+
 /// Identity flags such as `--actor` and `--harness` are global and read the
 /// environment, so every command records who is acting without being told. A
 /// command that also filters on one of those names gets a single argument for
@@ -3643,7 +3657,7 @@ fn command_path(matches: &clap::ArgMatches) -> String {
 /// Whether the command is read-only is answered here, from the complete
 /// subcommand path, so the table the guide prints is the one dispatch obeys.
 fn parse_cli() -> Result<(Cli, bool), clap::Error> {
-    let matches = Cli::command().try_get_matches()?;
+    let matches = cli_command().try_get_matches()?;
     let reads_only = commands::READ_ONLY_COMMANDS.contains(&command_path(&matches).as_str());
     let mut cli = Cli::from_arg_matches(&matches)?;
     if let Some(Cmd::Query { actor, harness, .. }) = cli.cmd.as_mut() {

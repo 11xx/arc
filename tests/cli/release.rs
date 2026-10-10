@@ -74,3 +74,34 @@ fn version_flag_reports_the_package_version() {
             env!("CARGO_PKG_VERSION")
         )));
 }
+
+/// `--version` names the build on a second line, so a build past a tag is
+/// told from the release itself; the first line stays the version alone for
+/// scripts, and `-V` is that first line only.
+#[test]
+fn version_flag_names_the_build_beside_the_release() {
+    let repo = Repo::new();
+    let long = stdout(repo.arc(&repo.root).arg("--version"));
+    let lines: Vec<&str> = long.lines().collect();
+    assert_eq!(lines.len(), 2, "{long}");
+    assert_eq!(
+        lines[0],
+        format!("arc {}", env!("CARGO_PKG_VERSION")),
+        "{long}"
+    );
+    let build = lines[1].strip_prefix("build: ").expect(&long);
+    assert!(
+        build == "unknown"
+            || build.ends_with(" (clean)")
+            || build.ends_with(" (dirty)")
+            || build.ends_with(" (unknown)"),
+        "{long}"
+    );
+
+    let short = stdout(repo.arc(&repo.root).arg("-V"));
+    assert_eq!(
+        short,
+        format!("arc {}\n", env!("CARGO_PKG_VERSION")),
+        "{short}"
+    );
+}

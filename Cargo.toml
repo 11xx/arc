@@ -19,7 +19,7 @@ path = "src/main.rs"
 agent-tapes-core = { git = "https://github.com/11xx/tapes", rev = "ec82af8b4efb2dd5e13896e249cc932c09a2da18", version = "2026.9.29" }
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
-clap = { version = "4", features = ["derive", "env"] }
+clap = { version = "4", features = ["derive", "env", "string"] }
 clap_complete = "4"
 clap_mangen = "0.2"
 hostname = "0.4"

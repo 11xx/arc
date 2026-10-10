@@ -28,7 +28,9 @@ SAY WHO YOU ARE (before the first write)
 
   `arc env` prints a build comment naming the compiled commit and whether
   tracked files differed at build time (clean or dirty). Builds outside Git
-  report unknown. `arc --version` is the release version.
+  report unknown. `arc --version` prints the release version alone on its
+  first line and `build: <commit> (clean|dirty)`, or `build: unknown`, on its
+  second; `-V` prints the release line alone.
 
   `arc env` leaves ARC_MODEL unset. Each write resolves the acting session's
   model. Declare one with `--model` or export ARC_MODEL; the declaration is
