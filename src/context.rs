@@ -362,7 +362,7 @@ fn resolved(harness: &str, session: &str) -> DetectedIdentity {
                 SessionVerdict::Corroborated,
                 None,
                 None,
-                Some(reason.line().to_string()),
+                Some(reason.line()),
             ),
             session_store::SessionIdentity::NoRecording(reason) => (
                 SessionVerdict::Uncorroborated(reason.clone()),

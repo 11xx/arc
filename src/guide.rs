@@ -100,7 +100,9 @@ SAY WHO YOU ARE (before the first write)
   answer while `PI_SESSION_ID` is the acting session, and a Claude subagent
   shares its parent's session id. An unfinished child recording leaves the
   invoking shell's owner ambiguous even if the parent's recording is newer,
-  so no model is named. Claude Code exposes no evidence that distinguishes a
+  so no model is named, and no other model stands in for it; the reason names
+  each unfinished child by the agent id and role its store records, three at
+  most and then a count. Claude Code exposes no evidence that distinguishes a
   subagent's tool shell from its parent's. Completed children permit the
   parent's recorded model. For a corroborated Claude recording without a
   model selection, `arc env` and write-time model resolution re-read every

@@ -81,18 +81,24 @@ enum LookupIssue {
 /// characters become spaces and whitespace runs collapse. Text past
 /// `REASON_LIMIT` characters loses its middle to an elision marker, because
 /// an error chain names what was asked first and the root cause last.
-fn bounded_reason(text: &str) -> String {
+pub(crate) fn bounded_reason(text: &str) -> String {
+    bounded_line(text, REASON_LIMIT)
+}
+
+/// `text` as one line of at most `limit` characters, with the elision
+/// `bounded_reason` describes.
+fn bounded_line(text: &str, limit: usize) -> String {
     let line = text
         .split(char::is_control)
         .flat_map(str::split_whitespace)
         .collect::<Vec<_>>()
         .join(" ");
     let length = line.chars().count();
-    if length <= REASON_LIMIT {
+    if length <= limit {
         return line;
     }
-    let head = (REASON_LIMIT - 1) / 2;
-    let tail = REASON_LIMIT - 1 - head;
+    let head = (limit - 1) / 2;
+    let tail = limit - 1 - head;
     let mut kept: String = line.chars().take(head).collect();
     kept.push('…');
     kept.extend(line.chars().skip(length - tail));
@@ -395,23 +401,83 @@ pub enum ModelUnavailable {
     NotRecorded,
     /// No model-bearing record appeared during the bounded Claude flush wait.
     NotRecordedAfterWait,
-    /// The store holds a subagent recording the session has not recorded as
-    /// finished. A subagent's tool shell carries its parent's session id, and
-    /// the store does not say which subagent a shell belongs to, so the
-    /// parent's model need not be the acting one.
-    SubagentActivity,
+    /// The store holds subagent recordings the session has not recorded as
+    /// finished, named as the store names them. A subagent's tool shell
+    /// carries its parent's session id, and the store does not say which
+    /// subagent a shell belongs to, so the parent's model need not be the
+    /// acting one.
+    SubagentActivity(Vec<UnfinishedChild>),
     OutsideRead,
+}
+
+/// The most unfinished subagents a reason names before it counts the rest.
+const CHILDREN_NAMED: usize = 3;
+/// The most characters of one child's id or role a reason keeps.
+const CHILD_FIELD_LIMIT: usize = 64;
+
+/// A subagent the store holds that the session has not recorded as finished.
+/// Both fields come from the recording, so they are cleaned to one short line
+/// before anything prints them.
+pub struct UnfinishedChild {
+    reference: String,
+    role: Option<String>,
+}
+
+impl UnfinishedChild {
+    fn new(reference: &str, role: Option<&str>) -> Self {
+        Self {
+            reference: bounded_line(reference, CHILD_FIELD_LIMIT),
+            role: role
+                .map(|role| bounded_line(role, CHILD_FIELD_LIMIT))
+                .filter(|role| !role.is_empty()),
+        }
+    }
+
+    /// `agent <id>` with `, role <role>` when the store names one.
+    fn label(&self) -> String {
+        let reference = if self.reference.is_empty() {
+            "(unnamed)"
+        } else {
+            &self.reference
+        };
+        match &self.role {
+            Some(role) => format!("agent {reference}, role {role}"),
+            None => format!("agent {reference}"),
+        }
+    }
 }
 
 impl ModelUnavailable {
     /// What an operator reads: why no model is named.
-    pub fn line(self) -> &'static str {
+    pub fn line(&self) -> String {
         match self {
-            ModelUnavailable::OutsideRead => "recording head not read; an earlier model selection may be outside the read",
-            ModelUnavailable::NotRecorded => "the recording names no model for this session",
-            ModelUnavailable::NotRecordedAfterWait => "the recording names no model for this session after waiting up to 1 second for a model-bearing record",
-            ModelUnavailable::SubagentActivity => {
-                "an unfinished subagent shares this session id; the store does not identify whether this shell belongs to the session or its subagent"
+            ModelUnavailable::OutsideRead => "recording head not read; an earlier model selection may be outside the read".to_string(),
+            ModelUnavailable::NotRecorded => "the recording names no model for this session".to_string(),
+            ModelUnavailable::NotRecordedAfterWait => "the recording names no model for this session after waiting up to 1 second for a model-bearing record".to_string(),
+            ModelUnavailable::SubagentActivity(children) => {
+                let mut named = children
+                    .iter()
+                    .take(CHILDREN_NAMED)
+                    .map(UnfinishedChild::label)
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                let more = children.len().saturating_sub(CHILDREN_NAMED);
+                if more > 0 {
+                    named.push_str(&format!("; and {more} more"));
+                }
+                let (subject, owner) = match children.len() {
+                    1 => (
+                        "an unfinished subagent shares".to_string(),
+                        "its subagent",
+                    ),
+                    count => (
+                        format!("{count} unfinished subagents share"),
+                        "one of its subagents",
+                    ),
+                };
+                format!(
+                    "{subject} this session id ({named}); the store does not identify whether this shell belongs to the session or {owner}"
+                )
             }
         }
     }
@@ -485,9 +551,11 @@ fn recording_identity(
         }
     };
     if harness == "claude" {
-        match subagent_may_be_acting(backend, session) {
-            Ok(false) => {}
-            Ok(true) => return SessionIdentity::Unnamed(ModelUnavailable::SubagentActivity),
+        match unfinished_subagents(backend, session) {
+            Ok(children) if children.is_empty() => {}
+            Ok(children) => {
+                return SessionIdentity::Unnamed(ModelUnavailable::SubagentActivity(children))
+            }
             // An unread lineage cannot rule out the subagent whose shell
             // this may be, so it names no model rather than the parent's.
             Err(error) => {
@@ -552,18 +620,20 @@ fn model_name(model: &agent_tapes_core::model::Model) -> String {
     }
 }
 
-/// Whether the store holds a subagent recording the session has not recorded
-/// as finished. Such a child may be the process whose shell is asking, and
+/// The subagent recordings the store holds that the session has not recorded
+/// as finished. Any of them may be the process whose shell is asking, and
 /// reading its parent's model would answer for the wrong agent.
-fn subagent_may_be_acting(
+fn unfinished_subagents(
     backend: &dyn Backend,
     session: &agent_tapes_core::model::Session,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<Vec<UnfinishedChild>> {
     Ok(backend
         .lineage(session)?
         .children
         .iter()
-        .any(|child| child.resolved && child.completed_at.is_none()))
+        .filter(|child| child.resolved && child.completed_at.is_none())
+        .map(|child| UnfinishedChild::new(&child.reference, child.role.as_deref()))
+        .collect())
 }
 
 /// The operator's view of a transcript: what they asked, plus where the
@@ -657,9 +727,82 @@ mod tests {
         let identity = session_identity_with_backends("claude", SESSION, &backends);
         assert!(matches!(
             identity,
-            SessionIdentity::Unnamed(ModelUnavailable::SubagentActivity)
+            SessionIdentity::Unnamed(ModelUnavailable::SubagentActivity(_))
         ));
         assert!(start.elapsed() < Duration::from_millis(500));
+    }
+
+    fn unfinished(reference: &str, role: Option<&str>) -> UnfinishedChild {
+        UnfinishedChild::new(reference, role)
+    }
+
+    #[test]
+    fn a_withheld_model_names_the_one_unfinished_child() {
+        assert_eq!(
+            ModelUnavailable::SubagentActivity(vec![unfinished("a01", Some("Explore"))]).line(),
+            "an unfinished subagent shares this session id (agent a01, role Explore); the store does not identify whether this shell belongs to the session or its subagent"
+        );
+        assert_eq!(
+            ModelUnavailable::SubagentActivity(vec![unfinished("a01", None)]).line(),
+            "an unfinished subagent shares this session id (agent a01); the store does not identify whether this shell belongs to the session or its subagent"
+        );
+    }
+
+    #[test]
+    fn a_withheld_model_names_several_children_and_counts_the_rest() {
+        let children = ["a01", "a02", "a03", "a04", "a05"]
+            .map(|reference| unfinished(reference, Some("Plan")))
+            .into_iter()
+            .collect();
+        assert_eq!(
+            ModelUnavailable::SubagentActivity(children).line(),
+            "5 unfinished subagents share this session id (agent a01, role Plan; agent a02, role Plan; agent a03, role Plan; and 2 more); the store does not identify whether this shell belongs to the session or one of its subagents"
+        );
+    }
+
+    #[test]
+    fn a_child_named_by_the_recording_cannot_break_out_of_its_line() {
+        let child = unfinished(
+            &format!("a01\nunset HOME{}", "x".repeat(CHILD_FIELD_LIMIT)),
+            Some("Role\r\necho pwned"),
+        );
+        let line = ModelUnavailable::SubagentActivity(vec![child]).line();
+        assert!(!line.contains(['\n', '\r']), "{line}");
+        assert!(line.contains("role Role echo pwned"), "{line}");
+        assert!(line.contains("agent a01 unset HOME"), "{line}");
+        assert!(line.contains('…'), "{line}");
+        assert!(
+            ModelUnavailable::SubagentActivity(vec![unfinished("", Some("  "))])
+                .line()
+                .contains("(agent (unnamed))")
+        );
+    }
+
+    #[test]
+    fn an_unfinished_child_is_named_from_the_lineage() {
+        let (_root, path, backends) = claude_fixture();
+        let children = path.with_extension("").join("subagents");
+        fs::create_dir_all(&children).unwrap();
+        let assistant = json!({"type":"assistant", "sessionId":SESSION, "uuid":"child-a1",
+            "timestamp":"2026-01-01T10:00:01Z", "message":{"role":"assistant", "model":"child-model", "content":"answer"}});
+        fs::write(children.join("agent-ab12.jsonl"), format!("{assistant}\n")).unwrap();
+        fs::write(
+            children.join("agent-ab12.meta.json"),
+            json!({"agentType":"Explore", "toolUseId":"tool-1"}).to_string(),
+        )
+        .unwrap();
+        let SessionIdentity::Unnamed(reason) =
+            session_identity_with_backends("claude", SESSION, &backends)
+        else {
+            panic!("an unfinished child withholds the model");
+        };
+        assert!(
+            reason.line().starts_with(
+                "an unfinished subagent shares this session id (agent ab12, role Explore);"
+            ),
+            "{}",
+            reason.line()
+        );
     }
 
     #[test]

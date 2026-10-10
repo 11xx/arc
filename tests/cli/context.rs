@@ -1340,8 +1340,8 @@ fn env_withholds_the_model_while_a_subagent_recording_is_live() {
                 "export ARC_HARNESS='claude' ARC_SESSION='{session}'\n",
                 "unset ARC_MODEL\n",
                 "# export ARC_MODEL=<model[#effort]>  # unavailable: an unfinished subagent ",
-                "shares this session id; the store does not identify whether this shell ",
-                "belongs to the session or its subagent\n",
+                "shares this session id (agent a0000000000000001); the store does not ",
+                "identify whether this shell belongs to the session or its subagent\n",
                 "{}"
             ),
             corroborated("claude"),
@@ -1364,6 +1364,43 @@ fn env_withholds_the_model_while_a_subagent_recording_is_live() {
             "export ARC_HARNESS='claude' ARC_SESSION='{session}'\nunset ARC_MODEL\n# model: claude-parent\n{}",
             corroborated("claude")
         )));
+}
+
+/// The unfinished child the store saw is named by its id and the role its
+/// recording carries, and no other model stands in for the withheld one.
+#[test]
+fn env_names_the_unfinished_subagent_and_its_role() {
+    let repo = Repo::new();
+    let session = "4074d881-1111-2222-3333-444444444444";
+    claude_with_subagent(&repo, session, "a0000000000000001", false);
+    fs::write(
+        repo.home
+            .join(".claude/projects/-test-repo")
+            .join(session)
+            .join("subagents/agent-a0000000000000001.meta.json"),
+        "{\"agentType\":\"Explore\",\"toolUseId\":\"tool-agent-1\"}\n",
+    )
+    .unwrap();
+
+    let output = stdout(
+        repo.arc(&repo.root)
+            .arg("env")
+            .env("CLAUDE_CODE_SESSION_ID", session)
+            .env_remove("CLAUDE_SESSION_ID")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("OPENCODE_SESSION")
+            .env_remove("PI_SESSION_ID"),
+    );
+    assert!(
+        output.contains(concat!(
+            "# export ARC_MODEL=<model[#effort]>  # unavailable: an unfinished subagent ",
+            "shares this session id (agent a0000000000000001, role Explore); "
+        )),
+        "{output}"
+    );
+    assert!(!output.contains("# model:"), "{output}");
+    assert!(!output.contains("claude-parent"), "{output}");
+    assert!(!output.contains("claude-subagent"), "{output}");
 }
 
 #[test]
