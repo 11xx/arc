@@ -1664,9 +1664,10 @@ FORGE
 
   coverage has overall and collections entries. Each has state (complete,
   truncated or failed), scope, optional frontier and failure_reason (required
-  on failure). Complete describes a finite read. A partial frontier cannot
-  establish absence, zero checks or a passed rollup. A passed rollup requires
-  positive count and complete checks coverage. Item facts are comment,
+  on failure). Complete describes a finite read. Absence and zero checks
+  require complete coverage of their collection. A passed rollup requires
+  positive count and complete checks coverage. Other collections may be
+  truncated or failed independently. Item facts are comment,
   pull-request (state and merge_sha), checks (state and count), or absence
   (collection). Raw bodies belong to referenced content, not typed facts.
 

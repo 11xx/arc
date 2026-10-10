@@ -360,12 +360,10 @@ impl ForgeObservation {
         Ok(())
     }
     pub fn complete(&self, collection: &str) -> bool {
-        self.coverage.overall.state == CoverageState::Complete
-            && self
-                .coverage
-                .collections
-                .get(collection)
-                .is_some_and(|c| c.state == CoverageState::Complete)
+        self.coverage
+            .collections
+            .get(collection)
+            .is_some_and(|c| c.state == CoverageState::Complete)
     }
 }
 

@@ -142,6 +142,8 @@ fn forge_partial_frontier_cannot_claim_absence_or_passed_zero_checks() {
     let (repo, id) = setup();
     let mut v = document("r1", "g1", "a", None);
     v["coverage"]["overall"]["state"] = json!("truncated");
+    v["coverage"]["collections"]["comments"]["state"] = json!("truncated");
+    v["coverage"]["collections"]["checks"]["state"] = json!("truncated");
     observe(&repo, &id, &v);
     let mut failed = document("failed", "g1", "a", None);
     failed["coverage"]["overall"]["state"] = json!("failed");
@@ -155,6 +157,8 @@ fn forge_partial_frontier_cannot_claim_absence_or_passed_zero_checks() {
     );
     v = document("r2", "g2", "checks", None);
     v["coverage"]["overall"]["state"] = json!("truncated");
+    v["coverage"]["collections"]["comments"]["state"] = json!("truncated");
+    v["coverage"]["collections"]["checks"]["state"] = json!("truncated");
     facts(
         &mut v,
         "checks",
@@ -350,4 +354,31 @@ fn forge_observations_round_trip_unchanged_and_do_not_change_readiness() {
     let retry = observe(&destination, &id, &document("r1", "g1", "first", None));
     assert_eq!(retry["event_ids"], receipt["event_ids"]);
     assert_eq!(retry["outcome"], "already-recorded");
+}
+
+#[test]
+fn forge_complete_collection_survives_an_incomplete_read() {
+    let (repo, id) = setup();
+    let mut v = document("partial", "checks-g1", "checks", None);
+    facts(
+        &mut v,
+        "checks",
+        json!({"kind":"checks", "state":"passed", "count":1}),
+    );
+    v["coverage"]["overall"]["state"] = json!("truncated");
+    v["coverage"]["collections"]["comments"]["state"] = json!("truncated");
+    observe(&repo, &id, &v);
+    v["read_id"] = json!("failed-comments");
+    v["coverage"]["overall"]["state"] = json!("failed");
+    v["coverage"]["overall"]["failure_reason"] = json!("comments unavailable");
+    v["coverage"]["collections"]["comments"]["state"] = json!("failed");
+    v["coverage"]["collections"]["comments"]["failure_reason"] = json!("timeout");
+    observe(&repo, &id, &v);
+    assert_eq!(
+        state(&repo, &id)["forge"]["observations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
 }
