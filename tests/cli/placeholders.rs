@@ -750,6 +750,259 @@ fn identity_corrections_refuse_values_that_are_not_fresh() {
 }
 
 #[test]
+fn reattribution_models_are_checked_against_the_effective_record_session() {
+    let repo = Repo::new();
+    let (_, file) = journal_artifact(&repo, "record-session", "todo", "# Record\n");
+    let before = journal_events(&repo);
+    for replacement in [None, Some("replacement-session")] {
+        for dry_run in [false, true] {
+            let model = replacement.unwrap_or("session-a");
+            let mut command = repo.arc(&repo.root);
+            command.env("ARC_SESSION", "repair-session").args([
+                "journal",
+                "reattribute",
+                &file,
+                "--set-model",
+                model,
+            ]);
+            if let Some(session) = replacement {
+                command.args(["--set-session", session]);
+            }
+            if dry_run {
+                command.arg("--dry-run");
+            }
+            let stderr = refused(&mut command);
+            assert!(stderr.contains("session id is not a model"), "{stderr}");
+            assert_eq!(journal_events(&repo), before);
+        }
+    }
+    repo.arc(&repo.root)
+        .env("ARC_SESSION", "repair-session")
+        .args([
+            "journal",
+            "reattribute",
+            &file,
+            "--set-model",
+            "fixture-model",
+            "--set-session",
+            "replacement-session",
+        ])
+        .assert()
+        .success();
+    let before = journal_events(&repo);
+    let stderr = refused(
+        repo.arc(&repo.root)
+            .env("ARC_SESSION", "repair-session")
+            .args([
+                "journal",
+                "reattribute",
+                &file,
+                "--set-session",
+                "fixture-model",
+            ]),
+    );
+    assert!(stderr.contains("session id is not a model"), "{stderr}");
+    assert_eq!(journal_events(&repo), before);
+}
+
+#[test]
+fn reattribution_keeps_an_untouched_historical_session_id_model() {
+    let repo = Repo::new();
+    let (dir, file) = journal_artifact(&repo, "historical-model", "todo", "# Historical\n");
+    let mut events = journal_event_log(&dir);
+    let event = events
+        .iter_mut()
+        .find(|event| event["event"] == "note" && event["file"] == file)
+        .unwrap();
+    event["model"] = serde_json::json!(UUID);
+    fs::write(
+        dir.join("events.jsonl"),
+        events
+            .iter()
+            .map(|event| format!("{event}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "reattribute",
+            &file,
+            "--set-session",
+            "replacement-session",
+        ])
+        .assert()
+        .success();
+    let events = journal_event_log(&dir);
+    let event = events
+        .iter()
+        .find(|event| event["event"] == "note" && event["file"] == file)
+        .unwrap();
+    assert_eq!(event["session"], "replacement-session");
+    assert_eq!(event["model"], UUID);
+}
+
+#[test]
+fn model_corrections_use_each_target_records_session() {
+    let repo = Repo::new();
+    let (dir, file) = journal_artifact(&repo, "target-sessions", "discussion", "# Discussion\n");
+    repo.arc(&repo.root)
+        .env("ARC_SESSION", "position-session")
+        .args([
+            "journal",
+            "position",
+            &file,
+            "--stance",
+            "for",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("An argument.\n")
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .env("ARC_SESSION", "question-session")
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "closing",
+            "--option",
+            "yes",
+            "--option",
+            "no",
+            "--settle-by",
+            "anyone",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Choose an option.\n")
+        .assert()
+        .success();
+    let events = journal_event_log(&dir);
+    let position = events
+        .iter()
+        .find(|event| event["event"] == "position")
+        .unwrap()["position_id"]
+        .as_str()
+        .unwrap();
+    let question = events
+        .iter()
+        .find(|event| event["event"] == "question")
+        .unwrap()["question_id"]
+        .as_str()
+        .unwrap();
+    repo.arc(&repo.root)
+        .env("ARC_SESSION", "answer-session")
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            question,
+            "--option",
+            "yes",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Choose yes.\n")
+        .assert()
+        .success();
+    let answer = format!("answer:{question}");
+    let before = journal_events(&repo);
+    let body_before = fs::read(dir.join(&file)).unwrap();
+    for (target, session) in [
+        (position, "position-session"),
+        (question, "question-session"),
+        (answer.as_str(), "answer-session"),
+    ] {
+        let stderr = refused(
+            repo.arc(&repo.root)
+                .env("ARC_SESSION", "repair-session")
+                .args([
+                    "journal",
+                    "correct",
+                    &file,
+                    "--target",
+                    target,
+                    "--field",
+                    "model",
+                    "--value",
+                    &format!("{session}#high"),
+                ]),
+        );
+        assert!(stderr.contains("session id is not a model"), "{stderr}");
+    }
+    assert_eq!(journal_events(&repo), before);
+    assert_eq!(fs::read(dir.join(&file)).unwrap(), body_before);
+    for target in [position, question, answer.as_str()] {
+        repo.arc(&repo.root)
+            .env("ARC_SESSION", "repair-session")
+            .args([
+                "journal",
+                "correct",
+                &file,
+                "--target",
+                target,
+                "--field",
+                "model",
+                "--value",
+                "fixture-model#high",
+            ])
+            .assert()
+            .success();
+    }
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "retract",
+            &file,
+            "--target",
+            &answer,
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Reconsider the answer.\n")
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .env("ARC_SESSION", "later-answer-session")
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            question,
+            "--option",
+            "no",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Choose no.\n")
+        .assert()
+        .success();
+    let before = journal_events(&repo);
+    let stderr = refused(
+        repo.arc(&repo.root)
+            .env("ARC_SESSION", "repair-session")
+            .args([
+                "journal",
+                "correct",
+                &file,
+                "--target",
+                &answer,
+                "--field",
+                "model",
+                "--value",
+                "later-answer-session",
+            ]),
+    );
+    assert!(stderr.contains("session id is not a model"), "{stderr}");
+    assert_eq!(journal_events(&repo), before);
+}
+
+#[test]
 fn a_plan_successor_refuses_an_inherited_placeholder_planner() {
     let repo = Repo::new();
     let (dir, file) = journal_artifact(&repo, "inherited", "todo", "# Inherited\n\nBody\n");

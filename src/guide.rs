@@ -433,6 +433,9 @@ SETTLE A QUESTION (before it is work)
                          one second the successor relation and recording order
                          decide, never the filename suffix.
   arc journal correct <file> --target <t> --field <f> --value <v> [--note]
+                         Model corrections are checked against the target's
+                         recorded session and the invoking session. An answer
+                         target names its latest settlement.
   arc journal retract <file> --target <t> --body-file -
   arc journal reattribute <file> --set-actor <a> --set-harness <h>
     --set-session <s> --set-model <m> [--dry-run]
@@ -443,6 +446,9 @@ SETTLE A QUESTION (before it is work)
                          the repaired log is published. Model replacements are
                          flag declarations compared with the retained observation;
                          changing harness or session clears that observation.
+                         The effective model must not equal the effective
+                         recorded session, including a supplied --set-session.
+                         Unnamed model fields otherwise keep their historical values.
   arc journal consume <file> --outcome done --decision <decision>
   arc journal transition <file> --to discussion [--dry-run]
     Change a live artifact's kind as one guarded operation: a typed successor

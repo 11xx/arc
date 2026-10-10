@@ -962,7 +962,9 @@ pub enum JournalCmd {
         /// `actor`, and `model` on an answer; `actor` and `model` on a
         /// question. A corrected actor, model or planner is held to what a
         /// write records: a placeholder or a session id model refuses. A
-        /// planner correction that fails the same checks when read reads as
+        /// model is checked against the target entry's session and the invoking
+        /// session; an answer target uses its latest settlement.
+        /// A planner correction that fails the same checks when read reads as
         /// `planner_status: malformed` in `show --json`
         #[arg(long, value_parser = CORRECTABLE_FIELDS)]
         field: String,
@@ -1024,10 +1026,14 @@ pub enum JournalCmd {
         /// Replacement harness; absent leaves the recorded harness alone
         #[arg(long = "set-harness", value_name = "HARNESS")]
         set_harness: Option<String>,
-        /// Replacement session; absent leaves the recorded session alone
+        /// Replacement session; absent leaves the recorded session alone.
+        /// The effective model must not equal this session. Unnamed model
+        /// fields otherwise keep their historical values
         #[arg(long = "set-session", value_name = "SESSION")]
         set_session: Option<String>,
-        /// Replacement model; absent leaves the recorded model alone
+        /// Replacement model; absent leaves the recorded model alone.
+        /// A model equal to the effective recorded session refuses; a supplied
+        /// --set-session selects that session for validation
         #[arg(long = "set-model", value_name = "MODEL")]
         set_model: Option<String>,
         /// Name the record and the other records carrying the replaced
@@ -3890,26 +3896,19 @@ fn amend_target_exists(
     target: &AmendTarget,
     body: Option<&str>,
 ) -> bool {
-    let typed = |kind: &str, id: &str, on: fn(&JournalEvent) -> Option<&str>| {
-        events.iter().any(|event| {
-            event.known()
-                && event.event == kind
-                && event.file.as_deref() == Some(filename)
-                && on(event) == Some(id)
-        })
-    };
     match target {
         AmendTarget::Artifact => true,
         AmendTarget::Position(id) => {
-            typed("position", id, |event| event.position_id.as_deref())
+            target.record(events, filename).is_some()
                 || body.is_some_and(|body| {
                     body.lines()
                         .filter_map(position_heading_id)
                         .any(|heading| &heading == id)
                 })
         }
-        AmendTarget::Question(id) => typed("question", id, |event| event.question_id.as_deref()),
-        AmendTarget::Answer(id) => typed("answer", id, |event| event.question_id.as_deref()),
+        AmendTarget::Question(_) | AmendTarget::Answer(_) => {
+            target.record(events, filename).is_some()
+        }
     }
 }
 
@@ -7120,7 +7119,6 @@ fn correct(
     }
     // A corrected identity is recorded as fresh as any other write's.
     let defect = match field {
-        "model" => crate::coordinate::model_defect(value, ctx.session.as_deref()),
         "actor" => crate::coordinate::actor_defect(value),
         _ => None,
     };
@@ -7150,6 +7148,19 @@ fn correct(
         .with_context(|| format!("cannot read {}", path.display()))?;
     if !amend_target_exists(&events, filename, &parsed, Some(&body)) {
         bail!("no {target} on {filename}");
+    }
+    if field == "model" {
+        let session = parsed
+            .record(&events, filename)
+            .map(|event| event.session.as_str());
+        if let Some(defect) = crate::coordinate::model_defect(value, session)
+            .or_else(|| crate::coordinate::model_defect(value, ctx.session.as_deref()))
+        {
+            bail!(
+                "--field model {value:?}: {}; name the value the entry should carry",
+                defect.reason()
+            );
+        }
     }
     if field == "option" {
         check_branch_correction(&events, filename, &parsed, value)?;
@@ -8073,6 +8084,27 @@ enum AmendTarget {
 }
 
 impl AmendTarget {
+    /// The latest typed record the target names. A reopened question's answer
+    /// belongs to its latest settlement rather than a withdrawn one.
+    fn record<'a>(&self, events: &'a [JournalEvent], filename: &str) -> Option<&'a JournalEvent> {
+        events.iter().rev().find(|event| {
+            event.known()
+                && event.file.as_deref() == Some(filename)
+                && match self {
+                    Self::Artifact => event.event == "note",
+                    Self::Position(id) => {
+                        event.event == "position" && event.position_id.as_deref() == Some(id)
+                    }
+                    Self::Question(id) => {
+                        event.event == "question" && event.question_id.as_deref() == Some(id)
+                    }
+                    Self::Answer(id) => {
+                        event.event == "answer" && event.question_id.as_deref() == Some(id)
+                    }
+                }
+        })
+    }
+
     fn parse(value: &str) -> Option<Self> {
         if value == "artifact" {
             return Some(Self::Artifact);
@@ -11736,6 +11768,24 @@ fn reattribute(
             "the creation event for {filename} records an on-behalf-of subject; \
              provenance repair does not reattribute a delegated contribution"
         );
+    }
+
+    if replacement.model.is_some() || replacement.session.is_some() {
+        if let Some(model) = replacement.model.or(target.model.as_deref()) {
+            let session = replacement.session.unwrap_or(&target.session);
+            let session_collision = model
+                .split('#')
+                .next()
+                .is_some_and(|model| model.trim() == session.trim());
+            if replacement.model.is_some() || session_collision {
+                if let Some(defect) = crate::coordinate::model_defect(model, Some(session)) {
+                    bail!(
+                        "--set-model {model:?}: {}; name the value the record should carry",
+                        defect.reason()
+                    );
+                }
+            }
+        }
     }
 
     let mut value = values[index].clone().expect("the target line parsed");
