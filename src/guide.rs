@@ -1306,7 +1306,9 @@ PAIR REPLICA STORES
   bundle digest. An interrupted write retains a prepared transaction with
   the bodies, event log, and receipt. Every journal write, including provenance
   repair and spool promotion, refuses a pending import and names its bundle
-  digest and the remedy: `arc journal import <bundle>`. Reads stay allowed.
+  digest and the remedy: `arc journal import <bundle>`, or `arc journal
+  --global import <bundle>` when the global journal holds it, including a
+  global write or promotion run from a project checkout. Reads stay allowed.
   Import completes the transaction before comparing revisions. Recovery refuses
   to overwrite unexpected body or event-log changes after preparation.
   A dry-run requires the pending exchange to be completed first.

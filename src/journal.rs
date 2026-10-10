@@ -982,7 +982,8 @@ pub enum JournalCmd {
     /// nothing. A model replacement is a flag declaration compared with the
     /// retained observation; changing harness or session clears that
     /// observation because it belongs to the replaced session. A pending exchange
-    /// refuses repair; finish it with `arc journal import <bundle>` first.
+    /// refuses repair; finish it first with `arc journal import <bundle>`, or
+    /// `arc journal --global import <bundle>` for the global journal.
     Reattribute {
         /// Artifact filename this project's journal or its cold archive holds
         /// (a name, not a path). A file only another known journal holds, or
@@ -1280,7 +1281,9 @@ pub enum JournalCmd {
     /// Interrupted writes retain a prepared transaction; an import completes
     /// it before comparing revisions. Every journal write, including provenance
     /// repair and spool promotion, refuses a pending import and names its
-    /// bundle digest and `arc journal import <bundle>` remedy. Reads stay allowed.
+    /// bundle digest and the remedy: `arc journal import <bundle>`, or
+    /// `arc journal --global import <bundle>` when the global journal holds it.
+    /// Reads stay allowed.
     /// Recovery refuses to overwrite unexpected body or event-log changes.
     /// --dry-run requires a completed exchange.
     Import {
@@ -2244,24 +2247,40 @@ fn ensure_exchange_settled(hot: &Path) -> Result<()> {
     if path.try_exists()? {
         let pending: ExchangeTransaction = serde_json::from_slice(&std::fs::read(&path)?)
             .context("cannot read pending journal exchange")?;
-        if let Some(receipt) = &pending.receipt {
-            bail!("journal exchange is incomplete (transaction {} at {}); run `arc journal import <bundle>` to finish it before writing the journal", receipt.bundle_sha256, path.display());
-        }
-        let remedy = if let Some(commit) = &pending.promotion {
-            format!(
-                "ARC_JOURNAL_DIR={} arc journal promote {} --global",
-                crate::context::shell_quote(&commit.project.display().to_string()),
-                crate::context::shell_quote(&commit.filename)
-            )
-        } else {
-            format!(
-                "ARC_JOURNAL_DIR={} arc journal log recovery 'complete prepared append'",
-                crate::context::shell_quote(&hot.display().to_string())
-            )
-        };
-        bail!("prepared journal write is incomplete at {}; run `{remedy}` to finish it before writing the journal", path.display());
+        bail!("{}", exchange_refusal(hot, &pending, is_global_dir(hot)?));
     }
     Ok(())
+}
+
+/// Why a write is refused while a transaction is pending in `hot`, and the
+/// command that finishes it. The global journal is selected by `--global`
+/// rather than by the checkout a command runs from, so a remedy that names it
+/// without the flag would act on the project journal instead.
+fn exchange_refusal(hot: &Path, pending: &ExchangeTransaction, global: bool) -> String {
+    let journal = if global {
+        "arc journal --global"
+    } else {
+        "arc journal"
+    };
+    let path = exchange_pending_path(hot);
+    if let Some(receipt) = &pending.receipt {
+        return format!("journal exchange is incomplete (transaction {} at {}); run `{journal} import <bundle>` to finish it before writing the journal", receipt.bundle_sha256, path.display());
+    }
+    let remedy = if let Some(commit) = &pending.promotion {
+        format!(
+            "ARC_JOURNAL_DIR={} arc journal promote {} --global",
+            crate::context::shell_quote(&commit.project.display().to_string()),
+            crate::context::shell_quote(&commit.filename)
+        )
+    } else if global {
+        format!("{journal} log recovery 'complete prepared append'")
+    } else {
+        format!(
+            "ARC_JOURNAL_DIR={} arc journal log recovery 'complete prepared append'",
+            crate::context::shell_quote(&hot.display().to_string())
+        )
+    };
+    format!("prepared journal write is incomplete at {}; run `{remedy}` to finish it before writing the journal", path.display())
 }
 
 /// Publish a prepared journal transaction under its participating journal locks.
@@ -15886,5 +15905,50 @@ mod timestamp_tests {
         let from_rfc = parse_since("2026-07-01T12:00:00Z").unwrap();
         assert_eq!(from_stamp, from_rfc);
         assert_eq!(from_legacy, from_rfc);
+    }
+}
+
+#[cfg(test)]
+mod exchange_refusal_tests {
+    use super::{exchange_refusal, ExchangeTransaction};
+    use std::path::Path;
+
+    fn pending(with_receipt: bool) -> ExchangeTransaction {
+        let mut transaction = serde_json::json!({"bodies": [], "events": ""});
+        if with_receipt {
+            transaction["receipt"] = serde_json::json!({
+                "schema": "arc-journal-import/1", "bundle_sha256": "a".repeat(64),
+                "source_replica": {"name": "sender", "repository_id": "sender-id"},
+                "imported_by": {"name": "receiver", "repository_id": "receiver-id"},
+                "imported_at": "2026-01-01T00:00:00Z", "artifacts": []
+            });
+        }
+        serde_json::from_value(transaction).unwrap()
+    }
+
+    /// An incomplete import is finished by the import that began it, run
+    /// against the journal that holds it. Naming the project command for the
+    /// global journal sends the caller to a journal that refuses the bundle.
+    #[test]
+    fn an_incomplete_import_is_finished_in_the_journal_holding_it() {
+        let hot = Path::new("/journal");
+        let global = exchange_refusal(hot, &pending(true), true);
+        assert!(global.contains("`arc journal --global import <bundle>`"));
+        let project = exchange_refusal(hot, &pending(true), false);
+        assert!(project.contains("`arc journal import <bundle>`"));
+        assert!(!project.contains("--global"));
+    }
+
+    /// A prepared append is finished by a write to the journal that holds it,
+    /// and the global journal is reachable only through `--global`.
+    #[test]
+    fn a_prepared_append_is_finished_in_the_journal_holding_it() {
+        let hot = Path::new("/journal");
+        let global = exchange_refusal(hot, &pending(false), true);
+        assert!(global.contains("`arc journal --global log recovery "));
+        let project = exchange_refusal(hot, &pending(false), false);
+        assert!(project.contains("ARC_JOURNAL_DIR="));
+        assert!(project.contains(" arc journal log recovery "));
+        assert!(!project.contains("--global"));
     }
 }

@@ -15032,11 +15032,23 @@ fn global_memory_promotion_preflights_both_exchanges() {
         let global = repo.home.join(".local/ai/arc/journals/global");
         global_memory_pending_exchange(if pending_global { &global } else { &project });
         let before = journal_event_log(&project);
-        repo.arc(&repo.root)
+        let refusal = repo
+            .arc(&repo.root)
             .args(["journal", "promote", &file, "--global"])
             .assert()
             .failure()
             .stderr(predicates::str::contains("exchange is incomplete"));
+        if pending_global {
+            refusal
+                .stderr(predicates::str::contains(
+                    "arc journal --global import <bundle>",
+                ))
+                .stderr(predicates::str::contains("arc journal import <bundle>").not());
+        } else {
+            refusal
+                .stderr(predicates::str::contains("arc journal import <bundle>"))
+                .stderr(predicates::str::contains("--global import").not());
+        }
         assert_eq!(journal_event_log(&project), before);
         assert!(journal_event_log(&global).is_empty());
         assert!(
@@ -15047,6 +15059,62 @@ fn global_memory_promotion_preflights_both_exchanges() {
                     .extension()
                     .is_some_and(|ext| ext == "md"))
         );
+    }
+}
+
+#[test]
+fn pending_global_exchange_refuses_global_writes_naming_the_global_import() {
+    let repo = Repo::new();
+    let global = repo.home.join(".local/ai/arc/journals/global");
+    let path = stdout(
+        repo.arc(&repo.home)
+            .args([
+                "journal",
+                "memory",
+                "--global",
+                "operator-rule",
+                "--title",
+                "Operator rule",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Rule\n"),
+    );
+    let file = Path::new(path.trim())
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    global_memory_pending_exchange(&global);
+    let log = journal_event_log(&global);
+    let body = fs::read(global.join(&file)).unwrap();
+    for args in [
+        vec![
+            "journal",
+            "memory",
+            "--global",
+            "second-rule",
+            "--title",
+            "Second rule",
+            "--body-file",
+            "-",
+        ],
+        vec!["journal", "position", "--global", &file, "--body-file", "-"],
+        vec!["journal", "consume", "--global", &file],
+    ] {
+        repo.arc(&repo.home)
+            .args(&args)
+            .write_stdin("Position: for\n\nBody\n")
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("exchange is incomplete"))
+            .stderr(predicates::str::contains(
+                "arc journal --global import <bundle>",
+            ))
+            .stderr(predicates::str::contains("arc journal import <bundle>").not());
+        assert_eq!(journal_event_log(&global), log, "{args:?}");
+        assert_eq!(fs::read(global.join(&file)).unwrap(), body, "{args:?}");
     }
 }
 
