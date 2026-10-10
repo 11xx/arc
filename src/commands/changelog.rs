@@ -877,13 +877,12 @@ fn print_entry(change: &str, entry: &ChangelogEntry, provenance: bool) {
             println!();
         }
         println!(
-            "> arc provenance: change={} event={} actor={} on_behalf_of={} harness={} session={} created_at={}",
+            "> arc provenance: change={} event={} actor={} on_behalf_of={} harness={} created_at={}",
             change,
             entry.event_id,
             entry.actor,
             entry.on_behalf_of.as_deref().unwrap_or("-"),
             entry.harness.as_deref().unwrap_or("-"),
-            entry.session.as_deref().unwrap_or("-"),
             entry.created_at,
         );
     }
@@ -910,13 +909,12 @@ fn validate_category(category: &str) -> Result<String> {
 
 fn provenance_line(entry: &ProjectedEntry<'_>) -> String {
     format!(
-        "> arc provenance: change={} event={} actor={} on_behalf_of={} harness={} session={} created_at={}",
+        "> arc provenance: change={} event={} actor={} on_behalf_of={} harness={} created_at={}",
         entry.change,
         entry.recorded.event_id,
         entry.recorded.actor,
         entry.recorded.on_behalf_of.unwrap_or("-"),
         entry.recorded.harness.unwrap_or("-"),
-        entry.recorded.session.unwrap_or("-"),
         entry.recorded.created_at,
     )
 }

@@ -285,10 +285,14 @@ fn json_projection_always_carries_full_event_provenance() {
         "actor=Changelog Lead",
         "on_behalf_of=Release Executor",
         "harness=claude",
-        "session=session-provenance",
     ] {
         assert!(annotated.contains(expected), "{annotated}");
     }
+    assert!(!annotated.contains("session="), "{annotated}");
+    assert!(!annotated.contains("session-provenance"), "{annotated}");
+    let projected = stdout(repo.arc(&repo.root).args(["changelog", "--provenance"]));
+    assert!(!projected.contains("session="), "{projected}");
+    assert!(!projected.contains("session-provenance"), "{projected}");
     repo.arc(&repo.root)
         .args(["changelog", "provenance-entry", "--json", "--provenance"])
         .assert()

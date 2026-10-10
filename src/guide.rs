@@ -1154,6 +1154,8 @@ RUN A CHANGE
   refuses entry recording and `--write` under the declaration. Per-change
   `--none --reason` remains valid and is unnecessary; reads remain available.
   Without the file, the target is `CHANGELOG.md`.
+  Text --provenance includes recording identity without the session id;
+  --json retains full session provenance. --provenance refuses with --write.
   The built-in renderer replaces the `## [Unreleased]` block of the target
   `.arc/changelog.toml` names, `CHANGELOG.md` by default. Prose is refilled;
   fenced and indented code retain their lines and container-relative columns.
