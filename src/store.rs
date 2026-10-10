@@ -149,6 +149,31 @@ pub fn import_batches(root: &Path) -> Result<Vec<ImportBatch>> {
     Ok(batches)
 }
 
+fn event_file_stems(dir: &Path) -> Result<BTreeSet<String>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(error) => return Err(error).with_context(|| format!("cannot read {}", dir.display())),
+    };
+    let mut stems = BTreeSet::new();
+    for entry in entries {
+        let name = entry?.file_name().to_string_lossy().into_owned();
+        if let Some(stem) = name.strip_suffix(".json") {
+            stems.insert(stem.to_string());
+        }
+    }
+    Ok(stems)
+}
+
+fn typed_events(raw: Vec<(String, serde_json::Value)>) -> Result<Vec<Event>> {
+    raw.into_iter()
+        .filter_map(|(_, value)| match serde_json::from_value::<Event>(value) {
+            Ok(event) if matches!(event.payload, Payload::Unknown) => None,
+            other => Some(other.context("malformed event file in change ledger")),
+        })
+        .collect()
+}
+
 fn merge_raw(
     events: &mut Vec<(String, serde_json::Value)>,
     incoming: impl IntoIterator<Item = serde_json::Value>,
@@ -579,10 +604,27 @@ impl Store {
     /// Every change in the ledger. A ledger with no changes directory has no
     /// changes; one whose directory cannot be read is an error, never empty.
     pub fn list_change_ids(&self) -> Result<Vec<String>> {
-        let mut ids_out = BTreeSet::new();
         let dir = self.changes_dir();
+        let mut ids_out = self.change_dir_ids(&dir)?;
+        for batch in import_batches(&self.root)? {
+            ids_out.insert(batch.change_id);
+        }
+        Ok(ids_out.into_iter().collect())
+    }
+
+    /// `list_change_ids` over import batches the caller already holds, so a
+    /// reader that consults the batches for several purposes reads and
+    /// validates them once.
+    pub fn list_change_ids_in(&self, batches: &[ImportBatch]) -> Result<Vec<String>> {
+        let mut ids_out = self.change_dir_ids(&self.changes_dir())?;
+        ids_out.extend(batches.iter().map(|batch| batch.change_id.clone()));
+        Ok(ids_out.into_iter().collect())
+    }
+
+    fn change_dir_ids(&self, dir: &Path) -> Result<BTreeSet<String>> {
+        let mut ids_out = BTreeSet::new();
         if dir.is_dir() {
-            for entry in fs::read_dir(&dir)? {
+            for entry in fs::read_dir(dir)? {
                 let entry = entry?;
                 let name = entry.file_name().to_string_lossy().into_owned();
                 if entry.file_type()?.is_dir() && ids::validate_id_component(&name).is_ok() {
@@ -590,10 +632,7 @@ impl Store {
                 }
             }
         }
-        for batch in import_batches(&self.root)? {
-            ids_out.insert(batch.change_id);
-        }
-        Ok(ids_out.into_iter().collect())
+        Ok(ids_out)
     }
 
     /// Resolve a user-supplied change reference: exact ID, else unique
@@ -1199,19 +1238,29 @@ impl Store {
 
     /// All events of one change in ULID (i.e. chronological) order.
     pub fn load_events(&self, change_id: &str) -> Result<Vec<Event>> {
-        self.raw_events(change_id)?
-            .into_iter()
-            .filter_map(|(_, value)| match serde_json::from_value::<Event>(value) {
-                Ok(event) if matches!(event.payload, Payload::Unknown) => None,
-                other => Some(other.context("malformed event file in change ledger")),
-            })
-            .collect()
+        typed_events(self.raw_events(change_id)?)
     }
 
     /// Raw JSON events of one change. Export deliberately bypasses the
     /// typed Event enum so future event types and fields survive intact.
     pub fn raw_events(&self, change_id: &str) -> Result<Vec<(String, serde_json::Value)>> {
         self.raw_events_unseen(change_id, &BTreeSet::new())
+    }
+
+    /// `raw_events` over import batches the caller already holds.
+    pub fn raw_events_in(
+        &self,
+        change_id: &str,
+        batches: &[ImportBatch],
+    ) -> Result<Vec<(String, serde_json::Value)>> {
+        let (events, directory_present) = self.event_files_unseen(change_id, &BTreeSet::new())?;
+        self.finish_raw_events(
+            change_id,
+            events,
+            directory_present,
+            batches,
+            &BTreeSet::new(),
+        )
     }
 
     /// Read only raw events whose IDs the caller has not already observed.
@@ -1222,6 +1271,23 @@ impl Store {
         change_id: &str,
         seen: &BTreeSet<String>,
     ) -> Result<Vec<(String, serde_json::Value)>> {
+        let (events, directory_present) = self.event_files_unseen(change_id, seen)?;
+        self.finish_raw_events(
+            change_id,
+            events,
+            directory_present,
+            &import_batches(&self.root)?,
+            seen,
+        )
+    }
+
+    /// The change's event files not in `seen`, and whether its directory
+    /// exists.
+    fn event_files_unseen(
+        &self,
+        change_id: &str,
+        seen: &BTreeSet<String>,
+    ) -> Result<(Vec<(String, serde_json::Value)>, bool)> {
         ids::validate_id_component(change_id)?;
         let dir = self.events_dir(change_id);
         let entries = match fs::read_dir(&dir) {
@@ -1250,11 +1316,24 @@ impl Store {
                 .with_context(|| format!("malformed event file {}", path.display()))?;
             events.push((event_id.to_string(), value));
         }
-        let mut found = dir.is_dir();
-        for batch in import_batches(&self.root)? {
+        Ok((events, dir.is_dir()))
+    }
+
+    /// Merge the batches' events into one change's file events, then check and
+    /// order the result.
+    fn finish_raw_events(
+        &self,
+        change_id: &str,
+        mut events: Vec<(String, serde_json::Value)>,
+        directory_present: bool,
+        batches: &[ImportBatch],
+        seen: &BTreeSet<String>,
+    ) -> Result<Vec<(String, serde_json::Value)>> {
+        let mut found = directory_present;
+        for batch in batches {
             if batch.change_id == change_id {
                 found = true;
-                merge_raw(&mut events, batch.events, seen)?;
+                merge_raw(&mut events, batch.events.iter().cloned(), seen)?;
             }
         }
         if !found {
@@ -1335,6 +1414,46 @@ impl Store {
         &self,
         seen: &BTreeSet<String>,
     ) -> Result<Vec<(String, serde_json::Value)>> {
+        let mut events = self.repository_event_files_unseen(seen)?;
+        for batch in import_batches(&self.root)? {
+            merge_raw(&mut events, batch.repository_events, seen)?;
+        }
+        events.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(events)
+    }
+
+    /// `raw_repository_events_unseen` over import batches the caller already
+    /// holds.
+    pub fn raw_repository_events_in(
+        &self,
+        batches: &[ImportBatch],
+    ) -> Result<Vec<(String, serde_json::Value)>> {
+        let seen = BTreeSet::new();
+        let mut events = self.repository_event_files_unseen(&seen)?;
+        for batch in batches {
+            merge_raw(&mut events, batch.repository_events.iter().cloned(), &seen)?;
+        }
+        events.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(events)
+    }
+
+    /// The IDs of the event files one change holds, named by file without
+    /// reading any of them. A file `raw_events` would reject is listed too, so
+    /// the answer is a superset of the IDs a read returns.
+    pub fn event_file_ids(&self, change_id: &str) -> Result<BTreeSet<String>> {
+        ids::validate_id_component(change_id)?;
+        event_file_stems(&self.events_dir(change_id))
+    }
+
+    /// `event_file_ids` for the repository-scoped events.
+    pub fn repository_event_file_ids(&self) -> Result<BTreeSet<String>> {
+        event_file_stems(&self.repository_events_dir())
+    }
+
+    fn repository_event_files_unseen(
+        &self,
+        seen: &BTreeSet<String>,
+    ) -> Result<Vec<(String, serde_json::Value)>> {
         let dir = self.repository_events_dir();
         let entries = match fs::read_dir(&dir) {
             Ok(entries) => Some(entries),
@@ -1356,10 +1475,6 @@ impl Store {
                 .with_context(|| format!("malformed event file {}", dir.join(&name).display()))?;
             events.push((event_id.to_string(), value));
         }
-        for batch in import_batches(&self.root)? {
-            merge_raw(&mut events, batch.repository_events, seen)?;
-        }
-        events.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(events)
     }
 

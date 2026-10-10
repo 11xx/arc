@@ -393,6 +393,8 @@ pub fn plan_import(
 
 /// Canonical content includes the complete envelope and every payload field.
 pub fn canonical_event_digest(value: &Value) -> Result<String> {
+    #[cfg(test)]
+    DIGESTS.with(|count| count.set(count.get() + 1));
     Ok(digest(&serde_json::to_vec(value)?))
 }
 
@@ -462,6 +464,10 @@ pub fn validate_import_identities(
 }
 
 /// Receiver permissions remain separate from the recorded verdict graph.
+///
+/// A scope describes the ledger as it stood when it was derived. A reader that
+/// consults several changes derives it once, for its one read, and passes it
+/// to each; a reader that writes derives a fresh one after the write.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct PrivilegeScope {
     pub local_origin: String,
@@ -471,37 +477,105 @@ pub struct PrivilegeScope {
     pub trusted_review_replicas: Vec<String>,
     pub admissions: std::collections::BTreeMap<String, EventAuthorization>,
     pub imported_event_ids: BTreeSet<String>,
+    /// Scope, origin and content digest the ledger holds for each admitted
+    /// event, which an admission must match to take effect.
     pub bound_events: std::collections::BTreeMap<String, (String, String, String)>,
+    /// Event IDs held twice with different scope, origin or content,
+    /// admitted or not.
     pub ambiguous_event_ids: BTreeSet<String>,
 }
-impl PrivilegeScope {
-    pub fn for_store(store: &crate::store::Store) -> Result<Self> {
-        let policy = match &store.operator_policy_path {
-            Some(path) => crate::policy::replica_at(path)?,
-            None => ReplicaPolicy::default(),
+
+/// Where a ledger holds events: one change's, or the repository's.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum EventHolder {
+    Change(String),
+    Repository,
+}
+
+/// Records one derivation of the scope for the test suite, which reads how
+/// many a command made. `ARC_SCOPE_COMPUTED` names a file that gains one byte
+/// per derivation. Unset, which is every run that is not a test, this does
+/// nothing.
+fn note_scope_derived() {
+    #[cfg(test)]
+    DERIVATIONS.with(|count| count.set(count.get() + 1));
+    if let Some(path) = std::env::var_os("ARC_SCOPE_COMPUTED") {
+        use std::io::Write;
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .and_then(|mut file| file.write_all(b"."));
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static DERIVATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static DIGESTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+type BoundEvents = std::collections::BTreeMap<String, (String, String, String)>;
+
+/// The identity the ledger holds for every event an admission names, and the
+/// IDs held twice with different identities.
+///
+/// An ID listed by two holders is contested and bound like an admitted one,
+/// so that the same ID with different content, origin or scope is seen as
+/// ambiguous wherever it sits. A holder that cannot be read binds nothing.
+fn bind_held_events(
+    store: &crate::store::Store,
+    batches: &[crate::store::ImportBatch],
+    admitted: &std::collections::BTreeMap<String, EventAuthorization>,
+) -> Result<(BoundEvents, BTreeSet<String>)> {
+    let ids_of = |values: &[Value]| -> Vec<String> {
+        values
+            .iter()
+            .filter_map(|value| value["event_id"].as_str().map(str::to_string))
+            .collect()
+    };
+    let mut holders: Vec<EventHolder> = Vec::new();
+    let mut listed: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
+    for change in store.list_change_ids_in(batches)? {
+        let Ok(mut ids) = store.event_file_ids(&change) else {
+            continue;
         };
-        let mut admissions = std::collections::BTreeMap::new();
-        let mut imported_event_ids = BTreeSet::new();
-        for batch in crate::store::import_batches(&store.root)? {
-            for value in batch.events.iter().chain(&batch.repository_events) {
-                imported_event_ids.insert(
-                    value["event_id"]
-                        .as_str()
-                        .context("imported event has no ID")?
-                        .to_string(),
-                );
-            }
-            if let Some(receipt) = batch.authorization {
-                for event in receipt.events {
-                    if admissions.insert(event.event_id.clone(), event).is_some() {
-                        bail!("duplicate event authorization receipt");
-                    }
-                }
-            }
+        for batch in batches.iter().filter(|batch| batch.change_id == change) {
+            ids.extend(ids_of(&batch.events));
         }
-        let mut bound_events = std::collections::BTreeMap::new();
-        let mut ambiguous_event_ids = BTreeSet::new();
-        let mut bind = |scope: &str, id: String, value: Value| -> Result<()> {
+        holders.push(EventHolder::Change(change));
+        for id in ids {
+            listed.entry(id).or_default().push(holders.len() - 1);
+        }
+    }
+    if let Ok(mut ids) = store.repository_event_file_ids() {
+        for batch in batches {
+            ids.extend(ids_of(&batch.repository_events));
+        }
+        holders.push(EventHolder::Repository);
+        for id in ids {
+            listed.entry(id).or_default().push(holders.len() - 1);
+        }
+    }
+    let contested = |id: &str| {
+        admitted.contains_key(id) || listed.get(id).is_some_and(|holders| holders.len() > 1)
+    };
+    let to_read: BTreeSet<usize> = listed
+        .iter()
+        .filter(|(id, _)| contested(id))
+        .flat_map(|(_, holders)| holders.iter().copied())
+        .collect();
+    let mut bound_events = BoundEvents::new();
+    let mut ambiguous_event_ids = BTreeSet::new();
+    for index in to_read {
+        let (scope, read) = match &holders[index] {
+            EventHolder::Change(change) => ("change", store.raw_events_in(change, batches)),
+            EventHolder::Repository => ("repository", store.raw_repository_events_in(batches)),
+        };
+        let Ok(values) = read else {
+            continue;
+        };
+        for (id, value) in values.into_iter().filter(|(id, _)| contested(id)) {
             let identity = (
                 scope.to_string(),
                 value["repository_id"]
@@ -515,22 +589,53 @@ impl PrivilegeScope {
                     ambiguous_event_ids.insert(id);
                 }
             }
-            Ok(())
+        }
+    }
+    Ok((bound_events, ambiguous_event_ids))
+}
+
+impl PrivilegeScope {
+    /// Derive the scope from the ledger as it stands.
+    ///
+    /// Only an event an admission receipt names, or one whose ID the ledger
+    /// holds in more than one place, is read for its identity: IDs come from
+    /// file names and import batches, and the digest that binds an admission
+    /// to the bytes it admitted is computed for those events alone. The cost
+    /// grows with the admissions, not with the ledger.
+    pub fn for_store(store: &crate::store::Store) -> Result<Self> {
+        note_scope_derived();
+        let policy = match &store.operator_policy_path {
+            Some(path) => crate::policy::replica_at(path)?,
+            None => ReplicaPolicy::default(),
         };
-        if !admissions.is_empty() {
-            for change in store.list_change_ids()? {
-                if let Ok(values) = store.raw_events(&change) {
-                    for (id, value) in values {
-                        bind("change", id, value)?;
+        let mut admissions = std::collections::BTreeMap::new();
+        let mut imported_event_ids = BTreeSet::new();
+        let batches = crate::store::import_batches(&store.root)?;
+        for batch in &batches {
+            for value in batch.events.iter().chain(&batch.repository_events) {
+                imported_event_ids.insert(
+                    value["event_id"]
+                        .as_str()
+                        .context("imported event has no ID")?
+                        .to_string(),
+                );
+            }
+            if let Some(receipt) = &batch.authorization {
+                for event in &receipt.events {
+                    if admissions
+                        .insert(event.event_id.clone(), event.clone())
+                        .is_some()
+                    {
+                        bail!("duplicate event authorization receipt");
                     }
                 }
             }
-            if let Ok(values) = store.raw_repository_events_unseen(&BTreeSet::new()) {
-                for (id, value) in values {
-                    bind("repository", id, value)?;
-                }
-            }
         }
+        let (mut bound_events, ambiguous_event_ids) = if admissions.is_empty() {
+            Default::default()
+        } else {
+            bind_held_events(store, &batches, &admissions)?
+        };
         admissions.retain(|id, receipt| {
             !ambiguous_event_ids.contains(id)
                 && bound_events.get(id).is_some_and(|(scope, origin, hash)| {
@@ -539,6 +644,7 @@ impl PrivilegeScope {
                         && hash == &receipt.event_sha256
                 })
         });
+        bound_events.retain(|id, _| admissions.contains_key(id));
         let replica = crate::replica::status(store)?;
         let authority_holder = replica
             .authority
@@ -645,3 +751,294 @@ pub struct ImportSummary {
     pub authorization: Option<ImportAuthorization>,
 }
 pub type ImportResult = crate::model::OperationResult<ImportSummary>;
+
+#[cfg(test)]
+pub fn scope_derivations() -> usize {
+    DERIVATIONS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::Store;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    const LOCAL: &str = "local-replica";
+    const PEER: &str = "peer-replica";
+
+    struct Ledger {
+        dir: tempfile::TempDir,
+        store: Store,
+    }
+
+    fn event(id: &str, change: &str, origin: &str, text: &str) -> Value {
+        json!({
+            "event_id": id,
+            "change_id": change,
+            "repository_id": origin,
+            "event_type": "message",
+            "text": text,
+        })
+    }
+
+    impl Ledger {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join("config.json"),
+                json!({
+                    "schema_version": 1,
+                    "repository_id": LOCAL,
+                    "created_at": "2026-10-01T00:00:00Z",
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let store = Store {
+                operator_policy_path: None,
+                root: dir.path().to_path_buf(),
+                repository_id: LOCAL.into(),
+                require_declared_actor: false,
+                require_declared_actor_sources: Vec::new(),
+                read_only: false,
+            };
+            Self { dir, store }
+        }
+
+        fn put(&self, change: &str, value: &Value) {
+            let events = self.dir.path().join("changes").join(change).join("events");
+            std::fs::create_dir_all(&events).unwrap();
+            let id = value["event_id"].as_str().unwrap();
+            std::fs::write(events.join(format!("{id}.json")), value.to_string()).unwrap();
+        }
+
+        /// Publish one import batch whose receipt admits `admitted`.
+        fn deliver(
+            &self,
+            name: &str,
+            change: &str,
+            events: &[Value],
+            repository_events: &[Value],
+            admitted: &[&str],
+        ) {
+            let grant = |scope: &str, value: &Value| EventAuthorization {
+                event_id: value["event_id"].as_str().unwrap().into(),
+                scope: scope.into(),
+                origin_replica_id: value["repository_id"].as_str().unwrap().into(),
+                event_sha256: canonical_event_digest(value).unwrap(),
+                authorized_roles: vec![Role::Facts],
+            };
+            let granted = events
+                .iter()
+                .map(|value| grant("change", value))
+                .chain(
+                    repository_events
+                        .iter()
+                        .map(|value| grant("repository", value)),
+                )
+                .filter(|grant| admitted.contains(&grant.event_id.as_str()))
+                .collect::<Vec<_>>();
+            let batch = json!({
+                "schema": "arc-import-batch/1",
+                "change_id": change,
+                "events": events,
+                "repository_events": repository_events,
+                "authorization": ImportAuthorization {
+                    principal: "channel".into(),
+                    authentication: "transport-asserted".into(),
+                    received_sha256: "0".repeat(64),
+                    source_replica_id: PEER.into(),
+                    project_id: None,
+                    policy_sha256: "0".repeat(64),
+                    events: granted,
+                },
+            });
+            let imports = self.dir.path().join("imports");
+            std::fs::create_dir_all(&imports).unwrap();
+            std::fs::write(imports.join(format!("{name}.json")), batch.to_string()).unwrap();
+        }
+    }
+
+    /// The identity of every event the ledger holds, bound in full.
+    fn reference_binding(
+        store: &Store,
+        admissions: &mut BTreeMap<String, EventAuthorization>,
+    ) -> (BoundEvents, BTreeSet<String>) {
+        let mut bound_events = BoundEvents::new();
+        let mut ambiguous = BTreeSet::new();
+        let mut bind = |scope: &str, id: String, value: Value| {
+            let identity = (
+                scope.to_string(),
+                value["repository_id"].as_str().unwrap().to_string(),
+                canonical_event_digest(&value).unwrap(),
+            );
+            if let Some(held) = bound_events.insert(id.clone(), identity.clone()) {
+                if held != identity {
+                    ambiguous.insert(id);
+                }
+            }
+        };
+        for change in store.list_change_ids().unwrap() {
+            if let Ok(values) = store.raw_events(&change) {
+                for (id, value) in values {
+                    bind("change", id, value);
+                }
+            }
+        }
+        if let Ok(values) = store.raw_repository_events_unseen(&BTreeSet::new()) {
+            for (id, value) in values {
+                bind("repository", id, value);
+            }
+        }
+        admissions.retain(|id, receipt| {
+            !ambiguous.contains(id)
+                && bound_events.get(id).is_some_and(|(scope, origin, hash)| {
+                    scope == &receipt.scope
+                        && origin == &receipt.origin_replica_id
+                        && hash == &receipt.event_sha256
+                })
+        });
+        (bound_events, ambiguous)
+    }
+
+    /// Admitted and unadmitted events, IDs held twice (one admitted, one not),
+    /// and an admitted event whose change cannot be read.
+    fn fixture(unadmitted: usize) -> Ledger {
+        let ledger = Ledger::new();
+        ledger.put("alpha", &event("A1", "alpha", LOCAL, "local"));
+        for index in 0..unadmitted {
+            ledger.put(
+                "gamma",
+                &event(&format!("L{index:03}"), "gamma", LOCAL, "bulk"),
+            );
+        }
+        let remote = |id: &str, change: &str| event(id, change, PEER, "remote");
+        // B1 and R1 are admitted and held once; B2 is admitted but a second
+        // holder carries other content under its ID.
+        ledger.deliver(
+            "one",
+            "beta",
+            &[remote("B1", "beta"), remote("B2", "beta")],
+            &[json!({
+                "event_id": "R1",
+                "change_id": null,
+                "repository_id": PEER,
+                "event_type": "paired",
+            })],
+            &["B1", "B2", "R1"],
+        );
+        ledger.put("alpha", &event("B2", "alpha", LOCAL, "second holder"));
+        // U1 is unadmitted and held by two changes.
+        ledger.put("alpha", &event("U1", "alpha", LOCAL, "first"));
+        ledger.put("gamma", &event("U1", "gamma", LOCAL, "second"));
+        // X1 is admitted, but its change holds a file under the same ID with
+        // other content, so the change cannot be read.
+        ledger.put("delta", &event("X1", "delta", LOCAL, "file"));
+        ledger.deliver("two", "delta", &[remote("X1", "delta")], &[], &["X1"]);
+        ledger
+    }
+
+    fn all_ids(ledger: &Ledger) -> BTreeSet<String> {
+        let mut ids = BTreeSet::new();
+        for change in ledger.store.list_change_ids().unwrap() {
+            ids.extend(ledger.store.event_file_ids(&change).unwrap());
+        }
+        ids.extend(["B1", "B2", "R1", "X1", "U1", "A1", "missing"].map(String::from));
+        ids
+    }
+
+    #[test]
+    fn admission_and_ambiguity_match_binding_every_event() {
+        let ledger = fixture(5);
+        let scope = PrivilegeScope::for_store(&ledger.store).unwrap();
+
+        let mut expected = BTreeMap::new();
+        for batch in crate::store::import_batches(&ledger.store.root).unwrap() {
+            for event in batch.authorization.unwrap().events {
+                expected.insert(event.event_id.clone(), event);
+            }
+        }
+        let (_, ambiguous) = reference_binding(&ledger.store, &mut expected);
+
+        assert_eq!(
+            expected.keys().collect::<Vec<_>>(),
+            vec!["B1", "R1"],
+            "the fixture admits the unambiguous, readable events"
+        );
+        assert_eq!(scope.admissions, expected);
+        assert_eq!(
+            scope.ambiguous_event_ids, ambiguous,
+            "ambiguity covers admitted and unadmitted IDs alike"
+        );
+        assert_eq!(
+            ambiguous,
+            BTreeSet::from(["B2".to_string(), "U1".to_string()])
+        );
+        for id in all_ids(&ledger) {
+            for role in [Role::Facts, Role::ReviewAuthority] {
+                for origin in [LOCAL, PEER] {
+                    let mut reference = scope.clone();
+                    reference.admissions = expected.clone();
+                    reference.ambiguous_event_ids = ambiguous.clone();
+                    assert_eq!(
+                        scope.permits(&id, origin, role),
+                        reference.permits(&id, origin, role),
+                        "{id} {origin} {role:?}"
+                    );
+                }
+            }
+            assert_eq!(
+                scope.provenance(&id),
+                if expected.contains_key(&id) {
+                    "transport-asserted"
+                } else {
+                    "legacy-unknown"
+                },
+                "{id}"
+            );
+        }
+        assert_eq!(
+            scope.bound_events.keys().collect::<Vec<_>>(),
+            scope.admissions.keys().collect::<Vec<_>>(),
+            "only admitted events keep a bound identity"
+        );
+    }
+
+    #[test]
+    fn digests_cover_admitted_events_not_the_ledger() {
+        let digests = |unadmitted: usize| {
+            let ledger = fixture(unadmitted);
+            DIGESTS.with(|count| count.set(0));
+            PrivilegeScope::for_store(&ledger.store).unwrap();
+            DIGESTS.with(std::cell::Cell::get)
+        };
+        let small = digests(0);
+        assert!(small > 0);
+        assert_eq!(digests(60), small);
+    }
+
+    #[test]
+    fn an_absent_receipt_leaves_the_ledger_unread() {
+        let ledger = Ledger::new();
+        for index in 0..20 {
+            ledger.put(
+                "alpha",
+                &event(&format!("L{index:03}"), "alpha", LOCAL, "bulk"),
+            );
+        }
+        DIGESTS.with(|count| count.set(0));
+        let scope = PrivilegeScope::for_store(&ledger.store).unwrap();
+        assert_eq!(DIGESTS.with(std::cell::Cell::get), 0);
+        assert!(scope.admissions.is_empty() && scope.ambiguous_event_ids.is_empty());
+    }
+
+    #[test]
+    fn each_derivation_is_counted() {
+        let ledger = Ledger::new();
+        let before = scope_derivations();
+        PrivilegeScope::for_store(&ledger.store).unwrap();
+        PrivilegeScope::for_store(&ledger.store).unwrap();
+        assert_eq!(scope_derivations() - before, 2);
+    }
+}
