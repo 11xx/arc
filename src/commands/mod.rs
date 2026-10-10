@@ -1274,9 +1274,28 @@ fn change_status(state: &ChangeState) -> &'static str {
     }
 }
 
+fn local_hostname() -> String {
+    hostname_or_unknown(hostname::get())
+}
+
+fn hostname_or_unknown(hostname: std::io::Result<std::ffi::OsString>) -> String {
+    hostname
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "unknown".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unreadable_hostname_is_the_unknown_host_fact() {
+        assert_eq!(
+            hostname_or_unknown(Err(std::io::Error::other("unreadable"))),
+            "unknown"
+        );
+        assert_eq!(hostname_or_unknown(Ok("build-host".into())), "build-host");
+    }
     use chrono::Utc;
 
     fn change(id: &str, blocked_by: &[&str], closure: Option<Closure>) -> ChangeState {

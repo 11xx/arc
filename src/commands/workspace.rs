@@ -1907,7 +1907,10 @@ fn workspace_backlog(
                 .unwrap_or_else(|| "+?".to_string());
             println!(
                 "  fork          {}  {}  {} over {}",
-                fork.slug, fork.branch, ahead, fork.base_branch
+                fork.slug,
+                fork.branch,
+                ahead,
+                fork.base_branch.as_deref().unwrap_or("unknown")
             );
         }
         if show_items {

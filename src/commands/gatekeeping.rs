@@ -1546,9 +1546,7 @@ fn verify_all_parallel(
     environments: &DeclaredEnvironments,
     note: Option<String>,
 ) -> Result<i32> {
-    let hostname = hostname::get()
-        .map(|h| h.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "unknown".into());
+    let hostname = super::local_hostname();
     let cwd = ctx.cwd.clone();
     // Every gate shares this worktree, so capture the batch boundary once on
     // each side. A gate that changes the worktree makes every result in the
@@ -1866,9 +1864,7 @@ fn record_verification_at(
     };
     let hostname = match &input.execution_host {
         Some(hostname) => hostname.clone(),
-        None => hostname::get()
-            .map(|h| h.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| "unknown".into()),
+        None => super::local_hostname(),
     };
     if input.attested_result.is_none() {
         eprintln!("running: {}", input.command);
@@ -3263,12 +3259,8 @@ fn integrate_one(
     let report = ctx.report_for_integration(&store, &st, &target, shape)?;
     if let Some(claim) = &st.claim {
         let timing = state::claim_timing_at(claim, chrono::Utc::now());
-        let caller = state::ClaimIdentity {
-            actor: ctx.actor.clone(),
-            harness: ctx.harness.clone().unwrap_or_default(),
-            session: ctx.session.clone().unwrap_or_default(),
-        };
-        if timing.active && claim.owner != caller {
+        let caller = super::claims::command_identity(ctx).ok();
+        if timing.active && caller.as_ref() != Some(&claim.owner) {
             eprintln!(
                 "warning: active foreign claim by {} via {}/{} at stage {}{}; integration remains lead-owned",
                 claim.owner.actor,

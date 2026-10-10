@@ -1712,7 +1712,8 @@ enum Cmd {
         /// Revision actually tested; required with --attest
         #[arg(long)]
         tested_revision: Option<String>,
-        /// Host or environment that executed the attested command
+        /// Host or environment that executed the attested command. Local runs
+        /// record the hostname, or `unknown` when it cannot be read
         #[arg(long)]
         execution_host: Option<String>,
         /// Stable identity of the external runner or job
@@ -2050,7 +2051,9 @@ enum Cmd {
     /// submodule ignore settings; use --shape no-ff or
     /// integrate manually with submodule updates. Closure publication
     /// failure reports whether the event is published, absent or unreadable;
-    /// inspect publication and durability before retrying.
+    /// inspect publication and durability before retrying. An active claim
+    /// warns as foreign unless the caller supplies a complete matching actor,
+    /// harness, and session; absent or empty coordinates cannot match its owner.
     #[command(
         group(clap::ArgGroup::new("integration_json_mode").args(["dry_run", "provisional"]).multiple(true)),
         after_help = "Arc exits 11 when --shape ff-only encounters a diverged target; run arc rebase <change> --verify and provide fresh review or declared debt. When --into selects a different destination, arc rebase cannot select it: run git rebase <destination> in the change checkout, then arc snapshot <change> --verify and obtain fresh review or debt. Arc exits 17 when a paired replica does not hold integration authority; the refusal names the holder or an offer in flight."
@@ -2622,7 +2625,9 @@ enum ForkCmd {
     },
     /// List every fork this repository knows about
     /// Unreadable change promotions are named with their errors on stderr;
-    /// readable promotions remain in the output
+    /// readable promotions remain in the output. JSON uses arc-forks/3;
+    /// base_branch is null when no integration branch can be established.
+    /// Text renders that missing base as unknown
     /// Records no events; ledger reads do not require a parseable append policy.
     List {
         /// Emit the machine-readable JSON view instead of text
@@ -3306,6 +3311,7 @@ enum CandidateCmd {
     /// the gate, its command, timeout, and environment probe as declared
     /// when it ran, the environment identity the probe yielded, and the
     /// result; `evaluation: <event>` names it for `select --evaluation`.
+    /// A hostname that cannot be read is recorded as `unknown`.
     /// Exits 0 when every gate run passes and 1 otherwise. Refused:
     /// `unknown-candidate`; `unknown-gate` for a --gate the change is not
     /// required to pass; `target-unreadable` when the target cannot be read

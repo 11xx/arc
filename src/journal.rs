@@ -1011,7 +1011,8 @@ pub enum JournalCmd {
     /// provenance repair must not rewrite, and so is a creation event
     /// recording an on-behalf-of subject. `--dry-run` names the exact record
     /// and every other record carrying the replaced identity, and writes
-    /// nothing. A model replacement is a flag declaration compared with the
+    /// nothing. Legacy placeholder harnesses and sessions read as absent and
+    /// do not identify sibling references during repair. A model replacement is a flag declaration compared with the
     /// retained observation; changing harness or session clears that
     /// observation because it belongs to the replaced session. A pending exchange
     /// refuses repair; finish it first with `arc journal import <bundle>`, or

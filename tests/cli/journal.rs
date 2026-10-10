@@ -17350,3 +17350,61 @@ fn journal_evidence_doctor_and_json_ignore_fenced_entry_examples() {
     assert_eq!(shown["evidence"].as_array().unwrap().len(), 2);
     assert!(shown["positions"].as_array().unwrap().is_empty());
 }
+
+#[test]
+fn sentinel_reattribute_omits_legacy_unknown_coordinates_from_sibling_references() {
+    let repo = Repo::new();
+    let file = artifact_with_identity(
+        &repo,
+        "legacy-harness",
+        "todo",
+        "unknown",
+        "unknown",
+        "author",
+        "model-x",
+    );
+    artifact_with_identity(
+        &repo,
+        "legacy-sibling",
+        "todo",
+        "unknown",
+        "unknown",
+        "other-author",
+        "model-y",
+    );
+    let before = events_bytes(&repo);
+    let text = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "reattribute",
+        &file,
+        "--set-harness",
+        "codex",
+        "--set-session",
+        "native-thread",
+        "--dry-run",
+    ]));
+    assert!(
+        !text.contains("other records naming the replaced identity"),
+        "{text}"
+    );
+    assert_eq!(events_bytes(&repo), before);
+    let help = stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "reattribute", "--help"]),
+    );
+    assert!(
+        help.contains("Legacy placeholder harnesses and sessions"),
+        "{help}"
+    );
+    let guide = stdout(&mut repo.arc(&repo.root));
+    assert!(guide.contains("Legacy placeholder harnesses and sessions"));
+}
+
+#[test]
+fn sentinel_hostname_fallback_is_a_documented_host_fact() {
+    let repo = Repo::new();
+    let guide = stdout(&mut repo.arc(&repo.root));
+    assert!(guide.contains("A hostname arc could not read is recorded as `unknown`"));
+    let help = stdout(repo.arc(&repo.root).args(["verify", "--help"]));
+    assert!(help.contains("hostname") && help.contains("unknown"));
+}

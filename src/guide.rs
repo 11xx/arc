@@ -268,6 +268,9 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          disposition and removes the worktree. `arc fork
                          thread <slug>` names the harness, session, and model
                          that opened it, and how to resume that session.
+  arc fork list --json   `arc-forks/3`; base_branch is null when no recorded
+                         or safely discovered integration branch is available.
+                         Text renders that missing base as unknown.
   arc journal open       The actionable backlog — work waiting for a session.
                          Incomplete successors appear under `pending`, with
                          availability `pending-transition`, outside actionable
@@ -510,6 +513,8 @@ SETTLE A QUESTION (before it is work)
                          The effective model must not equal the effective
                          recorded session, including a supplied --set-session.
                          Unnamed model fields otherwise keep their historical values.
+                         Legacy placeholder harnesses and sessions read as absent
+                         and do not identify sibling references during repair.
   arc journal consume <file> --outcome done --decision <decision>
   arc journal transition <file> --to discussion [--dry-run]
     Change a live artifact's kind as one guarded operation: a typed successor
@@ -2423,6 +2428,9 @@ RULES THAT CHANGE WHAT YOU DO
   - A verdict binds to the exact approved patchset head. Any new commit makes
     the approval stale until a fresh verdict on a new snapshot.
   - The ledger gates; claims, stages, and lanes are advisory signals, never locks.
+  - Integration warns about an active foreign claim unless the caller
+    supplies the complete matching actor, harness, and session. An absent or
+    empty coordinate cannot match a recorded owner. Integration remains lead-owned.
   - A lane's owner is a harness and a session together. Harnesses mint session
     strings independently, so neither half names an owner on its own.
   - A lane is occupancy of a topic; a claim on a journal artifact is occupancy
@@ -2570,6 +2578,8 @@ RULES THAT CHANGE WHAT YOU DO
     gate and applicable environment decides; other runs cannot hide it. An
     attested run happened where arc observes nothing, so `--attest` takes the
     identity with `--environment <IDENTITY>`.
+  - A hostname arc could not read is recorded as `unknown`, a host fact
+    on verification and candidate-evaluation events.
   - A gate that passed is not evidence that it could have failed. Watch it
     fail first, then record the pass with `--falsified-by <failing-event>
     --predicted "<why it should fail>"`; the gate line then reads
@@ -2925,7 +2935,7 @@ SCHEMAS
     `arc-stats-provenance/1`         arc stats --provenance --json
     `arc-changelog/1`                arc changelog --json
     `arc-changelog-render-request/1` stdin of a command changelog renderer
-    `arc-forks/2`                    arc fork list --json
+    `arc-forks/3`                    arc fork list --json
     `arc-doctor/6`                   arc doctor --json
     `arc-workspace/2`                arc workspace list|inbox --json
     `arc-workspace-backlog/19`       arc workspace backlog --json

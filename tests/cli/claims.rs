@@ -1634,3 +1634,47 @@ fn watch_reaches_stalled_on_an_expired_artifact_claim_and_refuses_other_conditio
     assert_eq!(reached["file"], file.as_str(), "{reached}");
     assert!(reached["claim_id"].is_string(), "{reached}");
 }
+
+#[test]
+fn sentinel_missing_claim_coordinates_never_match_recorded_empty_values() {
+    for missing in [vec!["harness"], vec!["session"], vec!["harness", "session"]] {
+        let repo = Repo::new();
+        let (change_id, worktree, _) = change_with_patchset(&repo, "empty-claim");
+        stdout(
+            repo.arc(&worktree)
+                .args(["review", "empty-claim", "--verdict", "approved"]),
+        );
+        stdout(repo.arc(&worktree).args(["claim", "empty-claim"]));
+        rewrite_event(&repo, &change_id, "claim-set", |event| {
+            for field in &missing {
+                event[*field] = serde_json::json!("");
+            }
+        });
+        let mut cmd = repo.arc(&repo.root);
+        for field in &missing {
+            cmd.env_remove(format!("ARC_{}", field.to_ascii_uppercase()));
+        }
+        cmd.args(["integrate", "empty-claim"])
+            .assert()
+            .success()
+            .stderr(predicates::str::contains(
+                "warning: active foreign claim by tester",
+            ));
+    }
+}
+
+#[test]
+fn sentinel_complete_claim_coordinates_match_the_recorded_owner() {
+    let repo = Repo::new();
+    let (_, worktree, _) = change_with_patchset(&repo, "complete-claim");
+    stdout(
+        repo.arc(&worktree)
+            .args(["review", "complete-claim", "--verdict", "approved"]),
+    );
+    stdout(repo.arc(&worktree).args(["claim", "complete-claim"]));
+    repo.arc(&repo.root)
+        .args(["integrate", "complete-claim"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("warning: active foreign claim").not());
+}

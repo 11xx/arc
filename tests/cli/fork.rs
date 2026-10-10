@@ -497,7 +497,7 @@ fn fork_list_from_inside_a_fork_uses_the_primary_worktree_branch() {
     let primary_text = stdout(repo.arc(&repo.root).args(["fork", "list"]));
     assert!(primary_text.contains("+1 over main"), "{primary_text}");
     let primary = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
-    assert_eq!(primary["schema"], "arc-forks/2", "{primary}");
+    assert_eq!(primary["schema"], "arc-forks/3", "{primary}");
     assert_eq!(primary["forks"][0]["base_branch"], "main", "{primary}");
     assert_eq!(primary["forks"][0]["ahead"], 1, "{primary}");
 
@@ -2482,4 +2482,21 @@ fn fork_worktree_population_failure_reports_recovery() {
         .find_map(|line| line.trim().strip_prefix("adopt: "))
         .expect("adopt recovery");
     stdout(&mut repo.arc_shell(&repo.root, recovery));
+}
+
+#[test]
+fn sentinel_fork_json_uses_null_when_no_base_branch_is_known() {
+    let repo = Repo::new();
+    git(&repo.root, &["branch", "fork/branch-only"]);
+    git(&repo.root, &["checkout", "--detach"]);
+    let listed = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    assert_eq!(listed["schema"], "arc-forks/3");
+    assert!(listed["forks"][0]
+        .as_object()
+        .unwrap()
+        .contains_key("base_branch"));
+    assert!(listed["forks"][0]["base_branch"].is_null(), "{listed}");
+    assert!(listed["forks"][0]["ahead"].is_null(), "{listed}");
+    let text = stdout(repo.arc(&repo.root).args(["fork", "list"]));
+    assert!(text.contains("over unknown"), "{text}");
 }

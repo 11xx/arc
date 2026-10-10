@@ -868,7 +868,12 @@ fn render_forks(forks: &[crate::commands::fork::ForkEntry]) {
             };
             println!(
                 "  {}  {}  {} over {}{}{}",
-                fork.slug, fork.branch, ahead, fork.base_branch, facts, place
+                fork.slug,
+                fork.branch,
+                ahead,
+                fork.base_branch.as_deref().unwrap_or("unknown"),
+                facts,
+                place
             );
         }
     }

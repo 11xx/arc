@@ -429,7 +429,7 @@ fn displaced_claim(
     }
 }
 
-fn command_identity(ctx: &Ctx) -> Result<state::ClaimIdentity> {
+pub(super) fn command_identity(ctx: &Ctx) -> Result<state::ClaimIdentity> {
     let actor = ctx.actor.trim();
     if actor.is_empty() {
         bail!("claim/stage commands require a nonempty actor");

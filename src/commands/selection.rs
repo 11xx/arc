@@ -231,9 +231,7 @@ pub fn verify(ctx: &Ctx, candidate_id: &str, only: Option<&str>) -> Result<i32> 
         &scratch.path,
         selected.iter().map(|(name, gate)| (name.as_str(), *gate)),
     )?;
-    let hostname = hostname::get()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "unknown".into());
+    let hostname = super::local_hostname();
     let total = selected.len();
     let mut passed = 0;
     for (name, gate) in selected {

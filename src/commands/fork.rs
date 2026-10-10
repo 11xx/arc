@@ -466,7 +466,7 @@ pub fn list(ctx: &Ctx, json: bool) -> Result<i32> {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "schema": "arc-forks/2",
+                "schema": "arc-forks/3",
                 "forks": entries,
             }))?
         );
@@ -517,7 +517,11 @@ pub fn list(ctx: &Ctx, json: bool) -> Result<i32> {
         };
         println!(
             "  {}  {}  {} over {}{}",
-            entry.slug, state, ahead, entry.base_branch, facts
+            entry.slug,
+            state,
+            ahead,
+            entry.base_branch.as_deref().unwrap_or("unknown"),
+            facts
         );
         if let Some(intent) = &entry.intent {
             println!("    {intent}");
@@ -548,9 +552,9 @@ pub struct ForkEntry {
     /// lie about work that may exist.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ahead: Option<usize>,
-    /// The recorded or discovered integration branch. `"unknown"` means no
-    /// marker or safe repository-level discovery supplied a branch.
-    pub base_branch: String,
+    /// The recorded or discovered integration branch, or null when neither a
+    /// marker nor safe repository-level discovery supplied one.
+    pub base_branch: Option<String>,
     /// When the fork was opened, from the marker's own record. Absent for a
     /// branch a marker never recorded, where the fork's age is unknowable
     /// rather than zero.
@@ -693,7 +697,6 @@ fn describe(
     let ahead = base_branch
         .as_deref()
         .and_then(|base| crate::gitio::ahead_count(cwd, base, fork.branch()).ok());
-    let base_branch = base_branch.unwrap_or_else(|| "unknown".to_string());
     // Age comes from the marker's own name, which is when the fork was
     // journaled. A branch no marker recorded has no open time to report.
     let opened = marker
