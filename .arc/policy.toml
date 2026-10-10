@@ -127,6 +127,25 @@ paths = [
   "src/journal.rs",
   # Bundle import writes foreign artifact bodies and events into the journal.
   "src/journal_exchange.rs",
+  # Decides which ignored content counts as a disposable build artifact.
+  # Integration cleanup removes a checkout on this recognition, so a
+  # recognizer that over-matches deletes work nobody meant to discard.
+  "src/artifacts.rs",
+  # Resolves the integration shape, discard mode, and disposable rules a merge
+  # and its cleanup run under, and validates the operator constraints on them.
+  "src/style.rs",
+  # `accept` prepares and lands a transported change: it appends ledger
+  # events, and an observation error decides whether it reports success.
+  "src/commands/accept.rs",
+  # Binds an accept checkout to a change; recovery reads the binding back to
+  # decide which checkout a change owns.
+  "src/commands/accept_checkout.rs",
+  # Collects the effects and event ids `accept` reports, the evidence that
+  # decides whether a step succeeded.
+  "src/commands/accept_effects.rs",
+  # Decides which role values a write records as `Planned-by` and
+  # `Orchestrated-by` attribution in an append-only event.
+  "src/commands/roles.rs",
 ]
 
 # Roots inside which classification is closed: every tracked file under one of
@@ -192,4 +211,8 @@ acknowledged_safe = [
   # arc hook exits 0 unconditionally so it can never block a commit.
   "src/commands/rescue.rs",
   "src/commands/hooks.rs",
+  # Captures printed text so a coordinator can render one document. Callers
+  # embed the captured string in their own output; it is written to no event
+  # and read by no gate.
+  "src/operation_output.rs",
 ]
