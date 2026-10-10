@@ -53,7 +53,8 @@ SAY WHO YOU ARE (before the first write)
   identity. In that case arc records an actor nobody claimed:
   `<harness>:<session>` when both are known, else `git config user.name`.
   Either is assumed rather than declared, so it cannot be the independent
-  party to an approval.
+  party to an approval. A harness or session nobody established is left off a
+  journal event, never recorded as a word standing in for it.
   The ledger's append guard reads `require_declared_actor` from the invoking
   checkout when opening a store for a command that can record, including for
   repository-wide events with no change target. Queue integration opens it
@@ -2818,8 +2819,8 @@ SCHEMAS
     `arc-sandbox-diff/1`             arc sandbox diff --json
     `arc-replica-id/1`               arc replica id --json
     `arc-replica/2`                  arc replica status --json
-    `arc-journal-questions/3`        arc journal questions --json
-    `journal-discussion/4`           arc journal discussion --json
+    `arc-journal-questions/4`        arc journal questions --json
+    `journal-discussion/5`           arc journal discussion --json
     `journal-source/1`               arc journal source --json
     `arc-journal-filed/1`            arc journal filed --json
     `arc-journal-latest/1`           arc journal latest --json
@@ -2832,7 +2833,7 @@ SCHEMAS
     `arc-replica-event/3`            one event inside an arc-replica-bundle
     `arc-journal-bundle/2`           arc journal export / import
     `journal-events/2`               events.jsonl, streamed by arc journal events
-    `arc-journal-spool/1`            .arc/outbox/<ts>-<kind>-<topic>.json
+    `arc-journal-spool/2`            .arc/outbox/<ts>-<kind>-<topic>.json
     `arc-trailer-edits/1`            arc rewrite trailers --edits
 
   Imports accept `arc-bundle/5` and `arc-replica-bundle/2` alongside
@@ -2840,11 +2841,14 @@ SCHEMAS
   `arc-journal-bundle/1`.
   Their absent model provenance stays absent.
 
-  An event line carries the lowest version that describes it:
-  `journal-events/2` marks an `evidence` event, and every other event is
-  `journal-events/1`. A reader accepts both. It skips an event it does not
-  know, `journal doctor` reports that event as `unknown-jsonl-event`, and an
-  import refuses a bundle carrying one.
+  A journal event omits the harness or session key nobody established.
+  `journal-events/2` covers that and the `evidence` kind; `journal-events/1`
+  events, which carry both keys, are read alongside it, and a value of
+  `unknown` in either reads as absent. A journal bundle and a journal spool
+  (`arc-journal-spool/1` or current) carry events of either version. A reader
+  of an older version skips an event it does not know, `journal doctor`
+  reports that event as `unknown-jsonl-event`, and an import refuses a bundle
+  carrying one.
 
   Private successor preparation uses complete Markdown at
   `.transitions/<successor>`, retained until source retirement. These files

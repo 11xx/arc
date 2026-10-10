@@ -392,7 +392,7 @@ fn journal_log_writes_typed_jsonl_events() {
     let events = journal_events(&dir);
     assert_eq!(events.len(), 3);
     for event in &events {
-        assert_eq!(event["schema"], "journal-events/1");
+        assert_eq!(event["schema"], "journal-events/2");
         assert_eq!(event["harness"], "test");
         assert_eq!(event["session"], "session-a");
         assert_eq!(event["topic"], "typed");
@@ -5326,7 +5326,7 @@ fn journal_evidence_after_a_position_does_not_disturb_the_position_block() {
 }
 
 #[test]
-fn journal_events_carry_the_lowest_version_that_describes_them() {
+fn every_journal_event_carries_the_current_version() {
     let repo = Repo::new();
     let file = evidence_artifact(&repo, "todo", "evidence-versions", "# Versions\n");
     repo.arc(&repo.root)
@@ -5350,9 +5350,9 @@ fn journal_events_carry_the_lowest_version_that_describes_them() {
     assert_eq!(
         versions,
         [
-            ("note", "journal-events/1"),
+            ("note", "journal-events/2"),
             ("evidence", "journal-events/2"),
-            ("log", "journal-events/1"),
+            ("log", "journal-events/2"),
         ]
         .map(|(kind, schema)| (kind.to_string(), schema.to_string())),
     );
@@ -6016,7 +6016,7 @@ fn journal_discussion_summarizes_stances_participants_and_resolution() {
             repo.arc(&repo.root)
                 .args(["journal", "discussion", &file, "--json"]),
         );
-    assert_eq!(summary["schema"], "journal-discussion/4");
+    assert_eq!(summary["schema"], "journal-discussion/5");
     assert_eq!(summary["positions"], 3);
     assert_eq!(summary["stances"]["for"], 2);
     assert_eq!(summary["stances"]["against"], 1);
@@ -8283,7 +8283,7 @@ fn journal_questions_lists_what_is_waiting_on_a_person_with_its_branches() {
         repo.arc(&repo.root)
             .args(["journal", "questions", "--json"]),
     );
-    assert_eq!(value["schema"], "arc-journal-questions/3");
+    assert_eq!(value["schema"], "arc-journal-questions/4");
     assert_eq!(value["questions"][0]["question"], question.as_str());
     assert_eq!(value["questions"][0]["placement"], "opening");
     assert_eq!(value["questions"][0]["heading"], "Paths or properties?");
@@ -8365,7 +8365,7 @@ fn journal_suggest_leaves_the_question_open_and_moves_no_tally() {
         repo.arc(&repo.root)
             .args(["journal", "questions", "--json"]),
     );
-    assert_eq!(queue["schema"], "arc-journal-questions/3");
+    assert_eq!(queue["schema"], "arc-journal-questions/4");
     let rows = queue["questions"].as_array().unwrap();
     assert_eq!(rows.len(), 1, "{queue}");
     let suggestions = rows[0]["suggestions"].as_array().unwrap();
@@ -8380,7 +8380,7 @@ fn journal_suggest_leaves_the_question_open_and_moves_no_tally() {
         repo.arc(&repo.root)
             .args(["journal", "discussion", &file, "--json"]),
     );
-    assert_eq!(after["schema"], "journal-discussion/4");
+    assert_eq!(after["schema"], "journal-discussion/5");
     assert_eq!(before["positions"], after["positions"]);
     assert_eq!(before["stances"], after["stances"]);
     assert_eq!(after["questions"][0]["suggestions"][0]["option"], "paths");
@@ -11462,7 +11462,7 @@ fn a_question_records_whether_anyone_was_asked() {
         repo.arc(&repo.root)
             .args(["journal", "questions", "--json"]),
     );
-    assert_eq!(queue["schema"], "arc-journal-questions/3", "{queue}");
+    assert_eq!(queue["schema"], "arc-journal-questions/4", "{queue}");
     // The boundary is published, because `unknown` cannot be read without it.
     assert!(queue["question_delivery"]["since"].is_string(), "{queue}");
     assert!(
@@ -11729,7 +11729,7 @@ fn spool_parks_a_write_in_the_repository() {
     assert!(name.ends_with("-todo-sandboxed.json"), "{name}");
     let file: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(outbox(&repo).join(name)).unwrap()).unwrap();
-    assert_eq!(file["schema"], "arc-journal-spool/1", "{file}");
+    assert_eq!(file["schema"], "arc-journal-spool/2", "{file}");
     assert_eq!(
         file["body"], "# Sandboxed\n\nwhat the round deferred\n",
         "{file}"

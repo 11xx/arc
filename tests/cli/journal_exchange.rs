@@ -624,6 +624,96 @@ fn previous_journal_bundles_import_without_model_provenance() {
     assert_eq!(bundle["schema"], "arc-journal-bundle/2");
 }
 
+/// An event without a harness or session travels in a journal bundle and
+/// arrives without them.
+#[test]
+fn a_journal_bundle_carries_events_without_harness_or_session() {
+    let source = Repo::new();
+    let recipient = Repo::new();
+    pair(&source, &recipient, "origin", "peer");
+    let out = stdout(
+        source
+            .arc(&source.root)
+            .env_remove("ARC_HARNESS")
+            .env_remove("ARC_SESSION")
+            .args([
+                "journal",
+                "note",
+                "carried",
+                "--kind",
+                "note",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Carried\n"),
+    );
+    let file = Path::new(out.lines().last().unwrap().trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let path = bundle_file(&source, "carried");
+    export(&source, &[&file], &path);
+    let bundle: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(bundle["schema"], "arc-journal-bundle/2", "{bundle}");
+    let carried = &bundle["artifacts"][0]["events"][0];
+    assert_eq!(carried["schema"], "journal-events/2", "{carried}");
+    for key in ["harness", "session"] {
+        assert!(carried.get(key).is_none(), "{key}: {carried}");
+    }
+
+    let result = import(&recipient, &path, false);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let arrived = events_for(&journal_dir(&recipient), &file);
+    assert_eq!(arrived.len(), 1, "{arrived:?}");
+    for key in ["harness", "session"] {
+        assert!(arrived[0].get(key).is_none(), "{key}: {}", arrived[0]);
+    }
+}
+
+/// A bundle verifies against the events it carries as arc serializes them, so
+/// an event recorded under the previous version travels exactly as recorded:
+/// the bundle of an older arc and the bundle of this one agree on its bytes.
+#[test]
+fn a_journal_bundle_relays_a_version_one_event_as_recorded() {
+    let source = Repo::new();
+    let recipient = Repo::new();
+    pair(&source, &recipient, "origin", "peer");
+    let file = write_artifact(&source, "relayed", "note", "# Relayed\n");
+    let events = journal_dir(&source).join("events.jsonl");
+    let rewritten: Vec<String> = journal_events_dir(&journal_dir(&source))
+        .lines()
+        .map(|line| {
+            let mut event: serde_json::Value = serde_json::from_str(line).unwrap();
+            if event["file"] == file.as_str() {
+                event["schema"] = "journal-events/1".into();
+                event["harness"] = "unknown".into();
+                event["session"] = "unknown".into();
+            }
+            event.to_string()
+        })
+        .collect();
+    fs::write(&events, rewritten.join("\n") + "\n").unwrap();
+    let recorded = events_for(&journal_dir(&source), &file).remove(0);
+
+    let path = bundle_file(&source, "relayed");
+    export(&source, &[&file], &path);
+    let bundle: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(bundle["artifacts"][0]["events"][0], recorded, "{bundle}");
+
+    let result = import(&recipient, &path, false);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(events_for(&journal_dir(&recipient), &file), vec![recorded]);
+}
+
 #[test]
 fn a_replica_checkpoint_returns_with_provenance_and_is_idempotent() {
     let a = Repo::new();

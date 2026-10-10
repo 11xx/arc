@@ -3,7 +3,8 @@
 //! The ledger is authoritative and gating; the journal is advisory and
 //! contextual. Artifacts stay freeform Markdown and remain readable and
 //! writable by a tool-less agent; the append-only event log is versioned
-//! JSONL (`journal-events/2` in `events.jsonl`). `arc journal` only encodes
+//! JSONL (`journal-events/2` in `events.jsonl`; `journal-events/1` is still
+//! read). `arc journal` only encodes
 //! the invariants that drift in practice — directory resolution, timestamped
 //! filenames, position identity and lifecycle, and journal event semantics.
 //! It is a convenience and
@@ -2906,7 +2907,11 @@ fn exchange_claim_contest(
     })
 }
 
-const SPOOL_SCHEMA: &str = "arc-journal-spool/1";
+const SPOOL_SCHEMA: &str = "arc-journal-spool/2";
+
+/// The spool version whose events always carried a harness and session. Its
+/// writes are still filed.
+const SPOOL_SCHEMA_V1: &str = "arc-journal-spool/1";
 const OUTBOX_DIR: &str = "outbox";
 
 /// One journal write held in the repository for a later caller to file.
@@ -3147,7 +3152,7 @@ fn promote_outbox(ctx: &Ctx, paths: &[PathBuf]) -> Result<()> {
                 continue;
             }
         };
-        match promote_one(ctx, &journal, &spooled, &promoter) {
+        match promote_one(ctx, &journal, &spooled, promoter.as_deref()) {
             Ok(filed) => {
                 // The spool file is the only copy until the event is appended,
                 // so it is removed last and never before.
@@ -3222,7 +3227,7 @@ fn read_spooled(path: &Path) -> Result<SpooledWrite> {
         std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
     let spooled: SpooledWrite = serde_json::from_str(&text)
         .with_context(|| format!("malformed spooled write in {}", path.display()))?;
-    if spooled.schema != SPOOL_SCHEMA {
+    if spooled.schema != SPOOL_SCHEMA && spooled.schema != SPOOL_SCHEMA_V1 {
         bail!(
             "spooled write in {} is {}, not {SPOOL_SCHEMA}",
             path.display(),
@@ -3243,7 +3248,7 @@ fn promote_one(
     ctx: &Ctx,
     journal: &Path,
     spooled: &SpooledWrite,
-    promoter: &str,
+    promoter: Option<&str>,
 ) -> Result<String> {
     let mut filed = String::new();
     // The identity is carried verbatim: promotion records who filed the write,
@@ -3260,16 +3265,16 @@ fn promote_one(
         event.file = Some(filename);
         filed = format!(" -> {}", path.display());
     }
-    event.promoted_by = Some(promoter.to_string());
+    event.promoted_by = promoter.map(str::to_string);
     append_event(ctx, journal, &event)?;
     Ok(filed)
 }
 
 /// Who is filing a spooled write. A declared actor names them; without one,
 /// the harness is all that is known, and naming it is better than a promotion
-/// that says nobody carried it.
-fn promoting_actor(ctx: &Ctx) -> String {
-    declared_actor(ctx).unwrap_or_else(|| identity(ctx).0)
+/// that says nobody carried it. With neither, nobody is named.
+fn promoting_actor(ctx: &Ctx) -> Option<String> {
+    declared_actor(ctx).or_else(|| identity(ctx).0)
 }
 
 /// Whether the journal directory can be written, and where writes go when it
@@ -3464,8 +3469,8 @@ fn rebind(ctx: &Ctx, from: &str) -> Result<i32> {
             event: "rebound".to_string(),
             anchor: anchor.clone(),
             previous_anchor: Some(previous.clone()),
-            harness: Some(harness),
-            session: Some(session),
+            harness,
+            session,
         },
     )?;
 
@@ -3879,8 +3884,8 @@ impl Amendments {
             .field(id, "model", event.model.as_deref())
             .filter(|model| !model.is_empty())
         {
-            Some(model) => format!("{model} via {}", event.harness),
-            None => event.harness.clone(),
+            Some(model) => model_label(model, event.harness()),
+            None => event.harness().unwrap_or(UNATTRIBUTED).to_string(),
         }
     }
 }
@@ -4566,20 +4571,11 @@ fn valid_topic(topic: &str) -> bool {
     !prev_hyphen // guards a trailing hyphen
 }
 
-fn identity(ctx: &Ctx) -> (String, String) {
-    let harness = ctx
-        .harness
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("unknown")
-        .to_string();
-    let session = ctx
-        .session
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("unknown")
-        .to_string();
-    (harness, session)
+/// The harness and session an invocation declared, each absent when nobody
+/// established it. Nothing stands in for a missing one.
+fn identity(ctx: &Ctx) -> (Option<String>, Option<String>) {
+    let established = |value: &Option<String>| value.clone().filter(|value| !value.is_empty());
+    (established(&ctx.harness), established(&ctx.session))
 }
 
 /// The acting identity when somebody declared one.
@@ -4599,19 +4595,25 @@ fn declared_actor(ctx: &Ctx) -> Option<String> {
 /// A model is the primary attribution wherever one is known, because the
 /// record exists to say which model argued what. Without one, a declared actor
 /// is a person acting directly and is named as such; with neither, only the
-/// harness is known.
-fn attribution(ctx: &Ctx, harness: &str) -> String {
+/// harness is known, and with no harness either nobody is named.
+fn attribution(ctx: &Ctx, harness: Option<&str>) -> Option<String> {
     match ctx
         .resolve_model()
         .model
         .as_deref()
         .filter(|value| !value.is_empty())
     {
-        Some(model) => format!("{model} via {harness}"),
-        None => match declared_actor(ctx) {
-            Some(actor) => actor,
-            None => harness.to_string(),
-        },
+        Some(model) => Some(model_label(model, harness)),
+        None => declared_actor(ctx).or_else(|| harness.map(str::to_string)),
+    }
+}
+
+/// The parenthetical of a block heading: who wrote it when that is known, and
+/// when.
+fn heading_stamp(who: Option<String>, ts: &str) -> String {
+    match who {
+        Some(who) => format!("{who}, {ts}"),
+        None => ts.to_string(),
     }
 }
 
@@ -5697,8 +5699,10 @@ pub(crate) struct FiledItem {
 
 #[derive(Serialize)]
 pub(crate) struct FiledSession {
-    harness: String,
-    session: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    harness: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session: Option<String>,
     model: Option<String>,
     pub(crate) items: Vec<FiledItem>,
 }
@@ -5745,7 +5749,7 @@ pub(crate) fn filed_report_in(
         Err(_) => Vec::new(),
     };
     let now = Utc::now();
-    let mut groups: std::collections::BTreeMap<(String, String), FiledSession> =
+    let mut groups: std::collections::BTreeMap<(Option<String>, Option<String>), FiledSession> =
         std::collections::BTreeMap::new();
     let mut seen = HashSet::new();
     let mut stale_count = 0;
@@ -5764,7 +5768,7 @@ pub(crate) fn filed_report_in(
         }
         let sources = artifact_sources(&events, file);
         if session.is_some_and(|session| {
-            event.session != session
+            event.session() != Some(session)
                 && !sources
                     .iter()
                     .any(|source| source.source.session == session)
@@ -5835,10 +5839,13 @@ pub(crate) fn filed_report_in(
             fate
         };
         let group = groups
-            .entry((event.harness.clone(), event.session.clone()))
+            .entry((
+                event.harness().map(str::to_string),
+                event.session().map(str::to_string),
+            ))
             .or_insert_with(|| FiledSession {
-                harness: event.harness.clone(),
-                session: event.session.clone(),
+                harness: event.harness().map(str::to_string),
+                session: event.session().map(str::to_string),
                 model: event.model.clone(),
                 items: Vec::new(),
             });
@@ -5881,9 +5888,8 @@ fn filed(ctx: &Ctx, session: Option<&str>, stale_days: u64, json: bool) -> Resul
     } else {
         for group in &report.sessions {
             println!(
-                "{}/{} ({})",
-                group.harness,
-                group.session,
+                "{} ({})",
+                session_label(group.harness.as_deref(), group.session.as_deref()),
                 group.model.as_deref().unwrap_or("unknown")
             );
             for item in &group.items {
@@ -6003,12 +6009,12 @@ pub(crate) fn recent_sessions(
         .collect();
     let mut filed = HashSet::new();
     for (event, created) in events.iter().zip(&creations) {
-        if present(&event.harness).is_none() || present(&event.session).is_none() {
+        let (Some(harness), Some(session)) = (event.harness(), event.session()) else {
             continue;
-        }
+        };
         let row = rows
-            .entry((event.harness.clone(), event.session.clone()))
-            .or_insert_with(|| RecentSession::new(&event.harness, &event.session));
+            .entry((harness.to_string(), session.to_string()))
+            .or_insert_with(|| RecentSession::new(harness, session));
         row.observe(event.timestamp(), event.model.as_deref());
         if *created {
             if let Some(file) = event
@@ -6035,8 +6041,8 @@ pub(crate) fn recent_sessions(
             continue;
         }
         let mut named = Vec::new();
-        if *created {
-            named.push((event.harness.as_str(), event.session.as_str()));
+        if let (true, Some(harness), Some(session)) = (*created, event.harness(), event.session()) {
+            named.push((harness, session));
         }
         if let Some(source) = &event.source {
             named.push((source.harness.as_str(), source.session.as_str()));
@@ -6204,8 +6210,8 @@ fn position(
         None => String::new(),
     };
     let heading = format!(
-        "### Position {position_id} ({}, {ts}){under}{}",
-        attribution(ctx, &harness),
+        "### Position {position_id} ({}){under}{}",
+        heading_stamp(attribution(ctx, harness.as_deref()), &ts),
         if archived { " [archived]" } else { "" }
     );
     let position_body = match stance {
@@ -6267,13 +6273,12 @@ fn evidence(ctx: &Ctx, filename: &str, body_file: &str) -> Result<i32> {
     let evidence_id = format!("evd-{}", ulid::Ulid::new().to_string().to_ascii_lowercase());
     let (harness, _) = identity(ctx);
     let heading = format!(
-        "### Evidence {evidence_id} ({}, {ts})",
-        attribution(ctx, &harness)
+        "### Evidence {evidence_id} ({})",
+        heading_stamp(attribution(ctx, harness.as_deref()), &ts)
     );
     append_block(&path, &heading, &body)?;
 
     let mut event = JournalEvent::base(ctx, now, &topic, "evidence");
-    event.schema = JOURNAL_SCHEMA_EVIDENCE.to_string();
     event.file = Some(filename.to_string());
     event.evidence_id = Some(evidence_id);
     event.storage_at_write = Some("hot".to_string());
@@ -6650,7 +6655,7 @@ fn answer(
     let now = Utc::now();
     let ts = now.to_rfc3339_opts(SecondsFormat::Nanos, true);
     let (harness, _) = identity(ctx);
-    let who = attribution(ctx, &harness);
+    let who = heading_stamp(attribution(ctx, harness.as_deref()), &ts);
     // A standing suggestion is advice the answerer may follow or leave. The
     // answer is still theirs to give; naming what it departed from keeps a
     // reader from reconstructing the standing advice out of branch prose.
@@ -6664,9 +6669,9 @@ fn answer(
         .filter(|suggestion| chosen_option != Some(suggestion.option.as_str()))
         .collect();
     let heading = match chosen {
-        Chosen::Offered(option) => format!("### Answer {question_id} = {option} ({who}, {ts})"),
+        Chosen::Offered(option) => format!("### Answer {question_id} = {option} ({who})"),
         Chosen::OffMenu(answer) => {
-            format!("### Answer {question_id} = (none offered) {answer} ({who}, {ts})")
+            format!("### Answer {question_id} = (none offered) {answer} ({who})")
         }
     };
     append_block(&path, &heading, &body)?;
@@ -6896,8 +6901,10 @@ pub(crate) struct QuestionDelivery {
     handle: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) actor: Option<String>,
-    harness: String,
-    session: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    harness: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     session_link: Option<String>,
     ts: String,
@@ -6921,8 +6928,8 @@ fn question_deliveries(
             to: event.delivered_to.clone().unwrap_or_default(),
             handle: event.handle.clone(),
             actor: event.actor.clone(),
-            harness: event.harness.clone(),
-            session: event.session.clone(),
+            harness: event.harness().map(str::to_string),
+            session: event.session().map(str::to_string),
             session_link: event.session_link.clone(),
             ts: event.ts.clone(),
         })
@@ -7170,7 +7177,7 @@ fn correct(
     if field == "model" {
         let session = parsed
             .record(&events, filename)
-            .map(|event| event.session.as_str());
+            .and_then(|event| event.session());
         if let Some(defect) = crate::coordinate::model_defect(value, session)
             .or_else(|| crate::coordinate::model_defect(value, ctx.session.as_deref()))
         {
@@ -7189,8 +7196,8 @@ fn correct(
     let (harness, _) = identity(ctx);
     let amendment_id = format!("cor-{}", ulid::Ulid::new().to_string().to_ascii_lowercase());
     let heading = format!(
-        "### Correction {amendment_id} ({}, {ts})",
-        attribution(ctx, &harness)
+        "### Correction {amendment_id} ({})",
+        heading_stamp(attribution(ctx, harness.as_deref()), &ts)
     );
     let mut block = format!("Target: {target}\nField: {field}\nValue: {value}\n");
     if let Some(note) = note {
@@ -7255,8 +7262,8 @@ fn retract(ctx: &Ctx, filename: &str, target: &str, body_file: &str) -> Result<i
     let (harness, _) = identity(ctx);
     let amendment_id = format!("ret-{}", ulid::Ulid::new().to_string().to_ascii_lowercase());
     let heading = format!(
-        "### Retraction {amendment_id} ({}, {ts})",
-        attribution(ctx, &harness)
+        "### Retraction {amendment_id} ({})",
+        heading_stamp(attribution(ctx, harness.as_deref()), &ts)
     );
     append_block(&path, &heading, &format!("Target: {target}\n\n{body}"))?;
 
@@ -7369,12 +7376,13 @@ fn suggestions_from(events: &[JournalEvent], file: &str, question: &str) -> Vec<
 
 fn suggestion_identity(event: &JournalEvent) -> String {
     match event.model.as_deref().filter(|value| !value.is_empty()) {
-        Some(model) => format!("{model} via {}", event.harness),
+        Some(model) => model_label(model, event.harness()),
         None => event
             .actor
             .clone()
             .filter(|actor| !actor.trim().is_empty())
-            .unwrap_or_else(|| event.harness.clone()),
+            .or_else(|| event.harness().map(str::to_string))
+            .unwrap_or_else(|| UNATTRIBUTED.to_string()),
     }
 }
 
@@ -7423,7 +7431,7 @@ fn questions(ctx: &Ctx, json: bool) -> Result<i32> {
         println!(
             "{}",
             serde_json::to_string_pretty(&OpenQuestions {
-                schema: "arc-journal-questions/3",
+                schema: "arc-journal-questions/4",
                 dir: dir.display().to_string(),
                 question_delivery: capability(&events, QUESTION_DELIVERY_CAPABILITY),
                 questions: open,
@@ -7769,20 +7777,36 @@ fn events(ctx: &Ctx, limit: Option<usize>) -> Result<i32> {
     Ok(0)
 }
 
-/// The version an event carries when every reader of the format knows its
-/// kind and shape.
-const JOURNAL_SCHEMA: &str = "journal-events/1";
-/// The version of an event whose kind a reader of `journal-events/1` does not
-/// know. A line carries the lowest version that describes it, so an older
-/// reader keeps every event it knows and skips only these.
-const JOURNAL_SCHEMA_EVIDENCE: &str = "journal-events/2";
+/// The version every event is written under. It names the optional harness and
+/// session keys and every event kind, `evidence` included.
+const JOURNAL_SCHEMA: &str = "journal-events/2";
+
+/// The previous version, whose events carry both identity keys. Its events
+/// remain readable, and a literal `unknown` in either key reads as absent.
+const JOURNAL_SCHEMA_V1: &str = "journal-events/1";
+
+/// Whether `schema` names a version of the event format this reader accepts.
+fn accepted_event_schema(schema: &str) -> bool {
+    schema == JOURNAL_SCHEMA || schema == JOURNAL_SCHEMA_V1
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct JournalEvent {
     schema: String,
     ts: String,
-    harness: String,
-    session: String,
+    /// The harness the invocation ran under, when one was established. An
+    /// event nobody could attribute to a harness omits the key rather than
+    /// naming one, so a reader never mistakes arc's gap for a declared value.
+    /// The key is held as recorded, a `journal-events/1` placeholder included,
+    /// so an event arc only relays is relayed unchanged; read it through
+    /// [`JournalEvent::harness`].
+    #[serde(rename = "harness", default, skip_serializing_if = "Option::is_none")]
+    recorded_harness: Option<String>,
+    /// The session the invocation ran in, when one was established; omitted
+    /// when not, and held as recorded, for the same reasons as the harness.
+    /// Read it through [`JournalEvent::session`].
+    #[serde(rename = "session", default, skip_serializing_if = "Option::is_none")]
+    recorded_session: Option<String>,
     /// Who acted, when somebody declared it. A journal event records the
     /// identity it was given rather than choosing among them: a person acting
     /// directly has an actor and no model, and an event carrying neither says
@@ -7844,7 +7868,7 @@ pub(crate) struct JournalEvent {
     decision: Option<String>,
     /// The project-anchor revision checked by a `verified` event. Optional so
     /// an event written before verification stamps existed, or on an unborn
-    /// anchor, remains valid `journal-events/1` input.
+    /// anchor, remains valid journal event input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     verified_revision: Option<String>,
     /// Which checkout `verified_revision` names, when it is not the project
@@ -7860,7 +7884,7 @@ pub(crate) struct JournalEvent {
     /// stable against a label that follows a directory rename.
     ///
     /// Optional, like the fields below it, so an events file written before
-    /// cross-journal references existed remains valid `journal-events/1`
+    /// cross-journal references existed remains valid journal event
     /// input. The schema version marks what a reader must accept, and a
     /// reader that accepts everything it accepted before has not changed.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -7881,14 +7905,14 @@ pub(crate) struct JournalEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<String>,
     /// Stable reply target for a position. Optional so pre-ID journal events
-    /// remain valid `journal-events/1` input.
+    /// remain valid journal event input.
     #[serde(skip_serializing_if = "Option::is_none")]
     position_id: Option<String>,
     /// Stable ID of an `evidence` event and the block its heading carries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     evidence_id: Option<String>,
     /// Stance explicitly written by `journal position --stance`. Optional so
-    /// position events written before the flag remain valid `journal-events/1`
+    /// position events written before the flag remain valid journal event
     /// input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     stance: Option<String>,
@@ -7901,7 +7925,7 @@ pub(crate) struct JournalEvent {
     /// Stable ID of a question. Set on the `question` event that opens one, on
     /// an `answer` event that settles it, and on a `position` event argued
     /// under one of its options. Optional, so every event written before
-    /// questions existed remains valid `journal-events/1` input — the same
+    /// questions existed remains valid journal event input — the same
     /// additive shape `position_id` took.
     #[serde(skip_serializing_if = "Option::is_none")]
     question_id: Option<String>,
@@ -8250,8 +8274,8 @@ impl JournalEvent {
         Self {
             schema: JOURNAL_SCHEMA.to_string(),
             ts: now.to_rfc3339_opts(SecondsFormat::Secs, true),
-            harness,
-            session,
+            recorded_harness: harness,
+            recorded_session: session,
             actor: declared_actor(ctx),
             on_behalf_of: ctx.on_behalf_of.clone(),
             session_link: ctx.session_link.clone(),
@@ -8353,6 +8377,16 @@ impl JournalEvent {
         }
     }
 
+    /// The harness this event records, absent when none was established.
+    pub(crate) fn harness(&self) -> Option<&str> {
+        self.recorded_harness.as_deref().and_then(present)
+    }
+
+    /// The session this event records, absent when none was established.
+    pub(crate) fn session(&self) -> Option<&str> {
+        self.recorded_session.as_deref().and_then(present)
+    }
+
     fn timestamp(&self) -> Option<DateTime<Utc>> {
         DateTime::parse_from_rfc3339(&self.ts)
             .ok()
@@ -8360,7 +8394,7 @@ impl JournalEvent {
     }
 
     pub(crate) fn known(&self) -> bool {
-        if ![JOURNAL_SCHEMA, JOURNAL_SCHEMA_EVIDENCE].contains(&self.schema.as_str())
+        if !accepted_event_schema(&self.schema)
             || self.timestamp().is_none()
             || !valid_topic(&self.topic)
         {
@@ -8970,8 +9004,8 @@ fn ensure_bound(ctx: &Ctx, dir: &Path) -> Result<()> {
             event: "bound".to_string(),
             anchor: anchor.display().to_string(),
             previous_anchor: recorded,
-            harness: Some(harness),
-            session: Some(session),
+            harness,
+            session,
         },
     )
 }
@@ -9302,14 +9336,12 @@ fn event_message(event: &JournalEvent) -> String {
 }
 
 fn render_event(event: &JournalEvent) -> String {
-    let mut line = format!(
-        "- {} {} {} {}: {}",
-        event.ts,
-        event.harness,
-        event.session,
-        event.topic,
-        event_message(event)
-    );
+    let mut line = format!("- {}", event.ts);
+    for identity in [event.harness(), event.session()].into_iter().flatten() {
+        line.push(' ');
+        line.push_str(identity);
+    }
+    line.push_str(&format!(" {}: {}", event.topic, event_message(event)));
     if event.event == "note" {
         if let Some(file) = &event.file {
             line.push_str(&format!(" ({file})"));
@@ -9500,31 +9532,31 @@ pub(crate) enum ClaimHistory {
 
 /// The identity a claim event records: whoever the invocation represented,
 /// falling back to whoever ran it. A lead claiming for an executor records
-/// both, and it is the executor who holds the claim.
-fn claim_owner(event: &JournalEvent) -> ClaimIdentity {
-    ClaimIdentity {
-        actor: event
-            .on_behalf_of
-            .clone()
-            .or_else(|| event.actor.clone())
-            .unwrap_or_else(|| "unknown".to_string()),
-        harness: event.harness.clone(),
-        session: event.session.clone(),
-    }
+/// both, and it is the executor who holds the claim. An event that leaves out
+/// any of the three names no holder, so it is no claim.
+fn claim_owner(event: &JournalEvent) -> Option<ClaimIdentity> {
+    Some(ClaimIdentity {
+        actor: event.on_behalf_of.clone().or_else(|| event.actor.clone())?,
+        harness: event.harness()?.to_string(),
+        session: event.session()?.to_string(),
+    })
 }
 
-/// The caller's own claim identity, in the shape ownership is compared in.
-fn caller_claim_identity(ctx: &Ctx) -> ClaimIdentity {
+/// The actor a claim made by this invocation is held under: the subject it
+/// represents, else the declared actor.
+fn claim_actor(ctx: &Ctx) -> Option<String> {
+    ctx.on_behalf_of.clone().or_else(|| declared_actor(ctx))
+}
+
+/// The caller's own claim identity, in the shape ownership is compared in,
+/// when all three halves are established.
+fn caller_claim_identity(ctx: &Ctx) -> Option<ClaimIdentity> {
     let (harness, session) = identity(ctx);
-    ClaimIdentity {
-        actor: ctx
-            .on_behalf_of
-            .clone()
-            .or_else(|| declared_actor(ctx))
-            .unwrap_or_else(|| "unknown".to_string()),
-        harness,
-        session,
-    }
+    Some(ClaimIdentity {
+        actor: claim_actor(ctx)?,
+        harness: harness?,
+        session: session?,
+    })
 }
 
 /// A blocker reference in the ledger's typed shape. A reference naming an
@@ -9604,6 +9636,9 @@ fn artifact_claims(events: &[JournalEvent], file: &str) -> Vec<ArtifactClaim> {
             continue;
         };
         if event.event == "claim-set" {
+            let Some(owner) = claim_owner(event) else {
+                continue;
+            };
             // A displaced claim ends here. Nothing else would close it, and a
             // lease nobody can renew that still reads as held would occupy the
             // artifact forever.
@@ -9626,7 +9661,7 @@ fn artifact_claims(events: &[JournalEvent], file: &str) -> Vec<ArtifactClaim> {
                 file: file.to_string(),
                 state: ClaimState {
                     claim_id: claim_id.to_string(),
-                    owner: claim_owner(event),
+                    owner,
                     ttl_seconds: event.ttl_seconds.unwrap_or(DEFAULT_ARTIFACT_CLAIM_TTL),
                     // Artifact work is not staged against per-stage budgets:
                     // its lease is the whole of what expires.
@@ -9995,17 +10030,21 @@ pub(crate) fn artifact_subject(cwd: &Path, reference: &str) -> Result<Option<Str
 /// Ownership is compared on all three, so a claim recorded under a fallback
 /// would be a lease nobody can prove they hold and anybody can appear to.
 fn require_claim_identity(ctx: &Ctx) -> Result<ClaimIdentity> {
-    let owner = caller_claim_identity(ctx);
-    if owner.actor == "unknown" {
+    let (harness, session) = identity(ctx);
+    let Some(actor) = claim_actor(ctx) else {
         bail!("claiming an artifact requires a declared actor (ARC_ACTOR or --actor)");
-    }
-    if owner.harness == "unknown" {
+    };
+    let Some(harness) = harness else {
         bail!("claiming an artifact requires a declared harness (ARC_HARNESS or --harness)");
-    }
-    if owner.session == "unknown" {
+    };
+    let Some(session) = session else {
         bail!("claiming an artifact requires a declared session (ARC_SESSION or --session)");
-    }
-    Ok(owner)
+    };
+    Ok(ClaimIdentity {
+        actor,
+        harness,
+        session,
+    })
 }
 
 fn print_artifact_claim_conflict(message: &str, claim: &ArtifactClaim, now: DateTime<Utc>) {
@@ -10384,8 +10423,8 @@ fn lanes_from_journal(events: &[JournalEvent], now: DateTime<Utc>) -> Vec<LaneEn
 
     let mut last_activity: HashMap<LaneOwner, DateTime<Utc>> = HashMap::new();
     for event in events {
-        if let Some(timestamp) = event.timestamp() {
-            last_activity.insert(event_owner(event), timestamp);
+        if let (Some(owner), Some(timestamp)) = (event_owner(event), event.timestamp()) {
+            last_activity.insert(owner, timestamp);
         }
     }
     let mut active: HashMap<String, ActiveLane> = HashMap::new();
@@ -10414,7 +10453,9 @@ fn lanes_from_journal(events: &[JournalEvent], now: DateTime<Utc>) -> Vec<LaneEn
         };
         match marker {
             LaneMarker::Opened { ttl, scope, status } => {
-                let owner = event_owner(event);
+                let Some(owner) = event_owner(event) else {
+                    continue;
+                };
                 active.retain(|_, lane| lane.owner != owner);
                 active.insert(
                     event.topic.clone(),
@@ -10650,12 +10691,12 @@ fn render_lanes(lanes: &[LaneEntry], now: DateTime<Utc>) {
     }
 }
 
-/// The owner a recorded event belongs to.
-fn event_owner(event: &JournalEvent) -> LaneOwner {
-    LaneOwner {
-        harness: event.harness.clone(),
-        session: event.session.clone(),
-    }
+/// The owner a recorded event belongs to, when it names both halves.
+fn event_owner(event: &JournalEvent) -> Option<LaneOwner> {
+    Some(LaneOwner {
+        harness: event.harness()?.to_string(),
+        session: event.session()?.to_string(),
+    })
 }
 
 /// The caller's own lane identity. Both halves must be declared: an undeclared
@@ -10663,12 +10704,12 @@ fn event_owner(event: &JournalEvent) -> LaneOwner {
 /// alone, which is exactly the collision the owner pair exists to prevent.
 fn require_lane_owner(ctx: &Ctx) -> Result<LaneOwner> {
     let (harness, session) = identity(ctx);
-    if session == "unknown" {
+    let Some(session) = session else {
         bail!("journal lane requires a session identity (--session or ARC_SESSION)");
-    }
-    if harness == "unknown" {
+    };
+    let Some(harness) = harness else {
         bail!("journal lane requires a harness identity (--harness or ARC_HARNESS)");
-    }
+    };
     Ok(LaneOwner { harness, session })
 }
 
@@ -10976,8 +11017,10 @@ pub(crate) struct VerificationStamp {
     pub(crate) on_behalf_of: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) model: Option<String>,
-    pub(crate) harness: String,
-    pub(crate) session: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) harness: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) session: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) session_link: Option<String>,
     /// `Some(false)` is current, `Some(true)` is moved, and `None` is unknown.
@@ -11614,12 +11657,13 @@ pub(crate) struct RecordedIdentity {
     pub(crate) model: Option<String>,
 }
 
-/// A harness or session arc could not read was recorded as the literal
-/// `unknown`. That is an absence, and a reader is told so rather than shown a
-/// word that reads like a name.
-fn present(value: &str) -> Option<String> {
+/// A harness or session that is blank, or the literal `unknown` a
+/// `journal-events/1` writer recorded for one it could not read, is an
+/// absence, and a reader is told so rather than shown a word that reads like
+/// a name.
+fn present(value: &str) -> Option<&str> {
     let value = value.trim();
-    (!value.is_empty() && value != "unknown").then(|| value.to_string())
+    (!value.is_empty() && value != "unknown").then_some(value)
 }
 
 /// The identity on the event that first named `filename` — the write that
@@ -11632,8 +11676,8 @@ pub(crate) fn recorded_identity(
         .iter()
         .find(|event| event.file.as_deref() == Some(filename))?;
     Some(RecordedIdentity {
-        harness: present(&event.harness),
-        session: present(&event.session),
+        harness: event.harness().map(str::to_string),
+        session: event.session().map(str::to_string),
         actor: event.actor.clone(),
         model: event.model.clone(),
     })
@@ -11801,13 +11845,15 @@ fn reattribute(
 
     if replacement.model.is_some() || replacement.session.is_some() {
         if let Some(model) = replacement.model.or(target.model.as_deref()) {
-            let session = replacement.session.unwrap_or(&target.session);
-            let session_collision = model
-                .split('#')
-                .next()
-                .is_some_and(|model| model.trim() == session.trim());
+            let session = replacement.session.or(target.session());
+            let session_collision = session.is_some_and(|session| {
+                model
+                    .split('#')
+                    .next()
+                    .is_some_and(|model| model.trim() == session.trim())
+            });
             if replacement.model.is_some() || session_collision {
-                if let Some(defect) = crate::coordinate::model_defect(model, Some(session)) {
+                if let Some(defect) = crate::coordinate::model_defect(model, session) {
                     bail!(
                         "--set-model {model:?}: {}; name the value the record should carry",
                         defect.reason()
@@ -11892,9 +11938,9 @@ fn reattribute(
             };
             let records = match *field {
                 "actor" => candidate.actor.as_deref() == Some(previous),
-                "harness" => candidate.harness == previous,
+                "harness" => candidate.harness() == Some(previous),
                 "model" => candidate.model.as_deref() == Some(previous),
-                "session" => candidate.session == previous,
+                "session" => candidate.session() == Some(previous),
                 _ => false,
             };
             if records {
@@ -12065,8 +12111,8 @@ fn verification_stamp(
         actor: event.actor.clone(),
         on_behalf_of: event.on_behalf_of.clone(),
         model: event.model.clone(),
-        harness: event.harness.clone(),
-        session: event.session.clone(),
+        harness: event.harness().map(str::to_string),
+        session: event.session().map(str::to_string),
         session_link: event.session_link.clone(),
         moved,
     })
@@ -12573,7 +12619,9 @@ fn project_inventory(
     let lanes = lanes_from_journal(&events, observed);
     let caller = {
         let (harness, session) = identity(ctx);
-        LaneOwner { harness, session }
+        harness
+            .zip(session)
+            .map(|(harness, session)| LaneOwner { harness, session })
     };
     let question_rows = questions_with_disposition_from(&hot, &events)?;
     let all_questions = questions_from(&hot, &events, true)?;
@@ -12670,7 +12718,7 @@ fn project_inventory(
             } else {
                 artifact_age_seconds(observed, &ts)
             },
-            lane: lane_for_topic(&lanes, &topic, &caller),
+            lane: lane_for_topic(&lanes, &topic, caller.as_ref()),
             change: change_annotation(&open_changes, &topic, &name),
             verification: verification_stamp(
                 &events,
@@ -12946,7 +12994,11 @@ fn render_amendments(amendments: Option<usize>) -> String {
     amendments.map_or_else(String::new, |count| format!(" [amended ×{count}]"))
 }
 
-fn lane_for_topic(lanes: &[LaneEntry], topic: &str, caller: &LaneOwner) -> Option<ArtifactLane> {
+fn lane_for_topic(
+    lanes: &[LaneEntry],
+    topic: &str,
+    caller: Option<&LaneOwner>,
+) -> Option<ArtifactLane> {
     lanes
         .iter()
         .find(|lane| {
@@ -12956,7 +13008,7 @@ fn lane_for_topic(lanes: &[LaneEntry], topic: &str, caller: &LaneOwner) -> Optio
         .map(|lane| ArtifactLane {
             topic: lane.topic.clone(),
             owner: lane.owner.clone(),
-            this_session: lane.owner == *caller,
+            this_session: caller == Some(&lane.owner),
         })
 }
 
@@ -13005,7 +13057,8 @@ fn render_verification(verification: Option<&VerificationStamp>) -> String {
         .actor
         .clone()
         .or_else(|| verification.model.clone())
-        .unwrap_or_else(|| verification.harness.clone());
+        .or_else(|| verification.harness.clone())
+        .unwrap_or_else(|| UNATTRIBUTED.to_string());
     // Where a check was made is part of what it claims: a fork's head is not
     // the anchor's, and the row says so instead of letting a reader assume
     // the revision is one they can look up on the project's line of history.
@@ -13897,11 +13950,33 @@ struct DiscussionRound {
 }
 
 /// The identity label a position or resolution carries: `<model> via <harness>`
-/// when the model is known, else the bare harness.
+/// when the model is known, else the bare harness, else `unattributed`.
 fn event_identity_label(event: &JournalEvent) -> String {
     match event.model.as_deref().filter(|value| !value.is_empty()) {
-        Some(model) => format!("{model} via {}", event.harness),
-        None => event.harness.clone(),
+        Some(model) => model_label(model, event.harness()),
+        None => event.harness().unwrap_or(UNATTRIBUTED).to_string(),
+    }
+}
+
+/// What a view prints for an identity an event does not record: no harness to
+/// name and no model to name it by.
+const UNATTRIBUTED: &str = "unattributed";
+
+/// The recording an event names, `<harness>/<session>`, as far as it records
+/// one.
+fn session_label(harness: Option<&str>, session: Option<&str>) -> String {
+    match (harness, session) {
+        (Some(harness), Some(session)) => format!("{harness}/{session}"),
+        (Some(only), None) | (None, Some(only)) => only.to_string(),
+        (None, None) => UNATTRIBUTED.to_string(),
+    }
+}
+
+/// A model, qualified by the harness that ran it when one is recorded.
+fn model_label(model: &str, harness: Option<&str>) -> String {
+    match harness {
+        Some(harness) => format!("{model} via {harness}"),
+        None => model.to_string(),
     }
 }
 
@@ -14388,7 +14463,10 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
             resolver: event_identity_label(event),
             decision: event.decision.clone(),
             resolver_participated: position_events.iter().any(|position| {
-                position.harness == event.harness && position.session == event.session
+                event.harness().is_some()
+                    && event.session().is_some()
+                    && position.harness() == event.harness()
+                    && position.session() == event.session()
             }),
         });
 
@@ -14404,7 +14482,7 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         resolution_basis,
         last_position_at,
         has_archived_positions,
-        schema: "journal-discussion/4",
+        schema: "journal-discussion/5",
         age_seconds: discussion_age_seconds(Utc::now(), &ts, filename, &events),
         file: filename.to_string(),
         topic,
@@ -15531,7 +15609,7 @@ pub fn consume_superseded_by_change(
     if let Some(mine) = open_artifact_claims(&events, filename)
         .into_iter()
         .rev()
-        .find(|claim| claim.state.owner == owner)
+        .find(|claim| Some(&claim.state.owner) == owner.as_ref())
     {
         let mut event = JournalEvent::base(ctx, now, &topic, "claim-released");
         event.file = Some(filename.to_string());

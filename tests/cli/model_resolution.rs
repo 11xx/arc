@@ -204,7 +204,7 @@ fn declarations_keep_both_values_in_ledger_journal_and_replica_events() {
         .iter()
         .find(|event| event["topic"] == "resolved")
         .unwrap();
-    assert_eq!(declared["schema"], "journal-events/1");
+    assert_eq!(declared["schema"], "journal-events/2");
     assert_eq!(declared["model_source"], "env");
     assert_eq!(
         declared["model_disagreement"],
