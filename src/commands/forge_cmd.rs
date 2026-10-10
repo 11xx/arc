@@ -28,8 +28,8 @@ pub fn forge_declare(
         policy,
     };
     ensure_append_allowed(&st, &payload)?;
-    let event = ctx.event(&store, &change_id, payload)?;
-    store.append_event(&event)?;
+    let mut event = ctx.event(&store, &change_id, payload)?;
+    store.append_local_event(&mut event)?;
     println!("forge projection declared: {change_id}");
     println!("event: {}", event.event_id);
     Ok(())
@@ -63,8 +63,8 @@ pub fn forge_link(ctx: &Ctx, reference: &str, args: ForgeLinkArgs) -> Result<i32
         head_sha: args.head_sha,
     };
     ensure_append_allowed(&st, &payload)?;
-    let event = ctx.event(&store, &change_id, payload)?;
-    store.append_event(&event)?;
+    let mut event = ctx.event(&store, &change_id, payload)?;
+    store.append_local_event(&mut event)?;
     println!("forge link recorded: {change_id} PR #{}", args.pr_number);
     println!("event: {}", event.event_id);
     Ok(0)
@@ -88,8 +88,8 @@ pub fn forge_checks(
         detail,
     };
     ensure_append_allowed(&st, &payload)?;
-    let event = ctx.event(&store, &change_id, payload)?;
-    store.append_event(&event)?;
+    let mut event = ctx.event(&store, &change_id, payload)?;
+    store.append_local_event(&mut event)?;
     println!(
         "forge checks recorded: {change_id} {}",
         check_state.as_str()
@@ -159,8 +159,8 @@ pub fn forge_pr_state(
         pr_head: Some(link.head_sha.clone()),
     };
     ensure_append_allowed(&st, &payload)?;
-    let event = ctx.event(&store, &change_id, payload)?;
-    store.append_event(&event)?;
+    let mut event = ctx.event(&store, &change_id, payload)?;
+    store.append_local_event(&mut event)?;
     println!("forge pr-state recorded: {change_id} {}", pr_state.as_str());
     println!("event: {}", event.event_id);
     Ok(())

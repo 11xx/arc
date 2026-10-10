@@ -4,8 +4,10 @@
 use super::*;
 
 /// Replay raw ledger events as compact NDJSON, optionally continuing as new
-/// event files arrive. Event IDs are ULIDs, so replay and each observed polling
-/// batch can be sorted across changes; concurrent appends may cross batches.
+/// event files arrive. Local issuance order equals ID order across processes.
+/// A cursor waits below every unresolved provisional reservation.
+/// Imported IDs retain origin order; each poll emits unseen imports even when
+/// their IDs precede the initial replay cursor.
 /// What to stream, as the CLI expresses it. One struct rather than eight
 /// arguments, because the selectors are mutually exclusive and a call site
 /// should show which one it chose.
@@ -52,6 +54,7 @@ pub fn events(ctx: &Ctx, args: EventsArgs<'_>) -> Result<()> {
     let mut seen = BTreeSet::new();
     let mut poll_interval = POLL_MIN;
     let since = since.map(|cursor| cursor.to_string());
+    let mut replay = true;
 
     // Membership is what it is when the stream is read, but deriving it means
     // replaying every change, so it is re-derived only when an event that can
@@ -63,11 +66,28 @@ pub fn events(ctx: &Ctx, args: EventsArgs<'_>) -> Result<()> {
         Some(resolve_tagged(ctx, &tags)?.into_iter().collect())
     };
     loop {
-        let raw_events = match (&change_id, repository_scope) {
-            (Some(id), _) => store.raw_events_unseen(id, &seen)?,
-            (None, true) => store.raw_repository_events_unseen(&seen)?,
-            (None, false) => store.raw_events_all_unseen(&seen)?,
+        let (raw_events, reservation) = {
+            let _cursor = store.lock_event_cursor()?;
+            let reservation = store.oldest_event_reservation()?;
+            let raw = match (&change_id, repository_scope) {
+                (Some(id), _) => store.raw_events_unseen(id, &seen)?,
+                (None, true) => store.raw_repository_events_unseen(&seen)?,
+                (None, false) => store.raw_events_all_unseen(&seen)?,
+            };
+            (raw, reservation)
         };
+        if replay
+            && since
+                .as_ref()
+                .zip(reservation.as_ref())
+                .is_some_and(|(cursor, reserved)| cursor >= reserved)
+        {
+            bail!("--since cursor is at or above unresolved provisional reservation {}; replay without --since or resume below that ID", reservation.as_deref().unwrap());
+        }
+        let raw_events: Vec<_> = raw_events
+            .into_iter()
+            .filter(|(id, _)| reservation.as_ref().is_none_or(|reserved| id < reserved))
+            .collect();
         let observed_events = !raw_events.is_empty();
         if tagged.is_some()
             && raw_events.iter().any(|(_, value)| {
@@ -82,9 +102,10 @@ pub fn events(ctx: &Ctx, args: EventsArgs<'_>) -> Result<()> {
         let mut out = std::io::stdout().lock();
         for (event_id, value) in raw_events {
             seen.insert(event_id.clone());
-            if since
-                .as_deref()
-                .is_some_and(|cursor| event_id.as_str() <= cursor)
+            if replay
+                && since
+                    .as_deref()
+                    .is_some_and(|cursor| event_id.as_str() <= cursor)
             {
                 continue;
             }
@@ -113,6 +134,7 @@ pub fn events(ctx: &Ctx, args: EventsArgs<'_>) -> Result<()> {
         if !follow {
             return Ok(());
         }
+        replay = false;
         poll_interval = if observed_events {
             POLL_MIN
         } else {

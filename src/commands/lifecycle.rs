@@ -352,7 +352,7 @@ pub fn begin(
         }
     }
 
-    let ev = ctx.event(
+    let mut ev = ctx.event(
         &store,
         &change_id,
         Payload::ChangeOpened {
@@ -373,7 +373,7 @@ pub fn begin(
             dangerous,
         },
     )?;
-    store.append_event(&ev)?;
+    store.append_local_event(&mut ev)?;
     super::roles::append(
         ctx,
         &store,
@@ -383,12 +383,12 @@ pub fn begin(
         BTreeMap::new(),
     )?;
     if iterating {
-        let event = ctx.event(
+        let mut event = ctx.event(
             &store,
             &change_id,
             Payload::IterationScopeSet { iterating: true },
         )?;
-        store.append_event(&event)?;
+        store.append_local_event(&mut event)?;
     }
 
     // Advisory bridge to the journal, all best-effort: record a promotion in
@@ -427,7 +427,7 @@ pub fn begin(
                     "> Seeded from journal artifact `{filename}` by `begin --from-journal`.\n\n{}",
                     body.trim_end_matches('\n')
                 );
-                let event = ctx.event(
+                let mut event = ctx.event(
                     &store,
                     &change_id,
                     Payload::BriefRecorded {
@@ -442,7 +442,7 @@ pub fn begin(
                         must_read: Vec::new(),
                     },
                 )?;
-                if let Err(error) = store.append_event(&event) {
+                if let Err(error) = store.append_local_event(&mut event) {
                     eprintln!("warning: could not seed a brief from {filename}: {error:#}");
                 }
             }
@@ -586,8 +586,8 @@ pub fn iterating(ctx: &Ctx, reference: &str, off: bool) -> Result<()> {
         println!("iterating: {iterating} (unchanged)");
         return Ok(());
     }
-    let event = ctx.event(&store, &change_id, Payload::IterationScopeSet { iterating })?;
-    store.append_event(&event)?;
+    let mut event = ctx.event(&store, &change_id, Payload::IterationScopeSet { iterating })?;
+    store.append_local_event(&mut event)?;
     println!("iterating: {iterating}");
     println!("event: {}", event.event_id);
     Ok(())
@@ -958,10 +958,10 @@ pub fn brief(
                 "renegotiates nothing; drop --caused-by and --cause-note"
             ));
         }
-        let event = ctx.event(&store, &change_id, payload)?;
-        let event_id = event.event_id.clone();
+        let mut event = ctx.event(&store, &change_id, payload)?;
         let event_plan_source = plan_source.clone();
-        store.append_event(&event)?;
+        store.append_local_event(&mut event)?;
+        let event_id = event.event_id.clone();
         super::roles::append(
             ctx,
             &store,
@@ -1266,8 +1266,8 @@ pub fn metadata(
         priority,
     };
     ensure_append_allowed(&state, &payload)?;
-    let event = ctx.event(&store, &change_id, payload)?;
-    store.append_event(&event)?;
+    let mut event = ctx.event(&store, &change_id, payload)?;
+    store.append_local_event(&mut event)?;
     println!("event: {}", event.event_id);
     Ok(())
 }

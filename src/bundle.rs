@@ -82,7 +82,29 @@ impl Bundle {
     /// receiver can verify the suffix against that prefix.
     pub fn export(store: &Store, cwd: &Path, change_id: &str, since: Option<&str>) -> Result<Self> {
         ids::validate_id_component(change_id)?;
-        let raw = store.raw_events(change_id)?;
+        let (raw, repository_events) = {
+            let _cursor = store.lock_event_cursor()?;
+            let reservation = store.oldest_event_reservation()?;
+            let mut raw = store.raw_events(change_id)?;
+            let mut repository =
+                store.raw_repository_events_unseen(&std::collections::BTreeSet::new())?;
+            if let Some(reserved) = &reservation {
+                raw.retain(|(id, _)| id < reserved);
+                repository.retain(|(id, _)| id < reserved);
+                if raw.is_empty() {
+                    bail!(
+                        "change {change_id} export waits below provisional reservation {reserved}"
+                    );
+                }
+            }
+            (
+                raw,
+                repository
+                    .into_iter()
+                    .map(|(_, value)| value)
+                    .collect::<Vec<_>>(),
+            )
+        };
         if raw.is_empty() {
             bail!("change {change_id:?} has no events");
         }
@@ -125,11 +147,6 @@ impl Bundle {
         let history_sha256 = checksum(&all)?;
         // Repository facts travel even when the change's ledger has not
         // advanced: a withdrawal cannot depend on another change event.
-        let repository_events: Vec<Value> = store
-            .raw_repository_events_unseen(&std::collections::BTreeSet::new())?
-            .into_iter()
-            .map(|(_, value)| value)
-            .collect();
         let (events, since) = match since {
             None => (all, None),
             Some(prefix_sha256) => {

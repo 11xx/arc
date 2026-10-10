@@ -51,7 +51,7 @@ pub fn take(ctx: &Ctx, tags: Vec<String>, ttl: Option<String>, json: bool) -> Re
         let timing = state::claim_timing_at(claim, now);
         displaced_claim(claim, &timing, None)
     });
-    let event = identity_event_at(
+    let mut event = identity_event_at(
         ctx,
         &store,
         &candidate.change_id,
@@ -64,7 +64,7 @@ pub fn take(ctx: &Ctx, tags: Vec<String>, ttl: Option<String>, json: bool) -> Re
             displaced,
         },
     )?;
-    store.append_event(&event)?;
+    store.append_local_event(&mut event)?;
     if json {
         let state = store.state(&candidate.change_id)?;
         let output = status_output(ctx, &store, &state)?;
@@ -213,8 +213,8 @@ fn claim_inner(
         displaced: displaced.clone(),
     };
     ensure_append_allowed(&state, &payload)?;
-    let event = identity_event_at(ctx, &store, &change_id, now, &owner, payload)?;
-    store.append_event(&event)?;
+    let mut event = identity_event_at(ctx, &store, &change_id, now, &owner, payload)?;
+    store.append_local_event(&mut event)?;
     if matches!(mode, ClaimMode::Standard { .. }) {
         if let Some(displaced) = &displaced {
             println!(
@@ -256,7 +256,7 @@ pub fn release_claim(ctx: &Ctx, reference: &str) -> Result<i32> {
         print_claim_conflict("claim is expired", existing, &timing);
         return Ok(8);
     }
-    let event = identity_event_at(
+    let mut event = identity_event_at(
         ctx,
         &store,
         &change_id,
@@ -266,7 +266,7 @@ pub fn release_claim(ctx: &Ctx, reference: &str) -> Result<i32> {
             claim_id: existing.claim_id.clone(),
         },
     )?;
-    store.append_event(&event)?;
+    store.append_local_event(&mut event)?;
     println!("claim released: {change_id}");
     println!("event: {}", event.event_id);
     Ok(0)
@@ -330,8 +330,8 @@ pub fn stage(
             displaced,
         };
         ensure_append_allowed(&state, &payload)?;
-        let claim_event = identity_event_at(ctx, &store, &change_id, now, &owner, payload)?;
-        store.append_event(&claim_event)?;
+        let mut claim_event = identity_event_at(ctx, &store, &change_id, now, &owner, payload)?;
+        store.append_local_event(&mut claim_event)?;
         println!("claimed: {change_id} for 7200s");
         println!("event: {}", claim_event.event_id);
         state = store.state(&change_id)?;
@@ -360,8 +360,8 @@ pub fn stage(
         blocker,
     };
     ensure_append_allowed(&state, &payload)?;
-    let event = identity_event_at(ctx, &store, &change_id, now, &owner, payload)?;
-    store.append_event(&event)?;
+    let mut event = identity_event_at(ctx, &store, &change_id, now, &owner, payload)?;
+    store.append_local_event(&mut event)?;
     println!("stage: {}", stage.as_str());
     println!("event: {}", event.event_id);
     Ok(0)
@@ -460,7 +460,7 @@ fn identity_event_at(
     created_at: chrono::DateTime<chrono::Utc>,
     identity: &state::ClaimIdentity,
     payload: Payload,
-) -> Result<Event> {
+) -> Result<crate::store::LocalEvent> {
     let mut event = ctx.event_at(store, change_id, created_at, payload)?;
     event.actor = identity.actor.clone();
     event.harness = Some(identity.harness.clone());

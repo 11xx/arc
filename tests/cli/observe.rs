@@ -1,6 +1,171 @@
 use super::common::*;
 
 #[test]
+fn events_cursor_waits_for_a_reservation_published_after_a_later_event() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "reserved-cursor", "--no-worktree"]),
+    );
+    let history = stdout(repo.arc(&repo.root).args(["events"]));
+    let opening: serde_json::Value = serde_json::from_str(history.lines().next().unwrap()).unwrap();
+    let cursor = serde_json::from_str::<serde_json::Value>(history.lines().last().unwrap())
+        .unwrap()["event_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let reserved = cursor.parse::<ulid::Ulid>().unwrap().increment().unwrap();
+    let event = serde_json::json!({
+        "schema_version": opening["schema_version"], "event_id": reserved.to_string(),
+        "repository_id": opening["repository_id"], "change_id": opening["change_id"],
+        "actor": opening["actor"], "created_at": opening["created_at"],
+        "event_type": "hold-set", "reason": "reserved"
+    });
+    let ledger = repo.root.join(".git/arc");
+    let intents = ledger.join("provisional");
+    fs::create_dir_all(&intents).unwrap();
+    fs::write(
+        intents.join(format!("{}.json", opening["change_id"].as_str().unwrap())),
+        serde_json::to_vec(&serde_json::json!({"event": event, "old_staging": null})).unwrap(),
+    )
+    .unwrap();
+    let events = ledger
+        .join("changes")
+        .join(opening["change_id"].as_str().unwrap())
+        .join("events");
+    let mut later = event.clone();
+    later["event_id"] = reserved.increment().unwrap().to_string().into();
+    later["reason"] = "later".into();
+    fs::write(
+        events.join(format!("{}.json", later["event_id"].as_str().unwrap())),
+        serde_json::to_vec(&later).unwrap(),
+    )
+    .unwrap();
+    let replay = stdout(repo.arc(&repo.root).args(["events", "--since", &cursor]));
+    assert!(replay.is_empty(), "cursor crossed a reservation: {replay}");
+    repo.arc(&repo.root)
+        .args(["events", "--since", later["event_id"].as_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "unresolved provisional reservation",
+        ));
+    let prefix = repo.home.join("reserved-prefix.json");
+    stdout(repo.arc(&repo.root).args([
+        "export",
+        "reserved-cursor",
+        "--output",
+        prefix.to_str().unwrap(),
+    ]));
+    let prefix: serde_json::Value = serde_json::from_slice(&fs::read(prefix).unwrap()).unwrap();
+    assert!(prefix["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|event| event["event_id"].as_str().unwrap() < reserved.to_string().as_str()));
+    let mut follower = Killed(spawn_arc(
+        &repo,
+        &repo.root,
+        &["events", "--follow", "--since", &cursor],
+    ));
+    let lines = follower.0.stdout.take().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(lines).lines() {
+            if sender.send(line.unwrap()).is_err() {
+                break;
+            }
+        }
+    });
+    assert!(matches!(
+        receiver.recv_timeout(Duration::from_millis(200)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+    fs::write(
+        events.join(format!("{reserved}.json")),
+        serde_json::to_vec(&event).unwrap(),
+    )
+    .unwrap();
+    let replay = stdout(repo.arc(&repo.root).args(["events", "--since", &cursor]));
+    let emitted = replay
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["event_id"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        emitted,
+        vec![event["event_id"].clone(), later["event_id"].clone()]
+    );
+    for expected in [&event, &later] {
+        let line = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&line).unwrap()["event_id"],
+            expected["event_id"]
+        );
+    }
+    drop(follower);
+    reader.join().unwrap();
+    let delta = repo.home.join("reserved-delta.json");
+    stdout(repo.arc(&repo.root).args([
+        "export",
+        "reserved-cursor",
+        "--since",
+        prefix["events_sha256"].as_str().unwrap(),
+        "--output",
+        delta.to_str().unwrap(),
+    ]));
+    let delta: serde_json::Value = serde_json::from_slice(&fs::read(delta).unwrap()).unwrap();
+    assert_eq!(delta["events"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn events_cursor_includes_a_fresh_process_append_on_another_change() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "cursor-a", "--no-worktree"]),
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "cursor-b", "--no-worktree", "--target", "master"]),
+    );
+    let events = stdout(
+        repo.arc(&repo.root)
+            .args(["events", "--change", "cursor-a"]),
+    );
+    let mut event: serde_json::Value =
+        serde_json::from_str(events.lines().last().unwrap()).unwrap();
+    let cursor = ulid::Ulid::from_parts(ulid::Ulid::new().timestamp_ms() + 60_000, 0).to_string();
+    event["event_id"] = cursor.clone().into();
+    event["event_type"] = "hold-set".into();
+    event["reason"] = "cursor floor".into();
+    let ledger = repo.root.join(".git/arc");
+    let path = ledger
+        .join("changes")
+        .join(event["change_id"].as_str().unwrap())
+        .join("events")
+        .join(format!("{cursor}.json"));
+    fs::write(path, serde_json::to_vec(&event).unwrap()).unwrap();
+    let _ = fs::remove_file(ledger.join("event-id"));
+    stdout(
+        repo.arc(&repo.root)
+            .args(["comment", "cursor-b", "--body", "after cursor"]),
+    );
+    let suffix = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--since",
+        &cursor,
+        "--type",
+        "comment-added",
+    ]));
+    let records = suffix
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 1, "{suffix}");
+    assert!(records[0]["event_id"].as_str().unwrap() > cursor.as_str());
+}
+
+#[test]
 fn events_replays_parseable_ndjson_and_filters_change_and_type() {
     let repo = Repo::new();
     let first = stdout(repo.arc(&repo.root).args(["begin", "events-a"]));
@@ -95,6 +260,59 @@ impl Drop for Killed {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
+}
+
+#[test]
+fn events_follow_discovers_an_import_below_its_initial_cursor() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "import-cursor", "--no-worktree"]),
+    );
+    let history = stdout(repo.arc(&repo.root).args(["events"]));
+    let opening: serde_json::Value = serde_json::from_str(history.lines().next().unwrap()).unwrap();
+    let cursor = opening["event_id"].as_str().unwrap();
+    let mut follower = Killed(spawn_arc(
+        &repo,
+        &repo.root,
+        &["events", "--follow", "--since", cursor],
+    ));
+    let lines = follower.0.stdout.take().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(lines).lines() {
+            if sender.send(line.unwrap()).is_err() {
+                break;
+            }
+        }
+    });
+    stdout(
+        repo.arc(&repo.root)
+            .args(["comment", "import-cursor", "--body", "replay fence"]),
+    );
+    let line = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&line).unwrap()["event_type"],
+        "comment-added"
+    );
+    let id = ulid::Ulid::from_parts(1, 0).to_string();
+    let imported = serde_json::json!({
+        "schema_version": 1, "event_id": id, "repository_id": "origin",
+        "change_id": "repository", "actor": "importer", "created_at": "2026-01-01T00:00:00Z",
+        "event_type": "opaque-import"
+    });
+    let imports = repo.root.join(".git/arc/imports");
+    fs::create_dir_all(&imports).unwrap();
+    let batch = serde_json::json!({"schema": "arc-import-batch/1", "change_id": opening["change_id"], "events": [], "repository_events": [imported], "authorization": null});
+    let temporary = imports.join("late.tmp");
+    fs::write(&temporary, serde_json::to_vec(&batch).unwrap()).unwrap();
+    fs::rename(temporary, imports.join("late.json")).unwrap();
+    let line = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+    let event: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(event["event_id"], id);
+    assert_eq!(event["repository_id"], "origin");
+    drop(follower);
+    reader.join().unwrap();
 }
 
 #[test]

@@ -482,7 +482,12 @@ impl Ctx {
         gitio::primary_worktree(&self.cwd).unwrap_or_else(|_| self.cwd.clone())
     }
 
-    fn event(&self, store: &Store, change_id: &str, payload: Payload) -> Result<Event> {
+    fn event(
+        &self,
+        store: &Store,
+        change_id: &str,
+        payload: Payload,
+    ) -> Result<crate::store::LocalEvent> {
         self.event_at(store, change_id, chrono::Utc::now(), payload)
     }
 
@@ -609,15 +614,14 @@ impl Ctx {
         true
     }
 
-    /// Issue local facts after the newest stored ID in their ledger scope.
-    /// Callers retain their transition lock through any subsequent append.
+    /// Build a local fact; publication assigns its identity under the ledger lock.
     fn event_at(
         &self,
         store: &Store,
         change_id: &str,
         created_at: chrono::DateTime<chrono::Utc>,
         payload: Payload,
-    ) -> Result<Event> {
+    ) -> Result<crate::store::LocalEvent> {
         self.announce_assumed_identity();
         let attribution = self.resolve_model();
         // The store's verdict on the session this event names, whether
@@ -631,33 +635,9 @@ impl Ctx {
             .as_ref()
             .and_then(SessionVerdict::reason)
             .map(str::to_string);
-        let latest = if change_id == Store::REPOSITORY_SCOPE {
-            store
-                .raw_repository_events_unseen(&BTreeSet::new())?
-                .last()
-                .map(|(id, _)| id.clone())
-        } else if store.list_change_ids()?.iter().any(|id| id == change_id) {
-            store
-                .raw_events(change_id)?
-                .last()
-                .map(|(id, _)| id.clone())
-        } else {
-            None
-        };
-        let event_id = match latest {
-            Some(id) => {
-                let floor = id.parse::<ulid::Ulid>().with_context(|| {
-                    format!("cannot issue a local event after non-ULID history {id:?}")
-                })?;
-                ids::new_event_id_after(floor)
-                    .with_context(|| format!("cannot issue a local event after {id:?}"))?
-                    .to_string()
-            }
-            None => ids::new_event_id()?,
-        };
-        Ok(Event {
+        Ok(crate::store::LocalEvent::draft(Event {
             schema_version: SCHEMA_VERSION,
-            event_id,
+            event_id: String::new(),
             repository_id: store.repository_id.clone(),
             change_id: change_id.to_string(),
             actor: self.actor.clone(),
@@ -673,7 +653,7 @@ impl Ctx {
             session_resolution_reason,
             created_at,
             payload,
-        })
+        }))
     }
 
     pub(crate) fn load_state(

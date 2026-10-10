@@ -162,8 +162,8 @@ pub fn changelog(
             no_entry_reason,
         };
         ensure_append_allowed(&state, &payload)?;
-        let event = ctx.event(&store, &change_id, payload)?;
-        store.append_event(&event)?;
+        let mut event = ctx.event(&store, &change_id, payload)?;
+        store.append_local_event(&mut event)?;
         match superseded {
             Some(superseded) => println!("changelog: {recorded} (supersedes {superseded})"),
             None => println!("changelog: {recorded}"),

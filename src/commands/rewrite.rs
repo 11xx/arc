@@ -856,9 +856,9 @@ fn apply(ctx: &Ctx, store: &Store, intent: &RewriteIntent, write_intent: bool) -
 
     let event_id = match event {
         None => recorded.context("rewrite event disappeared")?,
-        Some(event) => {
+        Some(mut event) => {
             let publication = super::pause_until_released("ARC_REWRITE_PAUSE")
-                .and_then(|()| store.append_repository_event(&event))
+                .and_then(|()| store.append_local_repository_event(&mut event))
                 .and_then(|()| interrupted_after("record"));
             if let Err(error) = publication {
                 match store.repository_event_is_published(&event) {
@@ -897,7 +897,7 @@ fn apply(ctx: &Ctx, store: &Store, intent: &RewriteIntent, write_intent: bool) -
                 "history rewrite recorded: {} revisions",
                 intent.mapping.len()
             );
-            event.event_id
+            event.event_id.clone()
         }
     };
     // The branch moved under the checkout, whose index still describes the

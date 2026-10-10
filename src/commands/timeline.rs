@@ -1,8 +1,8 @@
-//! Chronological event-log view over a change's ledger.
+//! Event-ID-ordered log view over a change's ledger.
 
 use super::*;
 
-/// Print one line per recorded event in chronological (ULID) order, or
+/// Print one line per recorded event in event ID order, or
 /// newest-first with `--reverse`. Pure derivation: no writes, no new events.
 pub fn log(ctx: &Ctx, reference: &str, reverse: bool) -> Result<()> {
     let store = ctx.store()?;

@@ -246,7 +246,7 @@ pub fn dispatch_run(ctx: &Ctx, dispatch: DispatchInput) -> Result<()> {
     let store = ctx.store()?;
     let _repository_events = store.lock_repository_events()?;
     let earlier = store.load_repository_events()?;
-    let event = ctx.event(
+    let mut event = ctx.event(
         &store,
         Store::REPOSITORY_SCOPE,
         Payload::RunDispatched {
@@ -265,7 +265,7 @@ pub fn dispatch_run(ctx: &Ctx, dispatch: DispatchInput) -> Result<()> {
         .filter(|round| round.subject == subject)
         .count()
         + 1;
-    store.append_repository_event(&event)?;
+    store.append_local_repository_event(&mut event)?;
     println!("run dispatched");
     if let Some(subject) = &subject {
         println!("round: {round} of {}", subject.label());
@@ -338,7 +338,7 @@ pub fn end_run(ctx: &Ctx, dispatch_event_id: &str, ending: EndingInput) -> Resul
     }
 
     let outcome = ending.outcome;
-    let event = ctx.event(
+    let mut event = ctx.event(
         &store,
         Store::REPOSITORY_SCOPE,
         Payload::RunEnded {
@@ -351,7 +351,7 @@ pub fn end_run(ctx: &Ctx, dispatch_event_id: &str, ending: EndingInput) -> Resul
             note: ending.note,
         },
     )?;
-    store.append_repository_event(&event)?;
+    store.append_local_repository_event(&mut event)?;
     println!("run ended: {}", outcome.as_str());
     for finding in &deferred {
         println!(

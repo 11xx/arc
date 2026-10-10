@@ -71,7 +71,7 @@ pub fn open_pass(ctx: &Ctx, raw_members: Vec<String>, note: Option<String>) -> R
     let _repository_events = store.lock_repository_events()?;
     let members = validate_members(&store, raw_members)?;
     let pass_id = ids::new_identifier();
-    let event = ctx.event(
+    let mut event = ctx.event(
         &store,
         Store::REPOSITORY_SCOPE,
         Payload::ReviewPassOpened {
@@ -80,7 +80,7 @@ pub fn open_pass(ctx: &Ctx, raw_members: Vec<String>, note: Option<String>) -> R
             note,
         },
     )?;
-    store.append_repository_event(&event)?;
+    store.append_local_repository_event(&mut event)?;
     println!("pass: {pass_id}");
     println!("review pass declared by caller");
     println!("event: {}", event.event_id);
@@ -95,7 +95,7 @@ pub fn complete_pass(ctx: &Ctx, pass_id: String, note: Option<String>) -> Result
     let pass = find_pass(&history, &pass_id)?;
     refuse_ended(pass)?;
     let canonical_id = pass.pass_id.clone();
-    let event = ctx.event(
+    let mut event = ctx.event(
         &store,
         Store::REPOSITORY_SCOPE,
         Payload::ReviewPassCompleted {
@@ -103,7 +103,7 @@ pub fn complete_pass(ctx: &Ctx, pass_id: String, note: Option<String>) -> Result
             note,
         },
     )?;
-    store.append_repository_event(&event)?;
+    store.append_local_repository_event(&mut event)?;
     println!("pass completed by caller: {canonical_id}");
     println!("event: {}", event.event_id);
     Ok(())
@@ -117,7 +117,7 @@ pub fn abandon_pass(ctx: &Ctx, pass_id: String, reason: String) -> Result<()> {
     let pass = find_pass(&history, &pass_id)?;
     refuse_ended(pass)?;
     let canonical_id = pass.pass_id.clone();
-    let event = ctx.event(
+    let mut event = ctx.event(
         &store,
         Store::REPOSITORY_SCOPE,
         Payload::ReviewPassAbandoned {
@@ -125,7 +125,7 @@ pub fn abandon_pass(ctx: &Ctx, pass_id: String, reason: String) -> Result<()> {
             reason,
         },
     )?;
-    store.append_repository_event(&event)?;
+    store.append_local_repository_event(&mut event)?;
     println!("pass abandoned by caller: {canonical_id}");
     println!("event: {}", event.event_id);
     Ok(())

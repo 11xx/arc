@@ -2461,8 +2461,8 @@ fn a_clock_ahead_previous_grant_approval_cannot_clear_an_unobserved_rejection() 
     let refused = obligation(&worker, &prerequisite);
     let rejection = refused["refusal_event_id"].as_str().unwrap();
     assert!(
-        approval_id.as_str() > rejection,
-        "the earlier approval has a higher clock-derived ID"
+        approval_id.as_str() < rejection,
+        "the transferred ledger floor orders the later rejection after the clock-ahead approval"
     );
     worker
         .arc(&worker.root)
@@ -2518,6 +2518,56 @@ fn unapplied_provisional_intent(worker: &Repo, change: &str) -> (PathBuf, Vec<u8
     )
     .is_empty());
     (path, bytes)
+}
+
+#[test]
+fn event_cursor_resumes_after_recovery_abandons_an_unapplied_reservation() {
+    let (_authority, worker) = worker();
+    let change = prepared(&worker);
+    let (intent, bytes) = unapplied_provisional_intent(&worker, &change);
+    let history = stdout(
+        worker
+            .arc(&worker.root)
+            .args(["events", "--change", &change]),
+    );
+    let cursor = serde_json::from_str::<serde_json::Value>(history.lines().last().unwrap())
+        .unwrap()["event_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    stdout(
+        worker
+            .arc(&worker.root)
+            .args(["close", &change, "--abandoned"]),
+    );
+    assert!(stdout(
+        worker
+            .arc(&worker.root)
+            .args(["events", "--change", &change, "--since", &cursor])
+    )
+    .is_empty());
+    worker
+        .arc(&worker.root)
+        .args(["integrate", &change, "--provisional"])
+        .assert()
+        .code(6);
+    assert_eq!(fs::read(intent).unwrap(), bytes);
+    let replay = stdout(
+        worker
+            .arc(&worker.root)
+            .args(["events", "--change", &change, "--since", &cursor]),
+    );
+    assert!(
+        replay.lines().any(
+            |line| serde_json::from_str::<serde_json::Value>(line).unwrap()["event_type"]
+                == "change-closed"
+        ),
+        "{replay}"
+    );
+    assert!(!replay.lines().any(
+        |line| serde_json::from_str::<serde_json::Value>(line).unwrap()["event_type"]
+            == "change-provisionally-integrated"
+    ));
 }
 
 fn current_guard_refuses_unapplied_retry(guard: &str, code: i32) {

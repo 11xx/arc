@@ -360,14 +360,14 @@ pub fn init(ctx: &Ctx, store: &Store, name: &str) -> Result<()> {
         name: name.to_string(),
         repository_id: store.repository_id.clone(),
     };
-    let event = make_event(
+    let mut event = make_event(
         ctx,
         store,
         &project_id,
         identity,
         ReplicaPayload::Initialized,
-    )?;
-    write_local_event(store, &event)?;
+    );
+    write_local_event(store, &mut event)?;
     println!("replica: {name}");
     println!("project: {project_id}");
     println!("integration authority: held by {name}");
@@ -402,7 +402,7 @@ pub fn pair(ctx: &Ctx, store: &Store, name: &str, repository_id: &str) -> Result
             existing.repository_id
         );
     }
-    let event = make_event(
+    let mut event = make_event(
         ctx,
         store,
         &current.project_id,
@@ -413,8 +413,8 @@ pub fn pair(ctx: &Ctx, store: &Store, name: &str, repository_id: &str) -> Result
                 repository_id: repository_id.to_string(),
             },
         },
-    )?;
-    write_local_event(store, &event)?;
+    );
+    write_local_event(store, &mut event)?;
     println!("paired: {name} ({repository_id})");
     println!("export the pairing record with `arc replica export`");
     Ok(())
@@ -470,7 +470,8 @@ pub fn import(
     let bundle = parse_bundle(&bytes)?;
     let digest = bundle_digest(&bundle)?;
     let import_path = imports_dir(store).join(format!("{digest}.json"));
-    let initial_declarations = crate::policy::load(&ctx.cwd)?;
+    let operator_path = crate::policy::operator_path(&ctx.cwd)?;
+    let initial_declarations = crate::policy::load_with_operator_path(&ctx.cwd, &operator_path)?;
     let initial_policy = initial_declarations.replica;
     let known = load_events(store)?;
     let known_by_id = event_map(&known)?;
@@ -497,7 +498,7 @@ pub fn import(
     let authorize = |policy: &crate::import_authorization::ReplicaPolicy| {
         crate::import_authorization::plan_import(
             policy,
-            &crate::policy::operator_path(&ctx.cwd)?,
+            &operator_path,
             crate::import_authorization::ImportRequest {
                 bytes: &bytes,
                 principal: publisher,
@@ -530,15 +531,19 @@ pub fn import(
         .cloned()
         .context("replica bundle does not name this local repository")?;
     let _lock = if dry_run { None } else { Some(lock(store)?) };
+    let _ledger = if dry_run {
+        None
+    } else {
+        Some(store.lock_event_ids()?)
+    };
     let _publication = if dry_run {
         None
     } else {
-        Some(crate::policy::lock_publication(
-            &crate::policy::operator_path(&ctx.cwd)?,
-        )?)
+        Some(crate::policy::lock_publication(&operator_path)?)
     };
     if !dry_run {
-        let current_declarations = crate::policy::load(&ctx.cwd)?;
+        let current_declarations =
+            crate::policy::load_with_operator_path(&ctx.cwd, &operator_path)?;
         let current_policy = current_declarations.replica;
         let changed_input = if current_policy != initial_policy {
             Some("operator replica policy")
@@ -582,13 +587,14 @@ pub fn import(
                 .as_ref()
                 .map(|state| state.project_id.as_str())
                 .context("replica project disappeared during import planning")?;
-            let event = make_event(
+            let mut event = make_event(
                 ctx,
                 store,
                 project_id,
                 local.clone(),
                 ReplicaPayload::AuthorityAcquired { offer_id },
-            )?;
+            );
+            event = preview_event(&event, &candidate)?;
             candidate.push(event.clone());
             added.push(event);
             acquired = Some(true);
@@ -634,6 +640,22 @@ pub fn import(
                 authorization: authorization.clone(),
             },
         });
+    }
+    if let Some(newest) = bundle
+        .events
+        .iter()
+        .map(|event| event.event_id.as_str())
+        .max()
+    {
+        store.advance_event_id(newest)?;
+    }
+    if acquired.is_some() {
+        let event = added.last_mut().context("local acquisition disappeared")?;
+        let preview = event.event_id.clone();
+        event.event_id = store.issue_event_id()?.to_string();
+        candidate.retain(|event| event.event_id != preview);
+        candidate.push(event.clone());
+        after = snapshot(&candidate, &store.repository_id)?;
     }
     let batch = ImportBatch {
         schema: IMPORT_SCHEMA.to_string(),
@@ -725,21 +747,19 @@ pub fn offer(ctx: &Ctx, store: &Store, recipient: &str) -> Result<()> {
         );
     }
     let parent_event_id = active_grant(&events, &current.project_id, &store.repository_id)?;
-    let event_id = ids::new_event_id()?;
-    let event = make_event_with_id(
+    let mut event = make_event(
         ctx,
         store,
         &current.project_id,
         current.local,
-        event_id.clone(),
         ReplicaPayload::AuthorityOffered {
-            offer_id: event_id.clone(),
+            offer_id: String::new(),
             to: to.clone(),
             parent_event_id,
         },
     );
-    write_local_event(store, &event)?;
-    println!("authority offer: {event_id}");
+    write_local_event(store, &mut event)?;
+    println!("authority offer: {}", event.event_id);
     println!("from: {}", holder.name);
     println!("to: {}", to.name);
     println!("integration authority: none; offer in flight");
@@ -794,7 +814,7 @@ pub fn reclaim(ctx: &Ctx, store: &Store, reason: &str) -> Result<()> {
     }) {
         bail!("authority return has already been requested for offer {offer_id}");
     }
-    let event = make_event(
+    let mut event = make_event(
         ctx,
         store,
         &current.project_id,
@@ -803,8 +823,8 @@ pub fn reclaim(ctx: &Ctx, store: &Store, reason: &str) -> Result<()> {
             offer_id: offer.offer_id.clone(),
             reason: reason.to_string(),
         },
-    )?;
-    write_local_event(store, &event)?;
+    );
+    write_local_event(store, &mut event)?;
     println!("authority return requested for offer: {}", offer.offer_id);
     println!("reason: {reason}");
     println!(
@@ -856,7 +876,7 @@ pub fn confirm_return(ctx: &Ctx, store: &Store) -> Result<()> {
             if requested == &offer_id)
         })
         .context("no current applicable return request for this authority grant")?;
-    let event = make_event(
+    let mut event = make_event(
         ctx,
         store,
         &current.project_id,
@@ -865,11 +885,11 @@ pub fn confirm_return(ctx: &Ctx, store: &Store) -> Result<()> {
             offer_id: offer_id.clone(),
             request_id: request.event_id.clone(),
         },
-    )?;
+    );
     let mut candidate = events;
-    candidate.push(event.clone());
+    candidate.push(preview_event(&event, &candidate)?);
     snapshot(&candidate, &store.repository_id)?;
-    write_local_event(store, &event)?;
+    write_local_event(store, &mut event)?;
     println!("authority return confirmed for offer: {offer_id}");
     println!("integration authority: blocked here; export the confirmation to the origin");
     Ok(())
@@ -992,29 +1012,11 @@ fn make_event(
     project_id: &str,
     actor: ReplicaIdentity,
     payload: ReplicaPayload,
-) -> Result<ReplicaEvent> {
-    Ok(make_event_with_id(
-        ctx,
-        store,
-        project_id,
-        actor,
-        ids::new_event_id()?,
-        payload,
-    ))
-}
-
-fn make_event_with_id(
-    ctx: &Ctx,
-    store: &Store,
-    project_id: &str,
-    actor: ReplicaIdentity,
-    event_id: String,
-    payload: ReplicaPayload,
 ) -> ReplicaEvent {
     let attribution = ctx.resolve_model();
     ReplicaEvent {
         schema: EVENT_SCHEMA.to_string(),
-        event_id,
+        event_id: String::new(),
         project_id: project_id.to_string(),
         repository_id: store.repository_id.clone(),
         actor,
@@ -1026,6 +1028,20 @@ fn make_event_with_id(
         created_at: Utc::now(),
         payload,
     }
+}
+
+fn preview_event(event: &ReplicaEvent, history: &[ReplicaEvent]) -> Result<ReplicaEvent> {
+    let floor = history
+        .iter()
+        .map(|event| event.event_id.as_str())
+        .max()
+        .context("replica preview has no prior history")?
+        .parse::<ulid::Ulid>()?;
+    let mut preview = event.clone();
+    preview.event_id = ids::after_floor(ulid::Ulid::new(), floor)
+        .context("no event ID remains for replica planning")?
+        .to_string();
+    Ok(preview)
 }
 
 fn active_grant(events: &[ReplicaEvent], project_id: &str, repository_id: &str) -> Result<String> {
@@ -1546,7 +1562,7 @@ fn bundle_digest(bundle: &ReplicaBundle) -> Result<String> {
     Ok(hex::encode(Sha256::digest(serde_json::to_vec(bundle)?)))
 }
 
-fn load_events(store: &Store) -> Result<Vec<ReplicaEvent>> {
+pub(crate) fn load_events(store: &Store) -> Result<Vec<ReplicaEvent>> {
     let root = replica_root(store);
     let mut events = BTreeMap::<String, ReplicaEvent>::new();
     let event_dir = root.join("events");
@@ -1625,7 +1641,15 @@ fn imports_dir(store: &Store) -> PathBuf {
     replica_root(store).join("imports")
 }
 
-fn write_local_event(store: &Store, event: &ReplicaEvent) -> Result<()> {
+fn write_local_event(store: &Store, event: &mut ReplicaEvent) -> Result<()> {
+    let _ledger = store.lock_event_ids()?;
+    if !event.event_id.is_empty() {
+        bail!("local replica event already has an issued identity");
+    }
+    event.event_id = store.issue_event_id()?.to_string();
+    if let ReplicaPayload::AuthorityOffered { offer_id, .. } = &mut event.payload {
+        *offer_id = event.event_id.clone();
+    }
     let dir = replica_root(store).join("events");
     create_private_dir_all(&dir)?;
     let path = dir.join(format!("{}.json", event.event_id));

@@ -900,6 +900,18 @@ fn integrate_provisionally_inner(
         }
         if !observed.applied && observed.event_state != "published" {
             let state = store.state(&initial.change_id)?;
+            if state
+                .closure
+                .as_ref()
+                .is_some_and(|closure| closure.outcome == Closure::Abandoned)
+                && observed.event_state == "absent"
+                && observed.observation_errors.is_empty()
+                && observed.retention_head.is_none()
+                && observed.staging_head == intent.old_staging
+            {
+                ctx.ensure_declared_actor(&store)?;
+                store.abandon_provisional_reservation(&intent.event)?;
+            }
             let selection = match select(
                 ctx,
                 &store,
@@ -1112,12 +1124,12 @@ fn integrate_provisionally_inner(
             authorization: plan.authorization,
         },
     );
-    let event = event?;
-    let intent = Intent {
+    let event = event?.into_event();
+    let mut intent = Intent {
         event,
         old_staging: selection.held,
     };
-    store.write_provisional_intent(&intent)?;
+    store.write_provisional_intent(&mut intent)?;
     finish(ctx, &store, &intent, args.json)
 }
 
@@ -1254,8 +1266,8 @@ pub fn resolve(
                 reason: reason.into(),
             },
         );
-        let event = event?;
-        store.append_event(&event)?;
+        let mut event = event?;
+        store.append_local_event(&mut event)?;
         if crate::provisional::project_obligations(&state)
             .iter()
             .any(|row| {

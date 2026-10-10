@@ -44,12 +44,42 @@ SAY WHO YOU ARE (before the first write)
   that is one or is a session id. Reads and Git hooks never refuse.
   Agent harness, model and supplied effort segments must be nonempty.
 
-  Local change and repository events receive IDs after the newest stored event
-  in their scope, even in fresh processes and after imports from a clock ahead.
-  Observation timestamps retain the recording clock. The store refuses an
-  append that would sort before a change's opening event.
-  Event issuance refuses sequence exhaustion. Non-event identifiers and scratch
-  names use an independent random ULID generator.
+  Local change, repository and replica IDs are totally ordered by issuance
+  across processes sharing one ledger. Ordinary issuance and publication use
+  one ledger-wide lock and a durable newest-issued-ID marker. Appends read constant-size
+  bookkeeping; missing or lagging bookkeeping is recovered by scanning the
+  event namespaces once. Observation timestamps retain the recording clock.
+  Issuance refuses an exhausted or noncanonical ULID floor rather than writing
+  an event that sorts below held history.
+  Non-event identifiers and scratch names use an independent random ULID generator.
+
+  A provisional intent durably reserves its exact event ID before binding Git
+  refs. Later local IDs sort after the reservation and may publish before it.
+  ID cursors wait below the oldest reservation that is neither published nor
+  abandoned by recovery. Recovery releases an unapplied reservation when its
+  change is abandoned and the saved refs still prove no transition occurred;
+  its intent remains evidence. The ledger ID lock never spans Git, hooks or network.
+
+  Imported change and replica events keep their origin IDs. They may arrive
+  below IDs already read. State, rewrite, relation, candidate, pass, log and replica
+  views replay the held history, so an import can revise a previous projection;
+  ID order across origins does not promise arrival or causal order. Historical
+  `explain --at` views likewise describe the history held when read.
+
+  `events --since ID` applies an ID boundary to its initial replay. Replay and
+  follow withhold events at or above an unresolved reservation without marking
+  them seen. A supplied cursor at or above that reservation refuses and names
+  the boundary; resume below it or replay without --since. Follow
+  emits every subsequently discovered matching event, including imports below
+  that cursor, sorted within each poll. A restart with --since excludes older
+  imports already present; recover them by replaying without --since and
+  deduplicating by event ID. A delta export's --since checksum binds an exact
+  history prefix. Change exports stop below unresolved reservations, so a
+  prefix cannot cross an event awaiting publication. An import that changes
+  that prefix requires a full export.
+  `messages --since` filters recording timestamps, which imports preserve;
+  recover older imported messages by reading without that filter. Other
+  timestamp views describe recorded clocks rather than local arrival order.
 
   Every event records who wrote it. Most writes accept an undeclared
   identity. In that case arc records an actor nobody claimed:

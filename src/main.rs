@@ -868,7 +868,9 @@ enum Cmd {
         message_type: Option<MessageType>,
         #[arg(long, value_enum)]
         severity: Option<MessageSeverity>,
-        /// Only messages created at or after this ISO 8601 instant
+        /// Only messages created at or after this ISO 8601 instant. Imports
+        /// preserve origin timestamps; replay without this filter to recover
+        /// older imported messages
         #[arg(long)]
         since: Option<String>,
         /// Emit the machine-readable JSON view instead of text
@@ -994,6 +996,9 @@ enum Cmd {
     },
     /// Replay raw ledger events as NDJSON, optionally following new events
     /// Records no events; ledger reads do not require a parseable append policy.
+    /// Local IDs are totally ordered by issuance across processes. ID cursors
+    /// wait below unresolved provisional reservations. Imported
+    /// events keep their origin IDs; follow emits unseen imports in each poll.
     Events {
         /// Continue emitting matching events appended after the replay
         #[arg(long)]
@@ -1010,7 +1015,13 @@ enum Cmd {
         /// Limit events to one raw kebab-case event_type value
         #[arg(long = "type")]
         event_type: Option<String>,
-        /// Emit only events whose ULID is strictly greater than this cursor
+        /// Start replay with IDs strictly greater than this cursor. Local
+        /// IDs are totally ordered by issuance across processes; imports keep
+        /// origin IDs. Follow emits all subsequently discovered events,
+        /// including imports below the cursor. To recover older imports
+        /// already present at restart, replay without --since and deduplicate
+        /// by event ID. Replay withholds IDs at or above unresolved provisional
+        /// reservations; a cursor crossing one refuses and names the boundary
         #[arg(long)]
         since: Option<ulid::Ulid>,
         /// Run `sh -c <cmd>` for every emitted event, with its NDJSON line on
@@ -1103,7 +1114,9 @@ enum Cmd {
         output: String,
         /// Export only the events after this history checksum, which the
         /// receiving store must already hold. Repository events travel in
-        /// every bundle, even when the change suffix is empty
+        /// every bundle, even when the change suffix is empty. An import that
+        /// changes this exact prefix requires a full export. Exports stop
+        /// below the oldest unresolved provisional reservation
         #[arg(long, value_name = "SHA256")]
         since: Option<String>,
         /// Write an `arc-bundle-objects/1` JSON envelope with `schema` and
@@ -1112,6 +1125,8 @@ enum Cmd {
         objects_json: Option<String>,
     },
     /// Import arc-bundle/6 or /5 into this repository's local store.
+    /// Imported events retain their origin IDs, including IDs below a
+    /// previously observed cursor; subsequent local IDs follow the held floor.
     /// Received-byte digest, object availability, and publishing authorization
     /// are checked before publication; either refusal writes nothing.
     /// Unless --provenance-only is selected, every listed Git object must
@@ -1961,6 +1976,9 @@ enum Cmd {
     /// obligation and grant no authority. Provisional prerequisites satisfy local preparation
     /// only; authority publication requires canonical closures. Replacing provisional ancestry
     /// requires a content replay, a new patchset and fresh review or explicit debt.
+    /// An unapplied retained reservation on an abandoned change is released by
+    /// recovery only when the saved refs prove no transition occurred; the intent
+    /// remains evidence. ID cursors wait until publication or this abandonment.
     /// Guarded integration of one change, or of a dependency-ordered queue named
     /// by several changes or by --tag.
     ///
@@ -2459,6 +2477,8 @@ enum ReplicaCmd {
         output: String,
     },
     /// Import a pairing record or authority exchange from another replica.
+    /// Imported IDs stay intact; local replica issuance shares the ledger's
+    /// ID order across processes.
     /// Paired stores and enrolled receivers require --publisher and
     /// --received-sha256. Pairing grants membership, never publishing permission.
     /// Accepts arc-replica-bundle/3 and /2; absent model provenance stays absent

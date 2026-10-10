@@ -565,7 +565,7 @@ fn validate_recovery(
         );
     }
     let mut combined = repository.to_vec();
-    combined.push(ctx.event(
+    let draft = ctx.event(
         store,
         Store::REPOSITORY_SCOPE,
         Payload::HistoryRewritten {
@@ -576,7 +576,8 @@ fn validate_recovery(
             refs: intent.refs.clone(),
             retained: intent.retained.clone(),
         },
-    )?);
+    )?;
+    combined.push(draft.preview_after(&combined)?);
     let mapped = RewriteMap::from_events(combined.iter())?;
     if crate::rewrite::signature_only_successors(&ctx.cwd, &intent.mapping, &mapped).len()
         != intent.mapping.len()
@@ -1058,7 +1059,7 @@ fn execute_acceptance(
         } else {
             (false, None)
         };
-        let event = ctx.event(
+        let mut event = ctx.event(
             &store,
             &plan.state.change_id,
             Payload::ChangeCheckoutBound {
@@ -1069,7 +1070,7 @@ fn execute_acceptance(
             },
         )?;
         ensure_append_allowed(&current, &event.payload)?;
-        store.append_event(&event)?;
+        store.append_local_event(&mut event)?;
         println!(
             "bound checkout: {} at {}; locally allocated: {created}",
             plan.state.branch,

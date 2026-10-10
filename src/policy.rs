@@ -292,9 +292,14 @@ pub fn validate_operator_text(text: &str) -> Result<()> {
 
 /// Load the policy in force in the checkout at `repo_toplevel`.
 pub fn load(repo_toplevel: &Path) -> Result<PolicyFile> {
+    load_with_operator_path(repo_toplevel, &operator_path(repo_toplevel)?)
+}
+
+/// Read checkout and operator policy through already resolved paths, without Git.
+pub(crate) fn load_with_operator_path(repo_toplevel: &Path, operator: &Path) -> Result<PolicyFile> {
     let path = repo_toplevel.join(PROJECT_SOURCE);
     let project = read_optional(&path)?.map(|text| (path.display().to_string(), text));
-    layered(repo_toplevel, project)
+    layered_with_operator(operator, project)
 }
 
 /// Load the policy with the project layer read from the tree committed at
@@ -317,7 +322,11 @@ fn read_optional(path: &Path) -> Result<Option<String>> {
 /// operator's. `repo` is any path inside the repository.
 fn layered(repo: &Path, project: Option<(String, String)>) -> Result<PolicyFile> {
     let operator = operator_path(repo)?;
-    let operator = read_optional(&operator)?.map(|text| (operator.display().to_string(), text));
+    layered_with_operator(&operator, project)
+}
+
+fn layered_with_operator(operator: &Path, project: Option<(String, String)>) -> Result<PolicyFile> {
+    let operator = read_optional(operator)?.map(|text| (operator.display().to_string(), text));
     let mut layers = Vec::new();
     let mut style_layers = Vec::new();
     for (source, layer) in [(PROJECT_SOURCE, project), (OPERATOR_SOURCE, operator)] {

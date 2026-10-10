@@ -69,7 +69,7 @@ pub fn register(ctx: &Ctx, args: RegisterArgs) -> Result<()> {
         }
     }
 
-    let event = ctx.event(
+    let mut event = ctx.event(
         &store,
         Store::REPOSITORY_SCOPE,
         Payload::CandidateRegistered {
@@ -92,7 +92,7 @@ pub fn register(ctx: &Ctx, args: RegisterArgs) -> Result<()> {
     // `arc doctor` names, never a record of content Git may collect.
     let reference = candidate::candidate_ref(&candidate_id);
     gitio::update_ref(&ctx.cwd, &reference, &tree)?;
-    store.append_repository_event(&event)?;
+    store.append_local_repository_event(&mut event)?;
     println!("candidate: {candidate_id}");
     println!("tree: {tree}");
     println!("brief: {}", contract_label(&brief));
@@ -198,7 +198,7 @@ pub fn judge(
         None => CandidateJudgement::Rejected,
     };
     ledger.check_judgement(&candidate_id, &judgement)?;
-    let event = ctx.event(
+    let mut event = ctx.event(
         &store,
         Store::REPOSITORY_SCOPE,
         Payload::CandidateJudged {
@@ -208,7 +208,7 @@ pub fn judge(
         },
     )?;
     ledger.record(&event)?;
-    store.append_repository_event(&event)?;
+    store.append_local_repository_event(&mut event)?;
     match judgement {
         CandidateJudgement::Rejected => println!("judged: {candidate_id} rejected"),
         CandidateJudgement::SupersededBy {
@@ -246,7 +246,7 @@ pub fn retire(ctx: &Ctx, candidate_id: String) -> Result<()> {
                 .join(", ")
         );
     }
-    let event = ctx.event(
+    let mut event = ctx.event(
         &store,
         Store::REPOSITORY_SCOPE,
         Payload::CandidateRetired {
@@ -262,7 +262,7 @@ pub fn retire(ctx: &Ctx, candidate_id: String) -> Result<()> {
     if held.is_some() {
         gitio::delete_ref(&ctx.cwd, &reference)?;
     }
-    store.append_repository_event(&event)?;
+    store.append_local_repository_event(&mut event)?;
     println!("retired: {candidate_id}");
     match held {
         Some(_) => println!("unpinned: {reference}"),

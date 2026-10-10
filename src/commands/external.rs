@@ -49,8 +49,8 @@ pub fn record_verdict(ctx: &Ctx, reference: &str, args: ExternalVerdictArgs) -> 
         findings: findings.clone(),
     };
     super::ensure_append_allowed(&state, &payload)?;
-    let event = ctx.event(&store, &change_id, payload)?;
-    store.append_event(&event)?;
+    let mut event = ctx.event(&store, &change_id, payload)?;
+    store.append_local_event(&mut event)?;
 
     println!(
         "external verdict: {:?} at {} by {} (reference {})",

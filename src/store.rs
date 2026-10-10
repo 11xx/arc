@@ -18,6 +18,12 @@ use std::time::{Duration, Instant};
 static OPENING_IDS: std::sync::Mutex<BTreeMap<(PathBuf, String), String>> =
     std::sync::Mutex::new(BTreeMap::new());
 
+#[cfg(test)]
+thread_local! {
+    static EVENT_ID_CANDIDATE: std::cell::Cell<Option<ulid::Ulid>> = const { std::cell::Cell::new(None) };
+    static LOCAL_PUBLICATION_PAUSE: std::cell::RefCell<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>> = const { std::cell::RefCell::new(None) };
+}
+
 // Candidate payload variants and wire names share one format barrier.
 macro_rules! candidate_format_barrier {
     ($($variant:ident => $wire:literal),+ $(,)?) => {
@@ -136,6 +142,47 @@ impl LedgerRead<'_> {
 /// persistent: the OS releases the advisory lock when this handle is dropped
 /// or the process exits, so a crash cannot leave a stale ownership marker.
 pub struct TransitionLock(File);
+
+/// A local fact without an issued identity. Only publication or a durable
+/// provisional intent can assign its event ID.
+pub(crate) struct LocalEvent(Event);
+
+impl LocalEvent {
+    pub(crate) fn draft(event: Event) -> Self {
+        Self(event)
+    }
+
+    /// A speculative replay places the draft after the held history without
+    /// issuing an identity or recording anything.
+    pub(crate) fn preview_after(&self, events: &[Event]) -> Result<Event> {
+        let mut preview = self.0.clone();
+        let latest = events.iter().map(|event| event.event_id.as_str()).max();
+        preview.event_id = match latest {
+            Some(id) => ids::after_floor(ulid::Ulid::new(), id.parse::<ulid::Ulid>()?)
+                .context("no event ID remains for a speculative replay")?
+                .to_string(),
+            None => ulid::Ulid::new().to_string(),
+        };
+        Ok(preview)
+    }
+
+    pub(crate) fn into_event(self) -> Event {
+        self.0
+    }
+}
+
+impl std::ops::Deref for LocalEvent {
+    type Target = Event;
+    fn deref(&self) -> &Event {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for LocalEvent {
+    fn deref_mut(&mut self) -> &mut Event {
+        &mut self.0
+    }
+}
 
 impl Drop for TransitionLock {
     fn drop(&mut self) {
@@ -423,7 +470,7 @@ impl Store {
     /// event schema stays one shape.
     pub const REPOSITORY_SCOPE: &'static str = "repository";
 
-    pub fn append_repository_event(&self, event: &Event) -> Result<()> {
+    fn append_repository_event_locked(&self, event: &Event) -> Result<()> {
         self.ensure_repository_event_allowed(event)?;
         self.stamp_session_resolution(event.session_resolution)?;
         self.stamp_format_for(&event.payload)?;
@@ -439,7 +486,11 @@ impl Store {
     pub(crate) fn ensure_repository_event_allowed(&self, event: &Event) -> Result<()> {
         self.refuse_read_only()?;
         self.refuse_undeclared_author(event)?;
-        ids::validate_id_component(&event.event_id)
+        if event.event_id.is_empty() {
+            Ok(())
+        } else {
+            ids::validate_id_component(&event.event_id)
+        }
     }
 
     /// Repository-scoped events in ID order. A repository that has never had
@@ -475,9 +526,14 @@ impl Store {
     }
     pub(crate) fn write_provisional_intent(
         &self,
-        intent: &crate::commands::provisional::Intent,
+        intent: &mut crate::commands::provisional::Intent,
     ) -> Result<()> {
         self.refuse_read_only()?;
+        let _ledger = self.lock_event_ids()?;
+        if !intent.event.event_id.is_empty() {
+            bail!("provisional intent already has an issued identity");
+        }
+        intent.event.event_id = self.issue_event_id()?.to_string();
         self.stamp_format_for(&intent.event.payload)?;
         let path = self.provisional_intent_path(&intent.event.change_id)?;
         create_private_dir_all(path.parent().context("intent has no parent")?)?;
@@ -509,8 +565,16 @@ impl Store {
     }
     pub(crate) fn publish_provisional_event(&self, event: &Event) -> Result<()> {
         self.refuse_read_only()?;
+        let _ledger = self.lock_event_ids()?;
+        if self.reservation_abandoned(event)? {
+            bail!(
+                "provisional reservation {} was abandoned by recovery",
+                event.event_id
+            );
+        }
         if !self.event_is_published(event)? {
-            self.append_event(event)?;
+            self.advance_event_id(&event.event_id)?;
+            self.write_event(event)?;
         }
         self.sync_published_event(&serde_json::to_value(event)?)
     }
@@ -623,6 +687,221 @@ impl Store {
 
     fn lock_format(&self) -> Result<TransitionLock> {
         self.lock_file("format.lock", "store format", LOCK_TIMEOUT)
+    }
+
+    /// Take after transition/replica locks and before format/publication locks.
+    /// Only filesystem work belongs inside this guard.
+    pub(crate) fn lock_event_ids(&self) -> Result<TransitionLock> {
+        self.refuse_read_only()?;
+        self.lock_event_cursor()
+    }
+
+    /// A consistent read of reservations and visible events. Release this
+    /// guard before running Git, hooks, or any consumer of the event stream.
+    pub(crate) fn lock_event_cursor(&self) -> Result<TransitionLock> {
+        self.lock_file("event-ids.lock", "ledger event IDs", LOCK_TIMEOUT)
+    }
+
+    fn read_id_marker(&self, name: &str) -> Result<Option<String>> {
+        match fs::read_to_string(self.root.join(name)) {
+            Ok(value) => {
+                let id = value.trim();
+                if !id.is_empty() {
+                    ids::validate_id_component(id)?;
+                }
+                Ok(Some(id.to_string()))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error).with_context(|| format!("cannot read {name} marker")),
+        }
+    }
+
+    fn write_id_marker(&self, name: &str, id: &str) -> Result<()> {
+        crate::commands::write_atomically(
+            &self.root.join(name),
+            id.as_bytes(),
+            crate::commands::FileMode::Create(0o600),
+        )
+    }
+
+    /// Recover the sequence from each event namespace once. Ordinary appends
+    /// read only the two constant-size markers. The floor is written first,
+    /// before publication, so interruption cannot hide an issued ID.
+    fn event_id_floor(&self) -> Result<String> {
+        let marker = self.read_id_marker("event-id")?;
+        let witness = self.read_id_marker("event-id-floor")?;
+        if let (Some(marker), Some(witness)) = (marker.as_ref(), witness.as_ref()) {
+            if marker >= witness {
+                return Ok(marker.clone());
+            }
+        }
+        let mut newest = marker.into_iter().chain(witness).max().unwrap_or_default();
+        let mut include = |id: &str| -> Result<()> {
+            ids::validate_id_component(id)?;
+            if id > newest.as_str() {
+                newest = id.to_string();
+            }
+            Ok(())
+        };
+        for change in self.change_dir_ids(&self.changes_dir())? {
+            for id in event_file_stems(&self.events_dir(&change))? {
+                include(&id)?;
+            }
+        }
+        for id in event_file_stems(&self.repository_events_dir())? {
+            include(&id)?;
+        }
+        for batch in import_batches(&self.root)? {
+            for event in batch.events.iter().chain(&batch.repository_events) {
+                include(
+                    event["event_id"]
+                        .as_str()
+                        .context("imported event has no ID")?,
+                )?;
+            }
+        }
+        for event in crate::replica::load_events(self)? {
+            include(&event.event_id)?;
+        }
+        for intent in self.provisional_intents()? {
+            include(&intent.event.event_id)?;
+        }
+        for id in event_file_stems(&self.root.join("provisional-abandoned"))? {
+            include(&id)?;
+        }
+        self.write_id_marker("event-id-floor", &newest)?;
+        self.write_id_marker("event-id", &newest)?;
+        Ok(newest)
+    }
+
+    /// Advance before publication; imported identities are preserved and only
+    /// contribute a floor for subsequent local issuance.
+    /// The caller holds the ledger ID lock through the subsequent publication.
+    pub(crate) fn advance_event_id(&self, id: &str) -> Result<()> {
+        ids::validate_id_component(id)?;
+        let newest = self.event_id_floor()?.max(id.to_string());
+        self.write_id_marker("event-id-floor", &newest)?;
+        self.write_id_marker("event-id", &newest)
+    }
+
+    fn reservation_abandoned(&self, event: &Event) -> Result<bool> {
+        ids::validate_id_component(&event.event_id)?;
+        let path = self
+            .root
+            .join("provisional-abandoned")
+            .join(format!("{}.json", event.event_id));
+        match fs::read(&path) {
+            Ok(bytes) => {
+                if serde_json::from_slice::<serde_json::Value>(&bytes)?
+                    != serde_json::to_value(event)?
+                {
+                    bail!(
+                        "abandoned reservation {} differs from its retained intent",
+                        event.event_id
+                    );
+                }
+                Ok(true)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error).context("cannot read abandoned event reservation"),
+        }
+    }
+
+    /// The recovery caller has proved that this exact transition is unapplied
+    /// and its change abandoned. Keep the intent as evidence; release its cursor.
+    pub(crate) fn abandon_provisional_reservation(&self, event: &Event) -> Result<()> {
+        let _ledger = self.lock_event_ids()?;
+        let held = self
+            .provisional_intent(&event.change_id)?
+            .context("no retained provisional intent to abandon")?;
+        if serde_json::to_value(&held.event)? != serde_json::to_value(event)? {
+            bail!("provisional intent changed before abandoning its reservation");
+        }
+        if self.event_is_published(event)? {
+            bail!("a published provisional event cannot be abandoned");
+        }
+        let directory = self.root.join("provisional-abandoned");
+        create_private_dir_all(&directory)?;
+        let path = directory.join(format!("{}.json", event.event_id));
+        if !self.reservation_abandoned(event)? {
+            write_exclusive(&path, &serde_json::to_vec(event)?)?;
+        }
+        File::open(&path)?.sync_all()?;
+        File::open(directory)?.sync_all()?;
+        Ok(())
+    }
+
+    /// Called under the ledger cursor lock. A reservation is its durable intent;
+    /// exact publication or a durable recovery abandonment resolves it.
+    pub(crate) fn oldest_event_reservation(&self) -> Result<Option<String>> {
+        let mut oldest: Option<String> = None;
+        for intent in self.provisional_intents()? {
+            if !self.event_is_published(&intent.event)?
+                && !self.reservation_abandoned(&intent.event)?
+            {
+                let id = intent.event.event_id;
+                if oldest.as_ref().is_none_or(|held| id < *held) {
+                    oldest = Some(id);
+                }
+            }
+        }
+        Ok(oldest)
+    }
+
+    /// The caller holds the ledger ID lock through publication or reservation.
+    pub(crate) fn issue_event_id(&self) -> Result<ulid::Ulid> {
+        let floor = self.event_id_floor()?;
+        let unfloored = floor.is_empty();
+        let floor = if floor.is_empty() {
+            ulid::Ulid::default()
+        } else {
+            let parsed: ulid::Ulid = floor.parse().with_context(|| {
+                format!("cannot issue a local event after non-ULID history {floor:?}")
+            })?;
+            if parsed.to_string() != floor {
+                bail!("cannot issue a local event after noncanonical ULID history {floor:?}");
+            }
+            parsed
+        };
+        let issue = || -> Result<ulid::Ulid> {
+            if unfloored {
+                Ok(ids::new_event_id()?.parse()?)
+            } else {
+                ids::new_event_id_after(floor)
+            }
+        };
+        #[cfg(test)]
+        let id = match EVENT_ID_CANDIDATE.take() {
+            Some(candidate) => {
+                ids::after_floor(candidate, floor).context("event ID sequence exhausted")?
+            }
+            None => issue()?,
+        };
+        #[cfg(not(test))]
+        let id = issue()?;
+        self.write_id_marker("event-id-floor", &id.to_string())?;
+        self.write_id_marker("event-id", &id.to_string())?;
+        Ok(id)
+    }
+
+    /// Issue and publish under the same ledger-wide lock. No caller work,
+    /// hook, or subprocess runs between these two operations.
+    pub(crate) fn append_local_event(&self, event: &mut LocalEvent) -> Result<()> {
+        let _ledger = self.lock_event_ids()?;
+        if !event.event_id.is_empty() {
+            bail!("local event already has an issued identity");
+        }
+        event.event_id = self.issue_event_id()?.to_string();
+        self.write_event(event)
+    }
+
+    pub(crate) fn append_local_repository_event(&self, event: &mut LocalEvent) -> Result<()> {
+        let _ledger = self.lock_event_ids()?;
+        if !event.event_id.is_empty() {
+            bail!("local event already has an issued identity");
+        }
+        event.event_id = self.issue_event_id()?.to_string();
+        self.append_repository_event_locked(event)
     }
 
     /// Create and return the directory used for probe-only event-path writes.
@@ -861,7 +1140,15 @@ impl Store {
 
     /// Append one event. The file is created exclusively; a collision on
     /// a ULID event ID indicates a real bug and fails loudly.
+    #[cfg(test)]
     pub fn append_event(&self, event: &Event) -> Result<()> {
+        let _ledger = self.lock_event_ids()?;
+        self.advance_event_id(&event.event_id)?;
+        self.append_event_locked(event)
+    }
+
+    #[cfg(test)]
+    fn append_event_locked(&self, event: &Event) -> Result<()> {
         self.refuse_read_only()?;
         self.refuse_undeclared_author(event)?;
         ids::validate_id_component(&event.change_id)?;
@@ -918,6 +1205,17 @@ impl Store {
                 );
             }
         }
+        self.write_event(event)
+    }
+
+    fn write_event(&self, event: &Event) -> Result<()> {
+        #[cfg(test)]
+        if let Some((issued, release)) = LOCAL_PUBLICATION_PAUSE.take() {
+            issued.send(()).unwrap();
+            release.recv().unwrap();
+        }
+        self.refuse_read_only()?;
+        self.refuse_undeclared_author(event)?;
         self.stamp_session_resolution(event.session_resolution)?;
         self.stamp_format_for(&event.payload)?;
         ids::validate_id_component(&event.change_id)?;
@@ -961,6 +1259,9 @@ impl Store {
         directory: &Path,
         repository: bool,
     ) -> Result<bool> {
+        if event.event_id.is_empty() {
+            return Ok(false);
+        }
         Ok(self
             .published_event_file(&serde_json::to_value(event)?, directory, repository)?
             .is_some())
@@ -1418,7 +1719,7 @@ impl Store {
             .context("cannot read the recorded history rewrites; `arc doctor` reports which")
     }
 
-    /// All events of one change in ULID (i.e. chronological) order.
+    /// All events of one change in ID order, preserving imported identities.
     pub fn load_events(&self, change_id: &str) -> Result<Vec<Event>> {
         typed_events(self.raw_events(change_id)?)
     }
@@ -1725,6 +2026,7 @@ impl Store {
 
     pub fn publish_import(&self, batch: &ImportBatch) -> Result<()> {
         self.refuse_read_only()?;
+        let _ledger = self.lock_event_ids()?;
         #[cfg(debug_assertions)]
         crate::import_authorization::test_rendezvous("format")?;
         let _format = self.lock_format()?;
@@ -1762,6 +2064,19 @@ impl Store {
             return Err(crate::import_authorization::Refusal("authorization configuration moved before publication: publishing enrollment required".into()).into());
         }
         crate::import_authorization::validate_import_identities(self, &values)?;
+        if let Some(newest) = values
+            .iter()
+            .map(|(_, event)| {
+                event["event_id"]
+                    .as_str()
+                    .context("imported event has no ID")
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .max()
+        {
+            self.advance_event_id(newest)?;
+        }
         let dir = self.root.join("imports");
         create_private_dir_all(&dir).map_err(|error| crate::model::OperationFailure {
             published: false,
@@ -1784,6 +2099,7 @@ impl Store {
     #[cfg(test)]
     pub fn append_raw_repository_event(&self, event_id: &str, bytes: &[u8]) -> Result<bool> {
         self.refuse_read_only()?;
+        let _ledger = self.lock_event_ids()?;
         ids::validate_id_component(event_id)?;
         let value = serde_json::from_slice::<serde_json::Value>(bytes).ok();
         self.stamp_format_for_value(value.as_ref())?;
@@ -1805,6 +2121,7 @@ impl Store {
             }
             return Ok(false);
         }
+        self.advance_event_id(event_id)?;
         write_exclusive(&path, bytes)
             .with_context(|| format!("repository event {event_id} already exists during import"))?;
         Ok(true)
@@ -1813,6 +2130,7 @@ impl Store {
     #[cfg(test)]
     pub fn append_raw_event(&self, change_id: &str, event_id: &str, bytes: &[u8]) -> Result<()> {
         self.refuse_read_only()?;
+        let _ledger = self.lock_event_ids()?;
         ids::validate_id_component(change_id)?;
         ids::validate_id_component(event_id)?;
         // Import writes bytes rather than a typed payload, but the store it
@@ -1824,6 +2142,7 @@ impl Store {
         let dir = self.events_dir(change_id);
         create_private_dir_all(&dir)?;
         let path = dir.join(format!("{event_id}.json"));
+        self.advance_event_id(event_id)?;
         write_exclusive(&path, bytes)
             .with_context(|| format!("event {event_id} already exists during import"))
     }
@@ -1965,6 +2284,194 @@ mod tests {
             require_declared_actor: false,
             require_declared_actor_sources: Vec::new(),
             read_only: false,
+        }
+    }
+
+    fn ordering_event(change: &str, id: ulid::Ulid) -> Event {
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "event_id": id.to_string(), "repository_id": "repo",
+            "change_id": change, "actor": "tester", "created_at": chrono::Utc::now(),
+            "event_type": "hold-set", "reason": "ordering"
+        }))
+        .unwrap()
+    }
+
+    fn ordering_draft(change: &str) -> LocalEvent {
+        let mut event = ordering_event(change, ulid::Ulid::default());
+        event.event_id.clear();
+        LocalEvent::draft(event)
+    }
+
+    #[test]
+    fn local_writers_issue_ids_in_publication_order_in_one_millisecond() {
+        let dir = tempfile::tempdir().unwrap();
+        let floor = ulid::Ulid::from_parts(ulid::Ulid::new().timestamp_ms() + 60_000, 0);
+        test_store(dir.path())
+            .append_event(&ordering_event("seed", floor))
+            .unwrap();
+        let (issued, wait) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let (started, starting) = mpsc::channel();
+        let (published, publication) = mpsc::channel();
+        let root = dir.path().to_path_buf();
+        let first = std::thread::spawn(move || {
+            let store = test_store(&root);
+            let mut event = ordering_draft("first");
+            EVENT_ID_CANDIDATE.set(Some(floor.increment().unwrap().increment().unwrap()));
+            LOCAL_PUBLICATION_PAUSE.set(Some((issued, released)));
+            store.append_local_event(&mut event).unwrap();
+            event.event_id.clone()
+        });
+        let root = dir.path().to_path_buf();
+        let second = std::thread::spawn(move || {
+            wait.recv().unwrap();
+            let store = test_store(&root);
+            let mut event = ordering_draft("second");
+            EVENT_ID_CANDIDATE.set(Some(floor.increment().unwrap()));
+            started.send(()).unwrap();
+            store.append_local_event(&mut event).unwrap();
+            published.send(event.event_id.clone()).unwrap();
+            assert_eq!(
+                event.event_id.parse::<ulid::Ulid>().unwrap().timestamp_ms(),
+                floor.timestamp_ms()
+            );
+        });
+        starting.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(matches!(
+            publication.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        release.send(()).unwrap();
+        let first = first.join().unwrap();
+        let second_id = publication.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(first < second_id);
+        second.join().unwrap();
+    }
+
+    #[test]
+    fn local_id_marker_recovers_after_deletion_and_when_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let floor = ulid::Ulid::from_parts(ulid::Ulid::new().timestamp_ms() + 60_000, 0);
+        let event = ordering_event("first", floor);
+        store.append_event(&event).unwrap();
+        let marker = dir.path().join("event-id");
+        assert_eq!(fs::read_to_string(&marker).unwrap().trim(), event.event_id);
+        fs::remove_file(&marker).unwrap();
+        fs::remove_file(dir.path().join("event-id-floor")).unwrap();
+        let mut next = ordering_draft("second");
+        EVENT_ID_CANDIDATE.set(Some(floor));
+        store.append_local_event(&mut next).unwrap();
+        assert_eq!(fs::read_to_string(&marker).unwrap().trim(), next.event_id);
+        fs::write(&marker, floor.to_string()).unwrap();
+        let mut last = ordering_draft("third");
+        EVENT_ID_CANDIDATE.set(Some(floor));
+        store.append_local_event(&mut last).unwrap();
+        assert!(last.event_id > next.event_id);
+        assert_eq!(fs::read_to_string(&marker).unwrap().trim(), last.event_id);
+    }
+
+    #[test]
+    fn an_initialized_local_append_does_not_read_other_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        store
+            .append_event(&ordering_event("seed", ulid::Ulid::new()))
+            .unwrap();
+        create_private_dir_all(&dir.path().join("changes/unreadable")).unwrap();
+        fs::write(
+            dir.path().join("changes/unreadable/events"),
+            b"not a directory",
+        )
+        .unwrap();
+        let mut event = ordering_draft("local");
+        store.append_local_event(&mut event).unwrap();
+        assert!(store.event_is_published(&event).unwrap());
+        fs::remove_file(dir.path().join("event-id")).unwrap();
+        assert!(store
+            .append_local_event(&mut ordering_draft("recovery"))
+            .is_err());
+    }
+
+    #[test]
+    fn provisional_reservation_allows_later_local_publication_before_exact_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut intent = crate::commands::provisional::Intent {
+            event: ordering_draft("reserved").into_event(),
+            old_staging: None,
+        };
+        store.write_provisional_intent(&mut intent).unwrap();
+        let reserved = intent.event.event_id.clone();
+        // No ledger lock spans the work that binds refs to this identity.
+        drop(store.lock_event_ids().unwrap());
+        let other = test_store(dir.path());
+        let mut later = ordering_draft("later");
+        other.append_local_event(&mut later).unwrap();
+        assert!(later.event_id > reserved);
+        assert_eq!(
+            other.oldest_event_reservation().unwrap().as_deref(),
+            Some(reserved.as_str())
+        );
+        fs::remove_file(dir.path().join("event-id")).unwrap();
+        store.publish_provisional_event(&intent.event).unwrap();
+        assert_eq!(intent.event.event_id, reserved);
+        assert!(later.event_id > reserved);
+        assert_eq!(other.oldest_event_reservation().unwrap(), None);
+        store.clear_provisional_intent("reserved").unwrap();
+    }
+
+    #[test]
+    fn reservation_cursor_waits_for_the_oldest_and_abandonment_is_durable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut first = crate::commands::provisional::Intent {
+            event: ordering_draft("first").into_event(),
+            old_staging: None,
+        };
+        let mut second = crate::commands::provisional::Intent {
+            event: ordering_draft("second").into_event(),
+            old_staging: None,
+        };
+        store.write_provisional_intent(&mut first).unwrap();
+        store.write_provisional_intent(&mut second).unwrap();
+        store.publish_provisional_event(&second.event).unwrap();
+        assert_eq!(
+            store.oldest_event_reservation().unwrap(),
+            Some(first.event.event_id.clone())
+        );
+        store.abandon_provisional_reservation(&first.event).unwrap();
+        assert_eq!(
+            test_store(dir.path()).oldest_event_reservation().unwrap(),
+            None
+        );
+        assert!(store.publish_provisional_event(&first.event).is_err());
+        assert!(store.provisional_intent("first").unwrap().is_some());
+        store.clear_provisional_intent("first").unwrap();
+        store.clear_provisional_intent("second").unwrap();
+        fs::remove_file(dir.path().join("event-id")).unwrap();
+        fs::remove_file(dir.path().join("event-id-floor")).unwrap();
+        let mut later = ordering_draft("later");
+        store.append_local_event(&mut later).unwrap();
+        assert!(later.event_id > second.event.event_id);
+    }
+
+    #[test]
+    fn local_publication_refuses_exhausted_and_noncanonical_floors() {
+        for floor in ["7ZZZZZZZZZZZZZZZZZZZZZZZZZ", "01arz3ndektsv4rrffq69g5fav"] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut held = ordering_event("held", ulid::Ulid::default());
+            held.event_id = floor.into();
+            store.append_event(&held).unwrap();
+            let mut local = ordering_draft("local");
+            assert!(store.append_local_event(&mut local).is_err());
+            assert!(local.event_id.is_empty());
+            assert!(!store.events_dir("local").exists());
+            assert_eq!(
+                fs::read_to_string(dir.path().join("event-id")).unwrap(),
+                floor
+            );
         }
     }
 

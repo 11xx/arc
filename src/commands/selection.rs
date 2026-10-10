@@ -141,10 +141,13 @@ fn is_range(text: &str) -> bool {
     })
 }
 
-/// A repository event sorting after every one already recorded, so a replay
-/// meets a selection before its promotion and a registration before its
-/// evaluations. Taken under the repository-events lock.
-fn repository_event(ctx: &Ctx, store: &Store, payload: Payload) -> Result<crate::model::Event> {
+/// A repository draft built under the repository-events transition lock.
+/// Publication assigns its ID after every previously issued ledger ID.
+fn repository_event(
+    ctx: &Ctx,
+    store: &Store,
+    payload: Payload,
+) -> Result<crate::store::LocalEvent> {
     ctx.event(store, Store::REPOSITORY_SCOPE, payload)
 }
 
@@ -267,10 +270,10 @@ pub fn verify(ctx: &Ctx, candidate_id: &str, only: Option<&str>) -> Result<i32> 
         // lock is taken only once it has returned.
         let _repository_events = store.lock_repository_events()?;
         let mut ledger = load_ledger(&store)?;
-        let event = repository_event(ctx, &store, payload)?;
+        let mut event = repository_event(ctx, &store, payload)?;
         ledger.record(&event)?;
         ctx.ensure_declared_actor(&store)?;
-        store.append_repository_event(&event)?;
+        store.append_local_repository_event(&mut event)?;
         let outcome = match result {
             VerifyResult::Pass => "pass",
             _ => "fail",
@@ -454,7 +457,7 @@ pub fn select(ctx: &Ctx, args: SelectArgs) -> Result<i32> {
                 args.chosen
             );
         }
-        let event = repository_event(
+        let mut event = repository_event(
             ctx,
             &store,
             Payload::CandidateSelected {
@@ -478,13 +481,13 @@ pub fn select(ctx: &Ctx, args: SelectArgs) -> Result<i32> {
         )?;
         ledger.record(&event)?;
         ctx.ensure_declared_actor(&store)?;
-        store.append_repository_event(&event)?;
+        store.append_local_repository_event(&mut event)?;
         println!("selection: {}", event.event_id);
         println!("chosen: {}", args.chosen);
         if let Some(superseded) = supersedes {
             println!("supersedes: {superseded}");
         }
-        event.event_id
+        event.event_id.clone()
     };
     paused_before_promotion()?;
     promote_selection(ctx, &store, &selection_id, false)
@@ -689,7 +692,7 @@ fn record_promotion(
         Some(id) => id,
         None => record_patchset(ctx, store, events, st, selection, commit)?,
     };
-    let event = repository_event(
+    let mut event = repository_event(
         ctx,
         store,
         Payload::CandidatePromoted {
@@ -702,7 +705,7 @@ fn record_promotion(
     )?;
     let mut ledger = load_ledger(store)?;
     ledger.record(&event)?;
-    store.append_repository_event(&event)?;
+    store.append_local_repository_event(&mut event)?;
     println!(
         "promoted: {} into {}",
         selection.candidate_id, selection.change_id
@@ -754,8 +757,8 @@ fn record_patchset(
         }),
     };
     super::ensure_append_allowed(st, &payload)?;
-    let event = ctx.event(store, &st.change_id, payload)?;
-    store.append_event(&event)?;
+    let mut event = ctx.event(store, &st.change_id, payload)?;
+    store.append_local_event(&mut event)?;
     gitio::update_ref(
         &ctx.cwd,
         &gitio::retention_ref(&st.change_id, &patchset_id),

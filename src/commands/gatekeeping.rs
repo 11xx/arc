@@ -325,7 +325,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             );
         }
         let revision = gitio::head(&run_ctx.cwd)?;
-        let ev = ctx.event(
+        let mut ev = ctx.event(
             &store,
             &change_id,
             Payload::DirtyTreeWaived {
@@ -334,7 +334,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             },
         )?;
         ensure_append_allowed(&st, &ev.payload)?;
-        store.append_event(&ev)?;
+        store.append_local_event(&mut ev)?;
         println!(
             "dirty-tree waived at {}: {reason}",
             &revision[..revision.len().min(8)]
@@ -1031,10 +1031,9 @@ fn start_verification_run(
             .collect(),
     };
     ensure_append_allowed(&state, &payload)?;
-    let event = ctx.event(store, change_id, payload)?;
-    let run_id = event.event_id.clone();
-    store.append_event(&event)?;
-    Ok(run_id)
+    let mut event = ctx.event(store, change_id, payload)?;
+    store.append_local_event(&mut event)?;
+    Ok(event.event_id.clone())
 }
 
 /// The passing evidence `--skip-green` reuses for `name` at `tree`, if any.
@@ -1092,8 +1091,8 @@ fn append_reuses(
             evidence_event_id: evidence_event_id.clone(),
         };
         ensure_append_allowed(&state, &payload)?;
-        let event = ctx.event(store, change_id, payload)?;
-        store.append_event(&event)?;
+        let mut event = ctx.event(store, change_id, payload)?;
+        store.append_local_event(&mut event)?;
     }
     Ok(())
 }
@@ -2058,10 +2057,8 @@ fn append_verifications(
         // leaves no pin behind for an event that never existed.
         ensure_append_allowed(&st, &payload)?;
         let mut ev = ctx.event(store, change_id, payload)?;
-        let event_id = ev.event_id.clone();
         let mut candidate = events.clone();
-        candidate.push(ev.clone());
-        candidate.sort_by(|a, b| a.event_id.cmp(&b.event_id));
+        candidate.push(ev.preview_after(&candidate)?);
         store
             .project_state(&candidate, &rewrites)
             .context("verification would make the change unreadable; nothing was written")?;
@@ -2070,7 +2067,7 @@ fn append_verifications(
         // cannot be pinned is recorded without one rather than pointing at
         // something collectable.
         if let Some(tree) = &captured_tree {
-            let name = gitio::tree_retention_ref(change_id, &event_id);
+            let name = gitio::tree_retention_ref(change_id, tree);
             match gitio::update_ref(&ctx.cwd, &name, tree) {
                 Ok(()) => {
                     if let Payload::VerificationRecorded { tested_tree, .. } = &mut ev.payload {
@@ -2096,7 +2093,28 @@ fn append_verifications(
                 }
             }
         }
-        store.append_event(&ev)?;
+        store.append_local_event(&mut ev)?;
+        if let Payload::VerificationRecorded {
+            tested_tree: Some(tree),
+            ..
+        } = &ev.payload
+        {
+            let name = gitio::tree_retention_ref(change_id, &ev.event_id);
+            match gitio::update_ref(&ctx.cwd, &name, tree) {
+                Ok(()) => {
+                    let prepared = gitio::tree_retention_ref(change_id, tree);
+                    if let Err(error) = gitio::git(&ctx.cwd, &["update-ref", "-d", &prepared, tree])
+                    {
+                        eprintln!(
+                            "warning: could not remove preparation pin {prepared}: {error:#}"
+                        );
+                    }
+                }
+                Err(error) => {
+                    eprintln!("warning: tree {tree} remains held by its preparation pin: {error:#}")
+                }
+            }
+        }
         events.push(ev.clone());
         if let Some(gate) = gate_label {
             let declared_by = ctx
@@ -2255,8 +2273,8 @@ pub fn hold(ctx: &Ctx, reference: &str, reason: String) -> Result<()> {
     let (change_id, _transition, st) = locked_state(&store, reference)?;
     let payload = Payload::HoldSet { reason };
     ensure_append_allowed(&st, &payload)?;
-    let ev = ctx.event(&store, &change_id, payload)?;
-    store.append_event(&ev)?;
+    let mut ev = ctx.event(&store, &change_id, payload)?;
+    store.append_local_event(&mut ev)?;
     // The event ID is how this hold is released, so printing it is what makes
     // an independent hold usable rather than merely recorded.
     println!("hold {} set on {change_id}", ev.event_id);
@@ -2277,7 +2295,7 @@ pub fn release_hold(
         bail!("no active hold on {change_id}");
     }
     let held = resolve_hold(&st, hold_event_id, &change_id)?;
-    let ev = ctx.event(
+    let mut ev = ctx.event(
         &store,
         &change_id,
         Payload::HoldReleased {
@@ -2285,7 +2303,7 @@ pub fn release_hold(
             reason,
         },
     )?;
-    store.append_event(&ev)?;
+    store.append_local_event(&mut ev)?;
     println!("hold {held} released on {change_id}");
     let left = st.holds.len() - 1;
     if left > 0 {
@@ -3475,7 +3493,7 @@ fn integrate_one(
         *integrated_commit = merged.clone();
     }
     ev.created_at = chrono::Utc::now();
-    if let Err(error) = store.append_event(&ev) {
+    if let Err(error) = store.append_local_event(&mut ev) {
         let publication = store.event_is_published(&ev);
         let (publication, next) = match publication {
             Ok(true) => ("published", "Do not retry integration. The closure is visible but its durability is unconfirmed; restore ledger durability, inspect arc show and perform any remaining retention or checkout cleanup."),
@@ -4145,8 +4163,8 @@ fn record_ready_to_send(
         target_revision: Some(target_revision.to_string()),
         authorization,
     };
-    let event = ctx.event(store, &st.change_id, payload)?;
-    store.append_event(&event)?;
+    let mut event = ctx.event(store, &st.change_id, payload)?;
+    store.append_local_event(&mut event)?;
     println!(
         "ready to send: {} at {head} ({} history); nothing was merged",
         st.change_id,
@@ -4766,8 +4784,8 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
             "provide exactly one of --assert-integrated <rev>, --abandoned, --superseded <change>"
         ),
     };
-    let ev = ctx.event(&store, &change_id, payload)?;
-    store.append_event(&ev)?;
+    let mut ev = ctx.event(&store, &change_id, payload)?;
+    store.append_local_event(&mut ev)?;
     drop(transition);
     println!("closed: {change_id}");
     println!("event: {}", ev.event_id);

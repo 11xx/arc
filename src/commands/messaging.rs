@@ -473,7 +473,7 @@ pub fn message(
 
     let store = ctx.store()?;
     let (change_id, _st) = ctx.load_state(&store, reference)?;
-    let event = ctx.event(
+    let mut event = ctx.event(
         &store,
         &change_id,
         Payload::Message {
@@ -484,7 +484,7 @@ pub fn message(
             metadata,
         },
     )?;
-    store.append_event(&event)?;
+    store.append_local_event(&mut event)?;
     println!("message: {} [{}]", message_type.as_str(), severity.as_str());
     println!("event: {}", event.event_id);
     Ok(())
@@ -549,8 +549,8 @@ pub fn messages(
             });
         }
     }
-    // Newest first; event IDs are ULIDs, so they break created_at ties in
-    // append order deterministically.
+    // Newest first; IDs deterministically break timestamp ties. Imported
+    // events retain their origin IDs rather than their local arrival order.
     views.sort_by(|a, b| {
         b.created_at
             .cmp(&a.created_at)

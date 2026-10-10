@@ -42,7 +42,7 @@ pub fn record_mapping(
     let _repository_events = store.lock_repository_events()?;
     let count = mapping.len();
     let retention = crate::retention::plan(&ctx.cwd, &store, &mapping, &refs)?;
-    let event = prepare_mapping(
+    let mut event = prepare_mapping(
         ctx,
         &store,
         mapping,
@@ -55,7 +55,7 @@ pub fn record_mapping(
     // is confirmed absent; an uncertain publication may already cite it.
     let (held, _) = crate::retention::creations(&ctx.cwd, &retention.retain)?;
     gitio::update_refs(&ctx.cwd, &held)?;
-    if let Err(error) = store.append_repository_event(&event) {
+    if let Err(error) = store.append_local_repository_event(&mut event) {
         match store.repository_event_is_published(&event) {
             Ok(false) => {
                 gitio::update_refs(&ctx.cwd, &crate::retention::withdrawals(&held))
@@ -79,7 +79,7 @@ pub fn record_mapping(
         println!("retained: {name} {commit}");
     }
     super::rewrite::report_unretained(&retention.gone);
-    Ok(event.event_id)
+    Ok(event.event_id.clone())
 }
 
 /// Validate and construct a mapping event under the repository-event lock.
@@ -92,7 +92,7 @@ pub(super) fn prepare_mapping(
     tool: Option<String>,
     refs: BTreeMap<String, crate::rewrite::RefMove>,
     retained: BTreeMap<String, String>,
-) -> Result<crate::model::Event> {
+) -> Result<crate::store::LocalEvent> {
     // A map from another repository, or with a typo in it, would otherwise be
     // recorded as fact: doctor would report a rewritten revision and suppress
     // the dangling warning, while nothing could resolve the successor. arc
@@ -135,8 +135,7 @@ pub(super) fn prepare_mapping(
             retained,
         },
     )?;
-    combined.push(event.clone());
-    combined.sort_by(|a, b| a.event_id.cmp(&b.event_id));
+    combined.push(event.preview_after(&combined)?);
     let rewrites = RewriteMap::from_events(combined.iter())
         .context("this rewrite contradicts one already recorded; nothing was written")?;
     // Judged here, while the old commits still exist: an approval follows a
@@ -186,7 +185,7 @@ pub fn withdraw_rewrite(ctx: &Ctx, event_id: &str, reason: String) -> Result<()>
     }) {
         println!("{event_id} was already withdrawn by {}", existing.event_id);
     } else {
-        let event = ctx.event(
+        let mut event = ctx.event(
             &store,
             Store::REPOSITORY_SCOPE,
             Payload::HistoryRewriteWithdrawn {
@@ -194,7 +193,7 @@ pub fn withdraw_rewrite(ctx: &Ctx, event_id: &str, reason: String) -> Result<()>
                 reason,
             },
         )?;
-        store.append_repository_event(&event)?;
+        store.append_local_repository_event(&mut event)?;
         println!("withdrawn: {event_id}");
         println!("event: {}", event.event_id);
     }

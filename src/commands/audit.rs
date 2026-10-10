@@ -110,9 +110,11 @@ pub(super) fn declare_debt_locked(
         production,
     };
     ensure_append_allowed(st, &payload)?;
-    let event = ctx.event(store, change_id, payload)?;
+    let mut event = ctx.event(store, change_id, payload)?;
     // One judgment is one obligation: an `arc integrate --debt` retried after
     // a refusal answers with the debt its first attempt recorded.
+    let origin_replica_id = event.repository_id.clone();
+    let declared_by = event.actor.clone();
     let receipt = |event_id: &str, disposition, publication, error: Option<String>| DebtReceipt {
         event_id: event_id.to_string(),
         disposition,
@@ -120,8 +122,8 @@ pub(super) fn declare_debt_locked(
         publication_error: error,
         reason: reason.to_string(),
         patchset_id: patchset_id.clone(),
-        origin_replica_id: event.repository_id.clone(),
-        declared_by: event.actor.clone(),
+        origin_replica_id: origin_replica_id.clone(),
+        declared_by: declared_by.clone(),
     };
     let (verb, receipt) = match st.debt.as_ref().filter(|debt| debt.restated_by(&event)) {
         Some(existing) => {
@@ -155,7 +157,7 @@ pub(super) fn declare_debt_locked(
             ("already declared", receipt)
         }
         None => {
-            if let Err(error) = store.append_event(&event) {
+            if let Err(error) = store.append_local_event(&mut event) {
                 let publication = store.publication_after_failed_append(&event);
                 let message = Some(format!("{error:#}"));
                 return Err(DebtPublicationFailure(receipt(
@@ -215,8 +217,8 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
         route_version: args.route_version,
     };
     ensure_append_allowed(&st, &payload)?;
-    let event = ctx.event(&store, &change_id, payload)?;
-    store.append_event(&event)?;
+    let mut event = ctx.event(&store, &change_id, payload)?;
+    store.append_local_event(&mut event)?;
     println!("audit: {:?} at {revision}", args.verdict);
     for id in finding_ids {
         println!("finding: {id}");

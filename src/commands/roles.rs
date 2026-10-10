@@ -120,7 +120,7 @@ pub(crate) fn append(
         withdrawn,
     };
     ensure_append_allowed(state, &payload)?;
-    store.append_event(&ctx.event(store, change_id, payload)?)?;
+    store.append_local_event(&mut ctx.event(store, change_id, payload)?)?;
     Ok(())
 }
 

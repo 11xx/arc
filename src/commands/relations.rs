@@ -55,10 +55,10 @@ impl Subject {
         }
     }
 
-    fn append(&self, store: &Store, event: &Event) -> Result<()> {
+    fn append(&self, store: &Store, event: &mut crate::store::LocalEvent) -> Result<()> {
         match &self.subject {
-            RelationSubject::Change { .. } => store.append_event(event),
-            RelationSubject::Candidate { .. } => store.append_repository_event(event),
+            RelationSubject::Change { .. } => store.append_local_event(event),
+            RelationSubject::Candidate { .. } => store.append_local_repository_event(event),
         }
     }
 }
@@ -108,16 +108,15 @@ pub fn repository_relations(store: &Store) -> Result<Relations> {
         .context("the repository's relations do not replay")
 }
 
-/// An event sorting after every event already on the ledger, so a replay
-/// meets a read before anything that cites or reports on it.
+/// A draft whose publication ID places a read before later local citations.
 fn next_event(
     ctx: &Ctx,
     store: &Store,
     subject: &Subject,
     _ledger: &[Event],
-    _appended: &[Event],
+    _appended: &[crate::store::LocalEvent],
     payload: Payload,
-) -> Result<Event> {
+) -> Result<crate::store::LocalEvent> {
     ctx.event(store, subject.ledger_scope(), payload)
 }
 
@@ -159,7 +158,7 @@ pub fn read(ctx: &Ctx, args: ReadArgs) -> Result<()> {
         digest: args.digest.to_ascii_lowercase(),
         coverage: args.coverage,
     };
-    let event = read_event(
+    let mut event = read_event(
         ctx,
         &store,
         &subject,
@@ -172,7 +171,7 @@ pub fn read(ctx: &Ctx, args: ReadArgs) -> Result<()> {
     )?;
     ledger.record(&event)?;
     ctx.ensure_declared_actor(&store)?;
-    subject.append(&store, &event)?;
+    subject.append(&store, &mut event)?;
     print_read(&event);
     Ok(())
 }
@@ -241,7 +240,7 @@ pub fn read_from_tapes(ctx: &Ctx, args: TapesArgs) -> Result<()> {
     if !appended.is_empty() {
         ctx.ensure_declared_actor(&store)?;
     }
-    for event in &appended {
+    for event in &mut appended {
         subject.append(&store, event)?;
         print_read(event);
     }
@@ -324,12 +323,12 @@ fn read_event(
     store: &Store,
     subject: &Subject,
     ledger: &[Event],
-    appended: &[Event],
+    appended: &[crate::store::LocalEvent],
     episode: &str,
     tool_read: ToolRead,
     at: Option<String>,
     source: Option<String>,
-) -> Result<Event> {
+) -> Result<crate::store::LocalEvent> {
     let blob = match &at {
         Some(revision) => infer_blob(ctx, revision, &tool_read)?,
         None => None,
@@ -525,7 +524,7 @@ pub fn declare(ctx: &Ctx, args: DeclareArgs) -> Result<()> {
     if let Some(citation) = &args.citation {
         ledger.check_citation(&subject.subject, citation)?;
     }
-    let event = next_event(
+    let mut event = next_event(
         ctx,
         &store,
         &subject,
@@ -540,7 +539,7 @@ pub fn declare(ctx: &Ctx, args: DeclareArgs) -> Result<()> {
     )?;
     ledger.record(&event)?;
     ctx.ensure_declared_actor(&store)?;
-    subject.append(&store, &event)?;
+    subject.append(&store, &mut event)?;
     println!(
         "declared: {} {} {target}",
         subject.subject.label(),
@@ -568,7 +567,7 @@ pub fn capture(
     let events = subject.events(&store)?;
     let mut ledger = load_relations(&store, &subject)?;
     ledger.check_capture(&subject.subject, &record)?;
-    let event = next_event(
+    let mut event = next_event(
         ctx,
         &store,
         &subject,
@@ -582,7 +581,7 @@ pub fn capture(
     )?;
     ledger.record(&event)?;
     ctx.ensure_declared_actor(&store)?;
-    subject.append(&store, &event)?;
+    subject.append(&store, &mut event)?;
     println!(
         "capture: {record} on {} {}",
         subject.subject.label(),
