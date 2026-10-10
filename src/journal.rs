@@ -939,7 +939,9 @@ pub enum JournalCmd {
         /// `option`, `ref`, `actor`, and `model` on a position; `option`,
         /// `actor`, and `model` on an answer; `actor` and `model` on a
         /// question. A corrected actor, model or planner is held to what a
-        /// write records: a placeholder or a session id model refuses
+        /// write records: a placeholder or a session id model refuses. A
+        /// planner correction that fails the same checks when read reads as
+        /// `planner_status: malformed` in `show --json`
         #[arg(long, value_parser = CORRECTABLE_FIELDS)]
         field: String,
         /// What the field should have said
@@ -1080,7 +1082,11 @@ pub enum JournalCmd {
     Show {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
-        /// Emit the versioned artifact metadata projection.
+        /// Emit the versioned artifact metadata projection: the body, the
+        /// planners credited with `planner_status` and its sources, and
+        /// `planner_correction_event`, the amendment ID of the planner
+        /// correction in force. A correction that fails validation reads
+        /// `planner_status: malformed` and credits no planner.
         #[arg(long)]
         json: bool,
     },
@@ -3641,6 +3647,9 @@ struct Amendments {
 }
 
 struct Correction {
+    /// The amendment ID the correction's block and event share, when it
+    /// recorded one.
+    id: Option<String>,
     target: String,
     field: String,
     value: String,
@@ -3683,6 +3692,7 @@ impl Amendments {
             .expect("a known amendment names a target");
         if event.event == "correction" {
             self.corrections.push(Correction {
+                id: event.amendment_id.clone(),
                 target,
                 field: event
                     .field
@@ -3704,6 +3714,14 @@ impl Amendments {
         }
     }
 
+    /// The correction in force on one field of one target.
+    fn latest(&self, target: &str, field: &str) -> Option<&Correction> {
+        self.corrections
+            .iter()
+            .rev()
+            .find(|correction| correction.target == target && correction.field == field)
+    }
+
     /// A field's value after corrections: the latest correction of it, or what
     /// was recorded.
     fn field<'a>(
@@ -3712,10 +3730,7 @@ impl Amendments {
         field: &str,
         recorded: Option<&'a str>,
     ) -> Option<&'a str> {
-        self.corrections
-            .iter()
-            .rev()
-            .find(|correction| correction.target == target && correction.field == field)
+        self.latest(target, field)
             .map(|correction| correction.value.as_str())
             .or(recorded)
     }
@@ -4912,12 +4927,34 @@ fn planner_from_value(value: &serde_json::Value) -> Result<PlannerIdentity> {
     Ok(planner)
 }
 
+/// The planners a `planners` correction names: a JSON array of planner
+/// objects, held to the rule a planner header is.
+fn planners_from_correction(value: &str) -> Result<Vec<PlannerIdentity>> {
+    let values: Vec<serde_json::Value> = serde_json::from_str(value)
+        .context("--field planners takes a JSON array of planner objects")?;
+    values.iter().map(planner_from_value).collect()
+}
+
 struct PlannerMetadata {
     planners: Vec<PlannerIdentity>,
     headers: Vec<PlannerIdentity>,
     recorded: Option<Vec<PlannerIdentity>>,
     status: &'static str,
     basis: &'static str,
+    /// The amendment ID of the planner correction in force, whether it was
+    /// applied (`corrected`) or refused as unreadable (`malformed`). Absent
+    /// when no correction was recorded, or when the one in force recorded no
+    /// ID.
+    correction_event: Option<String>,
+}
+
+impl PlannerMetadata {
+    /// The ID of the planner correction refused as unreadable.
+    fn refused_correction(&self) -> Option<&str> {
+        (self.status == "malformed" && self.basis == "correction")
+            .then_some(self.correction_event.as_deref())
+            .flatten()
+    }
 }
 
 fn planner_metadata(body: &str, events: &[JournalEvent], filename: &str) -> PlannerMetadata {
@@ -4928,18 +4965,15 @@ fn planner_metadata(body: &str, events: &[JournalEvent], filename: &str) -> Plan
             .flatten()
     });
     let amendments = Amendments::collect(events, filename);
-    let corrected = amendments
-        .field("artifact", "planners", None)
-        .and_then(|s| serde_json::from_str::<Vec<serde_json::Value>>(s).ok())
-        .and_then(|values| {
-            values
-                .iter()
-                .map(planner_from_value)
-                .collect::<Result<Vec<_>>>()
-                .ok()
-        });
-    let (mut planners, status, basis) = if let Some(corrected) = corrected {
-        (corrected, "corrected", "correction")
+    let correction = amendments.latest("artifact", "planners");
+    // The latest correction is the word on the planners. One that cannot be
+    // read grants no credit, and neither an earlier correction nor the headers
+    // speak in its place.
+    let (mut planners, status, basis) = if let Some(correction) = correction {
+        match planners_from_correction(&correction.value) {
+            Ok(corrected) => (corrected, "corrected", "correction"),
+            Err(_) => (Vec::new(), "malformed", "correction"),
+        }
     } else if malformed {
         (Vec::new(), "malformed", "body-header")
     } else if recorded.as_ref().is_some_and(|r| found && r != &headers) {
@@ -4959,6 +4993,7 @@ fn planner_metadata(body: &str, events: &[JournalEvent], filename: &str) -> Plan
         recorded,
         status,
         basis,
+        correction_event: correction.and_then(|correction| correction.id.clone()),
     }
 }
 
@@ -6989,12 +7024,7 @@ fn correct(
         if note.is_none_or(|note| note.trim().is_empty()) {
             bail!("planner corrections require --note <reason>");
         }
-        let values: Vec<serde_json::Value> = serde_json::from_str(value)
-            .context("--field planners takes a JSON array of planner objects")?;
-        let planners = values
-            .iter()
-            .map(planner_from_value)
-            .collect::<Result<Vec<_>>>()?;
+        let planners = planners_from_correction(value)?;
         ensure_fresh_planners(&planners, ctx.session.as_deref(), "omit the field")?;
     }
     let note = note.map(str::trim).filter(|note| !note.is_empty());
@@ -12832,11 +12862,12 @@ fn show(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "schema": "arc-journal-artifact/2",
+                "schema": "arc-journal-artifact/3",
                 "file": filename,
                 "body": body,
                 "planners": metadata.planners,
                 "planner_status": metadata.status,
+                "planner_correction_event": metadata.correction_event,
                 "planner_sources": {"headers": metadata.headers, "recorded": metadata.recorded},
                 "recorded_by": recorded.map(|identity| serde_json::json!({
                     "actor": identity.actor,
@@ -13334,8 +13365,12 @@ pub fn plan_source(ctx: &Ctx, reference: &str, slice: &str) -> Result<PlanSource
     ensure_storage_settled(&hot, &events, filename)?;
     let metadata = planner_metadata(&body, &events, filename);
     if matches!(metadata.status, "malformed" | "conflict") {
+        let refused = metadata
+            .refused_correction()
+            .map(|id| format!(" (correction {id})"))
+            .unwrap_or_default();
         eprintln!(
-            "warning: {} planner metadata in {filename}; no planner credit",
+            "warning: {} planner metadata in {filename}{refused}; no planner credit",
             metadata.status
         );
     }

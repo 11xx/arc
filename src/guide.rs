@@ -234,6 +234,12 @@ ORIENT INSIDE A PROJECT (start here, in this order)
   --plan-slice captures the body digest and declared planners; reading the
   brief prints available credit suggestions. Conflicting or malformed
   metadata grants no credit, and corrections leave existing briefs unchanged.
+  A planner correction that fails validation when read, as one imported from
+  another build can, is not dropped: `arc journal show --json` reads
+  `planner_status: malformed` with its amendment ID in
+  `planner_correction_event`, and no planner is credited until a later
+  correction replaces it. `planner_correction_event` also names the correction
+  in force when the status is `corrected`, and is null when none was recorded.
 
   Shelve a discussion with journal archive FILE --unresolved --note REASON.
   Use journal position FILE --archived to argue there, and journal unarchive
@@ -2651,7 +2657,7 @@ SCHEMAS
     `arc-integration-plan/1`         arc integrate --dry-run --json
     `arc-provisional-transition/1`   arc integrate --provisional --json
     `arc-brief/2`                    arc brief --json
-    `arc-journal-artifact/2`         arc journal show --json
+    `arc-journal-artifact/3`         arc journal show --json
     `arc-journal-inventory/6`        arc journal inventory --json
     `arc-rescue/5`                   arc rescue --json
     `arc-review/5`                   arc review --json

@@ -68,6 +68,119 @@ fn malformed_plan_records_no_credit_and_correction_is_shared() {
     );
 }
 
+/// Rewrite the value every `correction` event in a journal carries, as an
+/// import from another build could leave one the write path would have refused.
+fn overwrite_correction_values(dir: &Path, value: &str) {
+    let path = dir.join("events.jsonl");
+    let rewritten: String = fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let mut event: serde_json::Value = serde_json::from_str(line).unwrap();
+            if event["event"] == "correction" {
+                event["value"] = serde_json::Value::String(value.to_string());
+            }
+            format!("{}\n", serde_json::to_string(&event).unwrap())
+        })
+        .collect();
+    fs::write(&path, rewritten).unwrap();
+}
+
+fn correct_planners(repo: &Repo, file: &str, value: &str) {
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "correct",
+            file,
+            "--target",
+            "artifact",
+            "--field",
+            "planners",
+            "--value",
+            value,
+            "--note",
+            "correct author",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn unreadable_planner_correction_stays_visible_with_its_event_id() {
+    for unreadable in ["{broken", r#"[{"actor":""}]"#] {
+        let repo = Repo::new();
+        let path = stdout(repo.arc(&repo.root).env("ARC_ACTOR", "author-a").args([
+            "journal",
+            "plan",
+            "refused-correction",
+            "--title",
+            "Plan",
+        ]));
+        let path = Path::new(path.trim());
+        let dir = path.parent().unwrap();
+        let file = path.file_name().unwrap().to_str().unwrap();
+        let show = || {
+            json_stdout(
+                repo.arc(&repo.root)
+                    .args(["journal", "show", file, "--json"]),
+            )
+        };
+        let before = show();
+        assert_eq!(before["schema"], "arc-journal-artifact/3");
+        assert_eq!(before["planner_status"], "ok");
+        assert_eq!(before["planner_correction_event"], serde_json::Value::Null);
+
+        correct_planners(&repo, file, r#"[{"actor":"reviewer"}]"#);
+        let correction = journal_event_log(dir)
+            .into_iter()
+            .find(|event| event["event"] == "correction")
+            .unwrap()["amendment_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let corrected = show();
+        assert_eq!(corrected["planner_status"], "corrected");
+        assert_eq!(corrected["planner_correction_event"], correction);
+
+        overwrite_correction_values(dir, unreadable);
+        let view = show();
+        assert_eq!(view["planner_status"], "malformed", "{unreadable}");
+        assert_eq!(view["planner_correction_event"], correction, "{unreadable}");
+        assert_eq!(view["planners"], serde_json::json!([]), "{unreadable}");
+
+        begin_change(&repo, "refused-credit", None);
+        repo.arc(&repo.root)
+            .args([
+                "brief",
+                "refused-credit",
+                "--plan-ref",
+                file,
+                "--plan-slice",
+                "one",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Brief\n")
+            .assert()
+            .success()
+            .stderr(predicates::str::contains("malformed planner metadata"))
+            .stderr(predicates::str::contains(&correction));
+        let brief = json_stdout(
+            repo.arc(&repo.root)
+                .args(["brief", "refused-credit", "--json"]),
+        );
+        let source = &brief["brief"]["plan_source"];
+        assert_eq!(source["planner_status"], "malformed");
+        assert_eq!(source["planners"], serde_json::Value::Null);
+
+        correct_planners(&repo, file, r#"[{"actor":"reviewer-b"}]"#);
+        let latest = show();
+        assert_eq!(latest["planner_status"], "corrected");
+        assert_eq!(latest["planners"][0]["actor"], "reviewer-b");
+        assert_ne!(latest["planner_correction_event"], correction);
+    }
+}
+
 #[test]
 fn selected_plan_captures_author_instead_of_brief_recorder() {
     let repo = Repo::new();
