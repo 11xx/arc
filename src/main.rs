@@ -2084,9 +2084,11 @@ enum Cmd {
         /// the dry run and execution; a refusal prints the blocker on stderr
         /// and nothing on stdout. Provisional retries identify a completed
         /// preparation through reuse_event_id and reuse_commit, with merge_commit
-        /// false. With provisional execution, emit `arc-provisional-transition/1`
+        /// false. With provisional execution, emit `arc-provisional-transition/2`
         /// with observed refs, event publication, retained intent and recovery command.
-        /// A later refusal includes any debt written or reused earlier in the invocation.
+        /// A later refusal includes any debt written or reused earlier in the
+        /// invocation. A debt whose publication failed is reported too, with its
+        /// `publication` observed as durable, visible-unconfirmed, absent or unknown.
         /// Applied intent recovery precedes eligibility checks for a fresh preparation.
         /// Unapplied retries enforce current readiness and the saved basis. Explicit
         /// destination or recipient conflicts refuse with the exact retry parameters.

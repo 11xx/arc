@@ -2130,7 +2130,7 @@ fn failed_publication_has_structured_effects_in_execution_json() {
         .code(1);
     let output: serde_json::Value = serde_json::from_slice(&failed.get_output().stdout).unwrap();
     let saved: serde_json::Value = serde_json::from_slice(&fs::read(&intent).unwrap()).unwrap();
-    assert_eq!(output["schema"], "arc-provisional-transition/1");
+    assert_eq!(output["schema"], "arc-provisional-transition/2");
     assert_eq!(output["exit_code"], 1);
     assert_eq!(output["transition"]["applied"], true);
     assert_eq!(output["transition"]["event_state"], "unknown");
@@ -2757,9 +2757,10 @@ fn execution_json_reports_written_and_reused_debt_before_a_refusal() {
                     String::from_utf8_lossy(&refused.get_output().stderr)
                 )
             });
-        assert_eq!(output["schema"], "arc-provisional-transition/1");
+        assert_eq!(output["schema"], "arc-provisional-transition/2");
         assert_eq!(output["exit_code"], 5);
         assert_eq!(output["debt"]["disposition"], disposition);
+        assert_eq!(output["debt"]["publication"], "durable");
         assert_eq!(output["debt"]["reason"], "review obligation retained");
         assert!(output["debt"]["event_id"].is_string());
         let recorded = json_stdout(worker.arc(&worker.root).args(["show", &change, "--json"]));
@@ -2778,6 +2779,92 @@ fn execution_json_reports_written_and_reused_debt_before_a_refusal() {
         )
         .is_empty());
     }
+}
+
+#[test]
+fn execution_json_reports_a_debt_that_was_never_published() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_authority, worker) = worker();
+    let change = prepared(&worker);
+    let dir = worker
+        .root
+        .join(".git/arc/changes")
+        .join(&change)
+        .join("events");
+    let real_git =
+        String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout).unwrap();
+    // The change is read before the debt is appended, and the target branch
+    // is resolved once before that read and once after it.
+    let bin = worker.home.join("publication-bin");
+    let count = worker.home.join("target-resolutions");
+    fs::create_dir_all(&bin).unwrap();
+    let wrapper = bin.join("git");
+    fs::write(
+        &wrapper,
+        format!(
+            r#"#!/bin/sh
+if [ "$*" = "rev-parse --verify refs/heads/master^{{commit}}" ]; then
+    echo x >> '{count}'
+    if [ "$(wc -l < '{count}')" = 2 ]; then
+        chmod 500 '{dir}' || exit 1
+    fi
+fi
+exec '{git}' "$@"
+"#,
+            count = count.display(),
+            dir = dir.display(),
+            git = real_git.trim(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let reason = "review obligation retained";
+    let args = [
+        "integrate",
+        &change,
+        "--provisional",
+        "--json",
+        "--debt",
+        reason,
+    ];
+    let failed = worker
+        .arc(&worker.root)
+        .args(args)
+        .env("PATH", &path)
+        .assert()
+        .code(1);
+    let output: serde_json::Value = serde_json::from_slice(&failed.get_output().stdout)
+        .unwrap_or_else(|error| {
+            panic!(
+                "missing receipt: {error}; {}",
+                String::from_utf8_lossy(&failed.get_output().stderr)
+            )
+        });
+    assert_eq!(output["schema"], "arc-provisional-transition/2");
+    assert_eq!(output["exit_code"], 1);
+    assert!(output["transition"].is_null(), "{output}");
+    assert!(output["error"]
+        .as_str()
+        .unwrap()
+        .contains("publication=absent"));
+    let debt = &output["debt"];
+    assert_eq!(debt["disposition"], "attempted", "{output}");
+    assert_eq!(debt["publication"], "absent");
+    assert_eq!(debt["reason"], reason);
+    assert!(debt["publication_error"].is_string(), "{output}");
+    let event_id = debt["event_id"].as_str().unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(!dir.join(format!("{event_id}.json")).exists());
+    assert!(git_out(
+        &worker.root,
+        &["branch", "--list", "arc/provisional/worker/master"]
+    )
+    .is_empty());
+    let retried = json_stdout(worker.arc(&worker.root).args(args));
+    assert_eq!(retried["debt"]["publication"], "durable", "{retried}");
+    assert_eq!(retried["debt"]["disposition"], "written");
+    assert!(retried["debt"].get("publication_error").is_none());
 }
 
 #[test]

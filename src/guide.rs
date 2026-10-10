@@ -1257,10 +1257,17 @@ PAIR REPLICA STORES
   An intent binds the exact event and guarded ref transition before visibility;
   publication failure reports the merge, observed staging and retention refs,
   event state, retained intent and exact recovery command. Execution --json
-  emits `arc-provisional-transition/1`. Execution JSON includes debt declared
-  before any subsequent refusal, naming its written or reused event, bound
-  patchset, reason and declaration details. Doctor, status and workspace report
-  expose unfinished intents separately from published obligations and review debt.
+  emits `arc-provisional-transition/2`. Execution JSON includes the debt
+  declared before any subsequent refusal, naming its written or reused event,
+  bound patchset, reason and declaration details. Its `publication` states what
+  was observed of the event: `durable` once the file and its directory entry
+  are synced; `visible-unconfirmed` when the event is readable but the sync
+  failed, so a retry that answers with it confirms it; `absent`; or `unknown`
+  when the ledger could not be read. A declaration that fails after the
+  attempt still reports the debt, with disposition `attempted`, beside
+  `transition: null` and the error, and `publication_error` naming the failure.
+  Doctor, status and workspace report expose unfinished intents separately
+  from published obligations and review debt.
   Recovery of an applied transition precedes new-preparation eligibility checks,
   including changed authority or provisional_enabled declarations, and retains
   its exact event and authorization. Later preparations may advance the same
@@ -2693,7 +2700,7 @@ SCHEMAS
     `arc-config/1`                   arc config
     `arc-accept/1`                   arc accept --json
     `arc-integration-plan/1`         arc integrate --dry-run --json
-    `arc-provisional-transition/1`   arc integrate --provisional --json
+    `arc-provisional-transition/2`   arc integrate --provisional --json
     `arc-brief/2`                    arc brief --json
     `arc-journal-artifact/3`         arc journal show --json
     `arc-journal-inventory/6`        arc journal inventory --json

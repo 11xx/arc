@@ -504,7 +504,7 @@ pub(crate) struct Intent {
     pub old_staging: Option<String>,
 }
 
-pub(crate) const TRANSITION_SCHEMA: &str = "arc-provisional-transition/1";
+pub(crate) const TRANSITION_SCHEMA: &str = "arc-provisional-transition/2";
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct PendingTransition {
@@ -809,6 +809,15 @@ pub fn integrate_provisionally(
     Ok(exit_code)
 }
 
+fn debt_document(receipt: &super::audit::DebtReceipt, details: &str) -> Result<serde_json::Value> {
+    let mut document = serde_json::to_value(receipt)?;
+    document
+        .as_object_mut()
+        .context("debt receipt is not an object")?
+        .insert("details".into(), details.into());
+    Ok(document)
+}
+
 fn integrate_provisionally_inner(
     ctx: &Ctx,
     references: &[String],
@@ -962,30 +971,27 @@ fn integrate_provisionally_inner(
         }
         if fork::fork_slug_for_branch(&ctx.cwd, &state.branch)?.is_none() {
             if let Some(debt) = args.debt {
-                let previous = state.debt.as_ref().map(|debt| debt.event_id.clone());
                 let operation = || {
                     super::audit::declare_debt_locked(ctx, &store, &state, &debt.reason, debt.kind)
                 };
-                let details = if args.json {
-                    let (result, details) = crate::operation_output::capture(operation);
-                    result?;
-                    details
+                let (result, details) = if args.json {
+                    crate::operation_output::capture(operation)
                 } else {
-                    operation()?;
-                    String::new()
+                    (operation(), String::new())
+                };
+                let receipt = match result {
+                    Ok(receipt) => receipt,
+                    Err(error) => {
+                        if let Some(failure) =
+                            error.downcast_ref::<super::audit::DebtPublicationFailure>()
+                        {
+                            *debt_effect = Some(debt_document(&failure.0, &details)?);
+                        }
+                        return Err(error);
+                    }
                 };
                 state = store.state(&state.change_id)?;
-                let recorded = state
-                    .debt
-                    .as_ref()
-                    .context("declared debt is missing from its ledger")?;
-                *debt_effect = Some(serde_json::json!({
-                    "event_id": recorded.event_id,
-                    "disposition": if previous.as_ref() == Some(&recorded.event_id) { "reused" } else { "written" },
-                    "reason": recorded.reason, "patchset_id": recorded.patchset_id,
-                    "origin_replica_id": recorded.origin_replica_id,
-                    "declared_by": recorded.actor, "details": details,
-                }));
+                *debt_effect = Some(debt_document(&receipt, &details)?);
             }
         }
     }

@@ -24,8 +24,51 @@ pub fn declare_debt(
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
     let st = store.state(&change_id)?;
-    declare_debt_locked(ctx, &store, &st, reason, kind)
+    declare_debt_locked(ctx, &store, &st, reason, kind).map(|_| ())
 }
+
+/// What a debt declaration observed about its event: the event, and whether
+/// it is durably in the ledger.
+#[derive(Debug, Clone, serde::Serialize)]
+pub(super) struct DebtReceipt {
+    pub event_id: String,
+    /// `written` or `reused` once the event is durable; `attempted` for a new
+    /// event whose publication did not complete.
+    pub disposition: &'static str,
+    /// `durable` when the event file and its directory entry were synced;
+    /// `visible-unconfirmed` when the event is readable but the sync failed;
+    /// `absent` when it is not in the ledger; `unknown` when the ledger could
+    /// not be read to tell.
+    pub publication: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publication_error: Option<String>,
+    pub reason: String,
+    pub patchset_id: Option<String>,
+    pub origin_replica_id: String,
+    pub declared_by: String,
+}
+
+/// A declaration whose publication did not complete, carrying what was
+/// observed of the event so a caller can report it.
+#[derive(Debug)]
+pub(super) struct DebtPublicationFailure(pub DebtReceipt);
+
+impl std::fmt::Display for DebtPublicationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "debt event {} publication={}: {}",
+            self.0.event_id,
+            self.0.publication,
+            self.0
+                .publication_error
+                .as_deref()
+                .unwrap_or("not completed")
+        )
+    }
+}
+
+impl std::error::Error for DebtPublicationFailure {}
 
 /// The caller holds the change transition lock across observation and declaration.
 pub(super) fn declare_debt_locked(
@@ -34,7 +77,7 @@ pub(super) fn declare_debt_locked(
     st: &ChangeState,
     reason: &str,
     kind: Option<DebtMissing>,
-) -> Result<()> {
+) -> Result<DebtReceipt> {
     let reason = reason.trim();
     if reason.is_empty() {
         bail!("--reason must say what review is owed and why it could not run");
@@ -69,13 +112,49 @@ pub(super) fn declare_debt_locked(
     let event = ctx.event(store, change_id, payload)?;
     // One judgment is one obligation: an `arc integrate --debt` retried after
     // a refusal answers with the debt its first attempt recorded.
-    let (verb, event_id) = match st.debt.as_ref().filter(|debt| debt.restated_by(&event)) {
-        Some(existing) => ("already declared", existing.event_id.as_str()),
+    let receipt = |event_id: &str, disposition, publication, error: Option<String>| DebtReceipt {
+        event_id: event_id.to_string(),
+        disposition,
+        publication,
+        publication_error: error,
+        reason: reason.to_string(),
+        patchset_id: patchset_id.clone(),
+        origin_replica_id: event.repository_id.clone(),
+        declared_by: event.actor.clone(),
+    };
+    let (verb, receipt) = match st.debt.as_ref().filter(|debt| debt.restated_by(&event)) {
+        Some(existing) => {
+            // An earlier attempt may have left its event visible without a
+            // confirmed sync; a retry that answers with it confirms it.
+            let mut receipt = receipt(&existing.event_id, "reused", "durable", None);
+            receipt.origin_replica_id = existing.origin_replica_id.clone();
+            receipt.declared_by = existing.actor.clone();
+            if let Err(error) = store.sync_published_event(change_id, &existing.event_id) {
+                receipt.publication = "visible-unconfirmed";
+                receipt.publication_error = Some(format!("{error:#}"));
+                return Err(DebtPublicationFailure(receipt).into());
+            }
+            ("already declared", receipt)
+        }
         None => {
-            store.append_event(&event)?;
-            ("declared", event.event_id.as_str())
+            if let Err(error) = store.append_event(&event) {
+                let publication = store.publication_after_failed_append(&event);
+                let message = Some(format!("{error:#}"));
+                return Err(DebtPublicationFailure(receipt(
+                    &event.event_id,
+                    "attempted",
+                    publication,
+                    message,
+                ))
+                .into());
+            }
+            (
+                "declared",
+                receipt(&event.event_id, "written", "durable", None),
+            )
         }
     };
+    let event_id = receipt.event_id.as_str();
     match &patchset_id {
         Some(id) => {
             crate::operation_println!("debt {verb} for {id} ({}): {reason}", missing.as_str())
@@ -83,7 +162,7 @@ pub(super) fn declare_debt_locked(
         None => crate::operation_println!("debt {verb} ({}): {reason}", missing.as_str()),
     }
     crate::operation_println!("event: {event_id}");
-    Ok(())
+    Ok(receipt)
 }
 
 pub struct AuditArgs {

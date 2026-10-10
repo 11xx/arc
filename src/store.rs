@@ -505,8 +505,17 @@ impl Store {
         if !self.event_is_published(event)? {
             self.append_event(event)?;
         }
-        let directory = self.events_dir(&event.change_id);
-        File::open(directory.join(format!("{}.json", event.event_id)))?.sync_all()?;
+        self.sync_published_event(&event.change_id, &event.event_id)
+    }
+
+    /// Flush a visible event file and its directory entry to stable storage.
+    /// A publication whose directory sync failed becomes durable only when
+    /// this succeeds.
+    pub(crate) fn sync_published_event(&self, change_id: &str, event_id: &str) -> Result<()> {
+        ids::validate_id_component(change_id)?;
+        ids::validate_id_component(event_id)?;
+        let directory = self.events_dir(change_id);
+        File::open(directory.join(format!("{event_id}.json")))?.sync_all()?;
         File::open(directory)?.sync_all()?;
         Ok(())
     }
@@ -916,6 +925,18 @@ impl Store {
     pub fn event_is_published(&self, event: &Event) -> Result<bool> {
         ids::validate_id_component(&event.change_id)?;
         self.event_is_published_at(event, &self.events_dir(&event.change_id))
+    }
+
+    /// Where an event stands after its append reported an error: `visible-unconfirmed`
+    /// when the exact event is readable but its publication did not complete,
+    /// `absent` when it is not in the ledger, `unknown` when the ledger could
+    /// not be read to tell.
+    pub(crate) fn publication_after_failed_append(&self, event: &Event) -> &'static str {
+        match self.event_is_published(event) {
+            Ok(true) => "visible-unconfirmed",
+            Ok(false) => "absent",
+            Err(_) => "unknown",
+        }
     }
 
     pub(crate) fn repository_event_is_published(&self, event: &Event) -> Result<bool> {
@@ -1819,6 +1840,13 @@ fn create_private_dir_all(path: &Path) -> Result<()> {
         .with_context(|| format!("cannot create {}", path.display()))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Makes the directory sync that completes `write_exclusive` fail on this
+    /// thread, after the file is already visible.
+    static FAIL_DIRECTORY_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Durably publishes a new file by fsyncing its contents, hard-linking it into
 /// place, and fsyncing the containing directory.
 fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -1848,6 +1876,10 @@ fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<()> {
             .context("exclusive-write path has no parent directory")?;
         let directory =
             File::open(dir).with_context(|| format!("cannot fsync {}", dir.display()))?;
+        #[cfg(test)]
+        if FAIL_DIRECTORY_SYNC.get() {
+            bail!("injected failure syncing {}", dir.display());
+        }
         directory
             .sync_all()
             .with_context(|| format!("cannot fsync {}", dir.display()))?;
@@ -1871,6 +1903,48 @@ mod tests {
             require_declared_actor_sources: Vec::new(),
             read_only: false,
         }
+    }
+
+    #[test]
+    fn an_event_whose_directory_sync_failed_is_visible_but_unconfirmed() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = StoreConfig {
+            schema_version: 1,
+            repository_id: "repo".into(),
+            created_at: chrono::Utc::now(),
+        };
+        fs::write(
+            dir.path().join("config.json"),
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        let store = test_store(dir.path());
+        let event: Event = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "event_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "repository_id": "repo",
+            "change_id": "change",
+            "actor": "tester",
+            "created_at": chrono::Utc::now(),
+            "event_type": "candidate-retired",
+            "candidate_id": "candidate",
+        }))
+        .unwrap();
+        assert_eq!(store.publication_after_failed_append(&event), "absent");
+        FAIL_DIRECTORY_SYNC.set(true);
+        let failed = store.append_event(&event);
+        FAIL_DIRECTORY_SYNC.set(false);
+        assert!(failed.is_err());
+        assert_eq!(
+            store.publication_after_failed_append(&event),
+            "visible-unconfirmed"
+        );
+        store
+            .sync_published_event(&event.change_id, &event.event_id)
+            .unwrap();
+        let mut different = event.clone();
+        different.actor = "other".into();
+        assert_eq!(store.publication_after_failed_append(&different), "unknown");
     }
 
     #[test]
