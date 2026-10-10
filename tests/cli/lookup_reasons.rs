@@ -285,3 +285,51 @@ fn a_broken_config_warns_once_and_continues_without_detection() {
         "{output:?}"
     );
 }
+
+#[test]
+fn an_unsearchable_config_directory_reports_the_filesystem_error() {
+    let repo = Repo::new();
+    let change = opened_change_id(&stdout(
+        repo.arc(&repo.root).args(["begin", "config-access"]),
+    ));
+    let directory = repo.home.join(".local/ai/arc");
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o600)).unwrap();
+    let config = repo.arc(&repo.root).arg("config").output().unwrap();
+    let read = repo
+        .arc(&repo.root)
+        .env_remove("ARC_HARNESS")
+        .env_remove("ARC_SESSION")
+        .env("ARC_DATA_DIR", repo.root.join(".git/arc"))
+        .args(["events", "--change", &change])
+        .output()
+        .unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let stderr = String::from_utf8_lossy(&config.stderr);
+    assert!(!config.status.success(), "{config:?}");
+    assert!(
+        stderr.contains("config.toml") && stderr.contains("Permission denied"),
+        "{stderr}"
+    );
+    let stderr = String::from_utf8_lossy(&read.stderr);
+    assert!(read.status.success(), "{stderr}");
+    assert_eq!(
+        stderr.matches("warning: identity detection is off").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(stderr.contains("Permission denied"), "{stderr}");
+}
+
+#[test]
+fn a_config_path_that_is_a_directory_is_not_default_settings() {
+    let repo = Repo::new();
+    let path = repo.home.join(".local/ai/arc/config.toml");
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    repo.arc(&repo.root)
+        .arg("config")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("config.toml"));
+}

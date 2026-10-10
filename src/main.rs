@@ -2255,6 +2255,8 @@ enum Cmd {
     /// Style precedence: flag, operator defaults, HEAD project defaults, user, builtin.
     /// Style inspection parses user configuration and repository policy;
     /// malformed style or constraint tables and known keys refuse with file and key.
+    /// A missing user configuration selects built-in settings; filesystem
+    /// access errors refuse with the path and cause.
     /// Records no events; ledger reads do not require a parseable append policy.
     Config {
         /// Probe every local path required to write the ledger

@@ -2581,7 +2581,9 @@ FILES
   `~/.local/ai/` unless ARC_AI_HOME or AI_HOME names another. ARC_WORKTREES_DIR and
   ARC_DATA_ROOT override their keys, and ARC_DATA_DIR names one exact ledger
   directory for one repository, above both. `arc config` prints the resolved
-  paths.
+  paths. Only a missing configuration selects built-in settings. Access,
+  filesystem and parse errors remain errors for every configuration consumer;
+  advisory consumers name their fallback and the error on stderr.
 
     worktrees_dir = "~/.worktrees"       where change worktrees are created
     data_root = "<dir>"                  ledgers at <dir>/<repo-path-slug>/

@@ -273,13 +273,15 @@ pub fn load() -> Result<Config> {
     let sandbox = sandbox()?;
     let ai_home = ai_home()?;
     let config_path = ai_home.join("arc").join("config.toml");
-    let file: ConfigFile = if config_path.is_file() {
-        let text = std::fs::read_to_string(&config_path)
-            .with_context(|| format!("cannot read {}", config_path.display()))?;
-        crate::style::validate_user(&text, &config_path.display().to_string())?;
-        toml::from_str(&text).with_context(|| format!("malformed {}", config_path.display()))?
-    } else {
-        ConfigFile::default()
+    let file: ConfigFile = match std::fs::read_to_string(&config_path) {
+        Ok(text) => {
+            crate::style::validate_user(&text, &config_path.display().to_string())?;
+            toml::from_str(&text).with_context(|| format!("malformed {}", config_path.display()))?
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => ConfigFile::default(),
+        Err(error) => {
+            return Err(error).with_context(|| format!("cannot read {}", config_path.display()))
+        }
     };
 
     let worktrees_dir = match std::env::var_os("ARC_WORKTREES_DIR") {
