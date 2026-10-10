@@ -77,18 +77,58 @@ pub struct Store {
     pub read_only: bool,
 }
 
-/// A privilege scope derived at most once, the first time a read needs it.
-pub struct LazyScope<'a> {
+/// One read of the ledger. The import batches, the recorded rewrites and the
+/// privilege scope are each loaded or derived at most once, the first time the
+/// read needs them, and shared by every change it reads. A read of N changes
+/// then costs N changes' events, not N times the ledger.
+///
+/// The handle describes the ledger as it stood when it was opened: a reader
+/// that writes opens a new one afterwards.
+pub struct LedgerRead<'a> {
     store: &'a Store,
-    held: Option<Arc<PrivilegeScope>>,
+    batches: Vec<ImportBatch>,
+    scope: std::cell::OnceCell<Arc<PrivilegeScope>>,
+    rewrites: std::cell::OnceCell<crate::rewrite::RewriteMap>,
 }
 
-impl LazyScope<'_> {
-    pub fn get(&mut self) -> Result<&Arc<PrivilegeScope>> {
-        if self.held.is_none() {
-            self.held = Some(self.store.privilege_scope()?);
+impl LedgerRead<'_> {
+    pub fn change_ids(&self) -> Result<Vec<String>> {
+        self.store.list_change_ids_in(&self.batches)
+    }
+
+    pub fn events(&self, change_id: &str) -> Result<Vec<Event>> {
+        self.store.load_events_in(change_id, &self.batches)
+    }
+
+    pub fn rewrites(&self) -> Result<&crate::rewrite::RewriteMap> {
+        if let Some(held) = self.rewrites.get() {
+            return Ok(held);
         }
-        Ok(self.held.as_ref().expect("derived above"))
+        let loaded = self.store.rewrites_in(&self.batches)?;
+        Ok(self.rewrites.get_or_init(|| loaded))
+    }
+
+    /// The scope, derived when first asked for. A read that never asks, as one
+    /// over an empty ledger does not, never derives it, and one that cannot
+    /// derive it fails at each change that asks.
+    pub fn scope(&self) -> Result<&Arc<PrivilegeScope>> {
+        if let Some(held) = self.scope.get() {
+            return Ok(held);
+        }
+        let derived = self.store.privilege_scope()?;
+        Ok(self.scope.get_or_init(|| derived))
+    }
+
+    /// A change's events reduced under this read's rewrites and scope.
+    pub fn project(&self, events: &[Event]) -> Result<crate::state::ChangeState> {
+        self.store
+            .project_state_in(self.scope()?, events, self.rewrites()?)
+    }
+
+    pub fn state(&self, change_id: &str) -> Result<crate::state::ChangeState> {
+        let events = self.events(change_id)?;
+        self.rewrites()?;
+        self.project(&events)
     }
 }
 
@@ -180,6 +220,15 @@ fn event_file_stems(dir: &Path) -> Result<BTreeSet<String>> {
         }
     }
     Ok(stems)
+}
+
+fn typed_repository_events(raw: Vec<(String, serde_json::Value)>) -> Result<Vec<Event>> {
+    raw.into_iter()
+        .filter_map(|(_, value)| match serde_json::from_value::<Event>(value) {
+            Ok(event) if matches!(event.payload, Payload::Unknown) => None,
+            other => Some(other.context("malformed repository event")),
+        })
+        .collect()
 }
 
 fn typed_events(raw: Vec<(String, serde_json::Value)>) -> Result<Vec<Event>> {
@@ -389,13 +438,7 @@ impl Store {
     /// Repository-scoped events in ID order. A repository that has never had
     /// one has no directory, which is not an error.
     pub fn load_repository_events(&self) -> Result<Vec<Event>> {
-        self.raw_repository_events_unseen(&BTreeSet::new())?
-            .into_iter()
-            .filter_map(|(_, value)| match serde_json::from_value::<Event>(value) {
-                Ok(event) if matches!(event.payload, Payload::Unknown) => None,
-                other => Some(other.context("malformed repository event")),
-            })
-            .collect()
+        typed_repository_events(self.raw_repository_events_unseen(&BTreeSet::new())?)
     }
 
     /// One exact staging transition is retained per change until its event is durable.
@@ -1242,14 +1285,14 @@ impl Store {
         Ok(Arc::new(PrivilegeScope::for_store(self)?))
     }
 
-    /// The scope for one read, derived when the read first judges a change.
-    /// A read that finds nothing to judge never derives it, and one that
-    /// cannot derive it fails at each change that needs it.
-    pub fn lazy_scope(&self) -> LazyScope<'_> {
-        LazyScope {
+    /// Open one read of the ledger as it stands.
+    pub fn read(&self) -> Result<LedgerRead<'_>> {
+        Ok(LedgerRead {
             store: self,
-            held: None,
-        }
+            batches: import_batches(&self.root)?,
+            scope: Default::default(),
+            rewrites: Default::default(),
+        })
     }
 
     /// Readable changes for an aggregate view. A per-change failure is named
@@ -1259,19 +1302,16 @@ impl Store {
     /// The scope is derived once for the whole view, so the cost of an
     /// aggregate read does not multiply by the number of changes.
     pub fn readable_states(&self) -> Result<BTreeMap<String, crate::state::ChangeState>> {
-        let rewrites = self.rewrites()?;
-        let batches = import_batches(&self.root)?;
-        let mut scope = self.lazy_scope();
+        let read = self.read()?;
+        read.rewrites()?;
         let mut states = BTreeMap::new();
-        for change_id in self.list_change_ids_in(&batches)? {
-            let result = self
-                .load_events_in(&change_id, &batches)
-                .and_then(|events| {
-                    let mut state = crate::state::reduce_following(&events, &rewrites)?;
-                    state.apply_privilege_scope(Arc::clone(scope.get()?), &events);
-                    crate::replica::localize_change(&self.repository_id, &events, &mut state);
-                    Ok(state)
-                });
+        for change_id in read.change_ids()? {
+            let result = read.events(&change_id).and_then(|events| {
+                let mut state = crate::state::reduce_following(&events, read.rewrites()?)?;
+                state.apply_privilege_scope(Arc::clone(read.scope()?), &events);
+                crate::replica::localize_change(&self.repository_id, &events, &mut state);
+                Ok(state)
+            });
             match result {
                 Ok(state) => {
                     states.insert(change_id, state);
@@ -1287,6 +1327,13 @@ impl Store {
     /// need the repository's own terms.
     pub fn rewrites(&self) -> Result<crate::rewrite::RewriteMap> {
         crate::rewrite::RewriteMap::load(self)
+            .context("cannot read the recorded history rewrites; `arc doctor` reports which")
+    }
+
+    /// `rewrites` over import batches the caller already holds.
+    fn rewrites_in(&self, batches: &[ImportBatch]) -> Result<crate::rewrite::RewriteMap> {
+        typed_repository_events(self.raw_repository_events_in(batches)?)
+            .and_then(|events| crate::rewrite::RewriteMap::from_events(events.iter()))
             .context("cannot read the recorded history rewrites; `arc doctor` reports which")
     }
 

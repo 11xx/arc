@@ -5902,8 +5902,9 @@ pub(crate) fn recent_sessions(
             Vec::new()
         }
     };
-    for change in store.list_change_ids()? {
-        match store.load_events(&change) {
+    let read = store.read()?;
+    for change in read.change_ids()? {
+        match read.events(&change) {
             Ok(events) => ledger.extend(events),
             Err(error) => unavailable.push(format!("change {change}: {error:#}")),
         }
@@ -12088,13 +12089,12 @@ fn all_changes_in(
     store: &Store,
     rewrites: &crate::rewrite::RewriteMap,
 ) -> Result<Vec<ChangeState>> {
-    let mut scope = store.lazy_scope();
+    let read = store.read()?;
     let mut changes = Vec::new();
-    for id in store.list_change_ids()? {
-        let events = store.load_events(&id)?;
+    for id in read.change_ids()? {
+        let events = read.events(&id)?;
         changes.push(
-            scope
-                .get()
+            read.scope()
                 .and_then(|scope| store.project_state_in(scope, &events, rewrites))
                 .with_context(|| format!("cannot read change {id}"))?,
         );

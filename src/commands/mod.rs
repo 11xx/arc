@@ -680,12 +680,11 @@ impl Ctx {
 
     pub(crate) fn load_all_states(&self, store: &Store) -> Result<BTreeMap<String, ChangeState>> {
         let mut states = BTreeMap::new();
-        let rewrites = store.rewrites()?;
-        let batches = crate::store::import_batches(&store.root)?;
-        let mut scope = store.lazy_scope();
-        for change_id in store.list_change_ids_in(&batches)? {
-            let events = store.load_events_in(&change_id, &batches)?;
-            let mut state = store.project_state_in(scope.get()?, &events, &rewrites)?;
+        let read = store.read()?;
+        read.rewrites()?;
+        for change_id in read.change_ids()? {
+            let events = read.events(&change_id)?;
+            let mut state = read.project(&events)?;
             crate::replica::localize_change(&store.repository_id, &events, &mut state);
             states.insert(change_id, state);
         }

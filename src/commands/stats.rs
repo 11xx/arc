@@ -287,7 +287,8 @@ fn via_name(via: Option<JournalRefVia>) -> &'static str {
 }
 
 fn provenance(store: &Store, change_ids: &[String], json: bool) -> Result<()> {
-    let rewrites = store.rewrites()?;
+    let read = store.read()?;
+    read.rewrites()?;
     let mut falsification = FalsificationProvenance::default();
     let mut journal_refs = JournalRefProvenance::default();
     let mut via_counts: BTreeMap<&'static str, usize> = [
@@ -306,10 +307,9 @@ fn provenance(store: &Store, change_ids: &[String], json: bool) -> Result<()> {
 
     let mut passes = 0;
     let mut none_after_failure = 0;
-    let mut scope = store.lazy_scope();
     for change_id in change_ids {
-        let events = store.load_events(change_id)?;
-        let state = store.project_state_in(scope.get()?, &events, &rewrites)?;
+        let events = read.events(change_id)?;
+        let state = read.project(&events)?;
 
         for (index, entry) in state.verifications.iter().enumerate() {
             if entry.result != VerifyResult::Pass || entry.probe.is_some() {
@@ -473,11 +473,11 @@ pub fn stats(ctx: &Ctx, selection: StatsSelection, json: bool, view: StatsView) 
     let mut changes = Vec::new();
     // Per-gate run durations across the selection, for aggregate percentiles.
     let mut gate_runs: BTreeMap<String, Vec<u64>> = BTreeMap::new();
-    let rewrites = store.rewrites()?;
-    let mut scope = store.lazy_scope();
+    let read = store.read()?;
+    read.rewrites()?;
     for change_id in change_ids {
-        let events = store.load_events(&change_id)?;
-        let mut state = store.project_state_in(scope.get()?, &events, &rewrites)?;
+        let events = read.events(&change_id)?;
+        let mut state = read.project(&events)?;
         crate::replica::localize_change(&store.repository_id, &events, &mut state);
         for (gate, seconds) in observed_gate_runs(&events) {
             gate_runs.entry(gate).or_default().push(seconds);

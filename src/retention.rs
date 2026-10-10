@@ -45,8 +45,9 @@ impl Cited {
 /// verdict recorded on some other commit is named by its own event.
 pub fn cited(store: &Store) -> Result<Vec<Cited>> {
     let mut found = Vec::new();
-    for change_id in store.list_change_ids()? {
-        let events = store.load_events(&change_id)?;
+    let read = store.read()?;
+    for change_id in read.change_ids()? {
+        let events = read.events(&change_id)?;
         let mut seen = BTreeSet::new();
         let mut add = |subject: &str, what: String, commit: &str| {
             if seen.insert(commit.to_string()) {

@@ -625,9 +625,10 @@ fn ending_for<'a>(events: &'a [Event], dispatch_event_id: &str) -> Option<RunEnd
 }
 
 fn find_change_event(store: &Store, event_id: &str) -> Result<Option<Event>> {
-    for change_id in store.list_change_ids()? {
-        if let Some(event) = store
-            .load_events(&change_id)?
+    let read = store.read()?;
+    for change_id in read.change_ids()? {
+        if let Some(event) = read
+            .events(&change_id)?
             .into_iter()
             .find(|event| event.event_id == event_id)
         {

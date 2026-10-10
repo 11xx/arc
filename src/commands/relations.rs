@@ -596,8 +596,9 @@ pub fn capture(
 /// candidate. None, or more than one, refuses.
 fn subject_holding(store: &Store, record: &str) -> Result<Subject> {
     let mut holders = Vec::new();
-    for change_id in store.list_change_ids()? {
-        let relations = change_relations(&store.load_events(&change_id)?)?;
+    let read = store.read()?;
+    for change_id in read.change_ids()? {
+        let relations = change_relations(&read.events(&change_id)?)?;
         let subject = RelationSubject::Change {
             change_id: change_id.clone(),
         };
