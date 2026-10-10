@@ -2275,6 +2275,8 @@ enum Cmd {
     /// `retained-object-missing`; a commit the ledger cites as a patchset head
     /// or a verdict's revision that no ref reaches is the advice
     /// `unretained-commit`, with the `git update-ref` that holds it.
+    /// A failed reachability walk is the problem `retention-reachability-failed`;
+    /// the report retains all findings collected before that failure.
     /// A change whose events fail to reduce is the problem `unreplayable-change`,
     /// naming the change with the reduction error; no reader can load it.
     ///

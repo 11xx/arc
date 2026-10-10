@@ -426,6 +426,11 @@ fn doctor_names_a_retained_commit_whose_object_is_gone() {
     let (worktree, old) = approved_change(&repo, "alpha");
     let change = only_change(&repo);
     rewrite_trailers(&repo, &worktree, &old);
+    // Another cited head keeps the reachability walk nonempty.
+    repo.arc(&worktree)
+        .args(["snapshot", "alpha"])
+        .assert()
+        .success();
     let clean = doctor(&repo);
     assert!(
         finding(&clean, "problems", "retained-object-missing").is_none(),
@@ -445,7 +450,15 @@ fn doctor_names_a_retained_commit_whose_object_is_gone() {
         detail.contains(&retention_ref(&change, "ps-01", &old)),
         "{detail}"
     );
-    repo.arc(&repo.root).args(["doctor"]).assert().code(1);
+    let reachability = finding(&report, "problems", "retention-reachability-failed")
+        .unwrap_or_else(|| panic!("{report}"));
+    assert!(reachability.contains("bad object"), "{reachability}");
+    repo.arc(&repo.root)
+        .args(["doctor"])
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("retained-object-missing"))
+        .stdout(predicates::str::contains("retention-reachability-failed"));
 }
 
 #[test]

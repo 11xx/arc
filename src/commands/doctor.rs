@@ -651,7 +651,16 @@ fn inspect_retention(
     let present: Vec<String> =
         gitio::commits_among(&ctx.cwd, cited.iter().map(|cited| cited.commit.as_str()))?;
     let present: Vec<&str> = present.iter().map(String::as_str).collect();
-    let unreachable = gitio::unreachable_from_refs(&ctx.cwd, &present)?;
+    let unreachable = match gitio::unreachable_from_refs(&ctx.cwd, &present) {
+        Ok(unreachable) => unreachable,
+        Err(error) => {
+            problems.push(Finding {
+                code: "retention-reachability-failed",
+                detail: format!("cannot determine which cited commits refs reach: {error:#}"),
+            });
+            return Ok(());
+        }
+    };
     for cited in cited
         .iter()
         .filter(|cited| unreachable.contains(&cited.commit))

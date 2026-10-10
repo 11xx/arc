@@ -1997,6 +1997,8 @@ HISTORY REWRITES
   cannot. `arc doctor` reports a retention ref whose object is gone as the
   problem `retained-object-missing`, and a cited commit no ref reaches as the
   advice `unretained-commit`, naming the `git update-ref` that holds it.
+  If Git cannot complete the reachability walk, the report retains collected
+  findings and names the problem `retention-reachability-failed` with the error.
 
   Every ref moves in one Git transaction, so a rewrite leaves the branch and
   arc's evidence refs on one history or leaves them all alone. The map and
