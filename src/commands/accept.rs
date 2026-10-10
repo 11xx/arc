@@ -1177,7 +1177,8 @@ fn execute_acceptance(
             return refuse(
                 11,
                 format!(
-                    "signing changed more than signatures and translated parents; {}",
+                    "signing changed more than signatures and translated parents; {}; {}",
+                    publishing_remedy(&plan.state),
                     replay(&plan.state, &plan.state.branch)
                 ),
             );
