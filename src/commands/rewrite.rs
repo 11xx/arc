@@ -177,7 +177,9 @@ pub fn instructions_git(check: Option<&str>) -> Result<i32> {
 pub fn trailers(ctx: &Ctx, args: TrailerArgs) -> Result<i32> {
     // An appended role line is a fresh write: a value that is no fresh
     // coordinate is refused before any commit is read, let alone recreated.
-    if let Some(issue) = crate::trailers::first_unrecordable_role(&args.append) {
+    if let Some(issue) =
+        crate::trailers::first_unrecordable_role(&args.append, ctx.session.as_deref())
+    {
         bail!(
             "--append \"{}: {}\": {}; write a fresh coordinate or omit the line",
             issue.key,
@@ -194,6 +196,7 @@ pub fn trailers(ctx: &Ctx, args: TrailerArgs) -> Result<i32> {
         edits.extend(crate::trailers::parse_edits(
             &text,
             &path.display().to_string(),
+            ctx.session.as_deref(),
         )?);
     }
     let cwd = ctx.cwd.clone();

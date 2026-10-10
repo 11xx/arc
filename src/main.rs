@@ -3044,8 +3044,9 @@ enum RewriteCmd {
         /// once. `replace` puts the new line in the old one's place and `drop`
         /// removes the old line. A new line on Planned-by, Implemented-by,
         /// Reviewed-by or Orchestrated-by has to be a fresh coordinate, and on
-        /// Assisted-by so does its value without a trailing `(role)`. Any
-        /// violation refuses before any commit is recreated, --dry-run
+        /// Assisted-by so does its value without a trailing `(role)`.
+        /// Models equal to the invoking session refuse, including non-UUID ids.
+        /// Any violation refuses before any commit is recreated, --dry-run
         /// included, naming the file and line. Combined with --drop and
         /// --append, edits apply first, then --drop, then --append; the edits
         /// read each commit's trailer block as the commit carries it
@@ -3064,7 +3065,8 @@ enum RewriteCmd {
         /// Implemented-by, Reviewed-by or Orchestrated-by value that is no
         /// fresh coordinate (malformed, carrying a placeholder or a session
         /// id, or a person without an email) refuses before any commit is
-        /// recreated, --dry-run included
+        /// recreated, --dry-run included.
+        /// A model equal to the invoking session refuses, including a non-UUID id.
         #[arg(
             long,
             value_name = "LINE",

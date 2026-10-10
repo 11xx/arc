@@ -597,6 +597,8 @@ fn appended_role_trailers_refuse_placeholders_before_any_commit_moves() {
         "reviewed-by: Ada <ada>",
         "Implemented-by: fixture",
         "Planned-by: codex:",
+        "Implemented-by: opencode:session-a",
+        "Implemented-by: opencode:session-a#high",
     ] {
         for dry_run in [true, false] {
             let mut command = repo.arc(&worktree);
@@ -690,6 +692,62 @@ fn reattribution_refuses_replacement_values_that_are_not_fresh() {
             "--set-actor",
             &format!("codex:{UUID}"),
         ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn trailer_edits_refuse_the_acting_session_as_a_model() {
+    let repo = Repo::new();
+    let (change, worktree) = open(&repo, "edit-session");
+    repo.commit(
+        &worktree,
+        "one.txt",
+        "one\n",
+        "feat: one\n\nPlanned-by: fixture:model\nAssisted-by: fixture:model (planner)\n",
+    );
+    let head = repo.head(&worktree);
+    let before = event_count(&repo, &change);
+    let edits = repo.home.join("edits.tsv");
+    for (old, new) in [
+        (
+            "Planned-by: fixture:model",
+            "Planned-by: opencode:session-a",
+        ),
+        (
+            "Assisted-by: fixture:model (planner)",
+            "Assisted-by: opencode:session-a#high (planner)",
+        ),
+    ] {
+        fs::write(&edits, format!("{head}\treplace\t{old}\t{new}\n")).unwrap();
+        for dry_run in [true, false] {
+            let mut command = repo.arc(&worktree);
+            command.args([
+                "rewrite",
+                "trailers",
+                "--from",
+                "HEAD",
+                "--no-sign",
+                "--edits",
+                edits.to_str().unwrap(),
+            ]);
+            if dry_run {
+                command.arg("--dry-run");
+            }
+            let stderr = refused(&mut command);
+            assert!(stderr.contains("session id is not a model"), "{stderr}");
+        }
+    }
+    assert_eq!(repo.head(&worktree), head);
+    assert_eq!(event_count(&repo, &change), before);
+}
+
+#[test]
+fn standalone_trailer_checks_do_not_use_the_invoking_session() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["instructions", "git", "--check", "-"])
+        .write_stdin("feat: fixture\n\nImplemented-by: opencode:session-a\n")
         .assert()
         .success();
 }

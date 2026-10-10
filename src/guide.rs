@@ -1908,6 +1908,8 @@ HISTORY REWRITES
                        session id, or a person without an email) refuses
                        before any commit is recreated, including in
                        --dry-run.
+                       A model equal to the invoking session refuses even
+                       when the session id is not UUID-shaped.
                        The commit named by --from is itself edited;
                        it is rewritten when its message or ancestry changes.
                        Recreating a commit reachable from the target or another
@@ -1970,7 +1972,8 @@ HISTORY REWRITES
   other edit. `replace` puts the new line where the old one was and `drop`
   removes it. A new line on `Planned-by`, `Implemented-by`, `Reviewed-by` or
   `Orchestrated-by` is a fresh coordinate, and on `Assisted-by` so is its
-  value without a trailing `(role)`. Any violation refuses before a commit is
+  value without a trailing `(role)`. Models equal to the invoking session
+  refuse even when the id is not UUID-shaped. Any violation refuses before a commit is
   recreated, `--dry-run` included, naming the file and line. `--dry-run`
   lists each edit as `<short sha> <action> <old line> -> <new line>` with the
   map. A recreated commit keeps its tree, author, committer and both dates;

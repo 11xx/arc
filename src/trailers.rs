@@ -98,22 +98,25 @@ pub fn check_contribution(message: &[u8]) -> Vec<ContributionIssue> {
     };
     lines[block]
         .iter()
-        .filter_map(|line| line_issue(line))
+        .filter_map(|line| line_issue(line, None))
         .collect()
 }
 
 /// The first of `lines` whose role key carries a value that is no fresh
 /// coordinate: a line [`check_contribution`] reports as `malformed` or
 /// `placeholder`, and so a line no write records.
-pub(crate) fn first_unrecordable_role(lines: &[String]) -> Option<ContributionIssue> {
+pub(crate) fn first_unrecordable_role(
+    lines: &[String],
+    session: Option<&str>,
+) -> Option<ContributionIssue> {
     lines
         .iter()
-        .filter_map(|line| line_issue(line.as_bytes()))
+        .filter_map(|line| line_issue(line.as_bytes(), session))
         .find(|issue| issue.kind != "unsupported")
 }
 
 /// What the convention says about one trailer line, if anything.
-fn line_issue(line: &[u8]) -> Option<ContributionIssue> {
+fn line_issue(line: &[u8], session: Option<&str>) -> Option<ContributionIssue> {
     let key = trailer_key(line)?;
     let key = String::from_utf8_lossy(&key).into_owned();
     let value = String::from_utf8_lossy(&line[key.len() + 1..])
@@ -123,7 +126,7 @@ fn line_issue(line: &[u8]) -> Option<ContributionIssue> {
         .iter()
         .any(|role| role.eq_ignore_ascii_case(&key))
     {
-        let defect = crate::coordinate::coordinate_defect(&value, None)?;
+        let defect = crate::coordinate::coordinate_defect(&value, session)?;
         let kind = match defect {
             crate::coordinate::Defect::Unreadable => "malformed",
             _ => "placeholder",
@@ -282,8 +285,13 @@ pub struct LineEdit {
 /// field, which editors strip. A field beginning with a double quote is a
 /// JSON string: escapes encode tabs, quotes and backslashes. Unquoted fields
 /// keep literal backslashes. Quoted fields contain no carriage return or
-/// newline. Every refusal names `source` and the line.
-pub fn parse_edits(text: &str, source: &str) -> anyhow::Result<Vec<LineEdit>> {
+/// newline. Every refusal names `source` and the line. Replacement models
+/// must not equal `session` when the caller establishes it.
+pub fn parse_edits(
+    text: &str,
+    source: &str,
+    session: Option<&str>,
+) -> anyhow::Result<Vec<LineEdit>> {
     let mut edits = Vec::new();
     for (index, raw) in text.lines().enumerate() {
         let origin = format!("{source}:{}", index + 1);
@@ -351,7 +359,7 @@ pub fn parse_edits(text: &str, source: &str) -> anyhow::Result<Vec<LineEdit>> {
                         "{origin}: the new line {new:?} is not a `Key: value` trailer line"
                     );
                 }
-                if let Some(issue) = unrecordable_line(new) {
+                if let Some(issue) = unrecordable_line(new, session) {
                     anyhow::bail!(
                         "{origin}: the new line {new:?} is no fresh coordinate: {}; write a \
                          fresh coordinate or drop the line",
@@ -375,7 +383,7 @@ pub fn parse_edits(text: &str, source: &str) -> anyhow::Result<Vec<LineEdit>> {
 /// Why a trailer line a write would record is no fresh coordinate, when its
 /// key says it holds one: a role key's value, or an `Assisted-by` value read
 /// without its trailing `(role)`.
-fn unrecordable_line(line: &str) -> Option<&'static str> {
+fn unrecordable_line(line: &str, session: Option<&str>) -> Option<&'static str> {
     let key = String::from_utf8_lossy(&trailer_key(line.as_bytes())?).into_owned();
     let value = line[key.len() + 1..].trim();
     let value = if key.eq_ignore_ascii_case(LEGACY_DISCLOSURE) {
@@ -391,7 +399,7 @@ fn unrecordable_line(line: &str) -> Option<&'static str> {
     } else {
         return None;
     };
-    crate::coordinate::coordinate_defect(value, None).map(crate::coordinate::Defect::reason)
+    crate::coordinate::coordinate_defect(value, session).map(crate::coordinate::Defect::reason)
 }
 
 /// Apply the edits that name one commit to its message, or say which edit
@@ -904,7 +912,7 @@ mod tests {
     const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 
     fn parsed(text: &str) -> anyhow::Result<Vec<LineEdit>> {
-        parse_edits(text, "edits")
+        parse_edits(text, "edits", None)
     }
 
     fn edit_of(action: &str, old: &str, new: &str) -> LineEdit {
