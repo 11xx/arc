@@ -480,6 +480,10 @@ pub enum ActorSource {
     /// in, as `<harness>:<session>`. It names the acting agent session, but
     /// it is arc's inference from the environment, not anybody's claim.
     Derived,
+    /// Nobody declared one, no harness session was known, and Git has no
+    /// `user.name`: no actor was established. An event records an actor, so a
+    /// write refuses before it records one; this value is never on an event.
+    Absent,
 }
 
 impl ActorSource {
@@ -496,6 +500,7 @@ impl ActorSource {
             Self::Flag | Self::Env => None,
             Self::GitFallback => Some("git config user.name"),
             Self::Derived => Some("the harness session"),
+            Self::Absent => None,
         }
     }
 }

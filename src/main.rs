@@ -73,9 +73,10 @@ use std::path::{Path, PathBuf};
 struct Cli {
     /// Acting identity, from ARC_ACTOR when the flag is absent. Falls back to
     /// <harness>:<session> when both are known, else git user.name; arc
-    /// records either as an identity nobody declared. A write refuses a
-    /// declared placeholder (unknown, none, n/a, ...) or a harness:model form
-    /// carrying one; a harness:session form is an actor
+    /// records either as an identity nobody declared. A write refuses when
+    /// none of these names one, and refuses a declared placeholder (unknown,
+    /// none, n/a, ...) or a harness:model form carrying one; a
+    /// harness:session form is an actor. A read proceeds without one
     #[arg(long, global = true)]
     actor: Option<String>,
     /// Harness label, e.g. claude, codex, opencode. A write refuses a
@@ -3916,15 +3917,16 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
         gitio::git(&cwd, &["config", "user.name"])
             .ok()
             .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
     };
     let (mut actor, mut actor_source) =
         match (cli.actor.filter(|value| !value.trim().is_empty()), from_env) {
             (Some(declared), _) => (declared, ActorSource::Flag),
             (None, Some(declared)) => (declared, ActorSource::Env),
-            (None, None) => (
-                git_user().unwrap_or_else(|| "unknown".into()),
-                ActorSource::GitFallback,
-            ),
+            (None, None) => match git_user() {
+                Some(name) => (name, ActorSource::GitFallback),
+                None => (String::new(), ActorSource::Absent),
+            },
         };
     let mut harness = cli.harness;
     let mut session = cli.session;
@@ -3989,7 +3991,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
     // The session a command runs in names the acting agent better than the
     // checkout's Git identity does, which is kept as the operator instead.
     let mut operator = None;
-    if actor_source == ActorSource::GitFallback {
+    if matches!(actor_source, ActorSource::GitFallback | ActorSource::Absent) {
         let known = |value: &Option<String>| value.clone().filter(|value| !value.trim().is_empty());
         if let (Some(harness), Some(session)) = (known(&harness), known(&session)) {
             actor = format!("{harness}:{session}");

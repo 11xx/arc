@@ -53,8 +53,10 @@ SAY WHO YOU ARE (before the first write)
   identity. In that case arc records an actor nobody claimed:
   `<harness>:<session>` when both are known, else `git config user.name`.
   Either is assumed rather than declared, so it cannot be the independent
-  party to an approval. A harness or session nobody established is left off a
-  journal event, never recorded as a word standing in for it.
+  party to an approval. When neither exists no actor is established: a write
+  refuses, naming `--actor` and `ARC_ACTOR`, and a read proceeds. A harness
+  or session nobody established is left off a journal event, never recorded
+  as a word standing in for it.
   The ledger's append guard reads `require_declared_actor` from the invoking
   checkout when opening a store for a command that can record, including for
   repository-wide events with no change target. Queue integration opens it

@@ -373,14 +373,15 @@ impl Ctx {
             .clone()
     }
 
-    /// Refuse a declared identity no write may record: a placeholder harness,
+    /// Refuse an identity no write may record: a placeholder harness,
     /// session, actor or on-behalf-of subject, an actor of the
-    /// `harness:model` form carrying a placeholder, or a declared model that
-    /// is a placeholder or a session id. A value nobody established is
-    /// omitted, never declared, and an undeclared model is the one arc
-    /// observes. Every command outside `READ_ONLY_COMMANDS` asks this before
-    /// it acts, `--dry-run` included, except the Git hook entry point, which
-    /// records no identity; a read is never refused.
+    /// `harness:model` form carrying a placeholder, a declared model that
+    /// is a placeholder or a session id, or no actor at all. A value nobody
+    /// established is omitted, never declared, and an undeclared model is the
+    /// one arc observes; an event records an actor, so a write nobody can
+    /// attribute refuses. Every command outside `READ_ONLY_COMMANDS` asks this
+    /// before it acts, `--dry-run` included, except the Git hook entry point,
+    /// which records no identity; a read is never refused.
     pub(crate) fn ensure_fresh_identity(&self) -> Result<()> {
         use crate::coordinate::{actor_defect, is_placeholder, model_defect};
         if let Some(model) = self.model.as_deref() {
@@ -406,10 +407,16 @@ impl Ctx {
                 );
             }
         }
+        if self.actor_source == ActorSource::Absent {
+            bail!(
+                "no actor is established: pass --actor or set ARC_ACTOR (git config user.name \
+                 is unset and no harness session names one)"
+            );
+        }
         let actor = match self.actor_source {
             ActorSource::Flag => Some(("--actor", &self.actor)),
             ActorSource::Env => Some(("ARC_ACTOR", &self.actor)),
-            ActorSource::GitFallback | ActorSource::Derived => None,
+            ActorSource::GitFallback | ActorSource::Derived | ActorSource::Absent => None,
         };
         let subject = self
             .on_behalf_of
