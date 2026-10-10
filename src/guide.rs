@@ -1571,6 +1571,30 @@ PROFILES (--profile, default local)
   Promote when the work reveals more scope, risk, or concurrency; record why.
   Never keep an undersized profile just because the change started there.
 
+FORGE
+  Arc records provider assertions through forge declare/link/checks/pr-state;
+  it never contacts a provider. Link head, checks PR head, lifecycle PR head
+  and merge SHA retain their provider-observed values. Views pair each
+  observed value with its resolved local rewrite successor; a dropped
+  revision has a null successor. Stored event fields are raw observations.
+
+  show and status expose observed_head_match and resolved_head_match against
+  the approved patchset head. A local rewrite correspondence does not supply
+  provider evidence at its successor. checks_record preserves the rollup's
+  observed_pr_head, resolved_pr_head and the link present when recorded.
+  Without a recorded link its PR identity is unknown. Hosted checks apply
+  only to that PR identity and observed head; checks_applicable also requires
+  that observed head to equal the approved head. A different PR or head
+  renders the rollup stale. Repeating an identical link retains its binding.
+
+  pr-state binds to the current link's provider-observed head; --merge-sha
+  is the provider-reported merge revision. Local lifecycle correspondence,
+  hosted checks and local integration authorization are separate facts.
+  Forge readiness requires an observed approved head, applicable passed or
+  not-configured checks, and an observed open PR. Zero checks retains its
+  not-configured caveat. Integration authorization uses local gates and
+  judgments independently of forge readiness.
+
 REVIEW COVERAGE AND DEBT
   For ordinary work the review of record is the lead's own read of the diff,
   recorded as the verdict — or, where the lead contributed to the patchset or

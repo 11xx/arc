@@ -1203,16 +1203,16 @@ impl ChangeState {
         // newest: an earlier head is still recorded, and still named something
         // that was supposed to exist.
         for link in &self.forge.links {
-            note(&link.head_sha, "forge link head".to_string());
+            note(&link.observed_head_sha, "forge link head".to_string());
         }
         if let Some(checks) = &self.forge.checks {
-            note(&checks.pr_head, "forge checks head".to_string());
+            note(&checks.observed_pr_head, "forge checks head".to_string());
         }
         for pr_state in &self.forge.pr_states {
-            if let Some(merge_sha) = pr_state.merge_sha.as_deref() {
+            if let Some(merge_sha) = pr_state.observed_merge_sha.as_deref() {
                 note(merge_sha, "forge merge".to_string());
             }
-            if let Some(pr_head) = pr_state.pr_head.as_deref() {
+            if let Some(pr_head) = pr_state.observed_pr_head.as_deref() {
                 note(pr_head, "forge pr head".to_string());
             }
         }
@@ -2921,7 +2921,8 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     base_ref: base_ref.clone(),
                     head_repo: head_repo.clone(),
                     head_ref: head_ref.clone(),
-                    head_sha: head_sha.clone(),
+                    observed_head_sha: head_sha.clone(),
+                    resolved_head_sha: Some(head_sha.clone()),
                 };
                 state.forge.links.push(record.clone());
                 state.forge.link = Some(record);
@@ -2932,7 +2933,9 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 detail,
             } => {
                 state.forge.checks = Some(crate::forge::ForgeChecksRecord {
-                    pr_head: pr_head.clone(),
+                    observed_pr_head: pr_head.clone(),
+                    resolved_pr_head: Some(pr_head.clone()),
+                    link_event_id: state.forge.link.as_ref().map(|link| link.event_id.clone()),
                     state: *check_state,
                     detail: detail.clone(),
                 });
@@ -2960,9 +2963,11 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     .pr_states
                     .push(crate::forge::ForgePrStateRecord {
                         state: *pr_state,
-                        merge_sha: merge_sha.clone(),
+                        observed_merge_sha: merge_sha.clone(),
+                        resolved_merge_sha: merge_sha.clone(),
                         link_event_id: link_event_id.clone(),
-                        pr_head: pr_head.clone(),
+                        observed_pr_head: pr_head.clone(),
+                        resolved_pr_head: pr_head.clone(),
                         unresolved_binding,
                     });
             }

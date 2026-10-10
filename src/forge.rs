@@ -141,27 +141,36 @@ pub struct ForgeLinkRecord {
     pub base_ref: String,
     pub head_repo: String,
     pub head_ref: String,
-    pub head_sha: String,
+    pub observed_head_sha: String,
+    pub resolved_head_sha: Option<String>,
 }
 
 impl ForgeLinkRecord {
     /// Whether two link observations name the same pull request at the same
     /// head. Re-recording an identical link is a second reading, not a move.
     pub fn same_pr_as(&self, other: &ForgeLinkRecord) -> bool {
+        self.same_pr_identity_as(other) && self.observed_head_sha == other.observed_head_sha
+    }
+
+    /// Whether two observations identify the same pull request, independently
+    /// of the head reported by each read.
+    pub fn same_pr_identity_as(&self, other: &ForgeLinkRecord) -> bool {
         self.pr_number == other.pr_number
             && self.url == other.url
             && self.base_repo == other.base_repo
             && self.base_ref == other.base_ref
             && self.head_repo == other.head_repo
             && self.head_ref == other.head_ref
-            && self.head_sha == other.head_sha
     }
 }
 
 /// Latest-wins observed check rollup, reduced from `forge-checks`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ForgeChecksRecord {
-    pub pr_head: String,
+    pub observed_pr_head: String,
+    pub resolved_pr_head: Option<String>,
+    /// The link present when the rollup was recorded; absent without a link.
+    pub link_event_id: Option<String>,
     pub state: ForgeCheckState,
     pub detail: Option<String>,
 }
@@ -172,11 +181,13 @@ pub struct ForgeChecksRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ForgePrStateRecord {
     pub state: ForgePrState,
-    pub merge_sha: Option<String>,
+    pub observed_merge_sha: Option<String>,
+    pub resolved_merge_sha: Option<String>,
     /// The link this was observed against. `None` predates binding.
     pub link_event_id: Option<String>,
     /// The PR head this was observed at. `None` predates binding.
-    pub pr_head: Option<String>,
+    pub observed_pr_head: Option<String>,
+    pub resolved_pr_head: Option<String>,
     /// The binding named a link this change had not recorded when the fact
     /// was written, or named only half of one. Neither describes any PR this
     /// ledger knows about, so the fact is never current — and it is not
@@ -202,26 +213,41 @@ pub struct ForgeState {
 }
 
 impl ForgeState {
-    /// Follow every revision these observations name forward through the
-    /// recorded rewrites.
-    ///
-    /// A forge records revisions the same way the ledger does, and a rewritten
-    /// branch strands them the same way. The observation itself is unchanged:
-    /// what the host reported at a head is still what it reported, and this
-    /// says which commit that head is here.
+    /// Resolve provider-reported revisions through local rewrites without
+    /// changing their observed values. A dropped revision has no successor.
     pub fn follow_rewrites(&mut self, rewrites: &crate::rewrite::RewriteMap) -> Result<()> {
+        fn resolve(
+            rewrites: &crate::rewrite::RewriteMap,
+            observed: &str,
+        ) -> Result<Option<String>> {
+            Ok(match rewrites.fate(observed)? {
+                Some(crate::rewrite::Fate::Dropped) => None,
+                Some(crate::rewrite::Fate::Rewritten(successor)) => Some(successor),
+                None => Some(observed.to_string()),
+            })
+        }
         if let Some(link) = &mut self.link {
-            rewrites.advance(&mut link.head_sha)?;
+            link.resolved_head_sha = resolve(rewrites, &link.observed_head_sha)?;
         }
         for link in &mut self.links {
-            rewrites.advance(&mut link.head_sha)?;
+            link.resolved_head_sha = resolve(rewrites, &link.observed_head_sha)?;
         }
         if let Some(checks) = &mut self.checks {
-            rewrites.advance(&mut checks.pr_head)?;
+            checks.resolved_pr_head = resolve(rewrites, &checks.observed_pr_head)?;
         }
         for state in &mut self.pr_states {
-            rewrites.advance_opt(&mut state.merge_sha)?;
-            rewrites.advance_opt(&mut state.pr_head)?;
+            state.resolved_merge_sha = state
+                .observed_merge_sha
+                .as_deref()
+                .map(|sha| resolve(rewrites, sha))
+                .transpose()?
+                .flatten();
+            state.resolved_pr_head = state
+                .observed_pr_head
+                .as_deref()
+                .map(|sha| resolve(rewrites, sha))
+                .transpose()?
+                .flatten();
         }
         Ok(())
     }
@@ -250,9 +276,9 @@ impl ForgeState {
             if record.unresolved_binding {
                 return false;
             }
-            match (&record.link_event_id, &record.pr_head) {
+            match (&record.link_event_id, &record.observed_pr_head) {
                 (Some(event), Some(head)) => {
-                    same_link.contains(&event.as_str()) && *head == link.head_sha
+                    same_link.contains(&event.as_str()) && *head == link.observed_head_sha
                 }
                 // Unbound predates binding entirely, and is read as current
                 // only while this change has recorded one distinct link.
@@ -396,22 +422,26 @@ pub struct ForgeLinkView {
     pub base_ref: String,
     pub head_repo: String,
     pub head_ref: String,
-    pub head_sha: String,
+    pub observed_head_sha: String,
+    pub resolved_head_sha: Option<String>,
 }
 
 /// Serialized view of the observed PR lifecycle.
 #[derive(Debug, Clone, Serialize)]
 pub struct ForgePrStateView {
     pub state: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub merge_sha: Option<String>,
+    pub observed_pr_head: Option<String>,
+    pub resolved_pr_head: Option<String>,
+    pub observed_merge_sha: Option<String>,
+    pub resolved_merge_sha: Option<String>,
 }
 
 /// A held+linked change awaiting a user decision on its open PR.
 #[derive(Debug, Clone, Serialize)]
 pub struct AwaitingUser {
     pub pr_url: String,
-    pub head_sha: String,
+    pub observed_head_sha: String,
+    pub resolved_head_sha: Option<String>,
 }
 
 /// The `forge` block of `arc status`/`arc show`, derived from the latest
@@ -424,8 +454,14 @@ pub struct ForgeStatus {
     pub declared: Option<ForgeProjectionView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub link: Option<ForgeLinkView>,
-    /// Whether the linked head equals the current approved patchset head.
-    pub head_match: bool,
+    /// Whether the provider-observed link head equals the approved patchset head.
+    pub observed_head_match: bool,
+    /// Whether the local successor equals the approved patchset head.
+    pub resolved_head_match: bool,
+    /// The rollup and its observed and locally resolved coordinates.
+    pub checks_record: Option<ForgeChecksRecord>,
+    /// Whether the rollup applies to this PR at the approved observed head.
+    pub checks_applicable: bool,
     /// not-configured | not-triggered | pending | failed | passed | stale | unknown
     pub checks: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -476,20 +512,35 @@ pub fn build_status(
         base_ref: l.base_ref.clone(),
         head_repo: l.head_repo.clone(),
         head_ref: l.head_ref.clone(),
-        head_sha: l.head_sha.clone(),
+        observed_head_sha: l.observed_head_sha.clone(),
+        resolved_head_sha: l.resolved_head_sha.clone(),
     });
 
-    let linked_head = forge.link.as_ref().map(|l| l.head_sha.as_str());
-    let head_match = match (linked_head, approved_head) {
+    let linked_head = forge.link.as_ref().map(|l| l.observed_head_sha.as_str());
+    let observed_head_match = match (linked_head, approved_head) {
         (Some(linked), Some(approved)) => linked == approved,
         _ => false,
     };
 
+    let resolved_head_match = forge
+        .link
+        .as_ref()
+        .and_then(|link| link.resolved_head_sha.as_deref())
+        .zip(approved_head)
+        .is_some_and(|(resolved, approved)| resolved == approved);
+    let checks_pr_match = forge
+        .checks
+        .as_ref()
+        .and_then(|record| record.link_event_id.as_ref())
+        .and_then(|id| forge.links.iter().find(|link| &link.event_id == id))
+        .zip(forge.link.as_ref())
+        .is_some_and(|(observed, current)| observed.same_pr_identity_as(current));
+
     // Checks are read relative to the linked head. Without a link there is
     // no head to compare, so the rollup is `unknown`. A rollup recorded for
-    // a different head than the linked one is `stale`, never trusted.
+    // a different PR or observed head is `stale`, never trusted.
     let (checks, checks_detail) = match (&forge.checks, linked_head) {
-        (Some(record), Some(head)) if record.pr_head == head => {
+        (Some(record), Some(head)) if checks_pr_match && record.observed_pr_head == head => {
             (record.state.as_str(), record.detail.clone())
         }
         (Some(record), Some(_)) => ("stale", record.detail.clone()),
@@ -504,7 +555,10 @@ pub fn build_status(
     let current_pr_state = forge.current_pr_state();
     let pr_state = current_pr_state.map(|p| ForgePrStateView {
         state: p.state.as_str().to_string(),
-        merge_sha: p.merge_sha.clone(),
+        observed_merge_sha: p.observed_merge_sha.clone(),
+        resolved_merge_sha: p.resolved_merge_sha.clone(),
+        observed_pr_head: p.observed_pr_head.clone(),
+        resolved_pr_head: p.resolved_pr_head.clone(),
     });
 
     let mut caveats = Vec::new();
@@ -527,12 +581,15 @@ pub fn build_status(
 
     let pr_open = matches!(current_pr_state.map(|p| p.state), Some(ForgePrState::Open));
     let checks_ok = matches!(checks, "passed" | "not-configured");
-    let forge_ready = forge.link.is_some() && head_match && checks_ok && pr_open;
+    let checks_applicable =
+        observed_head_match && checks_pr_match && checks != "stale" && checks != "unknown";
+    let forge_ready = forge.link.is_some() && checks_applicable && checks_ok && pr_open;
 
     let awaiting_user = if held {
         forge.link.as_ref().map(|l| AwaitingUser {
             pr_url: l.url.clone(),
-            head_sha: l.head_sha.clone(),
+            observed_head_sha: l.observed_head_sha.clone(),
+            resolved_head_sha: l.resolved_head_sha.clone(),
         })
     } else {
         None
@@ -542,7 +599,10 @@ pub fn build_status(
         projection,
         declared,
         link,
-        head_match,
+        observed_head_match,
+        resolved_head_match,
+        checks_record: forge.checks.clone(),
+        checks_applicable,
         checks,
         checks_detail,
         pr_state,
@@ -580,16 +640,19 @@ mod tests {
             base_ref: "main".into(),
             head_repo: "o/r".into(),
             head_ref: "arc/x".into(),
-            head_sha: head.into(),
+            observed_head_sha: head.into(),
+            resolved_head_sha: Some(head.into()),
         }
     }
 
-    fn pr_state(link_event_id: Option<&str>, pr_head: Option<&str>) -> ForgePrStateRecord {
+    fn pr_state(link_event_id: Option<&str>, observed_pr_head: Option<&str>) -> ForgePrStateRecord {
         ForgePrStateRecord {
             state: ForgePrState::Open,
-            merge_sha: None,
+            observed_merge_sha: None,
+            resolved_merge_sha: None,
             link_event_id: link_event_id.map(str::to_string),
-            pr_head: pr_head.map(str::to_string),
+            observed_pr_head: observed_pr_head.map(str::to_string),
+            resolved_pr_head: observed_pr_head.map(str::to_string),
             unresolved_binding: false,
         }
     }

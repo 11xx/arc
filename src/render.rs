@@ -953,17 +953,22 @@ pub fn markdown(
         if let Some(link) = &forge.link {
             let _ = writeln!(
                 w,
-                "- PR #{}: {} (head `{}`)",
-                link.pr_number, link.url, link.head_sha
+                "- PR #{}: {} (observed head `{}`, resolved head `{}`)",
+                link.pr_number,
+                link.url,
+                link.observed_head_sha,
+                link.resolved_head_sha.as_deref().unwrap_or("null")
             );
+            let _ = writeln!(w, "- Observed head match: {}", forge.observed_head_match);
+            let _ = writeln!(w, "- Resolved head match: {}", forge.resolved_head_match);
+        }
+        if let Some(checks) = &forge.checks_record {
             let _ = writeln!(
                 w,
-                "- Head match: {}",
-                if forge.head_match {
-                    "yes"
-                } else {
-                    "NO — linked head differs from approved patchset"
-                }
+                "- Check head: observed `{}`, resolved `{}`; applicable: {}",
+                checks.observed_pr_head,
+                checks.resolved_pr_head.as_deref().unwrap_or("null"),
+                forge.checks_applicable
             );
         }
         let _ = writeln!(
@@ -979,14 +984,18 @@ pub fn markdown(
         if let Some(pr_state) = &forge.pr_state {
             let _ = writeln!(
                 w,
-                "- PR state: {}{}",
+                "- PR state: {} (observed head `{}`, resolved head `{}`)",
                 pr_state.state,
-                pr_state
-                    .merge_sha
-                    .as_deref()
-                    .map(|sha| format!(" (merge `{sha}`)"))
-                    .unwrap_or_default()
+                pr_state.observed_pr_head.as_deref().unwrap_or("null"),
+                pr_state.resolved_pr_head.as_deref().unwrap_or("null")
             );
+            if let Some(merge) = &pr_state.observed_merge_sha {
+                let _ = writeln!(
+                    w,
+                    "- Merge: observed `{merge}`, resolved `{}`",
+                    pr_state.resolved_merge_sha.as_deref().unwrap_or("null")
+                );
+            }
         }
         let _ = writeln!(
             w,
@@ -999,8 +1008,10 @@ pub fn markdown(
         if let Some(awaiting) = &forge.awaiting_user {
             let _ = writeln!(
                 w,
-                "- **Awaiting user:** open PR {} at head `{}`",
-                awaiting.pr_url, awaiting.head_sha
+                "- **Awaiting user:** open PR {} at observed head `{}`, resolved head `{}`",
+                awaiting.pr_url,
+                awaiting.observed_head_sha,
+                awaiting.resolved_head_sha.as_deref().unwrap_or("null")
             );
         }
     }

@@ -99,9 +99,8 @@ pub fn forge_checks(
 }
 
 /// Record the observed PR lifecycle state, bound to the link it was read at.
-/// `merged` requires `--merge-sha`. The head comes from the resolved link
-/// rather than the caller, so a lifecycle fact can never claim a head its PR
-/// does not have.
+/// `merged` requires the provider-reported `--merge-sha`. The head comes
+/// from the link's provider observation, independently of local rewrites.
 pub fn forge_pr_state(
     ctx: &Ctx,
     reference: &str,
@@ -156,7 +155,7 @@ pub fn forge_pr_state(
         state: pr_state,
         merge_sha,
         link_event_id: Some(link.event_id.clone()),
-        pr_head: Some(link.head_sha.clone()),
+        pr_head: Some(link.observed_head_sha.clone()),
     };
     ensure_append_allowed(&st, &payload)?;
     let mut event = ctx.event(&store, &change_id, payload)?;

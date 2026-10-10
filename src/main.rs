@@ -463,6 +463,8 @@ enum Cmd {
         json: bool,
     },
     /// Render one change (Markdown, or full state with --json)
+    /// Forge views preserve provider-observed SHAs beside nullable local rewrite
+    /// successors; observed and resolved head matches are separate diagnostics.
     /// Closed head drift compares with the closure's source patchset when
     /// recorded, otherwise with the newest snapshot
     /// Aggregate reads name unreadable changes with their errors on stderr
@@ -953,6 +955,8 @@ enum Cmd {
         off: bool,
     },
     /// Machine-readable status report (the versioned arc-status/27 schema).
+    /// Forge observed and resolved head matches are separate; hosted checks apply
+    /// only to their recorded PR identity and provider-observed approved head.
     /// Every verdict names its recorded origin, actor claims and admission
     /// provenance. Content coverage is separate from receiver gating eligibility.
     /// Readiness uses the integration shape resolved for the recorded target.
@@ -2893,7 +2897,8 @@ enum ForgeCmd {
         #[arg(long, default_value = "same-repository-only")]
         policy: String,
     },
-    /// Record the observed post-creation PR tuple (validated, fail-closed)
+    /// Record the provider-observed PR tuple (validated, fail-closed).
+    /// Observed SHAs are preserved; local rewrite successors are separate views.
     Link {
         /// Change the pull request was opened for
         change: String,
@@ -2919,7 +2924,9 @@ enum ForgeCmd {
         #[arg(long = "head-sha")]
         head_sha: String,
     },
-    /// Record the observed hosted-check rollup at an exact PR head
+    /// Record the provider-observed hosted-check rollup at an exact PR head.
+    /// The current link binds its PR identity. Local rewrites never establish
+    /// hosted checks at a successor; a provider readback supplies that evidence.
     Checks {
         /// Change whose hosted checks were read
         change: String,
@@ -2933,18 +2940,19 @@ enum ForgeCmd {
         #[arg(long)]
         detail: Option<String>,
     },
-    /// Record the observed PR lifecycle state
+    /// Record the provider-observed PR lifecycle state.
+    /// The head is the current link's observed head, never its local successor.
     PrState {
         /// Change whose pull request state was read
         change: String,
         /// The lifecycle state the forge reported
         #[arg(long, value_enum)]
         state: forge::ForgePrState,
-        /// Required when state is merged
+        /// Provider-reported merge SHA; required when state is merged
         #[arg(long = "merge-sha")]
         merge_sha: Option<String>,
         /// The forge-link event this state was read at (defaults to the
-        /// current link); the head is taken from that link
+        /// current link); the head is taken from that link's provider observation
         #[arg(long)]
         link: Option<String>,
     },

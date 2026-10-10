@@ -165,8 +165,8 @@ fn forge_link_matches_declaration_and_refuses_each_mismatch_axis() {
     let status = status_json(&repo, "linker");
     assert_eq!(status["forge"]["projection"], "linked");
     assert_eq!(status["forge"]["link"]["pr_number"], 1);
-    assert_eq!(status["forge"]["link"]["head_sha"], head);
-    assert_eq!(status["forge"]["head_match"], true);
+    assert_eq!(status["forge"]["link"]["observed_head_sha"], head);
+    assert_eq!(status["forge"]["observed_head_match"], true);
 }
 
 #[test]
@@ -430,7 +430,7 @@ fn forge_ready_truth_table() {
         .assert()
         .success();
     let status = status_json(&repo, "ready");
-    assert_eq!(status["forge"]["head_match"], true);
+    assert_eq!(status["forge"]["observed_head_match"], true);
     assert_eq!(status["forge"]["forge_ready"], true);
 
     // not-configured => ready, but with an explicit caveat.
@@ -497,7 +497,7 @@ fn forge_ready_truth_table() {
     repo.commit(&worktree, "ready2.txt", "more\n", "feat: more ready");
     stdout(repo.arc(&worktree).args(["snapshot", "ready"]));
     let status = status_json(&repo, "ready");
-    assert_eq!(status["forge"]["head_match"], false);
+    assert_eq!(status["forge"]["observed_head_match"], false);
     assert_eq!(status["forge"]["forge_ready"], false);
 }
 
@@ -526,7 +526,7 @@ fn forge_pr_state_merged_requires_merge_sha() {
         .success();
     let status = status_json(&repo, "merged");
     assert_eq!(status["forge"]["pr_state"]["state"], "merged");
-    assert_eq!(status["forge"]["pr_state"]["merge_sha"], "abc123");
+    assert_eq!(status["forge"]["pr_state"]["observed_merge_sha"], "abc123");
 }
 
 /// A lifecycle fact is an observation of one PR at one head. Pairing the
@@ -683,7 +683,7 @@ fn forge_held_and_linked_renders_awaiting_user() {
         status["forge"]["awaiting_user"]["pr_url"],
         "https://github.com/example-owner/example-repo/pull/1"
     );
-    assert_eq!(status["forge"]["awaiting_user"]["head_sha"], head);
+    assert_eq!(status["forge"]["awaiting_user"]["observed_head_sha"], head);
     // The awaiting-user fact also shows in the Markdown Forge section.
     let shown = stdout(repo.arc(&repo.root).args(["show", "awaiting"]));
     assert!(shown.contains("Awaiting user"));
@@ -841,4 +841,203 @@ fn typed_consumers_tolerate_imported_unknown_event_type() {
         .find(|event| event["event_id"] == event_id)
         .expect("unknown event survives re-export");
     assert_eq!(*found, unknown);
+}
+
+#[test]
+fn forge_rewrite_preserves_observed_shas_until_real_readback() {
+    use super::rewrite::{git_signing, signing_key};
+    let repo = Repo::new();
+    let key = signing_key(&repo).expect("forge successor requires a fixture signing key");
+    let (_id, wt, a) = forge_change(&repo, "observed");
+    declare_same_repo(&repo, "observed", "arc/observed");
+    link_at(&repo, "observed", "1", &a, "arc/observed");
+    stdout(repo.arc(&wt).args([
+        "forge",
+        "checks",
+        "observed",
+        "--pr-head",
+        &a,
+        "--state",
+        "passed",
+    ]));
+    git_signing(
+        &wt,
+        &key,
+        &[
+            "-c",
+            &format!("user.signingkey={}", key.fingerprint),
+            "commit",
+            "--amend",
+            "-S",
+            "--no-edit",
+        ],
+    );
+    git_signing(&wt, &key, &["verify-commit", "HEAD"]);
+    let b = repo.head(&wt);
+    assert_ne!(a, b);
+    let map = repo.home.join("forge-map");
+    fs::write(&map, format!("{a} {b}\n")).unwrap();
+    stdout(repo.arc(&wt).args([
+        "history",
+        "rewrite",
+        "--map",
+        map.to_str().unwrap(),
+        "--reason",
+        "signed successor",
+    ]));
+    for _ in 0..2 {
+        let shown: serde_json::Value =
+            serde_json::from_str(&stdout(repo.arc(&wt).args(["show", "observed", "--json"])))
+                .unwrap();
+        assert_eq!(shown["forge"]["link"]["observed_head_sha"], a);
+        assert_eq!(shown["forge"]["link"]["resolved_head_sha"], b);
+        assert_eq!(shown["forge"]["checks"]["observed_pr_head"], a);
+        assert_eq!(shown["forge"]["checks"]["resolved_pr_head"], b);
+        let status = status_json(&repo, "observed");
+        assert_eq!(status["forge"]["observed_head_match"], false);
+        assert_eq!(status["forge"]["resolved_head_match"], true);
+        assert_eq!(status["forge"]["checks_applicable"], false);
+        assert_eq!(status["forge"]["forge_ready"], false);
+        link_at(&repo, "observed", "1", &a, "arc/observed");
+    }
+    stdout(repo.arc(&wt).args([
+        "forge",
+        "pr-state",
+        "observed",
+        "--state",
+        "merged",
+        "--merge-sha",
+        &a,
+    ]));
+    let shown: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&wt).args(["show", "observed", "--json"]))).unwrap();
+    let lifecycle = &shown["forge"]["pr_states"][0];
+    assert_eq!(lifecycle["observed_pr_head"], a);
+    assert_eq!(lifecycle["resolved_pr_head"], b);
+    assert_eq!(lifecycle["observed_merge_sha"], a);
+    assert_eq!(lifecycle["resolved_merge_sha"], b);
+    let text = stdout(repo.arc(&wt).args(["show", "observed"]));
+    assert!(text.contains(&a) && text.contains(&b), "{text}");
+    link_at(&repo, "observed", "1", &b, "arc/observed");
+    assert_eq!(status_json(&repo, "observed")["forge"]["checks"], "stale");
+    stdout(repo.arc(&wt).args([
+        "forge",
+        "checks",
+        "observed",
+        "--pr-head",
+        &b,
+        "--state",
+        "passed",
+    ]));
+    stdout(
+        repo.arc(&wt)
+            .args(["forge", "pr-state", "observed", "--state", "open"]),
+    );
+    let status = status_json(&repo, "observed");
+    assert_eq!(status["forge"]["checks"], "passed");
+    assert_eq!(status["forge"]["checks_applicable"], true);
+    assert_eq!(status["forge"]["observed_head_match"], true);
+    assert_eq!(status["forge"]["resolved_head_match"], true);
+    assert_eq!(status["forge"]["forge_ready"], true);
+    let shown: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&wt).args(["show", "observed", "--json"]))).unwrap();
+    assert_eq!(shown["forge"]["links"][0]["observed_head_sha"], a);
+    assert_eq!(shown["forge"]["link"]["observed_head_sha"], b);
+    assert_eq!(shown["forge"]["pr_states"][1]["observed_pr_head"], b);
+    link_at(&repo, "observed", "2", &b, "arc/observed");
+    assert_eq!(status_json(&repo, "observed")["forge"]["checks"], "stale");
+}
+
+#[test]
+fn forge_dropped_revision_has_null_resolved_successor() {
+    let repo = Repo::new();
+    let (_id, wt, a) = forge_change(&repo, "dropped-forge");
+    declare_same_repo(&repo, "dropped-forge", "arc/dropped-forge");
+    link_at(&repo, "dropped-forge", "1", &a, "arc/dropped-forge");
+    stdout(repo.arc(&wt).args([
+        "forge",
+        "checks",
+        "dropped-forge",
+        "--pr-head",
+        &a,
+        "--state",
+        "passed",
+    ]));
+    stdout(repo.arc(&wt).args([
+        "forge",
+        "pr-state",
+        "dropped-forge",
+        "--state",
+        "merged",
+        "--merge-sha",
+        &a,
+    ]));
+    let map = repo.home.join("drop-map");
+    fs::write(&map, format!("{a} {}\n", "0".repeat(40))).unwrap();
+    stdout(repo.arc(&wt).args([
+        "history",
+        "rewrite",
+        "--map",
+        map.to_str().unwrap(),
+        "--reason",
+        "dropped revision",
+    ]));
+    let shown: serde_json::Value = serde_json::from_str(&stdout(repo.arc(&wt).args([
+        "show",
+        "dropped-forge",
+        "--json",
+    ])))
+    .unwrap();
+    for (record, observed, resolved) in [
+        (
+            &shown["forge"]["link"],
+            "observed_head_sha",
+            "resolved_head_sha",
+        ),
+        (
+            &shown["forge"]["checks"],
+            "observed_pr_head",
+            "resolved_pr_head",
+        ),
+        (
+            &shown["forge"]["pr_states"][0],
+            "observed_pr_head",
+            "resolved_pr_head",
+        ),
+        (
+            &shown["forge"]["pr_states"][0],
+            "observed_merge_sha",
+            "resolved_merge_sha",
+        ),
+    ] {
+        assert_eq!(record[observed], a);
+        assert!(record.as_object().unwrap().contains_key(resolved));
+        assert!(record[resolved].is_null());
+    }
+    assert_eq!(
+        status_json(&repo, "dropped-forge")["forge"]["resolved_head_match"],
+        false
+    );
+}
+
+#[test]
+fn forge_checks_do_not_cross_pr_identity_at_same_head() {
+    let repo = Repo::new();
+    let (_id, wt, head) = forge_change(&repo, "check-identity");
+    declare_same_repo(&repo, "check-identity", "arc/check-identity");
+    link_at(&repo, "check-identity", "1", &head, "arc/check-identity");
+    stdout(repo.arc(&wt).args([
+        "forge",
+        "checks",
+        "check-identity",
+        "--pr-head",
+        &head,
+        "--state",
+        "passed",
+    ]));
+    link_at(&repo, "check-identity", "2", &head, "arc/check-identity");
+    assert_eq!(
+        status_json(&repo, "check-identity")["forge"]["checks"],
+        "stale"
+    );
 }
