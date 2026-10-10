@@ -2333,6 +2333,9 @@ enum Cmd {
     /// identified. Other projects and unknown build revisions have no warning.
     /// Unreadable changes are named with their errors on stderr; readable
     /// changes remain in the output
+    /// The worktree filesystem is measured at the configured worktree root; a
+    /// configuration that cannot be loaded measures the current checkout and
+    /// warns on stderr
     /// Provisional integration obligations have a separate section and do not count as review debt.
     Catchup {
         /// Number of recent sessions, selected after ranking every discovered

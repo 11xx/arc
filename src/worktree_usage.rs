@@ -356,25 +356,36 @@ pub fn measure(
     } else {
         None
     };
+    let (root, warning) = accounting_root(cwd, crate::config::load().map(|cfg| cfg.worktrees_dir));
+    if let Some(warning) = warning {
+        eprintln!("{warning}");
+    }
     WorktreeAccounting {
         changes,
         forks: fork_usage,
         total_bytes: measured,
         fork_total_bytes: fork_measured,
-        measurement: measurement(worktrees_root(cwd).as_deref().unwrap_or(cwd)),
+        measurement: measurement(&root),
         unknown,
     }
 }
 
-/// Where new worktrees are created, absolute. A relative configured root is
-/// resolved against the invoking checkout, which is how `begin` resolves it.
-pub fn worktrees_root(cwd: &Path) -> Option<PathBuf> {
-    let root = crate::config::load().ok()?.worktrees_dir;
-    Some(if root.is_absolute() {
-        root
-    } else {
-        cwd.join(root)
-    })
+/// The directory whose filesystem the accounting describes: where new
+/// worktrees are created, absolute. A relative configured root is resolved
+/// against the invoking checkout, which is how `begin` resolves it. When the
+/// configuration that names the root cannot be loaded the checkout stands in,
+/// with the warning that says the measured filesystem is a substitute.
+fn accounting_root(cwd: &Path, configured: anyhow::Result<PathBuf>) -> (PathBuf, Option<String>) {
+    match configured {
+        Ok(root) if root.is_absolute() => (root, None),
+        Ok(root) => (cwd.join(root), None),
+        Err(error) => (
+            cwd.to_path_buf(),
+            Some(format!(
+                "warning: the worktree filesystem is measured at the current checkout: cannot load the arc configuration: {error:#}"
+            )),
+        ),
+    }
 }
 
 /// How a size for `path`'s filesystem was obtained and what it omits.
@@ -569,6 +580,30 @@ mod tests {
         // apparent size into a guess.
         assert!(!compresses("rw,nocompress"));
         assert!(!compresses("rw,compression_hint=none"));
+    }
+
+    #[test]
+    fn the_accounting_root_is_the_configured_worktrees_dir_resolved_against_the_checkout() {
+        let cwd = Path::new("/repo");
+        assert_eq!(
+            accounting_root(cwd, Ok(PathBuf::from("/trees"))),
+            (PathBuf::from("/trees"), None)
+        );
+        assert_eq!(
+            accounting_root(cwd, Ok(PathBuf::from("../trees"))),
+            (PathBuf::from("/repo/../trees"), None)
+        );
+    }
+
+    #[test]
+    fn an_unloadable_configuration_measures_the_checkout_and_says_so() {
+        let failure = anyhow::anyhow!("malformed config.toml").context("cannot read the file");
+        let (root, warning) = accounting_root(Path::new("/repo"), Err(failure));
+        assert_eq!(root, PathBuf::from("/repo"));
+        assert_eq!(
+            warning.as_deref(),
+            Some("warning: the worktree filesystem is measured at the current checkout: cannot load the arc configuration: cannot read the file: malformed config.toml")
+        );
     }
 
     #[test]
