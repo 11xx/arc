@@ -952,3 +952,27 @@ fn supplied_links_show_via_and_facts_show_citations() {
         "{text}"
     );
 }
+
+#[test]
+fn review_detail_text_validates_session_relative_models() {
+    let Fixture { repo, .. } = integrated_under_waiver();
+    audit_changes_requested(&repo, "inspect the recorded identity");
+    let change_id = explain_json(&repo, &[])["change_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for kind in ["verdict-recorded", "audit-verdict-recorded"] {
+        rewrite_event(&repo, &change_id, kind, |event| {
+            event["session"] = "fixture-recording".into();
+            event["model"] = "fixture-recording#high".into();
+        });
+    }
+    for command in ["show", "explain"] {
+        let text = stdout(repo.arc(&repo.root).args([command, WORK]));
+        assert!(text.contains("model not recorded"), "{command}: {text}");
+        assert!(
+            !text.contains("fixture-recording#high"),
+            "{command}: {text}"
+        );
+    }
+}

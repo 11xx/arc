@@ -305,6 +305,8 @@ pub enum Detail {
         #[serde(skip_serializing_if = "Option::is_none")]
         model: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         provisional: Option<String>,
     },
     ExternalVerdict {
@@ -339,6 +341,8 @@ pub enum Detail {
         reviewer: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
     },
     AuditFinding {
         event_id: String,
@@ -1271,6 +1275,7 @@ fn coverage_slot(
                         patchset_id: Some(verdict.patchset_id.clone()),
                         reviewer: Some(verdict.effective_author().to_string()),
                         model: verdict.model.clone(),
+                        session: verdict.session.clone(),
                         provisional: authorization.verdict_provisional.clone(),
                     },
                 ),
@@ -1284,6 +1289,7 @@ fn coverage_slot(
                         patchset_id: None,
                         reviewer: None,
                         model: None,
+                        session: None,
                         provisional: authorization.verdict_provisional.clone(),
                     },
                 ),
@@ -1297,6 +1303,7 @@ fn coverage_slot(
                 patchset_id: None,
                 reviewer: None,
                 model: None,
+                session: None,
                 provisional: None,
             },
         )),
@@ -1398,6 +1405,7 @@ fn later_knowledge(events: &[Event], discharge: Option<&Discharge>, at: Option<&
                         revision: revision.clone(),
                         reviewer,
                         model: event.model.clone(),
+                        session: event.session.clone(),
                     },
                 ));
                 for finding in findings {
@@ -1759,6 +1767,7 @@ fn describe(detail: &Detail) -> String {
             patchset_id,
             reviewer,
             model,
+            session,
             provisional,
         } => match event_id {
             Some(event_id) => format!(
@@ -1771,7 +1780,7 @@ fn describe(detail: &Detail) -> String {
                     crate::coordinate::display_model(
                         None,
                         model.as_deref(),
-                        None,
+                        session.as_deref(),
                         crate::coordinate::ModelStyle::Coordinate
                     )
                 ),
@@ -1847,12 +1856,13 @@ fn describe(detail: &Detail) -> String {
             revision,
             reviewer,
             model,
+            session,
         } => format!(
             "audit {verdict} `{event_id}` at {revision} by {reviewer} ({})",
             crate::coordinate::display_model(
                 None,
                 model.as_deref(),
-                None,
+                session.as_deref(),
                 crate::coordinate::ModelStyle::Coordinate
             )
         ),

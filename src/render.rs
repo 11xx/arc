@@ -1100,7 +1100,7 @@ pub fn markdown(
                 crate::coordinate::display_model(
                     None,
                     audit.model.as_deref(),
-                    None,
+                    audit.session.as_deref(),
                     crate::coordinate::ModelStyle::Coordinate
                 ),
                 audit

@@ -879,6 +879,8 @@ pub enum JournalCmd {
     /// Records no events; ledger reads do not require a parseable append policy.
     /// Recorded models that are missing, placeholders or session ids print as
     /// model not recorded, qualified by the harness when it is established.
+    /// JSON production identities retain raw models with model_recorded: false
+    /// when missing, placeholders or session ids; valid models omit the flag.
     Questions {
         /// Emit structured JSON instead of text
         #[arg(long)]
@@ -1073,6 +1075,8 @@ pub enum JournalCmd {
     /// Records no events; ledger reads do not require a parseable append policy.
     /// Recorded models that are missing, placeholders or session ids print as
     /// model not recorded, qualified by the harness when it is established.
+    /// JSON production identities retain raw models with model_recorded: false
+    /// when missing, placeholders or session ids; valid models omit the flag.
     Catchup {
         /// Cap the artifact list and journal tail (default 20)
         #[arg(long)]
@@ -1098,6 +1102,8 @@ pub enum JournalCmd {
     /// Records no events; ledger reads do not require a parseable append policy.
     /// Recorded models that are missing, placeholders or session ids print as
     /// model not recorded, qualified by the harness when it is established.
+    /// JSON production identities retain raw models with model_recorded: false
+    /// when missing, placeholders or session ids; valid models omit the flag.
     Open {
         /// Restrict to one actionable kind; lower-priority tiers stay separate
         #[arg(long, value_parser = parse_journal_kind_filter)]
@@ -1114,6 +1120,8 @@ pub enum JournalCmd {
     /// Records no events; ledger reads do not require a parseable append policy.
     /// Recorded models that are missing, placeholders or session ids print as
     /// model not recorded, qualified by the harness when it is established.
+    /// JSON production identities retain raw models with model_recorded: false
+    /// when missing, placeholders or session ids; valid models omit the flag.
     List {
         /// Restrict to one kind
         #[arg(long, value_parser = parse_journal_kind_filter)]
@@ -1128,6 +1136,8 @@ pub enum JournalCmd {
     /// Records no events; ledger reads do not require a parseable append policy.
     /// Recorded models that are missing, placeholders or session ids print as
     /// model not recorded, qualified by the harness when it is established.
+    /// JSON production identities retain raw models with model_recorded: false
+    /// when missing, placeholders or session ids; valid models omit the flag.
     Inventory {
         /// Inspect one exact artifact instead of the selected actionable set.
         file: Option<String>,
@@ -1199,6 +1209,8 @@ pub enum JournalCmd {
     /// Records no events; ledger reads do not require a parseable append policy.
     /// Recorded models that are missing, placeholders or session ids print as
     /// model not recorded, qualified by the harness when it is established.
+    /// JSON production identities retain raw models with model_recorded: false
+    /// when missing, placeholders or session ids; valid models omit the flag.
     Discussion {
         /// Discussion artifact filename inside the journal dir (a name, not a path)
         filename: String,
@@ -7399,7 +7411,7 @@ pub(crate) struct QuestionOption {
 }
 
 /// One standing suggestion on an open question.
-#[derive(Clone, Serialize)]
+#[derive(Clone)]
 pub(crate) struct Suggestion {
     /// The option suggested.
     pub(crate) option: String,
@@ -7407,19 +7419,41 @@ pub(crate) struct Suggestion {
     /// declared, the actor when one was, and the harness otherwise.
     pub(crate) by: String,
     /// Who ran the command, when somebody declared an actor.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) actor: Option<String>,
     /// The subject the suggestion was recorded for, when the invocation
     /// represented one.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) on_behalf_of: Option<String>,
     /// The model that suggested it, when one was declared.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) model: Option<String>,
+    /// The originating session used to validate the recorded model.
+    session: Option<String>,
     pub(crate) at: String,
     /// The reason, recorded verbatim. Absent when the caller supplied none.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) note: Option<String>,
+}
+
+impl Serialize for Suggestion {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("option", &self.option)?;
+        map.serialize_entry("by", &self.by)?;
+        map.serialize_entry("at", &self.at)?;
+        for (key, value) in [
+            ("actor", &self.actor),
+            ("on_behalf_of", &self.on_behalf_of),
+            ("model", &self.model),
+            ("note", &self.note),
+        ] {
+            if let Some(value) = value {
+                map.serialize_entry(key, value)?;
+            }
+        }
+        if !crate::coordinate::model_recorded(self.model.as_deref(), self.session.as_deref()) {
+            map.serialize_entry("model_recorded", &false)?;
+        }
+        map.end()
+    }
 }
 
 /// The suggestions standing on one question, oldest first. A suggestion is
@@ -7440,7 +7474,8 @@ fn suggestions_from(events: &[JournalEvent], file: &str, question: &str) -> Vec<
                 by: suggestion_identity(event),
                 actor: event.actor.clone(),
                 on_behalf_of: event.on_behalf_of.clone(),
-                model: event.model.clone().filter(|model| !model.is_empty()),
+                model: event.model.clone(),
+                session: event.session().map(str::to_string),
                 at: event.ts.clone(),
                 note: event.note.clone(),
             })
@@ -11089,31 +11124,50 @@ pub(crate) struct InventoryPromotion {
     pub(crate) anchor: Option<String>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone)]
 pub(crate) struct VerificationStamp {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) revision: Option<String>,
     /// Which checkout `revision` names, when it is not the project anchor.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) scope: Option<String>,
     pub(crate) timestamp: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) actor: Option<String>,
     /// The subject the check was recorded for, when the invocation
     /// represented one. It stands beside the actor rather than replacing it,
     /// so a queue row can say a lead stamped this for an executor.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) on_behalf_of: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) harness: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) session: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) session_link: Option<String>,
     /// `Some(false)` is current, `Some(true)` is moved, and `None` is unknown.
     pub(crate) moved: Option<bool>,
+}
+
+impl Serialize for VerificationStamp {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("timestamp", &self.timestamp)?;
+        map.serialize_entry("moved", &self.moved)?;
+        for (key, value) in [
+            ("revision", &self.revision),
+            ("scope", &self.scope),
+            ("actor", &self.actor),
+            ("on_behalf_of", &self.on_behalf_of),
+            ("model", &self.model),
+            ("harness", &self.harness),
+            ("session", &self.session),
+            ("session_link", &self.session_link),
+        ] {
+            if let Some(value) = value {
+                map.serialize_entry(key, value)?;
+            }
+        }
+        if !crate::coordinate::model_recorded(self.model.as_deref(), self.session.as_deref()) {
+            map.serialize_entry("model_recorded", &false)?;
+        }
+        map.end()
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -16133,6 +16187,65 @@ fn change_annotation(changes: &[ChangeState], topic: &str, filename: &str) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_producer_annotation(kind: &str) {
+        for model in [
+            None,
+            Some("unknown"),
+            Some(""),
+            Some("m#none"),
+            Some("fixture-recording#high"),
+            Some("m#high"),
+        ] {
+            let mut value = serde_json::json!({
+                "schema": JOURNAL_SCHEMA, "ts": "2026-10-01T12:00:00Z",
+                "event": kind, "topic": "fixture", "file": "20261001T120000Z-fixture-discussion.md",
+                "harness": "codex", "session": "fixture-recording",
+                "actor": "writer", "question_id": "q-fixture", "option": "option"
+            });
+            if let Some(model) = model {
+                value["model"] = model.into();
+            }
+            let event: JournalEvent = serde_json::from_value(value).unwrap();
+            let result = if kind == "suggestion" {
+                serde_json::to_value(
+                    &suggestions_from(
+                        &[event],
+                        "20261001T120000Z-fixture-discussion.md",
+                        "q-fixture",
+                    )[0],
+                )
+                .unwrap()
+            } else {
+                serde_json::to_value(
+                    verification_stamp(
+                        &[event],
+                        "20261001T120000Z-fixture-discussion.md",
+                        None,
+                        None,
+                    )
+                    .unwrap(),
+                )
+                .unwrap()
+            };
+            assert_eq!(
+                result.get("model_recorded"),
+                (model != Some("m#high")).then_some(&serde_json::Value::Bool(false)),
+                "{kind}: {result}"
+            );
+            assert_eq!(result["model"].as_str(), model, "{kind}: {result}");
+        }
+    }
+
+    #[test]
+    fn suggestion_json_annotates_missing_models() {
+        assert_producer_annotation("suggestion");
+    }
+
+    #[test]
+    fn stamp_json_annotates_missing_models() {
+        assert_producer_annotation("verified");
+    }
 
     #[test]
     fn filed_producer_json_marks_missing_models() {

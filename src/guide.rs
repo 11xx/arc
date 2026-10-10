@@ -48,11 +48,12 @@ SAY WHO YOU ARE (before the first write)
   or a session id prints as `<harness> (model not recorded)`, or
   `model not recorded` when no harness is established. Valid model and effort
   spellings retain their coordinates. JSON production identities, journal
-  artifact writers, filed and recent sessions, and review coverage retain the
-  raw model value and carry `model_recorded: false` when it names no model;
-  valid models omit that flag. Workspace report debt rows retain the raw
+  artifact writers, filed and recent sessions, suggestions, verification
+  stamps, and review coverage retain the raw model value and carry
+  `model_recorded: false` when it names no model; valid models omit that flag. Workspace report debt rows retain the raw
   implementer value with the same optional flag. Review coverage retains the
-  originating session and validates the model against it.
+  originating session and validates the model against it. Audit and verdict
+  detail text validates models against their recorded sessions.
 
   Local change, repository and replica IDs are totally ordered by issuance
   across processes sharing one ledger. Ordinary issuance and publication use

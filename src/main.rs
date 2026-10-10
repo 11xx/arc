@@ -484,6 +484,7 @@ enum Cmd {
     /// Recorded producer models that are missing, placeholders or session ids
     /// print as model not recorded. JSON production identities and review coverage retain raw values
     /// with model_recorded: false; valid models omit the flag.
+    /// Audit and verdict detail text validates models against their recorded sessions.
     Show {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -547,6 +548,7 @@ enum Cmd {
     /// Recorded producer models that are missing, placeholders or session ids
     /// print as model not recorded. JSON production identities and review coverage retain raw values
     /// with model_recorded: false; valid models omit the flag.
+    /// Audit and verdict detail text validates models against their recorded sessions.
     Explain {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
