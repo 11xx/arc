@@ -373,6 +373,12 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          discussion with `journal position`, and replace a
                          recorded field with `journal correct`. A consumed
                          item is closed: file a successor.
+                         Structural position headings in evidence refuse;
+                         fenced and indented examples are prose. Evidence and
+                         position check target availability before reading the
+                         body and again under the transition lock. Question,
+                         answer, suggestion, retraction, and checkpoint writes
+                         use the same two-stage target preflight.
                          Evidence cannot be appended in cold storage; use
                          `journal unarchive` before appending.
   arc journal verified <file> [--note <text>]
@@ -517,9 +523,10 @@ SETTLE A QUESTION (before it is work)
                          and retractions list typed events in log order.
                          Headings and fence markers permit up to three columns
                          of indentation; indented code is prose. Unrecorded
-                         fenced entry examples are prose; recorded position and
-                         evidence markers terminate an open fence. Discussion
-                         tallies and doctor use the same entry quotation rules.
+                         fenced entry, question, and answer examples are prose;
+                         recorded position, evidence, question, and answer
+                         markers terminate an open fence. Question readers,
+                         discussion tallies, and doctor share quotation rules.
   arc journal doctor
                          Matches position and evidence blocks with typed events
                          for every artifact kind in hot and cold storage. Either
@@ -2457,6 +2464,11 @@ RULES THAT CHANGE WHAT YOU DO
     empty coordinate cannot match a recorded owner. Integration remains lead-owned.
   - A lane's owner is a harness and a session together. Harnesses mint session
     strings independently, so neither half names an owner on its own.
+  - Owned journal lifecycle events require complete identity. Claim renewal,
+    progress, checkpoints, and release match the claim's actor, harness, and
+    session; lane renewal and closure match its harness and session. A stale
+    lane can be closed by another complete identity with outcome `expired`.
+    Established identity strings retain their whitespace on writes and reads.
   - A lane is occupancy of a topic; a claim on a journal artifact is occupancy
     of that file. Both render on a row and neither becomes the other: work with
     no artifact still takes a lane.
@@ -2993,6 +3005,8 @@ SCHEMAS
   Their absent model provenance stays absent.
 
   A journal event omits the harness or session key nobody established.
+  Owned claim and lane lifecycle events require their complete identities;
+  an event lacking one is unsupported and cannot change ownership state.
   `journal-events/2` covers that and the `evidence` kind; `journal-events/1`
   events, which carry both keys, are read alongside it, and a value of
   `unknown` in either reads as absent. A journal bundle and a journal spool

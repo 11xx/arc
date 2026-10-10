@@ -17627,3 +17627,174 @@ fn historical_entry_producer_json_marks_missing_models() {
         }
     }
 }
+
+#[test]
+fn ownership_round_trip_preserves_identity_whitespace() {
+    let repo = Repo::new();
+    let file = evidence_artifact(&repo, "todo", "ownership-spaces", "# Work\n");
+    for args in [
+        vec!["claim", &file],
+        vec!["claim", &file],
+        vec!["release-claim", &file],
+        vec!["journal", "lane", "open", "spaces"],
+        vec!["journal", "lane", "renew", "spaces"],
+        vec!["journal", "lane", "close", "spaces", "--outcome", "done"],
+    ] {
+        repo.arc(&repo.root)
+            .env("ARC_SESSION", " holder ")
+            .env("ARC_HARNESS", " test ")
+            .args(args)
+            .assert()
+            .success();
+    }
+}
+
+#[test]
+fn evidence_refuses_structural_position_headings() {
+    let repo = Repo::new();
+    let file = evidence_artifact(&repo, "discussion", "evidence-vote", "# Work\n");
+    for heading in ["### Position", "   ### Position pos-example"] {
+        repo.arc(&repo.root)
+            .args(["journal", "evidence", &file, "--body-file", "-"])
+            .write_stdin(format!("{heading}\nPosition: against\n"))
+            .assert()
+            .failure();
+    }
+}
+
+#[test]
+fn append_preflight_refuses_missing_targets_with_stdin_open() {
+    let mut waited = Vec::new();
+    for args in [
+        vec![
+            "journal",
+            "question",
+            "20200101T000000Z-missing-discussion.md",
+            "--placement",
+            "opening",
+            "--option",
+            "a",
+            "--option",
+            "b",
+            "--body-file",
+            "-",
+        ],
+        vec![
+            "journal",
+            "answer",
+            "20200101T000000Z-missing-discussion.md",
+            "--question",
+            "q-a",
+            "--option",
+            "a",
+            "--body-file",
+            "-",
+        ],
+        vec![
+            "journal",
+            "suggest",
+            "20200101T000000Z-missing-discussion.md",
+            "--question",
+            "q-a",
+            "--option",
+            "a",
+            "--body-file",
+            "-",
+        ],
+        vec![
+            "journal",
+            "retract",
+            "20200101T000000Z-missing-todo.md",
+            "--target",
+            "pos-a",
+            "--body-file",
+            "-",
+        ],
+        vec![
+            "journal",
+            "checkpoint",
+            "20200101T000000Z-missing-todo.md",
+            "--body-file",
+            "-",
+        ],
+        vec![
+            "journal",
+            "evidence",
+            "20200101T000000Z-missing-todo.md",
+            "--body-file",
+            "-",
+        ],
+        vec![
+            "journal",
+            "position",
+            "20200101T000000Z-missing-todo.md",
+            "--body-file",
+            "-",
+        ],
+        vec![
+            "journal",
+            "position",
+            "20200101T000000Z-missing-discussion.md",
+            "--archived",
+            "--body-file",
+            "-",
+        ],
+    ] {
+        let repo = Repo::new();
+        let mut child = spawn_arc_with_open_stdin(&repo, &repo.root, &args);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break Some(status);
+            }
+            if std::time::Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        if status.is_none() {
+            child.kill().unwrap();
+        }
+        let output = child.wait_with_output().unwrap();
+        if status.is_none() {
+            waited.push(args);
+            continue;
+        }
+        assert!(!status.unwrap().success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("missing"));
+    }
+    assert!(waited.is_empty(), "waited for stdin: {waited:?}");
+}
+
+#[test]
+fn question_text_recovers_at_recorded_marker_after_open_fence() {
+    let repo = Repo::new();
+    let file = evidence_artifact(
+        &repo,
+        "discussion",
+        "question-fence",
+        "# Work\n\n```md\nExample.\n",
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "question",
+                &file,
+                "--placement",
+                "opening",
+                "--option",
+                "a",
+                "--option",
+                "b",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("Which choice?\n"),
+    );
+    let output = stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "questions", "--json"]),
+    );
+    assert!(output.contains("Which choice?"), "{output}");
+}

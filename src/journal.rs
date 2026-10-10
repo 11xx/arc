@@ -279,7 +279,8 @@ pub enum LaneCmd {
         #[arg(long, conflicts_with = "status")]
         status_file: Option<String>,
     },
-    /// Renew a lane owned by this harness and session
+    /// Renew a lane owned by this harness and session.
+    /// Recorded renewal requires both owner coordinates and compares them verbatim
     Renew {
         /// The lane to renew
         topic: String,
@@ -296,7 +297,8 @@ pub enum LaneCmd {
     /// Close a lane
     ///
     /// A live lane closes only for the owning harness and session; a stale
-    /// one closes for anyone with `--outcome expired`.
+    /// one closes for anyone with `--outcome expired`. Recorded closure requires
+    /// both owner coordinates; foreign expiry is checked at the event timestamp.
     Close {
         /// The lane to close
         topic: String,
@@ -554,8 +556,8 @@ pub enum JournalCmd {
     /// source retirement, with both hot and archived bodies considered. Position
     /// and evidence blocks are matched to their typed events for every artifact
     /// kind in both storage tiers; either missing half is a problem. Indented
-    /// code and unrecorded fenced entry examples are prose; recorded position
-    /// and evidence markers terminate an open fence.
+    /// code and unrecorded fenced entry examples are prose; recorded position,
+    /// evidence, question, and answer markers terminate an open fence.
     /// Records no events; ledger reads do not require a parseable append policy.
     Doctor {
         /// Emit arc-journal-open/1 JSON, including the pending recovery bucket
@@ -736,7 +738,8 @@ pub enum JournalCmd {
     /// body; without it, the body can provide that line itself.
     /// Use `arc journal position <file> --body-file - --question <id> --option
     /// <opt>` to argue under one branch of an open question instead of
-    /// unconditionally
+    /// unconditionally. Target availability is checked before reading the body
+    /// and again under the transition lock
     Position {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
@@ -771,7 +774,10 @@ pub enum JournalCmd {
     /// position`, and replace a recorded field with `arc journal correct`. A
     /// consumed artifact refuses; file a successor. `show` prints the block,
     /// `filed` counts it per item, and it is recorded activity, so it keeps an
-    /// open item from going stale. Evidence cannot be appended in cold storage;
+    /// open item from going stale. Structural position headings in the body
+    /// refuse; fenced and indented examples are prose. Target availability is
+    /// checked before reading the body and again under the transition lock.
+    /// Evidence cannot be appended in cold storage;
     /// use `journal unarchive` before appending
     Evidence {
         /// Artifact filename inside the journal dir (a name, not a path)
@@ -814,6 +820,8 @@ pub enum JournalCmd {
         options: Vec<String>,
         /// Body source: a file path, or '-' for stdin (what the question asks,
         /// written verbatim below a tool-computed `### Question` heading)
+        /// Target availability is checked before reading and again under the
+        /// transition lock.
         #[arg(long)]
         body_file: String,
         /// Who may settle it: `person` (the default, what the prose always
@@ -840,6 +848,8 @@ pub enum JournalCmd {
         /// Body source: a file path, or '-' for stdin (direction, remaining
         /// work, and rejected approaches, written verbatim below a
         /// tool-computed `### Work checkpoint` heading)
+        /// Target availability is checked before reading and again under the
+        /// transition lock.
         #[arg(long)]
         body_file: String,
         /// The action a successor should take next
@@ -875,7 +885,9 @@ pub enum JournalCmd {
     /// reads to raise the question through its own harness prompt — file, id,
     /// placement, the options to offer, and which branches were already
     /// argued — and `answer` is where the reply comes back. `--json` carries
-    /// the same, for building the prompt without parsing text
+    /// the same, for building the prompt without parsing text. Indented code
+    /// and unrecorded fenced question and answer examples are prose; recorded
+    /// entry, question, and answer markers terminate an open fence
     /// Records no events; ledger reads do not require a parseable append policy.
     /// Recorded models that are missing, placeholders or session ids print as
     /// model not recorded, qualified by the harness when it is established.
@@ -912,6 +924,8 @@ pub enum JournalCmd {
         other: Option<String>,
         /// Body source: a file path, or '-' for stdin (why, written verbatim
         /// below a tool-computed `### Answer` heading)
+        /// Target availability is checked before reading and again under the
+        /// transition lock.
         #[arg(long)]
         body_file: String,
     },
@@ -931,6 +945,8 @@ pub enum JournalCmd {
         option: String,
         /// Body source: a file path, or '-' for stdin (the reason, recorded
         /// verbatim on the suggestion event)
+        /// Target availability is checked before reading and again under the
+        /// transition lock.
         #[arg(long)]
         body_file: String,
     },
@@ -1006,6 +1022,8 @@ pub enum JournalCmd {
         target: String,
         /// Body source: a file path, or '-' for stdin (why it is withdrawn,
         /// written verbatim below a tool-computed `### Retraction` heading)
+        /// Target availability is checked before reading and again under the
+        /// transition lock.
         #[arg(long)]
         body_file: String,
     },
@@ -1062,6 +1080,8 @@ pub enum JournalCmd {
     },
     /// Dump understood journal events as newline-delimited JSON in append order.
     /// A trailing line without its newline refuses with a recovery diagnostic.
+    /// Owned claim and lane lifecycle events without complete identity are
+    /// unsupported; journal doctor reports them.
     /// Records no events; ledger reads do not require a parseable append policy.
     Events {
         /// Cap the number of events (first appended first)
@@ -1171,9 +1191,9 @@ pub enum JournalCmd {
         /// body, recorded identity, corrected fields, and retraction status;
         /// unmatched blocks have null recorded identity and detached events
         /// have null heading and body. Indented code and unrecorded fenced
-        /// entry examples are prose; recorded position and evidence markers
-        /// terminate an open fence. Corrections and retractions list typed
-        /// amendment events in log order. A correction that fails validation reads
+        /// entry examples are prose; recorded position, evidence, question, and
+        /// answer markers terminate an open fence. Corrections and retractions
+        /// list typed amendment events in log order. A correction that fails validation reads
         /// `planner_status: malformed` and credits no planner.
         #[arg(long)]
         json: bool,
@@ -1201,8 +1221,8 @@ pub enum JournalCmd {
     /// age, and resolution with a resolver-participation flag (read-only).
     /// The tally counts `Position: for | against | amend` lines inside
     /// `### Position` blocks, and flags blocks that state no stance. Indented
-    /// code and unrecorded fenced entry examples are prose; recorded position
-    /// and evidence markers terminate an open fence. Reports
+    /// code and unrecorded fenced entry examples are prose; recorded position,
+    /// evidence, question, and answer markers terminate an open fence. Reports
     /// each open question with the positions argued under every option, so a
     /// branch nobody explored is visible before the question is answered.
     /// Resolve a discussion with `journal consume --outcome done --decision
@@ -6206,8 +6226,12 @@ fn position(
     if branch.is_some() && kind != JournalKind::Discussion.as_str() {
         bail!("{filename} is a {kind}, not a discussion");
     }
-    // Read the body before touching the filesystem so a bad source path leaves
-    // the artifact untouched.
+    if archived {
+        open_archived_discussion(ctx, filename)?;
+    } else {
+        open_artifact(ctx, filename)?;
+    }
+    // Body reads hold no transition lock; the target is checked again under it.
     let body = read_body_verbatim(body_file)?;
     if let Some(requested) = stance {
         if let Some(body_stance) = opening_position_stance(&body) {
@@ -6342,11 +6366,15 @@ fn position(
 /// it never enters a stance tally; the event supplies the stable id, the
 /// activity time, and the writer.
 fn evidence(ctx: &Ctx, filename: &str, body_file: &str) -> Result<i32> {
-    // Refuse a malformed name before the body is read: with `--body-file -`
-    // the read waits on stdin, and a caller who mistyped the filename would
-    // wait with it rather than being told.
-    check_artifact_name(ctx, filename)?;
+    // Check target availability before waiting on a body source.
+    open_artifact(ctx, filename)?;
     let body = read_body_verbatim(body_file)?;
+    let mut fence = None;
+    for line in body.lines() {
+        if !quoted_entry_line(line, &mut fence, &[], filename) && is_position_heading(line) {
+            bail!("evidence cannot contain a structural position heading; quote the example or use journal position");
+        }
+    }
     if body.trim().is_empty() {
         bail!("evidence needs a body: say what was found");
     }
@@ -6573,6 +6601,7 @@ fn question(
     if options.len() < 2 {
         bail!("a question needs at least two options; one option is a statement");
     }
+    open_discussion(ctx, filename)?;
     let body = read_body_verbatim(body_file)?;
     let resolution = resolve(&ctx.cwd)?;
     let anchor = resolution.anchor.clone();
@@ -6648,6 +6677,7 @@ fn answer(
     other: Option<&str>,
     body_file: &str,
 ) -> Result<i32> {
+    open_discussion_for_answer(ctx, filename)?;
     let body = read_body_verbatim(body_file)?;
     let dir = resolve_dir(&ctx.cwd)?;
     let _transition = lock_journal_transition(&dir)?;
@@ -6821,6 +6851,7 @@ fn suggest(
     option: &str,
     body_file: &str,
 ) -> Result<i32> {
+    open_discussion_for_answer(ctx, filename)?;
     let body = read_body_verbatim(body_file)?;
     let dir = resolve_dir(&ctx.cwd)?;
     let _transition = lock_journal_transition(&dir)?;
@@ -7318,9 +7349,8 @@ fn retract(ctx: &Ctx, filename: &str, target: &str, body_file: &str) -> Result<i
              `answer:<question id>`"
         );
     };
-    // Read the body before touching the filesystem so a bad source path leaves
-    // the artifact untouched, and refuse a malformed target before the read so
-    // a caller passing `-` is told rather than left waiting on stdin.
+    // Target and artifact preflight precede any wait on the body source.
+    open_artifact_for_amendment(ctx, filename)?;
     let body = read_body_verbatim(body_file)?;
     if body.trim().is_empty() {
         bail!("a retraction must say why the entry no longer holds");
@@ -7600,32 +7630,20 @@ fn artifact_body_path(hot: &Path, filename: &str) -> Option<PathBuf> {
     archived.is_file().then_some(archived)
 }
 
-fn question_text(path: &Path, question_id: &str) -> Option<String> {
+fn question_text(
+    path: &Path,
+    question_id: &str,
+    events: &[JournalEvent],
+    filename: &str,
+) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
-    // A fenced block quoting the conventions is prose, exactly as it is for
-    // position headings; and the id must end at a boundary, or asking for
-    // `q-a` would answer with `q-a1`'s prose and prompt somebody with the
-    // wrong question.
-    let mut fence: Option<(u8, usize)> = None;
+    let mut fence = None;
     let mut lines = text.lines().skip_while(|line| {
-        match (fence, fence_marker(line)) {
-            (None, Some((marker, run, _))) => {
-                fence = Some((marker, run));
-                return true;
-            }
-            (Some((marker, opened)), Some((closing, run, bare)))
-                if marker == closing && run >= opened && bare =>
-            {
-                fence = None;
-                return true;
-            }
-            (Some(_), _) => return true,
-            (None, None) => {}
-        }
-        !line.strip_prefix("### Question ").is_some_and(|rest| {
-            rest.strip_prefix(question_id)
+        quoted_entry_line(line, &mut fence, events, filename)
+            || !markdown_syntax_line(line)
+                .and_then(|line| line.strip_prefix("### Question "))
+                .and_then(|rest| rest.strip_prefix(question_id))
                 .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
-        })
     });
     lines.next()?;
     lines
@@ -7782,7 +7800,8 @@ fn questions_from(
                 answered.contains(&(file, question)),
             ),
             deliveries,
-            heading: artifact_body_path(dir, file).and_then(|path| question_text(&path, question)),
+            heading: artifact_body_path(dir, file)
+                .and_then(|path| question_text(&path, question, events, file)),
             file: file.to_string(),
             topic: event.topic.clone(),
             question: question.to_string(),
@@ -7884,7 +7903,8 @@ fn events(ctx: &Ctx, limit: Option<usize>) -> Result<i32> {
 }
 
 /// The version every event is written under. It names the optional harness and
-/// session keys and every event kind, `evidence` included.
+/// session keys and every event kind, `evidence` included. Owned lifecycle
+/// events require the complete claim or lane identity.
 const JOURNAL_SCHEMA: &str = "journal-events/2";
 
 /// The previous version, whose events carry both identity keys. Its events
@@ -8513,6 +8533,20 @@ impl JournalEvent {
         if !accepted_event_schema(&self.schema)
             || self.timestamp().is_none()
             || !valid_topic(&self.topic)
+        {
+            return false;
+        }
+        if matches!(
+            self.event.as_str(),
+            "claim-set" | "claim-renewed" | "claim-stage" | "claim-released" | "checkpoint"
+        ) && claim_owner(self).is_none()
+        {
+            return false;
+        }
+        if matches!(
+            self.event.as_str(),
+            "lane-opened" | "lane-renewed" | "lane-closed"
+        ) && event_owner(self).is_none()
         {
             return false;
         }
@@ -9661,7 +9695,12 @@ pub(crate) enum ClaimHistory {
 /// any of the three names no holder, so it is no claim.
 fn claim_owner(event: &JournalEvent) -> Option<ClaimIdentity> {
     Some(ClaimIdentity {
-        actor: event.on_behalf_of.clone().or_else(|| event.actor.clone())?,
+        actor: event
+            .on_behalf_of
+            .as_deref()
+            .or(event.actor.as_deref())
+            .and_then(present)?
+            .to_string(),
         harness: event.harness()?.to_string(),
         session: event.session()?.to_string(),
     })
@@ -9813,6 +9852,9 @@ fn artifact_claims(events: &[JournalEvent], file: &str) -> Vec<ArtifactClaim> {
         else {
             continue;
         };
+        if claim_owner(event).as_ref() != Some(&claim.state.owner) {
+            continue;
+        }
         match event.event.as_str() {
             "claim-renewed" => claim.state.last_activity_at = timestamp,
             "claim-stage" => {
@@ -10439,9 +10481,10 @@ pub fn checkpoint(
     supersedes: &[String],
 ) -> Result<i32> {
     let owner = require_claim_identity(ctx)?;
-    let body = read_body_verbatim(body_file)?;
     let context = claim_context(ctx, file)?;
+    let body = read_body_verbatim(body_file)?;
     let _lock = lock_journal_transition(&context.dir)?;
+    let context = claim_context(ctx, file)?;
     let events = read_events(&context.dir)?;
     refuse_if_consumed(&events, file)?;
     let now = Utc::now();
@@ -10547,13 +10590,14 @@ fn lanes_from_journal(events: &[JournalEvent], now: DateTime<Utc>) -> Vec<LaneEn
     }
 
     let mut last_activity: HashMap<LaneOwner, DateTime<Utc>> = HashMap::new();
+    let mut active: HashMap<String, ActiveLane> = HashMap::new();
     for event in events {
         if let (Some(owner), Some(timestamp)) = (event_owner(event), event.timestamp()) {
             last_activity.insert(owner, timestamp);
         }
-    }
-    let mut active: HashMap<String, ActiveLane> = HashMap::new();
-    for event in events.iter().filter(|event| event.known()) {
+        if !event.known() {
+            continue;
+        }
         let marker = match event.event.as_str() {
             "lane-opened" => Some(LaneMarker::Opened {
                 ttl: event.ttl_seconds.unwrap_or(DEFAULT_LANE_TTL),
@@ -10596,6 +10640,9 @@ fn lanes_from_journal(events: &[JournalEvent], now: DateTime<Utc>) -> Vec<LaneEn
             }
             LaneMarker::Renewed { ttl, status } => {
                 if let Some(lane) = active.get_mut(&event.topic) {
+                    if event_owner(event).as_ref() != Some(&lane.owner) {
+                        continue;
+                    }
                     if let Some(ttl) = ttl {
                         lane.ttl_seconds = ttl;
                     }
@@ -10604,8 +10651,23 @@ fn lanes_from_journal(events: &[JournalEvent], now: DateTime<Utc>) -> Vec<LaneEn
                     }
                 }
             }
-            LaneMarker::Closed { .. } => {
-                active.remove(&event.topic);
+            LaneMarker::Closed { outcome, .. } => {
+                if let Some(lane) = active.get(&event.topic) {
+                    let activity = last_activity
+                        .get(&lane.owner)
+                        .copied()
+                        .unwrap_or(lane.opened_time);
+                    let expired = timestamp
+                        .signed_duration_since(activity)
+                        .num_seconds()
+                        .max(0) as u64
+                        >= lane.ttl_seconds;
+                    if event_owner(event).as_ref() == Some(&lane.owner)
+                        || (outcome == "expired" && expired)
+                    {
+                        active.remove(&event.topic);
+                    }
+                }
             }
         }
     }
@@ -11829,11 +11891,9 @@ impl Serialize for RecordedIdentity {
 
 /// A harness or session that is blank, or the literal `unknown` a
 /// `journal-events/1` writer recorded for one it could not read, is an
-/// absence, and a reader is told so rather than shown a word that reads like
-/// a name.
+/// absence. Established values are returned verbatim for ownership comparisons.
 fn present(value: &str) -> Option<&str> {
-    let value = value.trim();
-    (!value.is_empty() && value != "unknown").then_some(value)
+    (!value.trim().is_empty() && value.trim() != "unknown").then_some(value)
 }
 
 /// The identity on the event that first named `filename` — the write that
@@ -14310,22 +14370,40 @@ struct QuestionBlockIds {
     answers: HashSet<String>,
 }
 
-fn question_block_ids(body: &str) -> QuestionBlockIds {
-    let mut ids = QuestionBlockIds::default();
-    for line in body.lines() {
+fn question_heading(line: &str) -> Option<(&'static str, &str)> {
+    let line = markdown_syntax_line(line)?;
+    for (kind, prefix, separator) in [
+        ("question", "### Question ", " ("),
+        ("answer", "### Answer ", " = "),
+    ] {
         if let Some(id) = line
-            .strip_prefix("### Question ")
-            .and_then(|rest| rest.split_once(" (").map(|(id, _)| id))
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.split_once(separator).map(|(id, _)| id))
             .filter(|id| valid_question_id(id))
         {
-            ids.questions.insert(id.to_string());
+            return Some((kind, id));
         }
-        if let Some(id) = line
-            .strip_prefix("### Answer ")
-            .and_then(|rest| rest.split_once(" = ").map(|(id, _)| id))
-            .filter(|id| valid_question_id(id))
-        {
-            ids.answers.insert(id.to_string());
+    }
+    None
+}
+
+fn question_block_ids(body: &str, events: &[JournalEvent], filename: &str) -> QuestionBlockIds {
+    let mut ids = QuestionBlockIds::default();
+    let mut fence = None;
+    for line in body.lines() {
+        if quoted_entry_line(line, &mut fence, events, filename) {
+            continue;
+        }
+        if let Some((kind, id)) = question_heading(line) {
+            match kind {
+                "question" => {
+                    ids.questions.insert(id.to_string());
+                }
+                "answer" => {
+                    ids.answers.insert(id.to_string());
+                }
+                _ => unreachable!(),
+            }
         }
     }
     ids
@@ -14336,7 +14414,7 @@ fn unrecorded_question_blocks(
     events: &[JournalEvent],
     filename: &str,
 ) -> (Vec<String>, Vec<String>) {
-    let blocks = question_block_ids(body);
+    let blocks = question_block_ids(body, events, filename);
     let questions: HashSet<&str> = events
         .iter()
         .filter(|event| event.event == "question" && event.file.as_deref() == Some(filename))
@@ -14610,15 +14688,24 @@ fn quoted_entry_line(
             true
         }
         (Some(_), _) => {
-            let recorded = entry_heading(line).is_some_and(|(kind, id)| {
-                id.is_some()
-                    && events.iter().any(|event| {
-                        event.known()
-                            && event.file.as_deref() == Some(filename)
-                            && event.event == kind
-                            && entry_id(event) == id.as_deref()
-                    })
+            let recorded_question = question_heading(line).is_some_and(|(kind, id)| {
+                events.iter().any(|event| {
+                    event.known()
+                        && event.file.as_deref() == Some(filename)
+                        && event.event == kind
+                        && event.question_id.as_deref() == Some(id)
+                })
             });
+            let recorded = recorded_question
+                || entry_heading(line).is_some_and(|(kind, id)| {
+                    id.is_some()
+                        && events.iter().any(|event| {
+                            event.known()
+                                && event.file.as_deref() == Some(filename)
+                                && event.event == kind
+                                && entry_id(event) == id.as_deref()
+                        })
+                });
             if recorded {
                 *fence = None;
             }
@@ -16788,11 +16875,11 @@ mod question_text_tests {
             "### Question q-a (opening, t) - x | y\n\nShorter.\n",
         ));
         assert_eq!(
-            question_text(file.path(), "q-a").as_deref(),
+            question_text(file.path(), "q-a", &[], "").as_deref(),
             Some("Shorter.")
         );
         assert_eq!(
-            question_text(file.path(), "q-a1").as_deref(),
+            question_text(file.path(), "q-a1", &[], "").as_deref(),
             Some("Longer.")
         );
     }
@@ -16806,7 +16893,7 @@ mod question_text_tests {
             "### Question q-a (opening, t) - x | y\n\nThe real one.\n",
         ));
         assert_eq!(
-            question_text(file.path(), "q-a").as_deref(),
+            question_text(file.path(), "q-a", &[], "").as_deref(),
             Some("The real one.")
         );
     }
@@ -16818,7 +16905,7 @@ mod question_text_tests {
                 "{indent}```md\n\n### Question q-a (opening, t) - x | y\n\nThe real one.\n"
             ));
             assert_eq!(
-                question_text(file.path(), "q-a").as_deref(),
+                question_text(file.path(), "q-a", &[], "").as_deref(),
                 Some("The real one.")
             );
         }
@@ -16829,7 +16916,7 @@ mod question_text_tests {
     #[test]
     fn a_missing_block_yields_nothing() {
         let file = fixture("# Title\n\nNo question blocks here.\n");
-        assert_eq!(question_text(file.path(), "q-a"), None);
+        assert_eq!(question_text(file.path(), "q-a", &[], ""), None);
     }
 }
 
@@ -17010,5 +17097,152 @@ mod append_order_tests {
             serde_json::to_value(replay).unwrap(),
             serde_json::to_value(appended).unwrap()
         );
+    }
+}
+
+#[cfg(test)]
+mod ownership_regressions {
+    use super::*;
+
+    fn event(kind: &str) -> JournalEvent {
+        serde_json::from_value(serde_json::json!({
+            "schema": "journal-events/2", "ts": "2026-01-01T00:00:00Z",
+            "topic": "work", "actor": "holder", "harness": "test",
+            "session": "holder", "event": kind,
+            "file": "20260101T000000Z-work-todo.md", "claim_id": "claim-a",
+            "ttl_seconds": 60, "scope": [], "stage": "implementing",
+            "outcome": if kind == "claim-released" { "paused" } else { "done" }, "checkpoint_id": "cp-a", "digest": format!("sha256:{}", "a".repeat(64))
+        })).unwrap()
+    }
+
+    #[test]
+    fn owned_claim_lifecycle_rejects_missing_and_foreign_identity() {
+        for kind in [
+            "claim-renewed",
+            "claim-stage",
+            "checkpoint",
+            "claim-released",
+        ] {
+            for identity in [
+                "actor",
+                "harness",
+                "session",
+                "foreign-actor",
+                "foreign-harness",
+                "foreign-session",
+            ] {
+                let initial = event("claim-set");
+                assert!(initial.known());
+                let mut update = event(kind);
+                assert!(update.known(), "{kind}");
+                update.ts = "2026-01-01T00:00:30Z".into();
+                match identity {
+                    "actor" => update.actor = None,
+                    "harness" => update.recorded_harness = None,
+                    "session" => update.recorded_session = None,
+                    "foreign-actor" => update.actor = Some("other".into()),
+                    "foreign-harness" => update.recorded_harness = Some("other".into()),
+                    _ => update.recorded_session = Some("other".into()),
+                }
+                assert_eq!(
+                    update.known(),
+                    identity.starts_with("foreign"),
+                    "{kind}: {identity}"
+                );
+                let claims = artifact_claims(&[initial, update], "20260101T000000Z-work-todo.md");
+                assert!(claims[0].is_open(), "{kind}: {identity}");
+                assert!(claims[0].state.progress.is_none(), "{kind}: {identity}");
+                assert!(claims[0].checkpoints.is_empty(), "{kind}: {identity}");
+                assert_eq!(
+                    claims[0].state.last_activity_at.to_rfc3339(),
+                    "2026-01-01T00:00:00+00:00",
+                    "{kind}: {identity}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn owned_lane_lifecycle_rejects_missing_and_foreign_identity() {
+        for kind in ["lane-renewed", "lane-closed"] {
+            for identity in ["harness", "session", "foreign-harness", "foreign-session"] {
+                let initial = event("lane-opened");
+                assert!(initial.known());
+                let mut update = event(kind);
+                assert!(update.known(), "{kind}");
+                update.ttl_seconds = Some(900);
+                match identity {
+                    "harness" => update.recorded_harness = None,
+                    "session" => update.recorded_session = None,
+                    "foreign-harness" => update.recorded_harness = Some("other".into()),
+                    _ => update.recorded_session = Some("other".into()),
+                }
+                assert_eq!(
+                    update.known(),
+                    identity.starts_with("foreign"),
+                    "{kind}: {identity}"
+                );
+                let lanes = lanes_from_journal(&[initial, update], Utc::now());
+                assert_eq!(lanes.len(), 1, "{kind}: {identity}");
+                assert_eq!(lanes[0].ttl_seconds, 60, "{kind}: {identity}");
+            }
+        }
+    }
+
+    #[test]
+    fn foreign_lane_expiry_requires_elapsed_lease() {
+        for (seconds, remaining) in [(30, 1), (60, 0)] {
+            let opened = event("lane-opened");
+            let mut closed = event("lane-closed");
+            closed.recorded_session = Some("other".into());
+            closed.outcome = Some("expired".into());
+            closed.ts =
+                (opened.timestamp().unwrap() + chrono::Duration::seconds(seconds)).to_rfc3339();
+            assert_eq!(
+                lanes_from_journal(&[opened, closed], Utc::now()).len(),
+                remaining
+            );
+        }
+    }
+
+    #[test]
+    fn recorded_questions_and_answers_recover_open_fences() {
+        let file = "20260101T000000Z-work-discussion.md";
+        let question: JournalEvent = serde_json::from_value(serde_json::json!({
+            "schema": "journal-events/2", "ts": "2026-01-01T00:00:00Z", "topic": "work",
+            "file": file, "event": "question", "question_id": "q-a", "placement": "opening", "options": ["a", "b"]
+        })).unwrap();
+        let answer: JournalEvent = serde_json::from_value(serde_json::json!({
+            "schema": "journal-events/2", "ts": "2026-01-01T00:00:00Z", "topic": "work",
+            "file": file, "event": "answer", "question_id": "q-a", "option": "a"
+        }))
+        .unwrap();
+        assert!(question.known() && answer.known());
+        for fence in ["```md", "~~~md"] {
+            let body = format!("{fence}\n### Question q-example (opening, t)\n   ### Question q-a (opening, t)\nWhich?\n{fence}\n### Answer q-example = a (t)\n   ### Answer q-a = a (t)\nChosen.\n");
+            let ids = question_block_ids(&body, &[question.clone(), answer.clone()], file);
+            assert_eq!(ids.questions, HashSet::from(["q-a".into()]));
+            assert_eq!(ids.answers, HashSet::from(["q-a".into()]));
+            let wrong_file = question_block_ids(
+                &body,
+                &[question.clone(), answer.clone()],
+                "20260101T000000Z-other-discussion.md",
+            );
+            assert!(wrong_file.questions.is_empty() && wrong_file.answers.is_empty());
+        }
+    }
+
+    #[test]
+    fn question_presence_ignores_quoted_examples() {
+        for quote in ["```md\n", "~~~md\n", "    ", "\t"] {
+            let body = if quote.ends_with('\n') {
+                format!("{quote}### Question q-example (opening, t)\n### Answer q-example = a (t)\n{}\n", quote.trim().trim_end_matches("md"))
+            } else {
+                format!("{quote}### Question q-example (opening, t)\n{quote}### Answer q-example = a (t)\n")
+            };
+            let ids = question_block_ids(&body, &[], "");
+            assert!(ids.questions.is_empty(), "{body}");
+            assert!(ids.answers.is_empty(), "{body}");
+        }
     }
 }

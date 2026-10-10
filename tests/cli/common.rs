@@ -733,3 +733,10 @@ pub(crate) fn output_past_busy_text(command: &mut Command) -> std::process::Outp
     }
     panic!("fixture executable stayed busy");
 }
+
+pub(crate) fn spawn_arc_with_open_stdin(repo: &Repo, cwd: &Path, args: &[&str]) -> Child {
+    arc_command(repo, cwd, args, "session-a", Stdio::piped())
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap()
+}

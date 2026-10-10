@@ -237,11 +237,22 @@ fn a_claim_event_naming_no_holder_claims_nothing() {
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let events = dir.join("events.jsonl");
     let mut text = fs::read_to_string(&events).unwrap();
+    for missing in ["actor", "harness", "session"] {
+        let mut claim = serde_json::json!({
+            "schema": "journal-events/2", "ts": now, "harness": "test",
+            "session": "ghost", "actor": "ghost", "topic": "ghost",
+            "event": "claim-set", "file": file, "claim_id": format!("claim-{missing}"),
+            "ttl_seconds": 3600,
+        });
+        claim.as_object_mut().unwrap().remove(missing);
+        text.push_str(&format!("{claim}\n"));
+    }
     for (harness, session) in [("unknown", "unknown"), ("test", "unknown")] {
         let claim = serde_json::json!({
             "schema": "journal-events/1", "ts": now, "harness": harness,
             "session": session, "actor": "ghost", "topic": "ghost",
             "event": "claim-set", "file": file, "claim_id": format!("claim-{harness}"),
+            "ttl_seconds": 3600,
         });
         text.push_str(&format!("{claim}\n"));
     }
