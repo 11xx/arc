@@ -1207,6 +1207,15 @@ PREPARE A DELIVERED CHANGE
   verification outcomes remain conditional.
 
 PAIR REPLICA STORES
+  A rebase on the worker requires a patchset before export. On the publishing
+  replica, record the branch head with
+  `arc snapshot <change> --contributors <the implementing actor>` when the
+  publisher only rebased, keeping the implementer as the contributor. For
+  multiple implementers, supply their comma-separated actors. Export again,
+  then accept the new bundle on the receiver. Acceptance requires the branch
+  head to match the delivered latest patchset head or its recorded
+  signature-only successor.
+
   Import reads received bytes once and checks a supplied --received-sha256
   before parsing. Object availability and publishing authorization are checked
   before publication. Either refusal leaves events, receipts, configuration,

@@ -226,6 +226,91 @@ fn accept_delivery_branch_head_mismatch_precedes_import() {
 }
 
 #[test]
+fn accept_delivery_rebased_after_patchset_names_publishing_remedy() {
+    rebased_delivery_names_publishing_remedy(false);
+}
+
+#[test]
+fn accept_delivery_recorded_rebase_names_publishing_remedy() {
+    rebased_delivery_names_publishing_remedy(true);
+}
+
+fn rebased_delivery_names_publishing_remedy(record_rewrite: bool) {
+    let d = Delivery::new();
+    git(&d.source.root, &["checkout", "master"]);
+    d.source.commit(
+        &d.source.root,
+        "target.txt",
+        "target\n",
+        "feat: advance target",
+    );
+    git(&d.source.root, &["checkout", &d.branch]);
+    git(&d.source.root, &["rebase", "master"]);
+    let rebased = d.source.head(&d.source.root);
+    assert_ne!(rebased, d.head);
+    if record_rewrite {
+        d.source
+            .arc(&d.source.root)
+            .args([
+                "history",
+                "rewrite",
+                "--map",
+                "-",
+                "--reason",
+                "rebase onto target",
+            ])
+            .write_stdin(format!("{} {rebased}\n", d.head))
+            .assert()
+            .success();
+    }
+    stdout(d.source.arc(&d.source.root).args([
+        "export",
+        &d.change,
+        "--output",
+        d.input.to_str().unwrap(),
+    ]));
+    deliver_git_objects(&d.source, &d.receiver);
+    git(
+        &d.receiver.root,
+        &["update-ref", &format!("refs/heads/{}", d.branch), &rebased],
+    );
+
+    let result = d.result(if record_rewrite { 11 } else { 1 });
+    assert_eq!(result["stopped_at"], "preflight");
+    let detail = result["next_steps"].to_string();
+    assert!(detail.contains("publishing replica"), "{detail}");
+    assert!(
+        detail.contains(&format!(
+            "arc snapshot '{}' --contributors 'worker'",
+            d.change
+        )),
+        "{detail}"
+    );
+    assert!(detail.contains("publisher only rebased"), "{detail}");
+    assert!(
+        detail.contains("export again") && detail.contains("accept the new bundle"),
+        "{detail}"
+    );
+    assert!(!d.receiver.root.join(".git/arc/changes").exists());
+}
+
+#[test]
+fn accept_delivery_guide_and_help_name_rebase_patchset_remedy() {
+    let repo = Repo::new();
+    let guide = stdout(&mut repo.arc(&repo.root));
+    let pairing = guide.split("PAIR REPLICA STORES").nth(1).unwrap();
+    assert!(pairing.contains("rebase on the worker requires a patchset before export"));
+    assert!(pairing.contains("arc snapshot <change> --contributors <the implementing actor>"));
+    let help = stdout(repo.arc(&repo.root).args(["accept", "--help"]));
+    assert!(help.contains("signature-only successor"));
+    assert!(
+        help.contains("publishing replica")
+            && help.contains("snapshot")
+            && help.contains("export again")
+    );
+}
+
+#[test]
 fn accept_delivery_missing_branch_names_transport() {
     let d = Delivery::new();
     git(&d.receiver.root, &["branch", "-D", &d.branch]);
@@ -479,6 +564,30 @@ fn accept_delivery_gate_moving_branch_or_policy_stops_next_effect() {
         assert!(!result["preparation_complete"].as_bool().unwrap());
         assert!(result["next_steps"].to_string().contains("moved"));
     }
+}
+
+#[test]
+fn accept_delivery_branch_moving_during_gate_names_publishing_remedy() {
+    let d = Delivery::new();
+    d.gates(&format!(
+        "git update-ref refs/heads/{} {}",
+        d.branch, d.base
+    ));
+    let result = d.result(1);
+    let detail = result["next_steps"].to_string();
+    assert!(detail.contains("change branch moved"), "{detail}");
+    assert!(detail.contains("publishing replica"), "{detail}");
+    assert!(
+        detail.contains(&format!(
+            "arc snapshot '{}' --contributors 'worker'",
+            d.change
+        )),
+        "{detail}"
+    );
+    assert!(
+        detail.contains("export again") && detail.contains("accept the new bundle"),
+        "{detail}"
+    );
 }
 
 #[test]

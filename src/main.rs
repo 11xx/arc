@@ -1181,7 +1181,11 @@ enum Cmd {
     Accept {
         /// Delivered arc-bundle/6 or /5 file ('-' for stdin)
         input: String,
-        /// Existing local branch matching the delivered change branch and head
+        /// Existing local branch matching the delivered change branch and latest
+        /// patchset head, or its recorded signature-only successor. A rebased
+        /// head requires a snapshot on the publishing replica before export;
+        /// preserve the implementing actors with --contributors when the
+        /// publisher only rebased, export again, and accept the new bundle
         #[arg(long)]
         branch: String,
         /// Authenticated receiving caller's enrolled publishing principal

@@ -356,12 +356,13 @@ fn plan_acceptance(
                     return refuse(
                         11,
                         format!(
-                            "delivered ancestry changed through a non-signature rewrite; {}",
+                            "delivered ancestry changed through a non-signature rewrite; {}; {}",
+                            publishing_remedy(&state),
                             replay(&state, &args.branch)
                         ),
                     );
                 }
-                return refuse(1, format!("branch {:?} head {head} differs from delivered head {delivered_head} and its recorded signature-only successor {expected}", args.branch));
+                return refuse(1, format!("branch {:?} head {head} differs from delivered head {delivered_head} and its recorded signature-only successor {expected}; {}", args.branch, publishing_remedy(&state)));
             }
             let target = match gitio::branch_head(&ctx.cwd, &state.target_branch) {
                 Ok(head) => head,
@@ -600,11 +601,8 @@ fn validate_recovery(
     Ok(())
 }
 
-fn replay(state: &ChangeState, branch: &str) -> String {
-    let change = crate::context::shell_quote(&state.change_id);
-    let branch = crate::context::shell_quote(branch);
-    let target = crate::context::shell_quote(&state.target_branch);
-    let attribution = state
+fn contributor_args(state: &ChangeState) -> String {
+    state
         .latest_patchset()
         .filter(|patchset| !patchset.contributors.is_empty())
         .map(|patchset| {
@@ -613,7 +611,20 @@ fn replay(state: &ChangeState, branch: &str) -> String {
                 crate::context::shell_quote(&patchset.contributors.join(","))
             )
         })
-        .unwrap_or_else(|| " --contributors ACTOR,...".into());
+        .unwrap_or_else(|| " --contributors ACTOR,...".into())
+}
+
+fn publishing_remedy(state: &ChangeState) -> String {
+    let change = crate::context::shell_quote(&state.change_id);
+    let attribution = contributor_args(state);
+    format!("record a patchset for the branch head on the publishing replica with arc snapshot {change}{attribution} when the publisher only rebased, preserving the implementing actors as contributors; export again, and accept the new bundle")
+}
+
+fn replay(state: &ChangeState, branch: &str) -> String {
+    let change = crate::context::shell_quote(&state.change_id);
+    let branch = crate::context::shell_quote(branch);
+    let target = crate::context::shell_quote(&state.target_branch);
+    let attribution = contributor_args(state);
     format!("# Replay in the delivery's owning checkout after transporting the authoritative target to {target}.\ngit switch {branch}\narc rebase {change}{attribution}\narc snapshot {change} --base {target}{attribution}\n# Read the replayed patchset and record approval only after fresh review.\narc review {change} --verdict approved")
 }
 
@@ -653,7 +664,8 @@ fn revalidate(ctx: &Ctx, plan: &AcceptancePlan, expected: &str) -> Result<()> {
         return refuse(
             1,
             format!(
-                "change branch moved: expected {expected}, observed {head}; {}",
+                "change branch moved: expected {expected}, observed {head}; {}; {}",
+                publishing_remedy(&plan.state),
                 replay(&plan.state, &plan.state.branch)
             ),
         );
