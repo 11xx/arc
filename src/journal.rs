@@ -524,6 +524,10 @@ pub struct KindWrite {
 pub enum JournalCmd {
     /// Print the resolved journal directory (creates nothing)
     ///
+    /// Use it when a filesystem path is required. To read an artifact whose
+    /// filename is known, `arc journal show <file.md>` needs no path, and
+    /// searching the filesystem for the name is never the way to find it.
+    ///
     /// Resolution takes the first source that answers: ARC_JOURNAL_DIR; the
     /// longest `[journals] dirs` prefix of the repository root, or of the
     /// directory outside a repository; `<ai-home>/journals/<repo-path-slug>`
@@ -1053,6 +1057,10 @@ pub enum JournalCmd {
         json: bool,
     },
     /// List live artifacts (hot journal dir) newest first, optionally filtered by kind (read-only)
+    ///
+    /// The way to find an artifact whose filename is unknown. With the
+    /// filename, `show` reads it; with an exact topic, `latest` resolves it;
+    /// `open` lists only the actionable ones.
     /// Records no events; ledger reads do not require a parseable append policy.
     List {
         /// Restrict to one kind
@@ -1079,6 +1087,11 @@ pub enum JournalCmd {
         json: bool,
     },
     /// Print one artifact's raw Markdown body to stdout (read-only)
+    ///
+    /// Reads the project journal the command runs in: the hot journal first,
+    /// then its cold archive, so an archived artifact reads the same way. The
+    /// argument is a filename, never a path; `arc journal discussion <file.md>`
+    /// reads the same artifact's stances and open questions.
     /// Records no events; ledger reads do not require a parseable append policy.
     Show {
         /// Artifact filename inside the journal dir (a name, not a path)

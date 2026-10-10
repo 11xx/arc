@@ -16496,3 +16496,30 @@ fn committed_promotion_cleanup_refuses_changed_bodies_and_relation_identity() {
         assert!(!pending_path.exists(), "{changed}");
     }
 }
+
+#[test]
+fn the_guide_and_help_teach_reading_a_known_artifact_without_a_filesystem_search() {
+    let repo = Repo::new();
+    let guide = stdout(&mut repo.arc(&repo.root));
+    let flat = guide.split_whitespace().collect::<Vec<_>>().join(" ");
+    for expected in [
+        "never by searching the filesystem",
+        "known filename `arc journal show <file.md>` reads the body, hot storage first and the cold archive after it;",
+        "`arc journal discussion <file.md>` reads its stances and open questions.",
+        "known topic `arc journal latest <topic> [--kind <kind>]`, matched exactly.",
+        "no filename `arc journal list [--kind <kind>]` browses live artifacts;",
+        "a path `arc journal dir` (`--explain` names the source that resolved it) only when a filesystem path is required.",
+    ] {
+        assert!(flat.contains(expected), "guide lacks {expected:?}");
+    }
+
+    for (verb, expected) in [
+        ("show", "the hot journal first, then its cold archive"),
+        ("list", "`latest` resolves it"),
+        ("dir", "`arc journal show <file.md>` needs no path"),
+    ] {
+        let help = stdout(repo.arc(&repo.root).args(["journal", verb, "--help"]));
+        let flat = help.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(flat.contains(expected), "journal {verb} --help: {help}");
+    }
+}

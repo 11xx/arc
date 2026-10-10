@@ -261,6 +261,19 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          Read-only journal commands also resolve from the
                          journal directory itself; a write refuses there and
                          names the checkout it needs.
+  Find a journal artifact from the project checkout, never by searching the
+  filesystem: a filename belongs to its owning project's journal, and
+  `--global` is a separate operator scope.
+    known filename   `arc journal show <file.md>` reads the body, hot storage
+                     first and the cold archive after it;
+                     `arc journal discussion <file.md>` reads its stances and
+                     open questions.
+    known topic      `arc journal latest <topic> [--kind <kind>]`, matched
+                     exactly.
+    no filename      `arc journal list [--kind <kind>]` browses live
+                     artifacts; `arc journal open` lists the actionable ones.
+    a path           `arc journal dir` (`--explain` names the source that
+                     resolved it) only when a filesystem path is required.
   arc claim <file.md>    Claim a journal artifact, the way a change is
                          claimed: a lease with a TTL, renewed by working it,
                          released with `arc release-claim <file.md> --outcome
@@ -392,6 +405,8 @@ SETTLE A QUESTION (before it is work)
   arc journal answer <file> --question <id> --option <choice> --body-file -
     --other "<answer>"                 Settle it outside the options offered.
   arc journal discussion <file>        Read stances, branches, and open questions.
+                                       The file is read hot or cold from the project
+                                       journal; ORIENT shows how to find one.
   arc journal suggest <file> --question <id> --option <opt> --body-file -
                          Suggest an option without settling the question;
                          every question view shows it beside the options.
