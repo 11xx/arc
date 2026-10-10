@@ -706,8 +706,9 @@ pub enum JournalCmd {
     /// artifact they supersede. A successor must carry its supersedes link and
     /// match the complete staged body or have its source's recorded retirement.
     /// Unverified intents are omitted; journal doctor reports pending transitions.
-    /// Open actionable items are stale after the threshold of recorded inactivity;
-    /// active claims suppress staleness. Plain reads record no activity.
+    /// Each item counts the evidence blocks appended to it. Open actionable
+    /// items are stale after the threshold of recorded inactivity; active
+    /// claims and evidence suppress staleness. Plain reads record no activity.
     /// Records no events; ledger reads do not require a parseable append policy.
     Filed {
         /// Filter by an exact writing or source session id
@@ -758,7 +759,9 @@ pub enum JournalCmd {
     /// filing a successor. The block is append-only, states no stance, and
     /// never enters a stance tally: argue a discussion with `arc journal
     /// position`, and replace a recorded field with `arc journal correct`. A
-    /// consumed artifact refuses; file a successor. `show` prints the block
+    /// consumed artifact refuses; file a successor. `show` prints the block,
+    /// `filed` counts it per item, and it is recorded activity, so it keeps an
+    /// open item from going stale
     Evidence {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
@@ -5670,6 +5673,8 @@ pub(crate) struct FiledItem {
     pub(crate) fate: String,
     untouched_days: Option<i64>,
     changes: Vec<String>,
+    /// Evidence blocks appended to the item.
+    evidence: usize,
     sources: Vec<ArtifactSource>,
 }
 
@@ -5793,6 +5798,10 @@ pub(crate) fn filed_report_in(
         } else {
             "open".to_string()
         };
+        let evidence = events
+            .iter()
+            .filter(|event| event.event == "evidence" && event.file.as_deref() == Some(file))
+            .count();
         let claimed = open_artifact_claims(&events, file)
             .iter()
             .any(|claim| state::claim_timing_at(&claim.state, now).active);
@@ -5826,6 +5835,7 @@ pub(crate) fn filed_report_in(
             fate,
             untouched_days,
             changes: promotions,
+            evidence,
             sources,
         });
     }
@@ -5869,7 +5879,12 @@ fn filed(ctx: &Ctx, session: Option<&str>, stale_days: u64, json: bool) -> Resul
                 } else {
                     format!(", change {}", item.changes.join(", "))
                 };
-                println!("  {} [{}{age}{changes}]", item.file, item.fate);
+                let evidence = if item.evidence == 0 {
+                    String::new()
+                } else {
+                    format!(", evidence {}", item.evidence)
+                };
+                println!("  {} [{}{age}{changes}{evidence}]", item.file, item.fate);
                 if let Some(origin) = &item.supersedes {
                     println!("    supersedes: {origin}");
                 }

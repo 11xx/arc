@@ -5133,6 +5133,71 @@ fn journal_evidence_records_a_typed_event_with_its_identity() {
 }
 
 #[test]
+fn journal_evidence_counts_in_filed_and_keeps_the_item_open() {
+    let repo = Repo::new();
+    let quiet = evidence_artifact(&repo, "todo", "evidence-quiet", "# Quiet\n");
+    let argued = evidence_artifact(&repo, "feature-request", "evidence-argued", "# Argued\n");
+    for text in ["First.\n", "Second.\n"] {
+        repo.arc(&repo.root)
+            .args(["journal", "evidence", &argued, "--body-file", "-"])
+            .write_stdin(text)
+            .assert()
+            .success();
+    }
+
+    let report = json_stdout(repo.arc(&repo.root).args(["journal", "filed", "--json"]));
+    assert_eq!(report["schema"], "arc-journal-filed/1");
+    let items: Vec<&serde_json::Value> = report["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|group| group["items"].as_array().unwrap())
+        .collect();
+    let item = |file: &str| *items.iter().find(|item| item["file"] == file).unwrap();
+    assert_eq!(item(&argued)["evidence"], 2, "{report}");
+    assert_eq!(item(&quiet)["evidence"], 0, "{report}");
+    // Evidence does not move an item out of the open fate.
+    assert_eq!(item(&argued)["fate"], "open", "{report}");
+    assert_eq!(report["counts"]["open"], 2, "{report}");
+
+    let text = stdout(repo.arc(&repo.root).args(["journal", "filed"]));
+    let argued_line = text.lines().find(|line| line.contains(&argued)).unwrap();
+    assert!(argued_line.contains("evidence 2"), "{text}");
+    let quiet_line = text.lines().find(|line| line.contains(&quiet)).unwrap();
+    assert!(!quiet_line.contains(", evidence"), "{text}");
+}
+
+#[test]
+fn journal_evidence_refreshes_the_activity_staleness_measures() {
+    let repo = Repo::new();
+    let file = evidence_artifact(&repo, "todo", "evidence-stale", "# Stale\n");
+    let dir = journal_dir(&repo);
+    let old = (chrono::Utc::now() - chrono::Duration::days(20)).to_rfc3339();
+    let mut events = journal_events(&dir);
+    for event in &mut events {
+        event["ts"] = old.clone().into();
+    }
+    fs::write(
+        dir.join("events.jsonl"),
+        events
+            .iter()
+            .map(|event| format!("{event}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let stale = json_stdout(repo.arc(&repo.root).args(["journal", "filed", "--json"]));
+    assert_eq!(stale["stale_count"], 1, "{stale}");
+
+    repo.arc(&repo.root)
+        .args(["journal", "evidence", &file, "--body-file", "-"])
+        .write_stdin("Still wanted.\n")
+        .assert()
+        .success();
+    let touched = json_stdout(repo.arc(&repo.root).args(["journal", "filed", "--json"]));
+    assert_eq!(touched["stale_count"], 0, "{touched}");
+}
+
+#[test]
 fn journal_evidence_refuses_a_consumed_artifact_and_names_the_successor() {
     let repo = Repo::new();
     let file = evidence_artifact(&repo, "feature-request", "evidence-closed", "# Closed\n");
@@ -5295,6 +5360,34 @@ fn journal_events_carry_the_lowest_version_that_describes_them() {
         .args(["journal", "doctor"])
         .assert()
         .success();
+}
+
+#[test]
+fn journal_filed_ignores_unknown_schema_evidence() {
+    let repo = Repo::new();
+    let file = evidence_artifact(&repo, "todo", "evidence-future", "# Future\n");
+    let dir = journal_dir(&repo);
+    let event = serde_json::json!({
+        "schema": "journal-events/3",
+        "ts": "2026-01-01T00:00:01Z",
+        "harness": "future",
+        "session": "future",
+        "topic": "evidence-future",
+        "event": "evidence",
+        "file": file,
+        "evidence_id": "evd-future"
+    });
+    use std::io::Write;
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join("events.jsonl"))
+            .unwrap(),
+        "{event}"
+    )
+    .unwrap();
+    let report = json_stdout(repo.arc(&repo.root).args(["journal", "filed", "--json"]));
+    assert_eq!(report["sessions"][0]["items"][0]["evidence"], 0, "{report}");
 }
 
 #[test]

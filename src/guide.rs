@@ -194,8 +194,10 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          Fates are open, taken (with change ids), done, superseded,
                          discarded, or stale. Staleness
                          measures recorded inactivity on open actionable items;
-                         active claims suppress it. Plain reads record no activity.
-                         JSON includes fate counts for mining and renderers.
+                         active claims and evidence suppress it. Plain reads
+                         record no activity.
+                         JSON includes fate counts for mining and renderers,
+                         and each item's count of evidence blocks.
                          Catchup and workspace inbox surface the same stale count.
   arc catchup            Text warns when the build commit differs from HEAD
                          in an arc-ledger checkout: older for an ancestor,
@@ -298,7 +300,9 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          live item of any kind instead of filing a successor:
                          an append-only block under a heading naming its id,
                          writer, and time, recorded as an `evidence` event.
-                         `arc journal show` prints it. It states no
+                         `arc journal show` prints it, `arc journal filed`
+                         counts it per item, and it is recorded activity, so
+                         it keeps an open item from going stale. It states no
                          stance and never enters a stance tally; argue a
                          discussion with `journal position`, and replace a
                          recorded field with `journal correct`. A consumed
