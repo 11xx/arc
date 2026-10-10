@@ -16753,6 +16753,70 @@ fn transition_retry_verifies_prepared_custom_body_and_preserves_prefix_evidence(
     fs::write(&prepared, &complete).unwrap();
     let prefix = format!("supersedes: {source}\n\n# Saved title\nThe custom ");
     fs::write(&path, &prefix).unwrap();
+    repo.arc(&repo.root)
+        .args(["begin", "pending-promotion", "--from-journal", successor])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("pending transition"));
+    let backlog = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    assert_eq!(backlog["schema"], "arc-journal-open/1");
+    assert!(backlog["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["file"] != successor));
+    assert_eq!(backlog["pending"][0]["file"], successor, "{backlog}");
+    assert_eq!(backlog["pending"][0]["availability"], "pending-transition");
+    repo.arc(&repo.root)
+        .args(["journal", "open"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("pending transitions"));
+    let inventory =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "inventory", successor, "--json"]),
+        );
+    assert_eq!(inventory["items"][0]["availability"], "pending-transition");
+    let workspace =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["workspace", "backlog", "--items", "--json"]),
+        );
+    let project = workspace["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|project| project["journal_dir"] == dir.display().to_string())
+        .unwrap();
+    assert_eq!(project["open_items"], 1, "{workspace}");
+    assert_eq!(project["pending_transitions"], 1, "{workspace}");
+    assert_eq!(project["items"]["pending"][0]["file"], successor);
+    assert_eq!(
+        workspace["summary"]["pending_transitions"], 1,
+        "{workspace}"
+    );
+    repo.arc(&repo.root)
+        .args(["workspace", "backlog"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("1 pending transitions"));
+    let catchup = json_stdout(repo.arc(&repo.root).args(["journal", "catchup", "--json"]));
+    assert_eq!(catchup["schema"], "arc-journal-catchup/9");
+    assert!(catchup["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["file"] == successor && row["availability"] == "pending-transition"));
+    let report = json_stdout(repo.arc(&repo.root).args(["workspace", "report", "--json"]));
+    assert!(
+        report["sections"]["work"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["file"] == successor && row["status"] == "pending-transition"),
+        "{report}"
+    );
     let filed = json_stdout(repo.arc(&repo.root).args([
         "journal",
         "filed",

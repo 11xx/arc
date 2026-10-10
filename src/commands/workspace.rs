@@ -657,6 +657,7 @@ struct BacklogSummary {
     open_items: usize,
     later_items: usize,
     feature_requests: usize,
+    pending_transitions: usize,
     /// Journal rows whose filename stamp does not parse, selected into the
     /// tiers above. They ride inside the tier counts — a delta that dropped
     /// what it could not date would under-report — and are counted here so
@@ -708,6 +709,10 @@ impl BacklogSummary {
                 .iter()
                 .map(|project| project.feature_requests)
                 .sum(),
+            pending_transitions: projects
+                .iter()
+                .map(|project| project.pending_transitions)
+                .sum(),
             unknown_time_items: projects
                 .iter()
                 .map(|project| project.unknown_time_items.len())
@@ -717,6 +722,11 @@ impl BacklogSummary {
     }
 
     fn render(&self) {
+        let pending = if self.pending_transitions > 0 {
+            format!(", {} pending transitions", self.pending_transitions)
+        } else {
+            String::new()
+        };
         let unknown = if self.unknown_time_items > 0 {
             format!(", {} unknown-time", self.unknown_time_items)
         } else {
@@ -738,7 +748,7 @@ impl BacklogSummary {
             String::new()
         };
         println!(
-            "summary: {} projects; {} needs-review; {} debt-owed{} ({}); {} no-patchset; journal {} open, {} later, {} feature-request{unknown}{questions}; {} deferred; {} unreachable",
+            "summary: {} projects; {} needs-review; {} debt-owed{} ({}); {} no-patchset; journal {} open, {} later, {} feature-request{pending}{unknown}{questions}; {} deferred; {} unreachable",
             self.projects,
             self.needs_review,
             self.debt_owed,
@@ -942,6 +952,7 @@ struct ProjectBacklog {
     open_items: usize,
     later_items: usize,
     feature_requests: usize,
+    pending_transitions: usize,
     /// Every open change with the predicate buckets it satisfies, the debt
     /// split by kind, and the outstanding round deferrals: the complete
     /// per-project observation `arc inbox` performs, taken from this
@@ -1010,6 +1021,7 @@ struct BacklogItems {
     open: Vec<crate::journal::ArtifactEntry>,
     later: Vec<crate::journal::ArtifactEntry>,
     feature_requests: Vec<crate::journal::ArtifactEntry>,
+    pending: Vec<crate::journal::ArtifactEntry>,
 }
 
 impl ProjectBacklog {
@@ -1026,6 +1038,7 @@ impl ProjectBacklog {
             && self.open_items == 0
             && self.later_items == 0
             && self.feature_requests == 0
+            && self.pending_transitions == 0
             && self.open_questions.is_empty()
             && self.fork_count == 0
     }
@@ -1408,6 +1421,7 @@ fn project_row(
         .collect();
     let backlog_items = if show_items {
         Some(BacklogItems {
+            pending: tiers.pending.iter().map(|entry| (*entry).clone()).collect(),
             open: tiers.open.iter().map(|entry| (*entry).clone()).collect(),
             later: tiers.later.iter().map(|entry| (*entry).clone()).collect(),
             feature_requests: tiers
@@ -1489,6 +1503,7 @@ fn project_row(
         open_items,
         later_items,
         feature_requests,
+        pending_transitions: tiers.pending.len(),
         changes,
         unknown_time_items: unknown_rows,
         open_questions: questions,
@@ -1855,6 +1870,12 @@ fn workspace_backlog(
             "  journal       {} open, {} later, {} feature-request{}",
             project.open_items, project.later_items, project.feature_requests, age
         );
+        if project.pending_transitions > 0 {
+            println!(
+                "  recovery      {} pending transitions",
+                project.pending_transitions
+            );
+        }
         if project.decision_questions > 0 || !project.open_questions.is_empty() {
             println!(
                 "  questions     {} waiting on open artifact(s) ({} opening, {} closing), {} on consumed/archived",
@@ -1896,6 +1917,7 @@ fn workspace_backlog(
                     .iter()
                     .chain(items.later.iter())
                     .chain(items.feature_requests.iter())
+                    .chain(items.pending.iter())
                 {
                     crate::journal::render_open_entry(item);
                 }
@@ -2822,6 +2844,9 @@ mod report {
                 "abandoned-promotion"
             };
         }
+        if item.get("availability").and_then(Value::as_str) == Some("pending-transition") {
+            return "pending-transition";
+        }
         if item.get("availability").and_then(Value::as_str) == Some("occupied") {
             return "claimed";
         }
@@ -2907,7 +2932,7 @@ mod report {
             .iter()
             .flat_map(|project| {
                 let name = text(project, "project");
-                ["open", "later", "feature_requests"]
+                ["open", "later", "feature_requests", "pending"]
                     .into_iter()
                     .flat_map(move |tier| {
                         array(project.get("items").unwrap_or(&Value::Null), tier).to_vec()
@@ -2978,7 +3003,7 @@ mod report {
                 questions: 0,
             };
 
-            for tier in ["open", "later", "feature_requests"] {
+            for tier in ["open", "later", "feature_requests", "pending"] {
                 for item in array(items, tier) {
                     let status = status(item, tier);
                     let age = age_days(item.get("age_seconds").and_then(Value::as_u64));

@@ -340,7 +340,8 @@ enum Cmd {
         /// Batch/query tag (repeatable)
         #[arg(long)]
         tag: Vec<String>,
-        /// Open from an actionable journal artifact, consuming it. A bare
+        /// Open from an actionable journal artifact, consuming it. An incomplete
+        /// transition successor is refused before opening a change. A bare
         /// filename resolves in this project's journal; `<journal-dir>::<file>`
         /// resolves `<file>` in the journal at the absolute `<journal-dir>`
         /// that project's `arc journal dir` prints, and records the promotion
@@ -2706,7 +2707,8 @@ enum WorkspaceCmd {
         /// matters more the longer it has been one
         #[arg(long)]
         since: Option<String>,
-        /// Name every actionable artifact, instead of counting them
+        /// Name every actionable artifact and pending transition successor.
+        /// Pending successors supply no actionable counts.
         #[arg(long)]
         items: bool,
         /// Report only projects whose canonical anchor is beneath this path

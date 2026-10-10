@@ -230,6 +230,10 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          thread <slug>` names the harness, session, and model
                          that opened it, and how to resume that session.
   arc journal open       The actionable backlog — work waiting for a session.
+                         Incomplete successors appear under `pending`, with
+                         availability `pending-transition`, outside actionable
+                         counts. Retry the source transition before promotion.
+                         Inventory and workspace backlog retain that status.
                          A row occupied by somebody reads `[claimed by <actor>
                          via <harness>: active|expired]`; `--json` carries the
                          same as `availability` and the claims themselves.
@@ -2760,7 +2764,7 @@ SCHEMAS
     `arc-check/4`                    arc check --json
     `arc-inbox/10`                   arc inbox --json
     `arc-catchup/12`                 arc catchup --json
-    `arc-journal-catchup/8`          arc journal catchup --json
+    `arc-journal-catchup/9`          arc journal catchup --json
     `arc-resume/8`                   arc resume --json
     `arc-explain/1`                  arc explain --json
     `arc-watch/1`                    arc watch --json, stdin of arc watch --exec
@@ -2770,6 +2774,7 @@ SCHEMAS
     `arc-provisional-transition/2`   arc integrate --provisional --json
     `arc-brief/2`                    arc brief --json
     `arc-journal-artifact/3`         arc journal show --json
+    `arc-journal-open/1`             arc journal open --json
     `arc-journal-inventory/6`        arc journal inventory --json
     `arc-rescue/5`                   arc rescue --json
     `arc-review/5`                   arc review --json
@@ -2868,8 +2873,8 @@ WHAT ARC WILL NOT DO
       missing or its HEAD is not the branch head. A run started from another
       checkout of the repository is redirected to the recorded worktree and
       says so.
-    arc refuses a `--from-journal` source that is missing, non-actionable, or
-      already consumed.
+    arc refuses a `--from-journal` source that is missing, non-actionable,
+      already consumed, or an incompletely published transition successor.
     arc refuses a delivery naming an audience that cannot settle the
       question.
     arc refuses a rewrite map claiming a revision survives as a commit this

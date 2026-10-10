@@ -552,7 +552,7 @@ pub enum JournalCmd {
     /// source retirement, with both hot and archived bodies considered.
     /// Records no events; ledger reads do not require a parseable append policy.
     Doctor {
-        /// Emit structured JSON instead of text
+        /// Emit arc-journal-open/1 JSON, including the pending recovery bucket
         #[arg(long)]
         json: bool,
     },
@@ -1050,6 +1050,8 @@ pub enum JournalCmd {
         limit: Option<usize>,
     },
     /// Newest-first listing of artifacts plus the journal tail (read-only)
+    /// Incomplete successors carry availability `pending-transition` in
+    /// arc-journal-catchup/9.
     /// Text warns when the running build revision differs from an arc checkout.
     /// Records no events; ledger reads do not require a parseable append policy.
     Catchup {
@@ -1071,6 +1073,9 @@ pub enum JournalCmd {
         json: bool,
     },
     /// List actionable artifacts in primary, later, and feature-request tiers
+    ///
+    /// Incomplete successors appear separately as pending transitions; they
+    /// supply no actionable counts and cannot be promoted.
     /// Records no events; ledger reads do not require a parseable append policy.
     Open {
         /// Restrict to one actionable kind; lower-priority tiers stay separate
@@ -1096,6 +1101,7 @@ pub enum JournalCmd {
     },
     /// Project one observation of journal artifacts and their orthogonal
     /// lifecycle facts. Hot storage is the default; `--archived` is explicit.
+    /// Incomplete successors have availability `pending-transition`.
     /// Records no events; ledger reads do not require a parseable append policy.
     Inventory {
         /// Inspect one exact artifact instead of the selected actionable set.
@@ -9429,6 +9435,8 @@ fn superseded_checkpoints(claims: &[ArtifactClaim]) -> HashSet<String> {
 pub(crate) enum Availability {
     /// Nobody holds it.
     Available,
+    /// The successor lacks complete publication evidence.
+    PendingTransition,
     /// Somebody holds a lease that has not run out.
     Occupied,
     /// A lease is held and has run out, so it may be taken over.
@@ -9459,6 +9467,7 @@ impl Availability {
     fn label(self) -> &'static str {
         match self {
             Self::Available => "available",
+            Self::PendingTransition => "pending-transition",
             Self::Occupied => "occupied",
             Self::Reclaimable => "reclaimable",
             Self::Terminal => "terminal",
@@ -9682,6 +9691,14 @@ fn open_artifact_claims(events: &[JournalEvent], file: &str) -> Vec<ArtifactClai
         .into_iter()
         .filter(ArtifactClaim::is_open)
         .collect()
+}
+
+fn pending_transition(dir: &Path, events: &[JournalEvent], file: &str) -> bool {
+    events.iter().any(|event| {
+        event.event == "transition"
+            && event.file.as_deref() == Some(file)
+            && !event.creates_artifact(dir, events)
+    })
 }
 
 /// Whether an artifact can be picked up, and what is known about who has.
@@ -11059,7 +11076,7 @@ pub(crate) fn context_for_change(
             let Some((_, topic, kind)) = parse_artifact_name(&name) else {
                 continue;
             };
-            if is_consumed(&events, &name) {
+            if is_consumed(&events, &name) || pending_transition(&dir, &events, &name) {
                 continue;
             }
             let item = ContextJournalItem {
@@ -11510,7 +11527,7 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
 
     if json {
         let out = Catchup {
-            schema: "arc-journal-catchup/8",
+            schema: "arc-journal-catchup/9",
             dir: dir.display().to_string(),
             lanes,
             claims,
@@ -12049,6 +12066,7 @@ pub(crate) struct OpenItems {
     open: Vec<ArtifactEntry>,
     later: Vec<ArtifactEntry>,
     feature_requests: Vec<ArtifactEntry>,
+    pending: Vec<ArtifactEntry>,
     #[serde(skip)]
     pub(crate) questions: Vec<WorkspaceQuestion>,
 }
@@ -12109,6 +12127,7 @@ pub(crate) struct TierSelection<'a> {
     pub(crate) open: Vec<&'a ArtifactEntry>,
     pub(crate) later: Vec<&'a ArtifactEntry>,
     pub(crate) feature_requests: Vec<&'a ArtifactEntry>,
+    pub(crate) pending: Vec<&'a ArtifactEntry>,
     /// The selected rows whose filename stamp does not parse. They ride
     /// inside their tier — a selection that silently dropped what it could
     /// not date would under-report — and are counted here so the inclusion
@@ -12140,6 +12159,7 @@ impl<'a> TierSelection<'a> {
         let (open, mut open_unknown) = select(&items.open);
         let (later, mut later_unknown) = select(&items.later);
         let (feature_requests, mut fr_unknown) = select(&items.feature_requests);
+        let (pending, _) = select(&items.pending);
         let mut unknown_time = std::mem::take(&mut open_unknown);
         unknown_time.append(&mut later_unknown);
         unknown_time.append(&mut fr_unknown);
@@ -12147,6 +12167,7 @@ impl<'a> TierSelection<'a> {
             open,
             later,
             feature_requests,
+            pending,
             unknown_time,
             since: cutoff.map(|cutoff| cutoff.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
             journal_counts: if cutoff.is_some() {
@@ -12181,9 +12202,14 @@ pub(crate) fn collect_open_in(
         open: Vec::new(),
         later: Vec::new(),
         feature_requests: Vec::new(),
+        pending: Vec::new(),
         questions: report.questions,
     };
     for item in report.items {
+        if item.availability == Some(Availability::PendingTransition) {
+            result.pending.push(item);
+            continue;
+        }
         match item.kind.as_deref() {
             Some(LATER_KIND) => result.later.push(item),
             Some(FEATURE_REQUEST_KIND) => result.feature_requests.push(item),
@@ -12196,7 +12222,19 @@ pub(crate) fn collect_open_in(
 fn open(ctx: &Ctx, kind: Option<String>, json: bool) -> Result<i32> {
     let items = collect_open(ctx, kind.as_deref())?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&items)?);
+        #[derive(Serialize)]
+        struct OpenReport<'a> {
+            schema: &'static str,
+            #[serde(flatten)]
+            items: &'a OpenItems,
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&OpenReport {
+                schema: "arc-journal-open/1",
+                items: &items,
+            })?
+        );
     } else {
         println!("dir: {}", items.dir);
         println!("{OPEN_TIER_LEGEND}");
@@ -12206,6 +12244,12 @@ fn open(ctx: &Ctx, kind: Option<String>, json: bool) -> Result<i32> {
         }
         for f in &items.open {
             render_open_entry(f);
+        }
+        if !items.pending.is_empty() {
+            println!("pending transitions (retry the source transition before promotion):");
+            for f in &items.pending {
+                render_open_entry(f);
+            }
         }
         println!("later items (newest first):");
         if items.later.is_empty() {
@@ -12550,8 +12594,11 @@ fn project_inventory(
         };
         let claims = artifact_claims(&events, &name);
         let superseded = superseded_checkpoints(&claims);
-        let (availability, claim_history) =
-            artifact_availability(&events, &name, &claims, observed);
+        let (availability, claim_history) = if pending_transition(&hot, &events, &name) {
+            (Availability::PendingTransition, None)
+        } else {
+            artifact_availability(&events, &name, &claims, observed)
+        };
         let (resolution_value, resolution_basis) = artifact_resolution(&events, &name);
         let (last_position_at, has_archived_positions) = position_metadata(&events, &name);
         let questions = question_rows
@@ -15067,6 +15114,9 @@ pub fn require_open_actionable(ctx: &Ctx, reference: &str) -> Result<String> {
         return Err(missing_artifact(&location, &dir.display().to_string()));
     }
     let events = read_events(dir)?;
+    if pending_transition(dir, &events, filename) {
+        bail!("{filename} is a pending transition without complete publication evidence; retry its source transition before promotion");
+    }
     if is_consumed(&events, filename) {
         bail!("{filename} is already consumed (see the journal)");
     }
@@ -15952,6 +16002,7 @@ pub(crate) fn orientation(ctx: &Ctx) -> Result<Orientation> {
                 open: Vec::new(),
                 later: Vec::new(),
                 feature_requests: Vec::new(),
+                pending: Vec::new(),
                 questions: Vec::new(),
             };
             (
@@ -16037,6 +16088,7 @@ impl Orientation {
             ("open", &self.queue.open),
             ("later", &self.queue.later),
             ("feature-request", &self.queue.feature_requests),
+            ("pending transition", &self.queue.pending),
         ] {
             println!("{label} ({}):", entries.len());
             if entries.is_empty() {
