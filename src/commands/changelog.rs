@@ -876,7 +876,7 @@ fn print_entry(change: &str, entry: &ChangelogEntry, provenance: bool) {
         if !entry.body.ends_with('\n') && entry.is_entry() {
             println!();
         }
-        println!(
+        let provenance = format!(
             "> arc provenance: change={} event={} actor={} on_behalf_of={} harness={} created_at={}",
             change,
             entry.event_id,
@@ -885,6 +885,7 @@ fn print_entry(change: &str, entry: &ChangelogEntry, provenance: bool) {
             entry.harness.as_deref().unwrap_or("-"),
             entry.created_at,
         );
+        println!("{}", provenance_text(provenance, entry.session.as_deref()));
     }
 }
 
@@ -908,7 +909,7 @@ fn validate_category(category: &str) -> Result<String> {
 }
 
 fn provenance_line(entry: &ProjectedEntry<'_>) -> String {
-    format!(
+    let provenance = format!(
         "> arc provenance: change={} event={} actor={} on_behalf_of={} harness={} created_at={}",
         entry.change,
         entry.recorded.event_id,
@@ -916,7 +917,15 @@ fn provenance_line(entry: &ProjectedEntry<'_>) -> String {
         entry.recorded.on_behalf_of.unwrap_or("-"),
         entry.recorded.harness.unwrap_or("-"),
         entry.recorded.created_at,
-    )
+    );
+    provenance_text(provenance, entry.recorded.session)
+}
+
+fn provenance_text(line: String, session: Option<&str>) -> String {
+    match session.filter(|session| !session.is_empty()) {
+        Some(session) => line.replace(session, "[session]"),
+        None => line,
+    }
 }
 
 fn read_changelog_config(cwd: &Path) -> Result<ChangelogConfig> {

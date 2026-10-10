@@ -822,7 +822,8 @@ enum Cmd {
         #[arg(long)]
         json: bool,
         /// Include recording identity in human-readable output, excluding
-        /// the session id. JSON retains full session provenance
+        /// the session field and masking its id in metadata as [session].
+        /// JSON retains full session provenance
         #[arg(long, conflicts_with = "json")]
         provenance: bool,
         /// Override the latest-tag release boundary

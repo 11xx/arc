@@ -1519,3 +1519,45 @@ fn command_renderer_keeps_an_existing_mode_and_creates_under_the_umask() {
         .success();
     assert_eq!(mode_of(&news), 0o666);
 }
+
+#[test]
+fn provenance_text_masks_session_ids_in_derived_recording_actors() {
+    let repo = Repo::new();
+    begin(&repo, "derived-provenance");
+    let worktree = repo.home.join(".worktrees/repo-derived-provenance");
+    let session = "provenance-fixture-session";
+    repo.arc(&worktree)
+        .env_remove("ARC_ACTOR")
+        .env("ARC_SESSION", session)
+        .args([
+            "changelog",
+            "derived-provenance",
+            "--category",
+            "fixed",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("- preserve recording privacy\n")
+        .assert()
+        .success();
+    integrate(&repo, "derived-provenance");
+    let json =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["changelog", "derived-provenance", "--json"]),
+        );
+    assert_eq!(
+        json["entries"][0]["recorded"]["actor"],
+        format!("test:{session}")
+    );
+    assert_eq!(json["entries"][0]["recorded"]["session"], session);
+    for args in [
+        vec!["changelog", "derived-provenance", "--provenance"],
+        vec!["changelog", "--provenance"],
+    ] {
+        let text = stdout(repo.arc(&repo.root).args(args));
+        assert!(!text.contains(session), "{text}");
+        assert!(!text.contains("session="), "{text}");
+        assert!(text.contains("actor=test:[session]"), "{text}");
+    }
+}
