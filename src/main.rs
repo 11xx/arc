@@ -482,7 +482,7 @@ enum Cmd {
     /// Aggregate reads name unreadable changes with their errors on stderr
     /// and retain readable changes; a selected unreadable change fails
     /// Recorded producer models that are missing, placeholders or session ids
-    /// print as model not recorded. JSON production identities retain raw values
+    /// print as model not recorded. JSON production identities and review coverage retain raw values
     /// with model_recorded: false; valid models omit the flag.
     Show {
         /// Change to act on. Omitted, it is inferred from the current branch,
@@ -545,7 +545,7 @@ enum Cmd {
     /// `fulfilled, not approved`. Coverage at acceptance never takes later
     /// knowledge into its values; it only points at the discharge.
     /// Recorded producer models that are missing, placeholders or session ids
-    /// print as model not recorded. JSON production identities retain raw values
+    /// print as model not recorded. JSON production identities and review coverage retain raw values
     /// with model_recorded: false; valid models omit the flag.
     Explain {
         /// Change to act on. Omitted, it is inferred from the current branch,
@@ -911,7 +911,7 @@ enum Cmd {
     /// Aggregate reads name unreadable changes with their errors on stderr
     /// and retain readable changes; a selected unreadable change fails
     /// Recorded producer models that are missing, placeholders or session ids
-    /// print as model not recorded. JSON production identities retain raw values
+    /// print as model not recorded. JSON production identities and review coverage retain raw values
     /// with model_recorded: false; valid models omit the flag.
     Inbox {
         /// Restrict to changes assigned to this harness
@@ -997,7 +997,7 @@ enum Cmd {
     /// Includes retained provisional deliveries, routing recipients, local merges and dispositions.
     /// Unfinished transitions include observed refs, event state, retained intent and recovery command.
     /// Recorded producer models that are missing, placeholders or session ids
-    /// print as model not recorded. JSON production identities retain raw values
+    /// print as model not recorded. JSON production identities and review coverage retain raw values
     /// with model_recorded: false; valid models omit the flag.
     Status {
         /// Change to act on. Omitted, it is inferred from the current branch,
@@ -1952,7 +1952,7 @@ enum Cmd {
     /// Resume one change with its brief, live state, and journal context
     /// Records no events; ledger reads do not require a parseable append policy.
     /// Recorded producer models that are missing, placeholders or session ids
-    /// print as model not recorded. JSON production identities retain raw values
+    /// print as model not recorded. JSON production identities and review coverage retain raw values
     /// with model_recorded: false; valid models omit the flag.
     Resume {
         /// Change to act on. Omitted, it is inferred from the current branch,
@@ -2463,8 +2463,10 @@ enum Cmd {
     /// warns on stderr
     /// Provisional integration obligations have a separate section and do not count as review debt.
     /// Recorded producer models that are missing, placeholders or session ids
-    /// print as model not recorded. JSON production identities retain raw values
+    /// print as model not recorded. JSON production identities and review coverage retain raw values
     /// with model_recorded: false; valid models omit the flag.
+    /// JSON recent sessions retain raw models with model_recorded: false when
+    /// the model is missing, a placeholder or a session id; valid models omit it.
     Catchup {
         /// Number of recent sessions, selected after ranking every discovered
         /// candidate by its last recorded activity rather than file modification time.
@@ -2763,7 +2765,7 @@ enum WorkspaceCmd {
     /// changes remain in the output
     /// Records no events; ledger reads do not require a parseable append policy.
     /// Recorded producer models that are missing, placeholders or session ids
-    /// print as model not recorded. JSON production identities retain raw values
+    /// print as model not recorded. JSON production identities and review coverage retain raw values
     /// with model_recorded: false; valid models omit the flag.
     Inbox {
         /// Report only projects whose canonical anchor is beneath this path
@@ -2810,7 +2812,7 @@ enum WorkspaceCmd {
     /// stderr and retain readable changes
     /// Records no events; ledger reads do not require a parseable append policy.
     /// Recorded producer models that are missing, placeholders or session ids
-    /// print as model not recorded. JSON production identities retain raw values
+    /// print as model not recorded. JSON production identities and review coverage retain raw values
     /// with model_recorded: false; valid models omit the flag.
     Backlog {
         /// Count only journal items filed at or after this journal stamp

@@ -394,6 +394,9 @@ pub struct VerdictEntry {
     /// Model identity recorded on the verdict event, when one was declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The originating session used to validate the recorded model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
     /// Why this verdict is owed corroboration, when the caller said it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provisional: Option<String>,
@@ -641,6 +644,9 @@ pub struct AuditVerdictEntry {
     /// Model identity recorded on the audit event, when one was declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The originating session used to validate the recorded model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
     /// The routing version that selected the auditor. Absent means unrouted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_version: Option<String>,
@@ -2310,6 +2316,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     causes: causes.clone(),
                     body: body.clone(),
                     model: ev.model.clone(),
+                    session: ev.session.clone(),
                     provisional: provisional.clone(),
                     route_version: route_version.clone(),
                     actor: ev.actor.clone(),
@@ -2477,6 +2484,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     verdict: *verdict,
                     body: body.clone(),
                     model: ev.model.clone(),
+                    session: ev.session.clone(),
                     route_version: route_version.clone(),
                     actor: ev.actor.clone(),
                     on_behalf_of: ev.on_behalf_of.clone(),
@@ -3343,6 +3351,7 @@ impl ChangeState {
                 DebtCoverage::new(
                     verdict.effective_author().to_string(),
                     verdict.model.clone(),
+                    verdict.session.clone(),
                     verdict.route_version.clone(),
                 )
             })
@@ -3427,6 +3436,7 @@ impl ChangeState {
                 DebtCoverage::new(
                     audit.effective_author().to_string(),
                     audit.model.clone(),
+                    audit.session.clone(),
                     audit.route_version.clone(),
                 ),
             ));
@@ -3452,6 +3462,7 @@ impl ChangeState {
                     DebtCoverage::new(
                         verdict.effective_author().to_string(),
                         verdict.model.clone(),
+                        verdict.session.clone(),
                         verdict.route_version.clone(),
                     ),
                 )
@@ -3463,6 +3474,94 @@ impl ChangeState {
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn review_projection_preserves_sessions_in_every_coverage_path() {
+        let patch = ev(
+            "fix",
+            serde_json::from_value(serde_json::json!({
+                "event_type": "patchset-added", "patchset_id": "ps-01", "base": "b0", "head": "h1"
+            }))
+            .unwrap(),
+        );
+        let debt = ev(
+            "fix",
+            Payload::AuditDebtDeclared {
+                reason: "review owed".into(),
+                patchset_id: Some("ps-01".into()),
+            },
+        );
+        for audit in [false, true] {
+            let mut review = if audit {
+                ev(
+                    "fix",
+                    Payload::AuditVerdictRecorded {
+                        revision: "h1".into(),
+                        verdict: Verdict::Approved,
+                        body: None,
+                        findings: vec![],
+                        route_version: None,
+                    },
+                )
+            } else {
+                verdict("fix", "ps-01", None)
+            };
+            review.actor = "reader".into();
+            review.session = Some("fixture-recording".into());
+            review.model = Some("fixture-recording#high".into());
+            let integrated = ev(
+                "fix",
+                Payload::ChangeIntegrated {
+                    authority_grant_event_id: None,
+                    provisional_resolutions: Vec::new(),
+                    integrated_commit: "h1".into(),
+                    source_patchset_id: "ps-01".into(),
+                    source_head: "h1".into(),
+                    target_branch: "master".into(),
+                    target_before: "b0".into(),
+                    authorization: None,
+                    already_contained: false,
+                    shape: None,
+                },
+            );
+            let state = reduce(&[
+                opened("fix"),
+                patch.clone(),
+                integrated,
+                debt.clone(),
+                review,
+            ])
+            .unwrap();
+            if !audit {
+                let coverage = state.debt_coverage_for(&state.patchsets[0]);
+                assert_eq!(
+                    serde_json::to_value(&coverage[0]).unwrap()["model_recorded"],
+                    false
+                );
+                assert_eq!(
+                    serde_json::to_value(
+                        state
+                            .debt_discharge(state.debt.as_ref().unwrap())
+                            .unwrap()
+                            .1
+                    )
+                    .unwrap()["model_recorded"],
+                    false
+                );
+            } else {
+                assert_eq!(
+                    serde_json::to_value(
+                        state
+                            .debt_discharge(state.debt.as_ref().unwrap())
+                            .unwrap()
+                            .1
+                    )
+                    .unwrap()["model_recorded"],
+                    false
+                );
+            }
+        }
+    }
 
     #[test]
     fn the_applicable_history_decides_whether_a_finding_is_released() {

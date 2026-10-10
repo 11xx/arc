@@ -1667,7 +1667,7 @@ fn blocker_title(blocker: Blocker) -> &'static str {
 /// record does not carry is left out rather than filled in.
 fn debt_coverage_label(coverage: &DebtCoverage) -> String {
     let mut label = coverage.reviewer.clone();
-    if crate::coordinate::model_recorded(coverage.model.as_deref(), None) {
+    if crate::coordinate::model_recorded(coverage.model.as_deref(), coverage.session.as_deref()) {
         if let Some(effort) = &coverage.effort {
             label.push('@');
             label.push_str(effort);
@@ -1687,7 +1687,7 @@ fn debt_coverage_detail(coverage: &DebtCoverage) -> String {
         crate::coordinate::display_model(
             None,
             coverage.model.as_deref(),
-            None,
+            coverage.session.as_deref(),
             crate::coordinate::ModelStyle::Coordinate,
         )
     )
@@ -2770,6 +2770,20 @@ pub fn verdict_assessments(assessments: &[crate::status::VerdictAssessment]) {
 #[cfg(test)]
 mod recorded_model_tests {
     use super::*;
+
+    #[test]
+    fn coverage_session_relative_model_is_unrecorded() {
+        let coverage: crate::model::DebtCoverage = serde_json::from_value(serde_json::json!({
+            "reviewer": "reader", "model": "fixture-recording#high",
+            "session": "fixture-recording", "effort": "high"
+        }))
+        .unwrap();
+        assert_eq!(
+            debt_coverage_detail(&coverage),
+            "reader (model not recorded)"
+        );
+        assert_eq!(debt_coverage_label(&coverage), "reader");
+    }
 
     #[test]
     fn producer_placeholders_are_unattributed() {

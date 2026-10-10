@@ -524,6 +524,7 @@ mod tests {
             causes: Vec::new(),
             body: None,
             model: None,
+            session: None,
             provisional: None,
             route_version: None,
             actor: actor.into(),

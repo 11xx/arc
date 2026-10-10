@@ -718,6 +718,8 @@ pub enum JournalCmd {
     /// Records no events; ledger reads do not require a parseable append policy.
     /// Recorded models that are missing, placeholders or session ids print as
     /// model not recorded, qualified by the harness when it is established.
+    /// JSON sessions retain raw models with model_recorded: false when no model
+    /// is recorded; valid models omit the flag.
     Filed {
         /// Filter by an exact writing or source session id
         #[arg(long)]
@@ -1146,6 +1148,8 @@ pub enum JournalCmd {
     /// argument is a filename, never a path; `arc journal discussion <file.md>`
     /// reads the same artifact's stances and open questions.
     /// Records no events; ledger reads do not require a parseable append policy.
+    /// JSON recorded_by retains the raw model with model_recorded: false when
+    /// it is missing, a placeholder or a session id; valid models omit the flag.
     Show {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
@@ -5746,14 +5750,30 @@ pub(crate) struct FiledItem {
     sources: Vec<ArtifactSource>,
 }
 
-#[derive(Serialize)]
 pub(crate) struct FiledSession {
-    #[serde(skip_serializing_if = "Option::is_none")]
     harness: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     session: Option<String>,
     model: Option<String>,
     pub(crate) items: Vec<FiledItem>,
+}
+
+impl Serialize for FiledSession {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        if let Some(value) = &self.harness {
+            map.serialize_entry("harness", value)?;
+        }
+        if let Some(value) = &self.session {
+            map.serialize_entry("session", value)?;
+        }
+        map.serialize_entry("model", &self.model)?;
+        map.serialize_entry("items", &self.items)?;
+        if !crate::coordinate::model_recorded(self.model.as_deref(), self.session.as_deref()) {
+            map.serialize_entry("model_recorded", &false)?;
+        }
+        map.end()
+    }
 }
 
 #[derive(Serialize)]
@@ -11726,6 +11746,21 @@ pub(crate) struct RecordedIdentity {
     pub(crate) model: Option<String>,
 }
 
+impl Serialize for RecordedIdentity {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("actor", &self.actor)?;
+        map.serialize_entry("harness", &self.harness)?;
+        map.serialize_entry("session", &self.session)?;
+        map.serialize_entry("model", &self.model)?;
+        if !crate::coordinate::model_recorded(self.model.as_deref(), self.session.as_deref()) {
+            map.serialize_entry("model_recorded", &false)?;
+        }
+        map.end()
+    }
+}
+
 /// A harness or session that is blank, or the literal `unknown` a
 /// `journal-events/1` writer recorded for one it could not read, is an
 /// absence, and a reader is told so rather than shown a word that reads like
@@ -13536,12 +13571,7 @@ fn show(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
                 "planner_status": metadata.status,
                 "planner_correction_event": metadata.correction_event,
                 "planner_sources": {"headers": metadata.headers, "recorded": metadata.recorded},
-                "recorded_by": recorded.map(|identity| serde_json::json!({
-                    "actor": identity.actor,
-                    "harness": identity.harness,
-                    "session": identity.session,
-                    "model": identity.model,
-                })),
+                "recorded_by": recorded,
             }))?
         );
         return Ok(0);
@@ -16103,6 +16133,52 @@ fn change_annotation(changes: &[ChangeState], topic: &str, filename: &str) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filed_producer_json_marks_missing_models() {
+        for model in [
+            Some("unknown"),
+            Some("fixture-recording#high"),
+            None,
+            Some("m#high"),
+        ] {
+            let row = FiledSession {
+                harness: Some("codex".into()),
+                session: Some("fixture-recording".into()),
+                model: model.map(str::to_string),
+                items: vec![],
+            };
+            let value = serde_json::to_value(row).unwrap();
+            assert_eq!(value["model"].as_str(), model);
+            assert_eq!(
+                value.get("model_recorded"),
+                (model != Some("m#high")).then_some(&serde_json::Value::Bool(false))
+            );
+        }
+    }
+
+    #[test]
+    fn artifact_producer_json_marks_missing_models() {
+        for model in [
+            Some("unknown"),
+            Some("fixture-recording#high"),
+            None,
+            Some("m#high"),
+        ] {
+            let identity = RecordedIdentity {
+                actor: Some("writer".into()),
+                harness: Some("codex".into()),
+                session: Some("fixture-recording".into()),
+                model: model.map(str::to_string),
+            };
+            let value = serde_json::to_value(identity).unwrap();
+            assert_eq!(value["model"].as_str(), model);
+            assert_eq!(
+                value.get("model_recorded"),
+                (model != Some("m#high")).then_some(&serde_json::Value::Bool(false))
+            );
+        }
+    }
 
     #[test]
     fn a_refusal_names_why_other_journals_were_not_searched() {

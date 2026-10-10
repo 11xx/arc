@@ -17520,3 +17520,29 @@ fn journal_entry_examples_cannot_be_amendment_targets() {
             .stderr(predicates::str::contains("no pos-example on"));
     }
 }
+
+#[test]
+fn historical_show_producer_json_marks_missing_models() {
+    let repo = Repo::new();
+    for model in ["unknown", "fixture-recording#high", "m#high"] {
+        let file = artifact_with_identity(
+            &repo,
+            "producer",
+            "note",
+            "codex",
+            "fixture-recording",
+            "writer",
+            model,
+        );
+        let value = json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "show", &file, "--json"]),
+        );
+        let identity = &value["recorded_by"];
+        assert_eq!(identity["model"], model);
+        assert_eq!(
+            identity.get("model_recorded"),
+            (model != "m#high").then_some(&serde_json::Value::Bool(false))
+        );
+    }
+}

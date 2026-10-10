@@ -1968,7 +1968,7 @@ fn coverage_label(coverage: &DebtCoverage) -> String {
         crate::coordinate::display_model(
             None,
             coverage.model.as_deref(),
-            None,
+            coverage.session.as_deref(),
             crate::coordinate::ModelStyle::Coordinate,
         )
     )
@@ -1993,6 +1993,16 @@ fn production_label(production: &DebtProduction) -> String {
 #[cfg(test)]
 mod recorded_model_tests {
     use super::*;
+
+    #[test]
+    fn coverage_session_relative_model_is_unrecorded() {
+        let coverage: crate::model::DebtCoverage = serde_json::from_value(serde_json::json!({
+            "reviewer": "reader", "model": "fixture-recording#high",
+            "session": "fixture-recording", "effort": "high"
+        }))
+        .unwrap();
+        assert_eq!(coverage_label(&coverage), "reader (model not recorded)");
+    }
 
     #[test]
     fn producer_placeholders_are_unattributed() {

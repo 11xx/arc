@@ -297,7 +297,7 @@ fn read_session_with_backends(
 }
 
 /// Project session metadata merged from recordings and arc events.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug)]
 pub(crate) struct RecentSession {
     pub(crate) session: String,
     pub(crate) harness: String,
@@ -307,6 +307,25 @@ pub(crate) struct RecentSession {
     pub(crate) handoffs: Vec<String>,
     pub(crate) conclusions: Vec<String>,
     pub(crate) unfiled: bool,
+}
+
+impl Serialize for RecentSession {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("session", &self.session)?;
+        map.serialize_entry("harness", &self.harness)?;
+        map.serialize_entry("model", &self.model)?;
+        map.serialize_entry("last_activity", &self.last_activity)?;
+        map.serialize_entry("journal_items", &self.journal_items)?;
+        map.serialize_entry("handoffs", &self.handoffs)?;
+        map.serialize_entry("conclusions", &self.conclusions)?;
+        map.serialize_entry("unfiled", &self.unfiled)?;
+        if !crate::coordinate::model_recorded(self.model.as_deref(), Some(&self.session)) {
+            map.serialize_entry("model_recorded", &false)?;
+        }
+        map.end()
+    }
 }
 
 impl RecentSession {
@@ -719,6 +738,25 @@ mod tests {
     use std::fs::{self, OpenOptions};
     use std::io::Write;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn recent_producer_json_marks_missing_models() {
+        for model in [
+            Some("unknown"),
+            Some("fixture-recording#high"),
+            None,
+            Some("m#high"),
+        ] {
+            let mut row = RecentSession::new("codex", "fixture-recording");
+            row.model = model.map(str::to_string);
+            let value = serde_json::to_value(row).unwrap();
+            assert_eq!(value["model"].as_str(), model);
+            assert_eq!(
+                value.get("model_recorded"),
+                (model != Some("m#high")).then_some(&serde_json::Value::Bool(false))
+            );
+        }
+    }
 
     #[test]
     fn discovery_queries_capped_backends_once_and_retains_the_listing() {
