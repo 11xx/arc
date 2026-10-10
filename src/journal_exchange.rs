@@ -4,7 +4,8 @@
 //! A bundle holds artifact bodies beside the journal events recorded about
 //! them, each body digested, and names the replica that exported it. A
 //! receipt written into the receiving journal records the bundle digest and
-//! source replica, which is what makes a repeated import a no-op. Neither
+//! source replica and admitted artifacts. A completed receipt makes a repeated
+//! import a no-op; a partial receipt leaves the rest eligible for admission. Neither
 //! carries a journal directory path: a journal location is local to the
 //! machine that holds it.
 
@@ -15,7 +16,7 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const BUNDLE_SCHEMA: &str = "arc-journal-bundle/2";
 pub(crate) const IMPORT_RECEIPT_SCHEMA: &str = "arc-journal-exchange-import/1";
@@ -33,7 +34,9 @@ pub(crate) struct BundledArtifact {
     /// `sha256:` over the body, the same spelling the journal records for a
     /// body digest.
     pub(crate) digest: String,
-    pub(crate) events: Vec<JournalEvent>,
+    /// Opaque payloads retain their fields and serialization order for checksum
+    /// validation even when this reader cannot understand them.
+    pub(crate) events: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +71,38 @@ pub(crate) struct ImportReceipt {
     pub(crate) imported_by: ReplicaIdentity,
     pub(crate) imported_at: DateTime<Utc>,
     pub(crate) artifacts: Vec<ImportedArtifact>,
+}
+
+impl BundledArtifact {
+    pub(crate) fn understood_events(&self) -> Result<Vec<JournalEvent>> {
+        self.events
+            .iter()
+            .map(|value| {
+                let event: JournalEvent = serde_json::from_value(value.clone())?;
+                if !event.known() {
+                    bail!("{} carries an unsupported journal event", self.file);
+                }
+                Ok(event)
+            })
+            .collect()
+    }
+
+    fn unsupported_events(&self) -> Vec<String> {
+        self.events
+            .iter()
+            .filter(|value| {
+                serde_json::from_value::<JournalEvent>((*value).clone())
+                    .map_or(true, |event| !event.known())
+            })
+            .map(|value| {
+                format!(
+                    "unsupported event kind {:?} in schema {:?}",
+                    value["event"].as_str().unwrap_or_default(),
+                    value["schema"].as_str().unwrap_or_default()
+                )
+            })
+            .collect()
+    }
 }
 
 impl JournalBundle {
@@ -115,6 +150,47 @@ impl JournalBundle {
         Ok(bundle)
     }
 
+    /// Admission preserves each artifact and the closure of its references.
+    pub(crate) fn held_back(&self) -> Result<BTreeMap<String, Vec<String>>> {
+        let mut held: BTreeMap<String, Vec<String>> = self
+            .artifacts
+            .iter()
+            .filter_map(|artifact| {
+                let reasons = artifact.unsupported_events();
+                (!reasons.is_empty()).then(|| (artifact.file.clone(), reasons))
+            })
+            .collect();
+        loop {
+            let mut changed = false;
+            for artifact in &self.artifacts {
+                if held.contains_key(&artifact.file) {
+                    continue;
+                }
+                for event in artifact.understood_events()? {
+                    for reference in artifact_references(&event)? {
+                        if let ArtifactReference::Local(file) = reference {
+                            if let Some(reasons) = held.get(&file) {
+                                let reasons = reasons
+                                    .iter()
+                                    .map(|reason| format!("references {file}: {reason}"))
+                                    .collect();
+                                held.insert(artifact.file.clone(), reasons);
+                                changed = true;
+                                break;
+                            }
+                        }
+                    }
+                    if held.contains_key(&artifact.file) {
+                        break;
+                    }
+                }
+            }
+            if !changed {
+                return Ok(held);
+            }
+        }
+    }
+
     fn validate(&self) -> Result<()> {
         ids::validate_id_component(&self.project_id)?;
         validate_identity(&self.source_replica)?;
@@ -143,7 +219,13 @@ impl JournalBundle {
 /// does not hold.
 fn validate_references(artifact: &BundledArtifact, files: &BTreeSet<&str>) -> Result<()> {
     for event in &artifact.events {
-        for reference in artifact_references(event)? {
+        let Ok(event) = serde_json::from_value::<JournalEvent>(event.clone()) else {
+            continue;
+        };
+        if !event.known() {
+            continue;
+        }
+        for reference in artifact_references(&event)? {
             match reference {
                 ArtifactReference::Local(referenced) => {
                     if !files.contains(referenced.as_str()) {
@@ -188,17 +270,17 @@ fn validate_artifact(artifact: &BundledArtifact) -> Result<()> {
     }
     let mut seen = BTreeSet::new();
     for event in &artifact.events {
-        if !event.known() {
+        if !event["event"].is_string() || !event["schema"].is_string() {
             bail!(
-                "journal bundle artifact {} carries an event that is not a journal record",
+                "journal bundle artifact {} carries an event without a kind or schema",
                 artifact.file
             );
         }
-        if event.file.as_deref() != Some(artifact.file.as_str()) {
+        if event["file"].as_str() != Some(artifact.file.as_str()) {
             bail!(
                 "journal bundle artifact {} carries an event recorded about {:?}",
                 artifact.file,
-                event.file.as_deref().unwrap_or("no artifact")
+                event["file"].as_str().unwrap_or("no artifact")
             );
         }
         if !seen.insert(serde_json::to_vec(event)?) {
@@ -346,7 +428,7 @@ pub(crate) fn merge_revision(
     incoming: &BundledArtifact,
 ) -> Result<String> {
     let held = revision(held_body, held_events)?;
-    let incoming_revision = revision(&incoming.body, &incoming.events)?;
+    let incoming_revision = revision(&incoming.body, &incoming.understood_events()?)?;
     if held.base != incoming_revision.base {
         bail!("base");
     }

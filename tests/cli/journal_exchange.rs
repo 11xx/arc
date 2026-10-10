@@ -312,6 +312,172 @@ fn importing_the_same_bundle_twice_changes_nothing() {
     assert_eq!(receipts(&recipient_dir), 1);
 }
 
+fn rewrite_bundle_checksum(bundle: &mut serde_json::Value) {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    for artifact in bundle["artifacts"].as_array().unwrap() {
+        digest.update(serde_json::to_vec(artifact).unwrap());
+        digest.update(b"\n");
+    }
+    bundle["artifacts_sha256"] = hex::encode(digest.finalize()).into();
+}
+
+#[test]
+fn a_mixed_bundle_admits_known_artifacts_and_retries_held_back_artifacts() {
+    let source = Repo::new();
+    let recipient = Repo::new();
+    pair(&source, &recipient, "origin", "peer");
+    let admitted = write_artifact(&source, "admitted", "todo", "# Work\n");
+    let held = write_artifact(&source, "held", "decision", "# Future decision\n");
+    source
+        .arc(&source.root)
+        .args(["journal", "evidence", &held, "--body-file", "-"])
+        .write_stdin("Future observation.\n")
+        .assert()
+        .success();
+    let dependent = write_artifact(&source, "dependent", "discussion", "# Related work\n");
+    source
+        .arc(&source.root)
+        .args([
+            "journal",
+            "consume",
+            &dependent,
+            "--outcome",
+            "done",
+            "--decision",
+            &held,
+        ])
+        .assert()
+        .success();
+    let path = bundle_file(&source, "mixed");
+    export(&source, &[&admitted, &dependent], &path);
+    let mut bundle: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let artifact = bundle["artifacts"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|artifact| artifact["file"] == held)
+        .unwrap();
+    let event = artifact["events"]
+        .as_array_mut()
+        .unwrap()
+        .last_mut()
+        .unwrap();
+    event["event"] = "future-observation".into();
+    event["schema"] = "journal-events/2".into();
+    event["future_payload"] = serde_json::json!({"observations": ["one", "two"]});
+    let mut future = event.clone();
+    future["schema"] = "journal-events/99".into();
+    artifact["events"].as_array_mut().unwrap().push(future);
+    rewrite_bundle_checksum(&mut bundle);
+    fs::write(&path, serde_json::to_vec_pretty(&bundle).unwrap()).unwrap();
+    let dir = journal_dir(&recipient);
+    for dry_run in [true, false, false] {
+        let result = import(&recipient, &path, dry_run);
+        assert!(result.status.success(), "{result:?}");
+        let output = String::from_utf8_lossy(&result.stdout);
+        assert!(output.contains(&format!("held back: {held}")), "{output}");
+        assert!(
+            output.contains("future-observation") && output.contains("journal-events/99"),
+            "{output}"
+        );
+        assert!(!output.contains("receipt already recorded"), "{output}");
+        for file in [&held, &dependent] {
+            assert!(output.contains(&format!("held back: {file}")), "{output}");
+            assert!(!dir.join(file).exists());
+            let cold = dir.with_file_name(format!(
+                "{}-archive",
+                dir.file_name().unwrap().to_str().unwrap()
+            ));
+            assert!(!cold.join(file).exists());
+            assert!(events_for(&dir, file).is_empty());
+        }
+        if dry_run {
+            assert!(!dir.join(&admitted).exists());
+            assert_eq!(receipts(&dir), 0);
+        } else {
+            assert!(dir.join(&admitted).exists());
+            assert_eq!(events_for(&dir, &admitted).len(), 1);
+            assert_eq!(receipts(&dir), 1);
+            let receipt = fs::read_dir(dir.join("exchange/imports"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            let receipt: serde_json::Value =
+                serde_json::from_slice(&fs::read(receipt).unwrap()).unwrap();
+            assert_eq!(receipt["artifacts"].as_array().unwrap().len(), 1);
+            assert_eq!(receipt["artifacts"][0]["file"], admitted);
+        }
+    }
+    let before = journal_events_dir(&dir);
+    let artifact = bundle["artifacts"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|artifact| artifact["file"] == admitted)
+        .unwrap();
+    artifact["events"][0]["event"] = "future-observation".into();
+    rewrite_bundle_checksum(&mut bundle);
+    fs::write(&path, serde_json::to_vec_pretty(&bundle).unwrap()).unwrap();
+    let result = import(&recipient, &path, false);
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(journal_events_dir(&dir), before);
+    assert_eq!(receipts(&dir), 1);
+    assert!(!String::from_utf8_lossy(&result.stdout).contains("receipt: recorded"));
+}
+
+#[test]
+fn a_partial_receipt_allows_the_remaining_artifact_to_be_admitted() {
+    let source = Repo::new();
+    let recipient = Repo::new();
+    pair(&source, &recipient, "origin", "peer");
+    let first = write_artifact(&source, "first", "todo", "# First\n");
+    let remaining = write_artifact(&source, "remaining", "todo", "# Remaining\n");
+    let path = bundle_file(&source, "retry");
+    export(&source, &[&first, &remaining], &path);
+    assert!(import(&recipient, &path, false).status.success());
+    let dir = journal_dir(&recipient);
+    let receipt = fs::read_dir(dir.join("exchange/imports"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
+    value["artifacts"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|artifact| artifact["file"] == first);
+    fs::write(&receipt, serde_json::to_vec(&value).unwrap()).unwrap();
+    fs::remove_file(dir.join(&remaining)).unwrap();
+    let retained = journal_events_dir(&dir)
+        .lines()
+        .filter(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["file"] != remaining
+        })
+        .map(str::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    fs::write(dir.join("events.jsonl"), retained).unwrap();
+
+    let result = import(&recipient, &path, false);
+    assert!(result.status.success(), "{result:?}");
+    assert!(dir.join(&remaining).exists(), "{result:?}");
+    assert_eq!(events_for(&dir, &first).len(), 1);
+    assert_eq!(events_for(&dir, &remaining).len(), 1);
+    let receipt: serde_json::Value = serde_json::from_slice(&fs::read(receipt).unwrap()).unwrap();
+    assert_eq!(receipt["artifacts"].as_array().unwrap().len(), 2);
+    assert!(receipt["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|artifact| artifact["events"] == 1));
+}
+
 #[test]
 fn a_divergent_local_revision_refuses_the_whole_import() {
     let source = Repo::new();

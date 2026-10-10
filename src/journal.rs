@@ -1325,7 +1325,11 @@ pub enum JournalCmd {
     /// reopened question retain distinct append identities.
     /// Edits to the base or a shared block refuse the entire bundle, naming
     /// both digests and the first differing block. Storage tiers must agree.
-    /// Events retain their provenance; a repeated bundle changes nothing.
+    /// Artifacts carrying unsupported events are held back as a unit, reported
+    /// with the event kind and schema; their dependent artifacts are held back
+    /// too. Admitted artifacts retain their provenance. Receipts cover only
+    /// admitted artifacts, so held-back artifacts are retried on every import.
+    /// A completely admitted bundle changes nothing on a repeated import.
     /// Interrupted writes retain a prepared transaction; an import completes
     /// it before comparing revisions. Every journal write, including provenance
     /// repair and spool promotion, refuses a pending import and names its
@@ -1872,8 +1876,8 @@ fn collect_exchange_artifacts(
         let recorded = events
             .iter()
             .filter(|event| event.file.as_deref() == Some(file.as_str()))
-            .cloned()
-            .collect();
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()?;
         artifacts.push(crate::journal_exchange::BundledArtifact {
             file,
             storage: storage.to_string(),
@@ -1986,6 +1990,7 @@ fn import_artifacts(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
     };
     let bundle = crate::journal_exchange::JournalBundle::parse(&bytes)?;
     let digest = bundle.digest()?;
+    let held_back = bundle.held_back()?;
     let hot = resolve_dir(&ctx.cwd)?;
     let cold = archive_dir(&hot);
     let global = is_global_dir(&hot)?;
@@ -2053,6 +2058,9 @@ fn import_artifacts(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
     let now = Utc::now();
     let mut plan = Vec::with_capacity(bundle.artifacts.len());
     for artifact in &bundle.artifacts {
+        if held_back.contains_key(&artifact.file) {
+            continue;
+        }
         let hot_path = hot.join(&artifact.file);
         let cold_path = cold.join(&artifact.file);
         let hot_digest = hot_path
@@ -2110,9 +2118,9 @@ fn import_artifacts(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
             }
         }
         let mut new_events = Vec::new();
-        for event in &artifact.events {
-            if !held.contains(&serde_json::to_vec(event)?) {
-                new_events.push(event.clone());
+        for event in artifact.understood_events()? {
+            if !held.contains(&serde_json::to_vec(&event)?) {
+                new_events.push(event);
             }
         }
         if !new_events.is_empty() {
@@ -2136,11 +2144,30 @@ fn import_artifacts(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
             merged_body,
         });
     }
-    if dry_run {
-        print_exchange_import(&bundle, &digest, &plan, true);
+    for (file, reasons) in &held_back {
+        for reason in reasons {
+            println!("held back: {file}: {reason}");
+        }
+    }
+    if dry_run || plan.is_empty() {
+        print_exchange_import(&bundle, &digest, &plan, dry_run);
         return Ok(0);
     }
-    if receipt_path.is_file() {
+    let previous_receipt: Option<crate::journal_exchange::ImportReceipt> = if receipt_path.is_file()
+    {
+        Some(serde_json::from_slice(&std::fs::read(&receipt_path)?)?)
+    } else {
+        None
+    };
+    if previous_receipt.as_ref().is_some_and(|receipt| {
+        bundle.artifacts.iter().all(|artifact| {
+            receipt
+                .artifacts
+                .iter()
+                .any(|entry| entry.file == artifact.file)
+        })
+    }) && held_back.is_empty()
+    {
         println!(
             "source replica: {} ({})",
             bundle.source_replica.name, bundle.source_replica.repository_id
@@ -2172,7 +2199,16 @@ fn import_artifacts(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
                 file: entry.artifact.file.clone(),
                 storage: entry.artifact.storage.clone(),
                 digest: entry.artifact.digest.clone(),
-                events: entry.new_events.len(),
+                events: entry.new_events.len()
+                    + previous_receipt
+                        .as_ref()
+                        .and_then(|receipt| {
+                            receipt
+                                .artifacts
+                                .iter()
+                                .find(|artifact| artifact.file == entry.artifact.file)
+                        })
+                        .map_or(0, |artifact| artifact.events),
             })
             .collect(),
     };
@@ -2256,11 +2292,15 @@ fn print_exchange_import(
     let events: usize = plan.iter().map(|entry| entry.new_events.len()).sum();
     if dry_run {
         println!("dry-run: would import {artifacts} artifact(s) and {events} event(s)");
-        println!("receipt: would record source replica and bundle digest");
+        if !plan.is_empty() {
+            println!("receipt: would record source replica and bundle digest");
+        }
     } else {
         println!("artifacts: {artifacts} imported");
         println!("events: {events} imported");
-        println!("receipt: recorded");
+        if !plan.is_empty() {
+            println!("receipt: recorded");
+        }
     }
 }
 
@@ -2620,7 +2660,7 @@ fn stage_memory_promotion(
         storage: crate::journal_exchange::HOT_STORAGE.to_string(),
         digest: crate::journal_exchange::body_digest(&prepared.body),
         body: prepared.body.clone(),
-        events: vec![prepared.promoted.clone()],
+        events: vec![serde_json::to_value(&prepared.promoted)?],
     };
     let current = exchange_body_digest(global, &artifact)?;
     if current

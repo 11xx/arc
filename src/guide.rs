@@ -801,7 +801,8 @@ RUN A CHANGE
                                      Export selected journal artifacts with
                                      the events recorded about them.
   arc journal import <file> [--dry-run]
-                                     File a journal bundle into this journal.
+                                     Admit understood artifacts; report and
+                                     retry artifacts with unsupported events.
   arc audit <change> --verdict <v>   Review an already-integrated revision.
   arc close                          Terminal outcome arc did not merge itself.
   arc changelog [<c>] --category <k> --body-file <f>
@@ -1420,7 +1421,12 @@ PAIR REPLICA STORES
   Journal artifacts travel between paired replicas as a versioned bundle:
   each body, the events recorded about it, its digest, the exporting replica,
   and every artifact the selection references by filename. An import is
-  all-or-nothing: the whole bundle is validated before anything is written.
+  all-or-nothing within each artifact: bundle integrity is validated before
+  anything is written. An artifact with an unsupported event is held back in
+  full, naming the event kind and its journal-events schema. Artifacts that
+  reference a held-back artifact are held back too, retaining the reference
+  closure. Other artifacts are admitted. A receipt covers only admitted
+  artifacts; every import retries the held-back artifacts.
   Storage tiers must agree for a held artifact. Appended sections are keyed
   by their recorded event identities. Each answer append has its own identity,
   including answers to reopened questions that repeat a choice. A prefix
@@ -1432,8 +1438,8 @@ PAIR REPLICA STORES
   appended blocks keep their recorded provenance. A live claim arriving on
   an artifact a live local claim holds is reported as a contest naming both
   replicas, and nothing on either claim's behalf is recorded. Importing the
-  same bundle twice changes nothing; the receipt names the source replica and
-  bundle digest. An interrupted write retains a prepared transaction with
+  same completely admitted bundle twice changes nothing; the receipt names
+  the source replica and bundle digest. An interrupted write retains a prepared transaction with
   the bodies, event log, and receipt. Every journal write, including provenance
   repair and spool promotion, refuses a pending import and names its bundle
   digest and the remedy: `arc journal import <bundle>`, or `arc journal
@@ -2957,8 +2963,10 @@ WHAT ARC WILL NOT DO
       irreversible decision.
 
   Refusals worth knowing before they happen:
-    arc refuses a bundle written by a newer arc rather than skipping
-      lifecycle events it does not know.
+    arc refuses a change or replica bundle written by a newer arc rather
+      than skipping lifecycle events it does not know. A journal import holds
+      back each artifact carrying an unsupported event and reports its kind
+      and schema, while admitting the understood reference closure.
     `arc import` reads `arc-bundle/6` and `arc-bundle/5`.
       Absent optional fields stay absent; other bundle schemas are refused.
     arc refuses a gate run only when the change's recorded worktree is
