@@ -66,6 +66,8 @@ fn placeholder_declared_identity_refuses_every_write_before_it_records() {
         ("ARC_MODEL", "", "gpt-6#unknown", &["unset ARC_MODEL"]),
         ("ARC_MODEL", "", UUID, &["session id", "unset ARC_MODEL"]),
         ("ARC_MODEL", "", "session-a", &["session id"]),
+        ("ARC_MODEL", "", "#high", &["unset ARC_MODEL"]),
+        ("ARC_MODEL", "", "fixture-model#", &["unset ARC_MODEL"]),
         (
             "",
             "--model",
@@ -206,6 +208,8 @@ fn role_assertions_refuse_values_that_are_not_fresh_coordinates() {
         ("--orchestrated-by", "codex:gpt-6#none"),
         ("--planned-by", "Ada <ada>"),
         ("--planned-by", "test:session-a"),
+        ("--planned-by", "codex:#high<fixture>"),
+        ("--planned-by", ":model<fixture>"),
     ] {
         let stderr = refused(repo.arc(&repo.root).args(["roles", &change, flag, value]));
         assert!(stderr.contains(value), "{value}: {stderr}");
@@ -599,6 +603,8 @@ fn appended_role_trailers_refuse_placeholders_before_any_commit_moves() {
         "Planned-by: codex:",
         "Implemented-by: opencode:session-a",
         "Implemented-by: opencode:session-a#high",
+        "Implemented-by: codex:#high<fixture>",
+        "Implemented-by: :model<fixture>",
     ] {
         for dry_run in [true, false] {
             let mut command = repo.arc(&worktree);
@@ -750,6 +756,19 @@ fn standalone_trailer_checks_do_not_use_the_invoking_session() {
         .write_stdin("feat: fixture\n\nImplemented-by: opencode:session-a\n")
         .assert()
         .success();
+}
+
+#[test]
+fn standalone_trailer_checks_refuse_empty_agent_segments_in_mixed_grammar() {
+    let repo = Repo::new();
+    for value in ["codex:#high<fixture>", ":model<fixture>"] {
+        repo.arc(&repo.root)
+            .args(["instructions", "git", "--check", "-"])
+            .write_stdin(format!("feat: fixture\n\nImplemented-by: {value}\n"))
+            .assert()
+            .failure()
+            .stdout(predicates::str::contains("malformed"));
+    }
 }
 
 #[test]

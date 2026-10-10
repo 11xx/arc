@@ -82,6 +82,9 @@ pub(crate) fn model_defect(value: &str, session: Option<&str>) -> Option<Defect>
         Some((model, effort)) => (model, Some(effort)),
         None => (value, None),
     };
+    if model.trim().is_empty() || effort.is_some_and(|effort| effort.trim().is_empty()) {
+        return Some(Defect::Unreadable);
+    }
     if is_placeholder(model) || effort.is_some_and(is_placeholder) {
         return Some(Defect::Placeholder);
     }
@@ -115,7 +118,7 @@ pub(crate) fn actor_defect(value: &str) -> Option<Defect> {
 ///
 /// A fresh value is a human `Name <address>`, whose name carries no `:` and
 /// whose address carries an `@`, or an agent `harness:model[#effort]` whose
-/// segments are no placeholder and whose model is no session id.
+/// segments are nonempty, are no placeholder and whose model is no session id.
 /// `claude:<synthetic>` reads as a person `claude:` at `synthetic`, which is
 /// how the lenient reader accepts it; it is an agent form with a placeholder
 /// model.
@@ -130,6 +133,9 @@ pub(crate) fn coordinate_defect(value: &str, session: Option<&str>) -> Option<De
     let Some((harness, rest)) = value.split_once(':') else {
         return Some(Defect::NotAnAddress);
     };
+    if harness.trim().is_empty() {
+        return Some(Defect::Unreadable);
+    }
     if is_placeholder(harness) {
         return Some(Defect::Placeholder);
     }
@@ -280,6 +286,33 @@ mod tests {
         ] {
             assert!(value_is_readable(value), "{value:?}");
             assert!(coordinate_defect(value, None).is_some(), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn mixed_grammar_values_cannot_supply_empty_agent_segments() {
+        for value in [
+            "codex:#high<fixture>",
+            "codex:  #high<fixture>",
+            ":model<fixture>",
+        ] {
+            assert!(value_is_readable(value), "{value:?}");
+            assert_eq!(
+                coordinate_defect(value, None),
+                Some(Defect::Unreadable),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn declared_model_segments_must_be_nonempty() {
+        for value in ["", "#high", "   #high", "model#", "model#  "] {
+            assert_eq!(
+                model_defect(value, None),
+                Some(Defect::Unreadable),
+                "{value:?}"
+            );
         }
     }
 }

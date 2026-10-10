@@ -42,6 +42,7 @@ SAY WHO YOU ARE (before the first write)
   (unknown, unset, none, null, n/a, na, tbd, undefined, ?, -, <synthetic>,
   synthetic), an actor of the form harness:model carrying one, and a model
   that is one or is a session id. Reads and Git hooks never refuse.
+  Agent harness, model and supplied effort segments must be nonempty.
 
   Local change and repository events receive IDs after the newest stored event
   in their scope, even in fresh processes and after imports from a clock ahead.
@@ -1834,6 +1835,8 @@ CONTRIBUTION TRAILERS
                        `harness:model[#effort]` or human `Name <email>` form.
                        A placeholder or a session id is not a coordinate;
                        its line is omitted.
+                       Agent harness, model and supplied effort segments
+                       must be nonempty.
                        `--check <file>` reports malformed role values,
                        placeholder role values (a placeholder or session-id
                        segment, or a person without an email), and keys
@@ -1910,6 +1913,8 @@ HISTORY REWRITES
                        --dry-run.
                        A model equal to the invoking session refuses even
                        when the session id is not UUID-shaped.
+                       Agent harness, model and supplied effort segments
+                       must be nonempty.
                        The commit named by --from is itself edited;
                        it is rewritten when its message or ancestry changes.
                        Recreating a commit reachable from the target or another
@@ -1972,9 +1977,10 @@ HISTORY REWRITES
   other edit. `replace` puts the new line where the old one was and `drop`
   removes it. A new line on `Planned-by`, `Implemented-by`, `Reviewed-by` or
   `Orchestrated-by` is a fresh coordinate, and on `Assisted-by` so is its
-  value without a trailing `(role)`. Models equal to the invoking session
-  refuse even when the id is not UUID-shaped. Any violation refuses before a commit is
-  recreated, `--dry-run` included, naming the file and line. `--dry-run`
+  value without a trailing `(role)`. Agent harness, model and supplied effort
+  segments must be nonempty. Models equal to the invoking session
+  refuse even when the id is not UUID-shaped. Any violation refuses before
+  a commit is recreated, `--dry-run` included, naming the file and line. `--dry-run`
   lists each edit as `<short sha> <action> <old line> -> <new line>` with the
   map. A recreated commit keeps its tree, author, committer and both dates;
   `--key` signs it, and pins, retained commits and `--retag` tags move as for

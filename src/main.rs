@@ -94,7 +94,8 @@ struct Cli {
     /// it writes. A corroborated Claude recording without a model selection
     /// is re-read every 50 ms for up to 1 second; other store answers return
     /// immediately. Declarations retain any observed disagreement and its
-    /// coordinate. A write refuses a placeholder model or effort (unknown,
+    /// coordinate. Model and supplied effort segments must be nonempty.
+    /// A write refuses a placeholder model or effort (unknown,
     /// none, n/a, ...) and a session id as the model, whether flagged or in
     /// ARC_MODEL: drop the declaration and arc records the observed model
     #[arg(long, global = true)]
@@ -293,8 +294,8 @@ enum Cmd {
         /// Assert a planner: harness:model[#effort] or Name <email>; repeatable.
         /// Without a value, the invoking identity: a declared Name <email>
         /// actor's own form, else the resolved harness:model under a declared
-        /// or session-derived actor. Unresolved coordinates, placeholders and
-        /// session ids refuse
+        /// or session-derived actor. Empty segments, unresolved coordinates,
+        /// placeholders and session ids refuse
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
         planned_by: Vec<String>,
         /// Assert an orchestrator in the same form; repeatable. Without a
@@ -374,8 +375,8 @@ enum Cmd {
         /// Assert a planner (repeatable harness:model[#effort] or Name <email>).
         /// Without a value, the invoking identity: a declared Name <email>
         /// actor's own form, else the resolved harness:model under a declared
-        /// or session-derived actor. Unresolved coordinates, placeholders and
-        /// session ids refuse
+        /// or session-derived actor. Empty segments, unresolved coordinates,
+        /// placeholders and session ids refuse
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
         planned_by: Vec<String>,
         /// Assert an orchestrator (repeatable harness:model[#effort] or Name <email>).
@@ -663,7 +664,8 @@ enum Cmd {
         /// Assert a planner on the change when writing a brief (repeatable).
         /// Value: harness:model[#effort] or Name <email>. Without a value,
         /// the invoking identity, as for `arc roles --planned-by`.
-        /// Unresolved coordinates, placeholders and session ids refuse
+        /// Empty segments, unresolved coordinates, placeholders and session
+        /// ids refuse
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
         planned_by: Vec<String>,
         /// Change to act on. Omitted, it is inferred from the current branch,
@@ -2576,7 +2578,8 @@ enum InstructionsCmd {
         /// placeholder or session-id segment, or a person without an email),
         /// and keys outside the convention in a commit message file ('-' for
         /// stdin); never rewrites it. Exits 1 on a malformed or placeholder
-        /// role value
+        /// role value. Agent harness, model and supplied effort segments must
+        /// be nonempty
         #[arg(long, value_name = "FILE")]
         check: Option<String>,
     },
@@ -3046,6 +3049,7 @@ enum RewriteCmd {
         /// Reviewed-by or Orchestrated-by has to be a fresh coordinate, and on
         /// Assisted-by so does its value without a trailing `(role)`.
         /// Models equal to the invoking session refuse, including non-UUID ids.
+        /// Agent harness, model and supplied effort segments must be nonempty.
         /// Any violation refuses before any commit is recreated, --dry-run
         /// included, naming the file and line. Combined with --drop and
         /// --append, edits apply first, then --drop, then --append; the edits
@@ -3067,6 +3071,7 @@ enum RewriteCmd {
         /// id, or a person without an email) refuses before any commit is
         /// recreated, --dry-run included.
         /// A model equal to the invoking session refuses, including a non-UUID id.
+        /// Agent harness, model and supplied effort segments must be nonempty.
         #[arg(
             long,
             value_name = "LINE",

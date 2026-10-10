@@ -39,7 +39,8 @@ Agent, with the harness that recorded it and the model it recorded:
     Reviewed-by: codex:reviewer-model#high
     Orchestrated-by: claude:lead-model#high
 
-`<harness>:<model>` is required and `#<effort>` is optional. Preserve the
+`<harness>:<model>` is required and `#<effort>` is optional. Each harness,
+model and supplied effort segment is nonempty. Preserve the
 recorded model and effort; omit a coordinate the source does not carry rather
 than guessing one. Never invent an email for a model.
 
