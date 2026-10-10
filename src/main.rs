@@ -1204,6 +1204,11 @@ enum Cmd {
     /// session id names arc rewrite trailers --from <rev> --edits <file>, to
     /// run before integration.
     ///
+    /// A change behind its target lists `merged-tree-unevaluated` beside
+    /// `needs-rebase` under every shape, `ff-only` included, until the merge
+    /// is evaluated; the exit code is the first listed, so `needs-rebase`
+    /// (11) shadows `merged-tree-unevaluated` (14).
+    ///
     /// Unreadable neighboring changes are named with their errors on stderr;
     /// an unreadable selected change fails and an unreadable prerequisite
     /// cannot authorize integration

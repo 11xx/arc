@@ -6,10 +6,14 @@ use super::common::*;
 /// textual merge can notice: the files never overlap, so Git reports success
 /// and the result violates what the gate asserts.
 fn paired_change(repo: &Repo) -> (String, PathBuf) {
+    paired_change_with_shape(repo, "no-ff")
+}
+
+fn paired_change_with_shape(repo: &Repo, shape: &str) -> (String, PathBuf) {
     fs::create_dir_all(repo.root.join(".arc")).unwrap();
     fs::write(
         repo.root.join(".arc/policy.toml"),
-        "[defaults.integration]\nshape = \"no-ff\"\n",
+        format!("[defaults.integration]\nshape = \"{shape}\"\n"),
     )
     .unwrap();
     fs::write(
@@ -80,6 +84,45 @@ fn verification_events(repo: &Repo) -> usize {
     .lines()
     .filter(|line| !line.trim().is_empty())
     .count()
+}
+
+#[test]
+fn a_behind_change_under_ff_only_lists_both_blockers_and_exits_on_the_rebase() {
+    let repo = Repo::new();
+    paired_change_with_shape(&repo, "ff-only");
+    repo.commit(&repo.root, "a.txt", "two\n", "test: a.txt becomes two");
+
+    let check = json_stdout_any_status(repo.arc(&repo.root).args(["check", "paired", "--json"]));
+    let listed: Vec<&str> = check["blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|blocker| blocker["blocker"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        listed[..2],
+        ["needs-rebase", "merged-tree-unevaluated"],
+        "{check}"
+    );
+    assert_eq!(check["exit_code"], 11, "{check}");
+    repo.arc(&repo.root)
+        .args(["check", "paired"])
+        .assert()
+        .code(11);
+
+    // The guide and `check --help` state what the fixture shows.
+    let guide = stdout(&mut repo.arc(&repo.root));
+    let flat = guide.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("under `ff-only`, where no merge ships, a change behind its target still lists `merged-tree-unevaluated` beside `needs-rebase`"),
+        "{flat}"
+    );
+    let help = stdout(repo.arc(&repo.root).args(["check", "--help"]));
+    let flat = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("`ff-only` included, until the merge is evaluated"),
+        "{help}"
+    );
 }
 
 #[test]

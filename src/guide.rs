@@ -2279,6 +2279,10 @@ RULES THAT CHANGE WHAT YOU DO
     evaluated, and undoes it otherwise. A queue runs the ones with no answer
     at that tree, because it moves the target itself and every member behind
     the one it just landed is now evaluating a different merge.
+    The rule names no integration shape: under `ff-only`, where no merge
+    ships, a change behind its target still lists `merged-tree-unevaluated`
+    beside `needs-rebase` in `check --json`, and `check` exits 11 for the
+    rebase before it would exit 14.
   - A snapshot records the context that framed the work. Each journal link
     names an artifact by filename with the body digest read at record time,
     and a `via` saying where it came from. With no `--journal-ref`, a
@@ -2420,7 +2424,7 @@ EXIT CODES
       branch that cannot be resolved.
     `arc check` exits 7 while a prerequisite change is unresolved.
     `arc check` exits 11 when the target conflicts or ff-only ancestry
-      requires rebasing.
+      requires rebasing; it shadows 14 when both are present.
     `arc check` exits 12 when a declared acceptance probe is not
       discriminating.
     `arc check` exits 13 while the change declares it is iterating.
