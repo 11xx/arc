@@ -715,3 +715,121 @@ fn withdrawing_a_map_keeps_what_it_retained() {
 
     assert_eq!(retained(&repo), vec![format!("{name} {old}")]);
 }
+
+/// Fail only the external history event's publication, leaving Git's ref
+/// transactions and the fixture's setup writes alone.
+fn history_publication_fault(repo: &Repo) -> PathBuf {
+    let source = repo.home.join("publication-fault.c");
+    let library = repo.home.join("publication-fault.so");
+    fs::write(
+        &source,
+        r#"#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <dirent.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+int fsync(int fd) {
+    static int (*original)(int);
+    if (!original) original = dlsym(RTLD_NEXT, "fsync");
+    char link[64], path[4096];
+    snprintf(link, sizeof(link), "/proc/self/fd/%d", fd);
+    ssize_t n = readlink(link, path, sizeof(path) - 1);
+    if (n < 0) return original(fd);
+    path[n] = 0;
+    const char *mode = getenv("HISTORY_PUBLICATION_FAULT");
+    if (!mode || !strstr(path, "/repository/events")) return original(fd);
+    struct stat info;
+    if (fstat(fd, &info)) return original(fd);
+    int before = !strcmp(mode, "absent");
+    if (before == S_ISDIR(info.st_mode)) return original(fd);
+    if (!strcmp(mode, "uncertain")) {
+        DIR *dir = opendir(path);
+        struct dirent *entry;
+        while (dir && (entry = readdir(dir))) {
+            if (!strstr(entry->d_name, ".json")) continue;
+            char event[8192];
+            snprintf(event, sizeof(event), "%s/%s", path, entry->d_name);
+            chmod(event, 0);
+        }
+        if (dir) closedir(dir);
+    }
+    errno = EIO;
+    return -1;
+}
+"#,
+    )
+    .unwrap();
+    assert!(Command::new("cc")
+        .args(["-shared", "-fPIC"])
+        .arg(&source)
+        .arg("-o")
+        .arg(&library)
+        .arg("-ldl")
+        .status()
+        .unwrap()
+        .success());
+    library
+}
+
+#[test]
+fn external_map_publication_failure_withdraws_only_confirmed_absent_retention() {
+    use std::os::unix::fs::PermissionsExt;
+    for mode in ["published", "uncertain", "absent"] {
+        let repo = repo_with_gates();
+        let (worktree, old) = approved_change(&repo, "alpha");
+        let change = only_change(&repo);
+        git(
+            &worktree,
+            &[
+                "commit",
+                "--amend",
+                "--no-edit",
+                "--date",
+                "2020-01-01T00:00:00Z",
+            ],
+        );
+        let new = repo.head(&worktree);
+        git(
+            &worktree,
+            &["update-ref", &format!("refs/arc/keep/{change}/ps-01"), &new],
+        );
+        let library = history_publication_fault(&repo);
+        let failed = repo
+            .arc(&repo.root)
+            .args([
+                "history",
+                "rewrite",
+                "--map",
+                "-",
+                "--reason",
+                "amended elsewhere",
+            ])
+            .write_stdin(format!("{old} {new}\n"))
+            .env("LD_PRELOAD", library)
+            .env("HISTORY_PUBLICATION_FAULT", mode)
+            .output()
+            .unwrap();
+        assert!(!failed.status.success(), "{mode}: {failed:?}");
+        assert!(
+            String::from_utf8_lossy(&failed.stderr).contains("Input/output error"),
+            "{failed:?}"
+        );
+        if mode == "absent" {
+            assert!(repository_events(&repo).is_empty());
+            assert!(retained(&repo).is_empty());
+        } else {
+            let events = repository_events(&repo);
+            assert_eq!(events.len(), 1, "{mode}");
+            fs::set_permissions(&events[0], fs::Permissions::from_mode(0o600)).unwrap();
+            let name = retention_ref(&change, "ps-01", &old);
+            assert_eq!(retained(&repo), vec![format!("{name} {old}")], "{mode}");
+            assert_eq!(recorded_retention(&repo)[&name], old.as_str());
+            collect_garbage(&worktree);
+            assert!(has_object(&worktree, &old), "{mode}");
+        }
+    }
+}

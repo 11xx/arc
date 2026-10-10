@@ -51,13 +51,28 @@ pub fn record_mapping(
         refs,
         retention.retain.clone(),
     )?;
-    // Held before the map is recorded, and released again if recording
-    // fails: a rewrite that did not happen must not leave refs saying it did.
+    // Retention precedes publication and is withdrawn only when the event
+    // is confirmed absent; an uncertain publication may already cite it.
     let (held, _) = crate::retention::creations(&ctx.cwd, &retention.retain)?;
     gitio::update_refs(&ctx.cwd, &held)?;
     if let Err(error) = store.append_repository_event(&event) {
-        let _ = gitio::update_refs(&ctx.cwd, &crate::retention::withdrawals(&held));
-        return Err(error);
+        match store.repository_event_is_published(&event) {
+            Ok(false) => {
+                gitio::update_refs(&ctx.cwd, &crate::retention::withdrawals(&held))
+                    .with_context(|| format!(
+                        "history rewrite publication failed ({error:#}); retention refs could not be withdrawn"
+                    ))?;
+                return Err(error.context("history rewrite event is absent; retention refs from this attempt were withdrawn"));
+            }
+            Ok(true) => return Err(error.context(format!(
+                "history rewrite event {} is published; retention refs are preserved",
+                event.event_id
+            ))),
+            Err(inspection) => return Err(error.context(format!(
+                "history rewrite event {} publication is uncertain ({inspection:#}); retention refs are preserved",
+                event.event_id
+            ))),
+        }
     }
     println!("history rewrite recorded: {count} revisions");
     for (name, commit) in &retention.retain {

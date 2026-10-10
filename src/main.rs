@@ -2913,7 +2913,9 @@ enum HistoryCmd {
     /// head or a verdict's revision that the map replaces and this repository
     /// still has under `refs/arc/retained/<change>/<subject>/<commit>`, named
     /// by the event's `retained` map; a cited commit already gone is named
-    /// and cannot be held
+    /// and cannot be held. An append error withdraws retention refs created
+    /// by that attempt only when publication is confirmed absent; a published
+    /// or uncertain event keeps them, and the error reports that state
     Rewrite {
         /// Commit map (`<old> <new>` per line, as git filter-repo writes), or
         /// '-' for stdin
