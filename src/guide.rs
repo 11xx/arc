@@ -2506,7 +2506,9 @@ FILES
                                          journal by path prefix; the longest
                                          matching prefix wins
     [journal] auto_log = true            begin, integrate, and close append a
-                                         journal log event
+                                         journal log event; a configuration
+                                         that cannot be loaded turns it off
+                                         and says why on stderr
     [identity] detect = true             an undeclared harness, session, and
                                          model are read from the session store
     [provenance] git_identity = "per-actor" | "shared"

@@ -15334,18 +15334,32 @@ fn append_located_event(
 }
 
 /// Best-effort lifecycle narration into the advisory journal. Does nothing
-/// unless `[journal] auto_log` is set. A write failure is a warning, never a
-/// propagated error: the authoritative ledger transition already succeeded.
+/// unless `[journal] auto_log` is set. A write failure, or a configuration
+/// that cannot be loaded, is a warning, never a propagated error: the
+/// authoritative ledger transition already succeeded.
 pub fn auto_log(ctx: &Ctx, topic: &str, message: &str) {
-    let enabled = config::load()
-        .map(|cfg| cfg.journal_auto_log)
-        .unwrap_or(false);
-    if !enabled || !valid_topic(topic) {
+    if !valid_topic(topic) {
         return;
+    }
+    match auto_log_enabled(config::load().map(|cfg| cfg.journal_auto_log)) {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(warning) => {
+            eprintln!("{warning}");
+            return;
+        }
     }
     if let Err(error) = try_auto_log(ctx, topic, message) {
         eprintln!("warning: journal auto-log failed: {error:#}");
     }
+}
+
+/// Whether `[journal] auto_log` is on, or the warning that says why it is
+/// off when the configuration that holds it could not be loaded.
+fn auto_log_enabled(setting: Result<bool>) -> std::result::Result<bool, String> {
+    setting.map_err(|error| {
+        format!("warning: journal auto-log is off: cannot load the arc configuration: {error:#}")
+    })
 }
 
 fn try_auto_log(ctx: &Ctx, topic: &str, message: &str) -> Result<()> {
@@ -15371,6 +15385,17 @@ fn change_annotation(changes: &[ChangeState], topic: &str, filename: &str) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_log_names_why_it_is_off_when_the_configuration_cannot_be_loaded() {
+        assert_eq!(auto_log_enabled(Ok(true)), Ok(true));
+        assert_eq!(auto_log_enabled(Ok(false)), Ok(false));
+        let failure = anyhow::anyhow!("malformed config.toml").context("cannot read the file");
+        assert_eq!(
+            auto_log_enabled(Err(failure)),
+            Err("warning: journal auto-log is off: cannot load the arc configuration: cannot read the file: malformed config.toml".to_string())
+        );
+    }
 
     #[test]
     fn transition_prefix_is_not_publication_evidence() {
