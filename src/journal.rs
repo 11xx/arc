@@ -551,7 +551,9 @@ pub enum JournalCmd {
     /// with the error on stderr and no report; a usage error exits 2.
     /// Question state and corrections follow event-log append order.
     /// Transition checks include complete successor publication evidence and
-    /// source retirement, with both hot and archived bodies considered.
+    /// source retirement, with both hot and archived bodies considered. Position
+    /// and evidence blocks are matched to their typed events for every artifact
+    /// kind in both storage tiers; either missing half is a problem.
     /// Records no events; ledger reads do not require a parseable append policy.
     Doctor {
         /// Emit arc-journal-open/1 JSON, including the pending recovery bucket
@@ -763,7 +765,8 @@ pub enum JournalCmd {
     /// position`, and replace a recorded field with `arc journal correct`. A
     /// consumed artifact refuses; file a successor. `show` prints the block,
     /// `filed` counts it per item, and it is recorded activity, so it keeps an
-    /// open item from going stale
+    /// open item from going stale. Evidence cannot be appended in cold storage;
+    /// use `journal unarchive` before appending
     Evidence {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
@@ -948,21 +951,21 @@ pub enum JournalCmd {
     /// Replace one field of one recorded entry without rewriting it. The entry
     /// stays in the artifact as it was filed and a `### Correction` block
     /// records the replacement; derived views read the corrected value.
-    /// `--target` names the entry: `artifact`, a position ID, a question ID,
-    /// or `answer:<question id>`. A consumed artifact accepts corrections — it
+    /// `--target` names the entry: `artifact`, a position ID, an evidence ID,
+    /// a question ID, or `answer:<question id>`. A consumed artifact accepts corrections — it
     /// is closed to new work, but a wrong record stays wrong
     Correct {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
-        /// The entry to correct: `artifact`, a position ID, a question ID, or
-        /// `answer:<question id>`
+        /// The entry to correct: `artifact`, a position ID, an evidence ID,
+        /// a question ID, or `answer:<question id>`
         #[arg(long)]
         target: String,
         /// The field to replace. Which fields exist depends on the target:
         /// `title` and, on a plan, `planners` on the artifact; `stance`,
         /// `option`, `ref`, `actor`, and `model` on a position; `option`,
         /// `actor`, and `model` on an answer; `actor` and `model` on a
-        /// question. A corrected actor, model or planner is held to what a
+        /// question or evidence block. A corrected actor, model or planner is held to what a
         /// write records: a placeholder or a session id model refuses. A
         /// model is checked against the target entry's session and the invoking
         /// session; an answer target uses its latest settlement. Headers and
@@ -981,13 +984,14 @@ pub enum JournalCmd {
     },
     /// Withdraw a recorded entry while leaving it visible. A retracted position
     /// leaves the stance tally and the branches argued under a question; a
-    /// retracted answer reopens the question it settled. The block stays in the
+    /// retracted answer reopens the question it settled. Retracted evidence is
+    /// marked withdrawn in `show --json`. The block stays in the
     /// artifact, because an argument withdrawn is a different record from an
     /// argument never made. A consumed artifact accepts retractions
     Retract {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
-        /// The entry to withdraw: a position ID or `answer:<question id>`
+        /// The entry to withdraw: a position ID, an evidence ID, or `answer:<question id>`
         #[arg(long)]
         target: String,
         /// Body source: a file path, or '-' for stdin (why it is withdrawn,
@@ -1133,7 +1137,11 @@ pub enum JournalCmd {
         /// Emit the versioned artifact metadata projection: the body, the
         /// planners credited with `planner_status` and its sources, and
         /// `planner_correction_event`, the amendment ID of the planner
-        /// correction in force. A correction that fails validation reads
+        /// correction in force. Positions and evidence carry their ID, heading,
+        /// body, recorded identity, corrected fields, and retraction status;
+        /// unmatched blocks have null recorded identity and detached events
+        /// have null heading and body. Corrections and retractions list typed
+        /// amendment events in log order. A correction that fails validation reads
         /// `planner_status: malformed` and credits no planner.
         #[arg(long)]
         json: bool,
@@ -3988,6 +3996,14 @@ fn amend_target_exists(
                         .any(|heading| &heading == id)
                 })
         }
+        AmendTarget::Evidence(id) => {
+            target.record(events, filename).is_some()
+                || body.is_some_and(|body| {
+                    artifact_entry_blocks(body)
+                        .iter()
+                        .any(|block| block.kind == "evidence" && block.id.as_deref() == Some(id))
+                })
+        }
         AmendTarget::Question(_) | AmendTarget::Answer(_) => {
             target.record(events, filename).is_some()
         }
@@ -4202,6 +4218,7 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
     inspect_transition_integrity(&dir, &cold, &hot_files, &events, &mut problems)?;
     inspect_fork_marker_paths(&dir, &hot_files, &mut problems)?;
     inspect_amendments(&dir, &events, &mut problems);
+    inspect_entry_blocks(&dir, &cold, &events, &mut problems)?;
 
     // A journal is addressed by the slugged path of its project. When that
     // path stops existing the journal becomes unreachable from anywhere, and
@@ -7139,7 +7156,7 @@ fn correct(
 ) -> Result<i32> {
     let Some(parsed) = AmendTarget::parse(target) else {
         bail!(
-            "{target:?} is not an entry to correct: pass `artifact`, a position ID, \
+            "{target:?} is not an entry to correct: pass `artifact`, a position ID, an evidence ID, \
              a question ID, or `answer:<question id>`"
         );
     };
@@ -7238,7 +7255,7 @@ fn correct(
 fn retract(ctx: &Ctx, filename: &str, target: &str, body_file: &str) -> Result<i32> {
     let Some(parsed) = AmendTarget::parse(target).filter(AmendTarget::retractable) else {
         bail!(
-            "{target:?} is not an entry to retract: pass a position ID or \
+            "{target:?} is not an entry to retract: pass a position ID, an evidence ID, or \
              `answer:<question id>`"
         );
     };
@@ -7998,7 +8015,7 @@ pub(crate) struct JournalEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     revision: Option<String>,
     /// What a `correction` or `retraction` acts on, within the artifact named
-    /// by `file`: `artifact`, a position ID, a question ID, or
+    /// by `file`: `artifact`, a position ID, an evidence ID, a question ID, or
     /// `answer:<question id>`. Both events are append-only amendments whose
     /// effect lives in derived views, so the entry they name is never
     /// rewritten and stays readable as it was filed.
@@ -8131,6 +8148,7 @@ enum AmendTarget {
     /// The artifact itself, rather than any entry inside it.
     Artifact,
     Position(String),
+    Evidence(String),
     Question(String),
     /// The settlement of the named question.
     Answer(String),
@@ -8147,6 +8165,9 @@ impl AmendTarget {
                     Self::Artifact => event.event == "note",
                     Self::Position(id) => {
                         event.event == "position" && event.position_id.as_deref() == Some(id)
+                    }
+                    Self::Evidence(id) => {
+                        event.event == "evidence" && event.evidence_id.as_deref() == Some(id)
                     }
                     Self::Question(id) => {
                         event.event == "question" && event.question_id.as_deref() == Some(id)
@@ -8168,6 +8189,9 @@ impl AmendTarget {
         if valid_question_id(value) {
             return Some(Self::Question(value.to_string()));
         }
+        if valid_evidence_id(value) {
+            return Some(Self::Evidence(value.to_string()));
+        }
         valid_position_id(value).then(|| Self::Position(value.to_string()))
     }
 
@@ -8180,16 +8204,19 @@ impl AmendTarget {
         match self {
             Self::Artifact => &["title", "planners"],
             Self::Position(_) => &["stance", "option", "actor", "model", "ref"],
-            Self::Question(_) => &["actor", "model"],
+            Self::Question(_) | Self::Evidence(_) => &["actor", "model"],
             Self::Answer(_) => &["option", "actor", "model"],
         }
     }
 
-    /// A retraction withdraws an argument or a settlement. An artifact is
+    /// A retraction withdraws an argument, evidence, or a settlement. An artifact is
     /// withdrawn by consuming it, and a question by answering it, so neither
     /// is a retraction target.
     fn retractable(&self) -> bool {
-        matches!(self, Self::Position(_) | Self::Answer(_))
+        matches!(
+            self,
+            Self::Position(_) | Self::Evidence(_) | Self::Answer(_)
+        )
     }
 }
 
@@ -13190,8 +13217,269 @@ fn list(ctx: &Ctx, kind: Option<String>, json: bool) -> Result<i32> {
     Ok(0)
 }
 
-/// Print one artifact's raw Markdown body: the read side of `note`. Resolves
-/// the hot journal dir first, then the cold sibling archive.
+/// A position or evidence section in the artifact's Markdown.
+struct ArtifactEntryBlock<'a> {
+    kind: &'static str,
+    id: Option<String>,
+    heading: &'a str,
+    body: &'a str,
+}
+
+fn entry_heading(line: &str) -> Option<(&'static str, Option<String>)> {
+    for (kind, heading, valid) in [
+        (
+            "position",
+            "### Position",
+            valid_position_id as fn(&str) -> bool,
+        ),
+        (
+            "evidence",
+            "### Evidence",
+            valid_evidence_id as fn(&str) -> bool,
+        ),
+    ] {
+        if let Some(rest) = line.trim_start().strip_prefix(heading) {
+            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                let id = rest.split_whitespace().next().filter(|id| valid(id));
+                return Some((kind, id.map(str::to_string)));
+            }
+        }
+    }
+    None
+}
+
+/// Fenced examples are prose, including headings with entry IDs.
+fn artifact_entry_blocks(body: &str) -> Vec<ArtifactEntryBlock<'_>> {
+    let mut blocks = Vec::new();
+    let mut open: Option<(&str, Option<String>, &str, usize)> = None;
+    let mut fence = None;
+    let mut offset = 0;
+    for line in body.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        let heading = entry_heading(line);
+        let start = offset;
+        offset += line.len();
+        match (fence, fence_marker(trimmed)) {
+            (None, Some((marker, run, _))) => {
+                fence = Some((marker, run));
+                continue;
+            }
+            (Some((marker, opened)), Some((closing, run, bare)))
+                if marker == closing && run >= opened && bare =>
+            {
+                fence = None;
+                continue;
+            }
+            (Some(_), _) => continue,
+            (None, None) => {}
+        }
+        let boundary = heading.is_some()
+            || [
+                "### Question",
+                "### Answer",
+                "### Correction",
+                "### Retraction",
+                "### Work checkpoint",
+            ]
+            .iter()
+            .any(|prefix| {
+                trimmed
+                    .strip_prefix(prefix)
+                    .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+            });
+        if boundary {
+            if let Some((kind, id, heading, content)) = open.take() {
+                blocks.push(ArtifactEntryBlock {
+                    kind,
+                    id,
+                    heading,
+                    body: body[content..start].trim(),
+                });
+            }
+        }
+        if let Some((kind, id)) = heading {
+            open = Some((kind, id, line.trim_end(), offset));
+        }
+    }
+    if let Some((kind, id, heading, content)) = open {
+        blocks.push(ArtifactEntryBlock {
+            kind,
+            id,
+            heading,
+            body: body[content..].trim(),
+        });
+    }
+    blocks
+}
+
+fn entry_id(event: &JournalEvent) -> Option<&str> {
+    match event.event.as_str() {
+        "position" => event.position_id.as_deref(),
+        "evidence" => event.evidence_id.as_deref(),
+        _ => None,
+    }
+}
+
+/// Match both halves of each entry across all artifact kinds and storage tiers.
+fn inspect_entry_blocks(
+    hot: &Path,
+    cold: &Path,
+    events: &[JournalEvent],
+    problems: &mut Vec<DoctorFinding>,
+) -> Result<()> {
+    let mut files = BTreeSet::new();
+    for dir in [hot, cold] {
+        if !dir.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let file = entry.file_name().to_string_lossy().into_owned();
+            if entry.file_type()?.is_file() && parse_artifact_name(&file).is_some() {
+                files.insert(file);
+            }
+        }
+    }
+    for event in events
+        .iter()
+        .filter(|event| event.known() && matches!(event.event.as_str(), "position" | "evidence"))
+    {
+        if let Some(file) = event.file.as_ref() {
+            files.insert(file.clone());
+        }
+    }
+    for file in files {
+        let body = artifact_body_path(hot, &file)
+            .map(std::fs::read_to_string)
+            .transpose()?;
+        let blocks = body
+            .as_deref()
+            .map(artifact_entry_blocks)
+            .unwrap_or_default();
+        let recorded: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.known()
+                    && event.file.as_deref() == Some(&file)
+                    && matches!(event.event.as_str(), "position" | "evidence")
+            })
+            .collect();
+        for block in &blocks {
+            if !recorded.iter().any(|event| {
+                event.event == block.kind
+                    && block.id.is_some()
+                    && entry_id(event) == block.id.as_deref()
+            }) {
+                problems.push(DoctorFinding {
+                    code: if block.kind == "evidence" {
+                        "unrecorded-evidence-block"
+                    } else {
+                        "unrecorded-position-block"
+                    },
+                    detail: format!("{file}: {}", block.id.as_deref().unwrap_or(block.heading)),
+                });
+            }
+        }
+        for event in recorded {
+            if !blocks.iter().any(|block| {
+                block.kind == event.event
+                    && block.id.is_some()
+                    && block.id.as_deref() == entry_id(event)
+            }) {
+                problems.push(DoctorFinding {
+                    code: if event.event == "evidence" {
+                        "detached-evidence-event"
+                    } else {
+                        "detached-position-event"
+                    },
+                    detail: format!(
+                        "{file}: {}",
+                        entry_id(event).unwrap_or("entry without an ID")
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn structured_entries(
+    kind: &str,
+    blocks: &[ArtifactEntryBlock<'_>],
+    events: &[JournalEvent],
+    file: &str,
+    amendments: &Amendments,
+) -> Vec<serde_json::Value> {
+    let recorded: Vec<_> = events
+        .iter()
+        .filter(|event| event.known() && event.event == kind && event.file.as_deref() == Some(file))
+        .collect();
+    let describe = |block: Option<&ArtifactEntryBlock<'_>>, event: Option<&JournalEvent>| {
+        let id = block
+            .and_then(|block| block.id.as_deref())
+            .or_else(|| event.and_then(entry_id));
+        let field = |name, value| id.map_or(value, |id| amendments.field(id, name, value));
+        let stance = block
+            .and_then(|block| block.body.lines().next())
+            .and_then(position_stance_value);
+        let mut value = serde_json::json!({
+            "id": id,
+            "heading": block.map(|block| block.heading),
+            "body": block.map(|block| block.body),
+            "recorded_by": event.map(|event| serde_json::json!({
+                "actor": event.actor,
+                "harness": event.harness(),
+                "session": event.session(),
+                "model": event.model,
+            })),
+            "actor": field("actor", event.and_then(|event| event.actor.as_deref())),
+            "model": field("model", event.and_then(|event| event.model.as_deref())),
+            "retracted": id.is_some_and(|id| amendments.is_retracted(id)),
+        });
+        if kind == "position" {
+            value["stance"] = serde_json::json!(field(
+                "stance",
+                stance.or_else(|| event.and_then(|event| event.stance.as_deref()))
+            ));
+            value["option"] = serde_json::json!(field(
+                "option",
+                event.and_then(|event| event.option.as_deref())
+            ));
+            value["ref"] = serde_json::json!(field(
+                "ref",
+                event.and_then(|event| event.reference.as_deref())
+            ));
+            value["question_id"] =
+                serde_json::json!(event.and_then(|event| event.question_id.as_deref()));
+        }
+        value
+    };
+    let mut entries: Vec<_> = blocks
+        .iter()
+        .filter(|block| block.kind == kind)
+        .map(|block| {
+            let event = recorded
+                .iter()
+                .find(|event| block.id.is_some() && block.id.as_deref() == entry_id(event));
+            describe(Some(block), event.copied())
+        })
+        .collect();
+    entries.extend(
+        recorded
+            .into_iter()
+            .filter(|event| {
+                !blocks.iter().any(|block| {
+                    block.kind == kind
+                        && block.id.is_some()
+                        && block.id.as_deref() == entry_id(event)
+                })
+            })
+            .map(|event| describe(None, Some(event))),
+    );
+    entries
+}
+
+/// Read one artifact from hot storage or its cold archive.
 fn show(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
     if parse_artifact_name(filename).is_none() {
         // Somebody holding a topic rather than a filename is one command from
@@ -13212,12 +13500,20 @@ fn show(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         let events = read_events(&hot)?;
         let metadata = planner_metadata(&body, &events, filename);
         let recorded = recorded_identity(&events, filename);
+        let amendments = Amendments::collect(&events, filename);
+        let blocks = artifact_entry_blocks(&body);
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "schema": "arc-journal-artifact/3",
                 "file": filename,
                 "body": body,
+                "positions": structured_entries("position", &blocks, &events, filename, &amendments),
+                "evidence": structured_entries("evidence", &blocks, &events, filename, &amendments),
+                "corrections": amendment_events(&events, filename).into_iter()
+                    .filter(|event| event.event == "correction").collect::<Vec<_>>(),
+                "retractions": amendment_events(&events, filename).into_iter()
+                    .filter(|event| event.event == "retraction").collect::<Vec<_>>(),
                 "planners": metadata.planners,
                 "planner_status": metadata.status,
                 "planner_correction_event": metadata.correction_event,

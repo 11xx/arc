@@ -9790,7 +9790,7 @@ fn journal_writes_without_a_subject_record_none() {
 #[test]
 fn a_journal_event_without_a_subject_loads_and_renders() {
     let repo = Repo::new();
-    let file = discussion_named(&repo, "legacy-subject", "# Debate\n\n## Positions\n");
+    let file = discussion_named(&repo, "legacy-subject", "# Debate\n\n## Positions\n\n### Position pos-legacy (tester, 2026-01-01T00:00:00Z)\n\nPosition: for\n");
     let dir = journal_dir(&repo);
     let event = serde_json::json!({
         "schema": "journal-events/1",
@@ -17071,4 +17071,282 @@ fn journal_doctor_and_question_state_follow_append_order() {
         questions["questions"].as_array().unwrap().is_empty(),
         "{questions}"
     );
+}
+
+#[test]
+fn journal_evidence_accepts_amendments_after_consumption_and_archive() {
+    let repo = Repo::new();
+    let file = evidence_artifact(&repo, "todo", "amended-evidence", "# Loader\n");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "evidence", &file, "--body-file", "-"])
+            .write_stdin("Cold cache finding.\n"),
+    );
+    let dir = journal_dir(&repo);
+    let event = journal_events(&dir)
+        .into_iter()
+        .find(|event| event["event"] == "evidence")
+        .unwrap();
+    let id = event["evidence_id"].as_str().unwrap();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "consume", &file, "--outcome", "done"]),
+    );
+    stdout(repo.arc(&repo.root).args(["journal", "archive", &file]));
+    for (field, value) in [("actor", "finder"), ("model", "model-x#high")] {
+        stdout(repo.arc(&repo.root).args([
+            "journal", "correct", &file, "--target", id, "--field", field, "--value", value,
+        ]));
+    }
+    repo.arc(&repo.root)
+        .args([
+            "journal", "correct", &file, "--target", id, "--field", "stance", "--value", "for",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("has no stance"));
+    stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "retract",
+                &file,
+                "--target",
+                id,
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("The cache was warm.\n"),
+    );
+    let shown = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "show", &file, "--json"]),
+    );
+    assert_eq!(shown["schema"], "arc-journal-artifact/3");
+    assert_eq!(shown["evidence"][0]["id"], id);
+    assert_eq!(shown["evidence"][0]["actor"], "finder");
+    assert_eq!(shown["evidence"][0]["model"], "model-x#high");
+    assert_eq!(shown["evidence"][0]["retracted"], true);
+    assert!(shown["evidence"][0]["body"]
+        .as_str()
+        .unwrap()
+        .contains("Cold cache finding."));
+    assert_eq!(shown["corrections"].as_array().unwrap().len(), 2);
+    assert_eq!(shown["retractions"].as_array().unwrap().len(), 1);
+    repo.arc(&repo.root)
+        .args(["journal", "doctor"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn journal_evidence_show_lists_positions_and_unrecorded_blocks() {
+    let repo = Repo::new();
+    let file = evidence_artifact(&repo, "todo", "structured-entries", "# Loader\n");
+    stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "position",
+                &file,
+                "--stance",
+                "for",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("Reproduce first.\n"),
+    );
+    let path = journal_dir(&repo).join(&file);
+    let mut body = fs::read_to_string(&path).unwrap();
+    body.push_str("\n---\n\n### Evidence evd-manual\n\nHandwritten finding.\n\n```md\n### Evidence (example)\n```\n");
+    fs::write(&path, body).unwrap();
+    let shown = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "show", &file, "--json"]),
+    );
+    assert_eq!(shown["positions"].as_array().unwrap().len(), 1);
+    assert_eq!(shown["positions"][0]["stance"], "for");
+    assert_eq!(shown["positions"][0]["recorded_by"]["actor"], "tester");
+    assert_eq!(shown["evidence"].as_array().unwrap().len(), 1);
+    assert_eq!(shown["evidence"][0]["id"], "evd-manual");
+    assert!(shown["evidence"][0]["recorded_by"].is_null());
+    assert!(shown["corrections"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn journal_evidence_doctor_reconciles_blocks_and_events_in_every_storage_tier() {
+    for kind in ["todo", "discussion"] {
+        for archived in [false, true] {
+            for entry in ["evidence", "position"] {
+                let repo = Repo::new();
+                let file = evidence_artifact(&repo, kind, "entry-pairing", "# Loader\n");
+                stdout(
+                    repo.arc(&repo.root)
+                        .args(["journal", entry, &file, "--body-file", "-"])
+                        .write_stdin("A finding.\n"),
+                );
+                let dir = journal_dir(&repo);
+                let recorded = journal_events(&dir)
+                    .into_iter()
+                    .find(|event| event["event"] == entry)
+                    .unwrap();
+                let id = recorded[format!("{entry}_id")].as_str().unwrap();
+                if archived {
+                    if kind == "discussion" {
+                        stdout(repo.arc(&repo.root).args([
+                            "journal",
+                            "archive",
+                            &file,
+                            "--unresolved",
+                            "--note",
+                            "Waiting",
+                        ]));
+                    } else {
+                        stdout(repo.arc(&repo.root).args([
+                            "journal",
+                            "consume",
+                            &file,
+                            "--outcome",
+                            "done",
+                        ]));
+                        stdout(repo.arc(&repo.root).args(["journal", "archive", &file]));
+                    }
+                }
+                let storage = if archived {
+                    PathBuf::from(
+                        stdout(repo.arc(&repo.root).args(["journal", "dir", "--archive"])).trim(),
+                    )
+                } else {
+                    dir.clone()
+                };
+                let path = storage.join(&file);
+                let before = fs::read_to_string(&path).unwrap();
+                let heading = if entry == "evidence" {
+                    "Evidence"
+                } else {
+                    "Position"
+                };
+                fs::write(&path, before.replace(id, "missing-id")).unwrap();
+                let problems = doctor_findings(&repo, "problems");
+                for code in [
+                    format!("unrecorded-{entry}-block"),
+                    format!("detached-{entry}-event"),
+                ] {
+                    assert!(
+                        problems
+                            .iter()
+                            .any(|finding| finding.starts_with(&code) && finding.contains(&file)),
+                        "{problems:?}"
+                    );
+                }
+                fs::write(&path, before).unwrap();
+                repo.arc(&repo.root)
+                    .args(["journal", "doctor"])
+                    .assert()
+                    .success();
+                let log = fs::read_to_string(dir.join("events.jsonl")).unwrap();
+                fs::write(
+                    dir.join("events.jsonl"),
+                    log.lines()
+                        .filter(|line| {
+                            let event: serde_json::Value = serde_json::from_str(line).unwrap();
+                            event["event"] != entry
+                        })
+                        .map(|line| format!("{line}\n"))
+                        .collect::<String>(),
+                )
+                .unwrap();
+                let problems = doctor_findings(&repo, "problems");
+                assert!(
+                    problems.iter().any(|finding| finding
+                        .starts_with(&format!("unrecorded-{entry}-block"))
+                        && finding.contains(id)),
+                    "{heading}: {problems:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn journal_evidence_archived_limit_is_documented_and_refused() {
+    let repo = Repo::new();
+    let file = evidence_artifact(&repo, "discussion", "cold-evidence", "# Loader\n");
+    stdout(repo.arc(&repo.root).args([
+        "journal",
+        "archive",
+        &file,
+        "--unresolved",
+        "--note",
+        "Waiting",
+    ]));
+    repo.arc(&repo.root)
+        .args(["journal", "evidence", &file, "--body-file", "-"])
+        .assert()
+        .failure();
+    let help = stdout(repo.arc(&repo.root).args(["journal", "evidence", "--help"]));
+    assert!(
+        help.contains("cold storage") && help.contains("unarchive"),
+        "{help}"
+    );
+    let guide = stdout(&mut repo.arc(&repo.root));
+    assert!(
+        guide.contains("Evidence cannot be appended in cold storage"),
+        "missing evidence limit"
+    );
+}
+
+#[test]
+fn journal_evidence_show_preserves_body_sections_and_reports_detached_events() {
+    let repo = Repo::new();
+    let file = evidence_artifact(&repo, "todo", "evidence-sections", "# Loader\n");
+    let finding = "First finding.\n\n---\n\n## Details\n\nSecond finding.\n";
+    stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "evidence", &file, "--body-file", "-"])
+            .write_stdin(finding),
+    );
+    let event = journal_events(&journal_dir(&repo))
+        .into_iter()
+        .find(|event| event["event"] == "evidence")
+        .unwrap();
+    let id = event["evidence_id"].as_str().unwrap();
+    stdout(repo.arc(&repo.root).args([
+        "journal", "correct", &file, "--target", id, "--field", "actor", "--value", "finder",
+    ]));
+    let shown = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "show", &file, "--json"]),
+    );
+    assert_eq!(shown["evidence"][0]["body"], finding.trim());
+    fs::write(journal_dir(&repo).join(&file), "# Loader\n").unwrap();
+    let shown = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "show", &file, "--json"]),
+    );
+    assert_eq!(shown["evidence"][0]["id"], id);
+    assert!(shown["evidence"][0]["body"].is_null());
+    assert!(shown["evidence"][0]["heading"].is_null());
+    assert_eq!(shown["evidence"][0]["actor"], "finder");
+}
+
+#[test]
+fn journal_evidence_doctor_and_json_ignore_fenced_entry_examples() {
+    let repo = Repo::new();
+    let file = evidence_artifact(&repo, "todo", "quoted-entries", "# Loader\n");
+    for fence in ["```md", "~~~md"] {
+        let closing = &fence[..3];
+        stdout(repo.arc(&repo.root).args(["journal", "evidence", &file, "--body-file", "-"])
+            .write_stdin(format!("Example:\n\n{fence}\n### Evidence evd-example\n\n### Position pos-example\nPosition: for\n{closing}\n")));
+    }
+    repo.arc(&repo.root)
+        .args(["journal", "doctor"])
+        .assert()
+        .success();
+    let shown = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "show", &file, "--json"]),
+    );
+    assert_eq!(shown["evidence"].as_array().unwrap().len(), 2);
+    assert!(shown["positions"].as_array().unwrap().is_empty());
 }

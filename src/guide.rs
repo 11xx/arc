@@ -354,6 +354,8 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          discussion with `journal position`, and replace a
                          recorded field with `journal correct`. A consumed
                          item is closed: file a successor.
+                         Evidence cannot be appended in cold storage; use
+                         `journal unarchive` before appending.
   arc journal verified <file> [--note <text>]
                          Record a source check at the head of the checkout it
                          was made in: the project anchor, or a fork's own
@@ -482,7 +484,19 @@ SETTLE A QUESTION (before it is work)
   arc journal correct <file> --target <t> --field <f> --value <v> [--note]
                          Model corrections are checked against the target's
                          recorded session and the invoking session. An answer
-                         target names its latest settlement.
+                         target names its latest settlement. Evidence IDs
+                         accept actor and model corrections; retraction marks
+                         their evidence withdrawn in `journal show --json`.
+  arc journal show <file> --json
+                         Positions and evidence list IDs, headings, bodies,
+                         recorded identities, corrected fields, and withdrawal
+                         status. Unrecorded blocks have null recorded identity;
+                         detached events have null heading and body. Corrections
+                         and retractions list typed events in log order.
+  arc journal doctor
+                         Matches position and evidence blocks with typed events
+                         for every artifact kind in hot and cold storage. Either
+                         missing half is a problem.
   arc journal retract <file> --target <t> --body-file -
   arc journal reattribute <file> --set-actor <a> --set-harness <h>
     --set-session <s> --set-model <m> [--dry-run]
