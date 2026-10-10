@@ -17,12 +17,19 @@ pub(crate) struct Repo {
 
 impl Repo {
     pub(crate) fn new() -> Repo {
+        Self::with_object_format("sha1")
+    }
+
+    pub(crate) fn with_object_format(format: &str) -> Repo {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("repo");
         let home = tmp.path().join("home");
         fs::create_dir_all(&root).unwrap();
         fs::create_dir_all(&home).unwrap();
-        git(&root, &["init", "-b", "master"]);
+        git(
+            &root,
+            &["init", "-b", "master", &format!("--object-format={format}")],
+        );
         git(&root, &["config", "user.name", "Tester"]);
         git(&root, &["config", "user.email", "tester@example.invalid"]);
         git(&root, &["config", "commit.gpgsign", "false"]);

@@ -1994,10 +1994,12 @@ HISTORY REWRITES
   with them on resume, and named by the event's `retained` map; `--dry-run`
   lists them. `arc history rewrite --map` moves no refs: it holds each cited
   commit the map replaces that this repository still has, and names each it
-  cannot. On an append error, retention refs created by the attempt are
+  cannot. Old revisions may abbreviate cited SHA-1 or SHA-256 commits from
+  seven characters up to their full width; retention holds the full commit.
+  On an append error, retention refs created by the attempt are
   withdrawn only when publication is confirmed absent; published or uncertain
-  events keep them, and the error names that state. `arc doctor` reports a retention ref whose object is gone as the
-  problem `retained-object-missing`, and a cited commit no ref reaches as the
+  events keep them, and the error names that state. `arc doctor` reports a
+  retention ref whose object is gone as the problem `retained-object-missing`, and a cited commit no ref reaches as the
   advice `unretained-commit`, naming the `git update-ref` that holds it.
   If Git cannot complete the reachability walk, the report retains collected
   findings and names the problem `retention-reachability-failed` with the error.

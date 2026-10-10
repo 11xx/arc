@@ -146,13 +146,13 @@ fn replaced_by(mapping: &BTreeMap<String, Option<String>>) -> impl Fn(&str) -> b
     let abbreviated: Vec<&str> = mapping
         .keys()
         .map(String::as_str)
-        .filter(|key| key.len() < 40)
+        .filter(|key| key.len() >= crate::rewrite::ABBREVIATION_FLOOR)
         .collect();
     move |commit| {
         mapping.contains_key(commit)
-            || abbreviated.iter().any(|key| {
-                key.len() >= crate::rewrite::ABBREVIATION_FLOOR && commit.starts_with(key)
-            })
+            || abbreviated
+                .iter()
+                .any(|key| key.len() < commit.len() && commit.starts_with(key))
     }
 }
 
@@ -224,6 +224,19 @@ mod tests {
         assert!(replaced_by(&long)(&commit));
         let short = map(&[&commit[..6]]);
         assert!(!replaced_by(&short)(&commit));
+    }
+
+    #[test]
+    fn sha256_abbreviations_match_the_cited_commit_width() {
+        let commit = "a".repeat(64);
+        for width in [7, 8, 39, 40, 48, 63, 64] {
+            assert!(
+                replaced_by(&map(&[&commit[..width]]))(&commit),
+                "width {width}"
+            );
+        }
+        assert!(!replaced_by(&map(&[&commit[..6]]))(&commit));
+        assert!(!replaced_by(&map(&[&commit[..48]]))(&"a".repeat(40)));
     }
 
     #[test]

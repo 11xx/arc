@@ -2918,7 +2918,9 @@ enum HistoryCmd {
     /// or uncertain event keeps them, and the error reports that state
     Rewrite {
         /// Commit map (`<old> <new>` per line, as git filter-repo writes), or
-        /// '-' for stdin
+        /// '-' for stdin. An old revision may abbreviate a cited SHA-1 or
+        /// SHA-256 commit from seven characters up to its full width;
+        /// retention holds the full cited commit
         #[arg(long)]
         map: String,
         /// Why the history was rewritten

@@ -833,3 +833,43 @@ fn external_map_publication_failure_withdraws_only_confirmed_absent_retention() 
         }
     }
 }
+
+#[test]
+fn a_sha256_external_map_abbreviation_retains_the_full_cited_commit() {
+    let repo = Repo::with_object_format("sha256");
+    let (change, worktree, old) = change_with_patchset(&repo, "alpha");
+    assert_eq!(old.len(), 64);
+    git(
+        &worktree,
+        &[
+            "commit",
+            "--amend",
+            "--no-edit",
+            "--date",
+            "2020-01-01T00:00:00Z",
+        ],
+    );
+    let new = repo.head(&worktree);
+    git(
+        &worktree,
+        &["update-ref", &format!("refs/arc/keep/{change}/ps-01"), &new],
+    );
+    repo.arc(&repo.root)
+        .args([
+            "history",
+            "rewrite",
+            "--map",
+            "-",
+            "--reason",
+            "amended elsewhere",
+        ])
+        .write_stdin(format!("{} {new}\n", &old[..48]))
+        .assert()
+        .success();
+    assert!(stdout(repo.arc(&repo.root).args(["history", "resolve", &old])).contains(&new));
+    let name = retention_ref(&change, "ps-01", &old);
+    assert_eq!(retained(&repo), vec![format!("{name} {old}")]);
+    assert_eq!(recorded_retention(&repo)[&name], old.as_str());
+    collect_garbage(&worktree);
+    assert!(has_object(&worktree, &old));
+}
