@@ -12,6 +12,7 @@ mod coordinate;
 mod declarations;
 mod explain;
 mod forge;
+mod forge_observation;
 mod gates;
 mod gitio;
 mod guide;
@@ -2352,7 +2353,9 @@ enum Cmd {
         #[command(subcommand)]
         cmd: PolicyCmd,
     },
-    /// Record and validate observed forge (hosted-PR) facts
+    /// Record local forge facts without contacting providers. Typed observation
+    /// admission preserves coverage, acquisition time and generation references;
+    /// legacy flag forms assert unretained facts with unknown acquisition time.
     Forge {
         #[command(subcommand)]
         cmd: ForgeCmd,
@@ -2943,7 +2946,21 @@ enum HooksCmd {
 
 #[derive(Subcommand)]
 enum ForgeCmd {
-    /// Declare the explicit projection tuple and policy for a change
+    /// Admit an adapter arc-forge-observation/1 file, including failed or
+    /// truncated reads. Records references only, never fetches bytes or
+    /// changes readiness. Retries of identical read IDs return the receipt.
+    Observe {
+        /// Change whose append-only ledger receives the read
+        change: String,
+        /// Local arc-forge-observation/1 JSON document
+        #[arg(long)]
+        file: String,
+        /// Emit arc-forge-receipt/1 metadata without response bodies
+        #[arg(long)]
+        json: bool,
+    },
+    /// Declare the explicit projection tuple and policy for a change.
+    /// Reads no provider and records no acquisition or retained content.
     Declare {
         /// Change the projection is declared for
         change: String,
@@ -2969,54 +2986,79 @@ enum ForgeCmd {
     /// Record the provider-observed PR tuple (validated, fail-closed).
     /// Observed SHAs are preserved; local rewrite successors are separate views.
     Link {
+        /// Recorded observation event or read ID; explicit flags must agree.
+        /// Without it, values are unretained assertions with unknown read time.
+        #[arg(long)]
+        observation: Option<String>,
+        /// Emit an arc-forge-receipt/1 document
+        #[arg(long)]
+        json: bool,
         /// Change the pull request was opened for
         change: String,
         /// Pull request number as the forge assigned it
-        #[arg(long)]
-        pr: u64,
+        #[arg(long, required_unless_present = "observation")]
+        pr: Option<u64>,
         /// Canonical URL of the pull request
-        #[arg(long)]
-        url: String,
+        #[arg(long, required_unless_present = "observation")]
+        url: Option<String>,
         /// Repository it merges into, as observed, in owner/name form
-        #[arg(long = "base-repo")]
-        base_repo: String,
+        #[arg(long = "base-repo", required_unless_present = "observation")]
+        base_repo: Option<String>,
         /// Branch it merges into, as observed
-        #[arg(long = "base-ref")]
-        base_ref: String,
+        #[arg(long = "base-ref", required_unless_present = "observation")]
+        base_ref: Option<String>,
         /// Repository it was opened from, as observed, in owner/name form
-        #[arg(long = "head-repo")]
-        head_repo: String,
+        #[arg(long = "head-repo", required_unless_present = "observation")]
+        head_repo: Option<String>,
         /// Branch it was opened from, as observed
-        #[arg(long = "head-ref")]
-        head_ref: String,
+        #[arg(long = "head-ref", required_unless_present = "observation")]
+        head_ref: Option<String>,
         /// Exact commit at the pull request head when it was read
-        #[arg(long = "head-sha")]
-        head_sha: String,
+        #[arg(long = "head-sha", required_unless_present = "observation")]
+        head_sha: Option<String>,
     },
     /// Record the provider-observed hosted-check rollup at an exact PR head.
     /// The current link binds its PR identity. Local rewrites never establish
     /// hosted checks at a successor; a provider readback supplies that evidence.
     Checks {
+        /// Recorded observation event or read ID; explicit flags must agree.
+        /// Without it, values are unretained assertions with unknown read time.
+        #[arg(long)]
+        observation: Option<String>,
+        /// Emit an arc-forge-receipt/1 document
+        #[arg(long)]
+        json: bool,
         /// Change whose hosted checks were read
         change: String,
         /// Exact commit the rollup was read at
-        #[arg(long = "pr-head")]
-        pr_head: String,
+        #[arg(long = "pr-head", required_unless_present = "observation")]
+        pr_head: Option<String>,
         /// The rollup the forge reported
-        #[arg(long, value_enum)]
-        state: forge::ForgeCheckState,
-        /// Free-text detail recorded with the rollup, such as a failing job
+        #[arg(long, value_enum, required_unless_present = "observation")]
+        state: Option<forge::ForgeCheckState>,
+        /// Current forge-link event the checks were read at
+        #[arg(long)]
+        link: Option<String>,
+        /// Free-text detail for a legacy assertion. Typed reads retain raw
+        /// prose through content references and refuse an unbound detail.
         #[arg(long)]
         detail: Option<String>,
     },
     /// Record the provider-observed PR lifecycle state.
     /// The head is the current link's observed head, never its local successor.
     PrState {
+        /// Recorded observation event or read ID; explicit flags must agree.
+        /// Without it, values are unretained assertions with unknown read time.
+        #[arg(long)]
+        observation: Option<String>,
+        /// Emit an arc-forge-receipt/1 document
+        #[arg(long)]
+        json: bool,
         /// Change whose pull request state was read
         change: String,
         /// The lifecycle state the forge reported
-        #[arg(long, value_enum)]
-        state: forge::ForgePrState,
+        #[arg(long, value_enum, required_unless_present = "observation")]
+        state: Option<forge::ForgePrState>,
         /// Provider-reported merge SHA; required when state is merged
         #[arg(long = "merge-sha")]
         merge_sha: Option<String>,
@@ -5347,6 +5389,10 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             Ok(0)
         }
         Cmd::Forge { cmd } => match cmd {
+            ForgeCmd::Observe { change, file, json } => {
+                commands::forge_observe(&ctx, &change, &file, json)?;
+                Ok(0)
+            }
             ForgeCmd::Declare {
                 change,
                 host,
@@ -5362,6 +5408,8 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 Ok(0)
             }
             ForgeCmd::Link {
+                observation,
+                json,
                 change,
                 pr,
                 url,
@@ -5374,6 +5422,8 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 &ctx,
                 &change,
                 commands::ForgeLinkArgs {
+                    observation,
+                    json,
                     pr_number: pr,
                     url,
                     base_repo,
@@ -5384,21 +5434,37 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 },
             ),
             ForgeCmd::Checks {
+                observation,
+                json,
+                link,
                 change,
                 pr_head,
                 state,
                 detail,
             } => {
-                commands::forge_checks(&ctx, &change, pr_head, state, detail)?;
+                commands::forge_checks(
+                    &ctx,
+                    &change,
+                    commands::ForgeChecksArgs {
+                        pr_head,
+                        state,
+                        detail,
+                        observation,
+                        link,
+                        json,
+                    },
+                )?;
                 Ok(0)
             }
             ForgeCmd::PrState {
+                observation,
+                json,
                 change,
                 state,
                 merge_sha,
                 link,
             } => {
-                commands::forge_pr_state(&ctx, &change, state, merge_sha, link)?;
+                commands::forge_pr_state(&ctx, &change, state, merge_sha, link, observation, json)?;
                 Ok(0)
             }
         },
@@ -5889,6 +5955,7 @@ mod tests {
             "run dispatch",
             "run end",
             "policy write",
+            "forge observe",
             "forge declare",
             "forge link",
             "forge checks",

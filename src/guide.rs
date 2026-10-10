@@ -1644,6 +1644,49 @@ PROFILES (--profile, default local)
   Never keep an undersized profile just because the change started there.
 
 FORGE
+  forge observe CHANGE --file frontier.json [--json] admits an adapter's
+  arc-forge-observation/1 document. Admission never changes readiness. A valid
+  failed or truncated read succeeds; invalid schemas, digests, references and
+  generation relationships refuse before append. Identical read_id retries
+  return the original event with already-recorded; conflicting content refuses.
+  arc-forge-receipt/1 carries command, change, event/observation/read IDs,
+  generation IDs, coverage, outcome and reference availability diagnostics.
+
+  Observations carry adapter identity, a provider/host/repository/PR snapshot,
+  nullable full observed head/base SHAs, adapter read_at, optional provider
+  update/event coordinates, responses, items, generations and an optional
+  previous_observation. Arc's created_at and collector identity are independent.
+  Missing revisions on failed reads stay absent. Each response and item names
+  its SHA-256, byte length and RetainedContentRef: provider, opaque handle,
+  sha256, byte_length, media_type and reported capture (pinned or unpinned).
+  References are claims; availability is unmaterialized. Arc never resolves
+  handles or verifies content bytes through a provider.
+
+  coverage has overall and collections entries. Each has state (complete,
+  truncated or failed), scope, optional frontier and failure_reason (required
+  on failure). Complete describes a finite read. A partial frontier cannot
+  establish absence, zero checks or a passed rollup. A passed rollup requires
+  positive count and complete checks coverage. Item facts are comment,
+  pull-request (state and merge_sha), checks (state and count), or absence
+  (collection). Raw bodies belong to referenced content, not typed facts.
+
+  Every item names a generation_id; generations carry kind, node_id, sha256
+  and optional predecessor. Unchanged bytes reuse that generation in a distinct
+  read. Changed bytes name a recorded predecessor on the same provider item.
+  Reversion creates another generation; concurrent predecessor branches remain
+  visible. Arrival order establishes no provider causality. show/status JSON
+  exposes every observation, including historical generations and digests.
+  export/import preserves observation event documents.
+
+  link/checks/pr-state accept --observation EVENT-OR-READ-ID and --json.
+  Values come from that fact; explicit flags must agree. --detail is valid
+  only on legacy check assertions; typed reads retain prose through references.
+  checks and pr-state
+  accept --link and require the current PR identity and raw observed head.
+  link still requires a matching declaration and policy. Legacy flag forms
+  render as unretained assertions with unknown acquisition time. Checks with
+  no link have unknown PR identity. Observed heads never come from rewrites.
+
   Arc records provider assertions through forge declare/link/checks/pr-state;
   it never contacts a provider. Link head, checks PR head, lifecycle PR head
   and merge SHA retain their provider-observed values. Views pair each
@@ -2691,6 +2734,10 @@ RULES THAT CHANGE WHAT YOU DO
     is a lead's. An unset role is `lead`, with full access.
 
 EXIT CODES
+  forge observe exits 0 for admitted complete, truncated or failed reads and
+  identical retries. Invalid input or conflicting read IDs exit 1; CLI usage
+  errors exit 2. forge link policy/tuple/host mismatches exit 10.
+
   `arc check` is the integration preflight and its code names the blocker.
   `integrate` and `rebase` refuse in the same vocabulary, and a queue exits
   with the code of the member that stopped it, so one table reads the same
@@ -2997,6 +3044,8 @@ SCHEMAS
   Commitments, files:
     `arc-bundle/6`                   arc export / arc import
     `arc-bundle-objects/1`           arc export --objects-json
+    `arc-forge-observation/1`        arc forge observe --file
+    `arc-forge-receipt/1`            arc forge observe|link|checks|pr-state --json
     `arc-replica-bundle/3`           arc replica export / import
     `arc-replica-event/3`            one event inside an arc-replica-bundle
     `arc-journal-bundle/2`           arc journal export / import

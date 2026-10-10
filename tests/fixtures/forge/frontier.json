@@ -1,0 +1,90 @@
+{
+  "schema": "arc-forge-observation/1",
+  "read_id": "read-1",
+  "adapter": "synthetic/1",
+  "provider_identity": {
+    "provider": "example",
+    "host": "forge.example.invalid",
+    "repository": "sample/project",
+    "repository_id": null,
+    "pr_number": 1,
+    "native_id": null,
+    "url": "https://forge.example.invalid/sample/project/pull/1",
+    "base_repo": "sample/project",
+    "base_ref": "main",
+    "head_repo": "sample/project",
+    "head_ref": "topic"
+  },
+  "observed_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "observed_base_sha": "cccccccccccccccccccccccccccccccccccccccc",
+  "read_at": "2026-01-01T00:00:00Z",
+  "provider_updated_at": null,
+  "provider_event_id": null,
+  "coverage": {
+    "overall": {
+      "state": "complete",
+      "scope": "pull request snapshot",
+      "frontier": null,
+      "failure_reason": null
+    },
+    "collections": {
+      "comments": {
+        "state": "complete",
+        "scope": "all comments",
+        "frontier": null,
+        "failure_reason": null
+      },
+      "checks": {
+        "state": "complete",
+        "scope": "all checks",
+        "frontier": null,
+        "failure_reason": null
+      }
+    }
+  },
+  "responses": [
+    {
+      "response_id": "page-1",
+      "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "byte_length": 2,
+      "content": {
+        "provider": "synthetic",
+        "handle": "opaque-page",
+        "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "byte_length": 2,
+        "media_type": "application/json",
+        "capture": "unpinned"
+      }
+    }
+  ],
+  "items": [
+    {
+      "kind": "comment",
+      "node_id": "comment-1",
+      "generation_id": "g1",
+      "sha256": "a7937b64b8caa58f03721bb6bacf5c78cb235febe0e70b1b84cd99541461a08e",
+      "byte_length": 5,
+      "content": {
+        "provider": "synthetic",
+        "handle": "opaque-comment",
+        "sha256": "a7937b64b8caa58f03721bb6bacf5c78cb235febe0e70b1b84cd99541461a08e",
+        "byte_length": 5,
+        "media_type": "text/plain",
+        "capture": "pinned"
+      },
+      "facts": {
+        "kind": "comment"
+      }
+    }
+  ],
+  "generations": [
+    {
+      "generation_id": "g1",
+      "predecessor": null,
+      "kind": "comment",
+      "node_id": "comment-1",
+      "sha256": "a7937b64b8caa58f03721bb6bacf5c78cb235febe0e70b1b84cd99541461a08e"
+    }
+  ],
+  "previous_observation": null
+}

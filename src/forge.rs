@@ -132,6 +132,9 @@ impl ForgeProjectionRecord {
 /// Latest-wins observed link, reduced from `forge-link`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ForgeLinkRecord {
+    pub observation: Option<String>,
+    pub acquisition: &'static str,
+    pub read_at: Option<chrono::DateTime<chrono::Utc>>,
     /// The `forge-link` event that recorded this link. Lifecycle facts bind
     /// to it, so relinking cannot inherit the previous PR's state.
     pub event_id: String,
@@ -167,6 +170,9 @@ impl ForgeLinkRecord {
 /// Latest-wins observed check rollup, reduced from `forge-checks`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ForgeChecksRecord {
+    pub observation: Option<String>,
+    pub acquisition: &'static str,
+    pub read_at: Option<chrono::DateTime<chrono::Utc>>,
     pub observed_pr_head: String,
     pub resolved_pr_head: Option<String>,
     /// The link present when the rollup was recorded; absent without a link.
@@ -180,6 +186,9 @@ pub struct ForgeChecksRecord {
 /// fact about a superseded PR is history, not the current state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ForgePrStateRecord {
+    pub observation: Option<String>,
+    pub acquisition: &'static str,
+    pub read_at: Option<chrono::DateTime<chrono::Utc>>,
     pub state: ForgePrState,
     pub observed_merge_sha: Option<String>,
     pub resolved_merge_sha: Option<String>,
@@ -200,6 +209,7 @@ pub struct ForgePrStateRecord {
 /// event kind. Absent everywhere until the first forge event.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ForgeState {
+    pub observations: Vec<crate::forge_observation::ObservationRecord>,
     pub projection: Option<ForgeProjectionRecord>,
     pub link: Option<ForgeLinkRecord>,
     pub checks: Option<ForgeChecksRecord>,
@@ -298,7 +308,8 @@ impl ForgeState {
 
     /// Whether this change has recorded any forge fact at all.
     pub fn is_empty(&self) -> bool {
-        self.projection.is_none()
+        self.observations.is_empty()
+            && self.projection.is_none()
             && self.link.is_none()
             && self.checks.is_none()
             && self.pr_states.is_empty()
@@ -416,6 +427,9 @@ pub struct ForgeProjectionView {
 /// Serialized view of the observed link.
 #[derive(Debug, Clone, Serialize)]
 pub struct ForgeLinkView {
+    pub observation: Option<String>,
+    pub acquisition: &'static str,
+    pub read_at: Option<chrono::DateTime<chrono::Utc>>,
     pub pr_number: u64,
     pub url: String,
     pub base_repo: String,
@@ -429,6 +443,9 @@ pub struct ForgeLinkView {
 /// Serialized view of the observed PR lifecycle.
 #[derive(Debug, Clone, Serialize)]
 pub struct ForgePrStateView {
+    pub observation: Option<String>,
+    pub acquisition: &'static str,
+    pub read_at: Option<chrono::DateTime<chrono::Utc>>,
     pub state: String,
     pub observed_pr_head: Option<String>,
     pub resolved_pr_head: Option<String>,
@@ -448,6 +465,7 @@ pub struct AwaitingUser {
 /// projection/link/checks/pr-state facts joined with the current head.
 #[derive(Debug, Clone, Serialize)]
 pub struct ForgeStatus {
+    pub observations: Vec<crate::forge_observation::ObservationRecord>,
     /// undeclared | declared | linked
     pub projection: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -506,6 +524,9 @@ pub fn build_status(
     });
 
     let link = forge.link.as_ref().map(|l| ForgeLinkView {
+        observation: l.observation.clone(),
+        acquisition: l.acquisition,
+        read_at: l.read_at,
         pr_number: l.pr_number,
         url: l.url.clone(),
         base_repo: l.base_repo.clone(),
@@ -554,6 +575,9 @@ pub fn build_status(
     // current link and head leaves the state unknown instead.
     let current_pr_state = forge.current_pr_state();
     let pr_state = current_pr_state.map(|p| ForgePrStateView {
+        observation: p.observation.clone(),
+        acquisition: p.acquisition,
+        read_at: p.read_at,
         state: p.state.as_str().to_string(),
         observed_merge_sha: p.observed_merge_sha.clone(),
         resolved_merge_sha: p.resolved_merge_sha.clone(),
@@ -596,6 +620,7 @@ pub fn build_status(
     };
 
     Some(ForgeStatus {
+        observations: forge.observations.clone(),
         projection,
         declared,
         link,
@@ -633,6 +658,9 @@ mod tests {
 
     fn link(event_id: &str, pr: u64, head: &str) -> ForgeLinkRecord {
         ForgeLinkRecord {
+            observation: None,
+            acquisition: "unretained-assertion",
+            read_at: None,
             event_id: event_id.into(),
             pr_number: pr,
             url: format!("https://example.invalid/pull/{pr}"),
@@ -647,6 +675,9 @@ mod tests {
 
     fn pr_state(link_event_id: Option<&str>, observed_pr_head: Option<&str>) -> ForgePrStateRecord {
         ForgePrStateRecord {
+            observation: None,
+            acquisition: "unretained-assertion",
+            read_at: None,
             state: ForgePrState::Open,
             observed_merge_sha: None,
             resolved_merge_sha: None,
@@ -659,6 +690,7 @@ mod tests {
 
     fn state_with(links: Vec<ForgeLinkRecord>, pr_states: Vec<ForgePrStateRecord>) -> ForgeState {
         ForgeState {
+            observations: Vec::new(),
             projection: None,
             link: links.last().cloned(),
             checks: None,

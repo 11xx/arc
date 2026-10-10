@@ -938,6 +938,21 @@ pub fn markdown(
     if let Some(forge) = &report.forge {
         let _ = writeln!(w, "\n## Forge\n");
         let _ = writeln!(w, "- Projection: {}", forge.projection);
+        for observation in &forge.observations {
+            let d = &observation.document;
+            let _ = writeln!(w, "- Observation `{}`: read `{}` at {}; coverage {:?}; {} generations; references unmaterialized", observation.event_id, d.read_id, d.read_at, d.coverage.overall.state, d.generations.len());
+            for g in &d.generations {
+                let _ = writeln!(
+                    w,
+                    "  - Generation `{}`: {} `{}`, sha256 `{}`, predecessor `{}`",
+                    g.generation_id,
+                    g.kind,
+                    g.node_id,
+                    g.sha256,
+                    g.predecessor.as_deref().unwrap_or("none")
+                );
+            }
+        }
         if let Some(declared) = &forge.declared {
             let _ = writeln!(
                 w,
@@ -953,6 +968,14 @@ pub fn markdown(
         if let Some(link) = &forge.link {
             let _ = writeln!(
                 w,
+                "- Link source: {}; acquisition: {}",
+                link.acquisition,
+                link.read_at
+                    .map(|t| t.to_rfc3339())
+                    .unwrap_or_else(|| "unknown".into())
+            );
+            let _ = writeln!(
+                w,
                 "- PR #{}: {} (observed head `{}`, resolved head `{}`)",
                 link.pr_number,
                 link.url,
@@ -963,6 +986,15 @@ pub fn markdown(
             let _ = writeln!(w, "- Resolved head match: {}", forge.resolved_head_match);
         }
         if let Some(checks) = &forge.checks_record {
+            let _ = writeln!(
+                w,
+                "- Checks source: {}; acquisition: {}",
+                checks.acquisition,
+                checks
+                    .read_at
+                    .map(|t| t.to_rfc3339())
+                    .unwrap_or_else(|| "unknown".into())
+            );
             let _ = writeln!(
                 w,
                 "- Check head: observed `{}`, resolved `{}`; applicable: {}",
@@ -982,6 +1014,15 @@ pub fn markdown(
                 .unwrap_or_default()
         );
         if let Some(pr_state) = &forge.pr_state {
+            let _ = writeln!(
+                w,
+                "- Lifecycle source: {}; acquisition: {}",
+                pr_state.acquisition,
+                pr_state
+                    .read_at
+                    .map(|t| t.to_rfc3339())
+                    .unwrap_or_else(|| "unknown".into())
+            );
             let _ = writeln!(
                 w,
                 "- PR state: {} (observed head `{}`, resolved head `{}`)",
@@ -2507,6 +2548,7 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             }
         }
         Payload::ForgeProjection { base_repo, .. } => ("forge-projection", base_repo.clone()),
+        Payload::ForgeObservationRecorded { observation } => ("forge-observation-recorded", observation.read_id.clone()),
         Payload::ForgeLink { pr_number, .. } => ("forge-link", format!("#{pr_number}")),
         Payload::ForgeChecks { state, .. } => ("forge-checks", format!("{state:?}").to_lowercase()),
         Payload::ForgePrState { state, .. } => {

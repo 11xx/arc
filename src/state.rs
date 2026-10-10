@@ -1,6 +1,6 @@
 use crate::model::*;
 use crate::rewrite::RewriteMap;
-use anyhow::{bail, Result};
+use anyhow::{bail, ensure, Result};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1765,6 +1765,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
         .collect();
 
     for ev in iter {
+        crate::forge_observation::validate_projection(&ev.payload, &state.forge)?;
         match &ev.payload {
             Payload::ChangeOpened { .. } => {
                 bail!("duplicate change-opened event {}", ev.event_id)
@@ -2912,7 +2913,27 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     policy: policy.clone(),
                 });
             }
+            Payload::ForgeObservationRecorded { observation } => {
+                observation.validate(&state.forge.observations)?;
+                ensure!(
+                    !state
+                        .forge
+                        .observations
+                        .iter()
+                        .any(|r| r.document.read_id == observation.read_id),
+                    "duplicate forge read in ledger"
+                );
+                state
+                    .forge
+                    .observations
+                    .push(crate::forge_observation::ObservationRecord {
+                        event_id: ev.event_id.clone(),
+                        created_at: ev.created_at,
+                        document: observation.clone(),
+                    });
+            }
             Payload::ForgeLink {
+                observation,
                 pr_number,
                 url,
                 base_repo,
@@ -2922,6 +2943,16 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 head_sha,
             } => {
                 let record = crate::forge::ForgeLinkRecord {
+                    observation: observation.clone(),
+                    acquisition: if observation.is_some() {
+                        "retention-reference"
+                    } else {
+                        "unretained-assertion"
+                    },
+                    read_at: observation
+                        .as_ref()
+                        .and_then(|id| state.forge.observations.iter().find(|r| &r.event_id == id))
+                        .map(|r| r.document.read_at),
                     event_id: ev.event_id.clone(),
                     pr_number: *pr_number,
                     url: url.clone(),
@@ -2936,19 +2967,34 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 state.forge.link = Some(record);
             }
             Payload::ForgeChecks {
+                link_event_id,
+                observation,
                 pr_head,
                 state: check_state,
                 detail,
             } => {
                 state.forge.checks = Some(crate::forge::ForgeChecksRecord {
+                    observation: observation.clone(),
+                    acquisition: if observation.is_some() {
+                        "retention-reference"
+                    } else {
+                        "unretained-assertion"
+                    },
+                    read_at: observation
+                        .as_ref()
+                        .and_then(|id| state.forge.observations.iter().find(|r| &r.event_id == id))
+                        .map(|r| r.document.read_at),
                     observed_pr_head: pr_head.clone(),
                     resolved_pr_head: Some(pr_head.clone()),
-                    link_event_id: state.forge.link.as_ref().map(|link| link.event_id.clone()),
+                    link_event_id: link_event_id
+                        .clone()
+                        .or_else(|| state.forge.link.as_ref().map(|link| link.event_id.clone())),
                     state: *check_state,
                     detail: detail.clone(),
                 });
             }
             Payload::ForgePrState {
+                observation,
                 state: pr_state,
                 merge_sha,
                 link_event_id,
@@ -2970,6 +3016,18 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     .forge
                     .pr_states
                     .push(crate::forge::ForgePrStateRecord {
+                        observation: observation.clone(),
+                        acquisition: if observation.is_some() {
+                            "retention-reference"
+                        } else {
+                            "unretained-assertion"
+                        },
+                        read_at: observation
+                            .as_ref()
+                            .and_then(|id| {
+                                state.forge.observations.iter().find(|r| &r.event_id == id)
+                            })
+                            .map(|r| r.document.read_at),
                         state: *pr_state,
                         observed_merge_sha: merge_sha.clone(),
                         resolved_merge_sha: merge_sha.clone(),

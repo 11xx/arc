@@ -22,6 +22,7 @@ paths = [
   "src/replica.rs",
   "src/state.rs",
   "src/model.rs",
+  "src/forge_observation.rs",
   "src/import_authorization.rs",
   "src/session_store.rs",
   "src/bundle.rs",

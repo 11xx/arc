@@ -184,6 +184,7 @@ pub fn required_roles(payload: &Payload) -> Option<Vec<Vec<Role>>> {
         | HoldSet { .. }
         | IterationScopeSet { .. }
         | ForgeProjection { .. }
+        | ForgeObservationRecorded { .. }
         | ForgeLink { .. }
         | ForgeChecks { .. }
         | ForgePrState { .. }

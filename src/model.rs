@@ -1423,10 +1423,15 @@ pub enum Payload {
         head_ref: String,
         policy: crate::forge::ForgePolicy,
     },
-    /// Observed post-creation PR tuple, read back from the forge by the
-    /// agent. Only appended after fail-closed validation against the
-    /// declaration; recording one asserts the tuple matched.
+    /// Adapter-reported acquisition and generation claims; no readiness
+    /// or integration authority follows from admission.
+    ForgeObservationRecorded {
+        observation: crate::forge_observation::ForgeObservation,
+    },
+    /// Observed PR tuple validated against its declaration and policy.
     ForgeLink {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observation: Option<String>,
         pr_number: u64,
         url: String,
         base_repo: String,
@@ -1438,6 +1443,10 @@ pub enum Payload {
     /// Observed hosted-check rollup at an exact PR head. Zero checks is
     /// `not-configured`/`not-triggered`, never `passed`.
     ForgeChecks {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        link_event_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observation: Option<String>,
         pr_head: String,
         state: crate::forge::ForgeCheckState,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -1447,6 +1456,8 @@ pub enum Payload {
     /// at. `merged` carries the actual merge commit. The binding fields are
     /// absent only on events written before lifecycle facts were bound.
     ForgePrState {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observation: Option<String>,
         state: crate::forge::ForgePrState,
         #[serde(skip_serializing_if = "Option::is_none")]
         merge_sha: Option<String>,
@@ -2124,6 +2135,7 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         | Payload::CommentAdded { .. }
         | Payload::ReplyAdded { .. }
         | Payload::HoldReleased { .. }
+        | Payload::ForgeObservationRecorded { .. }
         | Payload::ForgeLink { .. }
         | Payload::ForgeChecks { .. }
         | Payload::ForgePrState { .. } => AppendPermission::AnyPhaseFact,

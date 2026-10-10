@@ -67,7 +67,7 @@ pub use diff::{diff, DiffArgs};
 pub use doctor::run as run_doctor;
 pub use external::{record_verdict as record_external_verdict, ExternalVerdictArgs};
 pub use findings::{findings, FindingsFormat};
-pub use forge_cmd::{forge_checks, forge_declare, forge_link, forge_pr_state};
+pub use forge_cmd::{forge_checks, forge_declare, forge_link, forge_observe, forge_pr_state};
 pub(crate) use gatekeeping::dependency_order;
 pub use gatekeeping::{
     check_selection, close, done, hold, integrate, rebase, release_hold, snapshot_with_verify,
@@ -1244,13 +1244,23 @@ pub struct AnchorArgs {
 }
 
 pub struct ForgeLinkArgs {
-    pub pr_number: u64,
-    pub url: String,
-    pub base_repo: String,
-    pub base_ref: String,
-    pub head_repo: String,
-    pub head_ref: String,
-    pub head_sha: String,
+    pub observation: Option<String>,
+    pub json: bool,
+    pub pr_number: Option<u64>,
+    pub url: Option<String>,
+    pub base_repo: Option<String>,
+    pub base_ref: Option<String>,
+    pub head_repo: Option<String>,
+    pub head_ref: Option<String>,
+    pub head_sha: Option<String>,
+}
+pub struct ForgeChecksArgs {
+    pub pr_head: Option<String>,
+    pub state: Option<crate::forge::ForgeCheckState>,
+    pub detail: Option<String>,
+    pub observation: Option<String>,
+    pub link: Option<String>,
+    pub json: bool,
 }
 
 fn normalize_tags(tags: Vec<String>) -> Result<Vec<String>> {
