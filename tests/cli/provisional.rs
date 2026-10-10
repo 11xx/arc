@@ -2933,3 +2933,70 @@ fn an_inflight_remedy_keeps_the_selected_conflicting_staging_destination() {
     worker.arc_shell(&worker.root, command).assert().code(11);
     assert_eq!(git_out(&worker.root, &["show-ref", "--heads"]), heads);
 }
+
+#[test]
+#[cfg(target_os = "linux")]
+fn execution_json_preserves_durable_debt_after_a_ledger_read_failure() {
+    let (_authority, worker) = worker();
+    let change = prepared(&worker);
+    let source = worker.home.join("read-failure.c");
+    let library = worker.home.join("read-failure.so");
+    fs::write(
+        &source,
+        include_str!("../fixtures/post-debt-read-failure.c"),
+    )
+    .unwrap();
+    let compiled = Command::new("cc")
+        .args(["-shared", "-fPIC", "-Wall", "-Wextra", "-Werror"])
+        .arg(&source)
+        .args(["-o"])
+        .arg(&library)
+        .arg("-ldl")
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let directory = worker
+        .root
+        .join(".git/arc/changes")
+        .join(&change)
+        .join("events");
+    let failed = worker
+        .arc(&worker.root)
+        .env("LD_PRELOAD", &library)
+        .env("ARC_TEST_DEBT_EVENTS", &directory)
+        .args([
+            "integrate",
+            &change,
+            "--provisional",
+            "--json",
+            "--debt",
+            "review obligation retained",
+        ])
+        .assert()
+        .code(1);
+    let output: serde_json::Value = serde_json::from_slice(&failed.get_output().stdout).unwrap();
+    assert!(
+        output["error"]
+            .as_str()
+            .unwrap()
+            .contains("Input/output error"),
+        "{output}"
+    );
+    assert!(output["transition"].is_null(), "{output}");
+    let state = json_stdout(worker.arc(&worker.root).args(["show", &change, "--json"]));
+    assert!(state["debt"]["event_id"].is_string(), "{state}");
+    assert_eq!(
+        output["debt"]["event_id"], state["debt"]["event_id"],
+        "{output}"
+    );
+    assert_eq!(output["debt"]["publication"], "durable");
+    assert_eq!(output["debt"]["disposition"], "written");
+    assert!(output["debt"]["details"]
+        .as_str()
+        .unwrap()
+        .contains("debt declared"));
+}

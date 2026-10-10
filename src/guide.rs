@@ -1295,7 +1295,8 @@ PAIR REPLICA STORES
   publication failure reports the merge, observed staging and retention refs,
   event state, retained intent and exact recovery command. Execution --json
   emits `arc-provisional-transition/2`. Execution JSON includes the debt
-  declared before any subsequent refusal, naming its written or reused event,
+  declared before any subsequent refusal, including a failed ledger reread,
+  naming its written or reused event,
   bound patchset, reason and declaration details. Its `publication` states what
   was observed of the event: `durable` once the file and its directory entry
   are synced; `visible-unconfirmed` when the event is readable but the sync

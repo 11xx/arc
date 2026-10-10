@@ -2095,7 +2095,8 @@ enum Cmd {
         /// false. With provisional execution, emit `arc-provisional-transition/2`
         /// with observed refs, event publication, retained intent and recovery command.
         /// A later refusal includes any debt written or reused earlier in the
-        /// invocation. A debt whose publication failed is reported too, with its
+        /// invocation, including a failure to reread the ledger after declaration.
+        /// A debt whose publication failed is reported too, with its
         /// `publication` observed as durable, visible-unconfirmed, absent or unknown.
         /// Applied intent recovery precedes eligibility checks for a fresh preparation.
         /// Unapplied retries enforce current readiness and the saved basis. Explicit

@@ -799,11 +799,11 @@ pub fn integrate_provisionally(
                 "error": error, "output": output,
             })
         });
-    if let Some(debt) = debt_effect {
+    if let Some((receipt, details)) = debt_effect {
         document
             .as_object_mut()
             .context("execution result is not an object")?
-            .insert("debt".into(), debt);
+            .insert("debt".into(), debt_document(&receipt, &details)?);
     }
     println!("{}", serde_json::to_string_pretty(&document)?);
     Ok(exit_code)
@@ -822,7 +822,7 @@ fn integrate_provisionally_inner(
     ctx: &Ctx,
     references: &[String],
     args: IntegrateArgs,
-    debt_effect: &mut Option<serde_json::Value>,
+    debt_effect: &mut Option<(super::audit::DebtReceipt, String)>,
 ) -> Result<i32> {
     if references.len() != 1 || !args.tags.is_empty() {
         eprintln!("--provisional requires one change; queues and --tag conflict");
@@ -985,13 +985,13 @@ fn integrate_provisionally_inner(
                         if let Some(failure) =
                             error.downcast_ref::<super::audit::DebtPublicationFailure>()
                         {
-                            *debt_effect = Some(debt_document(&failure.0, &details)?);
+                            *debt_effect = Some((failure.0.clone(), details));
                         }
                         return Err(error);
                     }
                 };
+                *debt_effect = Some((receipt, details));
                 state = store.state(&state.change_id)?;
-                *debt_effect = Some(debt_document(&receipt, &details)?);
             }
         }
     }
