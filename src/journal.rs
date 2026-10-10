@@ -963,8 +963,10 @@ pub enum JournalCmd {
         /// question. A corrected actor, model or planner is held to what a
         /// write records: a placeholder or a session id model refuses. A
         /// model is checked against the target entry's session and the invoking
-        /// session; an answer target uses its latest settlement.
-        /// A planner correction that fails the same checks when read reads as
+        /// session; an answer target uses its latest settlement. Headers and
+        /// recorded planner coordinates undergo the same semantic validation
+        /// before credit is granted. A planner correction that fails the same
+        /// checks when read reads as
         /// `planner_status: malformed` in `show --json`
         #[arg(long, value_parser = CORRECTABLE_FIELDS)]
         field: String,
@@ -1215,8 +1217,9 @@ pub enum JournalCmd {
     /// is implementation authorization and never a kind conversion.
     /// The complete body is staged durably before the relation is recorded and
     /// published exclusively. Reusing a matching preparation syncs its file
-    /// and directory before recording the relation. Retry uses those staged bytes. A legacy pending
-    /// successor requires verification against the original body and title;
+    /// and directory before recording the relation. Retry uses those staged bytes.
+    /// Plan targets require valid inherited planner metadata or --no-planner.
+    /// A legacy successor requires verification against the original body and title;
     /// a mismatch preserves the artifact and refuses retirement.
     Transition {
         /// Artifact filename inside the journal dir (a name, not a path)
@@ -4962,6 +4965,7 @@ fn planner_headers(body: &str) -> (Vec<PlannerIdentity>, bool, bool) {
     (planners, malformed, found)
 }
 
+/// Parse planner fields; credit and write boundaries validate their coordinates.
 fn planner_from_value(value: &serde_json::Value) -> Result<PlannerIdentity> {
     let object = value
         .as_object()
@@ -5011,7 +5015,12 @@ fn planner_from_value(value: &serde_json::Value) -> Result<PlannerIdentity> {
 fn planners_from_correction(value: &str) -> Result<Vec<PlannerIdentity>> {
     let values: Vec<serde_json::Value> = serde_json::from_str(value)
         .context("--field planners takes a JSON array of planner objects")?;
-    values.iter().map(planner_from_value).collect()
+    let planners = values
+        .iter()
+        .map(planner_from_value)
+        .collect::<Result<Vec<_>>>()?;
+    ensure_fresh_planners(&planners, None, "omit the field")?;
+    Ok(planners)
 }
 
 struct PlannerMetadata {
@@ -5053,8 +5062,18 @@ fn planner_metadata(body: &str, events: &[JournalEvent], filename: &str) -> Plan
             Ok(corrected) => (corrected, "corrected", "correction"),
             Err(_) => (Vec::new(), "malformed", "correction"),
         }
-    } else if malformed {
+    } else if malformed
+        || headers
+            .iter()
+            .any(|planner| planner.validate_coordinates(None).is_err())
+    {
         (Vec::new(), "malformed", "body-header")
+    } else if recorded.as_ref().is_some_and(|planners| {
+        planners
+            .iter()
+            .any(|planner| planner.validate_coordinates(None).is_err())
+    }) {
+        (Vec::new(), "malformed", "journal-event")
     } else if recorded.as_ref().is_some_and(|r| found && r != &headers) {
         (Vec::new(), "conflict", "header-and-event")
     } else if let Some(recorded) = &recorded {
@@ -5153,42 +5172,16 @@ fn apply_planner_headers(body: &str, planners: &[PlannerIdentity]) -> String {
     out
 }
 
-/// Refuse a planner a write would record with a placeholder harness, session,
-/// actor or model, or with a session id as its model, whether it was typed,
-/// carried in a body header, or inherited. A coordinate nobody established is
-/// omitted, never recorded. Reading a recorded planner stays as lenient as
-/// [`planner_from_value`].
+/// A fresh declaration also rejects a model equal to the acting session.
 fn ensure_fresh_planners(
     planners: &[PlannerIdentity],
     acting_session: Option<&str>,
     remedy: &str,
 ) -> Result<()> {
-    use crate::coordinate::{actor_defect, is_placeholder, model_defect};
     for planner in planners {
-        let defect = [("harness", &planner.harness), ("session", &planner.session)]
-            .into_iter()
-            .find_map(|(field, value)| {
-                value
-                    .as_deref()
-                    .filter(|value| is_placeholder(value))
-                    .map(|value| (field, value, "a placeholder is not a coordinate"))
-            })
-            .or_else(|| {
-                let actor = planner.actor.as_deref()?;
-                actor_defect(actor).map(|defect| ("actor", actor, defect.reason()))
-            })
-            .or_else(|| {
-                let model = planner.model.as_deref()?;
-                model_defect(model, planner.session.as_deref())
-                    .or_else(|| model_defect(model, acting_session))
-                    .map(|defect| ("model", model, defect.reason()))
-            });
-        if let Some((field, value, reason)) = defect {
-            bail!(
-                "planner {}: {field} {value:?}: {reason}; {remedy}",
-                planner_header(planner)
-            );
-        }
+        planner
+            .validate_coordinates(acting_session)
+            .with_context(|| format!("planner {}; {remedy}", planner_header(planner)))?;
     }
     Ok(())
 }
@@ -15358,6 +15351,9 @@ fn transition(
             if body_file.is_some() { &[] } else { &events },
             filename,
         );
+        if !no_planner && metadata.status == "malformed" {
+            bail!("malformed planner metadata; correct it with `arc journal correct {filename} --target artifact --field planners`, or pass --no-planner");
+        }
         let mut planners = if no_planner {
             Vec::new()
         } else {

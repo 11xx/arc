@@ -150,6 +150,49 @@ pub struct PlannerIdentity {
 }
 
 impl PlannerIdentity {
+    pub(crate) fn validate_coordinates(&self, acting_session: Option<&str>) -> anyhow::Result<()> {
+        use crate::coordinate::{actor_defect, is_placeholder, model_defect};
+        let coordinates = [
+            ("actor", &self.actor),
+            ("harness", &self.harness),
+            ("session", &self.session),
+            ("model", &self.model),
+        ];
+        if coordinates.iter().all(|(_, value)| value.is_none()) {
+            anyhow::bail!("planner metadata must name at least one coordinate");
+        }
+        for (field, value) in coordinates {
+            if value
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+            {
+                anyhow::bail!("planner {field} must be a nonempty string");
+            }
+        }
+        let defect = [("harness", &self.harness), ("session", &self.session)]
+            .into_iter()
+            .find_map(|(field, value)| {
+                value
+                    .as_deref()
+                    .filter(|value| is_placeholder(value))
+                    .map(|value| (field, value, "a placeholder is not a coordinate"))
+            })
+            .or_else(|| {
+                let actor = self.actor.as_deref()?;
+                actor_defect(actor).map(|defect| ("actor", actor, defect.reason()))
+            })
+            .or_else(|| {
+                let model = self.model.as_deref()?;
+                model_defect(model, self.session.as_deref())
+                    .or_else(|| model_defect(model, acting_session))
+                    .map(|defect| ("model", model, defect.reason()))
+            });
+        if let Some((field, value, reason)) = defect {
+            anyhow::bail!("{field} {value:?}: {reason}");
+        }
+        Ok(())
+    }
+
     pub fn key(
         &self,
     ) -> (
@@ -178,8 +221,26 @@ pub struct PlanSource {
 }
 
 impl PlanSource {
+    pub(crate) fn validated(&self) -> Self {
+        let mut source = self.clone();
+        if source
+            .planners
+            .iter()
+            .any(|planner| planner.validate_coordinates(None).is_err())
+        {
+            source.planners.clear();
+            source.planner_status = "malformed".to_string();
+        }
+        source
+    }
+
     pub fn planner_trailers(&self) -> Vec<String> {
-        if !matches!(self.planner_status.as_str(), "ok" | "corrected") {
+        if !matches!(self.planner_status.as_str(), "ok" | "corrected")
+            || self
+                .planners
+                .iter()
+                .any(|planner| planner.validate_coordinates(None).is_err())
+        {
             return Vec::new();
         }
         let mut lines: Vec<_> = self

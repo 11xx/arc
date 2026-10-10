@@ -107,7 +107,16 @@ fn correct_planners(repo: &Repo, file: &str, value: &str) {
 
 #[test]
 fn unreadable_planner_correction_stays_visible_with_its_event_id() {
-    for unreadable in ["{broken", r#"[{"actor":""}]"#] {
+    for unreadable in [
+        "{broken",
+        r#"[{"actor":""}]"#,
+        r#"[{"harness":"codex","model":"unknown"}]"#,
+        r#"[{"harness":"codex","model":"00000000-0000-4000-8000-000000000001"}]"#,
+        r#"[{"actor":"codex:unknown"}]"#,
+        r#"[{"harness":"unknown"}]"#,
+        r#"[{"session":"unknown"}]"#,
+        r#"[{"model":"planner-model#unknown"}]"#,
+    ] {
         let repo = Repo::new();
         let path = stdout(repo.arc(&repo.root).env("ARC_ACTOR", "author-a").args([
             "journal",
@@ -407,4 +416,113 @@ fn planned_by_help_and_refusal_name_the_accepted_fields() {
         .stderr(predicates::str::contains(
             "planner metadata must name at least one coordinate",
         ));
+}
+
+#[test]
+fn forbidden_planner_headers_and_recorded_coordinates_grant_no_credit() {
+    for basis in ["header", "event"] {
+        let repo = Repo::new();
+        let path = stdout(repo.arc(&repo.root).args([
+            "journal",
+            "plan",
+            "invalid-credit",
+            "--title",
+            "Plan",
+        ]));
+        let path = Path::new(path.trim());
+        let dir = path.parent().unwrap();
+        let file = path.file_name().unwrap().to_str().unwrap();
+        if basis == "header" {
+            fs::write(
+                path,
+                "# Plan\nplanned-by: {\"harness\":\"codex\",\"model\":\"unknown\"}\n\nWork.\n",
+            )
+            .unwrap();
+            fs::write(dir.join("events.jsonl"), "").unwrap();
+        } else {
+            let records = journal_event_log(dir)
+                .into_iter()
+                .map(|mut event| {
+                    if event["event"] == "note" {
+                        event["planners"] =
+                            serde_json::json!([{"harness":"codex","model":"unknown"}]);
+                    }
+                    format!("{event}\n")
+                })
+                .collect::<String>();
+            fs::write(dir.join("events.jsonl"), records).unwrap();
+            fs::write(path, "# Plan\n\nWork.\n").unwrap();
+        }
+        let view = json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "show", file, "--json"]),
+        );
+        assert_eq!(view["planner_status"], "malformed", "{basis}: {view}");
+        assert_eq!(view["planners"], serde_json::json!([]));
+    }
+}
+
+#[test]
+fn captured_forbidden_planners_supply_no_credit_suggestion() {
+    let repo = Repo::new();
+    let path = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "plan",
+        "captured-credit",
+        "--title",
+        "Plan",
+    ]));
+    let file = Path::new(path.trim())
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    begin_change(&repo, "captured-credit", None);
+    stdout(
+        repo.arc(&repo.root)
+            .args([
+                "brief",
+                "captured-credit",
+                "--plan-ref",
+                file,
+                "--plan-slice",
+                "one",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Work\n"),
+    );
+    let change = json_stdout(
+        repo.arc(&repo.root)
+            .args(["show", "captured-credit", "--json"]),
+    );
+    let events = repo
+        .root
+        .join(".git/arc/changes")
+        .join(change["change_id"].as_str().unwrap())
+        .join("events");
+    for entry in fs::read_dir(events).unwrap() {
+        let path = entry.unwrap().path();
+        let mut event: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        if event["plan_source"].is_object() {
+            event["plan_source"]["planners"] =
+                serde_json::json!([{"harness":"codex","model":"unknown"}]);
+            fs::write(path, serde_json::to_vec(&event).unwrap()).unwrap();
+        }
+    }
+    let brief = json_stdout(
+        repo.arc(&repo.root)
+            .args(["brief", "captured-credit", "--json"]),
+    );
+    assert_eq!(brief["brief"]["plan_source"]["planner_status"], "malformed");
+    assert_eq!(
+        brief["brief"]["plan_source"]["planners"],
+        serde_json::Value::Null
+    );
+    repo.arc(&repo.root)
+        .args(["brief", "captured-credit"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("suggested-credit:").not());
 }

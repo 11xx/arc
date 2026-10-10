@@ -661,6 +661,7 @@ enum Cmd {
     /// brief and preserve its body and omitted title, plan provenance, and
     /// mandatory reads. Explicit metadata replaces the corresponding fields.
     /// A body or scaffold records a replacement contract.
+    /// Forbidden planner coordinates grant no credit in text or JSON reads.
     Brief {
         /// Assert a planner on the change when writing a brief (repeatable).
         /// Value: harness:model[#effort] or Name <email>. Without a value,

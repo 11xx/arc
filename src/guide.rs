@@ -252,6 +252,9 @@ ORIENT INSIDE A PROJECT (start here, in this order)
   --plan-slice captures the body digest and declared planners; reading the
   brief prints available credit suggestions. Conflicting or malformed
   metadata grants no credit, and corrections leave existing briefs unchanged.
+  Headers, event metadata, corrections and captured brief coordinates must
+  satisfy the coordinate rules before granting credit. Forbidden nonempty
+  coordinates read as malformed, including placeholders and session-id models.
   A planner correction that fails validation when read, as one imported from
   another build can, is not dropped: `arc journal show --json` reads
   `planner_status: malformed` with its amendment ID in

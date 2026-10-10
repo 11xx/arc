@@ -2,7 +2,8 @@
 //!
 //! Readers are lenient: [`crate::trailers::value_is_readable`] accepts any
 //! `x:y` and any `name <addr>`, so historical events, imported bundles and
-//! old commit messages reduce exactly as they were written. A fresh write is
+//! old commit messages reduce exactly as they were written. Planner credit
+//! requires valid coordinates, including when read from stored metadata. A fresh write is
 //! held to more. A placeholder or a session id is not a coordinate, and a
 //! value nobody can establish is omitted rather than recorded as one.
 

@@ -1887,7 +1887,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 acceptance_probes: acceptance_probes.clone(),
                 plan_ref: plan_ref.clone(),
                 plan_slice: plan_slice.clone(),
-                plan_source: plan_source.clone(),
+                plan_source: plan_source.as_ref().map(PlanSource::validated),
                 must_read: must_read.clone(),
             }),
             Payload::ChangelogRecorded {
