@@ -1089,9 +1089,12 @@ fn identity_text(
     if let Some(subject) = on_behalf_of {
         parts.push(format!("for {subject}"));
     }
-    if let Some(model) = model {
-        parts.push(format!("model {model}"));
-    }
+    parts.push(crate::coordinate::display_model(
+        harness,
+        model,
+        session,
+        crate::coordinate::ModelStyle::Coordinate,
+    ));
     if let Some(harness) = harness {
         parts.push(format!("via {harness}"));
     }
@@ -2704,6 +2707,14 @@ mod report {
         declared_by: String,
         age_days: Option<u64>,
         implementer: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model_recorded: Option<bool>,
+        #[serde(skip)]
+        implementer_harness: Option<String>,
+        #[serde(skip)]
+        implementer_model: Option<String>,
+        #[serde(skip)]
+        implementer_session: Option<String>,
     }
 
     #[derive(Debug, Serialize)]
@@ -3239,6 +3250,25 @@ mod report {
                         .or_else(|| debt.pointer("/production/implementer/actor"))
                         .and_then(Value::as_str)
                         .map(str::to_string),
+                    model_recorded: (!crate::coordinate::model_recorded(
+                        debt.pointer("/production/implementer/model")
+                            .and_then(Value::as_str),
+                        debt.pointer("/production/implementer/session")
+                            .and_then(Value::as_str),
+                    ))
+                    .then_some(false),
+                    implementer_harness: debt
+                        .pointer("/production/implementer/harness")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    implementer_model: debt
+                        .pointer("/production/implementer/model")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    implementer_session: debt
+                        .pointer("/production/implementer/session")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
                 });
             }
             for deferred in array(changes, "deferred") {
@@ -3449,6 +3479,17 @@ mod report {
         }
     }
 
+    impl DebtRow {
+        fn implementer_label(&self) -> String {
+            crate::coordinate::display_model(
+                self.implementer_harness.as_deref(),
+                self.implementer_model.as_deref(),
+                self.implementer_session.as_deref(),
+                crate::coordinate::ModelStyle::Coordinate,
+            )
+        }
+    }
+
     impl Report {
         /// A compact text summary; `--json` carries every row.
         pub(crate) fn render(&self) {
@@ -3519,6 +3560,14 @@ mod report {
                 println!(
                     "attention  {}  {}  {}  {}",
                     entry.rule, entry.project, entry.subject, entry.evidence
+                );
+            }
+            for debt in &self.sections.review_owed {
+                println!(
+                    "review owed  {}  {}  {}",
+                    debt.project,
+                    debt.change_id,
+                    debt.implementer_label()
                 );
             }
             println!("detail: arc workspace report --json");
@@ -3845,6 +3894,23 @@ mod report {
                 .unwrap();
             assert_eq!(idle.title, "Idle work");
             assert_eq!(idle.age_days, Some(12));
+        }
+
+        #[test]
+        fn report_retains_raw_implementer_and_marks_missing_models() {
+            for model in [json!("unknown"), json!("m#none"), Value::Null] {
+                let mut input = backlog(vec![], vec![]);
+                input["projects"][0]["debt_owed"] = json!([{
+                    "change_id": "work",
+                    "production": {"implementer": {"actor": "writer", "harness": "codex", "model": model}}
+                }]);
+                let report = build(&input, None, &BTreeMap::new(), &BTreeMap::new());
+                let row = &report.sections.review_owed[0];
+                let value = serde_json::to_value(row).unwrap();
+                assert_eq!(value["model_recorded"], false);
+                assert_eq!(value["implementer"], model);
+                assert_eq!(row.implementer_label(), "codex (model not recorded)");
+            }
         }
 
         #[test]

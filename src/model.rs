@@ -393,7 +393,7 @@ pub enum ModelTurnRelation {
 }
 
 impl ModelObservation {
-    pub fn line(&self) -> String {
+    pub fn line(&self, session: Option<&str>) -> String {
         let relation = match self.turn_relation {
             ModelTurnRelation::Inside => "inside the acting turn",
             ModelTurnRelation::Before => "from an earlier turn; effort may have changed since",
@@ -408,7 +408,12 @@ impl ModelObservation {
         };
         format!(
             "observed: {} at {} id {} ({relation}{coverage})",
-            self.observed,
+            crate::coordinate::display_model(
+                None,
+                Some(&self.observed),
+                session,
+                crate::coordinate::ModelStyle::Coordinate
+            ),
             self.timestamp.as_deref().unwrap_or("unknown timestamp"),
             self.native_id.as_deref().unwrap_or("unknown native id"),
         )
@@ -596,7 +601,7 @@ pub fn model_effort(model: &str) -> Option<&str> {
 ///
 /// Coordinates only: no routing tier is derived from the identity or from any
 /// configuration, and no ordering is implied between two of these.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct DebtCoverage {
     pub reviewer: String,
     /// Absent when the verdict event recorded no model.
@@ -609,6 +614,27 @@ pub struct DebtCoverage {
     /// The routing version that selected the reviewer. Absent means unrouted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_version: Option<String>,
+}
+
+impl Serialize for DebtCoverage {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("reviewer", &self.reviewer)?;
+        for (key, value) in [
+            ("model", &self.model),
+            ("effort", &self.effort),
+            ("route_version", &self.route_version),
+        ] {
+            if let Some(value) = value {
+                map.serialize_entry(key, value)?;
+            }
+        }
+        if !crate::coordinate::model_recorded(self.model.as_deref(), None) {
+            map.serialize_entry("model_recorded", &false)?;
+        }
+        map.end()
+    }
 }
 
 impl DebtCoverage {
@@ -626,7 +652,7 @@ impl DebtCoverage {
 }
 
 /// One identity at the coordinates arc keeps for it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct DebtIdentity {
     pub actor: String,
     /// Subject the work was recorded for, when a lead ran delegated ceremony.
@@ -641,6 +667,29 @@ pub struct DebtIdentity {
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
+}
+
+impl Serialize for DebtIdentity {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("actor", &self.actor)?;
+        for (key, value) in [
+            ("on_behalf_of", &self.on_behalf_of),
+            ("harness", &self.harness),
+            ("model", &self.model),
+            ("effort", &self.effort),
+            ("session", &self.session),
+        ] {
+            if let Some(value) = value {
+                map.serialize_entry(key, value)?;
+            }
+        }
+        if !crate::coordinate::model_recorded(self.model.as_deref(), self.session.as_deref()) {
+            map.serialize_entry("model_recorded", &false)?;
+        }
+        map.end()
+    }
 }
 
 impl DebtIdentity {
@@ -2610,6 +2659,63 @@ pub enum InferenceSource {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn coverage_json_retains_raw_models_and_marks_defects() {
+        for model in [Some("unknown"), Some("m#none"), None] {
+            let coverage =
+                super::DebtCoverage::new("reader".into(), model.map(str::to_string), None);
+            let value = serde_json::to_value(&coverage).unwrap();
+            assert_eq!(value["model_recorded"], false);
+            assert_eq!(
+                value.get("model").and_then(serde_json::Value::as_str),
+                model
+            );
+        }
+        let coverage = super::DebtCoverage::new("reader".into(), Some("m#high".into()), None);
+        assert!(serde_json::to_value(coverage)
+            .unwrap()
+            .get("model_recorded")
+            .is_none());
+    }
+
+    #[test]
+    fn producer_json_retains_raw_models_and_marks_defects() {
+        for model in [
+            Some("unknown"),
+            Some("m#none"),
+            Some("recording-key#low"),
+            Some(""),
+            None,
+        ] {
+            let identity = super::DebtIdentity::new(
+                "writer".into(),
+                None,
+                Some("codex".into()),
+                model.map(str::to_string),
+                Some("recording-key".into()),
+            );
+            let value = serde_json::to_value(&identity).unwrap();
+            assert_eq!(value["model_recorded"], false);
+            assert_eq!(
+                value.get("model").and_then(serde_json::Value::as_str),
+                model
+            );
+            let roundtrip: super::DebtIdentity = serde_json::from_value(value).unwrap();
+            assert_eq!(roundtrip, identity);
+        }
+        let identity = super::DebtIdentity::new(
+            "writer".into(),
+            None,
+            Some("codex".into()),
+            Some("m#high".into()),
+            None,
+        );
+        assert!(serde_json::to_value(identity)
+            .unwrap()
+            .get("model_recorded")
+            .is_none());
+    }
     use super::*;
 
     #[test]

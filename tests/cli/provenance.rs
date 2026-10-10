@@ -166,7 +166,7 @@ fn ledger_events_record_optional_model_identity_and_render_it_in_log() {
     let log = stdout(repo.arc(&repo.root).args(["log", &change_id]));
     assert!(log.contains("tester@test (gpt-5.6-sol#high)"), "{log}");
     assert!(
-        log.contains("tester@test  comment-added  no model declared"),
+        log.contains("tester@test (model not recorded)  comment-added  no model declared"),
         "{log}"
     );
     assert!(log.contains("tester@test (gpt-5.6-sol#medium)"), "{log}");

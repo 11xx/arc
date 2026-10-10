@@ -4,7 +4,7 @@ use crate::status::{ClaimStatus, StatusReport};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-pub const INBOX_SCHEMA: &str = "arc-inbox/10";
+pub const INBOX_SCHEMA: &str = "arc-inbox/11";
 
 /// A local branch no open change and no active fork own. The branch is where
 /// work gets lost: nothing in the ledger or the journal names it, so every

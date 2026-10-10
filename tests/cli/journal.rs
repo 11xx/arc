@@ -6205,11 +6205,14 @@ fn journal_discussion_reports_participants_per_round() {
         );
     assert_eq!(
         summary["rounds"][0]["participants"],
-        serde_json::json!(["claude"])
+        serde_json::json!(["claude (model not recorded)"])
     );
     assert_eq!(
         summary["rounds"][1]["participants"],
-        serde_json::json!(["codex", "opencode"])
+        serde_json::json!([
+            "codex (model not recorded)",
+            "opencode (model not recorded)"
+        ])
     );
 }
 

@@ -44,6 +44,14 @@ SAY WHO YOU ARE (before the first write)
   that is one or is a session id. Reads and Git hooks never refuse.
   Agent harness, model and supplied effort segments must be nonempty.
 
+  Text views validate recorded producer models. A missing model, a placeholder
+  or a session id prints as `<harness> (model not recorded)`, or
+  `model not recorded` when no harness is established. Valid model and effort
+  spellings retain their coordinates. JSON production identities and review
+  coverage retain the raw model value and carry `model_recorded: false` when
+  it names no model; valid models omit that flag. Workspace report debt rows retain the raw
+  implementer value with the same optional flag.
+
   Local change, repository and replica IDs are totally ordered by issuance
   across processes sharing one ledger. Ordinary issuance and publication use
   one ledger-wide lock and a durable newest-issued-ID marker. Appends read constant-size
@@ -2918,7 +2926,7 @@ SCHEMAS
     `arc-trailers/1`                 arc trailers --json
     `arc-status/27`                  arc status
     `arc-check/4`                    arc check --json
-    `arc-inbox/10`                   arc inbox --json
+    `arc-inbox/11`                   arc inbox --json
     `arc-catchup/12`                 arc catchup --json
     `arc-journal-catchup/9`          arc journal catchup --json
     `arc-resume/8`                   arc resume --json

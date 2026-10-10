@@ -716,6 +716,8 @@ pub enum JournalCmd {
     /// items are stale after the threshold of recorded inactivity; active
     /// claims and evidence suppress staleness. Plain reads record no activity.
     /// Records no events; ledger reads do not require a parseable append policy.
+    /// Recorded models that are missing, placeholders or session ids print as
+    /// model not recorded, qualified by the harness when it is established.
     Filed {
         /// Filter by an exact writing or source session id
         #[arg(long)]
@@ -873,6 +875,8 @@ pub enum JournalCmd {
     /// argued — and `answer` is where the reply comes back. `--json` carries
     /// the same, for building the prompt without parsing text
     /// Records no events; ledger reads do not require a parseable append policy.
+    /// Recorded models that are missing, placeholders or session ids print as
+    /// model not recorded, qualified by the harness when it is established.
     Questions {
         /// Emit structured JSON instead of text
         #[arg(long)]
@@ -1065,6 +1069,8 @@ pub enum JournalCmd {
     /// arc-journal-catchup/9.
     /// Text warns when the running build revision differs from an arc checkout.
     /// Records no events; ledger reads do not require a parseable append policy.
+    /// Recorded models that are missing, placeholders or session ids print as
+    /// model not recorded, qualified by the harness when it is established.
     Catchup {
         /// Cap the artifact list and journal tail (default 20)
         #[arg(long)]
@@ -1088,6 +1094,8 @@ pub enum JournalCmd {
     /// Incomplete successors appear separately as pending transitions; they
     /// supply no actionable counts and cannot be promoted.
     /// Records no events; ledger reads do not require a parseable append policy.
+    /// Recorded models that are missing, placeholders or session ids print as
+    /// model not recorded, qualified by the harness when it is established.
     Open {
         /// Restrict to one actionable kind; lower-priority tiers stay separate
         #[arg(long, value_parser = parse_journal_kind_filter)]
@@ -1102,6 +1110,8 @@ pub enum JournalCmd {
     /// filename, `show` reads it; with an exact topic, `latest` resolves it;
     /// `open` lists only the actionable ones.
     /// Records no events; ledger reads do not require a parseable append policy.
+    /// Recorded models that are missing, placeholders or session ids print as
+    /// model not recorded, qualified by the harness when it is established.
     List {
         /// Restrict to one kind
         #[arg(long, value_parser = parse_journal_kind_filter)]
@@ -1114,6 +1124,8 @@ pub enum JournalCmd {
     /// lifecycle facts. Hot storage is the default; `--archived` is explicit.
     /// Incomplete successors have availability `pending-transition`.
     /// Records no events; ledger reads do not require a parseable append policy.
+    /// Recorded models that are missing, placeholders or session ids print as
+    /// model not recorded, qualified by the harness when it is established.
     Inventory {
         /// Inspect one exact artifact instead of the selected actionable set.
         file: Option<String>,
@@ -1181,6 +1193,8 @@ pub enum JournalCmd {
     /// Resolve a discussion with `journal consume --outcome done --decision
     /// <file>`
     /// Records no events; ledger reads do not require a parseable append policy.
+    /// Recorded models that are missing, placeholders or session ids print as
+    /// model not recorded, qualified by the harness when it is established.
     Discussion {
         /// Discussion artifact filename inside the journal dir (a name, not a path)
         filename: String,
@@ -3938,19 +3952,17 @@ impl Amendments {
     }
 
     /// The identity a position is attributed to, after corrections: its model,
-    /// qualified by the harness that ran it, and the harness alone when no
-    /// model is known.
+    /// qualified by its harness. Missing models are marked as unrecorded.
     fn identity_label(&self, event: &JournalEvent) -> String {
         let Some(id) = event.position_id.as_deref() else {
             return event_identity_label(event);
         };
-        match self
-            .field(id, "model", event.model.as_deref())
-            .filter(|model| !model.is_empty())
-        {
-            Some(model) => model_label(model, event.harness()),
-            None => event.harness().unwrap_or(UNATTRIBUTED).to_string(),
-        }
+        crate::coordinate::display_model(
+            event.harness(),
+            self.field(id, "model", event.model.as_deref()),
+            event.session(),
+            crate::coordinate::ModelStyle::Via,
+        )
     }
 }
 
@@ -4635,7 +4647,12 @@ fn attribution(ctx: &Ctx, harness: Option<&str>) -> Option<String> {
         .as_deref()
         .filter(|value| !value.is_empty())
     {
-        Some(model) => Some(model_label(model, harness)),
+        Some(model) => Some(crate::coordinate::display_model(
+            harness,
+            Some(model),
+            ctx.session.as_deref(),
+            crate::coordinate::ModelStyle::Via,
+        )),
         None => declared_actor(ctx).or_else(|| harness.map(str::to_string)),
     }
 }
@@ -5922,7 +5939,12 @@ fn filed(ctx: &Ctx, session: Option<&str>, stale_days: u64, json: bool) -> Resul
             println!(
                 "{} ({})",
                 session_label(group.harness.as_deref(), group.session.as_deref()),
-                group.model.as_deref().unwrap_or("unknown")
+                crate::coordinate::display_model(
+                    None,
+                    group.model.as_deref(),
+                    group.session.as_deref(),
+                    crate::coordinate::ModelStyle::Coordinate
+                )
             );
             for item in &group.items {
                 let age = item
@@ -7407,15 +7429,12 @@ fn suggestions_from(events: &[JournalEvent], file: &str, question: &str) -> Vec<
 }
 
 fn suggestion_identity(event: &JournalEvent) -> String {
-    match event.model.as_deref().filter(|value| !value.is_empty()) {
-        Some(model) => model_label(model, event.harness()),
-        None => event
-            .actor
-            .clone()
-            .filter(|actor| !actor.trim().is_empty())
-            .or_else(|| event.harness().map(str::to_string))
-            .unwrap_or_else(|| UNATTRIBUTED.to_string()),
-    }
+    crate::coordinate::display_model(
+        event.harness(),
+        event.model.as_deref(),
+        event.session(),
+        crate::coordinate::ModelStyle::Via,
+    )
 }
 
 #[derive(Serialize)]
@@ -13103,12 +13122,14 @@ fn render_verification(verification: Option<&VerificationStamp>) -> String {
         .map(format_age)
         .map(|age| format!(" {age} ago"))
         .unwrap_or_default();
-    let checker = verification
-        .actor
-        .clone()
-        .or_else(|| verification.model.clone())
-        .or_else(|| verification.harness.clone())
-        .unwrap_or_else(|| UNATTRIBUTED.to_string());
+    let checker = verification.actor.clone().unwrap_or_else(|| {
+        crate::coordinate::display_model(
+            verification.harness.as_deref(),
+            verification.model.as_deref(),
+            verification.session.as_deref(),
+            crate::coordinate::ModelStyle::Coordinate,
+        )
+    });
     // Where a check was made is part of what it claims: a fork's head is not
     // the anchor's, and the row says so instead of letting a reader assume
     // the revision is one they can look up on the project's line of history.
@@ -14263,12 +14284,14 @@ struct DiscussionRound {
 }
 
 /// The identity label a position or resolution carries: `<model> via <harness>`
-/// when the model is known, else the bare harness, else `unattributed`.
+/// when the model is established; missing models name the harness when present.
 fn event_identity_label(event: &JournalEvent) -> String {
-    match event.model.as_deref().filter(|value| !value.is_empty()) {
-        Some(model) => model_label(model, event.harness()),
-        None => event.harness().unwrap_or(UNATTRIBUTED).to_string(),
-    }
+    crate::coordinate::display_model(
+        event.harness(),
+        event.model.as_deref(),
+        event.session(),
+        crate::coordinate::ModelStyle::Via,
+    )
 }
 
 /// What a view prints for an identity an event does not record: no harness to
@@ -14282,14 +14305,6 @@ fn session_label(harness: Option<&str>, session: Option<&str>) -> String {
         (Some(harness), Some(session)) => format!("{harness}/{session}"),
         (Some(only), None) | (None, Some(only)) => only.to_string(),
         (None, None) => UNATTRIBUTED.to_string(),
-    }
-}
-
-/// A model, qualified by the harness that ran it when one is recorded.
-fn model_label(model: &str, harness: Option<&str>) -> String {
-    match harness {
-        Some(harness) => format!("{model} via {harness}"),
-        None => model.to_string(),
     }
 }
 

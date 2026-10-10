@@ -1574,10 +1574,14 @@ fn describe(detail: &Detail) -> String {
             planner_status,
         } => match planner {
             Some(planner) => format!(
-                "planner {} (harness {}, model {}), plan status {}",
+                "planner {} ({}), plan status {}",
                 opt(&planner.actor),
-                opt(&planner.harness),
-                opt(&planner.model),
+                crate::coordinate::display_model(
+                    planner.harness.as_deref(),
+                    planner.model.as_deref(),
+                    planner.session.as_deref(),
+                    crate::coordinate::ModelStyle::Coordinate
+                ),
                 opt(planner_status)
             ),
             None => "planner".to_string(),
@@ -1762,10 +1766,15 @@ fn describe(detail: &Detail) -> String {
                 opt(verdict),
                 opt(patchset_id),
                 opt(reviewer),
-                model
-                    .as_deref()
-                    .map(|model| format!(" ({model})"))
-                    .unwrap_or_default(),
+                format_args!(
+                    " ({})",
+                    crate::coordinate::display_model(
+                        None,
+                        model.as_deref(),
+                        None,
+                        crate::coordinate::ModelStyle::Coordinate
+                    )
+                ),
                 provisional
                     .as_deref()
                     .map(|why| format!(", provisional: {why}"))
@@ -1839,11 +1848,13 @@ fn describe(detail: &Detail) -> String {
             reviewer,
             model,
         } => format!(
-            "audit {verdict} `{event_id}` at {revision} by {reviewer}{}",
-            model
-                .as_deref()
-                .map(|model| format!(" ({model})"))
-                .unwrap_or_default()
+            "audit {verdict} `{event_id}` at {revision} by {reviewer} ({})",
+            crate::coordinate::display_model(
+                None,
+                model.as_deref(),
+                None,
+                crate::coordinate::ModelStyle::Coordinate
+            )
         ),
         Detail::AuditFinding {
             event_id,
@@ -1951,17 +1962,20 @@ fn compared(recorded: &str, current: &Option<String>, resolution: Resolution) ->
 }
 
 fn coverage_label(coverage: &DebtCoverage) -> String {
-    match &coverage.model {
-        Some(model) => format!("{} ({model})", coverage.reviewer),
-        None => format!("{} (model unrecorded)", coverage.reviewer),
-    }
+    format!(
+        "{} ({})",
+        coverage.reviewer,
+        crate::coordinate::display_model(
+            None,
+            coverage.model.as_deref(),
+            None,
+            crate::coordinate::ModelStyle::Coordinate,
+        )
+    )
 }
 
 fn production_label(production: &DebtProduction) -> String {
-    let identity = |identity: &crate::model::DebtIdentity| match &identity.effort {
-        Some(effort) => format!("{}@{effort}", identity.effective_actor()),
-        None => identity.effective_actor().to_string(),
-    };
+    let identity = crate::render::debt_identity_label;
     match &production.planner {
         Some(planner) => format!(
             "planned by {}{}, implemented by {}",
@@ -1973,5 +1987,42 @@ fn production_label(production: &DebtProduction) -> String {
             identity(&production.implementer)
         ),
         None => format!("implemented by {}", identity(&production.implementer)),
+    }
+}
+
+#[cfg(test)]
+mod recorded_model_tests {
+    use super::*;
+
+    #[test]
+    fn producer_placeholders_are_unattributed() {
+        for model in [
+            Some("unknown"),
+            Some("m#none"),
+            Some("recording-key#low"),
+            Some(""),
+            None,
+        ] {
+            let production = DebtProduction {
+                planner: None,
+                brief_version: None,
+                implementer: crate::model::DebtIdentity::new(
+                    "codex:unknown".into(),
+                    None,
+                    Some("codex".into()),
+                    model.map(str::to_string),
+                    Some("recording-key".into()),
+                ),
+                following_brief: false,
+            };
+            let label = production_label(&production);
+            assert_eq!(label, "implemented by codex (model not recorded)");
+            let mut absent = production;
+            absent.implementer.harness = None;
+            assert_eq!(
+                production_label(&absent),
+                "implemented by model not recorded"
+            );
+        }
     }
 }

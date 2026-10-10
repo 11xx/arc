@@ -798,7 +798,7 @@ fn outstanding_debt_appears_in_the_inbox_and_catchup_after_closure() {
         .success();
 
     let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
-    assert_eq!(inbox["schema"], "arc-inbox/10");
+    assert_eq!(inbox["schema"], "arc-inbox/11");
     let owed = inbox["debt-owed"].as_array().unwrap();
     assert_eq!(owed.len(), 1, "{owed:?}");
     assert_eq!(owed[0]["next_actor"], "reviewer");
@@ -3359,7 +3359,7 @@ fn debt_coverage_preserves_an_unrecorded_model() {
     assert_eq!(coverage[0]["reviewer"], "Solo", "{status}");
     assert!(coverage[0].get("model").is_none(), "{status}");
     let human = stdout(repo.arc(&repo.root).args(["show", "unrecorded-model"]));
-    assert!(human.contains("Solo (model unrecorded)"), "{human}");
+    assert!(human.contains("Solo (model not recorded)"), "{human}");
     assert!(!human.contains("Coverage: none"), "{human}");
 }
 
@@ -3902,7 +3902,7 @@ fn the_inbox_and_catchup_split_their_debt_count_by_kind() {
         "{text}"
     );
     assert!(
-        text.contains("debt: nothing-read; implemented by tester"),
+        text.contains("debt: nothing-read; implemented by test (model not recorded)"),
         "{text}"
     );
 
@@ -4493,5 +4493,81 @@ fn equivalent_imported_debt_reuses_its_backing_publication() {
             );
         assert_eq!(after["debt"]["event_id"], id);
         assert!(!loose.exists());
+    }
+}
+
+#[test]
+fn historical_producer_models_are_flagged_and_never_displayed_as_placeholders() {
+    let repo = repo_forbidding_self_approval();
+    let change = integrated_debt(
+        &repo,
+        "recorded-models",
+        "work.txt",
+        "work\n",
+        "review is owed",
+    );
+    for model in [
+        Some("unknown"),
+        Some("<synthetic>"),
+        Some("recording-key#low"),
+        None,
+        Some("m#high"),
+    ] {
+        rewrite_event(&repo, &change, "debt-declared", |event| {
+            let identity = serde_json::json!({
+                "actor": "writer",
+                "harness": "codex",
+                "session": "recording-key",
+            });
+            event["production"]["implementer"] = identity.clone();
+            event["production"]["planner"] = identity;
+            if let Some(model) = model {
+                event["production"]["implementer"]["model"] = model.into();
+                event["production"]["planner"]["model"] = model.into();
+            }
+        });
+        let recorded = model == Some("m#high");
+        let check_identity = |identity: &serde_json::Value| {
+            assert_eq!(
+                identity.get("model").and_then(serde_json::Value::as_str),
+                model
+            );
+            if recorded {
+                assert!(identity.get("model_recorded").is_none(), "{identity}");
+            } else {
+                assert_eq!(identity["model_recorded"], false, "{identity}");
+            }
+        };
+        let catchup = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
+        assert_eq!(catchup["schema"], "arc-catchup/12");
+        let production = &catchup["ledger"]["debt-owed"][0]["debt_production"];
+        check_identity(&production["implementer"]);
+        check_identity(&production["planner"]);
+        let explain = json_stdout(repo.arc(&repo.root).args(["explain", &change, "--json"]));
+        assert_eq!(explain["schema"], "arc-explain/1");
+        let debt = explain["coverage_at_acceptance"]["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["item"] == "debt")
+            .unwrap();
+        check_identity(&debt["production"]["implementer"]);
+        let report = json_stdout(repo.arc(&repo.root).args(["workspace", "report", "--json"]));
+        assert_eq!(report["schema"], "arc-workspace-report/3");
+        let row = &report["sections"]["review_owed"][0];
+        assert_eq!(row["implementer"].as_str(), model.or(Some("writer")));
+        if recorded {
+            assert!(row.get("model_recorded").is_none(), "{row}");
+        } else {
+            assert_eq!(row["model_recorded"], false, "{row}");
+            for args in [
+                vec!["catchup"],
+                vec!["explain", &change],
+                vec!["workspace", "report"],
+            ] {
+                let text = stdout(repo.arc(&repo.root).args(args));
+                assert!(text.contains("codex (model not recorded)"), "{text}");
+            }
+        }
     }
 }

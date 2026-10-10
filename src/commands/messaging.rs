@@ -92,12 +92,19 @@ impl DebtSummary {
                 self.detail()
             );
             for entry in &self.entries {
-                if let Some(subject) = &entry.review_subject {
-                    println!(
-                        "  {}: {}",
+                let production = crate::render::debt_line(
+                    entry.missing,
+                    entry.production.as_ref(),
+                    entry.coverage.as_deref(),
+                );
+                match &entry.review_subject {
+                    Some(subject) => println!(
+                        "  {}: {}; {}",
                         entry.change_id,
-                        crate::render::review_subject_detail(subject)
-                    );
+                        crate::render::review_subject_detail(subject),
+                        production
+                    ),
+                    None => println!("  {}: {}", entry.change_id, production),
                 }
             }
         }
@@ -1110,9 +1117,13 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
             .unwrap_or_else(|| "unknown".to_string());
         let mark = if row.unfiled { " [unfiled]" } else { "" };
         println!(
-            "  {id} {} {} {activity} — {} journal items; {} handoffs, {} conclusions{mark}",
-            row.harness,
-            row.model.as_deref().unwrap_or("unknown"),
+            "  {id} {} {activity} — {} journal items; {} handoffs, {} conclusions{mark}",
+            crate::coordinate::display_model(
+                Some(&row.harness),
+                row.model.as_deref(),
+                Some(&row.session),
+                crate::coordinate::ModelStyle::Coordinate
+            ),
             row.journal_items,
             row.handoffs.len(),
             row.conclusions.len()

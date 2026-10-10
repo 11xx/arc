@@ -481,6 +481,9 @@ enum Cmd {
     /// recorded, otherwise with the newest snapshot
     /// Aggregate reads name unreadable changes with their errors on stderr
     /// and retain readable changes; a selected unreadable change fails
+    /// Recorded producer models that are missing, placeholders or session ids
+    /// print as model not recorded. JSON production identities retain raw values
+    /// with model_recorded: false; valid models omit the flag.
     Show {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -541,6 +544,9 @@ enum Cmd {
     /// A discharge of a debt by a later review that is not an approval reads
     /// `fulfilled, not approved`. Coverage at acceptance never takes later
     /// knowledge into its values; it only points at the discharge.
+    /// Recorded producer models that are missing, placeholders or session ids
+    /// print as model not recorded. JSON production identities retain raw values
+    /// with model_recorded: false; valid models omit the flag.
     Explain {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -563,6 +569,8 @@ enum Cmd {
     /// review batch records several, so it renders as several lines. This is
     /// the ledger, not Git history: for commits, use `git log`. Model sources,
     /// observation coordinates, and declaration disagreements accompany each fact
+    /// Recorded producer models that are missing, placeholders or session ids
+    /// print as model not recorded, qualified by the harness when established.
     Log {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -899,9 +907,12 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Lead-facing queue rollup: open changes, active claims, and outstanding debt (arc-inbox/10 schema)
+    /// Lead-facing queue rollup: open changes, active claims, and outstanding debt (arc-inbox/11 schema)
     /// Aggregate reads name unreadable changes with their errors on stderr
     /// and retain readable changes; a selected unreadable change fails
+    /// Recorded producer models that are missing, placeholders or session ids
+    /// print as model not recorded. JSON production identities retain raw values
+    /// with model_recorded: false; valid models omit the flag.
     Inbox {
         /// Restrict to changes assigned to this harness
         #[arg(long = "assigned-to")]
@@ -985,6 +996,9 @@ enum Cmd {
     /// observation. An unreadable prerequisite cannot count as integrated
     /// Includes retained provisional deliveries, routing recipients, local merges and dispositions.
     /// Unfinished transitions include observed refs, event state, retained intent and recovery command.
+    /// Recorded producer models that are missing, placeholders or session ids
+    /// print as model not recorded. JSON production identities retain raw values
+    /// with model_recorded: false; valid models omit the flag.
     Status {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1937,6 +1951,9 @@ enum Cmd {
     },
     /// Resume one change with its brief, live state, and journal context
     /// Records no events; ledger reads do not require a parseable append policy.
+    /// Recorded producer models that are missing, placeholders or session ids
+    /// print as model not recorded. JSON production identities retain raw values
+    /// with model_recorded: false; valid models omit the flag.
     Resume {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -2445,6 +2462,9 @@ enum Cmd {
     /// configuration that cannot be loaded measures the current checkout and
     /// warns on stderr
     /// Provisional integration obligations have a separate section and do not count as review debt.
+    /// Recorded producer models that are missing, placeholders or session ids
+    /// print as model not recorded. JSON production identities retain raw values
+    /// with model_recorded: false; valid models omit the flag.
     Catchup {
         /// Number of recent sessions, selected after ranking every discovered
         /// candidate by its last recorded activity rather than file modification time.
@@ -2742,6 +2762,9 @@ enum WorkspaceCmd {
     /// Unreadable changes are named with their errors on stderr; readable
     /// changes remain in the output
     /// Records no events; ledger reads do not require a parseable append policy.
+    /// Recorded producer models that are missing, placeholders or session ids
+    /// print as model not recorded. JSON production identities retain raw values
+    /// with model_recorded: false; valid models omit the flag.
     Inbox {
         /// Report only projects whose canonical anchor is beneath this path
         #[arg(long, value_name = "PATH", conflicts_with_all = ["here", "global"])]
@@ -2786,6 +2809,9 @@ enum WorkspaceCmd {
     /// Change observations name unreadable changes with their errors on
     /// stderr and retain readable changes
     /// Records no events; ledger reads do not require a parseable append policy.
+    /// Recorded producer models that are missing, placeholders or session ids
+    /// print as model not recorded. JSON production identities retain raw values
+    /// with model_recorded: false; valid models omit the flag.
     Backlog {
         /// Count only journal items filed at or after this journal stamp
         /// (20260101T000000Z) or RFC 3339 timestamp, so the tiers read as
@@ -2837,6 +2863,9 @@ enum WorkspaceCmd {
     /// Records no events; ledger reads do not require a parseable append policy.
     /// A separate provisional integration section carries recipient, age, refusal and reconciliation evidence.
     /// Unfinished transitions have a separate section with refs, event publication and recovery commands.
+    /// Debt implementers print as model not recorded when their model is absent,
+    /// a placeholder or a session id. JSON retains the raw implementer beside
+    /// model_recorded: false; valid models omit the flag.
     Report {
         /// Report only projects whose canonical anchor is beneath this path
         #[arg(long, value_name = "PATH", conflicts_with_all = ["here", "global"])]

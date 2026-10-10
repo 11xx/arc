@@ -1093,15 +1093,16 @@ pub fn markdown(
         for audit in &report.audit_verdicts {
             let _ = writeln!(
                 w,
-                "- {:?} at `{}` by {}{}{}",
+                "- {:?} at `{}` by {} ({}){}",
                 audit.verdict,
                 &audit.revision[..audit.revision.len().min(8)],
                 audit.effective_author(),
-                audit
-                    .model
-                    .as_deref()
-                    .map(|model| format!(" ({model})"))
-                    .unwrap_or_default(),
+                crate::coordinate::display_model(
+                    None,
+                    audit.model.as_deref(),
+                    None,
+                    crate::coordinate::ModelStyle::Coordinate
+                ),
                 audit
                     .body
                     .as_deref()
@@ -1666,9 +1667,11 @@ fn blocker_title(blocker: Blocker) -> &'static str {
 /// record does not carry is left out rather than filled in.
 fn debt_coverage_label(coverage: &DebtCoverage) -> String {
     let mut label = coverage.reviewer.clone();
-    if let Some(effort) = &coverage.effort {
-        label.push('@');
-        label.push_str(effort);
+    if crate::coordinate::model_recorded(coverage.model.as_deref(), None) {
+        if let Some(effort) = &coverage.effort {
+            label.push('@');
+            label.push_str(effort);
+        }
     }
     if let Some(route) = &coverage.route_version {
         let _ = write!(label, " [route {route}]");
@@ -1676,17 +1679,33 @@ fn debt_coverage_label(coverage: &DebtCoverage) -> String {
     label
 }
 
-/// One coverage entry with the model string it was cast under, kept whole.
+/// One coverage entry with its validated model label.
 fn debt_coverage_detail(coverage: &DebtCoverage) -> String {
-    match coverage.model.as_deref() {
-        Some(model) => format!("{} ({model})", debt_coverage_label(coverage)),
-        None => format!("{} (model unrecorded)", debt_coverage_label(coverage)),
-    }
+    format!(
+        "{} ({})",
+        debt_coverage_label(coverage),
+        crate::coordinate::display_model(
+            None,
+            coverage.model.as_deref(),
+            None,
+            crate::coordinate::ModelStyle::Coordinate,
+        )
+    )
 }
 
 /// One production identity as `<actor>@<effort>`, read the way every other
 /// identity comparison reads one: the subject when a lead acted for somebody.
-fn debt_identity_label(identity: &DebtIdentity) -> String {
+pub(crate) fn debt_identity_label(identity: &DebtIdentity) -> String {
+    if !crate::coordinate::model_recorded(identity.model.as_deref(), identity.session.as_deref())
+        || crate::coordinate::actor_defect(identity.effective_actor()).is_some()
+    {
+        return crate::coordinate::display_model(
+            identity.harness.as_deref(),
+            identity.model.as_deref(),
+            identity.session.as_deref(),
+            crate::coordinate::ModelStyle::Coordinate,
+        );
+    }
     match &identity.effort {
         Some(effort) => format!("{}@{effort}", identity.effective_actor()),
         None => identity.effective_actor().to_string(),
@@ -1745,7 +1764,7 @@ pub fn debt_line(
 
 /// One chronological log line for a ledger event:
 /// `<ts>  <actor>@<harness> (<model>)  <event-type>  <summary>`, with the
-/// parenthesized model omitted when no model was recorded.
+/// missing and defective models marked as unrecorded.
 pub fn event_line(event: &Event) -> String {
     let (kind, summary) = event_kind_summary(&event.payload);
     if summary.is_empty() {
@@ -1756,19 +1775,20 @@ pub fn event_line(event: &Event) -> String {
 }
 
 /// The `<ts>  <actor>@<harness> (<model>)` half of a log line, shared by
-/// events and by the facts an event carries inside it. The model annotation is
-/// present only when the event recorded one.
+/// events and by the facts an event carries inside it. The model annotation
+/// distinguishes coordinates from missing and defective recorded values.
 fn event_prefix(event: &Event) -> String {
     let ts = event.created_at.format("%Y-%m-%dT%H:%M:%SZ");
     let actor = match &event.on_behalf_of {
         Some(subject) => format!("{} (for {subject})", event.actor),
         None => event.actor.clone(),
     };
-    let model = event
-        .model
-        .as_deref()
-        .map(|model| format!(" ({model})"))
-        .unwrap_or_default();
+    let producer = crate::coordinate::display_model(
+        event.harness.as_deref(),
+        event.model.as_deref(),
+        event.session.as_deref(),
+        crate::coordinate::ModelStyle::Annotation,
+    );
     let source = event
         .model_provenance
         .model_source
@@ -1778,7 +1798,7 @@ fn event_prefix(event: &Event) -> String {
         .model_provenance
         .model_observation
         .as_ref()
-        .map(|obs| format!("; {}", obs.line()))
+        .map(|obs| format!("; {}", obs.line(event.session.as_deref())))
         .unwrap_or_default();
     let disagreement = event
         .model_provenance
@@ -1787,15 +1807,23 @@ fn event_prefix(event: &Event) -> String {
         .map(|mismatch| {
             format!(
                 "; declared: {}, observed: {}",
-                mismatch.declared, mismatch.observed
+                crate::coordinate::display_model(
+                    None,
+                    Some(&mismatch.declared),
+                    event.session.as_deref(),
+                    crate::coordinate::ModelStyle::Coordinate
+                ),
+                crate::coordinate::display_model(
+                    None,
+                    Some(&mismatch.observed),
+                    event.session.as_deref(),
+                    crate::coordinate::ModelStyle::Coordinate
+                )
             )
         })
         .unwrap_or_default();
     let provenance = one_line(&format!("{source}{observation}{disagreement}"));
-    format!(
-        "{ts}  {actor}@{}{model}{provenance}",
-        event.harness.as_deref().unwrap_or("-")
-    )
+    format!("{ts}  {actor}@{producer}{provenance}")
 }
 
 /// Which patchset a finding predates, when it is not the one under review.
@@ -2736,5 +2764,42 @@ pub fn verdict_assessments(assessments: &[crate::status::VerdictAssessment]) {
             verdict.event_id, verdict.origin_replica_id, verdict.origin_name.as_deref().unwrap_or("unnamed"), verdict.actor,
             verdict.on_behalf_of, verdict.admission_provenance, verdict.covers_current_head, verdict.gating_eligible,
             verdict.rejection_reason.as_ref().map(|reason| format!(", {reason}")).unwrap_or_default());
+    }
+}
+
+#[cfg(test)]
+mod recorded_model_tests {
+    use super::*;
+
+    #[test]
+    fn producer_placeholders_are_unattributed() {
+        for model in [
+            Some("unknown"),
+            Some("m#none"),
+            Some("recording-key#low"),
+            Some(""),
+            None,
+        ] {
+            let production = DebtProduction {
+                planner: None,
+                brief_version: None,
+                implementer: crate::model::DebtIdentity::new(
+                    "codex:unknown".into(),
+                    None,
+                    Some("codex".into()),
+                    model.map(str::to_string),
+                    Some("recording-key".into()),
+                ),
+                following_brief: false,
+            };
+            let label = debt_production_label(&production);
+            assert_eq!(label, "implemented by codex (model not recorded)");
+            let mut absent = production;
+            absent.implementer.harness = None;
+            assert_eq!(
+                debt_production_label(&absent),
+                "implemented by model not recorded"
+            );
+        }
     }
 }

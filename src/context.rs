@@ -648,10 +648,21 @@ pub fn print_env() -> i32 {
     );
     println!("unset ARC_MODEL");
     if let Some(model) = &identity.model {
-        println!("# model: {}", crate::render::one_line(model));
+        println!(
+            "# model: {}",
+            crate::render::one_line(&crate::coordinate::display_model(
+                None,
+                Some(model),
+                Some(&session.id),
+                crate::coordinate::ModelStyle::Coordinate
+            ))
+        );
     }
     if let Some(observation) = &identity.model_observation {
-        println!("# {}", crate::render::one_line(&observation.line()));
+        println!(
+            "# {}",
+            crate::render::one_line(&observation.line(Some(&session.id)))
+        );
     }
     if let Some(reason) = &identity.model_unavailable {
         println!("# export ARC_MODEL=<model[#effort]>  # unavailable: {reason}");

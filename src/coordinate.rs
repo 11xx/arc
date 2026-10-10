@@ -92,6 +92,44 @@ pub(crate) fn model_defect(value: &str, session: Option<&str>) -> Option<Defect>
     is_session_id(model, session).then_some(Defect::SessionId)
 }
 
+/// Whether a recorded model names a coordinate rather than an absent value,
+/// placeholder or session id.
+pub(crate) fn model_recorded(model: Option<&str>, session: Option<&str>) -> bool {
+    model.is_some_and(|model| model_defect(model, session).is_none())
+}
+
+/// The spelling of an established model and harness in a text view.
+#[derive(Clone, Copy)]
+pub(crate) enum ModelStyle {
+    Coordinate,
+    Annotation,
+    Via,
+}
+
+/// A recorded producer model, validated before it is presented as a coordinate.
+/// Missing and defective models name only the established harness.
+pub(crate) fn display_model(
+    harness: Option<&str>,
+    model: Option<&str>,
+    session: Option<&str>,
+    style: ModelStyle,
+) -> String {
+    let harness = harness.filter(|value| !value.trim().is_empty() && !is_placeholder(value));
+    if !model_recorded(model, session) {
+        return match harness {
+            Some(harness) => format!("{harness} (model not recorded)"),
+            None => "model not recorded".to_string(),
+        };
+    }
+    let model = model.expect("an established model is present");
+    match (harness, style) {
+        (Some(harness), ModelStyle::Coordinate) => format!("{harness}:{model}"),
+        (Some(harness), ModelStyle::Annotation) => format!("{harness} ({model})"),
+        (Some(harness), ModelStyle::Via) => format!("{model} via {harness}"),
+        (None, _) => model.to_string(),
+    }
+}
+
 /// What is wrong with an actor, if anything.
 ///
 /// Actors are free-form: a person's name, an agent label, or the
@@ -159,6 +197,47 @@ mod tests {
     use super::*;
 
     const UUID: &str = "019f0000-0000-7000-8000-00000000000a";
+
+    #[test]
+    fn recorded_model_display_validates_every_style() {
+        for style in [
+            ModelStyle::Coordinate,
+            ModelStyle::Annotation,
+            ModelStyle::Via,
+        ] {
+            for model in [
+                Some(UUID),
+                Some("recording-key#high"),
+                Some(" Unknown "),
+                Some("m#none"),
+                Some(""),
+                None,
+            ] {
+                assert_eq!(
+                    display_model(Some("codex"), model, Some("recording-key"), style),
+                    "codex (model not recorded)"
+                );
+                for harness in [None, Some("unknown"), Some("")] {
+                    assert_eq!(
+                        display_model(harness, model, Some("recording-key"), style),
+                        "model not recorded"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            display_model(Some("codex"), Some("m#high"), None, ModelStyle::Coordinate),
+            "codex:m#high"
+        );
+        assert_eq!(
+            display_model(Some("codex"), Some("m#high"), None, ModelStyle::Annotation),
+            "codex (m#high)"
+        );
+        assert_eq!(
+            display_model(Some("codex"), Some("m#high"), None, ModelStyle::Via),
+            "m#high via codex"
+        );
+    }
 
     #[test]
     fn placeholders_are_matched_trimmed_and_without_case() {

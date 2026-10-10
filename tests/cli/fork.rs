@@ -2259,7 +2259,7 @@ fn catchup_surfaces_branches_and_worktrees_no_owner_names() {
         .success();
 
     let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
-    assert_eq!(inbox["schema"], "arc-inbox/10");
+    assert_eq!(inbox["schema"], "arc-inbox/11");
     let names = |bucket: &str| -> Vec<String> {
         inbox[bucket]
             .as_array()
