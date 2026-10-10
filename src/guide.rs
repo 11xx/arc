@@ -461,7 +461,8 @@ SETTLE A QUESTION (before it is work)
     stays with `begin --from-journal`, never a kind conversion.
     Complete Markdown is staged durably under `.transitions/` before the
     relation event, then published exclusively and verified before retirement.
-    Retry uses the prepared bytes, including a supplied body and title. A
+    Reusing a matching preparation syncs its file and directory before the
+    relation is recorded. Retry uses the prepared bytes, including a supplied body and title. A
     legacy pending successor is verified against the original body and title;
     a mismatch preserves the artifact and refuses retirement. A readable
     supersedes prefix alone supplies no publication evidence.

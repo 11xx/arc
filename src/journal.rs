@@ -1214,7 +1214,8 @@ pub enum JournalCmd {
     /// Promotion to a code change stays with `begin --from-journal`, which
     /// is implementation authorization and never a kind conversion.
     /// The complete body is staged durably before the relation is recorded and
-    /// published exclusively. Retry uses those staged bytes. A legacy pending
+    /// published exclusively. Reusing a matching preparation syncs its file
+    /// and directory before recording the relation. Retry uses those staged bytes. A legacy pending
     /// successor requires verification against the original body and title;
     /// a mismatch preserves the artifact and refuses retirement.
     Transition {
@@ -2529,20 +2530,38 @@ fn verify_prepared_log(hot: &Path, expected: &str) -> Result<()> {
 
 /// A complete staged body acquires its final name without replacing any file.
 fn publish_exclusive_body(path: &Path, bytes: &[u8]) -> Result<()> {
+    let dir = path.parent().context("promotion body has no parent")?;
     if path.try_exists()? {
         if std::fs::read(path)? != bytes {
             bail!("destination body changed after preparation; recovery refuses");
         }
-        return Ok(());
+        sync_exclusive_body(path)?;
+        return sync_exclusive_body(dir);
     }
-    let dir = path.parent().context("promotion body has no parent")?;
     let staged = dir.join(format!(".exchange-{}.body", ulid::Ulid::new()));
     publish_exchange_file(&staged, bytes)?;
     let result = std::fs::hard_link(&staged, path);
     std::fs::remove_file(&staged)?;
     result.with_context(|| format!("cannot publish exclusive body {}", path.display()))?;
-    File::open(dir)?.sync_all()?;
+    sync_exclusive_body(dir)?;
     Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    static BODY_SYNC_FAILURE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    static BODY_SYNCS: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn sync_exclusive_body(path: &Path) -> Result<()> {
+    #[cfg(test)]
+    {
+        BODY_SYNCS.with(|paths| paths.borrow_mut().push(path.to_path_buf()));
+        if BODY_SYNC_FAILURE.with(|failure| failure.borrow().as_deref() == Some(path)) {
+            bail!("injected body sync failure");
+        }
+    }
+    File::open(path)?.sync_all().map_err(Into::into)
 }
 
 fn promotion_intent(project: &Path, filename: &str) -> PathBuf {
@@ -15691,6 +15710,35 @@ mod tests {
             auto_log_enabled(Err(failure)),
             Err("warning: journal auto-log is off: cannot load the arc configuration: cannot read the file: malformed config.toml".to_string())
         );
+    }
+
+    #[test]
+    fn matching_body_retry_confirms_file_and_directory_durability() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join(".transitions");
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("successor.md");
+        let body = b"# Prepared successor\nComplete custom body.\n";
+        BODY_SYNC_FAILURE.with(|failure| *failure.borrow_mut() = Some(directory.clone()));
+        let first = publish_exclusive_body(&path, body);
+        assert!(first.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), body);
+        for boundary in [&directory, &path] {
+            BODY_SYNC_FAILURE.with(|failure| *failure.borrow_mut() = Some(boundary.clone()));
+            let retry = publish_exclusive_body(&path, body);
+            BODY_SYNC_FAILURE.with(|failure| *failure.borrow_mut() = None);
+            assert!(
+                retry.is_err(),
+                "matching preparation skipped {} sync",
+                boundary.display()
+            );
+        }
+        BODY_SYNCS.with(|paths| paths.borrow_mut().clear());
+        publish_exclusive_body(&path, body).unwrap();
+        BODY_SYNCS.with(|paths| assert_eq!(*paths.borrow(), [path.clone(), directory.clone()]));
+        let before = std::fs::read(&path).unwrap();
+        assert!(publish_exclusive_body(&path, b"different").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]
