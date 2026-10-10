@@ -1944,7 +1944,12 @@ HISTORY REWRITES
 
   Blank lines and `#` comments are skipped; a comment naming another
   `arc-trailer-edits` version refuses, and a drop may leave out its empty
-  last field. An edit applies only to the named commit, which has to be in
+  last field. A field beginning with a double quote is a JSON string:
+  `\t` encodes a tab, `\"` a quote and `\\` a backslash; unquoted fields keep
+  literal backslashes. For example, `"Planned-by:\tcodex:unknown"` names a
+  line with a tab after its colon. Quoted fields contain no carriage return
+  or newline; malformed quoted fields refuse with the file and line.
+  An edit applies only to the named commit, which has to be in
   the --from range, and only to a trailer line of that commit's trailer block
   whose trimmed text equals the old line exactly. That line occurs once in the
   block, is not the head of a value continuing below it, and is named by no
@@ -1999,8 +2004,8 @@ HISTORY REWRITES
   On an append error, retention refs created by the attempt are
   withdrawn only when publication is confirmed absent; published or uncertain
   events keep them, and the error names that state. `arc doctor` reports a
-  retention ref whose object is gone as the problem `retained-object-missing`, and a cited commit no ref reaches as the
-  advice `unretained-commit`, naming the `git update-ref` that holds it.
+  retention ref whose object is gone as the problem `retained-object-missing`,
+  and a cited commit no ref reaches as the advice `unretained-commit`, naming the `git update-ref` that holds it.
   If Git cannot complete the reachability walk, the report retains collected
   findings and names the problem `retention-reachability-failed` with the error.
 

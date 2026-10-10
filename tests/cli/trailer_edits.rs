@@ -758,8 +758,86 @@ fn the_help_states_the_format_and_the_order() {
     let flat = help.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(flat.contains("--edits <FILE>"), "{flat}");
     assert!(flat.contains("arc-trailer-edits/1"), "{flat}");
+    assert!(flat.contains("JSON string"), "{flat}");
+    assert!(flat.contains(r"\t encodes a tab"), "{flat}");
+    assert!(
+        flat.contains("unquoted fields keep literal backslashes"),
+        "{flat}"
+    );
     assert!(
         flat.contains("edits apply first, then --drop, then --append"),
         "{flat}"
     );
+}
+
+#[test]
+fn quoted_trailer_fields_drop_or_replace_tabs_without_losing_same_key_attribution() {
+    for action in ["drop", "replace"] {
+        let repo = Repo::new();
+        let old = "Planned-by:\tcodex:unknown";
+        let valid = "Planned-by:\tcodex:gpt-6.1-sol#high";
+        let replacement = "Planned-by:\tPlanner <planner@example.invalid>";
+        repo.commit(
+            &repo.root,
+            "one.txt",
+            "one\n",
+            &format!("feat: one\n\n{old}\n{valid}\n"),
+        );
+        let first = repo.head(&repo.root);
+        repo.commit(
+            &repo.root,
+            "two.txt",
+            "two\n",
+            &format!("feat: two\n\n{valid}\n"),
+        );
+        let later = repo.head(&repo.root);
+        let later_message = git_out(&repo.root, &["show", "-s", "--format=%B", &later]);
+        let edits = repo.home.join("edits");
+        let new = if action == "drop" { "" } else { replacement };
+        fs::write(
+            &edits,
+            format!(
+                "# arc-trailer-edits/1\n{first}\t{action}\t{}\t{}\n",
+                serde_json::to_string(old).unwrap(),
+                serde_json::to_string(new).unwrap()
+            ),
+        )
+        .unwrap();
+        let before = ref_snapshot(&repo.root);
+        repo.arc(&repo.root)
+            .args([
+                "rewrite",
+                "trailers",
+                "--from",
+                &first,
+                "--no-sign",
+                "--edits",
+            ])
+            .arg(&edits)
+            .arg("--dry-run")
+            .assert()
+            .success()
+            .stdout(predicates::str::contains(format!("{action} {old}")));
+        assert_eq!(ref_snapshot(&repo.root), before);
+        repo.arc(&repo.root)
+            .args([
+                "rewrite",
+                "trailers",
+                "--from",
+                &first,
+                "--no-sign",
+                "--edits",
+            ])
+            .arg(&edits)
+            .assert()
+            .success();
+        let message = git_out(&repo.root, &["show", "-s", "--format=%B", "HEAD~1"]);
+        assert!(!message.contains(old), "{message}");
+        assert!(message.contains(valid), "{message}");
+        assert_eq!(message.contains(replacement), action == "replace");
+        assert_eq!(
+            git_out(&repo.root, &["show", "-s", "--format=%B", "HEAD"]),
+            later_message
+        );
+    }
 }

@@ -279,7 +279,10 @@ pub struct LineEdit {
 ///
 /// Blank lines and `#` comments are skipped, and a comment naming another
 /// `arc-trailer-edits` version is refused. A drop may leave out its empty last
-/// field, which editors strip. Every refusal names `source` and the line.
+/// field, which editors strip. A field beginning with a double quote is a
+/// JSON string: escapes encode tabs, quotes and backslashes. Unquoted fields
+/// keep literal backslashes. Quoted fields contain no carriage return or
+/// newline. Every refusal names `source` and the line.
 pub fn parse_edits(text: &str, source: &str) -> anyhow::Result<Vec<LineEdit>> {
     let mut edits = Vec::new();
     for (index, raw) in text.lines().enumerate() {
@@ -296,7 +299,24 @@ pub fn parse_edits(text: &str, source: &str) -> anyhow::Result<Vec<LineEdit>> {
             }
             continue;
         }
-        let fields: Vec<&str> = raw.split('\t').map(str::trim).collect();
+        let fields: Vec<String> = raw
+            .split('\t')
+            .map(|field| {
+                let field = field.trim();
+                if field.starts_with('"') {
+                    let decoded = serde_json::from_str::<String>(field).map_err(|error| {
+                        anyhow::anyhow!("{origin}: invalid JSON-quoted field: {error}")
+                    })?;
+                    if decoded.contains(['\n', '\r']) {
+                        anyhow::bail!("{origin}: quoted fields contain one line, without carriage returns or newlines");
+                    }
+                    Ok(decoded)
+                } else {
+                    Ok(field.to_string())
+                }
+            })
+            .collect::<anyhow::Result<_>>()?;
+        let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
         let (commit, action, old, new) = match fields[..] {
             [commit, action, old] => (commit, action, old, ""),
             [commit, action, old, new] => (commit, action, old, new),
@@ -896,6 +916,62 @@ mod tests {
     fn applied(message: &str, edits: &[LineEdit]) -> anyhow::Result<String> {
         let edits: Vec<&LineEdit> = edits.iter().collect();
         Ok(String::from_utf8(edit_lines(message.as_bytes(), &edits)?).unwrap())
+    }
+
+    #[test]
+    fn quoted_edit_fields_represent_tabs_and_preserve_literal_escapes() {
+        let old = "Planned-by:\tcodex:unknown";
+        let valid = "Planned-by:\tcodex:gpt-6.1-sol#high";
+        let message = format!("feat: one\n\n{old}\n{valid}\n");
+        for action in ["drop", "replace"] {
+            let new = if action == "drop" {
+                ""
+            } else {
+                "Planned-by:\tR <r@example.invalid>"
+            };
+            let text = format!(
+                "{SHA}\t{action}\t{}\t{}\n",
+                serde_json::to_string(old).unwrap(),
+                serde_json::to_string(new).unwrap()
+            );
+            let edits = parsed(&text).unwrap();
+            assert_eq!(edits[0].old, old);
+            assert_eq!(edits[0].new, new);
+            let result = applied(&message, &edits).unwrap();
+            assert!(!result.contains(old));
+            assert!(result.contains(valid));
+            if action == "replace" {
+                assert!(result.contains(new));
+            }
+        }
+        for line in [r"Example: literal\t", r#"Example: a "quote" and \slash"#] {
+            let quoted = serde_json::to_string(line).unwrap();
+            assert_eq!(
+                parsed(&format!("{SHA}\tdrop\t{quoted}\n")).unwrap()[0].old,
+                line
+            );
+            assert_eq!(
+                parsed(&format!("{SHA}\tdrop\t{line}\n")).unwrap()[0].old,
+                line
+            );
+        }
+    }
+
+    #[test]
+    fn quoted_fields_refuse_invalid_json_and_multiline_trailer_text() {
+        for field in [
+            r#""Planned-by: bad\q""#,
+            r#""A: x\nB: y""#,
+            r#""A: x\rB: y""#,
+        ] {
+            for row in [
+                format!("{SHA}\tdrop\t{field}\n"),
+                format!("{SHA}\treplace\tA: x\t{field}\n"),
+            ] {
+                let error = parsed(&row).unwrap_err();
+                assert!(error.to_string().contains("edits:1"), "{error}");
+            }
+        }
     }
 
     #[test]

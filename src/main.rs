@@ -3025,7 +3025,11 @@ enum RewriteCmd {
         /// file's lines are `<full commit sha>`, `replace` or `drop`, the
         /// exact old trailer line and the new trailer line (empty for a drop),
         /// separated by tabs; blank lines and `#` comments are skipped, and a
-        /// comment naming another `arc-trailer-edits` version refuses. An edit
+        /// comment naming another `arc-trailer-edits` version refuses. A field
+        /// beginning with a double quote is a JSON string: \t encodes a tab,
+        /// \" a quote and \\ a backslash; unquoted fields keep literal backslashes.
+        /// Quoted fields contain no carriage return or newline; malformed
+        /// quoted fields refuse with the file and line. An edit
         /// applies only to its commit, which has to be in the --from range,
         /// and only to a trailer line of that commit's trailer block whose
         /// trimmed text equals the old line; the old line occurs there exactly

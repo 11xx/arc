@@ -2384,7 +2384,8 @@ fn placeholder_role_trailers_advisory(messages: &[(String, Vec<u8>)]) -> Option<
              and holds, for each line named above, one line of tab-separated fields: the \
              commit, `drop` and the exact line to omit it, or the commit, `replace`, the \
              exact line and the real coordinate that is known; the other lines under the \
-             same key stay; message rewrites require a fresh snapshot and approval or \
+             same key stay; JSON-quote a field to encode an internal tab as \\t; \
+             message rewrites require a fresh snapshot and approval or \
              declared debt",
             found.join("; ")
         ),
