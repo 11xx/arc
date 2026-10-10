@@ -1939,10 +1939,10 @@ HISTORY REWRITES
                        hand, has no known source and stays protected, as does
                        one written from a source outside refs/heads/. Where
                        several refspecs write one ref, each must name the
-                       change branch. A configured upstream qualifies only
-                       when its remote source branch has the change branch's
-                       name, even with a fetch-refspec alias; an upstream of
-                       another branch remains protected. Target refs remain
+                       change branch, including for a configured upstream
+                       with a fetch-refspec alias. Upstream configuration
+                       grants no exemption from the all-sources check.
+                       Target refs remain
                        protected, a remote-tracking ref fetched from a target
                        branch among them. --include-shared
                        grants permission without changing the default range.

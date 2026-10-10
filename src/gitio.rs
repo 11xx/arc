@@ -1594,13 +1594,6 @@ pub fn branch_upstream(cwd: &Path, branch: &str) -> Result<Option<(String, Strin
     })
 }
 
-/// Source branch name recorded by the upstream's merge ref, before fetch
-/// refspecs translate it into a remote-tracking ref.
-pub fn branch_upstream_branch_name(cwd: &Path, branch: &str) -> Result<Option<String>> {
-    Ok(config_value(cwd, &format!("branch.{branch}.merge"))?
-        .and_then(|reference| reference.strip_prefix("refs/heads/").map(str::to_string)))
-}
-
 /// One remote's fetch refspecs: where its refs are written, and which of its
 /// refs a negative refspec leaves out.
 #[derive(Default)]

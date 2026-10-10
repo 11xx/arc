@@ -3036,8 +3036,8 @@ enum RewriteCmd {
         /// A remote-tracking ref is its own work only when its fetch source,
         /// read from `remote.<name>.fetch`, is a branch with this branch's
         /// name; a ref no refspec writes stays protected, as do target refs.
-        /// A configured upstream qualifies only when its remote source branch
-        /// has this branch's name. Shared commits are refused without
+        /// Every fetch source must name this branch, including for a
+        /// configured upstream. Shared commits are refused without
         /// permission before any moves, including --dry-run
         #[arg(long)]
         include_shared: bool,
@@ -3140,8 +3140,8 @@ enum RewriteCmd {
         /// local or remote-tracking branch. A remote-tracking ref is its own
         /// work only when its fetch source, read from `remote.<name>.fetch`,
         /// is a branch with this branch's name; a ref no refspec writes stays
-        /// protected, as do target refs. A configured upstream qualifies only
-        /// when its remote source branch has this branch's name.
+        /// protected, as do target refs. Every fetch source must name this
+        /// branch, including for a configured upstream.
         /// Without permission shared commits are refused before any ref moves,
         /// including --dry-run; unchanged commits are left alone. Permission
         /// never changes the inclusive range named by --from

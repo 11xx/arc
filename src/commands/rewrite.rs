@@ -313,9 +313,6 @@ fn protect_shared<'a>(
         })
         .map(|reference| (reference.name, reference.commit))
         .collect();
-    let upstream = gitio::branch_upstream(cwd, branch)?.map(|(_, reference)| reference);
-    let upstream_is_own =
-        gitio::branch_upstream_branch_name(cwd, branch)?.as_deref() == Some(branch.as_str());
     let mut target_protected = BTreeMap::new();
     let mut target_upstreams = BTreeSet::new();
     for target in targets {
@@ -340,11 +337,7 @@ fn protect_shared<'a>(
                 .strip_prefix("refs/heads/")
                 .is_some_and(|name| targets.contains(name))
         }) || target_upstreams.contains(&reference);
-        let own_ref = if upstream.as_deref() == Some(reference.as_str()) {
-            upstream_is_own
-        } else {
-            !sources.is_empty() && sources.iter().all(|source| *source == own_source)
-        };
+        let own_ref = !sources.is_empty() && sources.iter().all(|source| *source == own_source);
         if target_ref {
             target_protected.insert(reference.clone(), tip.clone());
         }

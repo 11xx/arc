@@ -2748,6 +2748,85 @@ fn a_remote_ref_is_the_changes_own_only_when_its_fetch_source_is_the_change_bran
 }
 
 #[test]
+fn configured_upstream_overlapping_sources_refuse_a_signing_rewrite() {
+    configured_upstream_overlapping_sources("sign");
+}
+
+#[test]
+fn configured_upstream_overlapping_sources_refuse_a_trailer_rewrite() {
+    configured_upstream_overlapping_sources("trailers");
+}
+
+fn configured_upstream_overlapping_sources(mode: &str) {
+    let tracking = "refs/remotes/origin/delivery";
+    for other_remote in ["origin", "mirror"] {
+        for other_source in ["develop", "arc/alpha"] {
+            for dry in [false, true] {
+                let (repo, worktree, old) = change_fetched_through(
+                    &["+refs/heads/arc/alpha:refs/remotes/origin/delivery"],
+                    tracking,
+                );
+                git(
+                    &worktree,
+                    &[
+                        "branch",
+                        "--set-upstream-to",
+                        "origin/delivery",
+                        "arc/alpha",
+                    ],
+                );
+                if other_remote != "origin" {
+                    git(
+                        &worktree,
+                        &["remote", "add", other_remote, repo.root.to_str().unwrap()],
+                    );
+                    git(&worktree, &["config", "--unset-all", "remote.mirror.fetch"]);
+                }
+                git(
+                    &worktree,
+                    &[
+                        "config",
+                        "--add",
+                        &format!("remote.{other_remote}.fetch"),
+                        &format!("+refs/heads/{other_source}:{tracking}"),
+                    ],
+                );
+                let key = signing_key(&repo).expect("upstream acceptance requires a sandbox key");
+                let before = ref_snapshot(&worktree);
+                let mut command = arc_signing(&repo, &key, &worktree);
+                command.args(["rewrite", mode, "--key", &key.fingerprint]);
+                if mode == "trailers" {
+                    command.args([
+                        "--from",
+                        &old,
+                        "--append",
+                        "Planned-by: Planner <planner@example.invalid>",
+                    ]);
+                }
+                if dry {
+                    command.arg("--dry-run");
+                }
+                if other_source == "arc/alpha" {
+                    command.assert().success();
+                    if !dry {
+                        assert_ne!(repo.head(&worktree), old);
+                    }
+                    assert_eq!(git_out(&worktree, &["rev-parse", tracking]), old);
+                } else {
+                    command.assert().failure().stderr(
+                        predicates::str::contains(tracking)
+                            .and(predicates::str::contains("--include-shared")),
+                    );
+                    assert_eq!(ref_snapshot(&worktree), before);
+                    assert!(repository_events(&repo).is_empty());
+                    assert!(!intent_path(&repo).exists());
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn a_fetch_alias_onto_the_change_branch_name_refuses_a_signing_rewrite() {
     for dry in [false, true] {
         let (repo, worktree, _) = change_fetched_through(
