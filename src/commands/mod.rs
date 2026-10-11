@@ -10,6 +10,7 @@ mod changelog;
 mod claims;
 mod config_cmd;
 mod cost;
+mod cost_read;
 mod diff;
 mod doctor;
 mod external;

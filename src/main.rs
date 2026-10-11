@@ -4053,8 +4053,13 @@ enum CostCmd {
     /// `supersedes` lineage and the changes begun from any name in it.
     /// Journal membership uses resolved journal and artifact identity: bare,
     /// qualified and equivalent directory spellings select the same work.
-    /// References retain their original spelling as provenance. Unreadable
-    /// membership refuses the view instead of silently omitting runs
+    /// References retain their original spelling as provenance. References
+    /// outside a readable artifact's lineage need no resolution. Unavailable
+    /// membership qualifies selection and withholds only dependent work
+    /// totals; readable session figures remain available. Unreadable ledger
+    /// records and published imports are coverage gaps beside readable peers.
+    /// A query refuses only when neither target metadata nor any relevant
+    /// dispatch or session can be read
     ///
     /// Each executor session bound to a selected run is measured through the
     /// pinned tapes reader over its whole recording, or, when the source
@@ -4092,8 +4097,8 @@ enum CostCmd {
     /// that acted on a selected change without a binding, such as a lead,
     /// are named outside assignment
     /// coverage with no figure. Transitions and `begin --from-journal` add
-    /// no consumption. Nonportable binding metadata refuses the view with
-    /// a fixed diagnostic. `--json` emits `arc-cost/1`
+    /// no consumption. Nonportable binding metadata qualifies the affected
+    /// assignment with a fixed diagnostic. `--json` emits `arc-cost/1`
     /// Records no events; ledger reads do not require a parseable append policy.
     Show {
         /// Change ID or unique prefix, or a journal artifact: a filename in
@@ -4110,8 +4115,11 @@ enum CostCmd {
     /// any harness-written dollar figure, plus lineage relations and read
     /// failures as fixed categories. Relatives are plain session ids; no
     /// recording locator or raw error text is retained. Binding fork origins
-    /// remain in the run records. Nonportable binding metadata refuses the
-    /// read with a fixed diagnostic. The source
+    /// remain in the run records. Unavailable journal membership, unreadable
+    /// ledger peers and nonportable bindings are coverage gaps; readable
+    /// session identities still permit independent retention. A query refuses
+    /// only when no target metadata or relevant dispatch or session is readable.
+    /// The source
     /// bytes stay in the harness store. Facts identical to ones already
     /// retained for a session
     /// record nothing and print the held event; a session whose source does

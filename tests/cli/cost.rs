@@ -1331,7 +1331,7 @@ fn review_journal_aliases_select_the_same_runs_and_changes_through_transitions()
 
 #[cfg(unix)]
 #[test]
-fn unreadable_journal_membership_refuses_a_partial_cost_view() {
+fn unreadable_journal_membership_qualifies_a_partial_cost_view() {
     let repo = Repo::new();
     let plan = file_artifact(&repo, "plan", "missing-alias");
     let directory = stdout(repo.arc(&repo.root).args(["journal", "dir"]));
@@ -1346,16 +1346,252 @@ fn unreadable_journal_membership_refuses_a_partial_cost_view() {
         "missing-alias",
     );
     fs::remove_file(&alias).unwrap();
+    let view = report(&repo, &plan);
+    assert_eq!(
+        usd(&session(&view, "pi:missing-alias")["totals"]),
+        Some(0.03)
+    );
+    assert_eq!(view["coverage"]["selection"]["status"], "incomplete");
+    assert!(usd(&view["union"]).is_none());
+    assert!(!view["coverage"]["selection"]
+        .to_string()
+        .contains(alias.to_str().unwrap()));
+    stdout(repo.arc(&repo.root).args(["cost", "retain", &plan]));
+}
+
+#[cfg(unix)]
+#[test]
+fn unrelated_unavailable_journal_reference_keeps_healthy_costs_and_retention() {
+    let repo = Repo::new();
+    let healthy = file_artifact(&repo, "plan", "healthy-query");
+    let unrelated = file_artifact(&repo, "plan", "unrelated-query");
+    let directory = stdout(repo.arc(&repo.root).args(["journal", "dir"]));
+    let alias = repo.home.join("retired-journal-alias");
+    std::os::unix::fs::symlink(directory.trim(), &alias).unwrap();
+    let qualified = format!("{}::{unrelated}", alias.display());
+    pi_recording(&repo, "healthy-query", &[0.03], false);
+    bind(
+        &repo,
+        &dispatch(&repo, "--journal", &healthy),
+        "pi",
+        "healthy-query",
+    );
+    let before = report(&repo, &healthy);
+    dispatch(&repo, "--journal", &qualified);
+    begin_without_checkout(&repo, "unrelated-query", &["--from-journal", &qualified]);
+    fs::remove_file(alias).unwrap();
+    let after = report(&repo, &healthy);
+    assert_eq!(after["sessions"], before["sessions"]);
+    assert_eq!(after["union"], before["union"]);
+    stdout(repo.arc(&repo.root).args(["cost", "retain", &healthy]));
+}
+
+#[test]
+fn bad_ledger_records_and_imports_preserve_healthy_session_figures() {
+    for fault in ["repository", "import", "change", "wrong-scope", "pending"] {
+        let repo = Repo::new();
+        let healthy = begin_without_checkout(&repo, "healthy-ledger", &[]);
+        pi_recording(&repo, "healthy-ledger", &[0.03], false);
+        bind(
+            &repo,
+            &dispatch(&repo, "--change", &healthy),
+            "pi",
+            "healthy-ledger",
+        );
+        let before = report(&repo, &healthy);
+        let path = match fault {
+            "repository" | "wrong-scope" | "pending" => {
+                repo.root.join(".git/arc/repository/events/bad-peer.json")
+            }
+            "import" => repo.root.join(".git/arc/imports/bad-peer.json"),
+            _ => {
+                let peer = begin_without_checkout(&repo, "bad-peer", &[]);
+                repo.root
+                    .join(".git/arc/changes")
+                    .join(peer)
+                    .join("events/bad-peer.json")
+            }
+        };
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        if fault == "pending" {
+            fs::create_dir(&path).unwrap();
+        } else if fault == "wrong-scope" {
+            fs::write(
+                &path,
+                json!({"event_id":"bad-peer", "change_id":"foreign"}).to_string(),
+            )
+            .unwrap();
+        } else {
+            fs::write(&path, "not json").unwrap();
+        }
+        let after = report(&repo, &healthy);
+        assert_eq!(after["sessions"], before["sessions"], "{fault}");
+        if fault != "change" {
+            assert_eq!(after["coverage"]["ledger"]["status"], "incomplete");
+            assert!(usd(&after["union"]).is_none(), "{fault}: {after}");
+        } else {
+            assert_eq!(after["union"], before["union"]);
+        }
+        let retained = stdout(repo.arc(&repo.root).args(["cost", "retain", &healthy]));
+        assert!(
+            retained.contains("retained: pi:healthy-ledger"),
+            "{retained}"
+        );
+    }
+}
+
+#[test]
+fn unreadable_change_opening_preserves_sessions_with_uncertain_journal_membership() {
+    let repo = Repo::new();
+    let plan = file_artifact(&repo, "plan", "partial-membership");
+    let change = begin_without_checkout(&repo, "partial-peer", &["--from-journal", &plan]);
+    pi_recording(&repo, "healthy-plan", &[0.03], false);
+    pi_recording(&repo, "readable-peer", &[0.02], false);
+    bind(
+        &repo,
+        &dispatch(&repo, "--journal", &plan),
+        "pi",
+        "healthy-plan",
+    );
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", &change),
+        "pi",
+        "readable-peer",
+    );
+    let events = repo
+        .root
+        .join(".git/arc/changes")
+        .join(&change)
+        .join("events");
+    for entry in fs::read_dir(events).unwrap() {
+        let path = entry.unwrap().path();
+        let event: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        if event["event_type"] == "change-opened" {
+            fs::write(path, "corrupt opening").unwrap();
+        }
+    }
+    let journal = report(&repo, &plan);
+    for (id, amount) in [("pi:healthy-plan", 0.03), ("pi:readable-peer", 0.02)] {
+        assert_eq!(usd(&session(&journal, id)["totals"]), Some(amount));
+    }
+    assert_eq!(journal["coverage"]["selection"]["status"], "incomplete");
+    assert!(usd(&journal["union"]).is_none());
+    let direct = report(&repo, &change);
+    assert_eq!(
+        usd(&work(&direct, &format!("change:{change}"))["direct"]),
+        Some(0.02)
+    );
+    assert!(usd(&direct["union"]).is_none());
+    let retained = stdout(repo.arc(&repo.root).args(["cost", "retain", &plan]));
+    assert!(retained.contains("retained: pi:healthy-plan"));
+    assert!(retained.contains("retained: pi:readable-peer"));
+}
+
+#[test]
+fn an_unrelated_nonportable_binding_preserves_healthy_costs() {
+    let repo = Repo::new();
+    pi_recording(&repo, "healthy-binding", &[0.03], false);
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "healthy-binding"),
+        "pi",
+        "healthy-binding",
+    );
+    let peer = dispatch(&repo, "--change", "unrelated-binding");
+    bind(&repo, &peer, "pi", "peer-session");
+    let before = report(&repo, "healthy-binding");
+    let locator = repo.home.join("private/peer-session.jsonl");
+    for entry in fs::read_dir(repo.root.join(".git/arc/repository/events")).unwrap() {
+        let path = entry.unwrap().path();
+        let mut event: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        if event["event_type"] == "run-bound" && event["dispatch_event_id"] == peer {
+            event["executor_session"] = json!(locator);
+            fs::write(path, event.to_string()).unwrap();
+        }
+    }
+    let after = report(&repo, "healthy-binding");
+    assert_eq!(after["sessions"], before["sessions"]);
+    assert_eq!(after["union"], before["union"]);
+    assert!(!after.to_string().contains(locator.to_str().unwrap()));
+    let retained = stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "retain", "healthy-binding"]),
+    );
+    assert!(retained.contains("retained: pi:healthy-binding"));
+}
+
+#[test]
+fn corrupt_retained_facts_do_not_spoil_healthy_fresh_figures() {
+    let repo = Repo::new();
+    pi_recording(&repo, "fresh-healthy", &[0.03], false);
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "fresh-healthy"),
+        "pi",
+        "fresh-healthy",
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "retain", "fresh-healthy"]),
+    );
+    let before = report(&repo, "fresh-healthy");
+    for entry in fs::read_dir(repo.root.join(".git/arc/repository/events")).unwrap() {
+        let path = entry.unwrap().path();
+        let mut event: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        if event["event_type"] == "cost-facts-retained" {
+            event["facts"]["counters"] = json!("corrupt counters");
+            fs::write(path, event.to_string()).unwrap();
+        }
+    }
+    let after = report(&repo, "fresh-healthy");
+    assert_eq!(after["sessions"], before["sessions"]);
+    assert_eq!(after["union"], before["union"]);
+    assert_eq!(after["coverage"]["ledger"]["status"], "incomplete");
+    let retained = stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "retain", "fresh-healthy"]),
+    );
+    assert!(retained.contains("retained: pi:fresh-healthy"));
+}
+
+#[cfg(unix)]
+#[test]
+fn unavailable_source_journal_preserves_independent_change_costs() {
+    let repo = Repo::new();
+    let plan = file_artifact(&repo, "plan", "unavailable-source");
+    let directory = stdout(repo.arc(&repo.root).args(["journal", "dir"]));
+    let alias = repo.home.join("source-alias");
+    std::os::unix::fs::symlink(directory.trim(), &alias).unwrap();
+    let qualified = format!("{}::{plan}", alias.display());
+    let change = begin_without_checkout(&repo, "healthy-direct", &["--from-journal", &qualified]);
+    pi_recording(&repo, "healthy-direct", &[0.03], false);
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", &change),
+        "pi",
+        "healthy-direct",
+    );
+    fs::remove_file(alias).unwrap();
+    let view = report(&repo, &change);
+    let item = work(&view, &format!("change:{change}"));
+    assert_eq!(usd(&item["direct"]), Some(0.03));
+    assert!(usd(&item["inclusive"]).is_none());
+    assert_eq!(view["coverage"]["selection"]["status"], "incomplete");
+    assert_eq!(usd(&view["sessions"][0]["totals"]), Some(0.03));
+    stdout(repo.arc(&repo.root).args(["cost", "retain", &change]));
+}
+
+#[test]
+fn an_unreadable_target_without_any_readable_dispatch_refuses() {
+    let repo = Repo::new();
     let output = repo
         .arc(&repo.root)
-        .args(["cost", "show", &plan, "--json"])
+        .args(["cost", "show", "missing-plan.md", "--json"])
         .output()
         .unwrap();
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("journal membership read failed"));
-    assert!(!stderr.contains(alias.to_str().unwrap()));
 }
 
 #[test]

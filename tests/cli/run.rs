@@ -1030,8 +1030,6 @@ fn legacy_binding_locators_refuse_views_and_transport_without_echoing_them() {
     fs::write(path, serde_json::to_vec(&event).unwrap()).unwrap();
     for args in [
         vec!["run", "list", "--json"],
-        vec!["cost", "show", &change, "--json"],
-        vec!["cost", "retain", &change],
         vec!["export", &change, "--output", "-"],
     ] {
         let output = repo.arc(&repo.root).args(args).output().unwrap();
@@ -1039,6 +1037,15 @@ fn legacy_binding_locators_refuse_views_and_transport_without_echoing_them() {
         assert!(output.stdout.is_empty());
         assert!(!String::from_utf8_lossy(&output.stderr).contains(&locator));
     }
+    let view = json_stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "show", &change, "--json"]),
+    );
+    assert_eq!(view["coverage"]["selection"]["status"], "incomplete");
+    assert!(!view.to_string().contains(&locator));
+    let retained = stdout(repo.arc(&repo.root).args(["cost", "retain", &change]));
+    assert!(retained.contains("coverage incomplete"));
+    assert!(!retained.contains(&locator));
 }
 
 /// A follow-up or resume is its own dispatch with its own binding, so two

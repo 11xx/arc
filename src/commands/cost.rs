@@ -9,6 +9,7 @@
 //! A total names its quantity kind and is withheld, refused, or absent rather
 //! than understated.
 
+use super::cost_read::CostRead;
 use super::run::{rounds, RunSubject};
 use super::*;
 use crate::model::{
@@ -61,6 +62,7 @@ struct WorkItem {
     lineage: Vec<String>,
     journal_members: BTreeSet<ArtifactIdentity>,
     source: Option<WorkKey>,
+    complete: bool,
 }
 
 type ArtifactIdentity = (std::path::PathBuf, String);
@@ -86,6 +88,7 @@ fn journal_item(ctx: &Ctx, reference: &str) -> Result<WorkItem> {
         lineage,
         journal_members,
         source: None,
+        complete: true,
     })
 }
 
@@ -96,6 +99,9 @@ struct Selection {
     /// Ledger changes among the items, whose own events name the sessions
     /// that acted on them.
     ledger_changes: Vec<String>,
+    gaps: Vec<Value>,
+    ledger_gaps: Vec<Value>,
+    readable: bool,
 }
 
 /// One dispatch bound to an executor session.
@@ -138,12 +144,14 @@ impl SessionRow {
 /// Print the read-only cost view of a change or a journal artifact.
 pub fn show_cost(ctx: &Ctx, target: &str, json: bool) -> Result<()> {
     let store = ctx.store()?;
-    let events = store
-        .load_repository_events()
-        .map_err(|_| anyhow::anyhow!("run metadata read failed"))?;
-    super::run::ensure_portable_bindings(&events)?;
-    let selection = select(ctx, &store, target, &events)?;
-    let (runs, sessions) = assign(ctx, &selection, &events)?;
+    let mut read = CostRead::new(&store);
+    let events = read.events(Store::REPOSITORY_SCOPE);
+    let mut selection = select(ctx, &mut read, target, &events)?;
+    qualify_ledger(&mut selection, &read.gaps);
+    let (runs, sessions) = assign(ctx, &mut selection, &events);
+    if !selection.readable && runs.is_empty() && sessions.is_empty() {
+        bail!("cost target has no readable metadata");
+    }
     let mut sessions: Vec<SessionRow> = sessions
         .into_iter()
         .map(|((harness, session), (spans, membership))| {
@@ -166,7 +174,8 @@ pub fn show_cost(ctx: &Ctx, target: &str, json: bool) -> Result<()> {
             .cloned()
             .unwrap_or_default();
     }
-    let lead = outside_sessions(&store, &selection, &sessions)?;
+    let lead = outside_sessions(&mut read, &selection, &sessions);
+    selection.ledger_gaps = read.gaps;
     let report = render_report(&selection, &runs, &sessions, &lead);
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -180,12 +189,15 @@ pub fn show_cost(ctx: &Ctx, target: &str, json: bool) -> Result<()> {
 /// Facts identical to ones already retained for the session record nothing.
 pub fn retain_cost(ctx: &Ctx, target: &str) -> Result<()> {
     let store = ctx.store()?;
-    let events = store
-        .load_repository_events()
-        .map_err(|_| anyhow::anyhow!("run metadata read failed"))?;
-    super::run::ensure_portable_bindings(&events)?;
-    let selection = select(ctx, &store, target, &events)?;
-    let (_, sessions) = assign(ctx, &selection, &events)?;
+    let mut read = CostRead::new(&store);
+    let events = read.events(Store::REPOSITORY_SCOPE);
+    let mut selection = select(ctx, &mut read, target, &events)?;
+    qualify_ledger(&mut selection, &read.gaps);
+    let (runs, sessions) = assign(ctx, &mut selection, &events);
+    if !selection.readable && runs.is_empty() && sessions.is_empty() {
+        bail!("cost target has no readable metadata");
+    }
+    print_read_gaps(&selection.gaps, &read.gaps);
     if sessions.is_empty() {
         println!("no bound sessions");
         return Ok(());
@@ -200,9 +212,9 @@ pub fn retain_cost(ctx: &Ctx, target: &str) -> Result<()> {
         })
         .collect();
     let _repository_events = store.lock_repository_events()?;
-    let events = store
-        .load_repository_events()
-        .map_err(|_| anyhow::anyhow!("run metadata read failed"))?;
+    let mut held = CostRead::new(&store);
+    let events = held.events(Store::REPOSITORY_SCOPE);
+    print_read_gaps(&[], &held.gaps);
     for (harness, session, read) in reads {
         let key = format!("{harness}:{session}");
         let facts = match read {
@@ -237,85 +249,208 @@ pub fn retain_cost(ctx: &Ctx, target: &str) -> Result<()> {
     Ok(())
 }
 
+fn print_read_gaps(selection: &[Value], ledger: &[Value]) {
+    for gap in selection.iter().chain(ledger) {
+        println!(
+            "coverage incomplete: {}: {}",
+            gap["record"].as_str().unwrap_or("record"),
+            gap["reason"].as_str().unwrap_or("record unavailable")
+        );
+    }
+}
+
 fn looks_like_journal(target: &str) -> bool {
     target.ends_with(".md") || crate::journal::split_qualified(target).is_some()
 }
 
-/// The work a target selects. A change selects itself and the journal
-/// artifact it was begun from; an artifact selects its transition lineage and
-/// every change begun from any name in it. A citation selects nothing.
-fn select(ctx: &Ctx, store: &Store, target: &str, events: &[Event]) -> Result<Selection> {
-    let read = store.read()?;
+fn reference_file(reference: &str) -> &str {
+    crate::journal::split_qualified(reference).map_or(reference, |(_, file)| file)
+}
+
+fn selection_gap(gaps: &mut Vec<Value>, record: &str, reason: &str, keys: &[WorkKey]) {
+    gaps.push(json!({"record": record, "reason": reason, "work": keys.iter().map(WorkKey::label).collect::<Vec<_>>()}));
+}
+
+fn qualify_ledger(selection: &mut Selection, gaps: &[Value]) {
+    let keys: Vec<_> = selection
+        .items
+        .iter()
+        .map(|item| item.key.clone())
+        .collect();
+    for gap in gaps.iter().filter(|gap| {
+        gap["assignment"] != false
+            && gap["record"].as_str().is_some_and(|record| {
+                record == Store::REPOSITORY_SCOPE
+                    || record.starts_with(&format!("{}:", Store::REPOSITORY_SCOPE))
+                    || record == "import"
+                    || record.starts_with("import:")
+            })
+    }) {
+        selection_gap(
+            &mut selection.gaps,
+            gap["record"].as_str().unwrap_or("ledger"),
+            "repository assignment records unavailable",
+            &keys,
+        );
+    }
+    let journals: Vec<_> = keys
+        .into_iter()
+        .filter(|key| matches!(key, WorkKey::Journal(_)))
+        .collect();
+    for gap in gaps.iter().filter(|gap| gap["record"] == "changes") {
+        selection_gap(
+            &mut selection.gaps,
+            gap["record"].as_str().unwrap_or("changes"),
+            "change journal membership unavailable",
+            &journals,
+        );
+    }
+}
+
+fn selected_journal(ctx: &Ctx, reference: &str, gaps: &mut Vec<Value>) -> WorkItem {
+    match journal_item(ctx, reference) {
+        Ok(item) => item,
+        Err(_) => {
+            let identity = artifact_identity(ctx, reference).unwrap_or_else(|_| {
+                (
+                    std::path::PathBuf::new(),
+                    reference_file(reference).to_string(),
+                )
+            });
+            let key = WorkKey::Journal(identity);
+            selection_gap(
+                gaps,
+                &key.label(),
+                "journal lineage or identity unavailable",
+                std::slice::from_ref(&key),
+            );
+            WorkItem {
+                key,
+                lineage: vec![reference.to_string()],
+                journal_members: BTreeSet::new(),
+                source: None,
+                complete: false,
+            }
+        }
+    }
+}
+
+fn opened_reference(events: &[Event]) -> Option<Option<String>> {
+    events.iter().find_map(|event| match &event.payload {
+        Payload::ChangeOpened { journal_ref, .. } => Some(journal_ref.clone()),
+        _ => None,
+    })
+}
+
+fn possible_journal(item: &WorkItem, reference: &str) -> bool {
+    !item.complete
+        || item
+            .lineage
+            .iter()
+            .any(|name| reference_file(name) == reference_file(reference))
+}
+
+/// A change selects itself and its source artifact; an artifact selects its
+/// transition lineage and changes begun from it. A citation selects nothing.
+fn select(ctx: &Ctx, read: &mut CostRead<'_>, target: &str, events: &[Event]) -> Result<Selection> {
+    let mut gaps = Vec::new();
     if looks_like_journal(target) {
-        crate::journal::artifact_digest(ctx, target)
-            .map_err(|_| anyhow::anyhow!("journal source read failed"))?;
-        let item = journal_item(ctx, target)?;
+        let item = selected_journal(ctx, target, &mut gaps);
         let journal = item.key.clone();
         let lineage = item.lineage.clone();
         let mut items = vec![item];
         let mut ledger_changes = Vec::new();
-        for change_id in read.change_ids()? {
-            let state = read.project(&read.events(&change_id)?)?;
-            if state
-                .journal_ref
-                .as_ref()
-                .map(|reference| artifact_identity(ctx, reference))
-                .transpose()?
-                .as_ref()
-                .is_some_and(|identity| items[0].journal_members.contains(identity))
-            {
-                items.push(WorkItem {
-                    key: WorkKey::Change(change_id.clone()),
-                    lineage: Vec::new(),
-                    journal_members: BTreeSet::new(),
-                    source: Some(journal.clone()),
-                });
-                ledger_changes.push(change_id);
+        for change_id in read.change_ids() {
+            let change_events = read.events(&change_id);
+            match opened_reference(&change_events) {
+                Some(Some(reference)) if possible_journal(&items[0], &reference) => {
+                    match artifact_identity(ctx, &reference) {
+                        Ok(identity) if items[0].journal_members.contains(&identity) => {
+                            items.push(WorkItem {
+                                key: WorkKey::Change(change_id.clone()),
+                                lineage: Vec::new(),
+                                journal_members: BTreeSet::new(),
+                                source: Some(journal.clone()),
+                                complete: true,
+                            });
+                            ledger_changes.push(change_id);
+                        }
+                        Ok(_) if items[0].complete => {}
+                        _ => selection_gap(
+                            &mut gaps,
+                            &change_id,
+                            "change journal membership unavailable",
+                            std::slice::from_ref(&journal),
+                        ),
+                    }
+                }
+                None => selection_gap(
+                    &mut gaps,
+                    &change_id,
+                    "change opening unreadable",
+                    std::slice::from_ref(&journal),
+                ),
+                _ => {}
             }
         }
         return Ok(Selection {
             target: json!({"kind": "journal", "file": target, "lineage": lineage}),
             items,
             ledger_changes,
+            gaps,
+            ledger_gaps: Vec::new(),
+            readable: crate::journal::artifact_digest(ctx, target).is_ok(),
         });
     }
-    let (change_id, journal_ref) = match store.resolve_change(target) {
-        Ok(change_id) => {
-            let state = read.project(&read.events(&change_id)?)?;
-            (change_id, state.journal_ref)
-        }
-        // A dispatch may name a change this ledger does not hold; the runs
-        // that name it exactly are still that work.
-        Err(error) => {
-            let named = rounds(events).iter().any(
-                |round| matches!(&round.subject, Some(RunSubject::Change { id }) if id == target),
-            );
-            if !named {
-                return Err(error);
-            }
-            (target.to_string(), None)
-        }
+    let ids = read.change_ids();
+    let matches: Vec<&String> = ids
+        .iter()
+        .filter(|id| id.as_str() == target || id.starts_with(target))
+        .collect();
+    let change_id = if ids.iter().any(|id| id == target) {
+        target.to_string()
+    } else if matches.len() == 1 {
+        matches[0].clone()
+    } else if matches.len() > 1 {
+        bail!("cost target matches multiple changes");
+    } else if rounds(events)
+        .iter()
+        .any(|round| matches!(&round.subject, Some(RunSubject::Change { id }) if id == target))
+    {
+        target.to_string()
+    } else {
+        bail!("cost target has no readable change or dispatch");
     };
-    let ledger_changes = store
-        .resolve_change(&change_id)
-        .ok()
-        .into_iter()
-        .collect::<Vec<_>>();
+    let held = ids.contains(&change_id);
+    let reference = held
+        .then(|| opened_reference(&read.events(&change_id)))
+        .flatten();
     let mut items = vec![WorkItem {
         key: WorkKey::Change(change_id.clone()),
         lineage: Vec::new(),
         journal_members: BTreeSet::new(),
         source: None,
+        complete: true,
     }];
-    if let Some(reference) = journal_ref {
-        let item = journal_item(ctx, &reference)?;
+    if held && reference.is_none() {
+        gaps.push(
+            json!({"record": change_id, "reason": "change opening unreadable",
+            "work": [items[0].key.label()], "scopes": ["inclusive", "union"]}),
+        );
+    }
+    let readable = reference.is_some();
+    if let Some(Some(reference)) = reference {
+        let item = selected_journal(ctx, &reference, &mut gaps);
         items[0].source = Some(item.key.clone());
         items.push(item);
     }
     Ok(Selection {
-        target: json!({"kind": "change", "id": change_id}),
+        target: json!({"kind": "change", "id": change_id.clone()}),
         items,
-        ledger_changes,
+        ledger_changes: if held { vec![change_id] } else { Vec::new() },
+        gaps,
+        ledger_gaps: Vec::new(),
+        readable,
     })
 }
 
@@ -324,6 +459,7 @@ struct AssignedRun {
     round: Option<usize>,
     candidates: Vec<String>,
     conflicting: bool,
+    invalid: bool,
 }
 
 type Runs = BTreeMap<WorkKey, Vec<AssignedRun>>;
@@ -334,46 +470,108 @@ type Sessions = BTreeMap<(String, String), (Vec<Span>, BTreeSet<WorkKey>)>;
 /// a span on unselected work makes the session shared beyond the view. A run
 /// is a change's when its dispatch names that change's exact id, so what a
 /// run is assigned to never moves as other changes are opened.
-fn assign(ctx: &Ctx, selection: &Selection, events: &[Event]) -> Result<(Runs, Sessions)> {
-    let work_of = |subject: &Option<RunSubject>| -> Result<WorkKey> {
-        Ok(match subject {
-            Some(RunSubject::Change { id }) => WorkKey::Change(id.clone()),
+fn assign(ctx: &Ctx, selection: &mut Selection, events: &[Event]) -> (Runs, Sessions) {
+    let selected: BTreeSet<WorkKey> = selection
+        .items
+        .iter()
+        .map(|item| item.key.clone())
+        .collect();
+    let mut runs: Runs = BTreeMap::new();
+    let mut sessions: Sessions = BTreeMap::new();
+    let mut possible_sessions = BTreeSet::new();
+    for round in rounds(events) {
+        let mut uncertain = Vec::new();
+        let work = match &round.subject {
+            Some(RunSubject::Change { id }) => {
+                for gap in &selection.gaps {
+                    if gap["record"] == *id && gap["reason"] == "change opening unreadable" {
+                        uncertain.extend(
+                            selection
+                                .items
+                                .iter()
+                                .filter(|item| {
+                                    matches!(item.key, WorkKey::Journal(_))
+                                        && gap["work"].as_array().is_some_and(|keys| {
+                                            keys.contains(&json!(item.key.label()))
+                                        })
+                                })
+                                .map(|item| item.key.clone()),
+                        );
+                    }
+                }
+                WorkKey::Change(id.clone())
+            }
             Some(RunSubject::Journal { file }) => {
-                let identity = if selection
+                let candidates: Vec<_> = selection
                     .items
                     .iter()
-                    .any(|item| !item.journal_members.is_empty())
-                {
-                    Some(artifact_identity(ctx, file)?)
-                } else {
-                    None
-                };
-                selection
-                    .items
-                    .iter()
-                    .find(|item| {
-                        identity
-                            .as_ref()
-                            .is_some_and(|id| item.journal_members.contains(id))
+                    .filter(|item| {
+                        matches!(item.key, WorkKey::Journal(_)) && possible_journal(item, file)
                     })
-                    .map(|item| item.key.clone())
-                    .unwrap_or_else(|| WorkKey::Other(format!("journal {file}")))
+                    .collect();
+                match if candidates.is_empty() {
+                    None
+                } else {
+                    Some(artifact_identity(ctx, file))
+                } {
+                    Some(Ok(identity)) => candidates
+                        .iter()
+                        .find(|item| item.journal_members.contains(&identity))
+                        .map(|item| item.key.clone())
+                        .unwrap_or_else(|| {
+                            uncertain.extend(
+                                candidates
+                                    .iter()
+                                    .filter(|item| !item.complete)
+                                    .map(|item| item.key.clone()),
+                            );
+                            WorkKey::Other(format!("journal dispatch {}", round.dispatch.event_id))
+                        }),
+                    Some(Err(_)) => {
+                        uncertain.extend(candidates.iter().map(|item| item.key.clone()));
+                        WorkKey::Other(format!(
+                            "unresolved journal dispatch {}",
+                            round.dispatch.event_id
+                        ))
+                    }
+                    None => WorkKey::Other(format!(
+                        "unselected journal dispatch {}",
+                        round.dispatch.event_id
+                    )),
+                }
             }
             Some(subject) => WorkKey::Other(subject.label()),
             None => WorkKey::Other("unattributed".to_string()),
-        })
-    };
-    let selected: BTreeSet<&WorkKey> = selection.items.iter().map(|item| &item.key).collect();
-    let mut runs: Runs = BTreeMap::new();
-    let mut sessions: Sessions = BTreeMap::new();
-    for round in rounds(events) {
-        let work = work_of(&round.subject)?;
+        };
+        if !uncertain.is_empty() {
+            selection_gap(
+                &mut selection.gaps,
+                &round.dispatch.event_id,
+                "dispatch journal membership unavailable",
+                &uncertain,
+            );
+        }
         let bindings: Vec<_> = round
             .binding
             .iter()
             .flat_map(|binding| std::iter::once(binding).chain(&binding.conflicts))
             .collect();
-        let candidates: BTreeSet<String> = bindings
+        let invalid = bindings.iter().any(|binding| {
+            !crate::model::portable_binding(
+                binding.executor_harness,
+                binding.executor_session,
+                binding.handle,
+                binding.forked_from,
+            )
+        });
+        let readable: Vec<_> = bindings
+            .iter()
+            .filter(|binding| {
+                plain_session_id(binding.executor_harness)
+                    && plain_session_id(binding.executor_session)
+            })
+            .collect();
+        let candidates: BTreeSet<String> = readable
             .iter()
             .map(|binding| format!("{}:{}", binding.executor_harness, binding.executor_session))
             .collect();
@@ -383,26 +581,48 @@ fn assign(ctx: &Ctx, selection: &Selection, events: &[Event]) -> Result<(Runs, S
                 round: round.round,
                 candidates: candidates.into_iter().collect(),
                 conflicting: bindings.len() > 1,
+                invalid,
             });
         }
-        for binding in bindings {
+        if invalid && (selected.contains(&work) || !uncertain.is_empty()) {
+            selection_gap(
+                &mut selection.gaps,
+                &round.dispatch.event_id,
+                "binding metadata nonportable",
+                if uncertain.is_empty() {
+                    std::slice::from_ref(&work)
+                } else {
+                    &uncertain
+                },
+            );
+        }
+        for binding in readable {
             let key = (
                 binding.executor_harness.clone(),
                 binding.executor_session.clone(),
             );
+            if !uncertain.is_empty() {
+                possible_sessions.insert(key.clone());
+            }
             let (spans, membership) = sessions.entry(key).or_default();
             membership.insert(work.clone());
             spans.push(Span {
                 dispatch_event_id: round.dispatch.event_id.clone(),
                 dispatched_at: round.dispatch.created_at,
-                forked_from: binding.forked_from.clone(),
+                forked_from: binding
+                    .forked_from
+                    .as_ref()
+                    .filter(|id| plain_session_id(id))
+                    .cloned(),
                 round: round.round,
                 work: work.clone(),
             });
         }
     }
-    sessions.retain(|_, (_, membership)| membership.iter().any(|work| selected.contains(work)));
-    Ok((runs, sessions))
+    sessions.retain(|key, (_, membership)| {
+        possible_sessions.contains(key) || membership.iter().any(|work| selected.contains(work))
+    });
+    (runs, sessions)
 }
 
 /// Every retained observation of one session, oldest first.
@@ -847,14 +1067,13 @@ fn qualify_price(facts: &mut CostFacts) {
 /// consumption is outside assignment coverage, and the view names them
 /// without a figure.
 fn outside_sessions(
-    store: &Store,
+    read: &mut CostRead<'_>,
     selection: &Selection,
     sessions: &[SessionRow],
-) -> Result<Vec<Value>> {
-    let read = store.read()?;
+) -> Vec<Value> {
     let mut counts: BTreeMap<(String, String), usize> = BTreeMap::new();
     for change_id in &selection.ledger_changes {
-        for event in read.events(change_id)? {
+        for event in read.events(change_id) {
             if let (Some(harness), Some(session)) = (&event.harness, &event.session) {
                 *counts
                     .entry((harness.clone(), session.clone()))
@@ -862,7 +1081,7 @@ fn outside_sessions(
             }
         }
     }
-    Ok(counts
+    counts
         .into_iter()
         .filter(|((harness, session), _)| {
             !sessions
@@ -872,7 +1091,7 @@ fn outside_sessions(
         .map(|((harness, session), events)| {
             json!({"harness": harness, "session": session, "events": events})
         })
-        .collect())
+        .collect()
 }
 
 fn round_amount(value: f64) -> f64 {
@@ -1323,7 +1542,7 @@ fn render_report(
             .map(|run| run.dispatch_event_id.clone())
             .collect()
     };
-    let withheld_for = |keys: &[&WorkKey]| -> Vec<String> {
+    let withheld_for = |keys: &[&WorkKey], scope: &str| -> Vec<String> {
         let mut reasons: Vec<String> = keys
             .iter()
             .flat_map(|key| unbound_in(key))
@@ -1361,6 +1580,21 @@ fn render_report(
                 )),
             }
         }
+        for gap in &selection.gaps {
+            if gap["work"]
+                .as_array()
+                .is_some_and(|work| keys.iter().any(|key| work.contains(&json!(key.label()))))
+                && gap["scopes"]
+                    .as_array()
+                    .is_none_or(|scopes| scopes.contains(&json!(scope)))
+            {
+                reasons.push(format!(
+                    "{}: {}",
+                    gap["record"].as_str().unwrap_or("record"),
+                    gap["reason"].as_str().unwrap_or("membership unavailable")
+                ));
+            }
+        }
         reasons
     };
     let within = |keys: &[&WorkKey]| -> (Vec<&SessionRow>, Vec<String>) {
@@ -1392,6 +1626,7 @@ fn render_report(
             .map(|run| {
                 let session = (!run.conflicting).then(|| run.candidates.first()).flatten();
                 let per_run = match &session {
+                    _ if run.invalid => "invalid-binding",
                     _ if run.conflicting => "conflicting-bindings",
                     None => "unbound",
                     Some(key) if span_count(key) > 1 => "shared-among-spans",
@@ -1405,7 +1640,7 @@ fn render_report(
             "key": item.key.label(),
             "runs": item_runs,
             "unbound": unbound_in(&item.key),
-            "direct": totals(&direct, &withheld_for(&[&item.key]), "direct"),
+            "direct": totals(&direct, &withheld_for(&[&item.key], "direct"), "direct"),
             "shared": shared,
         });
         match &item.key {
@@ -1423,7 +1658,7 @@ fn render_report(
         if let Some(source) = &item.source {
             let keys = [&item.key, source];
             let (inclusive, beyond) = within(&keys);
-            let mut totals = totals(&inclusive, &withheld_for(&keys), "inclusive");
+            let mut totals = totals(&inclusive, &withheld_for(&keys, "inclusive"), "inclusive");
             totals["members"] = json!([item.key.label(), source.label()]);
             totals["shared"] = json!(beyond);
             entry["inclusive"] = totals;
@@ -1433,7 +1668,7 @@ fn render_report(
 
     let all: Vec<&WorkKey> = selection.items.iter().map(|item| &item.key).collect();
     let (union_members, union_shared) = within(&all);
-    let mut union = totals(&union_members, &withheld_for(&all), "union");
+    let mut union = totals(&union_members, &withheld_for(&all, "union"), "union");
     union["members"] = json!(all.iter().map(|key| key.label()).collect::<Vec<_>>());
     union["shared"] = json!(union_shared);
 
@@ -1449,7 +1684,14 @@ fn render_report(
         })
         .collect();
     let unbound: Vec<String> = all.iter().flat_map(|key| unbound_in(key)).collect();
-    let assignment_gaps = withheld_for(&all);
+    let mut assignment_gaps = withheld_for(&all, "union");
+    assignment_gaps.extend(selection.gaps.iter().map(|gap| {
+        format!(
+            "{}: {}",
+            gap["record"].as_str().unwrap_or("record"),
+            gap["reason"].as_str().unwrap_or("membership unavailable")
+        )
+    }));
     let unavailable_sources: BTreeMap<String, &str> = sessions
         .iter()
         .filter_map(|row| match &row.measured.source {
@@ -1477,6 +1719,8 @@ fn render_report(
         "union": union,
         "sessions": session_rows,
         "coverage": {
+            "selection": {"status": if selection.gaps.is_empty() { "complete" } else { "incomplete" }, "records": selection.gaps},
+            "ledger": {"status": if selection.ledger_gaps.is_empty() { "complete" } else { "incomplete" }, "records": selection.ledger_gaps},
             "measurement": {
                 "status": if unmeasured.is_empty() && unavailable_sources.is_empty() { "complete" } else { "incomplete" },
                 "sessions": unmeasured,
@@ -1710,6 +1954,16 @@ fn print_report(report: &Value) {
     }
     let coverage = &report["coverage"];
     println!("coverage");
+    print_read_gaps(
+        report["coverage"]["selection"]["records"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default(),
+        report["coverage"]["ledger"]["records"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default(),
+    );
     println!(
         "  measurement: {}",
         coverage["measurement"]["status"]

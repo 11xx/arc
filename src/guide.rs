@@ -3056,8 +3056,9 @@ RULES THAT CHANGE WHAT YOU DO
     dispatch refuses; no tuple establishes an exclusive assignment.
     Binding identities carry no `/`, `\` or `~`; a refusal names the field
     and a fixed reason without echoing a private locator. A held locator
-    refuses binding retries, run listings and cost reads with a fixed
-    diagnostic. Imports and exports refuse nonportable bindings while
+    refuses binding retries and run listings with a fixed diagnostic.
+    Cost reads qualify the affected assignment and preserve readable session
+    figures. Imports and exports refuse nonportable bindings while
     preserving ledger events.
     `--forked-from` names the session in the executor's harness whose
     history it began as a copy of, and follows the validation and retry
@@ -3068,8 +3069,14 @@ RULES THAT CHANGE WHAT YOU DO
     selects its `supersedes` lineage and the changes begun from any name in
     it. Membership compares resolved journal and artifact identity, so bare,
     qualified and equivalent directory spellings select the same work.
-    References retain their original spelling as provenance. Unreadable
-    membership refuses the view instead of omitting runs. A citation selects
+    References retain their original spelling as provenance. References to
+    names outside a readable artifact's lineage need no resolution.
+    Unavailable membership qualifies selection and withholds only the work
+    totals that depend on it; readable session figures remain available.
+    Unreadable ledger records and published imports are reported as coverage
+    gaps beside readable records. A query refuses only when neither its
+    target metadata nor any relevant dispatch or session can be read.
+    A citation selects
     nothing, and transitions and `begin
     --from-journal` add no consumption. Each session is measured through
     the pinned tapes reader, or from retained facts when its source no longer
@@ -3127,6 +3134,9 @@ RULES THAT CHANGE WHAT YOU DO
     errors. Display sanitizes older facts; bundle import and export refuse
     nonportable identities, metadata, quantities or reason categories without
     changing recorded events.
+    Unavailable journal membership and unreadable ledger peers are reported
+    as coverage gaps; readable bound sessions are still retained. A session
+    whose source does not answer is reported and skipped independently.
     The source bytes stay in the harness store. Identical facts record
     nothing; retained facts are observations at their frontier and are never
     added to one another.
