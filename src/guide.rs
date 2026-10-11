@@ -3053,6 +3053,8 @@ RULES THAT CHANGE WHAT YOU DO
     tuple visible in text and in `binding.conflicts` in JSON. Equal imported
     tuples are harmless duplicate observations. Rebinding a conflicted
     dispatch refuses; no tuple establishes an exclusive assignment.
+    Binding identities carry no `/`, `\` or `~`; a refusal names the field
+    and a fixed reason without echoing a private locator.
   - A bounded round records what it deliberately left, so the next round
     inherits a list instead of a memory: `arc run end <dispatch> --outcome
     <o> --reviewed-head <sha> --raised-json <path|-> --deferred-json <path|->`.

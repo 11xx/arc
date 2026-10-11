@@ -417,10 +417,7 @@ pub fn bind_run(ctx: &Ctx, dispatch_event_id: &str, binding: BindingInput) -> Re
         ("--handle", handle.as_ref(), false),
     ] {
         if let Some(defect) = value.and_then(|value| binding_defect(value, harness)) {
-            bail!(
-                "run bind refused: {flag} {:?}: {defect}; omit a value nobody established",
-                value.expect("a defect names a supplied value")
-            );
+            bail!("run bind refused: {flag}: {defect}; omit a value nobody established");
         }
     }
 
@@ -479,6 +476,9 @@ fn binding_defect(value: &str, harness: bool) -> Option<&'static str> {
     }
     if value.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Some("an identity carries no whitespace or control characters");
+    }
+    if value.contains(['/', '\\', '~']) {
+        return Some("a binding identity cannot be a recording locator");
     }
     if harness && value.contains(':') {
         return Some("a harness name carries no ':'");

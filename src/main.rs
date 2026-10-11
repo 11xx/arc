@@ -3969,7 +3969,8 @@ enum RunCmd {
     /// value, a placeholder (unknown, none, n/a, ...), whitespace, a harness
     /// carrying ':' and a session id given as the harness refuse. Imported
     /// distinct tuples remain a binding conflict; rebinding a conflicted
-    /// dispatch refuses even when the supplied tuple matches one observation
+    /// dispatch refuses even when the supplied tuple matches one observation.
+    /// Binding values carry no '/', '\\' or '~'; refusals never echo values
     Bind {
         /// RunDispatched event ID being bound
         dispatch_event_id: String,

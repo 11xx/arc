@@ -902,6 +902,37 @@ fn imported_binding_tuples_expose_conflicts_and_equal_observations_are_harmless(
     }
 }
 
+#[test]
+fn binding_private_locators_are_refused_without_echoing_them() {
+    let repo = Repo::new();
+    let dispatch = dispatch_against(&repo, "--change", "private-binding");
+    for flag in ["--executor-harness", "--executor-session", "--handle"] {
+        for locator in [
+            "/fixture/private/session.jsonl",
+            "~/private/session.jsonl",
+            "private/session.jsonl",
+        ] {
+            let mut args = vec![
+                "--executor-harness",
+                "codex",
+                "--executor-session",
+                "session-one",
+            ];
+            if flag == "--handle" {
+                args.extend([flag, locator]);
+            } else {
+                let index = args.iter().position(|value| *value == flag).unwrap();
+                args[index + 1] = locator;
+            }
+            let output = bind(&repo, &dispatch, &args).output().unwrap();
+            assert!(!output.status.success(), "{flag} accepted a locator");
+            assert!(!String::from_utf8_lossy(&output.stderr).contains(locator));
+        }
+    }
+    let rows = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    assert!(row_for(&rows, &dispatch)["binding"].is_null());
+}
+
 /// A follow-up or resume is its own dispatch with its own binding, so two
 /// dispatches bound to one executor session are two spans of one scope.
 #[test]
