@@ -3055,7 +3055,10 @@ RULES THAT CHANGE WHAT YOU DO
     tuples are harmless duplicate observations. Rebinding a conflicted
     dispatch refuses; no tuple establishes an exclusive assignment.
     Binding identities carry no `/`, `\` or `~`; a refusal names the field
-    and a fixed reason without echoing a private locator.
+    and a fixed reason without echoing a private locator. A held locator
+    refuses binding retries, run listings and cost reads with a fixed
+    diagnostic. Imports and exports refuse nonportable bindings while
+    preserving ledger events.
     `--forked-from` names the session in the executor's harness whose
     history it began as a copy of, and follows the validation and retry
     rules of `--executor-session`. Fork origins participate in binding tuples.

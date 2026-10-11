@@ -2744,6 +2744,23 @@ pub(crate) fn portable_cost_metadata(value: &str) -> bool {
     !value.contains(['/', '\\', '~']) && !value.chars().any(char::is_control)
 }
 
+pub(crate) fn portable_binding(
+    harness: &str,
+    session: &str,
+    handle: &Option<String>,
+    origin: &Option<String>,
+) -> bool {
+    [
+        Some(harness),
+        Some(session),
+        handle.as_deref(),
+        origin.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .all(portable_cost_metadata)
+}
+
 impl CostFacts {
     /// Transport admits session relatives and fixed reason categories only.
     pub(crate) fn portable(&self) -> bool {

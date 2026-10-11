@@ -231,7 +231,10 @@ impl Bundle {
             bail!("change {change_id:?} has no events");
         }
         for value in &repository_events {
-            if value["event_type"] == "cost-facts-retained" {
+            if matches!(
+                value["event_type"].as_str(),
+                Some("cost-facts-retained" | "run-bound")
+            ) {
                 parse_typed_event(value)?;
             }
         }
@@ -252,7 +255,10 @@ impl Bundle {
                     envelope.change_id
                 );
             }
-            if value["event_type"] == "cost-facts-retained" {
+            if matches!(
+                value["event_type"].as_str(),
+                Some("cost-facts-retained" | "run-bound")
+            ) {
                 parse_typed_event(&value)?;
             }
             all.push(value);
@@ -880,6 +886,21 @@ pub fn parse_typed_event(value: &Value) -> Result<Option<Event>> {
         return Ok(None);
     }
     match &event.payload {
+        Payload::RunBound {
+            executor_harness,
+            executor_session,
+            handle,
+            forked_from,
+            ..
+        } if !crate::model::portable_binding(
+            executor_harness,
+            executor_session,
+            handle,
+            forked_from,
+        ) =>
+        {
+            bail!("run binding transport refused: recording locators are not binding identities");
+        }
         Payload::CostFactsRetained {
             executor_harness,
             executor_session,

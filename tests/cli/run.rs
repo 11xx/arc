@@ -837,7 +837,13 @@ fn rebinding_identical_values_records_nothing_and_different_values_refuse() {
 
 #[test]
 fn imported_binding_tuples_expose_conflicts_and_equal_observations_are_harmless() {
-    for field in ["executor_session", "executor_harness", "handle", "equal"] {
+    for field in [
+        "executor_session",
+        "executor_harness",
+        "handle",
+        "forked_from",
+        "equal",
+    ] {
         let repo = Repo::new();
         let change = begin_without_checkout(&repo, "binding-import", &[]);
         let dispatch = dispatch_against(&repo, "--change", &change);
@@ -866,7 +872,7 @@ fn imported_binding_tuples_expose_conflicts_and_equal_observations_are_harmless(
             .find(|e| e["event_type"] == "run-bound")
             .unwrap()
             .clone();
-        imported["event_id"] = serde_json::json!("01K0000000000000000000000Z");
+        imported["event_id"] = serde_json::json!("01Z0000000000000000000000Z");
         if field != "equal" {
             imported[field] = serde_json::json!("different");
         }
@@ -939,6 +945,100 @@ fn binding_private_locators_are_refused_without_echoing_them() {
     }
     let rows = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
     assert!(row_for(&rows, &dispatch)["binding"].is_null());
+}
+
+#[test]
+fn imported_binding_locators_refuse_transport_without_echoing_them() {
+    for field in [
+        "executor_harness",
+        "executor_session",
+        "handle",
+        "forked_from",
+    ] {
+        let repo = Repo::new();
+        let change = begin_without_checkout(&repo, "private-import", &[]);
+        let dispatch = dispatch_against(&repo, "--change", &change);
+        stdout(&mut bind(
+            &repo,
+            &dispatch,
+            &[
+                "--executor-harness",
+                "codex",
+                "--executor-session",
+                "executor-one",
+            ],
+        ));
+        let path = repo.home.join("bundle.json");
+        stdout(
+            repo.arc(&repo.root)
+                .args(["export", &change, "--output", path.to_str().unwrap()]),
+        );
+        let mut bundle: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let event = bundle["repository_events"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|event| event["event_type"] == "run-bound")
+            .unwrap();
+        let locator = repo
+            .home
+            .join("private/session.jsonl")
+            .display()
+            .to_string();
+        event["event_id"] = serde_json::json!("01Z0000000000000000000000Z");
+        event[field] = serde_json::json!(locator);
+        fs::write(&path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let output = repo
+            .arc(&repo.root)
+            .args(["import", path.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{field} accepted a locator");
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(&locator));
+        let events = stdout(repo.arc(&repo.root).args(["events", "--repository"]));
+        assert_eq!(events.matches("\"run-bound\"").count(), 1);
+    }
+}
+
+#[test]
+fn legacy_binding_locators_refuse_views_and_transport_without_echoing_them() {
+    let repo = Repo::new();
+    let change = begin_without_checkout(&repo, "legacy-binding", &[]);
+    let dispatch = dispatch_against(&repo, "--change", &change);
+    let binding = event_id(&stdout(&mut bind(
+        &repo,
+        &dispatch,
+        &[
+            "--executor-harness",
+            "codex",
+            "--executor-session",
+            "executor-one",
+        ],
+    )));
+    let path = repo
+        .root
+        .join(".git/arc/repository/events")
+        .join(format!("{binding}.json"));
+    let mut event: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let locator = repo
+        .home
+        .join("private/session.jsonl")
+        .display()
+        .to_string();
+    event["forked_from"] = serde_json::json!(locator);
+    fs::write(path, serde_json::to_vec(&event).unwrap()).unwrap();
+    for args in [
+        vec!["run", "list", "--json"],
+        vec!["cost", "show", &change, "--json"],
+        vec!["cost", "retain", &change],
+        vec!["export", &change, "--output", "-"],
+    ] {
+        let output = repo.arc(&repo.root).args(args).output().unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(&locator));
+    }
 }
 
 /// A follow-up or resume is its own dispatch with its own binding, so two

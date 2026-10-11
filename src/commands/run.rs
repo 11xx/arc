@@ -429,6 +429,7 @@ pub fn bind_run(ctx: &Ctx, dispatch_event_id: &str, binding: BindingInput) -> Re
     let store = ctx.store()?;
     let _repository_events = store.lock_repository_events()?;
     let events = store.load_repository_events()?;
+    ensure_portable_bindings(&events)?;
     find_dispatch(&store, &events, dispatch_event_id, "run bind")?;
     if let Some(existing) = binding_for(&events, dispatch_event_id) {
         if !existing.conflicts.is_empty() {
@@ -599,6 +600,7 @@ fn read_deferred(source: Option<&str>) -> Result<Vec<DeferredFinding>> {
 pub fn list_runs(ctx: &Ctx, json: bool) -> Result<()> {
     let store = ctx.store()?;
     let events = store.load_repository_events()?;
+    ensure_portable_bindings(&events)?;
     let open = open_deferrals(&events);
     let mut lineages: HashMap<String, Option<Vec<String>>> = HashMap::new();
     let rows = rounds(&events)
@@ -661,6 +663,32 @@ pub fn list_runs(ctx: &Ctx, json: bool) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn ensure_portable_bindings(events: &[Event]) -> Result<()> {
+    for event in events {
+        if let Payload::RunBound {
+            executor_harness,
+            executor_session,
+            handle,
+            forked_from,
+            ..
+        } = &event.payload
+        {
+            if !crate::model::portable_binding(
+                executor_harness,
+                executor_session,
+                handle,
+                forked_from,
+            ) {
+                bail!(
+                    "run binding {} contains nonportable metadata; assignment is incomplete",
+                    event.event_id
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn print_round(row: &RunRow) {
     let outcome = row.outcome.map(RunOutcome::as_str).unwrap_or("open");
     let round = row
@@ -702,11 +730,16 @@ fn print_round(row: &RunRow) {
             println!("{bound}");
             for conflict in &binding.conflicts {
                 println!(
-                    "    executor={} session={} handle={} event={}",
+                    "    executor={} session={} handle={} forked-from={} event={}",
                     crate::render::one_line(&conflict.executor_harness),
                     crate::render::one_line(&conflict.executor_session),
                     conflict
                         .handle
+                        .as_deref()
+                        .map(crate::render::one_line)
+                        .unwrap_or_default(),
+                    conflict
+                        .forked_from
                         .as_deref()
                         .map(crate::render::one_line)
                         .unwrap_or_default(),

@@ -1185,7 +1185,7 @@ enum Cmd {
     /// custody it does not hold. The bundle binds the manifest's digest. The
     /// sidecar is written beside the directory and moved into place only once
     /// the bundle is written, so a failed export leaves neither.
-    /// Nonportable cost facts refuse transport; recording
+    /// Nonportable cost facts or bindings refuse transport; recording
     /// locators and unclassified cost reasons are never emitted. Recorded
     /// events are preserved.
     /// Records no events and initializes no replica; ledger reads do not
@@ -1264,7 +1264,7 @@ enum Cmd {
     /// or post-integration disposition before it integrated, or a
     /// post-integration disposition on a finding that was resolved,
     /// accepted-risk, or obsolete when the change shipped. Nonportable cost
-    /// facts refuse transport: recording locators and
+    /// facts or bindings refuse transport: recording locators and
     /// unclassified cost reasons are not admitted
     Import {
         /// Input file ('-' for stdin)
@@ -3982,6 +3982,8 @@ enum RunCmd {
     /// distinct tuples remain a binding conflict; rebinding a conflicted
     /// dispatch refuses even when the supplied tuple matches one observation.
     /// Binding values carry no '/', '\\' or '~'; refusals never echo values
+    /// A held binding with a locator refuses reads and retries with a fixed
+    /// diagnostic; the ledger fact is preserved
     Bind {
         /// RunDispatched event ID being bound
         dispatch_event_id: String,
@@ -4034,7 +4036,9 @@ enum RunCmd {
     /// JSON rows carry `binding` as null or {event_id, executor_harness,
     /// executor_session, handle, forked_from, bound_at}, with `conflicts` listing other
     /// distinct tuples when imports disagree. Equal tuples are harmless
-    /// duplicate observations; a conflict names every distinct tuple
+    /// duplicate observations; a conflict names every distinct tuple,
+    /// including fork origins. A held locator refuses the view without
+    /// echoing it
     /// Records no events; ledger reads do not require a parseable append policy.
     List {
         /// Emit the machine-readable JSON view instead of text
@@ -4088,7 +4092,8 @@ enum CostCmd {
     /// that acted on a selected change without a binding, such as a lead,
     /// are named outside assignment
     /// coverage with no figure. Transitions and `begin --from-journal` add
-    /// no consumption. `--json` emits `arc-cost/1`
+    /// no consumption. Nonportable binding metadata refuses the view with
+    /// a fixed diagnostic. `--json` emits `arc-cost/1`
     /// Records no events; ledger reads do not require a parseable append policy.
     Show {
         /// Change ID or unique prefix, or a journal artifact: a filename in
@@ -4105,7 +4110,8 @@ enum CostCmd {
     /// any harness-written dollar figure, plus lineage relations and read
     /// failures as fixed categories. Relatives are plain session ids; no
     /// recording locator or raw error text is retained. Binding fork origins
-    /// remain in the run records. The source
+    /// remain in the run records. Nonportable binding metadata refuses the
+    /// read with a fixed diagnostic. The source
     /// bytes stay in the harness store. Facts identical to ones already
     /// retained for a session
     /// record nothing and print the held event; a session whose source does

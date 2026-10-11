@@ -141,6 +141,7 @@ pub fn show_cost(ctx: &Ctx, target: &str, json: bool) -> Result<()> {
     let events = store
         .load_repository_events()
         .map_err(|_| anyhow::anyhow!("run metadata read failed"))?;
+    super::run::ensure_portable_bindings(&events)?;
     let selection = select(ctx, &store, target, &events)?;
     let (runs, sessions) = assign(ctx, &selection, &events)?;
     let mut sessions: Vec<SessionRow> = sessions
@@ -182,6 +183,7 @@ pub fn retain_cost(ctx: &Ctx, target: &str) -> Result<()> {
     let events = store
         .load_repository_events()
         .map_err(|_| anyhow::anyhow!("run metadata read failed"))?;
+    super::run::ensure_portable_bindings(&events)?;
     let selection = select(ctx, &store, target, &events)?;
     let (_, sessions) = assign(ctx, &selection, &events)?;
     if sessions.is_empty() {
