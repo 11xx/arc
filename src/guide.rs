@@ -1649,6 +1649,17 @@ FORGE
   failed or truncated read succeeds; invalid schemas, digests, references and
   generation relationships refuse before append. Identical read_id retries
   return the original event with already-recorded; conflicting content refuses.
+  Import validates introduced facts before publication in their supplying
+  history. Independent replicas can supply different events for the same read.
+  Replay coalesces identical documents and retains their event IDs as aliases.
+  Conflicting documents mark every member of that read_id as conflict; invalid
+  documents carry the validation reason in invalid. Both remain readable and
+  are excluded from source selection and generation dependencies. Projections
+  naming unusable observations carry unresolved_binding and cannot establish
+  head matches, applicable checks or lifecycle. Forge diagnostics in show and
+  status identify observation conflicts, invalid documents and unresolved
+  projections. Stored facts are retained without making replay an admission
+  gate; historical bindings are read against their recorded links.
   arc-forge-receipt/1 carries command, change, event/observation/read IDs,
   generation IDs, coverage, outcome and reference availability diagnostics.
 

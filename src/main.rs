@@ -479,6 +479,8 @@ enum Cmd {
     /// Forge views preserve provider-observed SHAs beside nullable local rewrite
     /// successors; observed and resolved head matches compare with the
     /// patchset's approval anchor, not a content or trailer rewrite successor.
+    /// Forge diagnostics retain conflicting or invalid observations and their
+    /// unresolved projections without blocking the change's state read.
     /// Closed head drift compares with the closure's source patchset when
     /// recorded, otherwise with the newest snapshot
     /// Aggregate reads name unreadable changes with their errors on stderr
@@ -989,6 +991,8 @@ enum Cmd {
     /// Forge observed and resolved head matches are separate; hosted checks apply
     /// only to their recorded PR identity and the patchset's approval anchor.
     /// Content and trailer rewrite successors require a fresh snapshot.
+    /// Forge diagnostics expose conflicting or invalid observations; their
+    /// projections remain unresolved and cannot establish forge readiness.
     /// Every verdict names its recorded origin, actor claims and admission
     /// provenance. Content coverage is separate from receiver gating eligibility.
     /// Readiness uses the integration shape resolved for the recorded target.
@@ -2359,6 +2363,8 @@ enum Cmd {
     /// admission preserves coverage, acquisition time and generation references;
     /// legacy flag forms assert unretained facts with unknown acquisition time.
     /// Recorded PR bindings survive import; ambiguous unbound history stays unknown.
+    /// Stored conflicts and invalid facts remain readable as forge diagnostics;
+    /// projections naming unusable observations remain unresolved.
     Forge {
         #[command(subcommand)]
         cmd: ForgeCmd,
@@ -2952,6 +2958,9 @@ enum ForgeCmd {
     /// Admit an adapter arc-forge-observation/1 file, including failed or
     /// truncated reads. Records references only, never fetches bytes or
     /// changes readiness. Retries of identical read IDs return the receipt.
+    /// Admission refuses invalid input. Replay coalesces identical replica reads,
+    /// retains conflicts and invalid facts with diagnostics, and quarantines
+    /// their projections; it never refuses a stored fact on validation alone.
     Observe {
         /// Change whose append-only ledger receives the read
         change: String,
@@ -2989,7 +2998,8 @@ enum ForgeCmd {
     /// Record the provider-observed PR tuple (validated, fail-closed).
     /// Observed SHAs are preserved; local rewrite successors are separate views.
     Link {
-        /// Recorded observation event or read ID; explicit flags must agree.
+        /// Usable recorded observation event or read ID; explicit flags must agree.
+        /// Conflicting and invalid observations are refused as projection sources.
         /// Without it, values are unretained assertions with unknown read time.
         #[arg(long)]
         observation: Option<String>,
@@ -3026,7 +3036,8 @@ enum ForgeCmd {
     /// compares the raw head to the patchset's approval anchor. Content and
     /// trailer rewrite successors require a fresh snapshot.
     Checks {
-        /// Recorded observation event or read ID; explicit flags must agree.
+        /// Usable recorded observation event or read ID; explicit flags must agree.
+        /// Conflicting and invalid observations are refused as projection sources.
         /// Without it, values are unretained assertions with unknown read time.
         #[arg(long)]
         observation: Option<String>,
@@ -3054,7 +3065,8 @@ enum ForgeCmd {
     /// Unbound older facts need a prior link from their recording repository
     /// and an unambiguous link history to describe the current PR.
     PrState {
-        /// Recorded observation event or read ID; explicit flags must agree.
+        /// Usable recorded observation event or read ID; explicit flags must agree.
+        /// Conflicting and invalid observations are refused as projection sources.
         /// Without it, values are unretained assertions with unknown read time.
         #[arg(long)]
         observation: Option<String>,

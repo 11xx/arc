@@ -115,9 +115,30 @@ pub struct ForgeObservation {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ObservationRecord {
+    pub aliases: Vec<String>,
+    pub conflict: bool,
+    pub invalid: Option<String>,
     pub event_id: String,
     pub created_at: DateTime<Utc>,
     pub document: ForgeObservation,
+}
+impl ObservationRecord {
+    pub fn usable(&self) -> bool {
+        !self.conflict && self.invalid.is_none()
+    }
+    pub fn names_event(&self, id: &str) -> bool {
+        self.event_id == id || self.aliases.iter().any(|alias| alias == id)
+    }
+    pub fn names_prefix(&self, prefix: &str) -> bool {
+        self.event_id.starts_with(prefix)
+            || self.aliases.iter().any(|alias| alias.starts_with(prefix))
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ForgeDiagnostic {
+    pub event_id: String,
+    pub kind: &'static str,
+    pub message: String,
 }
 fn nonblank(s: &str) -> Result<()> {
     ensure!(!s.trim().is_empty(), "blank forge identifier or scope");
@@ -145,6 +166,7 @@ fn reference(content: &RetainedContentRef, digest: &str, length: u64) -> Result<
 }
 impl ForgeObservation {
     pub fn validate(&self, history: &[ObservationRecord]) -> Result<()> {
+        let history: Vec<_> = history.iter().filter(|r| r.usable()).collect();
         ensure!(
             self.schema == "arc-forge-observation/1",
             "unsupported forge observation schema"
@@ -202,7 +224,7 @@ impl ForgeObservation {
             nonblank(named)?;
             let matches: Vec<_> = history
                 .iter()
-                .filter(|r| r.event_id == *named || r.document.read_id == *named)
+                .filter(|r| r.names_event(named) || r.document.read_id == *named)
                 .collect();
             match matches.as_slice() {
                 [record] => Some(&record.document),
@@ -367,11 +389,26 @@ impl ForgeObservation {
     }
 }
 
-/// Check source-bound projections during both local append and imported replay.
+/// Check source-bound projections during local admission.
 /// Flag assertions carry no observation binding and retain their legacy rules.
 pub fn validate_projection(
     payload: &crate::model::Payload,
     forge: &crate::forge::ForgeState,
+) -> Result<()> {
+    validate_projection_inner(payload, forge, true)
+}
+pub fn projection_error(
+    payload: &crate::model::Payload,
+    forge: &crate::forge::ForgeState,
+) -> Option<String> {
+    validate_projection_inner(payload, forge, false)
+        .err()
+        .map(|error| error.to_string())
+}
+fn validate_projection_inner(
+    payload: &crate::model::Payload,
+    forge: &crate::forge::ForgeState,
+    admission: bool,
 ) -> Result<()> {
     use crate::model::Payload;
     let source = match payload {
@@ -386,8 +423,12 @@ pub fn validate_projection(
     let record = forge
         .observations
         .iter()
-        .find(|r| r.event_id == *source)
+        .find(|r| r.names_event(source))
         .ok_or_else(|| anyhow::anyhow!("projection observation is not recorded"))?;
+    ensure!(
+        record.usable(),
+        "projection observation is conflicting or invalid"
+    );
     let d = &record.document;
     let p = &d.provider_identity;
     let head = d
@@ -415,23 +456,25 @@ pub fn validate_projection(
                     && head_sha == head,
                 "link values disagree with observation"
             );
-            ensure!(
-                forge
-                    .projection
-                    .as_ref()
-                    .is_some_and(|projection| projection.host == p.host),
-                "observation host differs from declaration"
-            );
-            crate::forge::validate_link(
-                forge.projection.as_ref(),
-                &crate::forge::ForgeTuple {
-                    base_repo: base_repo.clone(),
-                    base_ref: base_ref.clone(),
-                    head_repo: head_repo.clone(),
-                    head_ref: head_ref.clone(),
-                },
-            )
-            .map_err(|e| anyhow::anyhow!("{}", e.message()))?;
+            if admission {
+                ensure!(
+                    forge
+                        .projection
+                        .as_ref()
+                        .is_some_and(|projection| projection.host == p.host),
+                    "observation host differs from declaration"
+                );
+                crate::forge::validate_link(
+                    forge.projection.as_ref(),
+                    &crate::forge::ForgeTuple {
+                        base_repo: base_repo.clone(),
+                        base_ref: base_ref.clone(),
+                        head_repo: head_repo.clone(),
+                        head_ref: head_ref.clone(),
+                    },
+                )
+                .map_err(|e| anyhow::anyhow!("{}", e.message()))?;
+            }
         }
         Payload::ForgeChecks {
             link_event_id,
@@ -440,7 +483,17 @@ pub fn validate_projection(
             detail,
             ..
         } => {
-            let link = validate_current_identity(d, forge)?;
+            let link = if admission {
+                validate_current_identity(d, forge)?
+            } else {
+                let link = forge
+                    .links
+                    .iter()
+                    .find(|link| Some(link.event_id.as_str()) == link_event_id.as_deref())
+                    .ok_or_else(|| anyhow::anyhow!("projection link is not recorded"))?;
+                validate_link_identity(d, forge, link, false)?;
+                link
+            };
             ensure!(
                 link_event_id.as_deref() == Some(link.event_id.as_str()),
                 "checks link binding disagrees with observation"
@@ -472,7 +525,17 @@ pub fn validate_projection(
             pr_head,
             ..
         } => {
-            let link = validate_current_identity(d, forge)?;
+            let link = if admission {
+                validate_current_identity(d, forge)?
+            } else {
+                let link = forge
+                    .links
+                    .iter()
+                    .find(|link| Some(link.event_id.as_str()) == link_event_id.as_deref())
+                    .ok_or_else(|| anyhow::anyhow!("projection link is not recorded"))?;
+                validate_link_identity(d, forge, link, false)?;
+                link
+            };
             ensure!(
                 link_event_id.as_deref() == Some(link.event_id.as_str())
                     && pr_head.as_deref() == Some(head),
@@ -507,6 +570,16 @@ pub fn validate_current_identity<'a>(
         .link
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("no forge link recorded"))?;
+    validate_link_identity(d, forge, link, true)?;
+    Ok(link)
+}
+fn validate_link_identity(
+    d: &ForgeObservation,
+    forge: &crate::forge::ForgeState,
+    link: &crate::forge::ForgeLinkRecord,
+    admission: bool,
+) -> Result<()> {
+    ensure!(!link.unresolved_binding, "projection link is unresolved");
     let p = &d.provider_identity;
     ensure!(
         p.pr_number == link.pr_number
@@ -522,13 +595,13 @@ pub fn validate_current_identity<'a>(
         let original = forge
             .observations
             .iter()
-            .find(|r| r.event_id == *source)
+            .find(|r| r.names_event(source))
             .ok_or_else(|| anyhow::anyhow!("link observation is not recorded"))?;
         ensure!(
-            original.document.provider_identity == *p,
+            original.usable() && original.document.provider_identity == *p,
             "observation provider identity differs from current PR"
         );
-    } else {
+    } else if admission {
         ensure!(
             forge
                 .projection
@@ -537,5 +610,101 @@ pub fn validate_current_identity<'a>(
             "observation host differs from declared host"
         );
     }
-    Ok(link)
+    Ok(())
+}
+
+pub fn replay_observation(
+    forge: &mut crate::forge::ForgeState,
+    event: &crate::model::Event,
+    document: &ForgeObservation,
+    known_conflict: bool,
+) {
+    if let Some(existing) = forge
+        .observations
+        .iter_mut()
+        .find(|r| r.document == *document)
+    {
+        existing.aliases.push(event.event_id.clone());
+        return;
+    }
+    let conflict = known_conflict
+        || forge
+            .observations
+            .iter()
+            .any(|r| r.document.read_id == document.read_id);
+    if conflict {
+        for record in forge
+            .observations
+            .iter_mut()
+            .filter(|r| r.document.read_id == document.read_id)
+        {
+            record.conflict = true;
+        }
+    }
+    let invalid = document
+        .validate(&forge.observations)
+        .err()
+        .map(|error| error.to_string());
+    forge.observations.push(ObservationRecord {
+        event_id: event.event_id.clone(),
+        created_at: event.created_at,
+        document: document.clone(),
+        aliases: Vec::new(),
+        conflict,
+        invalid,
+    });
+}
+
+/// Imported facts are checked in their supplying history. Independent reads
+/// sharing an acquisition ID remain separate claims until merged replay.
+pub fn validate_import_admission(
+    events: &[crate::model::Event],
+    introduced: &BTreeSet<&String>,
+) -> Result<()> {
+    use crate::model::Payload;
+    for (index, event) in events.iter().enumerate() {
+        if !introduced.contains(&event.event_id) {
+            continue;
+        }
+        let source = match &event.payload {
+            Payload::ForgeObservationRecorded { observation } => Some(observation),
+            Payload::ForgeLink {
+                observation: Some(id),
+                ..
+            }
+            | Payload::ForgeChecks {
+                observation: Some(id),
+                ..
+            }
+            | Payload::ForgePrState {
+                observation: Some(id),
+                ..
+            } => events[..index].iter().find_map(|e| {
+                if e.event_id != *id {
+                    return None;
+                }
+                if let Payload::ForgeObservationRecorded { observation } = &e.payload {
+                    Some(observation)
+                } else {
+                    None
+                }
+            }),
+            _ => continue,
+        };
+        if let Payload::ForgeObservationRecorded { observation } = &event.payload {
+            ensure!(!events[..index].iter().any(|e| e.repository_id == event.repository_id && matches!(&e.payload, Payload::ForgeObservationRecorded { observation: old } if old.read_id == observation.read_id && old != observation)), "conflicting read_id in one recording repository");
+        }
+        let prefix: Vec<_> = events[..index].iter().filter(|e| {
+            !matches!((&e.payload, source), (Payload::ForgeObservationRecorded { observation: old }, Some(doc)) if old.read_id == doc.read_id && old != doc)
+        }).cloned().collect();
+        let state = crate::state::reduce(&prefix)?;
+        if let Some(document) = source {
+            document.validate(&state.forge.observations)?;
+        }
+        match &event.payload {
+            Payload::ForgeObservationRecorded { .. } => {}
+            _ => validate_projection(&event.payload, &state.forge)?,
+        }
+    }
+    Ok(())
 }

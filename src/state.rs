@@ -1,6 +1,6 @@
 use crate::model::*;
 use crate::rewrite::RewriteMap;
-use anyhow::{bail, ensure, Result};
+use anyhow::{bail, Result};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1778,9 +1778,32 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
             })
             .map(|link| link.event_id.clone())
     };
+    let mut read_documents = BTreeMap::new();
+    let mut conflicting_reads = BTreeSet::new();
+    for event in events {
+        if let Payload::ForgeObservationRecorded { observation } = &event.payload {
+            if read_documents
+                .insert(observation.read_id.as_str(), observation)
+                .is_some_and(|old| old != observation)
+            {
+                conflicting_reads.insert(observation.read_id.as_str());
+            }
+        }
+    }
     let mut legacy_checks_binding = false;
     for ev in iter {
-        crate::forge_observation::validate_projection(&ev.payload, &state.forge)?;
+        let projection_error =
+            crate::forge_observation::projection_error(&ev.payload, &state.forge);
+        if let Some(message) = &projection_error {
+            state
+                .forge
+                .diagnostics
+                .push(crate::forge_observation::ForgeDiagnostic {
+                    event_id: ev.event_id.clone(),
+                    kind: "projection-unresolved",
+                    message: message.clone(),
+                });
+        }
         match &ev.payload {
             Payload::ChangeOpened { .. } => {
                 bail!("duplicate change-opened event {}", ev.event_id)
@@ -2929,23 +2952,12 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 });
             }
             Payload::ForgeObservationRecorded { observation } => {
-                observation.validate(&state.forge.observations)?;
-                ensure!(
-                    !state
-                        .forge
-                        .observations
-                        .iter()
-                        .any(|r| r.document.read_id == observation.read_id),
-                    "duplicate forge read in ledger"
+                crate::forge_observation::replay_observation(
+                    &mut state.forge,
+                    ev,
+                    observation,
+                    conflicting_reads.contains(observation.read_id.as_str()),
                 );
-                state
-                    .forge
-                    .observations
-                    .push(crate::forge_observation::ObservationRecord {
-                        event_id: ev.event_id.clone(),
-                        created_at: ev.created_at,
-                        document: observation.clone(),
-                    });
             }
             Payload::ForgeLink {
                 observation,
@@ -2958,6 +2970,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 head_sha,
             } => {
                 let record = crate::forge::ForgeLinkRecord {
+                    unresolved_binding: projection_error.is_some(),
                     observation: observation.clone(),
                     acquisition: if observation.is_some() {
                         "retention-reference"
@@ -2966,7 +2979,13 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     },
                     read_at: observation
                         .as_ref()
-                        .and_then(|id| state.forge.observations.iter().find(|r| &r.event_id == id))
+                        .and_then(|id| {
+                            state
+                                .forge
+                                .observations
+                                .iter()
+                                .find(|r| r.names_event(id) && r.usable())
+                        })
                         .map(|r| r.document.read_at),
                     event_id: ev.event_id.clone(),
                     pr_number: *pr_number,
@@ -2991,6 +3010,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
             } => {
                 legacy_checks_binding = !binding_recorded && link_event_id.is_none();
                 state.forge.checks = Some(crate::forge::ForgeChecksRecord {
+                    unresolved_binding: projection_error.is_some(),
                     observation: observation.clone(),
                     acquisition: if observation.is_some() {
                         "retention-reference"
@@ -2999,7 +3019,13 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     },
                     read_at: observation
                         .as_ref()
-                        .and_then(|id| state.forge.observations.iter().find(|r| &r.event_id == id))
+                        .and_then(|id| {
+                            state
+                                .forge
+                                .observations
+                                .iter()
+                                .find(|r| r.names_event(id) && r.usable())
+                        })
                         .map(|r| r.document.read_at),
                     observed_pr_head: pr_head.clone(),
                     resolved_pr_head: Some(pr_head.clone()),
@@ -3021,13 +3047,14 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
             } => {
                 // Explicit bindings name a recorded link and head. Legacy
                 // readings need a prior link from their recording repository.
-                let unresolved_binding = match (link_event_id, pr_head) {
-                    (Some(id), Some(_)) => {
-                        !state.forge.links.iter().any(|link| link.event_id == *id)
-                    }
-                    (None, None) => legacy_link(&state.forge.links, ev).is_none(),
-                    _ => true,
-                };
+                let unresolved_binding = projection_error.is_some()
+                    || match (link_event_id, pr_head) {
+                        (Some(id), Some(_)) => {
+                            !state.forge.links.iter().any(|link| link.event_id == *id)
+                        }
+                        (None, None) => legacy_link(&state.forge.links, ev).is_none(),
+                        _ => true,
+                    };
                 state
                     .forge
                     .pr_states
@@ -3041,7 +3068,11 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                         read_at: observation
                             .as_ref()
                             .and_then(|id| {
-                                state.forge.observations.iter().find(|r| &r.event_id == id)
+                                state
+                                    .forge
+                                    .observations
+                                    .iter()
+                                    .find(|r| r.names_event(id) && r.usable())
                             })
                             .map(|r| r.document.read_at),
                         state: *pr_state,
@@ -3075,6 +3106,96 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
             // unknown events before replay, so this arm is defensive: keep the
             // raw history intact without mutating the derived view.
             Payload::Unknown => {}
+        }
+    }
+    let unusable_source = |id: &str| {
+        state
+            .forge
+            .observations
+            .iter()
+            .find(|r| r.names_event(id))
+            .is_none_or(|r| !r.usable())
+    };
+    for link in &mut state.forge.links {
+        link.unresolved_binding |= link.observation.as_deref().is_some_and(&unusable_source);
+        if link.unresolved_binding {
+            link.read_at = None;
+            link.resolved_head_sha = None;
+        }
+    }
+    state.forge.link = state.forge.links.last().cloned();
+    let bad_link = |id: &str| {
+        state
+            .forge
+            .links
+            .iter()
+            .find(|link| link.event_id == id)
+            .is_none_or(|link| link.unresolved_binding)
+    };
+    if let Some(checks) = &mut state.forge.checks {
+        checks.unresolved_binding |= checks.observation.as_deref().is_some_and(&unusable_source)
+            || checks.link_event_id.as_deref().is_some_and(&bad_link);
+        if checks.unresolved_binding {
+            checks.read_at = None;
+            checks.resolved_pr_head = None;
+        }
+    }
+    for lifecycle in &mut state.forge.pr_states {
+        lifecycle.unresolved_binding |= lifecycle
+            .observation
+            .as_deref()
+            .is_some_and(&unusable_source)
+            || lifecycle.link_event_id.as_deref().is_some_and(&bad_link);
+        if lifecycle.unresolved_binding {
+            lifecycle.read_at = None;
+            lifecycle.resolved_pr_head = None;
+            lifecycle.resolved_merge_sha = None;
+        }
+    }
+    for record in &state.forge.observations {
+        for (kind, message) in [
+            (
+                "observation-conflict",
+                record
+                    .conflict
+                    .then(|| "read_id has conflicting documents".to_string()),
+            ),
+            ("observation-invalid", record.invalid.clone()),
+        ] {
+            if let Some(message) = message {
+                state
+                    .forge
+                    .diagnostics
+                    .push(crate::forge_observation::ForgeDiagnostic {
+                        event_id: record.event_id.clone(),
+                        kind,
+                        message,
+                    });
+            }
+        }
+    }
+    for event in events {
+        let source = match &event.payload {
+            Payload::ForgeLink { observation, .. }
+            | Payload::ForgeChecks { observation, .. }
+            | Payload::ForgePrState { observation, .. } => observation,
+            _ => continue,
+        };
+        if source.as_deref().is_some_and(&unusable_source)
+            && !state
+                .forge
+                .diagnostics
+                .iter()
+                .any(|d| d.event_id == event.event_id)
+        {
+            state
+                .forge
+                .diagnostics
+                .push(crate::forge_observation::ForgeDiagnostic {
+                    event_id: event.event_id.clone(),
+                    kind: "projection-unresolved",
+                    message: "observation unavailable, conflicting or invalid".into(),
+                });
         }
     }
     if legacy_checks_binding && state.forge.relinked() {

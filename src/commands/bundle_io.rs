@@ -895,6 +895,16 @@ fn validate_import_candidate(
             .filter_map(|event| event.typed.clone()),
     );
     candidate.sort_by(|a, b| a.event_id.cmp(&b.event_id));
+    let admission_history = if validated.bundle.since.is_none() {
+        validated
+            .events
+            .iter()
+            .filter_map(|event| event.typed.clone())
+            .collect::<Vec<_>>()
+    } else {
+        candidate.clone()
+    };
+    crate::forge_observation::validate_import_admission(&admission_history, &new_events)?;
     let mut projected = state::reduce_with_rewrites(&candidate, rewrites)
         .context("combined local and bundled known events are not replayable")?;
     let repository_events = combined_repository_events(store, repository)?;

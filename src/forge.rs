@@ -132,6 +132,7 @@ impl ForgeProjectionRecord {
 /// Latest-wins observed link, reduced from `forge-link`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ForgeLinkRecord {
+    pub unresolved_binding: bool,
     pub observation: Option<String>,
     pub acquisition: &'static str,
     pub read_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -170,6 +171,7 @@ impl ForgeLinkRecord {
 /// Latest-wins observed check rollup, reduced from `forge-checks`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ForgeChecksRecord {
+    pub unresolved_binding: bool,
     pub observation: Option<String>,
     pub acquisition: &'static str,
     pub read_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -208,6 +210,7 @@ pub struct ForgePrStateRecord {
 /// event kind. Absent everywhere until the first forge event.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ForgeState {
+    pub diagnostics: Vec<crate::forge_observation::ForgeDiagnostic>,
     pub observations: Vec<crate::forge_observation::ObservationRecord>,
     pub projection: Option<ForgeProjectionRecord>,
     pub link: Option<ForgeLinkRecord>,
@@ -236,15 +239,32 @@ impl ForgeState {
             })
         }
         if let Some(link) = &mut self.link {
-            link.resolved_head_sha = resolve(rewrites, &link.observed_head_sha)?;
+            link.resolved_head_sha = if link.unresolved_binding {
+                None
+            } else {
+                resolve(rewrites, &link.observed_head_sha)?
+            };
         }
         for link in &mut self.links {
-            link.resolved_head_sha = resolve(rewrites, &link.observed_head_sha)?;
+            link.resolved_head_sha = if link.unresolved_binding {
+                None
+            } else {
+                resolve(rewrites, &link.observed_head_sha)?
+            };
         }
         if let Some(checks) = &mut self.checks {
-            checks.resolved_pr_head = resolve(rewrites, &checks.observed_pr_head)?;
+            checks.resolved_pr_head = if checks.unresolved_binding {
+                None
+            } else {
+                resolve(rewrites, &checks.observed_pr_head)?
+            };
         }
         for state in &mut self.pr_states {
+            if state.unresolved_binding {
+                state.resolved_merge_sha = None;
+                state.resolved_pr_head = None;
+                continue;
+            }
             state.resolved_merge_sha = state
                 .observed_merge_sha
                 .as_deref()
@@ -270,6 +290,9 @@ impl ForgeState {
     /// and exactly one distinct link in the complete history.
     pub fn current_pr_state(&self) -> Option<&ForgePrStateRecord> {
         let link = self.link.as_ref()?;
+        if link.unresolved_binding {
+            return None;
+        }
         // Recording the same link twice is one PR observed twice, not a
         // relink, so a fact bound to any event that recorded this exact link
         // still describes it. Comparing event IDs alone would discard a good
@@ -425,6 +448,7 @@ pub struct ForgeProjectionView {
 /// Serialized view of the observed link.
 #[derive(Debug, Clone, Serialize)]
 pub struct ForgeLinkView {
+    pub unresolved_binding: bool,
     pub observation: Option<String>,
     pub acquisition: &'static str,
     pub read_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -463,6 +487,7 @@ pub struct AwaitingUser {
 /// projection/link/checks/pr-state facts joined with the current head.
 #[derive(Debug, Clone, Serialize)]
 pub struct ForgeStatus {
+    pub diagnostics: Vec<crate::forge_observation::ForgeDiagnostic>,
     pub observations: Vec<crate::forge_observation::ObservationRecord>,
     /// undeclared | declared | linked
     pub projection: &'static str,
@@ -522,6 +547,7 @@ pub fn build_status(
     });
 
     let link = forge.link.as_ref().map(|l| ForgeLinkView {
+        unresolved_binding: l.unresolved_binding,
         observation: l.observation.clone(),
         acquisition: l.acquisition,
         read_at: l.read_at,
@@ -535,7 +561,11 @@ pub fn build_status(
         resolved_head_sha: l.resolved_head_sha.clone(),
     });
 
-    let linked_head = forge.link.as_ref().map(|l| l.observed_head_sha.as_str());
+    let linked_head = forge
+        .link
+        .as_ref()
+        .filter(|link| !link.unresolved_binding)
+        .map(|l| l.observed_head_sha.as_str());
     let observed_head_match = match (linked_head, approved_head) {
         (Some(linked), Some(approved)) => linked == approved,
         _ => false,
@@ -544,16 +574,22 @@ pub fn build_status(
     let resolved_head_match = forge
         .link
         .as_ref()
+        .filter(|link| !link.unresolved_binding)
         .and_then(|link| link.resolved_head_sha.as_deref())
         .zip(approved_head)
         .is_some_and(|(resolved, approved)| resolved == approved);
     let checks_pr_match = forge
         .checks
         .as_ref()
+        .filter(|record| !record.unresolved_binding)
         .and_then(|record| record.link_event_id.as_ref())
         .and_then(|id| forge.links.iter().find(|link| &link.event_id == id))
         .zip(forge.link.as_ref())
-        .is_some_and(|(observed, current)| observed.same_pr_identity_as(current));
+        .is_some_and(|(observed, current)| {
+            !observed.unresolved_binding
+                && !current.unresolved_binding
+                && observed.same_pr_identity_as(current)
+        });
 
     // Checks are read relative to the linked head. Without a link there is
     // no head to compare, so the rollup is `unknown`. A rollup recorded for
@@ -618,6 +654,7 @@ pub fn build_status(
     };
 
     Some(ForgeStatus {
+        diagnostics: forge.diagnostics.clone(),
         observations: forge.observations.clone(),
         projection,
         declared,
@@ -656,6 +693,7 @@ mod tests {
 
     fn link(event_id: &str, pr: u64, head: &str) -> ForgeLinkRecord {
         ForgeLinkRecord {
+            unresolved_binding: false,
             observation: None,
             acquisition: "unretained-assertion",
             read_at: None,
@@ -688,6 +726,7 @@ mod tests {
 
     fn state_with(links: Vec<ForgeLinkRecord>, pr_states: Vec<ForgePrStateRecord>) -> ForgeState {
         ForgeState {
+            diagnostics: Vec::new(),
             observations: Vec::new(),
             projection: None,
             link: links.last().cloned(),

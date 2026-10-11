@@ -52,10 +52,11 @@ fn observation<'a>(
         .forge
         .observations
         .iter()
-        .filter(|r| r.document.read_id == named || r.event_id == named)
+        .filter(|r| r.document.read_id == named || r.names_event(named))
         .collect();
     match exact.as_slice() {
-        [r] => return Ok(Some(*r)),
+        [r] if r.usable() => return Ok(Some(*r)),
+        [..] if exact.len() == 1 => bail!("observation is conflicting or invalid"),
         [] => {}
         _ => bail!("observation reference is ambiguous between read and event IDs"),
     }
@@ -63,10 +64,11 @@ fn observation<'a>(
         .forge
         .observations
         .iter()
-        .filter(|r| r.event_id.starts_with(named))
+        .filter(|r| r.names_prefix(named))
         .collect();
     match matches.as_slice() {
-        [r] => Ok(Some(*r)),
+        [r] if r.usable() => Ok(Some(*r)),
+        [_] => bail!("observation is conflicting or invalid"),
         _ => bail!("observation reference must name exactly one recorded read"),
     }
 }
@@ -157,6 +159,9 @@ pub fn forge_observe(ctx: &Ctx, reference: &str, file: &str, json: bool) -> Resu
         .iter()
         .find(|r| r.document.read_id == document.read_id)
     {
+        if !original.usable() {
+            bail!("read_id is conflicting or invalid");
+        }
         if original.document != document {
             bail!("read_id conflicts with recorded observation");
         }
@@ -181,6 +186,9 @@ pub fn forge_observe(ctx: &Ctx, reference: &str, file: &str, json: bool) -> Resu
         event_id: event.event_id.clone(),
         created_at: event.created_at,
         document,
+        aliases: Vec::new(),
+        conflict: false,
+        invalid: None,
     };
     receipt(
         "observe",

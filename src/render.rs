@@ -938,6 +938,13 @@ pub fn markdown(
     if let Some(forge) = &report.forge {
         let _ = writeln!(w, "\n## Forge\n");
         let _ = writeln!(w, "- Projection: {}", forge.projection);
+        for diagnostic in &forge.diagnostics {
+            let _ = writeln!(
+                w,
+                "- Forge diagnostic `{}` at `{}`: {}",
+                diagnostic.kind, diagnostic.event_id, diagnostic.message
+            );
+        }
         for observation in &forge.observations {
             let d = &observation.document;
             let _ = writeln!(w, "- Observation `{}`: read `{}` at {}; coverage {:?}; {} generations; references unmaterialized", observation.event_id, d.read_id, d.read_at, d.coverage.overall.state, d.generations.len());

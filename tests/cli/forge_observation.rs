@@ -382,3 +382,178 @@ fn forge_complete_collection_survives_an_incomplete_read() {
         2
     );
 }
+
+fn exchange_read(conflicting: bool) {
+    let (source, id) = setup();
+    let seed = source.home.join("seed.json");
+    stdout(
+        source
+            .arc(&source.root)
+            .args(["export", &id, "--output", seed.to_str().unwrap()]),
+    );
+    let replica = Repo::new();
+    deliver_git_objects(&source, &replica);
+    stdout(
+        replica
+            .arc(&replica.root)
+            .args(["import", seed.to_str().unwrap()]),
+    );
+    let mut first = document("shared-read", "shared-generation", "first", None);
+    first["observed_head_sha"] = json!(source.head(&source.root));
+    first["observed_base_sha"] = first["observed_head_sha"].clone();
+    let a = observe(&source, &id, &first);
+    let mut second = if conflicting {
+        document("shared-read", "shared-generation", "other", None)
+    } else {
+        first.clone()
+    };
+    second["observed_head_sha"] = first["observed_head_sha"].clone();
+    second["observed_base_sha"] = first["observed_base_sha"].clone();
+    let b = observe(&replica, &id, &second);
+    stdout(replica.arc(&replica.root).args([
+        "forge",
+        "link",
+        &id,
+        "--observation",
+        b["observation_id"].as_str().unwrap(),
+    ]));
+    let bundle = replica.home.join("replica.json");
+    stdout(
+        replica
+            .arc(&replica.root)
+            .args(["export", &id, "--output", bundle.to_str().unwrap()]),
+    );
+    stdout(
+        source
+            .arc(&source.root)
+            .args(["import", bundle.to_str().unwrap()]),
+    );
+    let shown = state(&source, &id);
+    let observations = shown["forge"]["observations"].as_array().unwrap();
+    if conflicting {
+        assert_eq!(observations.len(), 2);
+        assert!(
+            observations.iter().all(|r| r["conflict"] == true),
+            "{shown}"
+        );
+        assert_eq!(shown["forge"]["link"]["unresolved_binding"], true);
+        let status: Value =
+            serde_json::from_str(&stdout(source.arc(&source.root).args(["status", &id]))).unwrap();
+        assert!(!status["forge"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        source
+            .arc(&source.root)
+            .args([
+                "forge",
+                "link",
+                &id,
+                "--observation",
+                a["observation_id"].as_str().unwrap(),
+            ])
+            .assert()
+            .failure();
+    } else {
+        assert_eq!(observations.len(), 1);
+        assert_eq!(shown["forge"]["link"]["unresolved_binding"], false);
+        assert_eq!(observations[0]["aliases"][0], b["observation_id"]);
+    }
+    stdout(
+        source
+            .arc(&source.root)
+            .args(["export", &id, "--output", seed.to_str().unwrap()]),
+    );
+    stdout(
+        replica
+            .arc(&replica.root)
+            .args(["import", seed.to_str().unwrap()]),
+    );
+    assert_eq!(
+        state(&replica, &id)["forge"]["observations"],
+        shown["forge"]["observations"]
+    );
+}
+
+#[test]
+fn forge_identical_replica_reads_coalesce_without_blocking_replay() {
+    exchange_read(false);
+}
+#[test]
+fn forge_conflicting_replica_reads_remain_readable_and_flagged() {
+    exchange_read(true);
+}
+#[test]
+fn forge_invalid_stored_observation_remains_readable_and_unresolved() {
+    let (repo, id) = setup();
+    let mut document = document("r1", "g1", "first", None);
+    document["observed_head_sha"] = json!(repo.head(&repo.root));
+    document["observed_base_sha"] = document["observed_head_sha"].clone();
+    let r = observe(&repo, &id, &document);
+    stdout(repo.arc(&repo.root).args([
+        "forge",
+        "link",
+        &id,
+        "--observation",
+        r["observation_id"].as_str().unwrap(),
+    ]));
+    rewrite_event(&repo, &id, "forge-observation-recorded", |e| {
+        e["observation"]["items"][0]["sha256"] = json!("bad-digest");
+    });
+    let shown = state(&repo, &id);
+    assert!(
+        shown["forge"]["observations"][0]["invalid"].is_string(),
+        "{shown}"
+    );
+    assert_eq!(shown["forge"]["link"]["unresolved_binding"], true);
+    let text = stdout(repo.arc(&repo.root).args(["show", &id]));
+    assert!(text.contains("invalid"), "{text}");
+    repo.arc(&repo.root)
+        .args(["status", &id])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["forge", "link", &id, "--observation", "r1"])
+        .assert()
+        .failure();
+    let bundle = repo.home.join("invalid.json");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["export", &id, "--output", bundle.to_str().unwrap()]),
+    );
+    let receiving = Repo::new();
+    deliver_git_objects(&repo, &receiving);
+    receiving
+        .arc(&receiving.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .failure();
+    assert!(!event_dir(&receiving, &id).exists());
+}
+
+#[test]
+fn forge_invalid_stored_projection_is_unresolved_without_poisoning_state() {
+    let (repo, id) = setup();
+    let r = observe(&repo, &id, &document("r1", "g1", "first", None));
+    stdout(repo.arc(&repo.root).args([
+        "forge",
+        "link",
+        &id,
+        "--observation",
+        r["observation_id"].as_str().unwrap(),
+    ]));
+    rewrite_event(&repo, &id, "forge-link", |e| {
+        e["head_sha"] = json!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    });
+    let shown = state(&repo, &id);
+    assert_eq!(shown["forge"]["link"]["unresolved_binding"], true);
+    assert_eq!(shown["forge"]["observations"][0]["invalid"], Value::Null);
+    let status: Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", &id]))).unwrap();
+    assert_eq!(status["forge"]["observed_head_match"], false);
+    assert_eq!(status["forge"]["forge_ready"], false);
+    assert_eq!(
+        status["forge"]["diagnostics"][0]["kind"],
+        "projection-unresolved"
+    );
+}
