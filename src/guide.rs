@@ -1795,10 +1795,10 @@ FORGE
   identity and observed head, read through the forge observations above.
   Received execution evidence is an external run's claim about its own
   commits, recorded on a candidate (see CANDIDATES), with its provenance and
-  receipts. Each is labelled by origin in the views that show it, and none
-  stands in for another: a green hosted check or a received pass is no local
-  evaluation, a local pass says nothing of a provider's checks, and a Git or
-  forge identity is never an agent role.
+  receipts, labelled external wherever it is shown. None stands in for
+  another: a green hosted check or a received pass is no local evaluation, a
+  local pass says nothing of a provider's checks, and a Git or forge identity
+  is never an agent role.
 
   Arc records provider assertions through forge declare/link/checks/pr-state;
   it never contacts a provider. Link head, checks PR head, lifecycle PR head
@@ -2537,7 +2537,7 @@ CANDIDATES
   `tested_tree_is_registered_tree`, which says only whether the tree the
   execution reports having tested is the registered one. Each receipt reads
   from custody as available, unavailable or corrupt, and a missing receipt
-  degrades only the claim that cites it. `--custody-dir DIR` copies each
+  leaves every recorded claim as it was. `--custody-dir DIR` copies each
   receipt's file from `DIR/sha256/<digest>` into custody after verifying its
   length and sha256, as `forge observe --custody-dir` does; a mismatch
   refuses and records nothing. `arc export` lists the commits and trees the
