@@ -1161,3 +1161,73 @@ fn doctor_reports_damaged_custody_and_orphaned_temporary_files() {
     // The damaged file is a finding that does not fail the command.
     repo.arc(&repo.root).args(["doctor"]).assert().success();
 }
+
+/// A bundle in the object roles an earlier build wrote: forge fields listed as
+/// `cited-commit` and `integration-commit`, and no custody binding.
+#[test]
+fn forge_bundle_in_the_earlier_object_roles_still_imports() {
+    let (source, id) = setup();
+    let wt = source.home.join(".worktrees/repo-frontier");
+    source.commit(&wt, "observed.txt", "one\n", "feat: observed");
+    let head = source.head(&wt);
+    let first = observed_at(&head, document("read-1", "g1", "first", None));
+    let receipt = observe_in(&source, &id, &first, None);
+    stdout(source.arc(&source.root).args([
+        "forge",
+        "link",
+        &id,
+        "--observation",
+        receipt["observation_id"].as_str().unwrap(),
+    ]));
+    stdout(source.arc(&source.root).args([
+        "forge",
+        "pr-state",
+        &id,
+        "--state",
+        "merged",
+        "--merge-sha",
+        &head,
+    ]));
+    let bundle_path = source.home.join("forge.json");
+    stdout(source.arc(&source.root).args([
+        "export",
+        &id,
+        "--output",
+        bundle_path.to_str().unwrap(),
+    ]));
+    let mut bundle: Value = serde_json::from_slice(&fs::read(&bundle_path).unwrap()).unwrap();
+    let listed = bundle["objects"].as_array().unwrap().clone();
+    assert!(listed.contains(&json!({"oid": head, "role": "observed-commit"})));
+
+    // What the earlier build listed for the same facts: the link head and the
+    // lifecycle head as cited-commit, the merge commit as integration-commit.
+    bundle.as_object_mut().unwrap().remove("custody");
+    let mut earlier_objects: Vec<Value> = listed
+        .into_iter()
+        .filter(|object| object["role"] != "observed-commit")
+        .collect();
+    earlier_objects.push(json!({"oid": head, "role": "cited-commit"}));
+    earlier_objects.push(json!({"oid": head, "role": "integration-commit"}));
+    bundle["objects"] = json!(earlier_objects);
+    let earlier = source.home.join("earlier.json");
+    fs::write(&earlier, serde_json::to_vec_pretty(&bundle).unwrap()).unwrap();
+
+    let replica = Repo::new();
+    deliver_git_objects(&source, &replica);
+    stdout(&mut admitted_change_command(&replica, &earlier));
+    assert_eq!(
+        state(&replica, &id)["forge"]["observations"],
+        state(&source, &id)["forge"]["observations"]
+    );
+    assert_eq!(
+        state(&replica, &id)["forge"]["link"]["observed_head_sha"],
+        head
+    );
+
+    // An earlier role still obliges the receiver: the object must be here.
+    let bare = Repo::new();
+    admitted_change_command(&bare, &earlier)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("missing bundled Git objects"));
+}
