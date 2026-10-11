@@ -65,6 +65,11 @@ pub struct Bundle {
     /// bundle that drops it hands the receiver revisions nothing can resolve.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repository_events: Vec<Value>,
+    /// The digest of the custody sidecar's manifest, present only when the
+    /// export wrote a sidecar. Import judges the sidecar against it, so a
+    /// replaced or foreign sidecar is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custody: Option<crate::custody::Binding>,
     // Validated at parse, not at write: an import that discovered a malformed
     // one halfway through would already have written change events.
 }
@@ -185,6 +190,7 @@ impl Bundle {
             events,
             objects: Some(objects),
             repository_events,
+            custody: None,
         })
     }
 
@@ -229,6 +235,11 @@ impl Bundle {
                     );
                 }
             }
+        }
+        if let Some(custody) = &bundle.custody {
+            custody
+                .validate()
+                .context("invalid bundle custody binding")?;
         }
         ids::validate_id_component(&bundle.repository_id)?;
         ids::validate_id_component(&bundle.change_id)?;

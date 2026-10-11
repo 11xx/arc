@@ -290,6 +290,120 @@ fn forge_observed_commit_is_retained_across_a_rewrite() {
         .any(|name| name.ends_with("cccccccccccccccccccccccccccccccccccccccc")));
 }
 
+fn replica_status(repo: &Repo) -> Value {
+    json_stdout(repo.arc(&repo.root).args(["replica", "status", "--json"]))
+}
+
+#[test]
+fn forge_custody_round_trip_recovers_generations_and_original_objects() {
+    let (source, id) = setup();
+    let (wt, a, b) = rewritten_observed_head(&source, &id);
+    let supplied = source.home.join("supplied");
+    materialize(&supplied, &["first", "second", PAGE]);
+    observe_in(
+        &source,
+        &id,
+        &observed_at(&a, document("read-1", "g1", "first", None)),
+        Some(&supplied),
+    );
+    let mut second = observed_at(&a, second_read());
+    second["observed_base_sha"] = json!(b);
+    observe_in(&source, &id, &second, Some(&supplied));
+    rewrite_to(&source, &wt, &a, &b);
+
+    // The provider-observed commit, no longer on any branch, stays held.
+    let held = retained_refs(&source, &id);
+    assert!(
+        held.iter().any(|name| name.ends_with(&format!("/{a}"))),
+        "{held:?}"
+    );
+
+    let before = replica_status(&source);
+    assert!(before["project_id"].is_null() && before["local"].is_null());
+    let replicas_dir = source.root.join(".git/arc/replicas");
+    let had_replicas_dir = replicas_dir.exists();
+
+    let bundle = source.home.join("forge.json");
+    let objects = source.home.join("objects.json");
+    let sidecar = source.home.join("forge.custody");
+    let exported = stdout(source.arc(&source.root).args([
+        "export",
+        &id,
+        "--output",
+        bundle.to_str().unwrap(),
+        "--objects-json",
+        objects.to_str().unwrap(),
+        "--custody-dir",
+        sidecar.to_str().unwrap(),
+    ]));
+    assert!(exported.contains("custody: 3 entries, 3 available, 0 unavailable"));
+    assert!(exported.contains("complete"));
+    assert!(!exported.contains("incomplete"));
+
+    // Export is an archive operation: it creates no replica identity.
+    assert_eq!(replica_status(&source), before);
+    assert_eq!(replicas_dir.exists(), had_replicas_dir);
+
+    // The sidecar carries each digest once and the bundle binds its manifest.
+    assert_eq!(files_in(&sidecar.join("sha256")).len(), 3);
+    let manifest_bytes = fs::read(sidecar.join("manifest.json")).unwrap();
+    let manifest: Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    assert_eq!(manifest["schema"], "arc-custody-bundle/1");
+    assert_eq!(manifest["complete"], true);
+    let bundle_json: Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    assert_eq!(bundle_json["schema"], "arc-bundle/6");
+    assert_eq!(bundle_json["custody"]["schema"], "arc-custody-bundle/1");
+    assert_eq!(
+        bundle_json["custody"]["manifest_sha256"],
+        format!("{:x}", Sha256::digest(&manifest_bytes))
+    );
+
+    // The Git closure lists the held observed commit and omits the one the
+    // provider reported that this repository never held.
+    let listed: Value = serde_json::from_slice(&fs::read(&objects).unwrap()).unwrap();
+    let listed = listed["objects"].as_array().unwrap();
+    assert!(listed.contains(&json!({"oid": a, "role": "observed-commit"})));
+    assert!(listed.contains(&json!({"oid": b, "role": "patchset-head"})));
+    assert!(!listed
+        .iter()
+        .any(|object| object["oid"] == "cccccccccccccccccccccccccccccccccccccccc"));
+
+    let replica = Repo::new();
+    deliver_git_objects(&source, &replica);
+    let before_replica = replica_status(&replica);
+    let imported = stdout(
+        admitted_change_command(&replica, &bundle)
+            .args(["--custody-dir", sidecar.to_str().unwrap()]),
+    );
+    assert!(imported.contains("custody: 3 installed, 0 held, 0 unavailable"));
+    assert_eq!(replica_status(&replica), before_replica);
+
+    for body in ["first", "second", PAGE] {
+        assert_eq!(
+            fs::read(custody_file(&replica, body)).unwrap(),
+            body.as_bytes()
+        );
+    }
+    let first = observed_at(&a, document("read-1", "g1", "first", None));
+    let receipt = observe_in(&replica, &id, &first, None);
+    assert_eq!(receipt["outcome"], "already-recorded");
+    assert_eq!(availability_of_generation(&receipt, "g1"), "available");
+    let receipt = observe_in(&replica, &id, &second, None);
+    assert_eq!(availability_of_generation(&receipt, "g2"), "available");
+    assert_eq!(
+        state(&replica, &id)["forge"]["observations"],
+        state(&source, &id)["forge"]["observations"]
+    );
+    // The original object is held here under the same retention ref.
+    git(
+        &replica.root,
+        &["cat-file", "-e", &format!("{a}^{{commit}}")],
+    );
+    assert!(retained_refs(&replica, &id)
+        .iter()
+        .any(|name| name.ends_with(&format!("/{a}"))));
+}
+
 #[test]
 fn forge_observed_commit_is_pinned_on_import_without_a_rewrite() {
     let (source, id) = setup();
@@ -329,6 +443,154 @@ fn forge_observed_commit_is_pinned_on_import_without_a_rewrite() {
         pins.iter().any(|name| name.ends_with(&format!("/{a}"))),
         "{pins:?}"
     );
+}
+
+#[test]
+fn forge_incomplete_custody_never_claims_complete() {
+    let (source, id) = setup();
+    let supplied = source.home.join("supplied");
+    materialize(&supplied, &["first", "second", PAGE]);
+    observe_in(
+        &source,
+        &id,
+        &document("read-1", "g1", "first", None),
+        Some(&supplied),
+    );
+    observe_in(&source, &id, &second_read(), Some(&supplied));
+    fs::remove_file(custody_file(&source, "second")).unwrap();
+    // A damaged source is never shipped as if it were content.
+    fs::write(custody_file(&source, "first"), "damaged").unwrap();
+
+    let bundle = source.home.join("forge.json");
+    let sidecar = source.home.join("forge.custody");
+    let exported = stdout(source.arc(&source.root).args([
+        "export",
+        &id,
+        "--output",
+        bundle.to_str().unwrap(),
+        "--custody-dir",
+        sidecar.to_str().unwrap(),
+    ]));
+    assert!(
+        exported.contains("custody: 3 entries, 1 available, 2 unavailable"),
+        "{exported}"
+    );
+    assert!(exported.contains("incomplete"));
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(sidecar.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["complete"], false);
+    let entries = manifest["entries"].as_array().unwrap();
+    let state_of = |body: &str| {
+        entries
+            .iter()
+            .find(|entry| entry["sha256"] == digest(body))
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(state_of("second")["state"], "unavailable");
+    assert_eq!(state_of("second")["reason"], "absent");
+    assert_eq!(state_of("first")["state"], "unavailable");
+    assert_eq!(state_of("first")["reason"], "corrupt");
+    assert_eq!(state_of(PAGE)["state"], "available");
+    assert_eq!(files_in(&sidecar.join("sha256")).len(), 1);
+
+    let replica = Repo::new();
+    deliver_git_objects(&source, &replica);
+    let imported = stdout(
+        admitted_change_command(&replica, &bundle)
+            .args(["--custody-dir", sidecar.to_str().unwrap()]),
+    );
+    assert!(
+        imported.contains("custody: 1 installed, 0 held, 2 unavailable"),
+        "{imported}"
+    );
+    assert!(imported.contains("incomplete"));
+    assert!(custody_file(&replica, PAGE).exists());
+    assert!(!custody_file(&replica, "first").exists());
+    assert!(!custody_file(&replica, "second").exists());
+    let receipt = observe_in(&replica, &id, &second_read(), None);
+    assert_eq!(availability_of_generation(&receipt, "g2"), "unavailable");
+
+    // Repairing the source and exporting again completes the replica, even
+    // though no event is new.
+    materialize(&supplied, &["first", "second", PAGE]);
+    observe_in(
+        &source,
+        &id,
+        &document("read-1", "g1", "first", None),
+        Some(&supplied),
+    );
+    observe_in(&source, &id, &second_read(), Some(&supplied));
+    let repaired = source.home.join("repaired.custody");
+    let bundle = source.home.join("repaired.json");
+    stdout(source.arc(&source.root).args([
+        "export",
+        &id,
+        "--output",
+        bundle.to_str().unwrap(),
+        "--custody-dir",
+        repaired.to_str().unwrap(),
+    ]));
+    let imported = stdout(
+        admitted_change_command(&replica, &bundle)
+            .args(["--custody-dir", repaired.to_str().unwrap()]),
+    );
+    assert!(
+        imported.contains("custody: 2 installed, 1 held, 0 unavailable"),
+        "{imported}"
+    );
+    let receipt = observe_in(&replica, &id, &second_read(), None);
+    assert_eq!(availability_of_generation(&receipt, "g2"), "available");
+    let mut dry = admitted_change_command(&replica, &bundle);
+    let dry = stdout(dry.args(["--dry-run", "--custody-dir", repaired.to_str().unwrap()]));
+    assert!(
+        dry.contains("custody: 0 would install, 3 held, 0 unavailable"),
+        "{dry}"
+    );
+}
+
+#[test]
+fn forge_bundle_binding_a_sidecar_reports_unsupplied_custody() {
+    let (source, id) = setup();
+    let supplied = source.home.join("supplied");
+    materialize(&supplied, &["first", PAGE]);
+    observe_in(
+        &source,
+        &id,
+        &document("read-1", "g1", "first", None),
+        Some(&supplied),
+    );
+    let bundle = source.home.join("forge.json");
+    let sidecar = source.home.join("forge.custody");
+    stdout(source.arc(&source.root).args([
+        "export",
+        &id,
+        "--output",
+        bundle.to_str().unwrap(),
+        "--custody-dir",
+        sidecar.to_str().unwrap(),
+    ]));
+    // The sidecar directory is not exported over an existing one.
+    source
+        .arc(&source.root)
+        .args([
+            "export",
+            &id,
+            "--output",
+            bundle.to_str().unwrap(),
+            "--custody-dir",
+            sidecar.to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+    let replica = Repo::new();
+    deliver_git_objects(&source, &replica);
+    let imported = stdout(&mut admitted_change_command(&replica, &bundle));
+    assert!(
+        imported.contains("custody: sidecar not supplied; 2 references unavailable"),
+        "{imported}"
+    );
+    assert!(!replica.root.join(".git/arc/custody").exists());
 }
 
 #[test]
@@ -429,6 +691,204 @@ fn forge_custody_corruption_and_unsafe_paths_refuse_before_publication() {
     materialize(&good, &["first", PAGE]);
     let receipt = observe_in(&repo, &id, &first, Some(&good));
     assert_eq!(availability_of_generation(&receipt, "g1"), "available");
+
+    // Import: a sidecar is judged before the first event or file lands.
+    let (source, source_id) = setup();
+    let supplied = source.home.join("supplied");
+    materialize(&supplied, &["first", PAGE]);
+    observe_in(&source, &source_id, &first, Some(&supplied));
+    let bundle_path = source.home.join("forge.json");
+    let sidecar = source.home.join("forge.custody");
+    stdout(source.arc(&source.root).args([
+        "export",
+        &source_id,
+        "--output",
+        bundle_path.to_str().unwrap(),
+        "--custody-dir",
+        sidecar.to_str().unwrap(),
+    ]));
+    let original_bundle: Value = serde_json::from_slice(&fs::read(&bundle_path).unwrap()).unwrap();
+    let original_manifest: Value =
+        serde_json::from_slice(&fs::read(sidecar.join("manifest.json")).unwrap()).unwrap();
+
+    let attempt = |label: &str, edit: &dyn Fn(&Path, &mut Value, &mut Value), needle: &str| {
+        let replica = Repo::new();
+        deliver_git_objects(&source, &replica);
+        let work = replica.home.join(label);
+        fs::create_dir_all(&work).unwrap();
+        let copy = work.join("sidecar");
+        copy_dir(&sidecar, &copy);
+        let mut bundle = original_bundle.clone();
+        let mut manifest = original_manifest.clone();
+        edit(&copy, &mut bundle, &mut manifest);
+        let manifest_bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+        fs::write(copy.join("manifest.json"), &manifest_bytes).unwrap();
+        if bundle["custody"]["manifest_sha256"] == original_bundle["custody"]["manifest_sha256"] {
+            bundle["custody"]["manifest_sha256"] =
+                json!(format!("{:x}", Sha256::digest(&manifest_bytes)));
+        }
+        let bundle_file = work.join("bundle.json");
+        fs::write(&bundle_file, serde_json::to_vec_pretty(&bundle).unwrap()).unwrap();
+        let output = admitted_change_command(&replica, &bundle_file)
+            .args(["--custody-dir", copy.to_str().unwrap()])
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!output.status.success(), "{label}: {text}");
+        assert!(
+            text.contains(needle),
+            "{label}: wanted {needle:?} in {text}"
+        );
+        assert!(
+            !replica.root.join(".git/arc/custody").exists(),
+            "{label}: custody was published"
+        );
+        assert_eq!(
+            event_count_if_any(&replica, &source_id),
+            0,
+            "{label}: events were published"
+        );
+    };
+
+    attempt(
+        "unbound-manifest",
+        &|_, bundle, manifest| {
+            manifest["complete"] = json!(true);
+            bundle["custody"]["manifest_sha256"] = json!("0".repeat(64));
+        },
+        "manifest",
+    );
+    attempt(
+        "corrupt-content",
+        &|dir, _, manifest| {
+            let entry = &manifest["entries"][0];
+            let path = dir.join(entry["path"].as_str().unwrap());
+            let length = fs::metadata(&path).unwrap().len() as usize;
+            fs::write(path, vec![b'x'; length]).unwrap();
+        },
+        "digest",
+    );
+    attempt(
+        "short-content",
+        &|dir, _, manifest| {
+            let entry = &manifest["entries"][0];
+            fs::write(dir.join(entry["path"].as_str().unwrap()), "").unwrap();
+        },
+        "length",
+    );
+    for (label, path) in [
+        ("parent-path", "../outside"),
+        ("absolute-path", "/etc/hostname"),
+        ("nested-parent", "sha256/../../outside"),
+        ("backslash-path", "sha256\\file"),
+        ("empty-path", ""),
+        ("other-name", "sha256/other"),
+    ] {
+        attempt(
+            label,
+            &|_, _, manifest| {
+                manifest["entries"][0]["path"] = json!(path);
+            },
+            "path",
+        );
+    }
+    attempt(
+        "false-completeness",
+        &|_, _, manifest| {
+            manifest["entries"][0] = json!({
+                "sha256": manifest["entries"][0]["sha256"],
+                "byte_length": manifest["entries"][0]["byte_length"],
+                "state": "unavailable",
+                "reason": "absent",
+            });
+        },
+        "complete",
+    );
+    attempt(
+        "unreferenced-entry",
+        &|_, _, manifest| {
+            manifest["entries"].as_array_mut().unwrap().push(json!({
+                "sha256": "b".repeat(64),
+                "byte_length": 1,
+                "state": "unavailable",
+                "reason": "absent",
+            }));
+        },
+        "reference",
+    );
+    attempt(
+        "omitted-entry",
+        &|_, _, manifest| {
+            manifest["entries"].as_array_mut().unwrap().pop();
+        },
+        "reference",
+    );
+    attempt(
+        "wrong-schema",
+        &|_, _, manifest| {
+            manifest["schema"] = json!("arc-custody-bundle/2");
+        },
+        "schema",
+    );
+    attempt(
+        "symlinked-content",
+        &|dir, _, manifest| {
+            let path = dir.join(manifest["entries"][0]["path"].as_str().unwrap());
+            let held = fs::read(&path).unwrap();
+            let target = dir.parent().unwrap().join("target");
+            fs::write(&target, held).unwrap();
+            fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink(&target, &path).unwrap();
+        },
+        "symlink",
+    );
+
+    // A sidecar offered to a bundle that binds none is refused too.
+    let replica = Repo::new();
+    deliver_git_objects(&source, &replica);
+    let unbound = replica.home.join("unbound.json");
+    let mut bundle = original_bundle.clone();
+    bundle.as_object_mut().unwrap().remove("custody");
+    fs::write(&unbound, serde_json::to_vec_pretty(&bundle).unwrap()).unwrap();
+    admitted_change_command(&replica, &unbound)
+        .args(["--custody-dir", sidecar.to_str().unwrap()])
+        .assert()
+        .failure();
+    assert!(!replica.root.join(".git/arc/custody").exists());
+    assert_eq!(event_count_if_any(&replica, &source_id), 0);
+
+    // The same sidecar, untouched, imports.
+    let replica = Repo::new();
+    deliver_git_objects(&source, &replica);
+    admitted_change_command(&replica, &bundle_path)
+        .args(["--custody-dir", sidecar.to_str().unwrap()])
+        .assert()
+        .success();
+}
+
+fn event_count_if_any(repo: &Repo, change_id: &str) -> usize {
+    if event_dir(repo, change_id).exists() {
+        event_count(repo, change_id)
+    } else {
+        0
+    }
+}
+
+fn copy_dir(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).unwrap();
+        }
+    }
 }
 
 /// A receiver that admits the exporter's facts and its history rewrites.

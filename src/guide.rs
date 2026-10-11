@@ -803,11 +803,14 @@ RUN A CHANGE
                                      Export a versioned event bundle and its
                                      Git objects, with a count by role.
     --objects-json <file>            Write an arc-bundle-objects/1 transport file.
+    --custody-dir <dir>              Also write an arc-custody-bundle/1 sidecar
+                                     of the retained forge content.
   arc import <file|-> [--dry-run]     Require every listed object locally before
                                      writing any events or refs. Missing OIDs and
                                      roles are reported; transport the objects first.
     --provenance-only                Import events despite missing objects,
                                      reporting the unavailable evidence.
+    --custody-dir <dir>              Install a sidecar the bundle binds.
 
   Change history checksums hash compact JSON with recursively sorted object
   keys and a newline after each event. The checksum names the same prefix
@@ -837,6 +840,30 @@ RUN A CHANGE
   retention ref. Bundles whose rewrite events name none import unchanged. An
   import holds each `observed-commit` of the imported change that is here the
   same way, under the event that recorded it.
+
+  Retained forge content travels beside the bundle as an optional sidecar,
+  never inside it. `arc export --custody-dir <dir>` writes
+  `arc-custody-bundle/1` into a new or empty directory: one `sha256/<digest>`
+  file per available digest, copied once however many references share it, and
+  `manifest.json` listing every digest the exported events reference as
+  `available` (with its path) or `unavailable` (with the reason `absent` or
+  `corrupt`). `complete` is true only when nothing is unavailable. Content
+  that fails verification is never shipped. The bundle's `custody` member
+  holds the manifest's SHA-256, and the export summary prints the entry
+  counts and `complete` or `incomplete`. `arc import --custody-dir <dir>`
+  refuses, before any event, ref or file is written, a sidecar when the bundle
+  binds none or another manifest; when the manifest names another change,
+  lists other content than the bundled events reference, claims completeness
+  over an unavailable entry or names a path other than `sha256/<digest>`; or
+  when its content is a symlink, is not a regular file or differs in length
+  or SHA-256 from its entry. Verified files are copied into ledger custody
+  unless already held, before the events that cite them are published, and
+  the summary counts installed, held and unavailable content. Unavailable
+  entries stay unavailable and the import says incomplete. Importing a bundle
+  that binds a sidecar without one says how many references stay unavailable.
+  Importing the same bundle again with a repaired sidecar installs the missing
+  content without recording events. Neither export nor import initializes a
+  replica.
   Full and delta histories use active, uncontradicted rewrites admitted with
   rewrite authority to prove a falsification's failure identity. A publisher
   lacking rewrite authority is refused; legacy transport without an
@@ -1685,7 +1712,8 @@ FORGE
   content, and missing content degrades only the generations and responses
   that reference it, never a retained fact or judgment. A provider's reported
   capture and arc's verification are separate facts. Arc never resolves a
-  provider handle: bytes arrive as files an adapter materialized.
+  provider handle: bytes arrive as files an adapter materialized or as an
+  export's custody sidecar.
 
   `forge observe --custody-dir DIR` copies materialized files. For each
   digest the document references, DIR/sha256/<digest> (lowercase hex) is the
@@ -1701,6 +1729,7 @@ FORGE
   Provider-observed commits (observed head and base, merge commits, link,
   checks and lifecycle heads) are held by retention refs when this
   repository has them, and `arc export` lists them as `observed-commit`.
+  Custody travels beside an export (see export and import above).
 
   coverage has overall and collections entries. Each has state (complete,
   truncated or failed), scope, optional frontier and failure_reason (required
@@ -3111,6 +3140,7 @@ SCHEMAS
   Commitments, files:
     `arc-bundle/6`                   arc export / arc import
     `arc-bundle-objects/1`           arc export --objects-json
+    `arc-custody-bundle/1`           arc export / import --custody-dir
     `arc-forge-observation/1`        arc forge observe --file
     `arc-forge-receipt/1`            arc forge observe|link|checks|pr-state --json
     `arc-replica-bundle/3`           arc replica export / import

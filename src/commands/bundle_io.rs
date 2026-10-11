@@ -7,10 +7,31 @@ pub fn export_bundle(
     output: &str,
     since: Option<&str>,
     objects_json: Option<&str>,
+    custody_dir: Option<&str>,
 ) -> Result<()> {
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
-    let bundle = Bundle::export(&store, &ctx.cwd, &change_id, since)?;
+    let mut bundle = Bundle::export(&store, &ctx.cwd, &change_id, since)?;
+    // The sidecar is written first: the bundle binds its manifest digest, so a
+    // bundle never names a sidecar that was not written.
+    let sidecar = custody_dir
+        .map(|dir| {
+            let events = bundle
+                .events
+                .iter()
+                .map(crate::bundle::parse_typed_event)
+                .collect::<Result<Vec<_>>>()?;
+            let wanted = crate::custody::referenced(events.iter().flatten().map(|e| &e.payload));
+            crate::custody::export_sidecar(
+                &crate::custody::Custody::at(&store.root),
+                &change_id,
+                &wanted,
+                Path::new(dir),
+            )
+            .with_context(|| format!("cannot write custody sidecar {dir}"))
+        })
+        .transpose()?;
+    bundle.custody = sidecar.as_ref().map(|exported| exported.binding.clone());
     let objects = bundle.objects.as_deref().unwrap_or_default();
     if let Some(path) = objects_json {
         let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
@@ -39,6 +60,23 @@ pub fn export_bundle(
     }
     reported.push_str(&format!("\nsha256: {}", bundle.events_sha256));
     reported.push_str(&format!("\nobjects: {} {summary}", objects.len()));
+    if let (Some(exported), Some(dir)) = (&sidecar, custody_dir) {
+        reported.push_str(&format!(
+            "\ncustody: {} entries, {} available, {} unavailable ({})",
+            exported.entries,
+            exported.available,
+            exported.unavailable,
+            if exported.complete() {
+                "complete"
+            } else {
+                "incomplete"
+            }
+        ));
+        reported.push_str(&format!(
+            "\ncustody-manifest: {}\ncustody-dir: {dir}",
+            exported.binding.manifest_sha256
+        ));
+    }
     if output == "-" {
         std::io::stdout().write_all(&bytes)?;
         eprintln!("{reported}\noutput: -");
@@ -57,6 +95,7 @@ pub fn import_bundle(
     provenance_only: bool,
     publisher: Option<&str>,
     received_sha256: Option<&str>,
+    custody_dir: Option<&str>,
 ) -> Result<crate::import_authorization::ImportResult> {
     let bytes = if input == "-" {
         let mut bytes = Vec::new();
@@ -69,7 +108,27 @@ pub fn import_bundle(
     // Parsing validates every path-bearing ID, checksum, envelope, and
     // patchset field before the local store is inspected or created.
     let validated = Bundle::parse(&bytes)?;
-    import_validated(
+    let referenced = crate::custody::referenced(
+        validated
+            .events
+            .iter()
+            .filter_map(|event| event.typed.as_ref())
+            .map(|event| &event.payload),
+    );
+    // The sidecar is judged in full before the store is inspected: a refusal
+    // leaves no event, ref or custody file behind.
+    let sidecar = custody_dir
+        .map(|dir| {
+            crate::custody::load_sidecar(
+                Path::new(dir),
+                validated.bundle.custody.as_ref(),
+                &validated.bundle.change_id,
+                &referenced,
+            )
+            .with_context(|| format!("custody sidecar {dir} refused; nothing was imported"))
+        })
+        .transpose()?;
+    let result = import_validated_guarded(
         ctx,
         &bytes,
         &validated,
@@ -77,7 +136,19 @@ pub fn import_bundle(
         provenance_only,
         publisher,
         received_sha256,
-    )
+        None,
+        sidecar.as_ref(),
+    )?;
+    // A bundle that names a sidecar the caller did not bring says what that
+    // leaves unavailable, rather than reading as if custody arrived.
+    if result.exit_code == 0 && sidecar.is_none() && validated.bundle.custody.is_some() {
+        let custody = crate::custody::Custody::at(&Store::resolve_root(&ctx.cwd)?);
+        println!(
+            "custody: sidecar not supplied; {} references unavailable",
+            crate::custody::unavailable_among(&custody, &referenced)
+        );
+    }
+    Ok(result)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -99,6 +170,7 @@ pub(super) fn import_validated(
         publisher,
         received_sha256,
         None,
+        None,
     )
 }
 
@@ -112,6 +184,7 @@ pub(super) fn import_validated_guarded(
     publisher: Option<&str>,
     received_sha256: Option<&str>,
     before_publish: Option<&dyn Fn() -> Result<()>>,
+    sidecar: Option<&crate::custody::Sidecar>,
 ) -> Result<crate::import_authorization::ImportResult> {
     if let Some(objects) = &validated.bundle.objects {
         let mut missing = Vec::new();
@@ -317,6 +390,10 @@ pub(super) fn import_validated_guarded(
             println!("aborted: no events or refs written");
             return Ok(crate::model::OperationResult::unpublished(1));
         }
+        if let Some(sidecar) = sidecar {
+            let outcome = sidecar.plan(&crate::custody::Custody::at(&root));
+            print_custody_outcome(&outcome, "would install");
+        }
         return Ok(crate::model::OperationResult {
             exit_code: 0,
             published: false,
@@ -457,6 +534,11 @@ pub(super) fn import_validated_guarded(
         &rewrites,
     )?;
     ctx.ensure_declared_actor(&store)?;
+    // Verified bytes land before the events that cite them.
+    if let Some(sidecar) = sidecar {
+        let outcome = sidecar.install(&crate::custody::Custody::at(&root))?;
+        print_custody_outcome(&outcome, "installed");
+    }
     let rewrites = incoming.len();
     let batch = crate::store::ImportBatch {
         schema: "arc-import-batch/1".into(),
@@ -514,6 +596,20 @@ pub(super) fn import_validated_guarded(
             authorization,
         },
     })
+}
+
+fn print_custody_outcome(outcome: &crate::custody::Outcome, installed: &str) {
+    println!(
+        "custody: {} {installed}, {} held, {} unavailable ({})",
+        outcome.installed,
+        outcome.held,
+        outcome.unavailable,
+        if outcome.complete() {
+            "complete"
+        } else {
+            "incomplete"
+        }
+    );
 }
 
 #[allow(clippy::too_many_arguments)]

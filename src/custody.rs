@@ -8,7 +8,9 @@
 //! resolves a provider handle: bytes arrive as files an adapter materialized
 //! or inside a sidecar an export wrote, and are verified before they are
 //! published.
+use crate::model::Payload;
 use anyhow::{bail, ensure, Context, Result};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
@@ -16,7 +18,10 @@ use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
+pub const SIDECAR_SCHEMA: &str = "arc-custody-bundle/1";
+pub const MANIFEST_FILE: &str = "manifest.json";
 const LAYOUT: &str = "sha256";
+const MANIFEST_LIMIT: u64 = 64 * 1024 * 1024;
 const CHUNK: usize = 64 * 1024;
 
 /// The bytes a reference names: their digest and exact length.
@@ -33,6 +38,17 @@ impl From<&crate::forge_observation::RetainedContentRef> for Content {
             byte_length: reference.byte_length,
         }
     }
+}
+
+/// Every content reference the payloads carry.
+pub fn referenced<'a>(payloads: impl Iterator<Item = &'a Payload>) -> BTreeSet<Content> {
+    let mut found = BTreeSet::new();
+    for payload in payloads {
+        if let Payload::ForgeObservationRecorded { observation } = payload {
+            found.extend(observation.contents().map(Content::from));
+        }
+    }
+    found
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,20 +149,59 @@ fn inspect(path: &Path, content: &Content) -> Availability {
     }
 }
 
-/// The ledger's private root: owner access only.
-fn create_dirs(path: &Path) -> Result<()> {
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(path)
-        .with_context(|| format!("cannot create {}", path.display()))
+#[derive(Clone, Copy)]
+enum Visibility {
+    /// The ledger's private root: owner access only.
+    Private,
+    /// A transport directory, created as the caller's umask allows.
+    Shared,
 }
 
-fn open_new(path: &Path) -> Result<File> {
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
+fn create_dirs(path: &Path, visibility: Visibility) -> Result<()> {
+    match visibility {
+        Visibility::Private => fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path),
+        Visibility::Shared => fs::create_dir_all(path),
+    }
+    .with_context(|| format!("cannot create {}", path.display()))
+}
+
+/// Write `bytes` beside `destination` and rename them into place, so a reader
+/// sees the whole file or none of it.
+fn write_atomic(destination: &Path, bytes: &[u8], visibility: Visibility) -> Result<()> {
+    let directory = destination
+        .parent()
+        .context("destination has no parent directory")?;
+    create_dirs(directory, visibility)?;
+    let name = destination
+        .file_name()
+        .context("destination has no file name")?
+        .to_string_lossy();
+    let temporary = directory.join(format!(".{name}.{}.tmp", crate::ids::new_identifier()));
+    let result = (|| -> Result<()> {
+        let mut file = open_new(&temporary, visibility)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&temporary, destination)
+            .with_context(|| format!("cannot publish {}", destination.display()))?;
+        File::open(directory)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn open_new(path: &Path, visibility: Visibility) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    if matches!(visibility, Visibility::Private) {
+        options.mode(0o600);
+    }
+    options
         .open(path)
         .with_context(|| format!("cannot create {}", path.display()))
 }
@@ -154,7 +209,12 @@ fn open_new(path: &Path) -> Result<File> {
 /// Copy a regular file to `destination` through a temporary sibling, verifying
 /// the bytes actually copied against `content`. Nothing is published unless
 /// they match.
-fn publish_verified(source: &Path, destination: &Path, content: &Content) -> Result<()> {
+fn publish_verified(
+    source: &Path,
+    destination: &Path,
+    content: &Content,
+    visibility: Visibility,
+) -> Result<()> {
     let mut input =
         File::open(source).with_context(|| format!("cannot read {}", source.display()))?;
     ensure!(
@@ -165,14 +225,14 @@ fn publish_verified(source: &Path, destination: &Path, content: &Content) -> Res
     let directory = destination
         .parent()
         .context("destination has no parent directory")?;
-    create_dirs(directory)?;
+    create_dirs(directory, visibility)?;
     let temporary = directory.join(format!(
         ".{}.{}.tmp",
         content.sha256,
         crate::ids::new_identifier()
     ));
     let result = (|| -> Result<()> {
-        let mut output = open_new(&temporary)?;
+        let mut output = open_new(&temporary, visibility)?;
         if let Verdict::Mismatch(reason) = stream(&mut input, content, Some(&mut output))? {
             bail!("content {} {reason}", short(&content.sha256));
         }
@@ -190,6 +250,21 @@ fn publish_verified(source: &Path, destination: &Path, content: &Content) -> Res
 
 fn short(digest: &str) -> &str {
     &digest[..digest.len().min(12)]
+}
+
+/// A path that names something inside the directory it is joined to: relative,
+/// with no empty, `.` or `..` component and no separator but `/`.
+pub fn safe_relative(path: &str) -> Result<()> {
+    ensure!(
+        !path.is_empty()
+            && !path.starts_with('/')
+            && !path.contains(['\\', '\0'])
+            && path
+                .split('/')
+                .all(|part| !part.is_empty() && part != "." && part != ".."),
+        "unsafe path {path:?}"
+    );
+    Ok(())
 }
 
 /// What a ledger holds for the references it records.
@@ -229,7 +304,12 @@ impl Custody {
         if self.availability(content).is_available() {
             return Ok(Installed::AlreadyHeld);
         }
-        publish_verified(source, &self.path(&content.sha256), content)?;
+        publish_verified(
+            source,
+            &self.path(&content.sha256),
+            content,
+            Visibility::Private,
+        )?;
         Ok(Installed::Written)
     }
 }
@@ -309,6 +389,371 @@ impl Materialization {
     }
 }
 
+/// The sidecar an export writes beside its bundle: `manifest.json` and one
+/// `sha256/<digest>` file per available digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Manifest {
+    pub schema: String,
+    pub change_id: String,
+    /// Whether every entry is available.
+    pub complete: bool,
+    pub entries: Vec<Entry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EntryState {
+    Available,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Entry {
+    pub sha256: String,
+    pub byte_length: u64,
+    pub state: EntryState,
+    /// Where an available entry's bytes are, relative to the sidecar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Why an unavailable entry has no bytes: `absent` or `corrupt`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl Entry {
+    fn content(&self) -> Content {
+        Content {
+            sha256: self.sha256.clone(),
+            byte_length: self.byte_length,
+        }
+    }
+}
+
+/// The manifest digest an arc bundle carries, which binds the sidecar to it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Binding {
+    pub schema: String,
+    pub manifest_sha256: String,
+}
+
+impl Binding {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.schema == SIDECAR_SCHEMA,
+            "unsupported custody schema {:?}",
+            self.schema
+        );
+        ensure!(
+            is_digest(&self.manifest_sha256),
+            "custody manifest digest {:?} is not a sha256",
+            self.manifest_sha256
+        );
+        Ok(())
+    }
+}
+
+pub struct Exported {
+    pub binding: Binding,
+    pub entries: usize,
+    pub available: usize,
+    pub unavailable: usize,
+}
+
+impl Exported {
+    pub fn complete(&self) -> bool {
+        self.unavailable == 0
+    }
+}
+
+/// Write the sidecar for `wanted` into a new or empty directory. Available
+/// bytes are copied once per digest; a source that is absent or damaged gets
+/// an explicit unavailable entry, and the manifest says it is incomplete.
+pub fn export_sidecar(
+    custody: &Custody,
+    change_id: &str,
+    wanted: &BTreeSet<Content>,
+    dir: &Path,
+) -> Result<Exported> {
+    match fs::read_dir(dir) {
+        Ok(mut entries) => ensure!(
+            entries.next().is_none(),
+            "refusing to write a custody sidecar into the non-empty {}",
+            dir.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).with_context(|| format!("cannot use {}", dir.display())),
+    }
+    create_dirs(&dir.join(LAYOUT), Visibility::Shared)?;
+    let mut entries = Vec::new();
+    for content in wanted {
+        let state = custody.availability(content);
+        let mut entry = Entry {
+            sha256: content.sha256.clone(),
+            byte_length: content.byte_length,
+            state: EntryState::Unavailable,
+            path: None,
+            reason: None,
+        };
+        match state {
+            Availability::Available => {
+                let path = format!("{LAYOUT}/{}", content.sha256);
+                publish_verified(
+                    &custody.path(&content.sha256),
+                    &dir.join(&path),
+                    content,
+                    Visibility::Shared,
+                )?;
+                entry.state = EntryState::Available;
+                entry.path = Some(path);
+            }
+            Availability::Unavailable => entry.reason = Some("absent".into()),
+            Availability::Corrupt(_) => entry.reason = Some("corrupt".into()),
+        }
+        entries.push(entry);
+    }
+    let available = entries
+        .iter()
+        .filter(|entry| entry.state == EntryState::Available)
+        .count();
+    let manifest = Manifest {
+        schema: SIDECAR_SCHEMA.to_string(),
+        change_id: change_id.to_string(),
+        complete: available == entries.len(),
+        entries,
+    };
+    let mut bytes = serde_json::to_vec_pretty(&manifest)?;
+    bytes.push(b'\n');
+    write_atomic(&dir.join(MANIFEST_FILE), &bytes, Visibility::Shared)?;
+    Ok(Exported {
+        binding: Binding {
+            schema: SIDECAR_SCHEMA.to_string(),
+            manifest_sha256: hex::encode(Sha256::digest(&bytes)),
+        },
+        entries: manifest.entries.len(),
+        available,
+        unavailable: manifest.entries.len() - available,
+    })
+}
+
+/// A sidecar judged against its bundle: every file checked, nothing published.
+pub struct Sidecar {
+    files: Vec<(Content, PathBuf)>,
+    unavailable: Vec<Content>,
+}
+
+/// What publishing a sidecar did, or would do.
+pub struct Outcome {
+    pub installed: usize,
+    pub held: usize,
+    pub unavailable: usize,
+}
+
+impl Outcome {
+    pub fn complete(&self) -> bool {
+        self.unavailable == 0
+    }
+}
+
+/// Judge the sidecar in `dir` against the bundle that binds it. The manifest
+/// must hash to the bundle's binding, belong to the bundle's change, and list
+/// exactly the content the bundled events reference. Available entries must
+/// name their digest's path inside the sidecar and hold exactly the recorded
+/// bytes in a regular file that is not a symlink. All of it is checked before
+/// the caller publishes anything.
+pub fn load_sidecar(
+    dir: &Path,
+    binding: Option<&Binding>,
+    change_id: &str,
+    referenced: &BTreeSet<Content>,
+) -> Result<Sidecar> {
+    let binding = binding.context("the bundle binds no custody manifest; refusing the sidecar")?;
+    binding.validate()?;
+    let root = fs::canonicalize(dir)
+        .with_context(|| format!("cannot read custody sidecar {}", dir.display()))?;
+    ensure!(root.is_dir(), "{} is not a directory", root.display());
+    let manifest_path = root.join(MANIFEST_FILE);
+    let metadata =
+        fs::symlink_metadata(&manifest_path).context("the custody sidecar has no manifest.json")?;
+    ensure!(
+        metadata.file_type().is_file(),
+        "the custody manifest is a symlink or not a regular file"
+    );
+    ensure!(
+        metadata.len() <= MANIFEST_LIMIT,
+        "the custody manifest exceeds {MANIFEST_LIMIT} bytes"
+    );
+    let bytes = fs::read(&manifest_path)?;
+    let actual = hex::encode(Sha256::digest(&bytes));
+    ensure!(
+        actual == binding.manifest_sha256,
+        "the custody manifest digest {actual} does not match the bundle's binding {}",
+        binding.manifest_sha256
+    );
+    let manifest: Manifest =
+        serde_json::from_slice(&bytes).context("malformed custody manifest")?;
+    ensure!(
+        manifest.schema == SIDECAR_SCHEMA,
+        "unsupported custody manifest schema {:?}",
+        manifest.schema
+    );
+    ensure!(
+        manifest.change_id == change_id,
+        "the custody manifest belongs to change {:?}, not {change_id:?}",
+        manifest.change_id
+    );
+    let mut listed = BTreeSet::new();
+    let mut paths = BTreeSet::new();
+    for entry in &manifest.entries {
+        ensure!(
+            is_digest(&entry.sha256),
+            "custody entry digest {:?} is not a sha256",
+            entry.sha256
+        );
+        ensure!(
+            listed.insert(entry.content()),
+            "custody entry {} is listed twice",
+            short(&entry.sha256)
+        );
+        match entry.state {
+            EntryState::Available => {
+                let path = entry.path.as_deref().with_context(|| {
+                    format!("available entry {} has no path", short(&entry.sha256))
+                })?;
+                ensure!(entry.reason.is_none(), "an available entry names a reason");
+                safe_relative(path)?;
+                ensure!(
+                    path == format!("{LAYOUT}/{}", entry.sha256),
+                    "path {path:?} does not name its content digest"
+                );
+                ensure!(
+                    paths.insert(path.to_string()),
+                    "two entries share the path {path:?}"
+                );
+            }
+            EntryState::Unavailable => {
+                ensure!(entry.path.is_none(), "an unavailable entry names a path");
+                ensure!(
+                    matches!(entry.reason.as_deref(), Some("absent" | "corrupt")),
+                    "an unavailable entry needs the reason absent or corrupt"
+                );
+            }
+        }
+    }
+    ensure!(
+        manifest.complete
+            == manifest
+                .entries
+                .iter()
+                .all(|entry| entry.state == EntryState::Available),
+        "the manifest's complete flag disagrees with its entries: complete custody \
+         cannot list unavailable content"
+    );
+    if let Some(extra) = listed.difference(referenced).next() {
+        bail!(
+            "the manifest names content no bundled event references: {}",
+            extra.sha256
+        );
+    }
+    if let Some(missing) = referenced.difference(&listed).next() {
+        bail!(
+            "the manifest omits content a bundled event references: {}",
+            missing.sha256
+        );
+    }
+    let mut files = Vec::new();
+    let mut unavailable = Vec::new();
+    if manifest
+        .entries
+        .iter()
+        .any(|entry| entry.state == EntryState::Available)
+    {
+        let layout = root.join(LAYOUT);
+        ensure!(
+            fs::symlink_metadata(&layout)
+                .map(|metadata| metadata.file_type().is_dir())
+                .unwrap_or(false),
+            "the sidecar's {LAYOUT}/ is a symlink or not a directory"
+        );
+    }
+    for entry in &manifest.entries {
+        let content = entry.content();
+        if entry.state == EntryState::Unavailable {
+            unavailable.push(content);
+            continue;
+        }
+        let file = root.join(entry.path.as_deref().expect("validated path"));
+        let metadata = fs::symlink_metadata(&file)
+            .with_context(|| format!("custody content {} is missing", short(&entry.sha256)))?;
+        ensure!(
+            !metadata.file_type().is_symlink(),
+            "custody content {} is a symlink",
+            short(&entry.sha256)
+        );
+        ensure!(
+            metadata.file_type().is_file(),
+            "custody content {} is not a regular file",
+            short(&entry.sha256)
+        );
+        let mut reader = File::open(&file)?;
+        if let Verdict::Mismatch(reason) = stream(&mut reader, &content, None)? {
+            bail!("custody content {} {reason}", short(&entry.sha256));
+        }
+        files.push((content, file));
+    }
+    Ok(Sidecar { files, unavailable })
+}
+
+impl Sidecar {
+    /// What publishing would do, against what the custody already holds.
+    pub fn plan(&self, custody: &Custody) -> Outcome {
+        self.tally(custody)
+    }
+
+    /// Publish each file the custody does not already hold, verifying the
+    /// bytes again as they are copied.
+    pub fn install(&self, custody: &Custody) -> Result<Outcome> {
+        let outcome = self.tally(custody);
+        for (content, file) in &self.files {
+            custody.install(content, file)?;
+        }
+        Ok(outcome)
+    }
+
+    fn tally(&self, custody: &Custody) -> Outcome {
+        let mut outcome = Outcome {
+            installed: 0,
+            held: 0,
+            unavailable: 0,
+        };
+        for (content, _) in &self.files {
+            if custody.availability(content).is_available() {
+                outcome.held += 1;
+            } else {
+                outcome.installed += 1;
+            }
+        }
+        for content in &self.unavailable {
+            if custody.availability(content).is_available() {
+                outcome.held += 1;
+            } else {
+                outcome.unavailable += 1;
+            }
+        }
+        outcome
+    }
+}
+
+/// How many of `referenced` this custody cannot supply.
+pub fn unavailable_among(custody: &Custody, referenced: &BTreeSet<Content>) -> usize {
+    referenced
+        .iter()
+        .filter(|content| !custody.availability(content).is_available())
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,6 +762,28 @@ mod tests {
         Content {
             sha256: hex::encode(Sha256::digest(body.as_bytes())),
             byte_length: body.len() as u64,
+        }
+    }
+
+    #[test]
+    fn a_relative_path_stays_inside_its_directory() {
+        for safe in ["sha256/abc", "a", "a/b/c"] {
+            assert!(safe_relative(safe).is_ok(), "{safe}");
+        }
+        for unsafe_path in [
+            "",
+            "/etc/passwd",
+            "../x",
+            "a/../x",
+            "a/./b",
+            "a//b",
+            "a/",
+            "a\\b",
+            "a\0b",
+            ".",
+            "..",
+        ] {
+            assert!(safe_relative(unsafe_path).is_err(), "{unsafe_path:?}");
         }
     }
 

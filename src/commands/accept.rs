@@ -975,6 +975,7 @@ fn execute_acceptance(
             Some(&args.publisher),
             Some(&args.received_sha256),
             Some(&|| revalidate(ctx, plan, &plan.head)),
+            None,
         )?;
         if imported.exit_code != 0 {
             return refuse(

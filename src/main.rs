@@ -1160,7 +1160,14 @@ enum Cmd {
     /// records as the provider's own is listed with the role `observed-commit`
     /// only where this repository holds it; an exporter that never fetched it
     /// does not oblige the receiver to.
-    /// Records no events; ledger reads do not require a parseable append policy.
+    /// --custody-dir writes an optional arc-custody-bundle/1 sidecar: the
+    /// retained content the exported forge observations reference, which
+    /// ledger custody holds, copied once per digest beside a manifest.json.
+    /// Content absent or damaged here gets an explicit unavailable entry and
+    /// the manifest and summary say incomplete; no archive claims complete
+    /// custody it does not hold. The bundle binds the manifest's digest.
+    /// Records no events and initializes no replica; ledger reads do not
+    /// require a parseable append policy.
     Export {
         /// Change to export as a versioned bundle
         change: String,
@@ -1178,6 +1185,9 @@ enum Cmd {
         /// `objects` fields for a transport
         #[arg(long, value_name = "FILE")]
         objects_json: Option<String>,
+        /// Write the custody sidecar into this new or empty directory
+        #[arg(long, value_name = "DIR")]
+        custody_dir: Option<String>,
     },
     /// Import arc-bundle/6 or /5 into this repository's local store.
     /// Imported events retain their origin IDs, including IDs below a
@@ -1202,7 +1212,16 @@ enum Cmd {
     /// is revalidated under the publication lock; unpublished failures leave
     /// the format stamp unchanged.
     /// --provenance-only permits missing objects; it never bypasses authorization.
-    /// A listed `observed-commit` held here is pinned under
+    /// --custody-dir installs an arc-custody-bundle/1 sidecar into the ledger's
+    /// custody. The bundle must bind the manifest's digest; the manifest, its
+    /// change, its entries against the bundled events' references, every
+    /// path, length and sha256, and the absence of symlinks are all checked
+    /// before any event, ref or file is written, and corrupt content or an
+    /// unsafe path refuses the whole import. Content already held is not
+    /// copied again. Unavailable entries stay unavailable and the summary
+    /// says incomplete. A bundle that binds a sidecar imported without one
+    /// reports how many references stay unavailable. Import initializes no
+    /// replica. A listed `observed-commit` held here is pinned under
     /// `refs/arc/retained/` for the imported change.
     /// Candidate events stamp store format 7, including evaluations,
     /// selections, and promotions without a registration in the bundle.
@@ -1229,6 +1248,9 @@ enum Cmd {
         /// each missing OID and role. Evidence requires those objects to arrive
         #[arg(long)]
         provenance_only: bool,
+        /// Install this arc-custody-bundle/1 sidecar directory after judging it
+        #[arg(long, value_name = "DIR")]
+        custody_dir: Option<String>,
     },
     /// Prepare a delivered change on the paired integration authority (lead only).
     /// Admission precedes local checkout binding, exclusive scoped signing,
@@ -4738,6 +4760,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             output,
             since,
             objects_json,
+            custody_dir,
         } => {
             commands::export_bundle(
                 &ctx,
@@ -4745,6 +4768,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 &output,
                 since.as_deref(),
                 objects_json.as_deref(),
+                custody_dir.as_deref(),
             )?;
             Ok(0)
         }
@@ -4780,6 +4804,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             provenance_only,
             publisher,
             received_sha256,
+            custody_dir,
         } => commands::import_bundle(
             &ctx,
             &input,
@@ -4787,6 +4812,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             provenance_only,
             publisher.as_deref(),
             received_sha256.as_deref(),
+            custody_dir.as_deref(),
         )
         .map(|result| result.exit_code),
         Cmd::Replica { cmd } => match cmd {
