@@ -2970,6 +2970,16 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 head_sha,
             } => {
                 let record = crate::forge::ForgeLinkRecord {
+                    provider_identity: observation
+                        .as_ref()
+                        .and_then(|id| {
+                            state
+                                .forge
+                                .observations
+                                .iter()
+                                .find(|r| r.names_event(id) && r.usable())
+                        })
+                        .map(|r| r.document.provider_identity.clone()),
                     unresolved_binding: projection_error.is_some(),
                     observation: observation.clone(),
                     acquisition: if observation.is_some() {
@@ -3119,6 +3129,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
     for link in &mut state.forge.links {
         link.unresolved_binding |= link.observation.as_deref().is_some_and(&unusable_source);
         if link.unresolved_binding {
+            link.provider_identity = None;
             link.read_at = None;
             link.resolved_head_sha = None;
         }

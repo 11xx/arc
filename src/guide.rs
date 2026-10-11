@@ -1685,11 +1685,15 @@ FORGE
   A PR's identity is its provider, host, repository and PR coordinates. Each
   coordinate is the native identifier (repository_id, native_id) when the read
   reports one, otherwise the name or number. A coordinate reported by only one
-  of two reads makes them different PRs. URLs, base and head repositories and
-  refs, and names or numbers that a native identifier supersedes are snapshots;
-  they may change without changing the PR. Retargeting a native PR keeps its
-  item generations: unchanged bytes reuse a generation and edits name their
-  predecessor. An item's identity adds its kind and node_id.
+  of two reads makes them different PRs, so typed and legacy links never share
+  an identity. URLs, base and head repositories and refs, and names or numbers
+  that a native identifier supersedes are snapshots; they may change without
+  changing the PR. Retargeting a native PR keeps its item generations:
+  unchanged bytes reuse a generation and edits name their predecessor. An
+  item's identity adds its kind and node_id. A typed link exposes its
+  observation's provider_identity; checks, lifecycle facts and the legacy
+  ambiguity test compare it, so a replacement PR cannot inherit another's
+  facts through a matching URL, number or ref.
 
   Every item names a generation_id; generations carry kind, node_id, sha256
   and optional predecessor. Unchanged bytes reuse that generation in a distinct

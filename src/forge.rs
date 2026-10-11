@@ -132,6 +132,7 @@ impl ForgeProjectionRecord {
 /// Latest-wins observed link, reduced from `forge-link`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ForgeLinkRecord {
+    pub provider_identity: Option<crate::forge_observation::ProviderIdentity>,
     pub unresolved_binding: bool,
     pub observation: Option<String>,
     pub acquisition: &'static str,
@@ -159,12 +160,18 @@ impl ForgeLinkRecord {
     /// Whether two observations identify the same pull request, independently
     /// of the head reported by each read.
     pub fn same_pr_identity_as(&self, other: &ForgeLinkRecord) -> bool {
-        self.pr_number == other.pr_number
-            && self.url == other.url
-            && self.base_repo == other.base_repo
-            && self.base_ref == other.base_ref
-            && self.head_repo == other.head_repo
-            && self.head_ref == other.head_ref
+        match (&self.provider_identity, &other.provider_identity) {
+            (Some(left), Some(right)) => left.same_pr_identity_as(right),
+            (Some(_), None) | (None, Some(_)) => false,
+            (None, None) => {
+                self.pr_number == other.pr_number
+                    && self.url == other.url
+                    && self.base_repo == other.base_repo
+                    && self.base_ref == other.base_ref
+                    && self.head_repo == other.head_repo
+                    && self.head_ref == other.head_ref
+            }
+        }
     }
 }
 
@@ -448,6 +455,7 @@ pub struct ForgeProjectionView {
 /// Serialized view of the observed link.
 #[derive(Debug, Clone, Serialize)]
 pub struct ForgeLinkView {
+    pub provider_identity: Option<crate::forge_observation::ProviderIdentity>,
     pub unresolved_binding: bool,
     pub observation: Option<String>,
     pub acquisition: &'static str,
@@ -547,6 +555,7 @@ pub fn build_status(
     });
 
     let link = forge.link.as_ref().map(|l| ForgeLinkView {
+        provider_identity: l.provider_identity.clone(),
         unresolved_binding: l.unresolved_binding,
         observation: l.observation.clone(),
         acquisition: l.acquisition,
@@ -693,6 +702,7 @@ mod tests {
 
     fn link(event_id: &str, pr: u64, head: &str) -> ForgeLinkRecord {
         ForgeLinkRecord {
+            provider_identity: None,
             unresolved_binding: false,
             observation: None,
             acquisition: "unretained-assertion",
@@ -755,6 +765,71 @@ mod tests {
             vec![pr_state(None, None)],
         );
         assert!(re_read.current_pr_state().is_some());
+    }
+
+    fn native_link(
+        event_id: &str,
+        repository_id: Option<&str>,
+        native_id: Option<&str>,
+        head: &str,
+    ) -> ForgeLinkRecord {
+        let mut record = link(event_id, 1, head);
+        record.provider_identity = Some(crate::forge_observation::ProviderIdentity {
+            provider: "example".into(),
+            host: "forge.example.invalid".into(),
+            repository: "o/r".into(),
+            repository_id: repository_id.map(str::to_string),
+            pr_number: record.pr_number,
+            native_id: native_id.map(str::to_string),
+            url: record.url.clone(),
+            base_repo: record.base_repo.clone(),
+            base_ref: record.base_ref.clone(),
+            head_repo: record.head_repo.clone(),
+            head_ref: record.head_ref.clone(),
+        });
+        record
+    }
+
+    /// A replacement native PR can share every displayed coordinate with the
+    /// PR it replaced, so none of them may carry a fact from one to the other.
+    #[test]
+    fn a_replacement_native_pr_inherits_no_lifecycle() {
+        let original = native_link("01A", Some("repository"), Some("pr"), "aaa");
+        let bound = pr_state(Some("01A"), Some("aaa"));
+        let unbound = pr_state(None, None);
+        for (repository_id, native_id) in [
+            (Some("recreated"), Some("pr")),
+            (Some("repository"), Some("other")),
+            (Some("repository"), None),
+            (None, None),
+        ] {
+            let replacement = native_link("01B", repository_id, native_id, "aaa");
+            assert!(!replacement.same_pr_as(&original));
+            let state = state_with(
+                vec![original.clone(), replacement],
+                vec![bound.clone(), unbound.clone()],
+            );
+            assert!(state.relinked());
+            assert_eq!(state.current_pr_state(), None);
+        }
+        let mut legacy = link("01B", 1, "aaa");
+        legacy.url = original.url.clone();
+        assert!(!legacy.same_pr_as(&original));
+        assert!(!original.same_pr_as(&legacy));
+    }
+
+    /// Retargeting or renaming does not make a native PR another PR.
+    #[test]
+    fn a_retargeted_native_pr_keeps_its_lifecycle() {
+        let original = native_link("01A", Some("repository"), Some("pr"), "aaa");
+        let mut retargeted = native_link("01B", Some("repository"), Some("pr"), "aaa");
+        retargeted.base_ref = "release".into();
+        retargeted.url = "https://example.invalid/renamed/pull/1".into();
+        assert!(retargeted.same_pr_as(&original));
+        let bound = pr_state(Some("01A"), Some("aaa"));
+        let state = state_with(vec![original, retargeted], vec![bound.clone()]);
+        assert!(!state.relinked());
+        assert_eq!(state.current_pr_state(), Some(&bound));
     }
 
     /// A bound fact follows the PR it named, not the event that recorded the

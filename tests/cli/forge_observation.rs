@@ -557,9 +557,52 @@ fn forge_invalid_stored_projection_is_unresolved_without_poisoning_state() {
         "projection-unresolved"
     );
 }
+
+fn status(repo: &Repo, id: &str) -> Value {
+    serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", id, "--json"]))).unwrap()
+}
 fn native_identity(v: &mut Value, repo_id: Option<&str>, pr_id: Option<&str>) {
     v["provider_identity"]["repository_id"] = json!(repo_id);
     v["provider_identity"]["native_id"] = json!(pr_id);
+}
+fn ready_change() -> (Repo, String, String) {
+    let (repo, id) = setup();
+    let wt = repo.home.join(".worktrees/repo-frontier");
+    repo.commit(&wt, "change.txt", "synthetic\n", "test: synthetic change");
+    stdout(repo.arc(&wt).args(["snapshot", &id]));
+    let head = repo.head(&wt);
+    let mut pr = document("initial-pr", "pr-generation", "open PR", None);
+    native_identity(&mut pr, Some("repository-a"), Some("native-pr-a"));
+    pr["observed_head_sha"] = json!(head);
+    facts(
+        &mut pr,
+        "pull-request",
+        json!({"kind":"pull-request", "state":"open", "merge_sha":null}),
+    );
+    observe(&repo, &id, &pr);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["forge", "link", &id, "--observation", "initial-pr"]),
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["forge", "pr-state", &id, "--observation", "initial-pr"]),
+    );
+    let mut checks = document("initial-checks", "check-generation", "passed checks", None);
+    native_identity(&mut checks, Some("repository-a"), Some("native-pr-a"));
+    checks["observed_head_sha"] = json!(head);
+    facts(
+        &mut checks,
+        "checks",
+        json!({"kind":"checks", "state":"passed", "count":1}),
+    );
+    observe(&repo, &id, &checks);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["forge", "checks", &id, "--observation", "initial-checks"]),
+    );
+    assert_eq!(status(&repo, &id)["forge"]["forge_ready"], true);
+    (repo, id, head)
 }
 fn retarget_generation(edited: bool) {
     let (repo, id) = setup();
@@ -623,4 +666,65 @@ fn forge_generation_identity_is_per_native_pr() {
     let mut unreported = document("unreported", "g4", "first", None);
     native_identity(&mut unreported, None, None);
     observe(&repo, &id, &unreported);
+}
+fn assert_inherits_nothing(s: &Value) {
+    let forge = &s["forge"];
+    assert_eq!(forge["checks_applicable"], false, "{s}");
+    assert_eq!(forge["checks"], "stale", "{s}");
+    assert!(forge["pr_state"].is_null(), "{s}");
+    assert!(
+        forge["caveats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c.as_str().unwrap().starts_with("pr-state unknown")),
+        "{s}"
+    );
+    assert_eq!(forge["forge_ready"], false, "{s}");
+}
+#[test]
+fn forge_replacement_native_pr_cannot_inherit_checks_or_lifecycle() {
+    for (repository_id, native_id) in [
+        (Some("repository-b"), Some("native-pr-b")),
+        (Some("repository-a"), Some("native-pr-b")),
+        (Some("repository-b"), Some("native-pr-a")),
+        (Some("repository-a"), None),
+        (None, None),
+    ] {
+        let (repo, id, head) = ready_change();
+        let mut replacement = document(
+            "replacement-pr",
+            "replacement-generation",
+            "replacement PR",
+            None,
+        );
+        native_identity(&mut replacement, repository_id, native_id);
+        replacement["observed_head_sha"] = json!(head);
+        facts(
+            &mut replacement,
+            "pull-request",
+            json!({"kind":"pull-request", "state":"open", "merge_sha":null}),
+        );
+        observe(&repo, &id, &replacement);
+        stdout(repo.arc(&repo.root).args([
+            "forge",
+            "link",
+            &id,
+            "--observation",
+            "replacement-pr",
+        ]));
+        assert_inherits_nothing(&status(&repo, &id));
+        // Legacy unbound facts must not bridge the two native identities either.
+        rewrite_event(&repo, &id, "forge-checks", |e| {
+            for field in ["observation", "link_event_id", "binding_recorded"] {
+                e.as_object_mut().unwrap().remove(field);
+            }
+        });
+        rewrite_event(&repo, &id, "forge-pr-state", |e| {
+            for field in ["observation", "link_event_id", "pr_head"] {
+                e.as_object_mut().unwrap().remove(field);
+            }
+        });
+        assert_inherits_nothing(&status(&repo, &id));
+    }
 }

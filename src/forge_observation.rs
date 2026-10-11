@@ -621,7 +621,7 @@ fn validate_link_identity(
             .find(|r| r.names_event(source))
             .ok_or_else(|| anyhow::anyhow!("link observation is not recorded"))?;
         ensure!(
-            original.usable() && original.document.provider_identity == *p,
+            original.usable() && original.document.provider_identity.same_pr_identity_as(p),
             "observation provider identity differs from current PR"
         );
     } else if admission {

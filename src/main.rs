@@ -2362,7 +2362,8 @@ enum Cmd {
     /// Record local forge facts without contacting providers. Typed observation
     /// admission preserves coverage, acquisition time and generation references;
     /// legacy flag forms assert unretained facts with unknown acquisition time.
-    /// Recorded PR bindings survive import; ambiguous unbound history stays unknown.
+    /// Recorded PR bindings survive import; provider/native identity separates
+    /// replacement PRs, and ambiguous unbound history stays unknown.
     /// Stored conflicts and invalid facts remain readable as forge diagnostics;
     /// projections naming unusable observations remain unresolved.
     Forge {
@@ -2999,6 +3000,8 @@ enum ForgeCmd {
     },
     /// Record the provider-observed PR tuple (validated, fail-closed).
     /// Observed SHAs are preserved; local rewrite successors are separate views.
+    /// The source observation's provider/native PR identity is retained so a
+    /// replacement native PR cannot inherit checks or lifecycle by URL or number.
     Link {
         /// Usable recorded observation event or read ID; explicit flags must agree.
         /// Conflicting and invalid observations are refused as projection sources.
@@ -3033,10 +3036,12 @@ enum ForgeCmd {
         head_sha: Option<String>,
     },
     /// Record the provider-observed hosted-check rollup at an exact PR head.
-    /// The current link's identity is persisted at recording. Import order
-    /// never rebinds it; ambiguous legacy bindings remain unknown. Applicability
-    /// compares the raw head to the patchset's approval anchor. Content and
-    /// trailer rewrite successors require a fresh snapshot.
+    /// The rollup binds to the current link, which retains its observation's
+    /// provider/native PR identity; matching numbers or URLs do not bind a
+    /// replacement native PR. Import order never rebinds it; ambiguous legacy
+    /// bindings remain unknown. Applicability compares the raw head to the
+    /// patchset's approval anchor. Content and trailer rewrite successors
+    /// require a fresh snapshot.
     Checks {
         /// Usable recorded observation event or read ID; explicit flags must agree.
         /// Conflicting and invalid observations are refused as projection sources.
@@ -3064,6 +3069,8 @@ enum ForgeCmd {
     },
     /// Record the provider-observed PR lifecycle state.
     /// The head is the current link's observed head, never its local successor.
+    /// Applicability requires its stable provider/native PR identity; matching
+    /// display URLs, numbers or refs do not identify a replacement native PR.
     /// Unbound older facts need a prior link from their recording repository
     /// and an unambiguous link history to describe the current PR.
     PrState {
