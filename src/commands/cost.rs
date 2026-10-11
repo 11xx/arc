@@ -37,8 +37,8 @@ const CATEGORIES: [&str; 5] = ["input", "output", "reasoning", "cache_read", "ca
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum WorkKey {
     Change(String),
-    /// A journal artifact, by the newest name its transitions gave it.
-    Journal(String),
+    /// Canonical journal directory and newest filename in the transition chain.
+    Journal(ArtifactIdentity),
     /// Work this view does not select: a fork, a range, an unselected
     /// artifact, or a dispatch with no subject.
     Other(String),
@@ -48,7 +48,7 @@ impl WorkKey {
     fn label(&self) -> String {
         match self {
             WorkKey::Change(id) => format!("change:{id}"),
-            WorkKey::Journal(file) => format!("journal:{file}"),
+            WorkKey::Journal((_, file)) => format!("journal:{file}"),
             WorkKey::Other(label) => format!("other:{label}"),
         }
     }
@@ -59,7 +59,34 @@ impl WorkKey {
 struct WorkItem {
     key: WorkKey,
     lineage: Vec<String>,
+    journal_members: BTreeSet<ArtifactIdentity>,
     source: Option<WorkKey>,
+}
+
+type ArtifactIdentity = (std::path::PathBuf, String);
+
+fn artifact_identity(ctx: &Ctx, reference: &str) -> Result<ArtifactIdentity> {
+    let location = crate::journal::locate_artifact(ctx, reference)
+        .map_err(|_| anyhow::anyhow!("journal membership read failed"))?;
+    let directory = std::fs::canonicalize(location.hot)
+        .map_err(|_| anyhow::anyhow!("journal membership read failed"))?;
+    Ok((directory, location.file))
+}
+
+fn journal_item(ctx: &Ctx, reference: &str) -> Result<WorkItem> {
+    let lineage = crate::journal::transition_lineage(ctx, reference)
+        .map_err(|_| anyhow::anyhow!("journal lineage read failed"))?;
+    let journal_members = lineage
+        .iter()
+        .map(|name| artifact_identity(ctx, name))
+        .collect::<Result<_>>()?;
+    let latest = lineage.last().context("journal lineage is empty")?;
+    Ok(WorkItem {
+        key: WorkKey::Journal(artifact_identity(ctx, latest)?),
+        lineage,
+        journal_members,
+        source: None,
+    })
 }
 
 /// What the view reports on and the work it selects.
@@ -115,7 +142,7 @@ pub fn show_cost(ctx: &Ctx, target: &str, json: bool) -> Result<()> {
         .load_repository_events()
         .map_err(|_| anyhow::anyhow!("run metadata read failed"))?;
     let selection = select(ctx, &store, target, &events)?;
-    let (runs, sessions) = assign(&selection, &events);
+    let (runs, sessions) = assign(ctx, &selection, &events)?;
     let mut sessions: Vec<SessionRow> = sessions
         .into_iter()
         .map(|((harness, session), (spans, membership))| {
@@ -156,7 +183,7 @@ pub fn retain_cost(ctx: &Ctx, target: &str) -> Result<()> {
         .load_repository_events()
         .map_err(|_| anyhow::anyhow!("run metadata read failed"))?;
     let selection = select(ctx, &store, target, &events)?;
-    let (_, sessions) = assign(&selection, &events);
+    let (_, sessions) = assign(ctx, &selection, &events)?;
     if sessions.is_empty() {
         println!("no bound sessions");
         return Ok(());
@@ -218,25 +245,27 @@ fn looks_like_journal(target: &str) -> bool {
 fn select(ctx: &Ctx, store: &Store, target: &str, events: &[Event]) -> Result<Selection> {
     let read = store.read()?;
     if looks_like_journal(target) {
-        crate::journal::artifact_digest(ctx, target)?;
-        let lineage = crate::journal::transition_lineage(ctx, target)?;
-        let journal = WorkKey::Journal(lineage.last().cloned().unwrap_or_default());
-        let mut items = vec![WorkItem {
-            key: journal.clone(),
-            lineage: lineage.clone(),
-            source: None,
-        }];
+        crate::journal::artifact_digest(ctx, target)
+            .map_err(|_| anyhow::anyhow!("journal source read failed"))?;
+        let item = journal_item(ctx, target)?;
+        let journal = item.key.clone();
+        let lineage = item.lineage.clone();
+        let mut items = vec![item];
         let mut ledger_changes = Vec::new();
         for change_id in read.change_ids()? {
             let state = read.project(&read.events(&change_id)?)?;
             if state
                 .journal_ref
                 .as_ref()
-                .is_some_and(|reference| lineage.contains(reference))
+                .map(|reference| artifact_identity(ctx, reference))
+                .transpose()?
+                .as_ref()
+                .is_some_and(|identity| items[0].journal_members.contains(identity))
             {
                 items.push(WorkItem {
                     key: WorkKey::Change(change_id.clone()),
                     lineage: Vec::new(),
+                    journal_members: BTreeSet::new(),
                     source: Some(journal.clone()),
                 });
                 ledger_changes.push(change_id);
@@ -273,18 +302,13 @@ fn select(ctx: &Ctx, store: &Store, target: &str, events: &[Event]) -> Result<Se
     let mut items = vec![WorkItem {
         key: WorkKey::Change(change_id.clone()),
         lineage: Vec::new(),
+        journal_members: BTreeSet::new(),
         source: None,
     }];
     if let Some(reference) = journal_ref {
-        let lineage = crate::journal::transition_lineage(ctx, &reference)
-            .unwrap_or_else(|_| vec![reference.clone()]);
-        let journal = WorkKey::Journal(lineage.last().cloned().unwrap_or(reference));
-        items[0].source = Some(journal.clone());
-        items.push(WorkItem {
-            key: journal,
-            lineage,
-            source: None,
-        });
+        let item = journal_item(ctx, &reference)?;
+        items[0].source = Some(item.key.clone());
+        items.push(item);
     }
     Ok(Selection {
         target: json!({"kind": "change", "id": change_id}),
@@ -308,25 +332,40 @@ type Sessions = BTreeMap<(String, String), (Vec<Span>, BTreeSet<WorkKey>)>;
 /// a span on unselected work makes the session shared beyond the view. A run
 /// is a change's when its dispatch names that change's exact id, so what a
 /// run is assigned to never moves as other changes are opened.
-fn assign(selection: &Selection, events: &[Event]) -> (Runs, Sessions) {
-    let work_of = |subject: &Option<RunSubject>| -> WorkKey {
-        match subject {
+fn assign(ctx: &Ctx, selection: &Selection, events: &[Event]) -> Result<(Runs, Sessions)> {
+    let work_of = |subject: &Option<RunSubject>| -> Result<WorkKey> {
+        Ok(match subject {
             Some(RunSubject::Change { id }) => WorkKey::Change(id.clone()),
-            Some(RunSubject::Journal { file }) => selection
-                .items
-                .iter()
-                .find(|item| item.lineage.contains(file))
-                .map(|item| item.key.clone())
-                .unwrap_or_else(|| WorkKey::Other(format!("journal {file}"))),
+            Some(RunSubject::Journal { file }) => {
+                let identity = if selection
+                    .items
+                    .iter()
+                    .any(|item| !item.journal_members.is_empty())
+                {
+                    Some(artifact_identity(ctx, file)?)
+                } else {
+                    None
+                };
+                selection
+                    .items
+                    .iter()
+                    .find(|item| {
+                        identity
+                            .as_ref()
+                            .is_some_and(|id| item.journal_members.contains(id))
+                    })
+                    .map(|item| item.key.clone())
+                    .unwrap_or_else(|| WorkKey::Other(format!("journal {file}")))
+            }
             Some(subject) => WorkKey::Other(subject.label()),
             None => WorkKey::Other("unattributed".to_string()),
-        }
+        })
     };
     let selected: BTreeSet<&WorkKey> = selection.items.iter().map(|item| &item.key).collect();
     let mut runs: Runs = BTreeMap::new();
     let mut sessions: Sessions = BTreeMap::new();
     for round in rounds(events) {
-        let work = work_of(&round.subject);
+        let work = work_of(&round.subject)?;
         let bindings: Vec<_> = round
             .binding
             .iter()
@@ -361,7 +400,7 @@ fn assign(selection: &Selection, events: &[Event]) -> (Runs, Sessions) {
         }
     }
     sessions.retain(|_, (_, membership)| membership.iter().any(|work| selected.contains(work)));
-    (runs, sessions)
+    Ok((runs, sessions))
 }
 
 /// Every retained observation of one session, oldest first.
@@ -1106,9 +1145,9 @@ fn render_report(
                 entry["kind"] = json!("change");
                 entry["id"] = json!(id);
             }
-            WorkKey::Journal(file) => {
+            WorkKey::Journal((_, file)) => {
                 entry["kind"] = json!("journal");
-                entry["file"] = json!(file);
+                entry["file"] = json!(item.lineage.last().unwrap_or(file));
                 entry["lineage"] = json!(item.lineage);
             }
             WorkKey::Other(_) => {}

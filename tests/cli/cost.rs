@@ -1206,3 +1206,84 @@ fn a_declared_claude_fork_is_exact_when_its_origin_is_outside_the_figure() {
     let rotated = report(&repo, "fork-only");
     assert_eq!(rotated["union"], fresh["union"]);
 }
+
+#[test]
+fn review_journal_aliases_select_the_same_runs_and_changes_through_transitions() {
+    let repo = Repo::new();
+    let plan = file_artifact(&repo, "plan", "aliases");
+    let dir = stdout(repo.arc(&repo.root).args(["journal", "dir"]));
+    let qualified = format!("{}::{plan}", dir.trim());
+    let equivalent = format!("{}/.::{plan}", dir.trim());
+    for (reference, id, amount) in [
+        (&plan, "bare", 0.01),
+        (&qualified, "qualified", 0.02),
+        (&equivalent, "equivalent", 0.03),
+    ] {
+        pi_recording(&repo, id, &[amount], false);
+        bind(&repo, &dispatch(&repo, "--journal", reference), "pi", id);
+    }
+    for (slug, reference, amount) in [
+        ("from-bare", &plan, 0.04),
+        ("from-qualified", &equivalent, 0.05),
+    ] {
+        let change = begin_without_checkout(&repo, slug, &["--from-journal", reference]);
+        pi_recording(&repo, slug, &[amount], false);
+        bind(&repo, &dispatch(&repo, "--change", &change), "pi", slug);
+    }
+    for reference in [&plan, &qualified, &equivalent] {
+        let view = report(&repo, reference);
+        assert_eq!(view["sessions"].as_array().unwrap().len(), 5, "{view}");
+        assert_eq!(usd(&view["union"]), Some(0.15), "{view}");
+    }
+    stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "transition", &plan, "--to", "discussion"]),
+    );
+    let successor = json_stdout(repo.arc(&repo.root).args([
+        "journal",
+        "latest",
+        "aliases",
+        "--kind",
+        "discussion",
+        "--json",
+    ]))["file"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        report(&repo, &successor)["sessions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        5
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn unreadable_journal_membership_refuses_a_partial_cost_view() {
+    let repo = Repo::new();
+    let plan = file_artifact(&repo, "plan", "missing-alias");
+    let directory = stdout(repo.arc(&repo.root).args(["journal", "dir"]));
+    let alias = repo.home.join("journal-alias");
+    std::os::unix::fs::symlink(directory.trim(), &alias).unwrap();
+    let qualified = format!("{}::{plan}", alias.display());
+    pi_recording(&repo, "missing-alias", &[0.03], false);
+    bind(
+        &repo,
+        &dispatch(&repo, "--journal", &qualified),
+        "pi",
+        "missing-alias",
+    );
+    fs::remove_file(&alias).unwrap();
+    let output = repo
+        .arc(&repo.root)
+        .args(["cost", "show", &plan, "--json"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("journal membership read failed"));
+    assert!(!stderr.contains(alias.to_str().unwrap()));
+}

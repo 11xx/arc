@@ -4045,6 +4045,10 @@ enum RunCmd {
 enum CostCmd {
     /// Report the work cost of a change, or of a journal artifact with its
     /// `supersedes` lineage and the changes begun from any name in it.
+    /// Journal membership uses resolved journal and artifact identity: bare,
+    /// qualified and equivalent directory spellings select the same work.
+    /// References retain their original spelling as provenance. Unreadable
+    /// membership refuses the view instead of silently omitting runs
     ///
     /// Each executor session bound to a selected run is measured through the
     /// pinned tapes reader over its whole recording, or, when the source no

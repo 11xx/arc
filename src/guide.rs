@@ -3063,7 +3063,11 @@ RULES THAT CHANGE WHAT YOU DO
     sessions bound to the selected runs consumed, and records nothing. A
     change selects itself and the artifact it was begun from; an artifact
     selects its `supersedes` lineage and the changes begun from any name in
-    it. A citation selects nothing, and transitions and `begin
+    it. Membership compares resolved journal and artifact identity, so bare,
+    qualified and equivalent directory spellings select the same work.
+    References retain their original spelling as provenance. Unreadable
+    membership refuses the view instead of omitting runs. A citation selects
+    nothing, and transitions and `begin
     --from-journal` add no consumption. Each session is measured through
     the pinned tapes reader, or from retained facts when its source no longer
     answers, and the report says which; a fresh read that disagrees with
