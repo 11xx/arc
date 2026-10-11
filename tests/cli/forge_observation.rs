@@ -329,12 +329,15 @@ fn forge_commands_never_fetch_or_invoke_provider() {
 #[test]
 fn forge_observations_round_trip_unchanged_and_do_not_change_readiness() {
     let (repo, id) = setup();
-    let before = state(&repo, &id)["forge"]["forge_ready"].clone();
+    let before = status(&repo, &id)["forge"]["forge_ready"].clone();
+    assert!(before.is_boolean(), "readiness must be a Boolean: {before}");
     let receipt = observe(&repo, &id, &document("r1", "g1", "first", None));
     assert_eq!(receipt["schema"], "arc-forge-receipt/1");
     assert_eq!(receipt["availability"][0]["availability"], "unmaterialized");
     let original = state(&repo, &id);
-    assert_eq!(original["forge"]["forge_ready"], before);
+    let after = status(&repo, &id)["forge"]["forge_ready"].clone();
+    assert!(after.is_boolean());
+    assert_eq!(after, before);
     let bundle = repo.home.join("forge.json");
     stdout(
         repo.arc(&repo.root)
@@ -727,4 +730,21 @@ fn forge_replacement_native_pr_cannot_inherit_checks_or_lifecycle() {
         });
         assert_inherits_nothing(&status(&repo, &id));
     }
+}
+#[test]
+fn forge_admission_preserves_initially_ready_boolean_readiness() {
+    let (repo, id, _) = ready_change();
+    let before = status(&repo, &id)["forge"]["forge_ready"]
+        .as_bool()
+        .expect("Boolean readiness");
+    assert!(before);
+    observe(
+        &repo,
+        &id,
+        &document("unrelated-read", "comment-generation", "comment", None),
+    );
+    let after = status(&repo, &id)["forge"]["forge_ready"]
+        .as_bool()
+        .expect("Boolean readiness");
+    assert_eq!(after, before);
 }
