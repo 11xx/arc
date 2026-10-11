@@ -851,3 +851,191 @@ fn a_reported_commit_keeps_its_value_beside_its_resolution_through_a_rewrite() {
         f.source.commit
     );
 }
+
+#[test]
+fn held_raw_heads_refuse_both_intake_paths_before_publication() {
+    for kind in ["tag", "blob", "tree", "commit"] {
+        let f = Fixture::new();
+        let receiver = Repo::new();
+        let root = git_out(&receiver.root, &["rev-parse", "HEAD"]);
+        let head = revision(
+            &receiver,
+            "receiver-only",
+            &[("answer.txt", "receiver answer")],
+            &root,
+        );
+        let oid = match kind {
+            "tag" => {
+                piped(&receiver, &["mktag"], &format!(
+                    "object {}\ntype commit\ntag receipt-head\ntagger Fixture <fixture@example.invalid> 1 +0000\n\nreceipt head\n", head.commit))
+            }
+            "blob" => piped(&receiver, &["hash-object", "-w", "--stdin"], "a held blob"),
+            "tree" => head.tree.clone(),
+            _ => head.commit.clone(),
+        };
+        // The sender lacks this raw object and can only record an external claim.
+        assert!(!Command::new("git")
+            .args(["cat-file", "-e", &oid])
+            .current_dir(&f.repo.root)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let mut evidence = f.evidence();
+        evidence["heads"]["source"] =
+            json!({"commit": oid, "tree": if kind == "tag" { &head.tree } else { &f.tested.tree }});
+        f.registered("external-head", &f.report.commit, &evidence);
+        let bundle = f.repo.home.join("bundle.json");
+        let sidecar = f.repo.home.join("sidecar");
+        stdout(f.repo.arc(&f.repo.root).args([
+            "export",
+            &f.change,
+            "--output",
+            bundle.to_str().unwrap(),
+            "--custody-dir",
+            sidecar.to_str().unwrap(),
+        ]));
+        deliver_git_objects(&f.repo, &receiver);
+        let refs = git_out(&receiver.root, &["show-ref"]);
+        let expected = if kind == "commit" {
+            "evidence-tree-mismatch"
+        } else {
+            "evidence-head-type"
+        };
+        for preview in [true, false] {
+            let mut cmd = import_command(&receiver, &bundle);
+            cmd.args(["--custody-dir", sidecar.to_str().unwrap()]);
+            if preview {
+                cmd.arg("--dry-run");
+            }
+            let out = cmd.output().unwrap();
+            assert!(!out.status.success(), "{kind}");
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(stderr.contains(expected), "{kind}: {stderr}");
+            assert!(!receiver.root.join(".git/arc/repository/events").exists());
+            assert!(!receiver.root.join(".git/arc/imports").exists());
+            assert!(!custody_file(&receiver, RECEIPT).exists());
+            assert_eq!(git_out(&receiver.root, &["show-ref"]), refs);
+        }
+        // The same held raw object is rejected by registration, including a tag
+        // whose peeled commit has exactly the claimed tree.
+        let git_bundle = receiver.home.join("receiver.git.bundle");
+        git(&receiver.root, &["update-ref", "refs/evidence/raw", &oid]);
+        git(
+            &receiver.root,
+            &["bundle", "create", git_bundle.to_str().unwrap(), "--all"],
+        );
+        git(
+            &f.repo.root,
+            &[
+                "fetch",
+                git_bundle.to_str().unwrap(),
+                "refs/evidence/raw:refs/evidence/raw",
+            ],
+        );
+        if kind == "tag" {
+            evidence["heads"]["source"]["tree"] = json!(head.tree);
+        }
+        let before = event_types(&f.repo, &f.change);
+        let pins = candidate_refs(&f.repo);
+        let out = f
+            .register("held-head", &f.report.commit, &evidence)
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains(expected));
+        assert_eq!(event_types(&f.repo, &f.change), before);
+        assert_eq!(candidate_refs(&f.repo), pins);
+    }
+}
+
+#[test]
+fn received_originals_survive_rewrite_and_import_garbage_collection() {
+    let f = Fixture::new();
+    f.registered("retained", &f.report.commit, &f.evidence());
+    let refs = git_out(
+        &f.repo.root,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads/evidence-",
+            "refs/arc/retained/",
+        ],
+    );
+    // Removing existing refs forces rewrite retention to derive every original
+    // from the repository events rather than an already held retention ref.
+    for reference in refs.lines() {
+        git(&f.repo.root, &["update-ref", "-d", reference]);
+    }
+    let map = f.repo.home.join("drop-map");
+    fs::write(
+        &map,
+        [&f.source, &f.tested, &f.report]
+            .iter()
+            .map(|rev| format!("{} {}\n", rev.commit, "0".repeat(40)))
+            .collect::<String>(),
+    )
+    .unwrap();
+    stdout(f.repo.arc(&f.repo.root).args([
+        "history",
+        "rewrite",
+        "--map",
+        map.to_str().unwrap(),
+        "--reason",
+        "drop original execution history",
+    ]));
+    git(&f.repo.root, &["reflog", "expire", "--expire=now", "--all"]);
+    git(&f.repo.root, &["gc", "--prune=now"]);
+    for rev in [&f.source, &f.tested, &f.report] {
+        assert_eq!(
+            git_out(&f.repo.root, &["cat-file", "-t", &rev.commit]),
+            "commit"
+        );
+    }
+    let bundle = f.repo.home.join("retained.json");
+    stdout(f.repo.arc(&f.repo.root).args([
+        "export",
+        &f.change,
+        "--output",
+        bundle.to_str().unwrap(),
+    ]));
+    // Without a rewrite event, import must still pin received originals.
+    let mut parsed: Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    parsed["repository_events"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|event| event["event_type"] != "history-rewritten");
+    fs::write(&bundle, serde_json::to_vec_pretty(&parsed).unwrap()).unwrap();
+    let receiver = Repo::new();
+    deliver_git_objects(&f.repo, &receiver);
+    stdout(&mut import_command(&receiver, &bundle));
+    let refs = git_out(&receiver.root, &["for-each-ref", "--format=%(refname)"]);
+    for reference in refs
+        .lines()
+        .filter(|reference| !reference.starts_with("refs/arc/"))
+    {
+        if reference != "refs/heads/master" {
+            git(&receiver.root, &["update-ref", "-d", reference]);
+        }
+    }
+    git(
+        &receiver.root,
+        &["reflog", "expire", "--expire=now", "--all"],
+    );
+    git(&receiver.root, &["gc", "--prune=now"]);
+    let held = git_out(
+        &receiver.root,
+        &[
+            "for-each-ref",
+            "--format=%(objectname)",
+            "refs/arc/retained/",
+        ],
+    );
+    for rev in [&f.source, &f.tested, &f.report] {
+        assert!(held.lines().any(|oid| oid == rev.commit));
+        assert_eq!(
+            git_out(&receiver.root, &["cat-file", "-t", &rev.commit]),
+            "commit"
+        );
+    }
+}

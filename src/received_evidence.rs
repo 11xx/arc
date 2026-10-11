@@ -44,6 +44,30 @@ pub struct ReceivedEvidence {
     pub omissions: Vec<Omission>,
 }
 
+impl ReceivedEvidence {
+    /// Validate claims against held raw objects without fetching absent heads.
+    pub fn validate_held_heads(&self, cwd: &std::path::Path) -> Result<()> {
+        self.validate()?;
+        for (role, head) in self.heads.each() {
+            let Some(kind) = crate::gitio::object_type(cwd, &head.commit)? else {
+                continue;
+            };
+            ensure!(
+                kind == "commit",
+                "evidence-head-type: the {} head {} is a held {}, not a commit",
+                role.as_str(),
+                head.commit,
+                kind
+            );
+            let held = crate::gitio::resolve_tree(cwd, &head.commit)?;
+            ensure!(held.as_deref() == Some(head.tree.as_str()),
+                "evidence-tree-mismatch: the {} head {} is held here with tree {}, not the claimed {}",
+                role.as_str(), head.commit, held.as_deref().unwrap_or("none"), head.tree);
+        }
+        Ok(())
+    }
+}
+
 /// The commits an execution names, each with its tree. They are claims: the
 /// tested head is not the source head because a report was added after it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

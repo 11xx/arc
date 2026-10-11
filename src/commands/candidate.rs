@@ -136,6 +136,17 @@ pub fn register(ctx: &Ctx, args: RegisterArgs) -> Result<()> {
     if let Some(materialization) = &materialization {
         materialization.publish(&custody::Custody::at(&store.root))?;
     }
+    if let Some(evidence) = ledger.received_by(&candidate_id) {
+        for (_, head) in evidence.evidence.heads.each() {
+            if gitio::object_type(&ctx.cwd, &head.commit)?.as_deref() == Some("commit") {
+                gitio::update_ref(
+                    &ctx.cwd,
+                    &gitio::retained_ref(&brief.change_id, &candidate_id, &head.commit),
+                    &head.commit,
+                )?;
+            }
+        }
+    }
     store.append_local_repository_event(&mut event)?;
     if let Some(evidence) = &mut evidence_event {
         store
@@ -173,21 +184,7 @@ fn read_evidence(cwd: &std::path::Path, path: &str) -> Result<ReceivedEvidence> 
     evidence
         .validate()
         .map_err(|error| anyhow::anyhow!("malformed-evidence: {error}"))?;
-    for (role, head) in evidence.heads.each() {
-        if gitio::commit_exists(cwd, &head.commit)? {
-            let held = gitio::resolve_tree(cwd, &head.commit)?;
-            if held.as_deref() != Some(head.tree.as_str()) {
-                bail!(
-                    "evidence-tree-mismatch: the {} head {} is held here with tree {}, not the \
-                     claimed {}",
-                    role.as_str(),
-                    head.commit,
-                    held.as_deref().unwrap_or("none"),
-                    head.tree
-                );
-            }
-        }
-    }
+    evidence.validate_held_heads(cwd)?;
     Ok(evidence)
 }
 

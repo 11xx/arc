@@ -2511,8 +2511,12 @@ CANDIDATES
   move the tested head, and the tested head need not descend from either.
   Arc records original commits as reported and resolves each through recorded
   rewrites beside them, as `resolved_commit`: itself, its successor, or null
-  when a rewrite dropped it. A commit this repository holds has the tree the
-  document claims, or the registration is refused; one commit named twice
+  when a rewrite dropped it. Registration and import require each held raw
+  head object to be a commit with the claimed tree. Tags are not peeled; held
+  tags, blobs and trees refuse as `evidence-head-type`, and a held commit with
+  a different tree refuses as `evidence-tree-mismatch`. Absent commits remain
+  external claims. Held originals have retention refs through rewrites and
+  garbage collection, including after import. One commit named twice
   carries one tree. Omissions are explicit: provenance, receipts, commands and
   environment each appear in `omissions`, with a reason, exactly when empty,
   and `omissions` itself is required.
@@ -2543,7 +2547,8 @@ CANDIDATES
   refuses and records nothing. `arc export` lists the commits and trees the
   evidence names that the exporter holds as `received-commit` and
   `received-tree`, and the receipts ride the custody sidecar; an exporter that
-  never held a head obliges no receiver.
+  never held a head leaves it as an external claim, subject to the receiver's
+  held-object checks before any event, ref or custody publication.
 
   Retirement deletes a candidate's pin and records that it did, and only when
   no root reaches the candidate: a selection or a promotion, reaching what its
@@ -3144,7 +3149,8 @@ FILES
   ledger cites as a patchset head or a verdict's revision, is held under
   `refs/arc/retained/<change>/<subject>/<commit>` by `arc rewrite` and
   `arc history rewrite --map`, as is a provider-observed commit a forge fact
-  cites and an import that holds one. A pin or a retention ref is released
+  cites, a received source/tested/report commit, and an import that holds one.
+  A pin or a retention ref is released
   only once its commit is reachable from the integration commit, where history holds it;
   a replaced commit is on no branch, so its ref stays while the ledger cites
   it, and closing a change without integrating it releases nothing. Release

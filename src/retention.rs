@@ -8,7 +8,8 @@
 //!
 //! Which commits count is decided by the ledger, not by which ref happens to
 //! hold one: a patchset's head, the revision an external or audit verdict
-//! was recorded on, and a commit a forge fact records as the provider's own.
+//! was recorded on, a commit a forge fact records as the provider's own,
+//! and the source, tested and report commits received with a candidate.
 //! A pin released at integration, or one an outside tool moved, leaves those
 //! commits as exposed as a pin the rewrite moves.
 
@@ -88,6 +89,40 @@ pub fn cited(store: &Store) -> Result<Vec<Cited>> {
                 .filter(|(_, commit)| matches!(commit.len(), 40 | 64))
             {
                 add(&event.event_id, what.to_string(), commit);
+            }
+        }
+    }
+    let repository_events = store.load_repository_events()?;
+    let registrations: BTreeMap<_, _> = repository_events
+        .iter()
+        .filter_map(|event| {
+            if let Payload::CandidateRegistered {
+                candidate_id,
+                brief,
+                ..
+            } = &event.payload
+            {
+                Some((candidate_id.as_str(), brief.change_id.as_str()))
+            } else {
+                None
+            }
+        })
+        .collect();
+    for event in &repository_events {
+        if let Payload::CandidateEvidenceReceived {
+            candidate_id,
+            evidence,
+        } = &event.payload
+        {
+            if let Some(change_id) = registrations.get(candidate_id.as_str()) {
+                for (role, head) in evidence.heads.each() {
+                    found.push(Cited {
+                        change_id: change_id.to_string(),
+                        subject: candidate_id.clone(),
+                        what: format!("received {} head", role.as_str()),
+                        commit: head.commit.clone(),
+                    });
+                }
             }
         }
     }

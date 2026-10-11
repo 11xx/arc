@@ -321,6 +321,52 @@ fn import_events(
             }
         }
     }
+    let mut candidate_changes = BTreeMap::new();
+    let held_repository_events = local_store
+        .as_ref()
+        .map(Store::load_repository_events)
+        .transpose()?
+        .unwrap_or_default();
+    let incoming_repository_events = validated
+        .bundle
+        .repository_events
+        .iter()
+        .map(crate::bundle::parse_typed_event)
+        .collect::<Result<Vec<_>>>()?;
+    for event in held_repository_events
+        .iter()
+        .chain(incoming_repository_events.iter().flatten())
+    {
+        if let Payload::CandidateRegistered {
+            candidate_id,
+            brief,
+            ..
+        } = &event.payload
+        {
+            candidate_changes.insert(candidate_id.clone(), brief.change_id.clone());
+        }
+    }
+    for value in &validated.bundle.repository_events {
+        let Some(event) = crate::bundle::parse_typed_event(value)? else {
+            continue;
+        };
+        if let Payload::CandidateEvidenceReceived {
+            candidate_id,
+            evidence,
+        } = &event.payload
+        {
+            if let Some(change_id) = candidate_changes.get(candidate_id) {
+                for (_, head) in evidence.heads.each() {
+                    if gitio::object_type(&ctx.cwd, &head.commit)?.as_deref() == Some("commit") {
+                        pins.push((
+                            gitio::retained_ref(change_id, candidate_id, &head.commit),
+                            head.commit.clone(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
     // The commits a rewrite recorded as replaced stay held here as they were
     // where the rewrite ran, for as many of them as this repository has.
     for value in &validated.bundle.repository_events {
@@ -951,6 +997,13 @@ fn plan_repository_events(
             if !held.contains(&event.event_id) {
                 combined.push(event);
             }
+        }
+    }
+    for event in &combined {
+        if let Payload::CandidateEvidenceReceived { evidence, .. } = &event.payload {
+            evidence
+                .validate_held_heads(cwd)
+                .context("the bundle's received heads are refused; nothing was imported")?;
         }
     }
     combined.sort_by(|a, b| a.event_id.cmp(&b.event_id));

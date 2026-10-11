@@ -1203,6 +1203,10 @@ enum Cmd {
     /// Unless --provenance-only is selected, every listed Git object must
     /// exist locally before any events or refs are written. Availability checks never fetch from a promisor remote.
     /// Bundles without an objects field retain advisory commit checks.
+    /// Received source/tested/report heads that are held must be raw commits
+    /// with their claimed trees; absent heads remain external claims. Tags
+    /// are not peeled. These checks precede event, ref and custody publication.
+    /// Held received originals are pinned under `refs/arc/retained/`.
     /// A rewrite event's retention refs are held under `refs/arc/retained/`
     /// for the imported change where the commit is here; a name that is no
     /// retention ref is refused, and events naming none import unchanged.
@@ -3428,8 +3432,11 @@ enum CandidateCmd {
     /// nothing: `malformed-evidence` for a document that breaks its schema or
     /// contradicts itself (one commit with two trees, a result against its exit
     /// code, an empty section not named in `omissions`); `evidence-tree-mismatch`
-    /// for a head commit this repository holds whose tree is not the claimed
-    /// one; a --custody-dir file that fails verification.
+    /// for a held commit whose tree differs; `evidence-head-type` for a held
+    /// raw tag, blob or tree used as a head. Absent heads remain external claims.
+    /// Import applies the same checks before publication. Held original commits
+    /// have retention refs across rewrites and garbage collection.
+    /// A --custody-dir file that fails verification refuses before publication.
     Register {
         /// The content: a tree, or a commit, which is recorded as its tree
         #[arg(long)]

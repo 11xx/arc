@@ -2322,6 +2322,17 @@ pub fn resolve_tree(cwd: &Path, rev: &str) -> Result<Option<String>> {
     ref_value(cwd, &format!("{rev}^{{tree}}"))
 }
 
+/// The raw type of a held object; missing objects remain absent claims.
+pub fn object_type(cwd: &Path, oid: &str) -> Result<Option<String>> {
+    let answers = batch_check(cwd, std::iter::once(oid))?;
+    let answer = &answers.first().context("invalid object query")?.1;
+    let kind = answer
+        .rsplit_once(' ')
+        .context("git returned no object type")?
+        .1;
+    Ok((kind != "missing").then(|| kind.to_string()))
+}
+
 pub fn commit_exists(cwd: &Path, oid: &str) -> Result<bool> {
     let object = format!("{oid}^{{commit}}");
     let out = git_command()
