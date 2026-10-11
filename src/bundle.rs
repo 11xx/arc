@@ -421,6 +421,17 @@ fn exported_objects(
         let Some(event) = parse_typed_event(value)? else {
             continue;
         };
+        // A commit a provider reported is a claim about the provider. It
+        // travels only where this repository holds it, so an exporter that
+        // never fetched it does not oblige the receiver to.
+        if let Some(observed) = crate::forge_observation::observed_commits(&event.payload) {
+            for (_, revision) in observed {
+                if let Ok(oid) = crate::gitio::rev_parse(cwd, revision) {
+                    insert_object(cwd, &mut objects, &oid, "observed-commit")?;
+                }
+            }
+            continue;
+        }
         let payload = serde_json::to_value(&event.payload)?;
         let event_type = payload["event_type"].as_str().unwrap_or_default();
         collect_payload_objects(cwd, &payload, event_type, &mut objects)?;

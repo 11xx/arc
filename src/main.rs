@@ -1156,7 +1156,10 @@ enum Cmd {
     /// events, including a delta's suffix and repository events. The summary
     /// counts objects by role; transports must deliver them before import.
     /// The commits a recorded rewrite replaced and retained for this change
-    /// are listed with the role `retention-commit`.
+    /// are listed with the role `retention-commit`. A commit a forge fact
+    /// records as the provider's own is listed with the role `observed-commit`
+    /// only where this repository holds it; an exporter that never fetched it
+    /// does not oblige the receiver to.
     /// Records no events; ledger reads do not require a parseable append policy.
     Export {
         /// Change to export as a versioned bundle
@@ -1199,6 +1202,8 @@ enum Cmd {
     /// is revalidated under the publication lock; unpublished failures leave
     /// the format stamp unchanged.
     /// --provenance-only permits missing objects; it never bypasses authorization.
+    /// A listed `observed-commit` held here is pinned under
+    /// `refs/arc/retained/` for the imported change.
     /// Candidate events stamp store format 7, including evaluations,
     /// selections, and promotions without a registration in the bundle.
     /// Events without model provenance retain that absence. Repository map

@@ -824,15 +824,19 @@ RUN A CHANGE
   including direct tree pins, and the commits refs/arc/retained holds for the
   exported change), `synthesized-merge` (verify --against),
   `disposition-commit`, `integration-commit`, `target-commit`, `content-tree`,
-  `cited-blob`, `cited-commit`, `rewrite-source`, and `rewrite-successor`.
-  Unknown event payloads remain opaque. A transport publishes the listed
-  objects and their Git reachability closure through scoped refs or a Git
+  `cited-blob`, `cited-commit`, `rewrite-source`, `rewrite-successor`, and
+  `observed-commit` (a commit a forge fact records as the provider's own,
+  listed only where the exporter holds it, so a commit never fetched here
+  obliges no receiver). Unknown event payloads remain opaque. A transport
+  publishes the listed objects and their Git reachability closure through scoped refs or a Git
   bundle before announcing the result. Bundles without the objects field
   retain advisory patchset-commit checks; /6 accepts that absent field.
   A bundle's rewrite events carry the retention refs the exporter created; an
   import holds each one it names for the imported change under
   `refs/arc/retained/` when the commit is here, and refuses a name that is no
-  retention ref. Bundles whose rewrite events name none import unchanged.
+  retention ref. Bundles whose rewrite events name none import unchanged. An
+  import holds each `observed-commit` of the imported change that is here the
+  same way, under the event that recorded it.
   Full and delta histories use active, uncontradicted rewrites admitted with
   rewrite authority to prove a falsification's failure identity. A publisher
   lacking rewrite authority is refused; legacy transport without an
@@ -1694,6 +1698,9 @@ FORGE
   unavailable. Repeating a read with --custody-dir publishes bytes that are
   missing or damaged. Receipts name each reference's claim: a response with
   its response_id, or an item with its item_kind, node_id and generation_id.
+  Provider-observed commits (observed head and base, merge commits, link,
+  checks and lifecycle heads) are held by retention refs when this
+  repository has them, and `arc export` lists them as `observed-commit`.
 
   coverage has overall and collections entries. Each has state (complete,
   truncated or failed), scope, optional frontier and failure_reason (required
@@ -2273,13 +2280,15 @@ HISTORY REWRITES
   `--no-sign` leaves them unsigned. `--dry-run` says which tags would be
   signed.
 
-  A commit that any recorded verdict or audit read, or that a patchset
-  recorded as its head, stays reachable after any rewrite arc performs or
-  records. Each such commit a rewrite replaces is held by
+  A commit that any recorded verdict or audit read, that a patchset recorded
+  as its head, or that a forge fact records as the provider's own (a full
+  object ID, from an observation, link, checks or lifecycle fact) stays
+  reachable after any rewrite arc performs or records. Each such commit a
+  rewrite replaces is held by
   `refs/arc/retained/<change>/<subject>/<commit>`: the subject is the
   patchset the commit was the head of, or the event that recorded a verdict
-  on it, and a change holds a commit once. A `refs/arc/keep/<change>/<patchset>`
-  pin the rewrite moves is held the same way, whether or not a verdict cites
+  or forge fact on it, and a change holds a commit once. A
+  `refs/arc/keep/<change>/<patchset>` pin the rewrite moves is held the same way, whether or not a verdict cites
   its commit. The pin follows the successor, which is what projections and
   signature-only approvals stand on; a retention ref holds the commit that
   was read and never follows a rewrite, so it never makes a replaced commit
@@ -3027,8 +3036,9 @@ FILES
   and hold their successors. The commit a pin held, and any other commit the
   ledger cites as a patchset head or a verdict's revision, is held under
   `refs/arc/retained/<change>/<subject>/<commit>` by `arc rewrite` and
-  `arc history rewrite --map`. A pin or a retention ref is released only once
-  its commit is reachable from the integration commit, where history holds it;
+  `arc history rewrite --map`, as is a provider-observed commit a forge fact
+  cites and an import that holds one. A pin or a retention ref is released
+  only once its commit is reachable from the integration commit, where history holds it;
   a replaced commit is on no branch, so its ref stays while the ledger cites
   it, and closing a change without integrating it releases nothing. Release
   any other with `git update-ref -d`. A registered candidate's tree is pinned by

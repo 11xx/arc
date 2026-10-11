@@ -183,6 +183,29 @@ pub(super) fn import_validated_guarded(
             }
         }
     }
+    // A commit a provider reported stays held here when the objects arrived:
+    // the ledger cites it, and nothing else need keep it reachable.
+    let mut pinned_observed = BTreeSet::new();
+    for event in &validated.events {
+        let Some(observed) = event
+            .typed
+            .as_ref()
+            .and_then(|event| crate::forge_observation::observed_commits(&event.payload))
+        else {
+            continue;
+        };
+        for (_, commit) in observed {
+            if matches!(commit.len(), 40 | 64)
+                && pinned_observed.insert(commit)
+                && gitio::commit_exists(&ctx.cwd, commit)?
+            {
+                pins.push((
+                    gitio::retained_ref(&validated.bundle.change_id, &event.event_id, commit),
+                    commit.to_string(),
+                ));
+            }
+        }
+    }
     // The commits a rewrite recorded as replaced stay held here as they were
     // where the rewrite ran, for as many of them as this repository has.
     for value in &validated.bundle.repository_events {

@@ -202,6 +202,135 @@ fn forge_observe_republishes_missing_content_from_a_new_directory() {
     assert_eq!(availability_of_response(&receipt, "page-1"), "unavailable");
 }
 
+/// A commit held locally that the provider observed, then rewritten away.
+fn rewritten_observed_head(repo: &Repo, id: &str) -> (PathBuf, String, String) {
+    let wt = repo.home.join(".worktrees/repo-frontier");
+    repo.commit(&wt, "observed.txt", "one\n", "feat: observed");
+    let a = repo.head(&wt);
+    fs::write(wt.join("observed.txt"), "two\n").unwrap();
+    git(&wt, &["add", "."]);
+    git(&wt, &["commit", "--amend", "--no-edit"]);
+    let b = repo.head(&wt);
+    assert_ne!(a, b);
+    stdout(repo.arc(&wt).args(["snapshot", id]));
+    (wt, a, b)
+}
+
+fn rewrite_to(repo: &Repo, wt: &Path, a: &str, b: &str) {
+    let map = repo.home.join("rewrite-map");
+    fs::write(&map, format!("{a} {b}\n")).unwrap();
+    stdout(repo.arc(wt).args([
+        "history",
+        "rewrite",
+        "--map",
+        map.to_str().unwrap(),
+        "--reason",
+        "amended after observation",
+    ]));
+}
+
+fn observed_at(head: &str, mut v: Value) -> Value {
+    v["observed_head_sha"] = json!(head);
+    v
+}
+
+fn retained_refs(repo: &Repo, id: &str) -> Vec<String> {
+    git_out(
+        &repo.root,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            &format!("refs/arc/retained/{id}/"),
+        ],
+    )
+    .lines()
+    .map(str::to_string)
+    .collect()
+}
+
+fn doctor_advice(repo: &Repo) -> Vec<String> {
+    let report = json_stdout_any_status(repo.arc(&repo.root).args(["doctor", "--json"]));
+    report["advice"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|finding| finding["code"] == "unretained-commit")
+        .map(|finding| finding["detail"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn forge_observed_commit_is_retained_across_a_rewrite() {
+    let (repo, id) = setup();
+    let (wt, a, b) = rewritten_observed_head(&repo, &id);
+    observe_in(
+        &repo,
+        &id,
+        &observed_at(&a, document("read-1", "g1", "first", None)),
+        None,
+    );
+    // The provider's commit is cited and held here, and nothing reaches it.
+    let advice = doctor_advice(&repo);
+    assert!(
+        advice
+            .iter()
+            .any(|detail| detail.contains(&a[..8]) && detail.contains("forge observed head")),
+        "{advice:?}"
+    );
+    assert!(retained_refs(&repo, &id).is_empty());
+
+    rewrite_to(&repo, &wt, &a, &b);
+    let held = retained_refs(&repo, &id);
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert!(held[0].ends_with(&format!("/{a}")));
+    assert!(doctor_advice(&repo).is_empty());
+    // The commit the provider never reported is not held.
+    assert!(!held
+        .iter()
+        .any(|name| name.ends_with("cccccccccccccccccccccccccccccccccccccccc")));
+}
+
+#[test]
+fn forge_observed_commit_is_pinned_on_import_without_a_rewrite() {
+    let (source, id) = setup();
+    let wt = source.home.join(".worktrees/repo-frontier");
+    source.commit(&wt, "observed.txt", "one\n", "feat: observed");
+    let a = source.head(&wt);
+    observe_in(
+        &source,
+        &id,
+        &observed_at(&a, document("read-1", "g1", "first", None)),
+        None,
+    );
+    let bundle = source.home.join("forge.json");
+    let objects = source.home.join("objects.json");
+    stdout(source.arc(&source.root).args([
+        "export",
+        &id,
+        "--output",
+        bundle.to_str().unwrap(),
+        "--objects-json",
+        objects.to_str().unwrap(),
+    ]));
+    let listed: Value = serde_json::from_slice(&fs::read(&objects).unwrap()).unwrap();
+    assert!(listed["objects"]
+        .as_array()
+        .unwrap()
+        .contains(&json!({"oid": a, "role": "observed-commit"})));
+    // No sidecar was written, so the bundle claims no custody.
+    let bundle_json: Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    assert!(bundle_json.get("custody").is_none());
+
+    let replica = Repo::new();
+    deliver_git_objects(&source, &replica);
+    stdout(&mut admitted_change_command(&replica, &bundle));
+    let pins = retained_refs(&replica, &id);
+    assert!(
+        pins.iter().any(|name| name.ends_with(&format!("/{a}"))),
+        "{pins:?}"
+    );
+}
+
 #[test]
 fn forge_custody_corruption_and_unsafe_paths_refuse_before_publication() {
     let (repo, id) = setup();
@@ -300,4 +429,22 @@ fn forge_custody_corruption_and_unsafe_paths_refuse_before_publication() {
     materialize(&good, &["first", PAGE]);
     let receipt = observe_in(&repo, &id, &first, Some(&good));
     assert_eq!(availability_of_generation(&receipt, "g1"), "available");
+}
+
+/// A receiver that admits the exporter's facts and its history rewrites.
+fn admitted_change_command(repo: &Repo, path: &Path) -> AssertCommand {
+    let bytes = fs::read(path).unwrap();
+    let bundle: Value = serde_json::from_slice(&bytes).unwrap();
+    let source = bundle["source_replica_id"].as_str().unwrap();
+    repo.declare_gates_locally(&format!("[[replica.publishers]]\nprincipal='fixture-change'\nsource_replica_id='{source}'\n[[replica.publishers.origins]]\nreplica_id='{source}'\nroles=['facts','rewrite']\nactors=[]\n"));
+    let mut command = repo.arc(&repo.root);
+    command.args([
+        "import",
+        path.to_str().unwrap(),
+        "--publisher",
+        "fixture-change",
+        "--received-sha256",
+        &format!("{:x}", Sha256::digest(&bytes)),
+    ]);
+    command
 }

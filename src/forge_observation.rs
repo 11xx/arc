@@ -419,6 +419,54 @@ impl ForgeObservation {
     }
 }
 
+/// The commits a forge fact records as the provider's own, each with what it
+/// is, or `None` for a payload that is no forge fact. Only hexadecimal
+/// revisions are named: a legacy assertion may carry any text.
+pub fn observed_commits(payload: &crate::model::Payload) -> Option<Vec<(&'static str, &str)>> {
+    use crate::model::Payload;
+    let found = match payload {
+        Payload::ForgeObservationRecorded { observation } => {
+            let mut found = Vec::new();
+            if let Some(sha) = &observation.observed_head_sha {
+                found.push(("forge observed head", sha.as_str()));
+            }
+            if let Some(sha) = &observation.observed_base_sha {
+                found.push(("forge observed base", sha.as_str()));
+            }
+            for item in &observation.items {
+                if let ItemFacts::PullRequest {
+                    merge_sha: Some(sha),
+                    ..
+                } = &item.facts
+                {
+                    found.push(("forge merge commit", sha.as_str()));
+                }
+            }
+            found
+        }
+        Payload::ForgeLink { head_sha, .. } => vec![("forge link head", head_sha.as_str())],
+        Payload::ForgeChecks { pr_head, .. } => vec![("forge checks head", pr_head.as_str())],
+        Payload::ForgePrState {
+            pr_head, merge_sha, ..
+        } => pr_head
+            .iter()
+            .map(|sha| ("forge lifecycle head", sha.as_str()))
+            .chain(
+                merge_sha
+                    .iter()
+                    .map(|sha| ("forge merge commit", sha.as_str())),
+            )
+            .collect(),
+        _ => return None,
+    };
+    Some(
+        found
+            .into_iter()
+            .filter(|(_, sha)| sha.len() >= 4 && sha.bytes().all(|c| c.is_ascii_hexdigit()))
+            .collect(),
+    )
+}
+
 /// Check source-bound projections during local admission.
 /// Flag assertions carry no observation binding and retain their legacy rules.
 pub fn validate_projection(
@@ -757,6 +805,45 @@ mod tests {
             head_repo: "sample/project".into(),
             head_ref: "topic".into(),
         }
+    }
+
+    #[test]
+    fn observed_commits_name_only_revisions_a_forge_fact_records() {
+        use crate::model::Payload;
+        let sha = "a".repeat(40);
+        let link = Payload::ForgeLink {
+            observation: None,
+            pr_number: 1,
+            url: "https://forge.example.invalid/sample/project/pull/1".into(),
+            base_repo: "sample/project".into(),
+            base_ref: "main".into(),
+            head_repo: "sample/project".into(),
+            head_ref: "topic".into(),
+            head_sha: sha.clone(),
+        };
+        assert_eq!(
+            observed_commits(&link),
+            Some(vec![("forge link head", sha.as_str())])
+        );
+        let lifecycle = Payload::ForgePrState {
+            observation: None,
+            state: crate::forge::ForgePrState::Merged,
+            merge_sha: Some("b".repeat(40)),
+            link_event_id: None,
+            pr_head: Some(sha.clone()),
+        };
+        assert_eq!(observed_commits(&lifecycle).unwrap().len(), 2);
+        // A legacy assertion may carry any text; only a revision is named.
+        let checks = Payload::ForgeChecks {
+            binding_recorded: false,
+            link_event_id: None,
+            observation: None,
+            pr_head: "not a revision".into(),
+            state: crate::forge::ForgeCheckState::Passed,
+            detail: None,
+        };
+        assert_eq!(observed_commits(&checks), Some(Vec::new()));
+        assert_eq!(observed_commits(&Payload::Unknown), None);
     }
 
     #[test]

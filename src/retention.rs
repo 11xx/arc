@@ -7,9 +7,10 @@
 //! follows a recorded revision forward; this is what keeps the object itself.
 //!
 //! Which commits count is decided by the ledger, not by which ref happens to
-//! hold one: a patchset's head, and the revision an external or audit verdict
-//! was recorded on. A pin released at integration, or one an outside tool
-//! moved, leaves those commits as exposed as a pin the rewrite moves.
+//! hold one: a patchset's head, the revision an external or audit verdict
+//! was recorded on, and a commit a forge fact records as the provider's own.
+//! A pin released at integration, or one an outside tool moved, leaves those
+//! commits as exposed as a pin the rewrite moves.
 
 use crate::gitio::{self, RefUpdate};
 use crate::model::Payload;
@@ -42,7 +43,9 @@ impl Cited {
 ///
 /// A commit appears once per change. A patchset head is named by its
 /// patchset, which is also what a verdict on that patchset read; only a
-/// verdict recorded on some other commit is named by its own event.
+/// verdict recorded on some other commit is named by its own event. A
+/// provider-observed commit is named by the forge event that recorded it, and
+/// only a full object ID can be held: a ref is named for the commit it holds.
 pub fn cited(store: &Store) -> Result<Vec<Cited>> {
     let mut found = Vec::new();
     let read = store.read()?;
@@ -76,6 +79,15 @@ pub fn cited(store: &Store) -> Result<Vec<Cited>> {
                     add(&event.event_id, "audit".to_string(), revision)
                 }
                 _ => {}
+            }
+        }
+        for event in &events {
+            for (what, commit) in crate::forge_observation::observed_commits(&event.payload)
+                .into_iter()
+                .flatten()
+                .filter(|(_, commit)| matches!(commit.len(), 40 | 64))
+            {
+                add(&event.event_id, what.to_string(), commit);
             }
         }
     }
