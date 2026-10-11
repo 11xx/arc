@@ -266,7 +266,7 @@ fn review_pre_dispatch_consumption_withholds_assignment_after_retention() {
 }
 
 #[test]
-fn review_native_pi_parent_path_is_unknown_and_never_transported() {
+fn review_native_pi_parent_path_resolves_to_its_id_and_is_never_transported() {
     let repo = Repo::new();
     let change = begin_without_checkout(&repo, "native-fork", &[]);
     let parent_id = "11111111-1111-4111-8111-111111111111";
@@ -300,11 +300,13 @@ fn review_native_pi_parent_path_is_unknown_and_never_transported() {
     assert!(fresh["coverage"]["assignment"]["reasons"]
         .to_string()
         .contains("pre-dispatch consumption"));
+    // The reader derives the parent's session id from the recorded path.
     let lineage = &session(&fresh, &format!("pi:{fork_id}"))["measurement"]["lineage"];
-    assert!(lineage["parent"].is_null());
+    assert_eq!(lineage["parent"], parent_id, "{fresh}");
+    assert_eq!(lineage["unknown"], json!([]));
     assert_eq!(
-        lineage["unknown"],
-        json!(["lineage relative is not a plain session id"])
+        fresh["union"]["identity"]["groups"],
+        json!([[format!("pi:{parent_id}"), format!("pi:{fork_id}")]])
     );
     stdout(repo.arc(&repo.root).args(["cost", "retain", &change]));
     let bundle = repo.home.join("native-export.json");
@@ -1723,9 +1725,8 @@ fn mixed_zero_and_positive_request_prices_remain_qualified_after_retention() {
     );
     let fresh = report(&repo, "mixed-price");
     let estimate = quantity(&fresh["union"], USD, None);
-    assert_eq!(estimate["status"], "incomplete");
-    assert!(estimate.get("amount").is_none());
-    assert_eq!(estimate["known_subtotal"], 0.02);
+    assert_eq!(estimate["status"], "absent");
+    assert!(estimate.get("amount").is_none() && estimate.get("known_subtotal").is_none());
     stdout(repo.arc(&repo.root).args(["cost", "retain", "mixed-price"]));
     fs::remove_file(path).unwrap();
     assert_eq!(report(&repo, "mixed-price")["union"], fresh["union"]);

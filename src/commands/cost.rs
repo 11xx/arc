@@ -22,9 +22,8 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const COST_SCHEMA: &str = "arc-cost/1";
 
 /// The reader a fresh measurement names: tapes' core library at the release
-/// and revision Cargo.toml pins. A test holds the two together.
-pub const TAPES_READER: &str =
-    "agent-tapes-core 2026.9.29 3f6f757d40b7ef8e15fe7ebcf81ba59edb4e6ba7";
+/// and revision Cargo.toml pins, which the build script reads.
+pub const TAPES_READER: &str = env!("ARC_TAPES_READER");
 
 /// How arc normalizes a reader's usage answer into retained facts. It moves
 /// when that normalization does, so facts from an older one stay identifiable.
@@ -2009,23 +2008,29 @@ fn print_report(report: &Value) {
 mod tests {
     use super::*;
 
-    /// The reader a measurement names is the one Cargo.toml pins.
+    /// The reader a measurement names is the release and revision Cargo.lock
+    /// resolved for the library this build links.
     #[test]
-    fn the_recorded_reader_names_the_pinned_tapes_revision() {
-        let manifest = include_str!("../../Cargo.toml");
-        let line = manifest
-            .lines()
-            .find(|line| line.starts_with("agent-tapes-core"))
-            .expect("Cargo.toml pins agent-tapes-core");
+    fn the_recorded_reader_names_the_resolved_tapes_revision() {
+        let lock = include_str!("../../Cargo.lock");
+        let package = lock
+            .split("[[package]]")
+            .find(|package| package.contains("\nname = \"agent-tapes-core\"\n"))
+            .expect("Cargo.lock resolves agent-tapes-core");
         let field = |name: &str| {
-            line.split(&format!("{name} = \""))
+            package
+                .split(&format!("\n{name} = \""))
                 .nth(1)
                 .and_then(|rest| rest.split('"').next())
-                .unwrap_or_else(|| panic!("the pin names a {name}: {line}"))
+                .unwrap_or_else(|| panic!("the package names a {name}: {package}"))
         };
+        let revision = field("source")
+            .rsplit('#')
+            .next()
+            .expect("a git source names its commit");
         assert_eq!(
             TAPES_READER,
-            format!("agent-tapes-core {} {}", field("version"), field("rev"))
+            format!("agent-tapes-core {} {revision}", field("version"))
         );
     }
 }

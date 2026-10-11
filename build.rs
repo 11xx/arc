@@ -13,6 +13,24 @@ fn watch(path: PathBuf) {
     println!("cargo:rerun-if-changed={}", path.display());
 }
 
+/// The reader a fresh cost measurement names: the release and revision the
+/// manifest pins `agent-tapes-core` at, so moving the pin is one line.
+fn tapes_reader() -> String {
+    let manifest = std::fs::read_to_string("Cargo.toml").expect("Cargo.toml is readable");
+    let line = manifest
+        .lines()
+        .find(|line| line.starts_with("agent-tapes-core"))
+        .expect("Cargo.toml pins agent-tapes-core");
+    let field = |name: &str| {
+        line.split(&format!("{name} = \""))
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .unwrap_or_else(|| panic!("the agent-tapes-core pin names a {name}"))
+            .to_owned()
+    };
+    format!("agent-tapes-core {} {}", field("version"), field("rev"))
+}
+
 fn main() {
     watch(PathBuf::from("build.rs"));
     watch(PathBuf::from("Cargo.toml"));
@@ -48,4 +66,5 @@ fn main() {
         "cargo:rustc-env=ARC_BUILD_DIRTY={}",
         dirty.unwrap_or("unknown")
     );
+    println!("cargo:rustc-env=ARC_TAPES_READER={}", tapes_reader());
 }
