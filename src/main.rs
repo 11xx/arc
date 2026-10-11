@@ -3967,7 +3967,9 @@ enum RunCmd {
     /// A dispatch has one binding: the same values again record nothing and
     /// print the binding already held, and different values refuse. An empty
     /// value, a placeholder (unknown, none, n/a, ...), whitespace, a harness
-    /// carrying ':' and a session id given as the harness refuse
+    /// carrying ':' and a session id given as the harness refuse. Imported
+    /// distinct tuples remain a binding conflict; rebinding a conflicted
+    /// dispatch refuses even when the supplied tuple matches one observation
     Bind {
         /// RunDispatched event ID being bound
         dispatch_event_id: String,
@@ -4015,7 +4017,9 @@ enum RunCmd {
     /// its journal resolves, `journal_lineage`: its names across kind
     /// transitions, oldest first; text names the newest as `(now <file>)`.
     /// JSON rows carry `binding` as null or {event_id, executor_harness,
-    /// executor_session, handle, bound_at}
+    /// executor_session, handle, bound_at}, with `conflicts` listing other
+    /// distinct tuples when imports disagree. Equal tuples are harmless
+    /// duplicate observations; a conflict names every distinct tuple
     /// Records no events; ledger reads do not require a parseable append policy.
     List {
         /// Emit the machine-readable JSON view instead of text

@@ -223,6 +223,9 @@ struct BindingRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     handle: Option<String>,
     bound_at: DateTime<Utc>,
+    /// Other distinct binding tuples held for this dispatch.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    conflicts: Vec<BindingRow>,
 }
 
 /// Everything one dispatch records.
@@ -426,6 +429,9 @@ pub fn bind_run(ctx: &Ctx, dispatch_event_id: &str, binding: BindingInput) -> Re
     let events = store.load_repository_events()?;
     find_dispatch(&store, &events, dispatch_event_id, "run bind")?;
     if let Some(existing) = binding_for(&events, dispatch_event_id) {
+        if !existing.conflicts.is_empty() {
+            bail!("run bind refused: dispatch {dispatch_event_id} has a binding conflict");
+        }
         if existing.executor_harness == &executor_harness
             && existing.executor_session == &executor_session
             && existing.handle == &handle
@@ -672,6 +678,9 @@ fn print_round(row: &RunRow) {
     println!("{line}");
     match &row.binding {
         Some(binding) => {
+            if !binding.conflicts.is_empty() {
+                println!("    binding conflict: incompatible executor tuples");
+            }
             let mut bound = format!(
                 "    executor={} session={}",
                 crate::render::one_line(&binding.executor_harness),
@@ -681,6 +690,19 @@ fn print_round(row: &RunRow) {
                 bound.push_str(&format!(" handle={}", crate::render::one_line(handle)));
             }
             println!("{bound}");
+            for conflict in &binding.conflicts {
+                println!(
+                    "    executor={} session={} handle={} event={}",
+                    crate::render::one_line(&conflict.executor_harness),
+                    crate::render::one_line(&conflict.executor_session),
+                    conflict
+                        .handle
+                        .as_deref()
+                        .map(crate::render::one_line)
+                        .unwrap_or_default(),
+                    conflict.event_id,
+                );
+            }
         }
         None => println!("    unbound"),
     }
@@ -761,13 +783,7 @@ fn run_row(
         brief_event_id: brief_event_id.clone(),
         note: note.clone(),
         dispatched_at: round.dispatch.created_at,
-        binding: round.binding.as_ref().map(|binding| BindingRow {
-            event_id: binding.event.event_id.clone(),
-            executor_harness: binding.executor_harness.clone(),
-            executor_session: binding.executor_session.clone(),
-            handle: binding.handle.clone(),
-            bound_at: binding.event.created_at,
-        }),
+        binding: round.binding.as_ref().map(binding_row),
         ending_event_id: ending.map(|ending| ending.event.event_id.clone()),
         ended_at: ending.map(|ending| ending.event.created_at),
         outcome: ending.map(|ending| *ending.outcome),
@@ -781,6 +797,17 @@ fn run_row(
             .map(|ending| ending.collects.clone())
             .unwrap_or_default(),
         open_deferrals,
+    }
+}
+
+fn binding_row(binding: &RunBinding<'_>) -> BindingRow {
+    BindingRow {
+        event_id: binding.event.event_id.clone(),
+        executor_harness: binding.executor_harness.clone(),
+        executor_session: binding.executor_session.clone(),
+        handle: binding.handle.clone(),
+        bound_at: binding.event.created_at,
+        conflicts: binding.conflicts.iter().map(binding_row).collect(),
     }
 }
 
@@ -827,6 +854,8 @@ pub struct RunBinding<'a> {
     pub executor_harness: &'a String,
     pub executor_session: &'a String,
     pub handle: &'a Option<String>,
+    /// Distinct tuples observed for the same dispatch; equal tuples are duplicates.
+    pub conflicts: Vec<RunBinding<'a>>,
 }
 
 impl RunBinding<'_> {
@@ -843,10 +872,10 @@ impl RunBinding<'_> {
     }
 }
 
-/// The first binding recorded against one dispatch. `run bind` writes one at
-/// most, so a later one can arrive only by import, and the first stands.
+/// All distinct binding tuples for one dispatch, with conflicts carried on
+/// the first observation. Imported duplicates do not change assignment.
 pub fn binding_for<'a>(events: &'a [Event], dispatch_event_id: &str) -> Option<RunBinding<'a>> {
-    events.iter().find_map(|event| match &event.payload {
+    let mut bindings = events.iter().filter_map(|event| match &event.payload {
         Payload::RunBound {
             dispatch_event_id: id,
             executor_harness,
@@ -857,9 +886,22 @@ pub fn binding_for<'a>(events: &'a [Event], dispatch_event_id: &str) -> Option<R
             executor_harness,
             executor_session,
             handle,
+            conflicts: Vec::new(),
         }),
         _ => None,
-    })
+    });
+    let mut first = bindings.next()?;
+    for binding in bindings {
+        let same = |held: &RunBinding<'_>| {
+            held.executor_harness == binding.executor_harness
+                && held.executor_session == binding.executor_session
+                && held.handle == binding.handle
+        };
+        if !same(&first) && !first.conflicts.iter().any(same) {
+            first.conflicts.push(binding);
+        }
+    }
+    Some(first)
 }
 
 fn find_change_event(store: &Store, event_id: &str) -> Result<Option<Event>> {

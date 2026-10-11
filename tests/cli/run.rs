@@ -827,6 +827,81 @@ fn rebinding_identical_values_records_nothing_and_different_values_refuse() {
     );
 }
 
+#[test]
+fn imported_binding_tuples_expose_conflicts_and_equal_observations_are_harmless() {
+    for field in ["executor_session", "executor_harness", "handle", "equal"] {
+        let repo = Repo::new();
+        let change = begin_without_checkout(&repo, "binding-import", &[]);
+        let dispatch = dispatch_against(&repo, "--change", &change);
+        stdout(&mut bind(
+            &repo,
+            &dispatch,
+            &[
+                "--executor-harness",
+                "codex",
+                "--executor-session",
+                "executor-one",
+                "--handle",
+                "handle-one",
+            ],
+        ));
+        let path = repo.home.join("bundle.json");
+        stdout(
+            repo.arc(&repo.root)
+                .args(["export", &change, "--output", path.to_str().unwrap()]),
+        );
+        let mut bundle: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let events = bundle["repository_events"].as_array_mut().unwrap();
+        let mut imported = events
+            .iter()
+            .find(|e| e["event_type"] == "run-bound")
+            .unwrap()
+            .clone();
+        imported["event_id"] = serde_json::json!("01K0000000000000000000000Z");
+        if field != "equal" {
+            imported[field] = serde_json::json!("different");
+        }
+        events.push(imported);
+        fs::write(&path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        stdout(
+            repo.arc(&repo.root)
+                .args(["import", path.to_str().unwrap()]),
+        );
+        let rows = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+        let binding = &row_for(&rows, &dispatch)["binding"];
+        let text = stdout(repo.arc(&repo.root).args(["run", "list"]));
+        if field == "equal" {
+            assert!(binding["conflicts"].is_null(), "{rows}");
+            assert!(!text.contains("binding conflict"), "{text}");
+        } else {
+            assert_eq!(
+                binding["conflicts"].as_array().map(Vec::len),
+                Some(1),
+                "{rows}"
+            );
+            assert!(text.contains("binding conflict"), "{text}");
+            assert!(text.contains("different"), "{text}");
+            bind(
+                &repo,
+                &dispatch,
+                &[
+                    "--executor-harness",
+                    "codex",
+                    "--executor-session",
+                    "executor-one",
+                    "--handle",
+                    "handle-one",
+                ],
+            )
+            .assert()
+            .failure();
+        }
+        let events = stdout(repo.arc(&repo.root).args(["events", "--repository"]));
+        assert_eq!(events.matches("\"run-bound\"").count(), 2, "{events}");
+    }
+}
+
 /// A follow-up or resume is its own dispatch with its own binding, so two
 /// dispatches bound to one executor session are two spans of one scope.
 #[test]

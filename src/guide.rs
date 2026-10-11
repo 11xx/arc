@@ -3048,7 +3048,11 @@ RULES THAT CHANGE WHAT YOU DO
     harness carrying `:`, and a session id given as the harness refuse. A
     follow-up or resume is its own dispatch with its own binding, so two
     dispatches bound to one executor session are two spans of one
-    measurement scope. `run list` shows each binding, or `unbound`.
+    measurement scope. `run list` shows each binding, or `unbound`. Distinct
+    complete tuples arriving by import remain a binding conflict, with each
+    tuple visible in text and in `binding.conflicts` in JSON. Equal imported
+    tuples are harmless duplicate observations. Rebinding a conflicted
+    dispatch refuses; no tuple establishes an exclusive assignment.
   - A bounded round records what it deliberately left, so the next round
     inherits a list instead of a memory: `arc run end <dispatch> --outcome
     <o> --reviewed-head <sha> --raised-json <path|-> --deferred-json <path|->`.
