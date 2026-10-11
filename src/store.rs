@@ -1705,6 +1705,7 @@ impl Store {
         let read = self.read()?;
         read.rewrites()?;
         let mut states = BTreeMap::new();
+        let repository_events = self.load_repository_events()?;
         for change_id in read.change_ids()? {
             let result = read.events(&change_id).and_then(|events| {
                 let mut state = crate::state::reduce_following(&events, read.rewrites()?)?;
@@ -1713,7 +1714,7 @@ impl Store {
                 let mut round_trip = std::mem::take(&mut state.round_trip);
                 round_trip.join(
                     &state,
-                    &self.load_repository_events()?,
+                    &repository_events,
                     &crate::custody::Custody::at(&self.root),
                 );
                 state.round_trip = round_trip;

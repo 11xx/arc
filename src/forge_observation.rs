@@ -465,12 +465,6 @@ pub fn observed_commits(payload: &crate::model::Payload) -> Option<Vec<(&'static
                     .map(|sha| ("forge merge commit", sha.as_str())),
             )
             .collect(),
-        payload if !crate::forge_round_trip::disclosure_commits(payload).is_empty() => {
-            crate::forge_round_trip::disclosure_commits(payload)
-                .into_iter()
-                .map(|commit| ("disclosure Git support", commit))
-                .collect()
-        }
         _ => return None,
     };
     Some(

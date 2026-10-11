@@ -385,7 +385,7 @@ pub enum Detail {
         target: DeclaredTarget,
         #[serde(skip_serializing_if = "Option::is_none")]
         citation: Option<String>,
-        disclosure: Option<crate::forge_round_trip::Disclosure>,
+        disclosure: Option<Box<crate::forge_round_trip::Disclosure>>,
         origin: Option<crate::forge_round_trip::SourceGeneration>,
         declarant: String,
     },
@@ -890,7 +890,7 @@ fn declared_facts(state: &ChangeState, relations: &Relations, subject: &Relation
                 relation: declaration.relation,
                 target: declaration.target.clone(),
                 citation: declaration.citation.clone(),
-                disclosure: declaration.disclosure.clone(),
+                disclosure: declaration.disclosure.clone().map(Box::new),
                 origin: declaration.origin.clone(),
                 declarant: declaration.declarant.clone(),
             },
@@ -1970,7 +1970,6 @@ fn describe(detail: &Detail) -> String {
             relation,
             target,
             citation,
-            declarant: _,
             ..
         } => format!(
             "{} {target}{} (event `{event_id}`)",

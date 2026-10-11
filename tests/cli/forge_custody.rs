@@ -891,7 +891,7 @@ fn copy_dir(from: &Path, to: &Path) {
 }
 
 /// A receiver that admits the exporter's facts and its history rewrites.
-pub(crate) fn admitted_change_command(repo: &Repo, path: &Path) -> AssertCommand {
+fn admitted_change_command(repo: &Repo, path: &Path) -> AssertCommand {
     let bytes = fs::read(path).unwrap();
     let bundle: Value = serde_json::from_slice(&bytes).unwrap();
     let source = bundle["source_replica_id"].as_str().unwrap();

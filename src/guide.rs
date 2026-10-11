@@ -1749,6 +1749,8 @@ FORGE
   readback source generation. A selected source names a forge generation,
   a ledger event (change_id/event), or Git support (change_id/commit); Git
   support uses a full held commit ID and travels with the object closure.
+  Repository-scoped ledger sources name change_id=repository and travel with
+  repository events rather than a related change.
   Outgoing and readback digests and lengths must
   agree, and verified exact bytes must be in custody before append. A missing
   or corrupt file refuses a local declaration. Import preserves the historical
@@ -1757,14 +1759,15 @@ FORGE
   and a validator version is an attributed assertion, not a security proof.
 
   An optional comment object retains comment_id, act_id, material authors,
-  source_frontiers, source_statements, renderer_version, roles and an optional
+  optional source_frontiers/source_statements and roles, renderer_version and an optional
   opaque cost reference. Each author names the original act and either a human
   name or optional harness/model/effort with act-specific model_observation.
   Absent effort has no guessed suffix. Material synthesis names each author
   and its source statements; quoted, transported and implementation participants
   remain roles and never become authors automatically. Corrections name an
   editor and previous_disclosure, preserve original authors, and bind the
-  outgoing/readback generation independently of the original judgment.
+  outgoing/readback generation independently of the original judgment. A comment
+  identity has one original disclosure; later annotations link its lineage.
   Local readers can project one compact line: Author: harness:model#effort ·
   Review cost: unmeasured. Multiple material authors use Authors. Missing model
   evidence reads model not recorded. A cost reference carries reference, as_of,

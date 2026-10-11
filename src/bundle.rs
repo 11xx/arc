@@ -553,6 +553,11 @@ fn exported_objects(
         let Some(event) = parse_typed_event(value)? else {
             continue;
         };
+        for commit in crate::forge_round_trip::disclosure_commits(&event.payload) {
+            if crate::gitio::commit_exists(cwd, commit)? {
+                insert_object(cwd, &mut objects, commit, "disclosure-commit")?;
+            }
+        }
         // A commit a provider reported is a claim about the provider. It
         // travels only where this repository holds it, so an exporter that
         // never fetched it does not oblige the receiver to.

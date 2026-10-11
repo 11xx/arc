@@ -31,7 +31,7 @@ impl SourceGeneration {
                 .forge
                 .observations
                 .iter()
-                .any(|o| o.event_id == self.observation && o.usable()),
+                .any(|o| o.names_event(&self.observation) && o.usable()),
             "source observation is conflicting or invalid"
         );
         let observation = events
@@ -272,9 +272,12 @@ pub struct CommentProvenance {
     pub comment_id: String,
     pub act_id: String,
     pub authors: Vec<CommentAuthor>,
+    #[serde(default)]
     pub source_frontiers: Vec<String>,
+    #[serde(default)]
     pub source_statements: Vec<String>,
     pub renderer_version: String,
+    #[serde(default)]
     pub roles: Vec<RoleAttribution>,
     #[serde(default)]
     pub cost: Option<CostReference>,
@@ -498,7 +501,6 @@ impl Disclosure {
         for selection in &self.selected {
             selection.source.resolve(events)?;
         }
-        self.readback.resolve(events)?;
         let readback = self.readback.resolve(events)?;
         ensure!(
             self.outgoing.sha256 == readback.sha256
@@ -601,6 +603,24 @@ pub fn validate_history(events: &[Event]) -> Result<()> {
                 ..
             } => {
                 disclosure.validate_readback(events)?;
+                if let Some(comment) = &disclosure.comment {
+                    for old in &disclosures {
+                        if let Some(original) = &old.comment {
+                            if original.comment_id == comment.comment_id {
+                                ensure!(
+                                    original.authors == comment.authors,
+                                    "comment identity cannot change original material authors"
+                                );
+                                ensure!(
+                                    disclosure.previous_disclosure.is_some()
+                                        || old.previous_disclosure.is_some()
+                                        || old.disclosure_id == disclosure.disclosure_id,
+                                    "later comment annotations need previous_disclosure"
+                                );
+                            }
+                        }
+                    }
+                }
                 if let Some(previous) = &disclosure.previous_disclosure {
                     let old = disclosures
                         .iter()
@@ -842,6 +862,7 @@ pub fn source_changes(payload: &Payload) -> BTreeSet<String> {
         }
         _ => {}
     }
+    changes.remove(crate::store::Store::REPOSITORY_SCOPE);
     changes
 }
 

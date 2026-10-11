@@ -542,7 +542,11 @@ pub fn declare(ctx: &Ctx, args: DeclareArgs) -> Result<()> {
             })
         })
         .transpose()?;
-    let held = crate::forge_round_trip::held_events(&store)?;
+    let held = if disclosure.is_some() || origin.is_some() {
+        crate::forge_round_trip::held_events(&store)?
+    } else {
+        events.clone()
+    };
     if let Some(source) = &origin {
         source.resolve(&held)?;
     }
@@ -575,9 +579,20 @@ pub fn declare(ctx: &Ctx, args: DeclareArgs) -> Result<()> {
             origin,
         },
     )?;
-    let mut history = held;
-    history.push((*event).clone());
-    crate::forge_round_trip::validate_history(&history)?;
+    if matches!(
+        &event.payload,
+        Payload::ContextDeclared {
+            disclosure: Some(_),
+            ..
+        } | Payload::ContextDeclared {
+            origin: Some(_),
+            ..
+        }
+    ) {
+        let mut history = held;
+        history.push((*event).clone());
+        crate::forge_round_trip::validate_history(&history)?;
+    }
     ledger.record(&event)?;
     ctx.ensure_declared_actor(&store)?;
     if let Some(disclosure) = &disclosure {

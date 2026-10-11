@@ -201,6 +201,8 @@ pub(super) fn import_validated_guarded(
     sidecar: Option<&crate::custody::Sidecar>,
 ) -> Result<crate::import_authorization::ImportResult> {
     let mut members = Vec::new();
+    let mut admitted = Vec::new();
+    let mut introduced = BTreeSet::new();
     for related in &validated.bundle.related_changes {
         let mut member = Bundle::parse(&related.to_bytes()?)?;
         member.bundle.related_changes = validated
@@ -214,40 +216,50 @@ pub(super) fn import_validated_guarded(
         primary.related_changes.clear();
         primary.custody = None;
         member.bundle.related_changes.push(primary);
-        let preflight = import_events(
-            ctx,
-            bytes,
-            &member,
-            true,
-            provenance_only,
-            publisher,
-            received_sha256,
-            None,
-            None,
-        )?;
+        let (preflight, output) = crate::operation_output::capture(|| {
+            import_events(
+                ctx,
+                bytes,
+                &member,
+                true,
+                provenance_only,
+                publisher,
+                received_sha256,
+                None,
+                None,
+            )
+        });
+        let preflight = preflight?;
+        if dry_run || preflight.exit_code != 0 {
+            println!("{output}");
+        }
         if preflight.exit_code != 0 {
             return Ok(preflight);
         }
         members.push(member);
     }
     if !members.is_empty() {
-        let preflight = import_events(
-            ctx,
-            bytes,
-            validated,
-            true,
-            provenance_only,
-            publisher,
-            received_sha256,
-            None,
-            sidecar,
-        )?;
+        let (preflight, output) = crate::operation_output::capture(|| {
+            import_events(
+                ctx,
+                bytes,
+                validated,
+                true,
+                provenance_only,
+                publisher,
+                received_sha256,
+                None,
+                sidecar,
+            )
+        });
+        let preflight = preflight?;
         if preflight.exit_code != 0 {
+            println!("{output}");
             return Ok(preflight);
         }
         if !dry_run {
             for member in &members {
-                let imported = import_events(
+                let mut imported = import_events(
                     ctx,
                     bytes,
                     member,
@@ -255,16 +267,23 @@ pub(super) fn import_validated_guarded(
                     provenance_only,
                     publisher,
                     received_sha256,
-                    before_publish,
                     None,
-                )?;
+                    None,
+                )
+                .map_err(|error| related_failure(error, &admitted))?;
+                introduced.extend(imported.output.introduced_event_ids.iter().cloned());
+                if imported.published {
+                    admitted.push(member.bundle.change_id.clone());
+                }
                 if imported.exit_code != 0 {
+                    imported.published |= !admitted.is_empty();
+                    imported.output.introduced_event_ids = introduced.into_iter().collect();
                     return Ok(imported);
                 }
             }
         }
     }
-    let result = import_events(
+    let mut result = import_events(
         ctx,
         bytes,
         validated,
@@ -274,7 +293,11 @@ pub(super) fn import_validated_guarded(
         received_sha256,
         before_publish,
         sidecar,
-    )?;
+    )
+    .map_err(|error| related_failure(error, &admitted))?;
+    result.published |= !admitted.is_empty();
+    introduced.extend(result.output.introduced_event_ids.iter().cloned());
+    result.output.introduced_event_ids = introduced.into_iter().collect();
     if let (0, None, Some(binding)) = (result.exit_code, sidecar, &validated.bundle.custody) {
         let custody = crate::custody::Custody::at(&Store::resolve_root(&ctx.cwd)?);
         println!(
@@ -286,6 +309,21 @@ pub(super) fn import_validated_guarded(
         );
     }
     Ok(result)
+}
+
+fn related_failure(error: anyhow::Error, admitted: &[String]) -> anyhow::Error {
+    if admitted.is_empty() {
+        error
+    } else {
+        crate::model::OperationFailure {
+            published: true,
+            message: format!(
+                "related changes already admitted ({}); {error:#}",
+                admitted.join(", ")
+            ),
+        }
+        .into()
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -374,6 +412,16 @@ fn import_events(
     // the ledger cites it, and nothing else need keep it reachable.
     let mut pinned_observed = BTreeSet::new();
     for event in &validated.events {
+        if let Some(typed) = &event.typed {
+            for commit in crate::forge_round_trip::disclosure_commits(&typed.payload) {
+                if gitio::commit_exists(&ctx.cwd, commit)? {
+                    pins.push((
+                        gitio::retained_ref(&validated.bundle.change_id, &event.event_id, commit),
+                        commit.to_string(),
+                    ));
+                }
+            }
+        }
         let Some(observed) = event
             .typed
             .as_ref()
@@ -445,6 +493,14 @@ fn import_events(
         let Some(event) = crate::bundle::parse_typed_event(value)? else {
             continue;
         };
+        for commit in crate::forge_round_trip::disclosure_commits(&event.payload) {
+            if gitio::commit_exists(&ctx.cwd, commit)? {
+                pins.push((
+                    gitio::retained_ref(Store::REPOSITORY_SCOPE, &event.event_id, commit),
+                    commit.to_string(),
+                ));
+            }
+        }
         let Payload::HistoryRewritten { retained, .. } = &event.payload else {
             continue;
         };

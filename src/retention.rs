@@ -9,7 +9,8 @@
 //! Which commits count is decided by the ledger, not by which ref happens to
 //! hold one: a patchset's head, the revision an external or audit verdict
 //! was recorded on, a commit a forge fact records as the provider's own,
-//! and the source, tested and report commits received with a candidate.
+//! the source, tested and report commits received with a candidate, and Git
+//! support selected by a disclosure.
 //! A pin released at integration, or one an outside tool moved, leaves those
 //! commits as exposed as a pin the rewrite moves.
 
@@ -26,7 +27,7 @@ use std::path::Path;
 pub struct Cited {
     pub change_id: String,
     /// The patchset the commit was the head of, or the event that recorded a
-    /// verdict on it.
+    /// verdict or source fact on it.
     pub subject: String,
     /// How a reader is told what cites it.
     pub what: String,
@@ -83,6 +84,9 @@ pub fn cited(store: &Store) -> Result<Vec<Cited>> {
             }
         }
         for event in &events {
+            for commit in crate::forge_round_trip::disclosure_commits(&event.payload) {
+                add(&event.event_id, "disclosure Git support".into(), commit);
+            }
             for (what, commit) in crate::forge_observation::observed_commits(&event.payload)
                 .into_iter()
                 .flatten()
@@ -109,6 +113,9 @@ pub fn cited(store: &Store) -> Result<Vec<Cited>> {
         })
         .collect();
     for event in &repository_events {
+        for commit in crate::forge_round_trip::disclosure_commits(&event.payload) {
+            found.push(Cited { change_id: Store::REPOSITORY_SCOPE.into(), subject: event.event_id.clone(), what: "disclosure Git support".into(), commit: commit.to_string() });
+        }
         if let Payload::CandidateEvidenceReceived {
             candidate_id,
             evidence,
@@ -124,6 +131,7 @@ pub fn cited(store: &Store) -> Result<Vec<Cited>> {
                     });
                 }
             }
+
         }
     }
     Ok(found)

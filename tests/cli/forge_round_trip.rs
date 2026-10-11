@@ -217,7 +217,10 @@ fn compact_provenance_absent_frontier_cost_and_model_degrade_independently() {
     let body = "Review\nAuthor: model not recorded · Review cost: unmeasured.";
     let obs = observe(&repo, &id, "read-1", "g1", body, None);
     let mut provenance = comment(vec![author(None, None, "act-1")]);
-    provenance["source_frontiers"] = json!([]);
+    provenance
+        .as_object_mut()
+        .unwrap()
+        .remove("source_frontiers");
     let mut doc = disclosure(&id, &obs, "g1", body, Some(provenance));
     assert!(stdout(&mut declare(&repo, &id, &doc))
         .contains("Author: model not recorded · Review cost: unmeasured."));
@@ -227,12 +230,30 @@ fn compact_provenance_absent_frontier_cost_and_model_degrade_independently() {
     declare(&repo, &id, &doc).assert().failure();
     assert_eq!(event_count(&repo, &id), before);
     doc["disclosure_id"] = json!("scoped-cost");
+    doc["previous_disclosure"] = json!("disclosure-1");
+    doc["editor"] = json!("cost-annotator");
     doc["comment"]["cost"]["scope"] = json!("review-exchange");
     assert!(stdout(&mut declare(&repo, &id, &doc)).contains("Review cost: unmeasured."));
     assert_eq!(
         state(&repo, &id)["round_trip"]["disclosures"][1]["comment"]["cost"]["reference"],
         "opaque-cost"
     );
+}
+fn admitted_round_trip(repo: &Repo, path: &Path) -> AssertCommand {
+    let bytes = fs::read(path).unwrap();
+    let bundle: Value = serde_json::from_slice(&bytes).unwrap();
+    let source = bundle["source_replica_id"].as_str().unwrap();
+    repo.declare_gates_locally(&format!("[[replica.publishers]]\nprincipal='fixture-round-trip'\nsource_replica_id='{source}'\n[[replica.publishers.origins]]\nreplica_id='{source}'\nroles=['facts','rewrite','integration']\nactors=['tester']\n"));
+    let mut command = repo.arc(&repo.root);
+    command.args([
+        "import",
+        path.to_str().unwrap(),
+        "--publisher",
+        "fixture-round-trip",
+        "--received-sha256",
+        &format!("{:x}", Sha256::digest(&bytes)),
+    ]);
+    command
 }
 #[test]
 fn forge_round_trip_related_change_and_custody_closure_imports_offline() {
@@ -255,6 +276,20 @@ fn forge_round_trip_related_change_and_custody_closure_imports_offline() {
     ]));
     let disclosure = disclosure(&origin, &obs, "g1", "public bytes", None);
     stdout(&mut declare(&repo, &destination, &disclosure));
+    let worktree = repo.home.join(".worktrees/repo-prepared");
+    repo.commit(
+        &worktree,
+        "prepared.txt",
+        "prepared content",
+        "feat: prepare received content",
+    );
+    let integrated = repo.head(&worktree);
+    stdout(repo.arc(&worktree).args(["snapshot", &destination]));
+    git(&repo.root, &["merge", "--ff-only", &integrated]);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["close", &destination, "--assert-integrated", &integrated]),
+    );
     let exported = repo.home.join("round-trip.json");
     let sidecar = repo.home.join("sidecar");
     stdout(repo.arc(&repo.root).args([
@@ -273,13 +308,10 @@ fn forge_round_trip_related_change_and_custody_closure_imports_offline() {
     malformed["related_changes"][0]["event_count"] = json!(0);
     let bad = repo.home.join("bad-round-trip.json");
     fs::write(&bad, malformed.to_string()).unwrap();
-    super::forge_custody::admitted_change_command(&replica, &bad)
-        .assert()
-        .failure();
+    admitted_round_trip(&replica, &bad).assert().failure();
     assert!(!replica.root.join(".git/arc/config.json").exists());
     stdout(
-        super::forge_custody::admitted_change_command(&replica, &exported)
-            .args(["--custody-dir", sidecar.to_str().unwrap()]),
+        admitted_round_trip(&replica, &exported).args(["--custody-dir", sidecar.to_str().unwrap()]),
     );
     assert_eq!(
         state(&replica, &origin)["forge"]["observations"],
@@ -379,4 +411,105 @@ fn disclosure_labels_git_and_withheld_ledger_support_and_retains_commit() {
     doc["selected"][0]["source"]["commit"] = json!("b".repeat(40));
     declare(&repo, &id, &doc).assert().failure();
     assert_eq!(event_count(&repo, &id), before);
+}
+
+#[test]
+fn disclosure_repository_ledger_source_exports_without_a_fake_related_change() {
+    let (repo, id) = setup();
+    let observation = observe(&repo, &id, "read-1", "g1", "public bytes", None);
+    repo.arc(&repo.root)
+        .args(["brief", &id, "--body-file", "-"])
+        .write_stdin("Prepare a candidate.")
+        .assert()
+        .success();
+    stdout(repo.arc(&repo.root).args([
+        "candidate",
+        "register",
+        "--tree",
+        "HEAD",
+        "--brief",
+        &id,
+        "--producer",
+        "fixture-producer",
+    ]));
+    let event = fs::read_dir(repo.root.join(".git/arc/repository/events"))
+        .unwrap()
+        .map(|entry| {
+            serde_json::from_slice::<Value>(&fs::read(entry.unwrap().path()).unwrap()).unwrap()
+        })
+        .find(|event| event["event_type"] == "candidate-registered")
+        .unwrap();
+    let mut doc = disclosure(&id, &observation, "g1", "public bytes", None);
+    doc["selected"] = json!([{"source":{"change_id":"repository","event":event["event_id"]},"fields":["producer assertion"],"access_basis":"withheld-private-assertion"}]);
+    stdout(&mut declare(&repo, &id, &doc));
+    let mut candidate_doc = doc.clone();
+    let head = repo.head(&repo.root);
+    candidate_doc["disclosure_id"] = json!("candidate-disclosure");
+    candidate_doc["selected"] = json!([{"source":{"change_id":id,"commit":head},"fields":["tree"],"access_basis":"accessible-git"}]);
+    stdout(&mut declare(
+        &repo,
+        event["candidate_id"].as_str().unwrap(),
+        &candidate_doc,
+    ));
+    let bundle = repo.home.join("repository-source.json");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["export", &id, "--output", bundle.to_str().unwrap()]),
+    );
+    let exported: Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    assert!(exported.get("related_changes").is_none());
+    assert!(exported["repository_events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|held| held["event_id"] == event["event_id"]));
+    let replica = Repo::new();
+    deliver_git_objects(&repo, &replica);
+    stdout(&mut admitted_round_trip(&replica, &bundle));
+    assert!(git_out(
+        &replica.root,
+        &[
+            "for-each-ref",
+            "--format=%(objectname)",
+            "refs/arc/retained/repository/"
+        ]
+    )
+    .contains(&head));
+    assert_eq!(
+        state(&replica, &id)["round_trip"]["disclosure_availability"][0]["outgoing_bytes"],
+        "unavailable"
+    );
+}
+
+#[test]
+fn compact_provenance_unestablished_model_and_human_authorship_are_distinct() {
+    let (repo, id) = setup();
+    let body = "Review\nAuthor: model not recorded · Review cost: unmeasured.";
+    let observation = observe(&repo, &id, "read-1", "g1", body, None);
+    let mut unestablished = author(Some("review-model"), None, "act-1");
+    unestablished["model_observation"] = Value::Null;
+    let mut doc = disclosure(
+        &id,
+        &observation,
+        "g1",
+        body,
+        Some(comment(vec![unestablished])),
+    );
+    let output = stdout(&mut declare(&repo, &id, &doc));
+    assert!(output.contains("Author: model not recorded · Review cost: unmeasured."));
+    assert!(!output.contains("review-model"));
+    let (human_repo, human_id) = setup();
+    let human_body = "Review\nAuthor: Review Writer · Review cost: unmeasured.";
+    let human_observation = observe(&human_repo, &human_id, "read-1", "g1", human_body, None);
+    let mut human = author(None, None, "human-act");
+    human["name"] = json!("Review Writer");
+    doc = disclosure(
+        &human_id,
+        &human_observation,
+        "g1",
+        human_body,
+        Some(comment(vec![human])),
+    );
+    assert!(stdout(&mut declare(&human_repo, &human_id, &doc))
+        .contains("Author: Review Writer · Review cost: unmeasured."));
 }

@@ -528,9 +528,17 @@ pub fn message(
             delivery,
         },
     )?;
-    let mut history = crate::forge_round_trip::held_events(&store)?;
-    history.push((*event).clone());
-    crate::forge_round_trip::validate_history(&history)?;
+    if matches!(
+        &event.payload,
+        Payload::Message {
+            delivery: Some(_),
+            ..
+        }
+    ) {
+        let mut history = crate::forge_round_trip::held_events(&store)?;
+        history.push((*event).clone());
+        crate::forge_round_trip::validate_history(&history)?;
+    }
     store.append_local_event(&mut event)?;
     println!("message: {} [{}]", message_type.as_str(), severity.as_str());
     println!("event: {}", event.event_id);
