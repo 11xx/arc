@@ -2652,6 +2652,12 @@ pub struct CostFacts {
     /// or `since-reset`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage: Option<String>,
+    /// Earliest observed source timestamp, including copied recording turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_started_at: Option<DateTime<Utc>>,
+    /// The read could not establish the source's complete opening boundary.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_start_uncertain: bool,
     /// Token counters by tapes' categories. Reasoning is a subset of output.
     #[serde(default)]
     pub counters: CostCounters,
@@ -2676,6 +2682,66 @@ pub struct CostLineage {
     pub forked_from: Option<String>,
     /// Failed or bounded reads cannot establish absence of other relatives.
     pub unknown: Vec<String>,
+}
+
+pub(crate) fn plain_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn counted_reason(reason: &str, suffix: &str) -> bool {
+    reason
+        .strip_suffix(suffix)
+        .is_some_and(|count| count.parse::<usize>().is_ok())
+}
+
+pub(crate) fn portable_lineage_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        "lineage read failed"
+            | "lineage read bounded"
+            | "lineage identity mismatch"
+            | "lineage relative unresolved"
+            | "lineage relative is not a plain session id"
+    ) || counted_reason(reason, " lineage notes")
+}
+
+pub(crate) fn portable_cost_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        "the source recorded no usage counters"
+            | "the read was bounded and withheld part of the source"
+            | "the reader established no source frontier"
+            | "abandoned branch consumption is outside the pinned reader's active branch"
+            | "the counters cover the read-window, not the whole session"
+            | "the counters cover the since-reset, not the whole session"
+            | "retained measurement gap"
+    ) || counted_reason(reason, " source read gaps")
+        || counted_reason(reason, " usage notes")
+}
+
+impl CostFacts {
+    /// Transport admits session relatives and fixed reason categories only.
+    pub(crate) fn portable(&self) -> bool {
+        self.incomplete
+            .iter()
+            .all(|reason| portable_cost_reason(reason))
+            && self.lineage.as_ref().is_none_or(|lineage| {
+                [&lineage.parent, &lineage.forked_from]
+                    .into_iter()
+                    .flatten()
+                    .all(|id| plain_session_id(id))
+                    && lineage.children.iter().all(|child| {
+                        plain_session_id(&child.harness) && plain_session_id(&child.session)
+                    })
+                    && lineage
+                        .unknown
+                        .iter()
+                        .all(|reason| portable_lineage_reason(reason))
+            })
+    }
 }
 
 /// A child in its harness's native session namespace.

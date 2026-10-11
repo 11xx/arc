@@ -97,7 +97,7 @@ fn claude_recording(repo: &Repo, id: &str, input: u64) -> PathBuf {
 }
 
 fn dispatch(repo: &Repo, subject: &str, value: &str) -> String {
-    event_id(&stdout(repo.arc(&repo.root).args([
+    let id = event_id(&stdout(repo.arc(&repo.root).args([
         "run",
         "dispatch",
         "--route",
@@ -106,7 +106,28 @@ fn dispatch(repo: &Repo, subject: &str, value: &str) -> String {
         "/work/run",
         subject,
         value,
-    ])))
+    ])));
+    // Dedicated recordings begin in January; their first dispatch is earlier.
+    dispatch_time(repo, &id, "2026-01-01T09:59:00Z");
+    id
+}
+
+fn dispatch_time(repo: &Repo, id: &str, timestamp: &str) {
+    let path = repo
+        .root
+        .join(".git/arc/repository/events")
+        .join(format!("{id}.json"));
+    let mut event: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    event["created_at"] = json!(timestamp);
+    fs::write(path, serde_json::to_vec(&event).unwrap()).unwrap();
+}
+
+fn recording_lines(path: &Path) -> Vec<Value> {
+    fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
 }
 
 fn bind(repo: &Repo, dispatch_id: &str, harness: &str, session: &str) {
@@ -177,6 +198,256 @@ fn session<'a>(report: &'a Value, key: &str) -> &'a Value {
         .iter()
         .find(|session| session["key"] == key)
         .unwrap_or_else(|| panic!("no session {key}: {report}"))
+}
+
+#[test]
+fn review_pre_dispatch_consumption_withholds_assignment_after_retention() {
+    let repo = Repo::new();
+    let path = pi_recording(&repo, "preexisting", &[0.03], false);
+    let run = dispatch(&repo, "--change", "resumed");
+    dispatch_time(&repo, &run, "2026-10-01T00:00:00Z");
+    bind(&repo, &run, "pi", "preexisting");
+    let fresh = report(&repo, "resumed");
+    assert_eq!(
+        fresh["coverage"]["assignment"]["status"], "incomplete",
+        "{fresh}"
+    );
+    for totals in [&fresh["union"], &work(&fresh, "change:resumed")["direct"]] {
+        let figure = quantity(totals, USD, None);
+        assert_eq!(figure["status"], "withheld");
+        assert!(figure.get("amount").is_none() && figure.get("known_subtotal").is_none());
+        assert!(figure["reasons"]
+            .to_string()
+            .contains("pre-dispatch consumption"));
+    }
+    assert!(session(&fresh, "pi:preexisting")["measurement"]["source_started_at"].is_string());
+    assert_eq!(
+        usd(&session(&fresh, "pi:preexisting")["totals"]),
+        Some(0.03)
+    );
+    stdout(repo.arc(&repo.root).args(["cost", "retain", "resumed"]));
+    fs::remove_file(path).unwrap();
+    let rotated = report(&repo, "resumed");
+    assert_eq!(
+        rotated["coverage"]["assignment"],
+        fresh["coverage"]["assignment"]
+    );
+    assert_eq!(rotated["union"], fresh["union"]);
+}
+
+#[test]
+fn review_native_pi_parent_path_is_unknown_and_never_transported() {
+    let repo = Repo::new();
+    let change = begin_without_checkout(&repo, "native-fork", &[]);
+    let parent = pi_recording(&repo, "native-parent", &[0.03], false);
+    let original = pi_recording(&repo, "native-fork", &[0.03, 0.02], false);
+    let mut lines = recording_lines(&original);
+    lines[0]["timestamp"] = json!("2026-10-01T10:00:00Z");
+    let fork = original
+        .parent()
+        .unwrap()
+        .join("2026-10-01T10-00-00-000Z_native-fork.jsonl");
+    write_lines(&fork, &lines);
+    fs::remove_file(original).unwrap();
+    // Pi createBranchedSession and forkFrom write the source recording path.
+    name_pi_parent(&fork, parent.to_str().unwrap());
+    for id in ["native-parent", "native-fork"] {
+        let run = dispatch(&repo, "--change", &change);
+        if id == "native-fork" {
+            dispatch_time(&repo, &run, "2026-10-01T09:59:00Z");
+        }
+        bind(&repo, &run, "pi", id);
+    }
+    let fresh = report(&repo, &change);
+    assert_eq!(
+        fresh["coverage"]["identity"]["status"], "incomplete",
+        "{fresh}"
+    );
+    assert!(usd(&fresh["union"]).is_none());
+    assert_eq!(fresh["coverage"]["assignment"]["status"], "incomplete");
+    assert!(fresh["coverage"]["assignment"]["reasons"]
+        .to_string()
+        .contains("pre-dispatch consumption"));
+    let lineage = &session(&fresh, "pi:native-fork")["measurement"]["lineage"];
+    assert!(lineage["parent"].is_null());
+    assert_eq!(
+        lineage["unknown"],
+        json!(["lineage relative is not a plain session id"])
+    );
+    stdout(repo.arc(&repo.root).args(["cost", "retain", &change]));
+    let bundle = repo.home.join("native-export.json");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["export", &change, "--output", bundle.to_str().unwrap()]),
+    );
+    let retained: Value = serde_json::from_slice(&fs::read(bundle).unwrap()).unwrap();
+    for event in retained["repository_events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["event_type"] == "cost-facts-retained")
+    {
+        assert!(
+            !event["facts"]
+                .to_string()
+                .contains(repo.home.to_str().unwrap()),
+            "{event}"
+        );
+    }
+    assert!(!fresh.to_string().contains(parent.to_str().unwrap()));
+    fs::remove_file(parent).unwrap();
+    fs::remove_file(fork).unwrap();
+    let rotated = report(&repo, &change);
+    assert_eq!(rotated["union"], fresh["union"]);
+}
+
+#[test]
+fn review_lineage_error_text_is_replaced_by_fixed_categories() {
+    let repo = Repo::new();
+    let id = "44444444-4444-4444-8444-444444444444";
+    let path = claude_recording(&repo, id, 100);
+    let children = path.with_extension("").join("subagents");
+    fs::create_dir_all(children.parent().unwrap()).unwrap();
+    fs::write(children, "not a directory").unwrap();
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "private-error"),
+        "claude",
+        id,
+    );
+    let fresh = report(&repo, "private-error");
+    let lineage = &fresh["sessions"][0]["measurement"]["lineage"];
+    assert_eq!(
+        lineage["unknown"],
+        json!(["lineage read failed"]),
+        "{fresh}"
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "retain", "private-error"]),
+    );
+    let events = stdout(repo.arc(&repo.root).args(["events", "--repository"]));
+    for event in events
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|e| e["event_type"] == "cost-facts-retained")
+    {
+        assert!(!event["facts"]
+            .to_string()
+            .contains(repo.home.to_str().unwrap()));
+    }
+}
+
+#[test]
+fn review_legacy_retained_locators_are_sanitized_and_refused_for_transport() {
+    let repo = Repo::new();
+    let change = begin_without_checkout(&repo, "legacy-private", &[]);
+    let recording = pi_recording(&repo, "legacy-private", &[0.03], false);
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", &change),
+        "pi",
+        "legacy-private",
+    );
+    stdout(repo.arc(&repo.root).args(["cost", "retain", &change]));
+    let input = repo.home.join("unsafe-import.json");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["export", &change, "--output", input.to_str().unwrap()]),
+    );
+    let mut exported: Value = serde_json::from_slice(&fs::read(&input).unwrap()).unwrap();
+    let imported = exported["repository_events"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|event| event["event_type"] == "cost-facts-retained")
+        .unwrap();
+    imported["facts"]["lineage"]["unknown"] =
+        json!([format!("cannot read {}", recording.display())]);
+    fs::write(&input, serde_json::to_vec(&exported).unwrap()).unwrap();
+    let refusal = repo
+        .arc(&repo.root)
+        .args(["import", input.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!refusal.status.success());
+    let stderr = String::from_utf8_lossy(&refusal.stderr);
+    assert!(stderr.contains("cost facts transport refused"));
+    assert!(!stderr.contains(recording.to_str().unwrap()));
+    let values = stdout(repo.arc(&repo.root).args(["events", "--repository"]));
+    let mut held = values
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|e| e["event_type"] == "cost-facts-retained")
+        .unwrap();
+    held["facts"]["lineage"]["parent"] = json!(recording);
+    held["facts"]["lineage"]["unknown"] = json!([format!("cannot read {}", recording.display())]);
+    let path = repo
+        .root
+        .join(".git/arc/repository/events")
+        .join(format!("{}.json", held["event_id"].as_str().unwrap()));
+    fs::write(path, serde_json::to_vec(&held).unwrap()).unwrap();
+    fs::remove_file(&recording).unwrap();
+    let view = report(&repo, &change);
+    assert!(
+        !view.to_string().contains(recording.to_str().unwrap()),
+        "{view}"
+    );
+    let bundle = repo.home.join("unsafe-export.json");
+    let output = repo
+        .arc(&repo.root)
+        .args(["export", &change, "--output", bundle.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(recording.to_str().unwrap()));
+    assert!(!bundle.exists());
+}
+
+#[test]
+fn review_conflicting_bindings_withhold_assignment_and_keep_each_session() {
+    let repo = Repo::new();
+    let change = begin_without_checkout(&repo, "conflicted-cost", &[]);
+    for id in ["executor-one", "executor-two"] {
+        pi_recording(&repo, id, &[0.03], false);
+    }
+    let run = dispatch(&repo, "--change", &change);
+    bind(&repo, &run, "pi", "executor-one");
+    let path = repo.home.join("conflict.json");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["export", &change, "--output", path.to_str().unwrap()]),
+    );
+    let mut bundle: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let events = bundle["repository_events"].as_array_mut().unwrap();
+    let mut second = events
+        .iter()
+        .find(|e| e["event_type"] == "run-bound")
+        .unwrap()
+        .clone();
+    second["event_id"] = json!("01K0000000000000000000000Z");
+    second["executor_session"] = json!("executor-two");
+    events.push(second);
+    fs::write(&path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["import", path.to_str().unwrap()]),
+    );
+    let view = report(&repo, &change);
+    assert_eq!(
+        view["coverage"]["assignment"]["status"], "incomplete",
+        "{view}"
+    );
+    assert_eq!(view["sessions"].as_array().unwrap().len(), 2);
+    for totals in [
+        &view["union"],
+        &work(&view, &format!("change:{change}"))["direct"],
+    ] {
+        let amount = quantity(totals, USD, None);
+        assert_eq!(amount["status"], "withheld");
+        assert!(amount.get("amount").is_none() && amount.get("known_subtotal").is_none());
+        assert!(amount["reasons"].to_string().contains("binding conflict"));
+    }
 }
 
 #[test]
@@ -420,8 +691,14 @@ fn an_absent_amount_stays_absent_never_zero() {
     assert!(estimate.get("amount").is_none(), "{report}");
     assert!(estimate.get("known_subtotal").is_none(), "{report}");
     assert!(estimate.get("bound").is_none(), "{report}");
-    assert_eq!(estimate["known_bound"]["at_least"], 0.05);
-    assert_eq!(estimate["known_bound"]["at_most"], 0.05);
+    assert!(estimate.get("known_bound").is_none());
+    assert!(estimate["reasons"]
+        .to_string()
+        .contains("unknown source start"));
+    assert_eq!(
+        usd(&session(&report, "pi:priced-session")["totals"]),
+        Some(0.05)
+    );
     assert_eq!(report["union"]["identity"]["status"], "incomplete");
     let codex = session(&report, &format!("codex:{codex_id}"));
     let codex_estimate = quantity(&codex["totals"], USD, None);
@@ -693,20 +970,17 @@ fn a_failed_lineage_read_is_unknown_and_survives_retention() {
     }
     let fresh = report(&repo, "failed-lineage");
     let measured = &session(&fresh, &format!("claude:{id}"))["measurement"];
-    assert_eq!(measured["status"], "complete", "{fresh}");
-    assert!(
-        measured["lineage"]["unknown"][0]
-            .as_str()
-            .unwrap()
-            .contains("Subagent enumeration"),
-        "{fresh}"
+    assert_eq!(measured["status"], "incomplete", "{fresh}");
+    assert_eq!(
+        measured["lineage"]["unknown"],
+        json!(["lineage read failed"])
     );
     assert_eq!(fresh["coverage"]["identity"]["status"], "incomplete");
     let input = quantity(&fresh["union"], "resource-quantity", Some("input"));
     assert_eq!(input["status"], "withheld");
     assert!(input.get("amount").is_none());
-    assert_eq!(input["bound"]["at_least"], 200);
-    assert_eq!(input["bound"]["at_most"], 300);
+    assert_eq!(input["known_bound"]["at_least"], 200);
+    assert_eq!(input["known_bound"]["at_most"], 300);
     stdout(
         repo.arc(&repo.root)
             .args(["cost", "retain", "failed-lineage"]),

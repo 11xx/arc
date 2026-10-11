@@ -3075,11 +3075,20 @@ RULES THAT CHANGE WHAT YOU DO
     figure is a harness-calculated estimate with an unknown pricing basis;
     token counts are resource quantities by tapes' categories. A raw input
     sum across harnesses is refused and other cross-harness token sums are
-    withheld; an unbound dispatch withholds its work totals; a missing amount
-    leaves a total absent beside its known subtotal, never zero. Measurement,
-    assignment, and identity coverage are reported apart. Every direct,
-    inclusive, and union figure groups recorded parent, child, and fork
-    relations transitively, including a binding's declared `--forked-from`.
+    withheld; an unbound or conflicting dispatch withholds its work totals.
+    A missing amount leaves a total absent beside its known subtotal, never
+    zero. Measurement, assignment, and identity coverage are reported apart.
+    A recording beginning before its session's first dispatch has
+    pre-dispatch consumption: assignment is incomplete and work totals are
+    withheld. An unknown opening boundary also withholds them. Sessions
+    retain their own measurements; consumption is never split by time.
+    Lineage relatives are plain session ids. A non-id reference makes
+    identity unknown with a fixed reason; arc does not parse a recording path
+    to infer an id. Lineage notes, failed reads and bounded reads also make
+    identity unknown, using fixed categories and note counts.
+    Every direct, inclusive, and union figure groups recorded parent, child,
+    and fork relations transitively, including a binding's declared
+    `--forked-from`.
     An origin outside the figure contributes no consumption and does not
     make the figure's identity incomplete by itself. Binding relations are
     durable alongside retained usage facts, so source rotation preserves
@@ -3096,8 +3105,11 @@ RULES THAT CHANGE WHAT YOU DO
     incomplete or withheld while the pinned reader cannot measure them.
   - `arc cost retain <change|journal-file>` keeps, per bound session, the
     facts a fresh read gives: reader and calculation versions, source
-    frontier and digest, counters with their basis and coverage, and any
-    harness-written dollar figure, plus lineage relations and read failures.
+    frontier, digest and opening boundary, counters with their basis and coverage, and any
+    harness-written dollar figure, plus lineage relations and read failures
+    as fixed categories. Retained facts carry no recording locators or raw
+    errors. Display sanitizes older facts; bundle import and export refuse
+    nonportable cost facts without changing recorded events.
     The source bytes stay in the harness store. Identical facts record
     nothing; retained facts are observations at their frontier and are never
     added to one another.

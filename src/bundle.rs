@@ -230,6 +230,11 @@ impl Bundle {
         if raw.is_empty() {
             bail!("change {change_id:?} has no events");
         }
+        for value in &repository_events {
+            if value["event_type"] == "cost-facts-retained" {
+                parse_typed_event(value)?;
+            }
+        }
 
         let mut all = Vec::with_capacity(raw.len());
         for (file_event_id, value) in raw {
@@ -872,6 +877,9 @@ pub fn parse_typed_event(value: &Value) -> Result<Option<Event>> {
         return Ok(None);
     }
     match &event.payload {
+        Payload::CostFactsRetained { facts, .. } if !facts.portable() => {
+            bail!("cost facts transport refused: relatives must be plain session ids and reasons must be fixed categories");
+        }
         Payload::ClaimSet {
             claim_id,
             ttl_seconds,

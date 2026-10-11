@@ -11,7 +11,10 @@
 
 use super::run::{rounds, RunSubject};
 use super::*;
-use crate::model::{CostCounters, CostFacts, CostLineage, CostRelative, Event, Payload};
+use crate::model::{
+    plain_session_id, portable_cost_reason, portable_lineage_reason, CostCounters, CostFacts,
+    CostLineage, CostRelative, Event, Payload,
+};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -24,7 +27,7 @@ pub const TAPES_READER: &str =
 
 /// How arc normalizes a reader's usage answer into retained facts. It moves
 /// when that normalization does, so facts from an older one stay identifiable.
-pub const COST_CALCULATION: &str = "usage-normalization 1";
+pub const COST_CALCULATION: &str = "usage-normalization 2";
 
 const USD_KIND: &str = "harness-calculated-estimate";
 const TOKEN_KIND: &str = "resource-quantity";
@@ -71,6 +74,7 @@ struct Selection {
 /// One dispatch bound to an executor session.
 struct Span {
     dispatch_event_id: String,
+    dispatched_at: chrono::DateTime<chrono::Utc>,
     forked_from: Option<String>,
     round: Option<usize>,
     work: WorkKey,
@@ -79,7 +83,7 @@ struct Span {
 /// Where a session's measurement came from.
 enum Source {
     Fresh,
-    Retained(String),
+    Retained(String, String),
     Unavailable(String),
 }
 
@@ -107,7 +111,9 @@ impl SessionRow {
 /// Print the read-only cost view of a change or a journal artifact.
 pub fn show_cost(ctx: &Ctx, target: &str, json: bool) -> Result<()> {
     let store = ctx.store()?;
-    let events = store.load_repository_events()?;
+    let events = store
+        .load_repository_events()
+        .map_err(|_| anyhow::anyhow!("run metadata read failed"))?;
     let selection = select(ctx, &store, target, &events)?;
     let (runs, sessions) = assign(&selection, &events);
     let mut sessions: Vec<SessionRow> = sessions
@@ -146,7 +152,9 @@ pub fn show_cost(ctx: &Ctx, target: &str, json: bool) -> Result<()> {
 /// Facts identical to ones already retained for the session record nothing.
 pub fn retain_cost(ctx: &Ctx, target: &str) -> Result<()> {
     let store = ctx.store()?;
-    let events = store.load_repository_events()?;
+    let events = store
+        .load_repository_events()
+        .map_err(|_| anyhow::anyhow!("run metadata read failed"))?;
     let selection = select(ctx, &store, target, &events)?;
     let (_, sessions) = assign(&selection, &events);
     if sessions.is_empty() {
@@ -163,7 +171,9 @@ pub fn retain_cost(ctx: &Ctx, target: &str) -> Result<()> {
         })
         .collect();
     let _repository_events = store.lock_repository_events()?;
-    let events = store.load_repository_events()?;
+    let events = store
+        .load_repository_events()
+        .map_err(|_| anyhow::anyhow!("run metadata read failed"))?;
     for (harness, session, read) in reads {
         let key = format!("{harness}:{session}");
         let facts = match read {
@@ -283,7 +293,14 @@ fn select(ctx: &Ctx, store: &Store, target: &str, events: &[Event]) -> Result<Se
     })
 }
 
-type Runs = BTreeMap<WorkKey, Vec<(String, Option<usize>, Option<(String, String)>)>>;
+struct AssignedRun {
+    dispatch_event_id: String,
+    round: Option<usize>,
+    candidates: Vec<String>,
+    conflicting: bool,
+}
+
+type Runs = BTreeMap<WorkKey, Vec<AssignedRun>>;
 type Sessions = BTreeMap<(String, String), (Vec<Span>, BTreeSet<WorkKey>)>;
 
 /// The selected runs per work item, and every bound session with at least
@@ -310,30 +327,36 @@ fn assign(selection: &Selection, events: &[Event]) -> (Runs, Sessions) {
     let mut sessions: Sessions = BTreeMap::new();
     for round in rounds(events) {
         let work = work_of(&round.subject);
-        let binding = round.binding.as_ref().map(|binding| {
-            (
+        let bindings: Vec<_> = round
+            .binding
+            .iter()
+            .flat_map(|binding| std::iter::once(binding).chain(&binding.conflicts))
+            .collect();
+        let candidates: BTreeSet<String> = bindings
+            .iter()
+            .map(|binding| format!("{}:{}", binding.executor_harness, binding.executor_session))
+            .collect();
+        if selected.contains(&work) {
+            runs.entry(work.clone()).or_default().push(AssignedRun {
+                dispatch_event_id: round.dispatch.event_id.clone(),
+                round: round.round,
+                candidates: candidates.into_iter().collect(),
+                conflicting: bindings.len() > 1,
+            });
+        }
+        for binding in bindings {
+            let key = (
                 binding.executor_harness.clone(),
                 binding.executor_session.clone(),
-            )
-        });
-        if selected.contains(&work) {
-            runs.entry(work.clone()).or_default().push((
-                round.dispatch.event_id.clone(),
-                round.round,
-                binding.clone(),
-            ));
-        }
-        if let Some(binding) = binding {
-            let (spans, membership) = sessions.entry(binding).or_default();
+            );
+            let (spans, membership) = sessions.entry(key).or_default();
             membership.insert(work.clone());
             spans.push(Span {
                 dispatch_event_id: round.dispatch.event_id.clone(),
-                forked_from: round
-                    .binding
-                    .as_ref()
-                    .and_then(|binding| binding.forked_from.clone()),
+                dispatched_at: round.dispatch.created_at,
+                forked_from: binding.forked_from.clone(),
                 round: round.round,
-                work,
+                work: work.clone(),
             });
         }
     }
@@ -367,10 +390,12 @@ fn measure(events: &[Event], harness: &str, session: &str) -> Measured {
     // The furthest frontier, and among equal frontiers the latest retention.
     let retained = retained_for(events, harness, session)
         .into_iter()
-        .max_by_key(|(_, facts)| facts.frontier);
+        .max_by_key(|(_, facts)| facts.frontier)
+        .map(|(event, facts)| (event, sanitized_facts(facts)));
     match read_fresh(harness, session) {
         Ok(fresh) => {
             let conflict = retained
+                .as_ref()
                 .filter(|(_, held)| held.frontier == fresh.frontier && !same_measurement(held, &fresh))
                 .map(|(event, held)| {
                     json!({
@@ -388,8 +413,8 @@ fn measure(events: &[Event], harness: &str, session: &str) -> Measured {
         }
         Err(reason) => match retained {
             Some((event, held)) => Measured {
-                source: Source::Retained(event.event_id.clone()),
-                facts: Some(held.clone()),
+                source: Source::Retained(event.event_id.clone(), reason),
+                facts: Some(held),
                 conflict: None,
             },
             None => Measured {
@@ -406,6 +431,10 @@ fn same_measurement(left: &CostFacts, right: &CostFacts) -> bool {
         && left.counters == right.counters
         && left.harness_estimate_usd == right.harness_estimate_usd
         && left.lineage == right.lineage
+        && left.basis == right.basis
+        && left.coverage == right.coverage
+        && left.source_started_at == right.source_started_at
+        && left.source_start_uncertain == right.source_start_uncertain
 }
 
 /// Measure one session through the pinned tapes reader, over its whole
@@ -417,25 +446,35 @@ fn read_fresh(harness: &str, session: &str) -> std::result::Result<CostFacts, St
             .filter(|backend| backend.harness() == harness)
             .collect();
     if backends.is_empty() {
-        return Err(format!(
-            "arc reads no session store for the {harness} harness"
-        ));
+        return Err("session store unsupported".to_string());
     }
-    let view = agent_tapes_core::usage_full_with_backends(
-        &backends,
-        agent_tapes_core::Selection::IdInHarness {
-            id: session,
-            harness,
-        },
-    )
-    .map_err(|error| crate::session_store::bounded_reason(&format!("{error:#}")))?;
-    if view.session.id != session {
-        return Err(format!(
-            "session {session} resolves to the recording of a different id, {}",
-            view.session.id
-        ));
+    let resolved = agent_tapes_core::resolve_session(&backends, session)
+        .map_err(|_| "usage read failed".to_string())?;
+    if resolved.session.id != session {
+        return Err("usage identity mismatch".to_string());
     }
+    let backend = &backends[resolved.backend_index];
+    let mut tally = agent_tapes_core::usage::TurnTally::default();
+    let mut earliest = None;
+    let mut read = backend
+        .stream_transcript(&resolved.session, None, &mut |turn| {
+            earliest = earliest.into_iter().chain(turn.ts).min();
+            tally.add(&turn);
+            Ok(())
+        })
+        .map_err(|_| "usage read failed".to_string())?;
+    read.notes
+        .extend(resolved.diagnostics.latest_warnings(&resolved.session));
+    let whole = backend
+        .stream_session(&resolved.session, &read)
+        .map_err(|_| "usage read failed".to_string())?;
+    let view = agent_tapes_core::usage::streamed(&whole, tally, &read);
     let mut facts = normalize(&view);
+    facts.source_started_at = earliest.into_iter().chain(whole.started_at).min();
+    facts.source_start_uncertain = whole.start_uncertain
+        || view.truncated
+        || !view.truncation.is_empty()
+        || view.read.as_ref().is_none_or(|read| !read.gaps.is_empty());
     facts.lineage = Some(
         match agent_tapes_core::lineage_with_backends(
             &backends,
@@ -445,36 +484,110 @@ fn read_fresh(harness: &str, session: &str) -> std::result::Result<CostFacts, St
             },
         ) {
             Ok(view) if view.session.id == session => {
-                let mut unknown = view.notes;
-                if view.truncated {
-                    unknown.push("the lineage read was bounded".to_string());
+                let mut unknown = Vec::new();
+                if !view.notes.is_empty() {
+                    unknown.push(format!("{} lineage notes", view.notes.len()));
                 }
-                CostLineage {
-                    parent: view.lineage.parent.map(|parent| parent.native_id),
-                    children: view
-                        .lineage
-                        .children
-                        .into_iter()
-                        .map(|child| CostRelative {
+                if view.truncated {
+                    unknown.push("lineage read bounded".to_string());
+                }
+                let parent = view.lineage.parent.and_then(|parent| {
+                    if !parent.resolved && plain_session_id(&parent.native_id) {
+                        unknown.push("lineage relative unresolved".to_string());
+                    }
+                    safe_relative(parent.native_id, &mut unknown)
+                });
+                let children = view
+                    .lineage
+                    .children
+                    .into_iter()
+                    .filter_map(|child| {
+                        if !child.resolved {
+                            unknown.push("lineage relative unresolved".to_string());
+                        }
+                        let Some(session) = child.session_id else {
+                            unknown.push("lineage relative unresolved".to_string());
+                            return None;
+                        };
+                        if !plain_session_id(&child.harness) {
+                            unknown.push("lineage relative is not a plain session id".to_string());
+                            return None;
+                        }
+                        safe_relative(session, &mut unknown).map(|session| CostRelative {
                             harness: child.harness,
-                            session: child.session_id.unwrap_or(child.reference),
+                            session,
                         })
-                        .collect(),
-                    forked_from: view.lineage.forked_from,
+                    })
+                    .collect();
+                let forked_from = view
+                    .lineage
+                    .forked_from
+                    .and_then(|id| safe_relative(id, &mut unknown));
+                unknown.sort();
+                unknown.dedup();
+                CostLineage {
+                    parent,
+                    children,
+                    forked_from,
                     unknown,
                 }
             }
             Ok(_) => CostLineage {
-                unknown: vec!["lineage resolved to a different session".to_string()],
+                unknown: vec!["lineage identity mismatch".to_string()],
                 ..CostLineage::default()
             },
-            Err(error) => CostLineage {
-                unknown: vec![crate::session_store::bounded_reason(&format!("{error:#}"))],
+            Err(_) => CostLineage {
+                unknown: vec!["lineage read failed".to_string()],
                 ..CostLineage::default()
             },
         },
     );
     Ok(facts)
+}
+
+fn safe_relative(id: String, unknown: &mut Vec<String>) -> Option<String> {
+    if plain_session_id(&id) {
+        Some(id)
+    } else {
+        unknown.push("lineage relative is not a plain session id".to_string());
+        None
+    }
+}
+
+fn sanitized_facts(held: &CostFacts) -> CostFacts {
+    let mut facts = held.clone();
+    for reason in &mut facts.incomplete {
+        if !portable_cost_reason(reason) {
+            *reason = "retained measurement gap".to_string();
+        }
+    }
+    if let Some(lineage) = &mut facts.lineage {
+        for reason in &mut lineage.unknown {
+            if !portable_lineage_reason(reason) {
+                *reason = "lineage read failed".to_string();
+            }
+        }
+        lineage.parent = lineage
+            .parent
+            .take()
+            .and_then(|id| safe_relative(id, &mut lineage.unknown));
+        lineage.forked_from = lineage
+            .forked_from
+            .take()
+            .and_then(|id| safe_relative(id, &mut lineage.unknown));
+        lineage.children.retain(|child| {
+            let safe = plain_session_id(&child.harness) && plain_session_id(&child.session);
+            if !safe {
+                lineage
+                    .unknown
+                    .push("lineage relative is not a plain session id".to_string());
+            }
+            safe
+        });
+        lineage.unknown.sort();
+        lineage.unknown.dedup();
+    }
+    facts
 }
 
 fn kebab<T: serde::Serialize>(value: T) -> Option<String> {
@@ -506,12 +619,18 @@ fn normalize(view: &agent_tapes_core::usage::UsageView) -> CostFacts {
     if view.truncated || !view.truncation.is_empty() {
         incomplete.push("the read was bounded and withheld part of the source".to_string());
     }
+    if !view.notes.is_empty() {
+        incomplete.push(format!("{} usage notes", view.notes.len()));
+    }
+    if let Some(read) = view.read.as_ref().filter(|read| !read.gaps.is_empty()) {
+        incomplete.push(format!("{} source read gaps", read.gaps.len()));
+    }
     for note in &view.notes {
         if note.contains("abandoned branch") {
-            incomplete.push(format!(
-                "{note} The pinned reader counts the active branch only, so consumption on \
-                 abandoned branches is outside the counters (tapes pi-consumption-across-branches)"
-            ));
+            incomplete.push(
+                "abandoned branch consumption is outside the pinned reader's active branch"
+                    .to_string(),
+            );
         }
     }
     let read = view.read.as_ref();
@@ -528,6 +647,8 @@ fn normalize(view: &agent_tapes_core::usage::UsageView) -> CostFacts {
             .map(|digest| format!("sha256:{}", digest.value)),
         basis,
         coverage,
+        source_started_at: view.session.started_at,
+        source_start_uncertain: false,
         lineage: None,
         counters: CostCounters {
             input: tokens.and_then(|tokens| tokens.input),
@@ -891,15 +1012,49 @@ fn render_report(
         runs.get(key)
             .into_iter()
             .flatten()
-            .filter(|(_, _, binding)| binding.is_none())
-            .map(|(id, _, _)| id.clone())
+            .filter(|run| run.candidates.is_empty())
+            .map(|run| run.dispatch_event_id.clone())
             .collect()
     };
     let withheld_for = |keys: &[&WorkKey]| -> Vec<String> {
-        keys.iter()
+        let mut reasons: Vec<String> = keys
+            .iter()
             .flat_map(|key| unbound_in(key))
             .map(|id| format!("dispatch {id} is unbound, so its consumption is unassigned"))
-            .collect()
+            .collect();
+        for key in keys {
+            for run in runs
+                .get(key)
+                .into_iter()
+                .flatten()
+                .filter(|run| run.conflicting)
+            {
+                reasons.push(format!(
+                    "dispatch {} has a binding conflict, so its consumption is unassigned",
+                    run.dispatch_event_id
+                ));
+            }
+        }
+        for row in sessions
+            .iter()
+            .filter(|row| row.membership.iter().any(|work| keys.contains(&work)))
+        {
+            let first = row.spans.iter().map(|span| span.dispatched_at).min();
+            match row.measured.facts.as_ref() {
+                Some(facts)
+                    if !facts.source_start_uncertain && facts.source_started_at.is_some() =>
+                {
+                    if facts.source_started_at < first {
+                        reasons.push(format!("session {} has pre-dispatch consumption: its recording begins before its first dispatch", row.key()));
+                    }
+                }
+                _ => reasons.push(format!(
+                    "session {} has an unknown source start, so its consumption is unassigned",
+                    row.key()
+                )),
+            }
+        }
+        reasons
     };
     let within = |keys: &[&WorkKey]| -> (Vec<&SessionRow>, Vec<String>) {
         let mut inside = Vec::new();
@@ -927,16 +1082,16 @@ fn render_report(
             .get(&item.key)
             .into_iter()
             .flatten()
-            .map(|(id, round, binding)| {
-                let session = binding
-                    .as_ref()
-                    .map(|(harness, session)| format!("{harness}:{session}"));
+            .map(|run| {
+                let session = (!run.conflicting).then(|| run.candidates.first()).flatten();
                 let per_run = match &session {
+                    _ if run.conflicting => "conflicting-bindings",
                     None => "unbound",
                     Some(key) if span_count(key) > 1 => "shared-among-spans",
                     Some(_) => "whole-session",
                 };
-                json!({"dispatch_event_id": id, "round": round, "session": session, "per_run": per_run})
+                json!({"dispatch_event_id": run.dispatch_event_id, "round": run.round,
+                    "session": session, "binding_candidates": run.candidates, "per_run": per_run})
             })
             .collect();
         let mut entry = json!({
@@ -987,6 +1142,16 @@ fn render_report(
         })
         .collect();
     let unbound: Vec<String> = all.iter().flat_map(|key| unbound_in(key)).collect();
+    let assignment_gaps = withheld_for(&all);
+    let unavailable_sources: BTreeMap<String, &str> = sessions
+        .iter()
+        .filter_map(|row| match &row.measured.source {
+            Source::Fresh => None,
+            Source::Retained(_, reason) | Source::Unavailable(reason) => {
+                Some((row.key(), reason.as_str()))
+            }
+        })
+        .collect();
     let mut identities = vec![json!({"scope": "union", "identity": union["identity"]})];
     for item in &work {
         for scope in ["direct", "inclusive"] {
@@ -1006,16 +1171,18 @@ fn render_report(
         "sessions": session_rows,
         "coverage": {
             "measurement": {
-                "status": if unmeasured.is_empty() { "complete" } else { "incomplete" },
+                "status": if unmeasured.is_empty() && unavailable_sources.is_empty() { "complete" } else { "incomplete" },
                 "sessions": unmeasured,
+                "current_sources": {"status": if unavailable_sources.is_empty() { "complete" } else { "incomplete" }, "unavailable": unavailable_sources},
                 "residual": {
                     "status": "withheld",
                     "reason": "the residual between a recorded total and its requests waits for tapes' usage-total-request-reconciliation, which the pinned reader does not carry",
                 },
             },
             "assignment": {
-                "status": if unbound.is_empty() { "complete" } else { "incomplete" },
+                "status": if assignment_gaps.is_empty() { "complete" } else { "incomplete" },
                 "unbound": unbound,
+                "reasons": assignment_gaps,
                 "outside": {
                     "statement": "consumption no dispatch names, such as a lead session, is outside assignment coverage: it is not measured here and is never zero",
                     "sessions": lead,
@@ -1035,9 +1202,10 @@ fn session_json(row: &SessionRow) -> Value {
     let mut measurement = json!({});
     match &measured.source {
         Source::Fresh => measurement["source"] = json!("fresh"),
-        Source::Retained(event_id) => {
+        Source::Retained(event_id, reason) => {
             measurement["source"] = json!("retained");
             measurement["retained_event_id"] = json!(event_id);
+            measurement["fresh_read"] = json!({"status": "unavailable", "reason": reason});
         }
         Source::Unavailable(reason) => {
             measurement["source"] = json!("unavailable");
@@ -1059,6 +1227,8 @@ fn session_json(row: &SessionRow) -> Value {
             measurement["lineage"] = json!(facts.lineage);
             measurement["basis"] = json!(facts.basis);
             measurement["coverage"] = json!(facts.coverage);
+            measurement["source_started_at"] = json!(facts.source_started_at);
+            measurement["source_start_uncertain"] = json!(facts.source_start_uncertain);
         }
         None => measurement["status"] = json!("unmeasured"),
     }
@@ -1072,6 +1242,7 @@ fn session_json(row: &SessionRow) -> Value {
         "session": row.session,
         "spans": row.spans.iter().map(|span| json!({
             "dispatch_event_id": span.dispatch_event_id,
+            "dispatched_at": span.dispatched_at,
             "forked_from": span.forked_from,
             "round": span.round,
             "work": span.work.label(),
@@ -1139,6 +1310,16 @@ fn print_totals(indent: &str, heading: &str, totals: &Value) {
     for reason in reasons {
         println!("{indent}  {}", crate::render::one_line(&reason));
     }
+    if let Some(unknown) = totals["identity"]["unknown"].as_object() {
+        for (session, reasons) in unknown {
+            for reason in reasons.as_array().into_iter().flatten() {
+                println!(
+                    "{indent}  {session}: {}",
+                    reason.as_str().unwrap_or_default()
+                );
+            }
+        }
+    }
 }
 
 fn print_report(report: &Value) {
@@ -1201,6 +1382,17 @@ fn print_report(report: &Value) {
                 "    conflict: a fresh read disagrees with retained facts at the same frontier"
             );
         }
+        if measurement["fresh_read"]["status"] == "unavailable" {
+            println!(
+                "    fresh read unavailable: {}",
+                measurement["fresh_read"]["reason"]
+                    .as_str()
+                    .unwrap_or_default()
+            );
+        }
+        for reason in measurement["reasons"].as_array().into_iter().flatten() {
+            println!("    {}", reason.as_str().unwrap_or_default());
+        }
         print_totals("    ", "measured", &session["totals"]);
     }
     let coverage = &report["coverage"];
@@ -1223,6 +1415,13 @@ fn print_report(report: &Value) {
             .as_str()
             .unwrap_or_default()
     );
+    for reason in coverage["assignment"]["reasons"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        println!("    {}", reason.as_str().unwrap_or_default());
+    }
     println!(
         "  identity: {}",
         coverage["identity"]["status"].as_str().unwrap_or_default()
