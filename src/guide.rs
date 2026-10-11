@@ -2471,6 +2471,9 @@ RULES THAT CHANGE WHAT YOU DO
     session; lane renewal and closure match its harness and session. A stale
     lane can be closed by another complete identity with outcome `expired`.
     Established identity strings retain their whitespace on writes and reads.
+    Lane renewal checks existence and ownership before reading status input
+    and again under the transition lock. Lane opening and closure share that
+    lock, so the check and append observe one lane state.
   - A lane is occupancy of a topic; a claim on a journal artifact is occupancy
     of that file. Both render on a row and neither becomes the other: work with
     no artifact still takes a lane.

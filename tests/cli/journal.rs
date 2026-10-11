@@ -17831,3 +17831,153 @@ fn claim_renewal_replaces_ttl_and_controls_expiry() {
         );
     }
 }
+
+#[test]
+fn lane_renewal_preflights_status_stdin() {
+    for foreign in [false, true] {
+        let repo = Repo::new();
+        if foreign {
+            repo.arc(&repo.root)
+                .env("ARC_SESSION", "other")
+                .args(["journal", "lane", "open", "renew-preflight"])
+                .assert()
+                .success();
+        }
+        let before = fs::read(journal_dir(&repo).join("events.jsonl")).unwrap_or_default();
+        let mut child = spawn_arc_with_open_stdin(
+            &repo,
+            &repo.root,
+            &[
+                "journal",
+                "lane",
+                "renew",
+                "renew-preflight",
+                "--status-file",
+                "-",
+            ],
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break Some(status);
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        if status.is_none() {
+            child.kill().unwrap();
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            status.is_some(),
+            "lane renewal waited on stdin: foreign={foreign}"
+        );
+        assert!(!status.unwrap().success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(if foreign {
+                "owned by"
+            } else {
+                "does not exist"
+            }),
+            "{stderr}"
+        );
+        assert_eq!(
+            fs::read(journal_dir(&repo).join("events.jsonl")).unwrap_or_default(),
+            before
+        );
+    }
+}
+
+#[test]
+fn lane_renewal_rechecks_state_under_transition_lock() {
+    use std::io::Write;
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["journal", "lane", "open", "renew-race"])
+        .assert()
+        .success();
+    let dir = journal_dir(&repo);
+    fs::create_dir_all(dir.join(".locks")).unwrap();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join(".locks/transition.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let mut child = spawn_arc_with_open_stdin(
+        &repo,
+        &repo.root,
+        &[
+            "journal",
+            "lane",
+            "renew",
+            "renew-race",
+            "--status-file",
+            "-",
+        ],
+    );
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"Working.\n")
+        .unwrap();
+    assert_waiting_on_transition_lock(&mut [&mut child]);
+    let mut closed = journal_events(&dir)
+        .into_iter()
+        .find(|event| event["event"] == "lane-opened")
+        .unwrap();
+    closed["event"] = "lane-closed".into();
+    closed["outcome"] = "done".into();
+    let mut events = fs::read_to_string(dir.join("events.jsonl")).unwrap();
+    events.push_str(&format!("{closed}\n"));
+    fs::write(dir.join("events.jsonl"), &events).unwrap();
+    lock.unlock().unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("does not exist"));
+    assert_eq!(
+        fs::read_to_string(dir.join("events.jsonl")).unwrap(),
+        events
+    );
+}
+
+#[test]
+fn lane_state_writers_share_transition_lock() {
+    for verb in ["open", "close"] {
+        let repo = Repo::new();
+        repo.arc(&repo.root)
+            .args(["journal", "lane", "open", "serialized"])
+            .assert()
+            .success();
+        let dir = journal_dir(&repo);
+        fs::create_dir_all(dir.join(".locks")).unwrap();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dir.join(".locks/transition.lock"))
+            .unwrap();
+        lock.lock().unwrap();
+        let mut child = spawn_arc_keeping_stderr(
+            &repo,
+            &repo.root,
+            &["journal", "lane", verb, "serialized"],
+            "session-a",
+        );
+        assert_waiting_on_transition_lock(&mut [&mut child]);
+        lock.unlock().unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}

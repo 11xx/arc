@@ -262,6 +262,7 @@ pub enum LaneCmd {
     /// A lane's owner is the declared harness and session together, so both
     /// must be given. Opening replaces only that owner's own previous lane;
     /// another harness presenting the same session string keeps its lane.
+    /// Ownership checks and lane changes share the journal transition lock.
     Open {
         /// Kebab-case topic slug naming the lane
         topic: String,
@@ -280,7 +281,9 @@ pub enum LaneCmd {
         status_file: Option<String>,
     },
     /// Renew a lane owned by this harness and session.
-    /// Recorded renewal requires both owner coordinates and compares them verbatim
+    /// Recorded renewal requires both owner coordinates and compares them verbatim.
+    /// Lane existence and ownership are checked before status input and again
+    /// under the transition lock; opening and closure share that lock
     Renew {
         /// The lane to renew
         topic: String,
@@ -299,6 +302,7 @@ pub enum LaneCmd {
     /// A live lane closes only for the owning harness and session; a stale
     /// one closes for anyone with `--outcome expired`. Recorded closure requires
     /// both owner coordinates; foreign expiry is checked at the event timestamp.
+    /// Ownership checks and lane changes share the journal transition lock.
     Close {
         /// The lane to close
         topic: String,
@@ -10934,6 +10938,9 @@ fn lane(ctx: &Ctx, command: LaneCmd) -> Result<i32> {
             if scope.iter().any(|topic| !valid_topic(topic)) {
                 bail!("scope topics must be comma-separated kebab-case-safe topics");
             }
+            let _transition = lock_journal_transition(&dir)?;
+            let now = Utc::now();
+            let lanes = lanes_from_journal(&read_events(&dir)?, now);
             if let Some(overlap) = lanes.iter().find(|lane| {
                 lane.state == "live"
                     && lane.owner != owner
@@ -10961,21 +10968,29 @@ fn lane(ctx: &Ctx, command: LaneCmd) -> Result<i32> {
             status,
             status_file,
         } => {
+            let owner = require_lane_owner(ctx)?;
+            let check_owner = |lanes: &[LaneEntry]| -> Result<()> {
+                let current = lanes
+                    .iter()
+                    .find(|lane| lane.topic == topic)
+                    .with_context(|| format!("lane {topic} does not exist or is already closed"))?;
+                if current.owner != owner {
+                    bail!("lane {topic} is owned by {}", current.owner);
+                }
+                Ok(())
+            };
+            check_owner(&lanes)?;
+            if let Some(ttl) = &ttl {
+                parse_ttl(ttl).context("ttl must be a positive integer followed by s, m, or h")?;
+            }
             let status = match (status, status_file) {
                 (None, None) => None,
                 (status, status_file) => Some(crate::commands::read_body(status, status_file)?),
             };
-            let owner = require_lane_owner(ctx)?;
-            let current = lanes
-                .iter()
-                .find(|lane| lane.topic == topic)
-                .with_context(|| format!("lane {topic} does not exist or is already closed"))?;
-            if current.owner != owner {
-                bail!("lane {topic} is owned by {}", current.owner);
-            }
-            if let Some(ttl) = &ttl {
-                parse_ttl(ttl).context("ttl must be a positive integer followed by s, m, or h")?;
-            }
+            let _transition = lock_journal_transition(&dir)?;
+            let now = Utc::now();
+            let lanes = lanes_from_journal(&read_events(&dir)?, now);
+            check_owner(&lanes)?;
             let mut message = "lane renewed".to_string();
             if let Some(ttl) = ttl {
                 message.push_str(&format!(" [{ttl}]"));
@@ -10991,6 +11006,9 @@ fn lane(ctx: &Ctx, command: LaneCmd) -> Result<i32> {
             note,
         } => {
             let owner = require_lane_owner(ctx)?;
+            let _transition = lock_journal_transition(&dir)?;
+            let now = Utc::now();
+            let lanes = lanes_from_journal(&read_events(&dir)?, now);
             let current = lanes
                 .iter()
                 .find(|lane| lane.topic == topic)
