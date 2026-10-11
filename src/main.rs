@@ -29,6 +29,7 @@ mod policy;
 mod process_group;
 mod project;
 mod provisional;
+mod received_evidence;
 mod registry;
 mod relations;
 mod render;
@@ -3396,6 +3397,35 @@ enum CandidateCmd {
     /// brief version; `adoption-drops-producer`, naming them, when the
     /// producers omit anyone along the adopted registration's parent chain;
     /// `unknown-episode` for a claim not recorded on the brief's change.
+    ///
+    /// --evidence-file also records `candidate-evidence-received` right after
+    /// the registration and prints `received evidence: <event> (external)`:
+    /// an `arc-received-evidence/1` document of what an external execution
+    /// reports, written once. It carries the private run handle, the packet
+    /// or brief reference, the source, tested and report heads (each a full
+    /// commit and tree), provenance entries, receipt references, commands with
+    /// reported results, the environment, the head the results apply to, and
+    /// `omissions`. A provenance entry is one role (producer, collector or
+    /// reviewer) with the native producer and the model, each with its source
+    /// coordinates, and the forge account, review sender, Git author and Git
+    /// committer as fields of their own; none stands in for another, and two
+    /// roles behind one account are two entries. A receipt is a
+    /// RetainedContentRef (provider, handle, sha256, byte_length, media_type,
+    /// capture); it is a claim about bytes until custody holds them.
+    /// `omissions` is required: provenance, receipts, commands and
+    /// environment each appear in it exactly when empty.
+    ///
+    /// Received evidence is the sender's claim and never an evaluation: it
+    /// records no `candidate-verified` or `verification-recorded` event, and
+    /// `select` reads none of it as a gate result. Candidate producers,
+    /// patchset contributors and --on-behalf-of keep their roles. --custody-dir
+    /// copies each receipt's file from `DIR/sha256/<digest>` into custody once
+    /// every one has the recorded length and sha256. Also refused, writing
+    /// nothing: `malformed-evidence` for a document that breaks its schema or
+    /// contradicts itself (one commit with two trees, a result against its exit
+    /// code, an empty section not named in `omissions`); `evidence-tree-mismatch`
+    /// for a head commit this repository holds whose tree is not the claimed
+    /// one; a --custody-dir file that fails verification.
     Register {
         /// The content: a tree, or a commit, which is recorded as its tree
         #[arg(long)]
@@ -3424,12 +3454,29 @@ enum CandidateCmd {
         /// The candidate id; generated from the change's slug when omitted
         #[arg(long)]
         id: Option<String>,
+        /// An `arc-received-evidence/1` document: what an external execution
+        /// reports of the candidate, recorded as the sender's claim beside the
+        /// registration
+        #[arg(long = "evidence-file", value_name = "FILE")]
+        evidence_file: Option<String>,
+        /// Adapter-materialized receipt files for --evidence-file, at
+        /// `DIR/sha256/<digest>`, verified before anything is recorded and
+        /// copied into custody
+        #[arg(long = "custody-dir", value_name = "DIR", requires = "evidence_file")]
+        custody_dir: Option<String>,
     },
     /// Show one candidate: tree, contract, producers, parents, adoptions,
     /// episodes, judgements, retirement, whether its pin holds the tree,
     /// evaluations, selections naming it (promoted, superseded, or not
     /// promoted), promotion refs no `candidate-promoted` event records, and
-    /// every registration sharing its tree. `--json` emits `arc-candidate/1`
+    /// every registration sharing its tree. Evidence received from an external
+    /// execution is `received_evidence` with `origin: external`: each head as
+    /// reported beside `resolved_commit`, the commit's resolution through
+    /// recorded rewrites (itself, its successor, or null when dropped);
+    /// `tested_tree_is_registered_tree`; provenance by role; each receipt with
+    /// its custody availability (available, unavailable or corrupt); commands,
+    /// environment, applicability and omissions. It is null without evidence,
+    /// and none of it is an evaluation. `--json` emits `arc-candidate/1`
     /// Records no events; ledger reads do not require a parseable append policy.
     Show {
         /// Candidate id
@@ -3438,9 +3485,9 @@ enum CandidateCmd {
         #[arg(long)]
         json: bool,
     },
-    /// List registrations as `show` renders them, grouping every tree more
-    /// than one registration names under `shared_trees`. `--json` emits
-    /// `arc-candidate/1`
+    /// List registrations as `show` renders them, received evidence included
+    /// and labelled external, grouping every tree more than one registration
+    /// names under `shared_trees`. `--json` emits `arc-candidate/1`
     /// Records no events; ledger reads do not require a parseable append policy.
     List {
         /// Only candidates answering this change's brief
@@ -3487,7 +3534,9 @@ enum CandidateCmd {
     /// the gate, its command, timeout, and environment probe as declared
     /// when it ran, the environment identity the probe yielded, and the
     /// result; `evaluation: <event>` names it for `select --evaluation`.
-    /// A hostname that cannot be read is recorded as `unknown`.
+    /// A hostname that cannot be read is recorded as `unknown`. These are the
+    /// only evaluations: evidence received from an external execution is
+    /// recorded by `register --evidence-file` and is no evaluation.
     /// Exits 0 when every gate run passes and 1 otherwise. Refused:
     /// `unknown-candidate`; `unknown-gate` for a --gate the change is not
     /// required to pass; `target-unreadable` when the target cannot be read
@@ -3519,7 +3568,9 @@ enum CandidateCmd {
     /// evaluation, `unrecorded`, `other-registration` (under `never`),
     /// `other-tree`, `other-declaration`, `environment-unrecorded`,
     /// `environment-other`, or `failed`, and `no-evaluation` for a gate none
-    /// is named for. Each `--must-read` of the registration's brief version
+    /// is named for. Received evidence satisfies no ground: whatever an
+    /// external execution reports of any tree, a required gate needs an
+    /// evaluation at the shipped tree. Each `--must-read` of the registration's brief version
     /// needs a tool read (`arc context read`) on the registration or one
     /// along its parent chain, by an episode one of them cites, at the
     /// required version (an artifact's body digest; a file's blob, inferred
@@ -5631,6 +5682,8 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 adopts,
                 episodes,
                 id,
+                evidence_file,
+                custody_dir,
             } => commands::candidate::register(
                 &ctx,
                 commands::candidate::RegisterArgs {
@@ -5641,6 +5694,8 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     adopts,
                     episodes,
                     id,
+                    evidence_file,
+                    custody_dir,
                 },
             )
             .map(|_| 0),

@@ -171,11 +171,19 @@ fn hex(s: &str, widths: &[usize]) -> Result<()> {
     );
     Ok(())
 }
+impl RetainedContentRef {
+    /// The reference names a provider, an opaque handle and a media type, and
+    /// its digest is a full SHA-256.
+    pub fn validate(&self) -> Result<()> {
+        hex(&self.sha256, &[64])?;
+        nonblank(&self.provider)?;
+        nonblank(&self.handle)?;
+        nonblank(&self.media_type)
+    }
+}
 fn reference(content: &RetainedContentRef, digest: &str, length: u64) -> Result<()> {
     hex(digest, &[64])?;
-    nonblank(&content.provider)?;
-    nonblank(&content.handle)?;
-    nonblank(&content.media_type)?;
+    content.validate()?;
     ensure!(
         content.sha256 == digest && content.byte_length == length,
         "retention reference digest/length disagreement"

@@ -1789,6 +1789,17 @@ FORGE
   render as unretained assertions with unknown acquisition time. Checks with
   no link have unknown PR identity. Observed heads never come from rewrites.
 
+  Evidence origins stay apart. A local gate evaluation is a result arc itself
+  ran at a tree (`verify`, `candidate verify`); the gates of integration and
+  selection read evaluations. Hosted checks are a provider's rollup for one PR
+  identity and observed head, read through the forge observations above.
+  Received execution evidence is an external run's claim about its own
+  commits, recorded on a candidate (see CANDIDATES), with its provenance and
+  receipts. Each is labelled by origin in the views that show it, and none
+  stands in for another: a green hosted check or a received pass is no local
+  evaluation, a local pass says nothing of a provider's checks, and a Git or
+  forge identity is never an agent role.
+
   Arc records provider assertions through forge declare/link/checks/pr-state;
   it never contacts a provider. Link head, checks PR head, lifecycle PR head
   and merge SHA retain their provider-observed values. Views pair each
@@ -2458,6 +2469,7 @@ CANDIDATES
     arc candidate register --tree <tree-or-commit> --brief <change>[@<event>]
                            --producer <actor>... [--parent <id>]...
                            [--adopts <id>]... [--episode <claim>]... [--id <id>]
+                           [--evidence-file <file> [--custody-dir <dir>]]
                        Record an alternative answer to one brief version and
                        pin its tree at `refs/arc/candidate/<id>`.
     arc candidate show <id> | list [--brief <change>] [--json]
@@ -2485,6 +2497,50 @@ CANDIDATES
 
   A judgement — rejected, or superseded by another registration — is its
   declarant's claim. It alters no registration and selects nothing.
+
+  Received evidence is what an external execution reports of a candidate,
+  recorded beside the registration with `register --evidence-file`. The
+  document, `arc-received-evidence/1`, carries the execution's private run
+  handle; the packet or brief reference it was handed; the source, tested and
+  report heads, each a full commit with its tree; provenance entries;
+  receipt references (RetainedContentRef: provider, opaque handle, sha256,
+  byte_length, media_type, capture); commands with reported results (pass,
+  fail, error or not-run, an optional exit code, an optional receipt);
+  the environment; the head the results apply to; and omissions. The three
+  heads are three claims: a report commit that is the source's child does not
+  move the tested head, and the tested head need not descend from either.
+  Arc records original commits as reported and resolves each through recorded
+  rewrites beside them, as `resolved_commit`: itself, its successor, or null
+  when a rewrite dropped it. A commit this repository holds has the tree the
+  document claims, or the registration is refused; one commit named twice
+  carries one tree. Omissions are explicit: provenance, receipts, commands and
+  environment each appear in `omissions`, with a reason, exactly when empty,
+  and `omissions` itself is required.
+
+  Each provenance entry is one agent role (producer, collector or reviewer)
+  with the observations of it: the native producer and the model, each with
+  its source coordinates (a kind and a reference), the forge account, the
+  review sender, the Git author and the Git committer. They are separate
+  facts and none implies another: one forge account behind three roles is
+  three entries, and account equality establishes no equality of roles,
+  models or Git identities. A candidate's `producers`, a promoted patchset's
+  contributors and `--on-behalf-of` keep their own roles and are never
+  derived from, or merged with, a provenance entry. `registered_by` and the
+  evidence's `recorded_by` are the declarant of the write.
+
+  Received evidence is the sender's claim, written once and never altered, and
+  never an evaluation. It records no `candidate-verified` or
+  `verification-recorded` event and eligibility for selection is unchanged:
+  each required gate still needs an evaluation `candidate verify` ran at the
+  shipped tree, whatever the evidence reports of any tree. `candidate show`
+  and `list` render it as `received_evidence` with `origin: external` and
+  `tested_tree_is_registered_tree`, which says only whether the tree the
+  execution reports having tested is the registered one. Each receipt reads
+  from custody as available, unavailable or corrupt, and a missing receipt
+  degrades only the claim that cites it. `--custody-dir DIR` copies each
+  receipt's file from `DIR/sha256/<digest>` into custody after verifying its
+  length and sha256, as `forge observe --custody-dir` does; a mismatch
+  refuses and records nothing.
 
   Retirement deletes a candidate's pin and records that it did, and only when
   no root reaches the candidate: a selection or a promotion, reaching what its
@@ -3162,6 +3218,7 @@ SCHEMAS
     `arc-custody-bundle/1`           arc export / import --custody-dir
     `arc-forge-observation/1`        arc forge observe --file
     `arc-forge-receipt/1`            arc forge observe|link|checks|pr-state --json
+    `arc-received-evidence/1`        arc candidate register --evidence-file
     `arc-replica-bundle/3`           arc replica export / import
     `arc-replica-event/3`            one event inside an arc-replica-bundle
     `arc-journal-bundle/2`           arc journal export / import

@@ -5,14 +5,20 @@
 //! append, so the rules are judged against the ledger the event joins.
 
 pub use crate::candidate::Ledger;
-use crate::candidate::{self, contract_label, Registration};
+use crate::candidate::{self, contract_label, Received, Registration};
+use crate::custody::{self, Content};
+use crate::forge_observation::RetainedContentRef;
 use crate::gitio;
 use crate::ids;
 use crate::model::{
     CandidateBriefRef, CandidateJudgement, CaptureState, DeclaredRelation, DeclaredTarget,
     InferredBlob, Payload, ReadArtifact, ReadCoverage, RelationSubject, VerifyResult,
 };
+use crate::received_evidence::{
+    self, Applicability, Command, Environment, Omission, Provenance, ReceivedEvidence,
+};
 use crate::relations::Relations;
+use crate::rewrite::{Fate, RewriteMap};
 use crate::store::Store;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
@@ -32,6 +38,8 @@ pub struct RegisterArgs {
     pub adopts: Vec<String>,
     pub episodes: Vec<String>,
     pub id: Option<String>,
+    pub evidence_file: Option<String>,
+    pub custody_dir: Option<String>,
 }
 
 /// The candidate ledger as the repository holds it.
@@ -69,6 +77,23 @@ pub fn register(ctx: &Ctx, args: RegisterArgs) -> Result<()> {
         }
     }
 
+    let received = args
+        .evidence_file
+        .as_deref()
+        .map(|path| read_evidence(&ctx.cwd, path))
+        .transpose()?;
+    let materialization = match (&received, args.custody_dir.as_deref()) {
+        (Some(evidence), Some(dir)) => {
+            let wanted = evidence.receipts.iter().map(Content::from).collect();
+            Some(
+                custody::plan_materialization(std::path::Path::new(dir), &wanted).with_context(
+                    || format!("custody directory {dir} refused; nothing was recorded"),
+                )?,
+            )
+        }
+        _ => None,
+    };
+
     let mut event = ctx.event(
         &store,
         Store::REPOSITORY_SCOPE,
@@ -82,23 +107,88 @@ pub fn register(ctx: &Ctx, args: RegisterArgs) -> Result<()> {
             episodes: distinct(args.episodes),
         },
     )?;
+    let mut evidence_event = received
+        .map(|evidence| {
+            ctx.event(
+                &store,
+                Store::REPOSITORY_SCOPE,
+                Payload::CandidateEvidenceReceived {
+                    candidate_id: candidate_id.clone(),
+                    evidence,
+                },
+            )
+        })
+        .transpose()?;
     // Judged by the same replay a bundle's copy is, so a registration typed
     // here can never be one an import would refuse.
     let mut ledger = ledger;
     ledger.record(&event)?;
+    if let Some(evidence) = &evidence_event {
+        ledger.record(evidence)?;
+    }
     ctx.ensure_declared_actor(&store)?;
 
     // Pinned before it is recorded: an interrupted registration leaves a pin
     // `arc doctor` names, never a record of content Git may collect.
     let reference = candidate::candidate_ref(&candidate_id);
     gitio::update_ref(&ctx.cwd, &reference, &tree)?;
+    // Verified bytes land before the event that cites them.
+    if let Some(materialization) = &materialization {
+        materialization.publish(&custody::Custody::at(&store.root))?;
+    }
     store.append_local_repository_event(&mut event)?;
+    if let Some(evidence) = &mut evidence_event {
+        store
+            .append_local_repository_event(evidence)
+            .with_context(|| {
+                format!(
+                    "candidate {candidate_id} is registered (event {}) but its received \
+                     evidence was not recorded",
+                    event.event_id
+                )
+            })?;
+    }
     println!("candidate: {candidate_id}");
     println!("tree: {tree}");
     println!("brief: {}", contract_label(&brief));
     println!("pinned: {reference}");
     println!("event: {}", event.event_id);
+    if let Some(evidence) = &evidence_event {
+        println!("received evidence: {} (external)", evidence.event_id);
+    }
     Ok(())
+}
+
+/// A received-evidence document read from `path` and judged by every rule
+/// that needs only the document and the object store: its own consistency,
+/// and the tree of each commit this repository holds.
+fn read_evidence(cwd: &std::path::Path, path: &str) -> Result<ReceivedEvidence> {
+    let bytes = std::fs::read(path).with_context(|| format!("cannot read evidence file {path}"))?;
+    let evidence: ReceivedEvidence = serde_json::from_slice(&bytes).with_context(|| {
+        format!(
+            "malformed-evidence: {path} is not an {} document",
+            received_evidence::SCHEMA
+        )
+    })?;
+    evidence
+        .validate()
+        .map_err(|error| anyhow::anyhow!("malformed-evidence: {error}"))?;
+    for (role, head) in evidence.heads.each() {
+        if gitio::commit_exists(cwd, &head.commit)? {
+            let held = gitio::resolve_tree(cwd, &head.commit)?;
+            if held.as_deref() != Some(head.tree.as_str()) {
+                bail!(
+                    "evidence-tree-mismatch: the {} head {} is held here with tree {}, not the \
+                     claimed {}",
+                    role.as_str(),
+                    head.commit,
+                    held.as_deref().unwrap_or("none"),
+                    head.tree
+                );
+            }
+        }
+    }
+    Ok(evidence)
 }
 
 /// Names in the order given, each once: a flag repeated names one member.
@@ -295,11 +385,64 @@ struct CandidateView {
     retired: Option<RetirementView>,
     pin: PinView,
     relations: RelationsView,
+    /// What the candidate received from an external execution, when it did.
+    received_evidence: Option<ReceivedView>,
     evaluations: Vec<EvaluationView>,
     selections: Vec<SelectionView>,
     /// Promotion refs of this candidate no `candidate-promoted` event
     /// records.
     interrupted_promotions: Vec<InterruptedView>,
+}
+
+/// Evidence a candidate received from outside this ledger. It is the
+/// sender's claim, labelled by its origin; it is no evaluation and no gate
+/// reads it as one.
+#[derive(Serialize)]
+struct ReceivedView {
+    origin: &'static str,
+    event_id: String,
+    recorded_by: String,
+    recorded_at: DateTime<Utc>,
+    schema: String,
+    run_handle: String,
+    packet: String,
+    heads: HeadsView,
+    /// Whether the tree the run reports having tested is the registered tree.
+    /// A claim about a tree, never an evaluation of it.
+    tested_tree_is_registered_tree: bool,
+    provenance: Vec<Provenance>,
+    receipts: Vec<ReceiptView>,
+    commands: Vec<Command>,
+    environment: Option<Environment>,
+    applicability: Applicability,
+    omissions: Vec<Omission>,
+}
+
+#[derive(Serialize)]
+struct HeadsView {
+    source: HeadView,
+    tested: HeadView,
+    report: HeadView,
+}
+
+/// A head as the run reported it, beside what a recorded rewrite makes of
+/// the commit here: itself when none touched it, its successor, or null
+/// when a rewrite dropped it.
+#[derive(Serialize)]
+struct HeadView {
+    commit: String,
+    tree: String,
+    resolved_commit: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ReceiptView {
+    #[serde(flatten)]
+    reference: RetainedContentRef,
+    /// `available`, `unavailable` or `corrupt`, read from custody now.
+    availability: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -477,10 +620,30 @@ fn emit(ctx: &Ctx, ledger: &Ledger, selected: Vec<&Registration>, json: bool) ->
         })
         .collect::<Vec<_>>();
     let interrupted = super::selection::interrupted_promotions(&ctx.cwd, ledger)?;
+    let store = ctx.store()?;
+    let custody = custody::Custody::at(&store.root);
+    // A rewrite map is read only for evidence that names commits to resolve.
+    let rewrites = if selected
+        .iter()
+        .any(|registration| ledger.received_by(&registration.candidate_id).is_some())
+    {
+        Some(RewriteMap::load(&store).context("the recorded rewrites do not load")?)
+    } else {
+        None
+    };
     let candidates = selected
         .into_iter()
-        .map(|registration| view(ledger, &relations, registration, &pins, &interrupted))
-        .collect::<Vec<_>>();
+        .map(|registration| {
+            view(
+                ledger,
+                &relations,
+                registration,
+                &pins,
+                &interrupted,
+                (rewrites.as_ref(), &custody),
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
     let document = CandidateDocument {
         schema: CANDIDATE_SCHEMA,
         candidates,
@@ -500,10 +663,15 @@ fn view(
     registration: &Registration,
     pins: &BTreeMap<String, String>,
     interrupted: &[super::selection::Interrupted],
-) -> CandidateView {
+    (rewrites, custody): (Option<&RewriteMap>, &custody::Custody),
+) -> Result<CandidateView> {
     let value = pins.get(&registration.candidate_id).cloned();
     let id = registration.candidate_id.as_str();
-    CandidateView {
+    let received_evidence = ledger
+        .received_by(id)
+        .map(|received| received_view(received, registration, rewrites, custody))
+        .transpose()?;
+    Ok(CandidateView {
         candidate_id: registration.candidate_id.clone(),
         tree: registration.tree.clone(),
         brief: registration.brief.clone(),
@@ -538,6 +706,7 @@ fn view(
             value,
         },
         relations: relations_view(relations, &registration.candidate_id),
+        received_evidence,
         evaluations: ledger
             .evaluations_of(id)
             .into_iter()
@@ -594,7 +763,63 @@ fn view(
                 commit: interrupted.commit.clone(),
             })
             .collect(),
-    }
+    })
+}
+
+fn received_view(
+    received: &Received,
+    registration: &Registration,
+    rewrites: Option<&RewriteMap>,
+    custody: &custody::Custody,
+) -> Result<ReceivedView> {
+    let evidence = &received.evidence;
+    let head = |head: &received_evidence::Head| -> Result<HeadView> {
+        let resolved_commit = match rewrites.map(|map| map.fate(&head.commit)).transpose()? {
+            Some(Some(Fate::Dropped)) => None,
+            Some(Some(Fate::Rewritten(successor))) => Some(successor),
+            Some(None) | None => Some(head.commit.clone()),
+        };
+        Ok(HeadView {
+            commit: head.commit.clone(),
+            tree: head.tree.clone(),
+            resolved_commit,
+        })
+    };
+    Ok(ReceivedView {
+        origin: "external",
+        event_id: received.event_id.clone(),
+        recorded_by: received.declarant.clone(),
+        recorded_at: received.recorded_at,
+        schema: evidence.schema.clone(),
+        run_handle: evidence.run_handle.clone(),
+        packet: evidence.packet.clone(),
+        heads: HeadsView {
+            source: head(&evidence.heads.source)?,
+            tested: head(&evidence.heads.tested)?,
+            report: head(&evidence.heads.report)?,
+        },
+        tested_tree_is_registered_tree: evidence.heads.tested.tree == registration.tree,
+        provenance: evidence.provenance.clone(),
+        receipts: evidence
+            .receipts
+            .iter()
+            .map(|reference| {
+                let availability = custody.availability(&Content::from(reference));
+                ReceiptView {
+                    reference: reference.clone(),
+                    availability: availability.label(),
+                    detail: match &availability {
+                        custody::Availability::Corrupt(reason) => Some(reason.clone()),
+                        _ => None,
+                    },
+                }
+            })
+            .collect(),
+        commands: evidence.commands.clone(),
+        environment: evidence.environment.clone(),
+        applicability: evidence.applicability.clone(),
+        omissions: evidence.omissions.clone(),
+    })
 }
 
 fn relations_view(relations: &Relations, candidate_id: &str) -> RelationsView {
@@ -710,6 +935,9 @@ fn render(document: &CandidateDocument) {
                 read.record, read.path, read.coverage, read.digest, read.episode
             );
         }
+        if let Some(received) = &candidate.received_evidence {
+            render_received(received);
+        }
         for evaluation in &candidate.evaluations {
             let result = match evaluation.result {
                 VerifyResult::Pass => "pass",
@@ -763,6 +991,140 @@ fn render(document: &CandidateDocument) {
             shared.tree,
             shared.candidates.join(", ")
         );
+    }
+}
+
+fn render_received(received: &ReceivedView) {
+    println!(
+        "  received evidence [{}]: recorded {} by {} (event {}); a claim, not an evaluation",
+        received.origin,
+        received.recorded_at.to_rfc3339(),
+        received.recorded_by,
+        received.event_id
+    );
+    println!(
+        "    run handle (private): {}; packet: {}",
+        received.run_handle, received.packet
+    );
+    for (role, head) in [
+        ("source", &received.heads.source),
+        ("tested", &received.heads.tested),
+        ("report", &received.heads.report),
+    ] {
+        let resolved = match &head.resolved_commit {
+            Some(commit) if *commit == head.commit => String::new(),
+            Some(commit) => format!("; resolves here to {commit}"),
+            None => "; dropped by a recorded rewrite".to_string(),
+        };
+        println!(
+            "    {role} head: {} (tree {}){resolved}",
+            head.commit, head.tree
+        );
+    }
+    println!(
+        "    applies to: {} head; the tested tree is {} the registered tree",
+        received.applicability.applies_to.as_str(),
+        if received.tested_tree_is_registered_tree {
+            "also"
+        } else {
+            "not"
+        }
+    );
+    if let Some(note) = &received.applicability.note {
+        println!("    applicability note: {note}");
+    }
+    for entry in &received.provenance {
+        let mut seen = Vec::new();
+        if let Some(native) = &entry.native {
+            seen.push(format!(
+                "native {}/{} [{} {}]",
+                native.provider, native.identity, native.source.kind, native.source.reference
+            ));
+        }
+        if let Some(model) = &entry.model {
+            seen.push(format!(
+                "model {}{} [{} {}]",
+                model.name,
+                model
+                    .effort
+                    .as_deref()
+                    .map(|effort| format!(" {effort}"))
+                    .unwrap_or_default(),
+                model.source.kind,
+                model.source.reference
+            ));
+        }
+        for (label, account) in [
+            ("forge account", &entry.forge_account),
+            ("review sender", &entry.review_sender),
+        ] {
+            if let Some(account) = account {
+                seen.push(format!(
+                    "{label} {} at {} ({})",
+                    account.account, account.host, account.provider
+                ));
+            }
+        }
+        for (label, identity) in [
+            ("git author", &entry.git_author),
+            ("git committer", &entry.git_committer),
+        ] {
+            if let Some(identity) = identity {
+                seen.push(format!("{label} {} <{}>", identity.name, identity.email));
+            }
+        }
+        println!(
+            "    provenance {}: {}",
+            entry.role.as_str(),
+            seen.join("; ")
+        );
+    }
+    for (index, receipt) in received.receipts.iter().enumerate() {
+        let reference = &receipt.reference;
+        println!(
+            "    receipt {index}: {} {}, sha256 {}, {} bytes, {}, reported {}; {}{}",
+            reference.provider,
+            reference.handle,
+            reference.sha256,
+            reference.byte_length,
+            reference.media_type,
+            reference.capture.as_str(),
+            receipt.availability,
+            receipt
+                .detail
+                .as_deref()
+                .map(|reason| format!(" ({reason})"))
+                .unwrap_or_default()
+        );
+    }
+    for (index, command) in received.commands.iter().enumerate() {
+        println!(
+            "    command {index}: `{}` reported {}{}{}",
+            command.command,
+            command.result.as_str(),
+            command
+                .exit_code
+                .map(|code| format!(" (exit {code})"))
+                .unwrap_or_default(),
+            command
+                .receipt
+                .map(|receipt| format!(", receipt {receipt}"))
+                .unwrap_or_default()
+        );
+    }
+    if let Some(environment) = &received.environment {
+        println!(
+            "    environment: {}{}",
+            environment.identity,
+            environment
+                .detail
+                .as_deref()
+                .map(|detail| format!(" ({detail})"))
+                .unwrap_or_default()
+        );
+    }
+    for omission in &received.omissions {
+        println!("    omitted: {}: {}", omission.what, omission.reason);
     }
 }
 

@@ -47,6 +47,7 @@ mod provenance;
 mod provisional;
 mod queue;
 mod rebase;
+mod received_evidence;
 mod relations;
 mod release;
 mod replicas;

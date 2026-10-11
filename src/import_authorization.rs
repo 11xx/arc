@@ -196,6 +196,7 @@ pub fn required_roles(payload: &Payload) -> Option<Vec<Vec<Role>>> {
         | CandidateRegistered { .. }
         | CandidateJudged { .. }
         | CandidateRetired { .. }
+        | CandidateEvidenceReceived { .. }
         | CandidateVerified { .. }
         | CandidateSelected { .. }
         | CandidatePromoted { .. }

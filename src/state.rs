@@ -3106,6 +3106,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
             | Payload::CandidateRegistered { .. }
             | Payload::CandidateJudged { .. }
             | Payload::CandidateRetired { .. }
+            | Payload::CandidateEvidenceReceived { .. }
             | Payload::CandidateVerified { .. }
             | Payload::CandidateSelected { .. }
             | Payload::CandidatePromoted { .. }

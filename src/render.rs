@@ -2487,6 +2487,16 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             )
         }
         Payload::CandidateRetired { candidate_id } => ("candidate-retired", candidate_id.clone()),
+        Payload::CandidateEvidenceReceived {
+            candidate_id,
+            evidence,
+        } => (
+            "candidate-evidence-received",
+            format!(
+                "{candidate_id}: external claims tested at {}",
+                short_sha(&evidence.heads.tested.commit)
+            ),
+        ),
         Payload::CandidateVerified {
             candidate_id,
             gate,

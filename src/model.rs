@@ -1617,6 +1617,14 @@ pub enum Payload {
     CandidateRetired {
         candidate_id: String,
     },
+    /// Execution evidence received from outside this ledger, recorded for a
+    /// registered candidate. It is the sender's claim, written once beside the
+    /// registration, and it is no evaluation: no gate, selection or
+    /// promotion reads it as one. Repository-scoped.
+    CandidateEvidenceReceived {
+        candidate_id: String,
+        evidence: crate::received_evidence::ReceivedEvidence,
+    },
     /// A required gate run against a candidate's tree in a scratch checkout.
     /// Repository-scoped, keyed by the tree, and carrying the declaration it
     /// ran under as consumed, so a later reader compares coordinates rather
@@ -2169,6 +2177,7 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         | Payload::CandidateRegistered { .. }
         | Payload::CandidateJudged { .. }
         | Payload::CandidateRetired { .. }
+        | Payload::CandidateEvidenceReceived { .. }
         | Payload::CandidateVerified { .. }
         | Payload::CandidateSelected { .. }
         | Payload::CandidatePromoted { .. }

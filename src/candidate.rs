@@ -18,6 +18,7 @@ use crate::model::{
     SelectedRead, VerifyResult,
 };
 use crate::policy::EvaluationReuse;
+use crate::received_evidence::ReceivedEvidence;
 use chrono::{DateTime, Utc};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -74,6 +75,16 @@ pub struct Judgement {
     pub candidate_id: String,
     pub judgement: CandidateJudgement,
     pub reason: String,
+    pub event_id: String,
+    pub declarant: String,
+    pub recorded_at: DateTime<Utc>,
+}
+
+/// Execution evidence a candidate received from outside this ledger. It
+/// is the sender's claim and no evaluation.
+#[derive(Debug, Clone)]
+pub struct Received {
+    pub evidence: ReceivedEvidence,
     pub event_id: String,
     pub declarant: String,
     pub recorded_at: DateTime<Utc>,
@@ -180,6 +191,7 @@ pub enum Refusal {
         dropped: Vec<String>,
     },
     UnknownCandidate(String),
+    EvidenceAlreadyReceived(String),
     SelfSupersession(String),
     UnknownSelection(String),
     DuplicatePromotion {
@@ -203,6 +215,7 @@ impl Refusal {
             Refusal::UnknownAdopted { .. } => "unknown-adopted",
             Refusal::AdoptionDropsProducer { .. } => "adoption-drops-producer",
             Refusal::UnknownCandidate(_) => "unknown-candidate",
+            Refusal::EvidenceAlreadyReceived(_) => "evidence-already-received",
             Refusal::SelfSupersession(_) => "self-supersession",
             Refusal::UnknownSelection(_) => "unknown-selection",
             Refusal::DuplicatePromotion { .. } => "duplicate-promotion",
@@ -250,6 +263,10 @@ impl fmt::Display for Refusal {
                 dropped.join(", ")
             ),
             Refusal::UnknownCandidate(id) => write!(f, "no candidate {id} is registered"),
+            Refusal::EvidenceAlreadyReceived(id) => write!(
+                f,
+                "candidate {id} already holds received evidence; evidence is written once"
+            ),
             Refusal::SelfSupersession(id) => {
                 write!(f, "candidate {id} cannot be superseded by itself")
             }
@@ -280,6 +297,8 @@ pub struct Ledger {
     registrations: BTreeMap<String, Registration>,
     judgements: Vec<Judgement>,
     retirements: BTreeMap<String, Retirement>,
+    /// Received evidence by candidate: at most one, and never an evaluation.
+    received: BTreeMap<String, Received>,
     evaluations: BTreeMap<String, Evaluation>,
     selections: BTreeMap<String, Selection>,
     /// Selection event id to the promotion that completed it.
@@ -355,6 +374,28 @@ impl Ledger {
                     declarant,
                     recorded_at: event.created_at,
                 });
+            }
+            Payload::CandidateEvidenceReceived {
+                candidate_id,
+                evidence,
+            } => {
+                self.known(candidate_id)?;
+                evidence.validate().map_err(|error| Refusal::Malformed {
+                    event_id: event.event_id.clone(),
+                    detail: format!("received evidence for {candidate_id}: {error}"),
+                })?;
+                if self.received.contains_key(candidate_id) {
+                    return Err(Refusal::EvidenceAlreadyReceived(candidate_id.clone()));
+                }
+                self.received.insert(
+                    candidate_id.clone(),
+                    Received {
+                        evidence: evidence.clone(),
+                        event_id: event.event_id.clone(),
+                        declarant,
+                        recorded_at: event.created_at,
+                    },
+                );
             }
             Payload::CandidateVerified {
                 candidate_id,
@@ -626,6 +667,11 @@ impl Ledger {
 
     pub fn retirement(&self, candidate_id: &str) -> Option<&Retirement> {
         self.retirements.get(candidate_id)
+    }
+
+    /// The evidence the candidate received from outside, when it did.
+    pub fn received_by(&self, candidate_id: &str) -> Option<&Received> {
+        self.received.get(candidate_id)
     }
 
     pub fn evaluation(&self, event_id: &str) -> Option<&Evaluation> {
@@ -995,6 +1041,76 @@ mod tests {
         assert_eq!(missing.len(), 1);
         assert_eq!(missing[0].0.candidate_id, "b");
         assert_eq!(missing[0].1[0].event_id, "01ROOT");
+    }
+
+    fn received(id: &str, version: &str) -> Event {
+        use crate::received_evidence::{
+            Applicability, Head, HeadRole, Heads, Omission, ReceivedEvidence, SCHEMA,
+        };
+        let head = |commit: &str| Head {
+            commit: commit.repeat(40),
+            tree: TREE.to_string(),
+        };
+        let mut event = registered(id, brief("one", "v1"), &["x"], &[], &[]);
+        event.event_id = format!("01RECEIVED{version}");
+        event.payload = Payload::CandidateEvidenceReceived {
+            candidate_id: id.to_string(),
+            evidence: ReceivedEvidence {
+                schema: SCHEMA.to_string(),
+                run_handle: "run".to_string(),
+                packet: "packet".to_string(),
+                heads: Heads {
+                    source: head("1"),
+                    tested: head("2"),
+                    report: head("3"),
+                },
+                provenance: Vec::new(),
+                receipts: Vec::new(),
+                commands: Vec::new(),
+                environment: None,
+                applicability: Applicability {
+                    applies_to: HeadRole::Tested,
+                    note: None,
+                },
+                omissions: ["provenance", "receipts", "commands", "environment"]
+                    .iter()
+                    .map(|what| Omission {
+                        what: what.to_string(),
+                        reason: "not supplied".to_string(),
+                    })
+                    .collect(),
+            },
+        };
+        event
+    }
+
+    #[test]
+    fn received_evidence_is_recorded_once_and_evaluates_nothing() {
+        let mut ledger =
+            Ledger::replay([&registered("a", brief("one", "v1"), &["x"], &[], &[])]).unwrap();
+        ledger.record(&received("a", "1")).unwrap();
+        assert!(ledger.received_by("a").is_some());
+        assert!(ledger.evaluations_of("a").is_empty());
+        assert_eq!(
+            ledger.record(&received("a", "2")).unwrap_err().code(),
+            "evidence-already-received"
+        );
+        // Evidence belongs to a registered candidate.
+        assert_eq!(
+            ledger.record(&received("b", "3")).unwrap_err().code(),
+            "unknown-candidate"
+        );
+        // A bundle's copy is judged by the document's own rules.
+        let mut lax = received("a", "4");
+        if let Payload::CandidateEvidenceReceived { evidence, .. } = &mut lax.payload {
+            evidence.omissions.clear();
+        }
+        let mut other =
+            Ledger::replay([&registered("a", brief("one", "v1"), &["x"], &[], &[])]).unwrap();
+        assert_eq!(
+            other.record(&lax).unwrap_err().code(),
+            "malformed-candidate-event"
+        );
     }
 
     #[test]
