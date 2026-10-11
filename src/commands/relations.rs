@@ -591,7 +591,10 @@ pub fn declare(ctx: &Ctx, args: DeclareArgs) -> Result<()> {
     ) {
         let mut history = held;
         history.push((*event).clone());
-        crate::forge_round_trip::validate_history(&history)?;
+        crate::forge_round_trip::validate_history(
+            &history,
+            &std::collections::BTreeSet::from([&event.event_id]),
+        )?;
     }
     ledger.record(&event)?;
     ctx.ensure_declared_actor(&store)?;

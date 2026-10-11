@@ -1700,7 +1700,21 @@ FORGE
   forge show --provider P --host H --repo OWNER/REPO --pr N returns all matches.
   arc-forge-view/1 includes observations, generations, coverage, custody
   availability, patchsets, candidates, runs, acceptance and review bindings.
-  show, status, log and explain carry the same reconstruction facts.
+  show, status, log and explain carry the same reconstruction facts, including
+  local changes with delivery, disclosure or candidate/manual-origin records.
+  Provider lookup traverses their explicit reference and adoption relationships.
+  Related workflows retain their local closure alongside provider lifecycle;
+  neither a context relationship nor public closure supplies an approval.
+  Deliveries, disclosures and candidate context retain typed records. Their
+  source_availability distinguishes valid, conflicting and unresolved references;
+  byte_references names current receipt/outgoing custody separately from reported
+  outcomes. Source read failures degrade those references. Selected Git support
+  and private ledger records retain their access-basis labels and current availability.
+  Exact coalesced event aliases and read IDs use the same source selector as
+  review bindings. New bindings refuse unusable sources; a later conflicting
+  read preserves earlier declarations and exposes their current source conflict.
+  Local workflow records and current related workflows are separately named
+  reads; --observation bounds provider content and lifecycle, not local acceptance.
   show --json and status keep recorded forge state in forge and current reads
   in forge_view. Exact provider lookup requires a recorded provider identity;
   a legacy link without one does not establish a provider coordinate.
@@ -1762,7 +1776,9 @@ FORGE
   optional source_frontiers/source_statements and roles, renderer_version and an optional
   opaque cost reference. Each author names the original act and either a human
   name or optional harness/model/effort with act-specific model_observation.
-  Absent effort has no guessed suffix. Material synthesis names each author
+  Absent effort has no guessed suffix. Supplied agent coordinates follow the
+  shared coordinate rules: placeholders and malformed separators refuse; missing
+  model/harness evidence degrades the projection without inventing a coordinate. Material synthesis names each author
   and its source statements; quoted, transported and implementation participants
   remain roles and never become authors automatically. Corrections name an
   editor and previous_disclosure, preserve original authors, and bind the
@@ -1777,7 +1793,8 @@ FORGE
   is another linked annotation/disclosure, preserving its disclosed frontier.
 
   Export includes flat full related_changes histories for source/context and
-  candidate adoption closure, plus their custody references and held Git objects.
+  candidate adoption and explicit predecessor-record closure, plus their custody
+  references and held Git objects.
   Related members share the root custody manifest. Import validates every
   member before publication, then admits each through normal guarded imports.
   Publication is atomic per change; an interruption can leave already-admitted

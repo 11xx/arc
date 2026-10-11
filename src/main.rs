@@ -14,8 +14,8 @@ mod declarations;
 mod explain;
 mod forge;
 mod forge_observation;
-mod forge_view;
 mod forge_round_trip;
+mod forge_view;
 mod gates;
 mod gitio;
 mod guide;
@@ -467,7 +467,8 @@ enum Cmd {
         /// matches this revision (unique prefix accepted)
         #[arg(long)]
         commit: Option<String>,
-        /// Recorded identities, including superseded links: PROVIDER:HOST/OWNER/REPO#NUMBER
+        /// Recorded identities and explicitly related acceptance/source changes,
+        /// including superseded links: PROVIDER:HOST/OWNER/REPO#NUMBER
         #[arg(long, conflicts_with = "commit")]
         forge: Option<String>,
         /// Only changes that integrated owing a review nobody has recorded yet
@@ -3035,7 +3036,11 @@ enum HooksCmd {
 enum ForgeCmd {
     /// Reconstruct recorded forge content offline. Observation selection freezes
     /// forge content; local rewrite resolution and custody availability are current
-    /// reads. This command records nothing and never contacts a provider.
+    /// reads. Includes typed deliveries, disclosure selections, exact source/byte
+    /// availability and candidate/manual acceptance relationships. Local integration
+    /// and provider lifecycle are independent; closed means closed-unmerged.
+    /// Coalesced event aliases remain exact sources; conflicting reads are labelled.
+    /// This command records nothing and never contacts a provider.
     Show {
         /// Change whose recorded forge content is reconstructed
         #[arg(conflicts_with_all = ["provider", "host", "repo", "pr"])]

@@ -94,6 +94,7 @@ impl Bundle {
         let mut pending = vec![change_id.to_string()];
         let mut seen = BTreeSet::new();
         let mut related = BTreeSet::new();
+        let mut predecessor_history = None;
         while let Some(id) = pending.pop() {
             if !seen.insert(id.clone()) {
                 continue;
@@ -102,9 +103,33 @@ impl Bundle {
             for event in events.iter().chain(&repository) {
                 if event.change_id == Store::REPOSITORY_SCOPE {
                     pending.extend(crate::forge_round_trip::source_changes(&event.payload));
+                    if crate::forge_round_trip::has_predecessor(&event.payload) {
+                        if predecessor_history.is_none() {
+                            predecessor_history =
+                                Some(crate::forge_round_trip::held_events(store)?);
+                        }
+                        pending.extend(crate::forge_round_trip::predecessor_changes(
+                            &event.payload,
+                            predecessor_history
+                                .as_deref()
+                                .expect("loaded predecessor history"),
+                        ));
+                    }
                 }
                 if event.change_id == id {
                     pending.extend(crate::forge_round_trip::source_changes(&event.payload));
+                    if crate::forge_round_trip::has_predecessor(&event.payload) {
+                        if predecessor_history.is_none() {
+                            predecessor_history =
+                                Some(crate::forge_round_trip::held_events(store)?);
+                        }
+                        pending.extend(crate::forge_round_trip::predecessor_changes(
+                            &event.payload,
+                            predecessor_history
+                                .as_deref()
+                                .expect("loaded predecessor history"),
+                        ));
+                    }
                     if let Payload::ChangeClosed {
                         superseded_by: Some(successor),
                         ..

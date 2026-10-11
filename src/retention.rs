@@ -114,7 +114,12 @@ pub fn cited(store: &Store) -> Result<Vec<Cited>> {
         .collect();
     for event in &repository_events {
         for commit in crate::forge_round_trip::disclosure_commits(&event.payload) {
-            found.push(Cited { change_id: Store::REPOSITORY_SCOPE.into(), subject: event.event_id.clone(), what: "disclosure Git support".into(), commit: commit.to_string() });
+            found.push(Cited {
+                change_id: Store::REPOSITORY_SCOPE.into(),
+                subject: event.event_id.clone(),
+                what: "disclosure Git support".into(),
+                commit: commit.to_string(),
+            });
         }
         if let Payload::CandidateEvidenceReceived {
             candidate_id,
@@ -131,7 +136,6 @@ pub fn cited(store: &Store) -> Result<Vec<Cited>> {
                     });
                 }
             }
-
         }
     }
     Ok(found)

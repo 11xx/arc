@@ -1280,7 +1280,9 @@ fn validate_import_candidate(
         }
     }
     round_trip_history.dedup_by(|a, b| a.event_id == b.event_id);
-    crate::forge_round_trip::validate_history(&round_trip_history)?;
+    let mut introduced_round_trip = new_events.clone();
+    introduced_round_trip.extend(repository.keys());
+    crate::forge_round_trip::validate_history(&round_trip_history, &introduced_round_trip)?;
     let mut projected = state::reduce_with_rewrites(&candidate, rewrites)
         .context("combined local and bundled known events are not replayable")?;
     let repository_events = combined_repository_events(store, repository)?;

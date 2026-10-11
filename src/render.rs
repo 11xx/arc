@@ -981,10 +981,10 @@ pub fn markdown(
             );
         }
     }
+    if let Some(view) = &report.forge_view {
+        let _ = writeln!(w, "{}", crate::forge_view::render(view));
+    }
     if let Some(forge) = &report.forge {
-        if let Some(view) = &report.forge_view {
-            let _ = writeln!(w, "{}", crate::forge_view::render(view));
-        }
         let _ = writeln!(w, "\n## Forge\n");
         let _ = writeln!(w, "- Projection: {}", forge.projection);
         for diagnostic in &forge.diagnostics {

@@ -588,7 +588,10 @@ fn build(ctx: &Ctx, reference: &str, at: Option<&str>) -> Result<Explanation> {
     }
 
     Ok(Explanation {
-        forge_view: if subject_state.profile == "forge" || !subject_state.forge.is_empty() {
+        forge_view: if subject_state.profile == "forge"
+            || !subject_state.forge.is_empty()
+            || crate::forge_round_trip::has_records(&subject_state)
+        {
             Some(crate::forge_view::build(
                 &store,
                 &subject_state,

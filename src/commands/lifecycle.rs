@@ -679,13 +679,23 @@ pub fn query(ctx: &Ctx, args: QueryArgs) -> Result<()> {
         ctx.store()?
     };
     let states = store.readable_states()?;
+    let forge_matches = forge_identity.as_ref().map(|identity| {
+        crate::forge_view::related_closure(
+            &states,
+            states
+                .values()
+                .filter(|state| identity.matches(state))
+                .map(|state| state.change_id.clone())
+                .collect(),
+        )
+    });
     let tags = normalize_tags(args.tags)?;
     let selected = states
         .values()
         .filter(|state| {
-            forge_identity
+            forge_matches
                 .as_ref()
-                .is_none_or(|identity| identity.matches(state))
+                .is_none_or(|matches| matches.contains(&state.change_id))
                 && args
                     .status
                     .as_deref()
@@ -1553,7 +1563,10 @@ fn show(
     };
     if json {
         let mut value = serde_json::to_value(&st)?;
-        if st.profile == "forge" || !st.forge.is_empty() {
+        if st.profile == "forge"
+            || !st.forge.is_empty()
+            || crate::forge_round_trip::has_records(&st)
+        {
             value["forge_view"] = crate::forge_view::build(
                 &store,
                 &st,

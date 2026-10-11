@@ -166,6 +166,17 @@ fn forge_disclosure_binds_actual_outgoing_bytes_and_readback() {
             .len(),
         1
     );
+    let view: Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["forge", "show", &id, "--json"]),
+    ))
+    .unwrap();
+    assert_eq!(view["disclosures"][0]["outgoing"]["sha256"], digest(body));
+    assert!(view["source_availability"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r["availability"] == "unavailable" && r["source_status"] == "valid"));
+    assert_eq!(view["byte_references"][0]["availability"], "unavailable");
 }
 #[test]
 fn compact_provenance_material_authors_roles_act_coordinates_and_edit_lineage() {
@@ -331,6 +342,52 @@ fn forge_round_trip_related_change_and_custody_closure_imports_offline() {
         .unwrap(),
         b"public bytes"
     );
+    let projected: Value = serde_json::from_str(&stdout(
+        replica
+            .arc(&replica.root)
+            .args(["forge", "show", &origin, "--json"]),
+    ))
+    .unwrap();
+    assert!(projected["related_changes"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(destination)));
+    let accepted = projected["related_workflows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["change_id"] == destination)
+        .unwrap();
+    assert_eq!(
+        accepted["round_trip"]["local_integration_revision"],
+        integrated
+    );
+    let query = stdout(replica.arc(&replica.root).args([
+        "query",
+        "--forge",
+        "example:forge.example.invalid/sample/project#1",
+    ]));
+    assert!(query.contains(&origin) && query.contains(&destination));
+    let shown = state(&replica, &destination);
+    assert_eq!(
+        shown["forge_view"]["round_trip"]["local_integration_revision"],
+        integrated
+    );
+    let status: Value = serde_json::from_str(&stdout(
+        replica.arc(&replica.root).args(["status", &destination]),
+    ))
+    .unwrap();
+    assert_eq!(
+        status["forge_view"]["disclosures"][0]["schema"],
+        "arc-disclosure/1"
+    );
+    for command in ["show", "log", "explain"] {
+        let text = stdout(replica.arc(&replica.root).args([command, &destination]));
+        assert!(
+            text.contains("arc-disclosure/1") && text.contains("local_integration_revision"),
+            "{command}: {text}"
+        );
+    }
 }
 #[test]
 fn local_integration_and_closed_unmerged_pr_remain_distinct() {
@@ -512,4 +569,215 @@ fn compact_provenance_unestablished_model_and_human_authorship_are_distinct() {
     );
     assert!(stdout(&mut declare(&human_repo, &human_id, &doc))
         .contains("Author: Review Writer · Review cost: unmeasured."));
+}
+
+#[test]
+fn compact_provenance_rejects_placeholder_and_malformed_coordinates_before_publication() {
+    let (repo, id) = setup();
+    let observation = observe(&repo, &id, "read-1", "g1", "public bytes", None);
+    let mut doc = disclosure(
+        &id,
+        &observation,
+        "g1",
+        "public bytes",
+        Some(comment(vec![author(
+            Some("review-model"),
+            Some("high"),
+            "act-1",
+        )])),
+    );
+    let before = event_count(&repo, &id);
+    for (field, value) in [
+        ("harness", "unknown"),
+        ("harness", "none"),
+        ("harness", "codex:other"),
+        ("model", "unknown"),
+        ("model", "model:other"),
+        ("model", "model#high"),
+        ("effort", "none"),
+        ("effort", "high#other"),
+    ] {
+        let mut bad = doc.clone();
+        bad["comment"]["authors"][0][field] = json!(value);
+        declare(&repo, &id, &bad).assert().failure();
+        assert_eq!(event_count(&repo, &id), before);
+    }
+    doc["comment"]["authors"][0]["harness"] = Value::Null;
+    assert!(stdout(&mut declare(&repo, &id, &doc)).contains("Author: model not recorded"));
+    let bundle = repo.home.join("bad-author.json");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["export", &id, "--output", bundle.to_str().unwrap()]),
+    );
+    let mut foreign: Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    for event in foreign["events"].as_array_mut().unwrap() {
+        if event["event_type"] == "context-declared" {
+            event["disclosure"]["comment"]["authors"][0]["harness"] = json!("unknown");
+        }
+    }
+    let mut hash = Sha256::new();
+    for event in foreign["events"].as_array().unwrap() {
+        hash.update(serde_json::to_vec(event).unwrap());
+        hash.update(b"\n");
+    }
+    foreign["events_sha256"] = json!(format!("{:x}", hash.finalize()));
+    fs::write(&bundle, foreign.to_string()).unwrap();
+    let receiving = Repo::new();
+    deliver_git_objects(&repo, &receiving);
+    admitted_round_trip(&receiving, &bundle).assert().failure();
+    assert!(!receiving.root.join(".git/arc/config.json").exists());
+}
+
+#[test]
+fn forge_delivery_predecessor_change_closure_survives_offline_import() {
+    let (repo, origin) = setup();
+    let observation = observe(&repo, &origin, "read-1", "g1", "first", None);
+    let review = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "review-record",
+        "--target",
+        "master",
+    ])));
+    let recipient = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "response-record",
+        "--target",
+        "master",
+    ])));
+    let mut first = delivery();
+    first["sources"] = json!([source(&origin, &observation, "g1")]);
+    stdout(&mut send(&repo, &review, &first));
+    let mut later = first.clone();
+    later["evidence_id"] = json!("outcome-2");
+    later["previous_evidence"] = json!("outcome-1");
+    stdout(&mut send(&repo, &recipient, &later));
+    let bundle = repo.home.join("outcome-closure.json");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["export", &recipient, "--output", bundle.to_str().unwrap()]),
+    );
+    let exported: Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    let related: Vec<_> = exported["related_changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["change_id"].clone())
+        .collect();
+    assert!(related.contains(&json!(origin)) && related.contains(&json!(review)));
+    let receiving = Repo::new();
+    deliver_git_objects(&repo, &receiving);
+    stdout(&mut admitted_round_trip(&receiving, &bundle));
+    let view: Value = serde_json::from_str(&stdout(
+        receiving
+            .arc(&receiving.root)
+            .args(["forge", "show", &recipient, "--json"]),
+    ))
+    .unwrap();
+    assert_eq!(
+        view["deliveries"][0]["delivery"]["previous_evidence"],
+        "outcome-1"
+    );
+    assert_eq!(
+        view["deliveries"][0]["delivery"]["acknowledgement"]["standing"],
+        "uncertain"
+    );
+    assert_eq!(
+        view["source_availability"][0]["availability"],
+        "unavailable"
+    );
+}
+
+#[test]
+fn forge_delivery_disclosure_aliases_and_conflicts_use_the_shared_source_selector() {
+    let (repo, id) = setup();
+    let seed = repo.home.join("seed.json");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["export", &id, "--output", seed.to_str().unwrap()]),
+    );
+    let replica = Repo::new();
+    deliver_git_objects(&repo, &replica);
+    stdout(
+        replica
+            .arc(&replica.root)
+            .args(["import", seed.to_str().unwrap()]),
+    );
+    let a = observe(&repo, &id, "shared-read", "g1", "first", None);
+    let b = observe(&replica, &id, "shared-read", "g1", "first", None);
+    let exchanged = replica.home.join("exchange.json");
+    stdout(replica.arc(&replica.root).args([
+        "export",
+        &id,
+        "--output",
+        exchanged.to_str().unwrap(),
+    ]));
+    stdout(
+        repo.arc(&repo.root)
+            .args(["import", exchanged.to_str().unwrap()]),
+    );
+    let mut sent = delivery();
+    sent["sources"] = json!([source(&id, &b, "g1")]);
+    stdout(&mut send(&repo, &id, &sent));
+    let doc = disclosure(&id, &b, "g1", "first", None);
+    stdout(&mut declare(&repo, &id, &doc));
+    let view: Value = serde_json::from_str(&stdout(repo.arc(&repo.root).args([
+        "forge",
+        "show",
+        &id,
+        "--observation",
+        &b,
+        "--body",
+        "g1",
+        "--json",
+    ])))
+    .unwrap();
+    assert_eq!(view["body"]["availability"], "available");
+    assert_eq!(
+        view["source_availability"][0]["canonical_observation_id"],
+        a
+    );
+    assert!(view["source_availability"][0]["aliases"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(b)));
+    let conflicting = Repo::new();
+    deliver_git_objects(&repo, &conflicting);
+    stdout(
+        conflicting
+            .arc(&conflicting.root)
+            .args(["import", seed.to_str().unwrap()]),
+    );
+    observe(&conflicting, &id, "shared-read", "g1", "other", None);
+    let conflict = conflicting.home.join("conflict.json");
+    stdout(conflicting.arc(&conflicting.root).args([
+        "export",
+        &id,
+        "--output",
+        conflict.to_str().unwrap(),
+    ]));
+    stdout(
+        repo.arc(&repo.root)
+            .args(["import", conflict.to_str().unwrap()]),
+    );
+    let before = event_count(&repo, &id);
+    sent["attempt_id"] = json!("attempt-2");
+    sent["transport_request"] = json!("request-2");
+    send(&repo, &id, &sent).assert().failure();
+    let mut bad = doc.clone();
+    bad["disclosure_id"] = json!("bad-source");
+    declare(&repo, &id, &bad).assert().failure();
+    assert_eq!(event_count(&repo, &id), before);
+    let current: Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["forge", "show", &id, "--json"]),
+    ))
+    .unwrap();
+    assert!(current["source_availability"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r["source_status"] == "conflict"));
+    assert_eq!(
+        current["deliveries"][0]["delivery"]["acknowledgement"]["standing"],
+        "uncertain"
+    );
 }

@@ -26,18 +26,20 @@ impl SourceGeneration {
             .cloned()
             .collect();
         let projected = crate::state::reduce(&source_history)?;
+        let resolved =
+            crate::forge_observation::find_observation(&projected.forge, &self.observation)?;
         ensure!(
-            projected
-                .forge
-                .observations
+            resolved
+                .document
+                .generations
                 .iter()
-                .any(|o| o.names_event(&self.observation) && o.usable()),
-            "source observation is conflicting or invalid"
+                .any(|g| g.generation_id == self.generation),
+            "generation is not on the exact observation"
         );
         let observation = events
             .iter()
             .find_map(|e| {
-                if e.change_id == self.change_id && e.event_id == self.observation {
+                if e.change_id == self.change_id && e.event_id == resolved.event_id {
                     if let Payload::ForgeObservationRecorded { observation } = &e.payload {
                         return Some(observation);
                     }
@@ -196,10 +198,15 @@ impl CommentAuthor {
         {
             named(value)?;
         }
-        ensure!(
-            self.effort.is_none() || self.model.is_some(),
-            "effort needs a model observation"
-        );
+        if let Some(effort) = &self.effort {
+            ensure!(
+                !crate::coordinate::is_placeholder(effort)
+                    && effort
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                "invalid authorship effort"
+            );
+        }
         if let Some(name) = &self.name {
             ensure!(
                 !name.contains(['/', '\\', ':', '@']),
@@ -208,9 +215,10 @@ impl CommentAuthor {
         }
         if let Some(harness) = &self.harness {
             ensure!(
-                harness
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                !crate::coordinate::is_placeholder(harness)
+                    && harness
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
                 "invalid authorship harness"
             );
         }
@@ -230,11 +238,26 @@ impl CommentAuthor {
                     "invalid authorship effort"
                 );
             }
-            ensure!(self.harness.is_some(), "agent authorship needs harness");
+            if let Some(harness) = &self.harness {
+                let coordinate = format!(
+                    "{harness}:{model}{}",
+                    self.effort
+                        .as_ref()
+                        .map(|e| format!("#{e}"))
+                        .unwrap_or_default()
+                );
+                ensure!(
+                    crate::coordinate::coordinate_defect(&coordinate, None).is_none(),
+                    "invalid authorship coordinate"
+                );
+            }
         }
         Ok(())
     }
     fn coordinate(&self) -> String {
+        if self.validate().is_err() {
+            return "model not recorded".into();
+        }
         if let Some(name) = &self.name {
             return name.clone();
         }
@@ -512,7 +535,7 @@ impl Disclosure {
 }
 
 /// Validate foreign delivery/disclosure shapes and their immutable lineage before publication.
-pub fn validate_history(events: &[Event]) -> Result<()> {
+pub fn validate_history(events: &[Event], introduced: &BTreeSet<&String>) -> Result<()> {
     let deliveries: Vec<_> = events
         .iter()
         .filter_map(|event| match &event.payload {
@@ -534,6 +557,9 @@ pub fn validate_history(events: &[Event]) -> Result<()> {
         })
         .collect();
     for event in events {
+        if !introduced.contains(&event.event_id) {
+            continue;
+        }
         if let Payload::ContextDeclared {
             origin: Some(origin),
             ..
@@ -882,4 +908,133 @@ pub fn disclosure_commits(payload: &Payload) -> Vec<&str> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// Whether a local workflow carries forge-related records without a provider declaration.
+pub fn has_records(state: &crate::state::ChangeState) -> bool {
+    !state.round_trip.disclosures.is_empty()
+        || !state.round_trip.origins.is_empty()
+        || !state.round_trip.candidate_paths.is_empty()
+        || state.messages.iter().any(|m| m.delivery.is_some())
+}
+
+pub fn related_to(state: &crate::state::ChangeState) -> BTreeSet<String> {
+    let mut changes = BTreeSet::new();
+    if let Some(successor) = state
+        .closure
+        .as_ref()
+        .and_then(|c| c.superseded_by.as_ref())
+    {
+        changes.insert(successor.clone());
+    }
+    changes.extend(state.round_trip.origins.iter().map(|s| s.change_id.clone()));
+    changes.extend(
+        state
+            .round_trip
+            .candidate_paths
+            .iter()
+            .map(|p| p.origin_change.clone()),
+    );
+    for disclosure in &state.round_trip.disclosures {
+        changes.extend(disclosure.sources().map(|s| s.change_id.clone()));
+        changes.extend(
+            disclosure
+                .selected
+                .iter()
+                .map(|s| s.source.change_id().to_string()),
+        );
+    }
+    for delivery in state.messages.iter().filter_map(|m| m.delivery.as_ref()) {
+        changes.extend(delivery.sources().map(|s| s.change_id.clone()));
+    }
+    changes.remove(crate::store::Store::REPOSITORY_SCOPE);
+    changes
+}
+
+/// The exact source discriminator and current bytes, separate from the recorded claim.
+pub fn source_view(
+    source: &SourceGeneration,
+    events: &[Event],
+    custody: &crate::custody::Custody,
+) -> serde_json::Value {
+    let history: Vec<_> = events
+        .iter()
+        .filter(|e| e.change_id == source.change_id)
+        .cloned()
+        .collect();
+    let projected = crate::state::reduce(&history);
+    let record = projected.as_ref().ok().and_then(|state| {
+        crate::forge_observation::find_observation(&state.forge, &source.observation).ok()
+    });
+    match (record, source.resolve(events)) {
+        (Some(record), Ok(content)) => {
+            serde_json::json!({"reference":source,"source_status":"valid","canonical_observation_id":record.event_id,"aliases":record.aliases,"content":content,"availability":custody.availability(&content.into()).label()})
+        }
+        (_, Err(error)) => {
+            let conflict = projected.as_ref().ok().is_some_and(|state| {
+                state.forge.observations.iter().any(|r| {
+                    (r.names_event(&source.observation) || r.document.read_id == source.observation)
+                        && r.conflict
+                })
+            });
+            serde_json::json!({"reference":source,"source_status":if conflict {"conflict"} else {"invalid-or-unresolved"},"availability":"unavailable","diagnostic":error.to_string()})
+        }
+        _ => unreachable!("resolution and the shared source selector agree"),
+    }
+}
+
+/// Explicit predecessor records can live on a different change from their source observation.
+pub fn predecessor_changes(payload: &Payload, history: &[Event]) -> BTreeSet<String> {
+    let mut changes = BTreeSet::new();
+    for event in history {
+        let references = match (payload, &event.payload) {
+            (
+                Payload::Message {
+                    delivery: Some(current),
+                    ..
+                },
+                Payload::Message {
+                    delivery: Some(previous),
+                    ..
+                },
+            ) => {
+                current.previous_evidence.as_ref() == Some(&previous.evidence_id)
+                    && current.same_attempt(previous)
+            }
+            (
+                Payload::ContextDeclared {
+                    disclosure: Some(current),
+                    ..
+                },
+                Payload::ContextDeclared {
+                    disclosure: Some(previous),
+                    ..
+                },
+            ) => current.previous_disclosure.as_ref() == Some(&previous.disclosure_id),
+            _ => false,
+        };
+        if references && event.change_id != crate::store::Store::REPOSITORY_SCOPE {
+            changes.insert(event.change_id.clone());
+        }
+    }
+    changes
+}
+
+pub fn has_predecessor(payload: &Payload) -> bool {
+    matches!(
+        payload,
+        Payload::Message {
+            delivery: Some(ForgeDelivery {
+                previous_evidence: Some(_),
+                ..
+            }),
+            ..
+        } | Payload::ContextDeclared {
+            disclosure: Some(Disclosure {
+                previous_disclosure: Some(_),
+                ..
+            }),
+            ..
+        }
+    )
 }
