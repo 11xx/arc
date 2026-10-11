@@ -45,6 +45,14 @@ pub struct ReceivedEvidence {
 }
 
 impl ReceivedEvidence {
+    /// SHA256 of the typed document serialized with sorted object keys.
+    pub fn sha256(&self) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        let mut value = serde_json::to_value(self)?;
+        value.sort_all_objects();
+        Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(&value)?)))
+    }
+
     /// Validate claims against held raw objects without fetching absent heads.
     pub fn validate_held_heads(&self, cwd: &std::path::Path) -> Result<()> {
         self.validate()?;

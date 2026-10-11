@@ -106,6 +106,10 @@ pub fn register(ctx: &Ctx, args: RegisterArgs) -> Result<()> {
             parents: distinct(args.parents),
             adopts: distinct(args.adopts),
             episodes: distinct(args.episodes),
+            requested_evidence_sha256: received
+                .as_ref()
+                .map(ReceivedEvidence::sha256)
+                .transpose()?,
         },
     )?;
     let mut evidence_event = received
@@ -134,6 +138,18 @@ pub fn register(ctx: &Ctx, args: RegisterArgs) -> Result<()> {
     };
     let mut ledger = ledger;
     if let Some(held) = existing {
+        let Payload::CandidateRegistered {
+            requested_evidence_sha256,
+            ..
+        } = &held.payload
+        else {
+            unreachable!();
+        };
+        if evidence_event.is_some() && requested_evidence_sha256.is_none() {
+            bail!(
+                "evidence-not-requested: {candidate_id} has no original requested-evidence intent"
+            );
+        }
         if !explicit_id
             || evidence_event.is_none()
             || ledger.retirement(&candidate_id).is_some()
@@ -185,18 +201,21 @@ pub fn register(ctx: &Ctx, args: RegisterArgs) -> Result<()> {
     if existing.is_none() {
         store.append_local_repository_event(&mut event)?;
     }
-    #[cfg(debug_assertions)]
-    registration_rendezvous("registered")?;
     if let Some(evidence) = evidence_event.as_mut().filter(|_| evidence_id.is_none()) {
-        store
-            .append_local_repository_event(evidence)
-            .with_context(|| {
-                format!(
-                    "candidate {candidate_id} is registered (event {}) but its received \
+        (|| {
+            #[cfg(debug_assertions)]
+            registration_rendezvous("registered")?;
+            store.append_local_repository_event(evidence)
+        })()
+        .with_context(|| {
+            format!(
+                "candidate {candidate_id} is registered (event {}) but its received \
                      evidence was not recorded",
-                    event.event_id
-                )
-            })?;
+                existing
+                    .map(|held| &held.event_id)
+                    .unwrap_or(&event.event_id)
+            )
+        })?;
     }
     println!("candidate: {candidate_id}");
     println!("tree: {tree}");

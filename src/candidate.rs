@@ -57,6 +57,7 @@ pub struct Registration {
     pub parents: Vec<String>,
     pub adopts: Vec<String>,
     pub episodes: Vec<String>,
+    pub requested_evidence_sha256: Option<String>,
     pub event_id: String,
     pub declarant: String,
     pub recorded_at: DateTime<Utc>,
@@ -333,6 +334,7 @@ impl Ledger {
                 parents,
                 adopts,
                 episodes,
+                requested_evidence_sha256,
             } => {
                 let registration = Registration {
                     candidate_id: candidate_id.clone(),
@@ -342,6 +344,7 @@ impl Ledger {
                     parents: parents.clone(),
                     adopts: adopts.clone(),
                     episodes: episodes.clone(),
+                    requested_evidence_sha256: requested_evidence_sha256.clone(),
                     event_id: event.event_id.clone(),
                     declarant,
                     recorded_at: event.created_at,
@@ -379,11 +382,23 @@ impl Ledger {
                 candidate_id,
                 evidence,
             } => {
-                self.known(candidate_id)?;
+                let registration = self.known(candidate_id)?;
                 evidence.validate().map_err(|error| Refusal::Malformed {
                     event_id: event.event_id.clone(),
                     detail: format!("received evidence for {candidate_id}: {error}"),
                 })?;
+                if let Some(expected) = &registration.requested_evidence_sha256 {
+                    let actual = evidence.sha256().map_err(|error| Refusal::Malformed {
+                        event_id: event.event_id.clone(),
+                        detail: error.to_string(),
+                    })?;
+                    if expected != &actual || registration.declarant != declarant {
+                        return Err(Refusal::Malformed {
+                            event_id: event.event_id.clone(),
+                            detail: format!("received evidence for {candidate_id} disagrees with its original request or declarant"),
+                        });
+                    }
+                }
                 if self.received.contains_key(candidate_id) {
                     return Err(Refusal::EvidenceAlreadyReceived(candidate_id.clone()));
                 }
@@ -831,6 +846,16 @@ pub fn contract_label(brief: &CandidateBriefRef) -> String {
 /// a bundle: identifiers usable as ref and path components, an object id for
 /// the tree, a `sha256:` digest, and no blank or repeated names.
 fn well_formed(registration: &Registration) -> Result<(), String> {
+    if let Some(digest) = &registration.requested_evidence_sha256 {
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err("requested_evidence_sha256 is not a lowercase SHA256 digest".into());
+        }
+    }
+
     ids::validate_id_component(&registration.candidate_id).map_err(|error| error.to_string())?;
     if !is_object_id(&registration.tree) {
         return Err(format!(
@@ -952,6 +977,7 @@ mod tests {
                 parents: strings(parents),
                 adopts: strings(adopts),
                 episodes: Vec::new(),
+                requested_evidence_sha256: None,
             },
         }
     }

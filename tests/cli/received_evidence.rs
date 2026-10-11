@@ -713,7 +713,7 @@ fn received_evidence_travels_with_its_receipts_and_the_objects_the_exporter_hold
 }
 
 #[test]
-fn a_matching_explicit_registration_retry_can_complete_evidence_and_custody() {
+fn a_registration_without_evidence_shows_none_and_cannot_gain_it_later() {
     let f = Fixture::new();
     f.repo
         .arc(&f.repo.root)
@@ -740,6 +740,20 @@ fn a_matching_explicit_registration_retry_can_complete_evidence_and_custody() {
     assert!(!text.contains("received evidence"), "{text}");
     assert!(repository_events(&f.repo, "candidate-evidence-received").is_empty());
 
+    // The same candidate id cannot be registered again to add evidence.
+    let out = f
+        .register("plain", &f.report.commit, &f.evidence())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("evidence-not-requested"));
+    assert!(repository_events(&f.repo, "candidate-evidence-received").is_empty());
+}
+
+#[test]
+fn an_original_evidence_request_can_retry_custody_without_duplicate_events() {
+    let f = Fixture::new();
+    f.registered("plain", &f.report.commit, &f.evidence());
     // A retry can complete a registration whose evidence append was interrupted.
     f.registered("plain", &f.report.commit, &f.evidence());
     assert_eq!(repository_events(&f.repo, "candidate-registered").len(), 1);
@@ -769,7 +783,7 @@ fn a_matching_explicit_registration_retry_can_complete_evidence_and_custody() {
         .output()
         .unwrap();
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("evidence-already-received"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("duplicate-candidate"));
     let out = f
         .register("plain", &f.tested.commit, &f.evidence())
         .output()
@@ -1011,6 +1025,49 @@ fn interrupted_registration_retries_preserve_unavailable_claims_and_event_identi
         let registration = repository_events(&f.repo, "candidate-registered");
         assert_eq!(registration.len(), usize::from(phase == "registered"));
         assert!(repository_events(&f.repo, "candidate-evidence-received").is_empty());
+        if phase == "registered" {
+            let held_id = registration[0]["event_id"].clone();
+            assert_eq!(
+                registration[0]["requested_evidence_sha256"]
+                    .as_str()
+                    .unwrap()
+                    .len(),
+                64
+            );
+            let mut conflicting = evidence.clone();
+            conflicting["packet"] = json!("changed-request");
+            for (document, other_declarant) in [(&conflicting, false), (&evidence, true)] {
+                let mut retry = f.register("partial", &f.report.commit, document);
+                if other_declarant {
+                    retry.args(["--actor", "other-collector"]);
+                }
+                let out = retry.output().unwrap();
+                assert!(!out.status.success());
+                assert!(String::from_utf8_lossy(&out.stderr).contains("duplicate-candidate"));
+                assert_eq!(
+                    repository_events(&f.repo, "candidate-registered")[0]["event_id"],
+                    held_id
+                );
+                assert!(repository_events(&f.repo, "candidate-evidence-received").is_empty());
+            }
+        }
+        if phase == "registered" {
+            let out = f
+                .register("partial", &f.report.commit, &evidence)
+                .env("ARC_TEST_REGISTRATION_RENDEZVOUS", "registered")
+                .write_stdin("-")
+                .output()
+                .unwrap();
+            assert!(!out.status.success());
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let held_id = registration[0]["event_id"].as_str().unwrap();
+            assert!(
+                stderr.contains(&format!("is registered (event {held_id})")),
+                "{stderr}"
+            );
+            assert!(repository_events(&f.repo, "candidate-evidence-received").is_empty());
+        }
+
         f.registered("partial", &f.report.commit, &evidence);
         let completed_registration = repository_events(&f.repo, "candidate-registered");
         if phase == "registered" {
@@ -1137,5 +1194,81 @@ fn received_originals_survive_rewrite_and_import_garbage_collection() {
             git_out(&receiver.root, &["cat-file", "-t", &rev.commit]),
             "commit"
         );
+    }
+}
+
+#[test]
+fn legacy_received_records_import_but_conflicting_original_intents_refuse() {
+    let f = Fixture::new();
+    f.registered("intent", &f.report.commit, &f.evidence());
+    let bundle = f.repo.home.join("intent.json");
+    stdout(f.repo.arc(&f.repo.root).args([
+        "export",
+        &f.change,
+        "--output",
+        bundle.to_str().unwrap(),
+    ]));
+    let original: Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    for corrupt in [false, true] {
+        let mut parsed = original.clone();
+        for event in parsed["repository_events"].as_array_mut().unwrap() {
+            if event["event_type"] == "candidate-registered" {
+                if corrupt {
+                    event["requested_evidence_sha256"] = json!("0".repeat(64));
+                } else {
+                    event
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("requested_evidence_sha256");
+                }
+            }
+        }
+        fs::write(&bundle, serde_json::to_vec_pretty(&parsed).unwrap()).unwrap();
+        let receiver = Repo::new();
+        deliver_git_objects(&f.repo, &receiver);
+        let out = import_command(&receiver, &bundle).output().unwrap();
+        if corrupt {
+            assert!(!out.status.success());
+            assert!(String::from_utf8_lossy(&out.stderr)
+                .contains("disagrees with its original request or declarant"));
+            assert!(!receiver.root.join(".git/arc/imports").exists());
+        } else {
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let view = json_stdout(receiver.arc(&receiver.root).args([
+                "candidate",
+                "show",
+                "intent",
+                "--json",
+            ]));
+            assert_eq!(
+                view["candidates"][0]["received_evidence"]["origin"],
+                "external"
+            );
+            let path = f.repo.home.join("intent.evidence.json");
+            let out = receiver
+                .arc(&receiver.root)
+                .args([
+                    "candidate",
+                    "register",
+                    "--id",
+                    "intent",
+                    "--tree",
+                    &f.report.commit,
+                    "--brief",
+                    &f.change,
+                    "--producer",
+                    "lead-a",
+                    "--evidence-file",
+                    path.to_str().unwrap(),
+                ])
+                .output()
+                .unwrap();
+            assert!(!out.status.success());
+            assert!(String::from_utf8_lossy(&out.stderr).contains("evidence-not-requested"));
+        }
     }
 }

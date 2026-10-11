@@ -1605,6 +1605,10 @@ pub enum Payload {
         /// Claims recorded on the brief's change that the work ran under.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         episodes: Vec<String>,
+        /// Digest of the received evidence requested by this registration.
+        /// Absence establishes no recoverable evidence request.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        requested_evidence_sha256: Option<String>,
     },
     /// A declarant's judgement of a candidate. It changes no registration.
     CandidateJudged {

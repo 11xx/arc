@@ -1363,7 +1363,10 @@ PAIR REPLICA STORES
   before publication. Either refusal leaves events, receipts, configuration,
   format stamps and refs unchanged. --provenance-only permits missing listed
   Git objects; publishing authorization still applies. Git checks do not fetch
-  from promisor remotes.
+  from promisor remotes. A candidate's optional original evidence-request
+  digest binds its received document and declarant before publication. Records
+  without that intent remain readable and importable without establishing a
+  registration retry.
   Pairing grants project membership, never publishing capabilities. A paired
   receiver requires --publisher PRINCIPAL and --received-sha256 SHA256 on both
   import commands. Enroll publishing principals only in operator-policy.toml:
@@ -2550,12 +2553,21 @@ CANDIDATES
   never held a head leaves it as an external claim, subject to the receiver's
   held-object checks before any event, ref or custody publication.
 
-  An active registration with explicit `--id` and `--evidence-file` permits recovery: matching tree, brief,
-  producers, parents, adoptions, episodes and declarant reuse the registration.
-  A retry can finish missing evidence or publish supplied receipt bytes. Held
-  evidence must match the requested document and declarant exactly. Each fact
-  is recorded once; conflicting retries refuse. Without a custody directory,
-  absent receipt bytes remain unavailable and do not block registration.
+  Registration records `requested_evidence_sha256` only when --evidence-file
+  requests received evidence: the SHA256 of the typed document serialized as
+  JSON with sorted object keys. The request is immutable and shares the
+  registration event's publication boundary. An active registration with
+  explicit --id and --evidence-file permits recovery only when its original
+  request digest, tree, brief, producers, parents, adoptions, episodes and
+  declarant match. A retry can finish missing evidence or publish supplied
+  receipt bytes. Held evidence must match the requested document and declarant
+  exactly. Each fact is recorded once; conflicting retries refuse. Registration
+  without evidence establishes no request: --evidence-file cannot attach one
+  later (`evidence-not-requested`). Older records without this optional intent
+  remain readable and importable, including their received evidence, but grant
+  no registration retry. An evidence publication failure names the durable
+  registration event. Without a custody directory, absent receipt bytes remain
+  unavailable and do not block registration.
 
   Retirement deletes a candidate's pin and records that it did, and only when
   no root reaches the candidate: a selection or a promotion, reaching what its

@@ -1207,6 +1207,9 @@ enum Cmd {
     /// with their claimed trees; absent heads remain external claims. Tags
     /// are not peeled. These checks precede event, ref and custody publication.
     /// Held received originals are pinned under `refs/arc/retained/`.
+    /// A candidate's optional original evidence-request digest binds its
+    /// received document and declarant. Records without that intent remain
+    /// readable and importable without establishing a registration retry.
     /// A rewrite event's retention refs are held under `refs/arc/retained/`
     /// for the imported change where the commit is here; a name that is no
     /// retention ref is refused, and events naming none import unchanged.
@@ -3437,9 +3440,15 @@ enum CandidateCmd {
     /// Import applies the same checks before publication. Held original commits
     /// have retention refs across rewrites and garbage collection.
     /// A --custody-dir file that fails verification refuses before publication.
-    /// With --id and --evidence-file, identical active registration fields and declarant can
-    /// complete a partial registration or supply receipt bytes on retry. Held
-    /// evidence must match exactly; a retry records each fact at most once.
+    /// With --id and --evidence-file, a retry can finish the original request
+    /// only when the active registration's fields, declarant and immutable
+    /// requested_evidence_sha256 match. The digest covers the typed evidence
+    /// document serialized as JSON with sorted object keys. A registration
+    /// without evidence, including an older record without this optional intent,
+    /// establishes no retry request (`evidence-not-requested`). Old records and
+    /// their evidence remain readable and importable. Held evidence must match
+    /// exactly; each fact is recorded at most once. An evidence publication
+    /// failure names the durable registration event.
     Register {
         /// The content: a tree, or a commit, which is recorded as its tree
         #[arg(long)]
