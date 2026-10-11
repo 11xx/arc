@@ -2550,6 +2550,13 @@ CANDIDATES
   never held a head leaves it as an external claim, subject to the receiver's
   held-object checks before any event, ref or custody publication.
 
+  An active registration with explicit `--id` and `--evidence-file` permits recovery: matching tree, brief,
+  producers, parents, adoptions, episodes and declarant reuse the registration.
+  A retry can finish missing evidence or publish supplied receipt bytes. Held
+  evidence must match the requested document and declarant exactly. Each fact
+  is recorded once; conflicting retries refuse. Without a custody directory,
+  absent receipt bytes remain unavailable and do not block registration.
+
   Retirement deletes a candidate's pin and records that it did, and only when
   no root reaches the candidate: a selection or a promotion, reaching what its
   candidate's parents and adoptions carry. The registration and its

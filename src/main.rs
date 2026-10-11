@@ -3437,6 +3437,9 @@ enum CandidateCmd {
     /// Import applies the same checks before publication. Held original commits
     /// have retention refs across rewrites and garbage collection.
     /// A --custody-dir file that fails verification refuses before publication.
+    /// With --id and --evidence-file, identical active registration fields and declarant can
+    /// complete a partial registration or supply receipt bytes on retry. Held
+    /// evidence must match exactly; a retry records each fact at most once.
     Register {
         /// The content: a tree, or a commit, which is recorded as its tree
         #[arg(long)]

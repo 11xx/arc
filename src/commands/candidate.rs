@@ -54,6 +54,7 @@ pub fn register(ctx: &Ctx, args: RegisterArgs) -> Result<()> {
     let ledger = load_ledger(&store)?;
 
     let (brief, change_slug) = resolve_brief(ctx, &store, &args.brief)?;
+    let explicit_id = args.id.is_some();
     let candidate_id = match args.id {
         Some(id) => {
             ids::validate_id_component(&id)?;
@@ -119,12 +120,44 @@ pub fn register(ctx: &Ctx, args: RegisterArgs) -> Result<()> {
             )
         })
         .transpose()?;
-    // Judged by the same replay a bundle's copy is, so a registration typed
-    // here can never be one an import would refuse.
+    // An explicit identity makes a partial publication recoverable. Only the
+    // same registration and declarant can finish it.
+    let held_events = store.load_repository_events()?;
+    let existing = held_events.iter().find(|held| matches!(
+        &held.payload, Payload::CandidateRegistered { candidate_id: id, .. } if id == &candidate_id
+    ));
+    let declarant = |event: &crate::model::Event| {
+        event
+            .on_behalf_of
+            .clone()
+            .unwrap_or_else(|| event.actor.clone())
+    };
     let mut ledger = ledger;
-    ledger.record(&event)?;
-    if let Some(evidence) = &evidence_event {
-        ledger.record(evidence)?;
+    if let Some(held) = existing {
+        if !explicit_id
+            || evidence_event.is_none()
+            || ledger.retirement(&candidate_id).is_some()
+            || serde_json::to_value(&held.payload)? != serde_json::to_value(&event.payload)?
+            || declarant(held) != declarant(&event)
+        {
+            bail!("duplicate-candidate: {candidate_id} is not a matching active evidence retry");
+        }
+    } else {
+        ledger.record(&event)?;
+    }
+    let held_evidence = ledger.received_by(&candidate_id);
+    let evidence_id = held_evidence.map(|received| received.event_id.clone());
+    if let Some(requested) = &evidence_event {
+        if let Some(held) = held_evidence {
+            let Payload::CandidateEvidenceReceived { evidence, .. } = &requested.payload else {
+                unreachable!();
+            };
+            if &held.evidence != evidence || held.declarant != declarant(requested) {
+                bail!("evidence-already-received: {candidate_id} holds different evidence or declarant");
+            }
+        } else {
+            ledger.record(requested)?;
+        }
     }
     ctx.ensure_declared_actor(&store)?;
 
@@ -147,8 +180,14 @@ pub fn register(ctx: &Ctx, args: RegisterArgs) -> Result<()> {
             }
         }
     }
-    store.append_local_repository_event(&mut event)?;
-    if let Some(evidence) = &mut evidence_event {
+    #[cfg(debug_assertions)]
+    registration_rendezvous("pinned")?;
+    if existing.is_none() {
+        store.append_local_repository_event(&mut event)?;
+    }
+    #[cfg(debug_assertions)]
+    registration_rendezvous("registered")?;
+    if let Some(evidence) = evidence_event.as_mut().filter(|_| evidence_id.is_none()) {
         store
             .append_local_repository_event(evidence)
             .with_context(|| {
@@ -163,10 +202,34 @@ pub fn register(ctx: &Ctx, args: RegisterArgs) -> Result<()> {
     println!("tree: {tree}");
     println!("brief: {}", contract_label(&brief));
     println!("pinned: {reference}");
-    println!("event: {}", event.event_id);
+    println!(
+        "event: {}",
+        existing
+            .map(|held| &held.event_id)
+            .unwrap_or(&event.event_id)
+    );
     if let Some(evidence) = &evidence_event {
-        println!("received evidence: {} (external)", evidence.event_id);
+        println!(
+            "received evidence: {} (external)",
+            evidence_id.as_ref().unwrap_or(&evidence.event_id)
+        );
     }
+    Ok(())
+}
+
+#[cfg(debug_assertions)]
+fn registration_rendezvous(phase: &str) -> Result<()> {
+    use std::io::{Read, Write};
+    if std::env::var("ARC_TEST_REGISTRATION_RENDEZVOUS").as_deref() != Ok(phase) {
+        return Ok(());
+    }
+    let mut stderr = std::io::stderr().lock();
+    writeln!(stderr, "arc test: registration {phase}")?;
+    stderr.flush()?;
+    drop(stderr);
+    let mut release = [0];
+    std::io::stdin().read_exact(&mut release)?;
+    anyhow::ensure!(release == *b"+", "invalid registration rendezvous release");
     Ok(())
 }
 

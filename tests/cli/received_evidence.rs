@@ -713,7 +713,7 @@ fn received_evidence_travels_with_its_receipts_and_the_objects_the_exporter_hold
 }
 
 #[test]
-fn a_registration_without_evidence_shows_none_and_cannot_gain_it_later() {
+fn a_matching_explicit_registration_retry_can_complete_evidence_and_custody() {
     let f = Fixture::new();
     f.repo
         .arc(&f.repo.root)
@@ -740,14 +740,42 @@ fn a_registration_without_evidence_shows_none_and_cannot_gain_it_later() {
     assert!(!text.contains("received evidence"), "{text}");
     assert!(repository_events(&f.repo, "candidate-evidence-received").is_empty());
 
-    // The same candidate id cannot be registered again to add evidence.
+    // A retry can complete a registration whose evidence append was interrupted.
+    f.registered("plain", &f.report.commit, &f.evidence());
+    assert_eq!(repository_events(&f.repo, "candidate-registered").len(), 1);
+    assert_eq!(
+        repository_events(&f.repo, "candidate-evidence-received").len(),
+        1
+    );
+    let supplied = f.repo.home.join("retry-custody");
+    materialize(&supplied, &[RECEIPT]);
+    f.register("plain", &f.report.commit, &f.evidence())
+        .args(["--custody-dir", supplied.to_str().unwrap()])
+        .assert()
+        .success();
+    assert_eq!(
+        f.view("plain")["received_evidence"]["receipts"][0]["availability"],
+        "available"
+    );
+    assert_eq!(repository_events(&f.repo, "candidate-registered").len(), 1);
+    assert_eq!(
+        repository_events(&f.repo, "candidate-evidence-received").len(),
+        1
+    );
+    let mut conflict = f.evidence();
+    conflict["packet"] = json!("different-packet");
     let out = f
-        .register("plain", &f.report.commit, &f.evidence())
+        .register("plain", &f.report.commit, &conflict)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("evidence-already-received"));
+    let out = f
+        .register("plain", &f.tested.commit, &f.evidence())
         .output()
         .unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("duplicate-candidate"));
-    assert!(repository_events(&f.repo, "candidate-evidence-received").is_empty());
 }
 
 #[test]
@@ -946,6 +974,78 @@ fn held_raw_heads_refuse_both_intake_paths_before_publication() {
         assert!(String::from_utf8_lossy(&out.stderr).contains(expected));
         assert_eq!(event_types(&f.repo, &f.change), before);
         assert_eq!(candidate_refs(&f.repo), pins);
+    }
+}
+
+#[test]
+#[cfg(debug_assertions)]
+fn interrupted_registration_retries_preserve_unavailable_claims_and_event_identity() {
+    for phase in ["pinned", "registered"] {
+        let f = Fixture::new();
+        let mut evidence = f.evidence();
+        evidence["heads"]["tested"] = json!({"commit": "c".repeat(40), "tree": "d".repeat(40)});
+        let template = f.register("partial", &f.report.commit, &evidence);
+        let mut command = Command::new(template.get_program());
+        command
+            .args(template.get_args())
+            .current_dir(template.get_current_dir().unwrap())
+            .env("ARC_TEST_REGISTRATION_RENDEZVOUS", phase)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (key, value) in template.get_envs() {
+            if let Some(value) = value {
+                command.env(key, value);
+            } else {
+                command.env_remove(key);
+            }
+        }
+        let mut child = command.spawn().unwrap();
+        let mut line = String::new();
+        BufReader::new(child.stderr.as_mut().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert_eq!(line, format!("arc test: registration {phase}\n"));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let registration = repository_events(&f.repo, "candidate-registered");
+        assert_eq!(registration.len(), usize::from(phase == "registered"));
+        assert!(repository_events(&f.repo, "candidate-evidence-received").is_empty());
+        f.registered("partial", &f.report.commit, &evidence);
+        let completed_registration = repository_events(&f.repo, "candidate-registered");
+        if phase == "registered" {
+            assert_eq!(completed_registration, registration);
+        }
+        f.registered("partial", &f.report.commit, &evidence);
+        assert_eq!(
+            repository_events(&f.repo, "candidate-registered"),
+            completed_registration
+        );
+        assert_eq!(
+            repository_events(&f.repo, "candidate-evidence-received").len(),
+            1
+        );
+        let view = f.view("partial");
+        assert_eq!(
+            view["received_evidence"]["heads"]["tested"]["commit"],
+            "c".repeat(40)
+        );
+        assert_eq!(
+            view["received_evidence"]["receipts"][0]["availability"],
+            "unavailable"
+        );
+        assert!(!event_types(&f.repo, &f.change)
+            .iter()
+            .any(|kind| kind == "candidate-verified" || kind == "verification-recorded"));
+        assert!(!git_out(
+            &f.repo.root,
+            &[
+                "for-each-ref",
+                "--format=%(objectname)",
+                "refs/arc/retained/"
+            ]
+        )
+        .contains(&"c".repeat(40)));
     }
 }
 
