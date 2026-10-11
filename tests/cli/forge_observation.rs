@@ -557,3 +557,70 @@ fn forge_invalid_stored_projection_is_unresolved_without_poisoning_state() {
         "projection-unresolved"
     );
 }
+fn native_identity(v: &mut Value, repo_id: Option<&str>, pr_id: Option<&str>) {
+    v["provider_identity"]["repository_id"] = json!(repo_id);
+    v["provider_identity"]["native_id"] = json!(pr_id);
+}
+fn retarget_generation(edited: bool) {
+    let (repo, id) = setup();
+    let mut first = document("before-retarget", "g1", "first", None);
+    native_identity(&mut first, Some("repository-a"), Some("native-pr-a"));
+    observe(&repo, &id, &first);
+    let mut next = if edited {
+        document("after-retarget", "g2", "edited", Some("g1"))
+    } else {
+        document("after-retarget", "g1", "first", None)
+    };
+    native_identity(&mut next, Some("repository-a"), Some("native-pr-a"));
+    next["provider_identity"]["base_ref"] = json!("release");
+    next["previous_observation"] = json!("before-retarget");
+    observe(&repo, &id, &next);
+    let shown = state(&repo, &id);
+    assert_eq!(
+        shown["forge"]["observations"][0]["document"]["provider_identity"]["base_ref"],
+        "main"
+    );
+    assert_eq!(
+        shown["forge"]["observations"][1]["document"]["provider_identity"]["base_ref"],
+        "release"
+    );
+    assert_eq!(shown["forge"]["observations"][1]["invalid"], Value::Null);
+}
+#[test]
+fn forge_retargeted_native_pr_reuses_unchanged_generation() {
+    retarget_generation(false);
+}
+#[test]
+fn forge_retargeted_native_pr_edits_existing_generation() {
+    retarget_generation(true);
+}
+#[test]
+fn forge_retargeted_native_pr_cannot_fork_an_existing_item() {
+    let (repo, id) = setup();
+    let mut first = document("before-retarget", "g1", "first", None);
+    native_identity(&mut first, Some("repository-a"), Some("native-pr-a"));
+    observe(&repo, &id, &first);
+    let mut fork = document("after-retarget", "g2", "edited", None);
+    native_identity(&mut fork, Some("repository-a"), Some("native-pr-a"));
+    fork["provider_identity"]["base_ref"] = json!("release");
+    refuses(&repo, &id, &fork);
+}
+#[test]
+fn forge_generation_identity_is_per_native_pr() {
+    let (repo, id) = setup();
+    let mut first = document("read-a", "g1", "first", None);
+    native_identity(&mut first, Some("repository-a"), Some("native-pr-a"));
+    observe(&repo, &id, &first);
+    let mut reuse = document("reuse-b", "g1", "first", None);
+    native_identity(&mut reuse, Some("repository-a"), Some("native-pr-b"));
+    refuses(&repo, &id, &reuse);
+    let mut extend = document("extend-b", "g2", "edited", Some("g1"));
+    native_identity(&mut extend, Some("repository-a"), Some("native-pr-b"));
+    refuses(&repo, &id, &extend);
+    let mut own = document("own-b", "g3", "first", None);
+    native_identity(&mut own, Some("repository-a"), Some("native-pr-b"));
+    observe(&repo, &id, &own);
+    let mut unreported = document("unreported", "g4", "first", None);
+    native_identity(&mut unreported, None, None);
+    observe(&repo, &id, &unreported);
+}

@@ -2958,6 +2958,8 @@ enum ForgeCmd {
     /// Admit an adapter arc-forge-observation/1 file, including failed or
     /// truncated reads. Records references only, never fetches bytes or
     /// changes readiness. Retries of identical read IDs return the receipt.
+    /// Generations use stable provider/PR/item identity across retargeting;
+    /// repository/ref and URL snapshots retain the values from each read.
     /// Admission refuses invalid input. Replay coalesces identical replica reads,
     /// retains conflicts and invalid facts with diagnostics, and quarantines
     /// their projections; it never refuses a stored fact on validation alone.

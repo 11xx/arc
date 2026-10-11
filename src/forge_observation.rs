@@ -30,6 +30,24 @@ pub struct ProviderIdentity {
     pub head_repo: String,
     pub head_ref: String,
 }
+impl ProviderIdentity {
+    /// Immutable provider/PR coordinates, with names and numbers as fallback
+    /// only when both reads lack the corresponding native identifier.
+    pub fn same_pr_identity_as(&self, other: &Self) -> bool {
+        self.provider == other.provider
+            && self.host == other.host
+            && match (&self.repository_id, &other.repository_id) {
+                (Some(left), Some(right)) => left == right,
+                (None, None) => self.repository == other.repository,
+                _ => false,
+            }
+            && match (&self.native_id, &other.native_id) {
+                (Some(left), Some(right)) => left == right,
+                (None, None) => self.pr_number == other.pr_number,
+                _ => false,
+            }
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CoverageState {
@@ -260,7 +278,7 @@ impl ForgeObservation {
             );
             if let Some((old, identity)) = prior.get(g.generation_id.as_str()) {
                 ensure!(
-                    *old == g && *identity == p,
+                    *old == g && identity.same_pr_identity_as(p),
                     "generation ID conflicts with recorded content"
                 );
             }
@@ -274,7 +292,9 @@ impl ForgeObservation {
                     bail!("generation predecessor is not recorded");
                 };
                 ensure!(
-                    *identity == p && old.kind == g.kind && old.node_id == g.node_id,
+                    identity.same_pr_identity_as(p)
+                        && old.kind == g.kind
+                        && old.node_id == g.node_id,
                     "generation predecessor names another item or PR"
                 );
                 ensure!(
@@ -283,9 +303,11 @@ impl ForgeObservation {
                 );
             } else {
                 ensure!(
-                    !prior.values().any(|(old, identity)| *identity == p
-                        && old.kind == g.kind
-                        && old.node_id == g.node_id),
+                    !prior
+                        .values()
+                        .any(|(old, identity)| identity.same_pr_identity_as(p)
+                            && old.kind == g.kind
+                            && old.node_id == g.node_id),
                     "changed item requires an explicit predecessor"
                 );
             }
@@ -314,7 +336,8 @@ impl ForgeObservation {
                     "generation byte length conflicts with recorded item"
                 );
             }
-            if let Some(previous) = previous.filter(|d| d.provider_identity == *p) {
+            if let Some(previous) = previous.filter(|d| d.provider_identity.same_pr_identity_as(p))
+            {
                 if let Some(old) = previous
                     .items
                     .iter()
@@ -707,4 +730,69 @@ pub fn validate_import_admission(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn identity(repository_id: Option<&str>, native_id: Option<&str>) -> ProviderIdentity {
+        ProviderIdentity {
+            provider: "example".into(),
+            host: "forge.example.invalid".into(),
+            repository: "sample/project".into(),
+            repository_id: repository_id.map(str::to_string),
+            pr_number: 1,
+            native_id: native_id.map(str::to_string),
+            url: "https://forge.example.invalid/sample/project/pull/1".into(),
+            base_repo: "sample/project".into(),
+            base_ref: "main".into(),
+            head_repo: "sample/project".into(),
+            head_ref: "topic".into(),
+        }
+    }
+
+    #[test]
+    fn snapshot_fields_do_not_identify_a_native_pr() {
+        let original = identity(Some("repository"), Some("pr"));
+        let mut moved = original.clone();
+        moved.repository = "renamed/project".into();
+        moved.pr_number = 7;
+        moved.url = "https://forge.example.invalid/renamed/project/pull/7".into();
+        moved.base_repo = "renamed/project".into();
+        moved.base_ref = "release".into();
+        moved.head_repo = "fork/project".into();
+        moved.head_ref = "other".into();
+        assert!(original.same_pr_identity_as(&moved));
+    }
+
+    #[test]
+    fn native_coordinates_separate_prs() {
+        let original = identity(Some("repository"), Some("pr"));
+        assert!(!original.same_pr_identity_as(&identity(Some("recreated"), Some("pr"))));
+        assert!(!original.same_pr_identity_as(&identity(Some("repository"), Some("other"))));
+        let mut other_host = original.clone();
+        other_host.host = "other.example.invalid".into();
+        assert!(!original.same_pr_identity_as(&other_host));
+        let mut other_provider = original.clone();
+        other_provider.provider = "other".into();
+        assert!(!original.same_pr_identity_as(&other_provider));
+    }
+
+    #[test]
+    fn a_missing_native_coordinate_matches_only_a_missing_one() {
+        let native = identity(Some("repository"), Some("pr"));
+        assert!(!native.same_pr_identity_as(&identity(None, None)));
+        assert!(!native.same_pr_identity_as(&identity(Some("repository"), None)));
+        assert!(!native.same_pr_identity_as(&identity(None, Some("pr"))));
+
+        let named = identity(None, None);
+        assert!(named.same_pr_identity_as(&identity(None, None)));
+        let mut renumbered = named.clone();
+        renumbered.pr_number = 2;
+        assert!(!named.same_pr_identity_as(&renumbered));
+        let mut renamed = named.clone();
+        renamed.repository = "other/project".into();
+        assert!(!named.same_pr_identity_as(&renamed));
+    }
 }
