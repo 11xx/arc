@@ -3122,6 +3122,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
             | Payload::RunDispatched { .. }
             | Payload::RunBound { .. }
             | Payload::RunEnded { .. }
+            | Payload::CostFactsRetained { .. }
             | Payload::CandidateRegistered { .. }
             | Payload::CandidateJudged { .. }
             | Payload::CandidateRetired { .. }

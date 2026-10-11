@@ -194,6 +194,7 @@ pub fn required_roles(payload: &Payload) -> Option<Vec<Vec<Role>>> {
         | RunDispatched { .. }
         | RunBound { .. }
         | RunEnded { .. }
+        | CostFactsRetained { .. }
         | CandidateRegistered { .. }
         | CandidateJudged { .. }
         | CandidateRetired { .. }

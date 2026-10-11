@@ -1594,6 +1594,18 @@ pub enum Payload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         handle: Option<String>,
     },
+    /// Normalized consumption facts arc read from one executor session, kept
+    /// so the cost view's arithmetic replays after the source rotates. The
+    /// facts name the reader and calculation that produced them and the
+    /// source frontier and digest they describe; the source bytes stay in the
+    /// harness's own store. A later retention for the same session supersedes
+    /// nothing: each is an observation at its frontier, never added to
+    /// another.
+    CostFactsRetained {
+        executor_harness: String,
+        executor_session: String,
+        facts: CostFacts,
+    },
     /// A caller told arc that a dispatched run reached a terminal outcome.
     /// `unknown` records that no more specific outcome is known.
     ///
@@ -2223,6 +2235,7 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         | Payload::RunDispatched { .. }
         | Payload::RunBound { .. }
         | Payload::RunEnded { .. }
+        | Payload::CostFactsRetained { .. }
         | Payload::CandidateRegistered { .. }
         | Payload::CandidateJudged { .. }
         | Payload::CandidateRetired { .. }
@@ -2613,6 +2626,55 @@ impl CommitRange {
     pub fn as_str(&self) -> String {
         format!("{}..{}", self.base, self.head)
     }
+}
+
+/// One session's consumption as one read measured it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CostFacts {
+    /// The reader that measured the session: tapes' core library and the
+    /// revision arc pins it at.
+    pub reader: String,
+    /// The normalization arc applied to the reader's answer.
+    pub calculation: String,
+    /// Bytes of the source the read observed.
+    pub frontier: u64,
+    /// `sha256:` over the observed source prefix, when the reader pinned one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+    /// What the counters are, as tapes names it: `recorded-total` or
+    /// `summed-requests`. Absent when the source recorded no counters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basis: Option<String>,
+    /// How much of the session the counters cover: `session`, `read-window`
+    /// or `since-reset`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<String>,
+    /// Token counters by tapes' categories. Reasoning is a subset of output.
+    #[serde(default)]
+    pub counters: CostCounters,
+    /// The dollar figure the harness wrote: a harness-calculated estimate
+    /// with an unknown pricing basis, never a charge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_estimate_usd: Option<f64>,
+    /// Why the measurement is incomplete. Empty when it covers the session.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub incomplete: Vec<String>,
+}
+
+/// Token counters by tapes' categories, each absent when the source recorded
+/// none.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CostCounters {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<u64>,
 }
 
 /// The journal artifact a run was dispatched against: the reference as it

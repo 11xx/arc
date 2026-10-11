@@ -1400,7 +1400,8 @@ impl Store {
             Payload::RunDispatched {
                 journal: Some(_), ..
             }
-            | Payload::RunBound { .. } => Some(7),
+            | Payload::RunBound { .. }
+            | Payload::CostFactsRetained { .. } => Some(7),
             // An older reader projects a record that a change needs no entry
             // as an entry with an empty category and body.
             Payload::ChangelogRecorded {
@@ -1445,7 +1446,7 @@ impl Store {
             | Some("change-roles-asserted")
             | Some("change-checkout-bound") => Some(7),
             Some("post-integration-disposition-recorded") => Some(7),
-            Some("run-bound") => Some(7),
+            Some("run-bound") | Some("cost-facts-retained") => Some(7),
             Some("run-dispatched")
                 if value
                     .and_then(|value| value.get("journal"))
@@ -2714,8 +2715,9 @@ mod tests {
         assert!(mismatches.is_empty(), "{}", mismatches.join("; "));
     }
 
-    /// A binding and a journal-subject dispatch stamp format 7 on every
-    /// append path; a dispatch against an older subject stamps nothing.
+    /// A binding, a journal-subject dispatch, and retained cost facts stamp
+    /// format 7 on every append path; a dispatch against an older subject
+    /// stamps nothing.
     #[test]
     fn run_bindings_and_journal_subjects_stamp_seven_on_every_path() {
         let fixtures = [
@@ -2725,6 +2727,11 @@ mod tests {
             ),
             (
                 serde_json::json!({"event_type": "run-dispatched", "route": "r", "worktree": "w", "journal": {"file": "20260101T000000Z-topic-todo.md", "digest": "sha256:00"}}),
+                7,
+            ),
+            (
+                serde_json::json!({"event_type": "cost-facts-retained", "executor_harness": "pi", "executor_session": "session", "facts": {
+                    "reader": "reader", "calculation": "calculation", "frontier": 10, "counters": {"input": 1}}}),
                 7,
             ),
             (

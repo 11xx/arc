@@ -2498,6 +2498,19 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             }
             ("run-bound", summary)
         }
+        Payload::CostFactsRetained {
+            executor_harness,
+            executor_session,
+            facts,
+        } => (
+            "cost-facts-retained",
+            format!(
+                "{}:{} frontier={}",
+                one_line(executor_harness),
+                one_line(executor_session),
+                facts.frontier
+            ),
+        ),
         Payload::RunEnded {
             dispatch_event_id,
             outcome,
