@@ -44,8 +44,14 @@ impl From<&crate::forge_observation::RetainedContentRef> for Content {
 pub fn referenced<'a>(payloads: impl Iterator<Item = &'a Payload>) -> BTreeSet<Content> {
     let mut found = BTreeSet::new();
     for payload in payloads {
-        if let Payload::ForgeObservationRecorded { observation } = payload {
-            found.extend(observation.contents().map(Content::from));
+        match payload {
+            Payload::ForgeObservationRecorded { observation } => {
+                found.extend(observation.contents().map(Content::from));
+            }
+            Payload::CandidateEvidenceReceived { evidence, .. } => {
+                found.extend(evidence.receipts.iter().map(Content::from));
+            }
+            _ => {}
         }
     }
     found

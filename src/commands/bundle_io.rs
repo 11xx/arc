@@ -20,6 +20,7 @@ pub fn export_bundle(
             let events = bundle
                 .events
                 .iter()
+                .chain(&bundle.repository_events)
                 .map(crate::bundle::parse_typed_event)
                 .collect::<Result<Vec<_>>>()?;
             let wanted = crate::custody::referenced(events.iter().flatten().map(|e| &e.payload));
@@ -123,11 +124,19 @@ pub(super) fn load_custody_sidecar(
 fn referenced_content(
     validated: &ValidatedBundle,
 ) -> std::collections::BTreeSet<crate::custody::Content> {
+    // Repository events were judged well-formed when the bundle parsed.
+    let repository: Vec<_> = validated
+        .bundle
+        .repository_events
+        .iter()
+        .filter_map(|value| crate::bundle::parse_typed_event(value).ok().flatten())
+        .collect();
     crate::custody::referenced(
         validated
             .events
             .iter()
             .filter_map(|event| event.typed.as_ref())
+            .chain(&repository)
             .map(|event| &event.payload),
     )
 }

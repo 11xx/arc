@@ -2540,7 +2540,10 @@ CANDIDATES
   degrades only the claim that cites it. `--custody-dir DIR` copies each
   receipt's file from `DIR/sha256/<digest>` into custody after verifying its
   length and sha256, as `forge observe --custody-dir` does; a mismatch
-  refuses and records nothing.
+  refuses and records nothing. `arc export` lists the commits and trees the
+  evidence names that the exporter holds as `received-commit` and
+  `received-tree`, and the receipts ride the custody sidecar; an exporter that
+  never held a head obliges no receiver.
 
   Retirement deletes a candidate's pin and records that it did, and only when
   no root reaches the candidate: a selection or a promotion, reaching what its
@@ -2599,8 +2602,8 @@ CANDIDATES
   workspace report` flags a promoted brief with unjudged siblings, and `arc
   explain` lists them under rejected alternatives.
 
-  Candidate events, evaluations, selections, and promotions among them, are
-  repository events, so every `arc export` carries them
+  Candidate events, received evidence, evaluations, selections, and promotions
+  among them, are repository events, so every `arc export` carries them
   and `arc import` judges them with the ledger they join before writing
   anything. Every imported candidate event stamps store format 7, including
   an evaluation, selection, or promotion without its registration.

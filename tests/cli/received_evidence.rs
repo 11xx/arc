@@ -245,6 +245,24 @@ fn candidate_refs(repo: &Repo) -> String {
     )
 }
 
+/// A receiver that admits the exporter's facts.
+fn import_command(replica: &Repo, bundle: &Path) -> AssertCommand {
+    let bytes = fs::read(bundle).unwrap();
+    let parsed: Value = serde_json::from_slice(&bytes).unwrap();
+    let source = parsed["source_replica_id"].as_str().unwrap();
+    replica.declare_gates_locally(&format!("[[replica.publishers]]\nprincipal='fixture-change'\nsource_replica_id='{source}'\n[[replica.publishers.origins]]\nreplica_id='{source}'\nroles=['facts']\nactors=[]\n"));
+    let mut command = replica.arc(&replica.root);
+    command.args([
+        "import",
+        bundle.to_str().unwrap(),
+        "--publisher",
+        "fixture-change",
+        "--received-sha256",
+        &format!("{:x}", Sha256::digest(&bytes)),
+    ]);
+    command
+}
+
 #[test]
 fn received_report_child_does_not_move_tested_source_claim() {
     let f = Fixture::new();
@@ -611,6 +629,90 @@ fn received_evidence_that_breaks_a_rule_writes_nothing() {
 }
 
 #[test]
+fn received_evidence_travels_with_its_receipts_and_the_objects_the_exporter_holds() {
+    let f = Fixture::new();
+    let supplied = f.repo.home.join("supplied");
+    materialize(&supplied, &[RECEIPT]);
+    // The tested head is a commit this repository never held.
+    let unheld = ("c".repeat(40), "d".repeat(40));
+    let mut evidence = f.evidence();
+    evidence["heads"]["tested"] = json!({"commit": unheld.0, "tree": unheld.1});
+    f.register("travelling", &f.report.commit, &evidence)
+        .args(["--custody-dir", supplied.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let bundle = f.repo.home.join("bundle.json");
+    let objects = f.repo.home.join("objects.json");
+    let sidecar = f.repo.home.join("bundle.custody");
+    let exported = stdout(f.repo.arc(&f.repo.root).args([
+        "export",
+        &f.change,
+        "--output",
+        bundle.to_str().unwrap(),
+        "--objects-json",
+        objects.to_str().unwrap(),
+        "--custody-dir",
+        sidecar.to_str().unwrap(),
+    ]));
+    assert!(
+        exported.contains("custody: 1 entries, 1 available, 0 unavailable"),
+        "{exported}"
+    );
+    let bundle_json: Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    assert!(bundle_json["repository_events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["event_type"] == "candidate-evidence-received"));
+    let listed: Value = serde_json::from_slice(&fs::read(&objects).unwrap()).unwrap();
+    let listed = listed["objects"].as_array().unwrap();
+    for revision in [&f.source, &f.report] {
+        assert!(
+            listed.contains(&json!({"oid": revision.commit, "role": "received-commit"})),
+            "{listed:?}"
+        );
+        assert!(
+            listed.contains(&json!({"oid": revision.tree, "role": "received-tree"})),
+            "{listed:?}"
+        );
+    }
+    // What the exporter never held obliges no receiver.
+    assert!(!listed.iter().any(|object| object["oid"] == unheld.0));
+    assert!(!listed.iter().any(|object| object["oid"] == unheld.1));
+
+    let replica = Repo::new();
+    deliver_git_objects(&f.repo, &replica);
+    let imported = stdout(
+        import_command(&replica, &bundle).args(["--custody-dir", sidecar.to_str().unwrap()]),
+    );
+    assert!(
+        imported.contains("custody: 1 installed, 0 held, 0 unavailable"),
+        "{imported}"
+    );
+    assert_eq!(
+        fs::read(custody_file(&replica, RECEIPT)).unwrap(),
+        RECEIPT.as_bytes()
+    );
+    let shown =
+        json_stdout(
+            replica
+                .arc(&replica.root)
+                .args(["candidate", "show", "travelling", "--json"]),
+        );
+    let received = &shown["candidates"][0]["received_evidence"];
+    assert_eq!(received["origin"], "external");
+    assert_eq!(received["receipts"][0]["availability"], "available");
+    assert_eq!(received["heads"]["tested"]["commit"], unheld.0);
+    assert_eq!(received["heads"]["source"]["commit"], f.source.commit);
+    // The same document, as the sender recorded it.
+    let before = f.view("travelling")["received_evidence"].clone();
+    assert_eq!(received["heads"], before["heads"]);
+    assert_eq!(received["commands"], before["commands"]);
+    assert_eq!(received["omissions"], before["omissions"]);
+}
+
+#[test]
 fn a_registration_without_evidence_shows_none_and_cannot_gain_it_later() {
     let f = Fixture::new();
     f.repo
@@ -646,6 +748,41 @@ fn a_registration_without_evidence_shows_none_and_cannot_gain_it_later() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("duplicate-candidate"));
     assert!(repository_events(&f.repo, "candidate-evidence-received").is_empty());
+}
+
+#[test]
+fn an_imported_second_evidence_event_for_one_candidate_is_refused_before_anything_is_written() {
+    let f = Fixture::new();
+    f.registered("once", &f.report.commit, &f.evidence());
+    let bundle = f.repo.home.join("bundle.json");
+    stdout(f.repo.arc(&f.repo.root).args([
+        "export",
+        &f.change,
+        "--output",
+        bundle.to_str().unwrap(),
+    ]));
+    let mut parsed: Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    let events = parsed["repository_events"].as_array_mut().unwrap();
+    let mut second = events
+        .iter()
+        .find(|event| event["event_type"] == "candidate-evidence-received")
+        .unwrap()
+        .clone();
+    let mut id = second["event_id"].as_str().unwrap().to_string();
+    let last = if id.ends_with('Z') { 'Y' } else { 'Z' };
+    id.replace_range(id.len() - 1.., &last.to_string());
+    second["event_id"] = json!(id);
+    events.push(second);
+    fs::write(&bundle, serde_json::to_vec_pretty(&parsed).unwrap()).unwrap();
+
+    let replica = Repo::new();
+    deliver_git_objects(&f.repo, &replica);
+    let out = import_command(&replica, &bundle).output().unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("evidence-already-received"), "{stderr}");
+    assert!(stderr.contains("nothing was imported"), "{stderr}");
+    assert!(!replica.root.join(".git/arc/repository/events").exists());
 }
 
 #[test]

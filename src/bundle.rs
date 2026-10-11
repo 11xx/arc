@@ -443,6 +443,19 @@ fn exported_objects(
             }
             continue;
         }
+        // The commits and trees an external run names are its claims. Like a
+        // provider's, they travel only where this repository holds them.
+        if let Payload::CandidateEvidenceReceived { evidence, .. } = &event.payload {
+            for (_, head) in evidence.heads.each() {
+                if crate::gitio::commit_exists(cwd, &head.commit)? {
+                    insert_object(cwd, &mut objects, &head.commit, "received-commit")?;
+                }
+                if crate::gitio::resolve_tree(cwd, &head.tree)?.as_deref() == Some(&head.tree) {
+                    insert_object(cwd, &mut objects, &head.tree, "received-tree")?;
+                }
+            }
+            continue;
+        }
         let payload = serde_json::to_value(&event.payload)?;
         let event_type = payload["event_type"].as_str().unwrap_or_default();
         collect_payload_objects(cwd, &payload, event_type, &mut objects)?;

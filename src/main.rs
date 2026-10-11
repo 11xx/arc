@@ -1160,10 +1160,13 @@ enum Cmd {
     /// are listed with the role `retention-commit`. A commit a forge fact
     /// records as the provider's own is listed with the role `observed-commit`
     /// only where this repository holds it; an exporter that never fetched it
-    /// does not oblige the receiver to.
+    /// does not oblige the receiver to. The commits and trees the repository
+    /// events' received candidate evidence names are listed as `received-commit`
+    /// and `received-tree` on the same terms.
     /// --custody-dir writes an optional arc-custody-bundle/1 sidecar: the
-    /// retained content the exported forge observations reference, which
-    /// ledger custody holds, copied once per digest beside a manifest.json.
+    /// retained content the exported forge observations and the repository
+    /// events' received candidate evidence reference, which ledger custody
+    /// holds, copied once per digest beside a manifest.json.
     /// Content absent or damaged here gets an explicit unavailable entry and
     /// the manifest and summary say incomplete; no archive claims complete
     /// custody it does not hold. The bundle binds the manifest's digest. The
@@ -1217,7 +1220,8 @@ enum Cmd {
     /// --provenance-only permits missing objects; it never bypasses authorization.
     /// --custody-dir installs an arc-custody-bundle/1 sidecar into the ledger's
     /// custody. The bundle must bind the manifest's digest; the manifest, its
-    /// change, its entries against the bundled events' references, every
+    /// change, its entries against the references of the bundled change and
+    /// repository events, every
     /// path, length and sha256, and the absence of symlinks are all checked
     /// before any event, ref or file is written, and corrupt content or an
     /// unsafe path refuses the whole import. Content already held is not
