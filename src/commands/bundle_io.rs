@@ -12,9 +12,10 @@ pub fn export_bundle(
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
     let mut bundle = Bundle::export(&store, &ctx.cwd, &change_id, since)?;
-    // The sidecar is written first: the bundle binds its manifest digest, so a
-    // bundle never names a sidecar that was not written.
-    let sidecar = custody_dir
+    // The sidecar is staged first because the bundle binds its manifest
+    // digest, and published only once the bundle is written: a failed export
+    // leaves neither a bundle naming a missing sidecar nor a partial one.
+    let staged = custody_dir
         .map(|dir| {
             let events = bundle
                 .events
@@ -31,7 +32,13 @@ pub fn export_bundle(
             .with_context(|| format!("cannot write custody sidecar {dir}"))
         })
         .transpose()?;
-    bundle.custody = sidecar.as_ref().map(|exported| exported.binding.clone());
+    bundle.custody = staged
+        .as_ref()
+        .map(|(exported, _)| exported.binding.clone());
+    let (sidecar, staged) = match staged {
+        Some((exported, staged)) => (Some(exported), Some(staged)),
+        None => (None, None),
+    };
     let objects = bundle.objects.as_deref().unwrap_or_default();
     if let Some(path) = objects_json {
         let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
@@ -79,13 +86,50 @@ pub fn export_bundle(
     }
     if output == "-" {
         std::io::stdout().write_all(&bytes)?;
-        eprintln!("{reported}\noutput: -");
     } else {
         std::fs::write(output, bytes)
             .with_context(|| format!("cannot write export bundle {output}"))?;
+    }
+    if let Some(staged) = staged {
+        staged.publish()?;
+    }
+    if output == "-" {
+        eprintln!("{reported}\noutput: -");
+    } else {
         println!("{reported}\noutput: {output}");
     }
     Ok(())
+}
+
+/// Judge the sidecar a caller supplies against the bundle that binds it.
+pub(super) fn load_custody_sidecar(
+    validated: &ValidatedBundle,
+    dir: Option<&str>,
+) -> Result<Option<crate::custody::Sidecar>> {
+    let Some(dir) = dir else {
+        return Ok(None);
+    };
+    let referenced = referenced_content(validated);
+    crate::custody::load_sidecar(
+        Path::new(dir),
+        validated.bundle.custody.as_ref(),
+        &validated.bundle.change_id,
+        &referenced,
+    )
+    .map(Some)
+    .with_context(|| format!("custody sidecar {dir} refused; nothing was imported"))
+}
+
+fn referenced_content(
+    validated: &ValidatedBundle,
+) -> std::collections::BTreeSet<crate::custody::Content> {
+    crate::custody::referenced(
+        validated
+            .events
+            .iter()
+            .filter_map(|event| event.typed.as_ref())
+            .map(|event| &event.payload),
+    )
 }
 
 pub fn import_bundle(
@@ -108,27 +152,10 @@ pub fn import_bundle(
     // Parsing validates every path-bearing ID, checksum, envelope, and
     // patchset field before the local store is inspected or created.
     let validated = Bundle::parse(&bytes)?;
-    let referenced = crate::custody::referenced(
-        validated
-            .events
-            .iter()
-            .filter_map(|event| event.typed.as_ref())
-            .map(|event| &event.payload),
-    );
     // The sidecar is judged in full before the store is inspected: a refusal
     // leaves no event, ref or custody file behind.
-    let sidecar = custody_dir
-        .map(|dir| {
-            crate::custody::load_sidecar(
-                Path::new(dir),
-                validated.bundle.custody.as_ref(),
-                &validated.bundle.change_id,
-                &referenced,
-            )
-            .with_context(|| format!("custody sidecar {dir} refused; nothing was imported"))
-        })
-        .transpose()?;
-    let result = import_validated_guarded(
+    let sidecar = load_custody_sidecar(&validated, custody_dir)?;
+    import_validated_guarded(
         ctx,
         &bytes,
         &validated,
@@ -138,21 +165,14 @@ pub fn import_bundle(
         received_sha256,
         None,
         sidecar.as_ref(),
-    )?;
-    // A bundle that names a sidecar the caller did not bring says what that
-    // leaves unavailable, rather than reading as if custody arrived.
-    if result.exit_code == 0 && sidecar.is_none() && validated.bundle.custody.is_some() {
-        let custody = crate::custody::Custody::at(&Store::resolve_root(&ctx.cwd)?);
-        println!(
-            "custody: sidecar not supplied; {} references unavailable",
-            crate::custody::unavailable_among(&custody, &referenced)
-        );
-    }
-    Ok(result)
+    )
 }
 
+/// Import a validated bundle. A bundle that binds a custody sidecar the caller
+/// did not supply says what that leaves unavailable and how to install it,
+/// rather than reading as if custody had arrived.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn import_validated(
+pub(super) fn import_validated_guarded(
     ctx: &Ctx,
     bytes: &[u8],
     validated: &ValidatedBundle,
@@ -160,8 +180,10 @@ pub(super) fn import_validated(
     provenance_only: bool,
     publisher: Option<&str>,
     received_sha256: Option<&str>,
+    before_publish: Option<&dyn Fn() -> Result<()>>,
+    sidecar: Option<&crate::custody::Sidecar>,
 ) -> Result<crate::import_authorization::ImportResult> {
-    import_validated_guarded(
+    let result = import_events(
         ctx,
         bytes,
         validated,
@@ -169,13 +191,24 @@ pub(super) fn import_validated(
         provenance_only,
         publisher,
         received_sha256,
-        None,
-        None,
-    )
+        before_publish,
+        sidecar,
+    )?;
+    if let (0, None, Some(binding)) = (result.exit_code, sidecar, &validated.bundle.custody) {
+        let custody = crate::custody::Custody::at(&Store::resolve_root(&ctx.cwd)?);
+        println!(
+            "custody: sidecar not supplied; {}",
+            crate::custody::unsupplied_note(
+                binding,
+                crate::custody::unavailable_among(&custody, &referenced_content(validated))
+            )
+        );
+    }
+    Ok(result)
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn import_validated_guarded(
+fn import_events(
     ctx: &Ctx,
     bytes: &[u8],
     validated: &ValidatedBundle,
@@ -534,11 +567,6 @@ pub(super) fn import_validated_guarded(
         &rewrites,
     )?;
     ctx.ensure_declared_actor(&store)?;
-    // Verified bytes land before the events that cite them.
-    if let Some(sidecar) = sidecar {
-        let outcome = sidecar.install(&crate::custody::Custody::at(&root))?;
-        print_custody_outcome(&outcome, "installed");
-    }
     let rewrites = incoming.len();
     let batch = crate::store::ImportBatch {
         schema: "arc-import-batch/1".into(),
@@ -582,6 +610,26 @@ pub(super) fn import_validated_guarded(
                 message: format!("retention-ref maintenance failed: {error:#}"),
             }
         })?;
+    }
+    // Custody is reported installed only once the events are published. Its
+    // bytes are verified and content-addressed, so a failure here costs
+    // nothing but the installation, which repeating the import completes.
+    if let Some(sidecar) = sidecar {
+        let outcome = sidecar
+            .install(&crate::custody::Custody::at(&root))
+            .map_err(|error| crate::model::OperationFailure {
+                published,
+                message: format!(
+                    "custody installation failed: {error:#}; {}repeat the import with \
+                     --custody-dir to install it",
+                    if published {
+                        "the events are published; "
+                    } else {
+                        ""
+                    }
+                ),
+            })?;
+        print_custody_outcome(&outcome, "installed");
     }
     Ok(crate::model::OperationResult {
         exit_code: 0,

@@ -721,7 +721,8 @@ RUN A CHANGE
                                      expected evidence; any text is accepted.
   arc accept INPUT --branch LOCAL-BRANCH --publisher PRINCIPAL
       --received-sha256 SHA256 [--worktree PATH] [--key KEY]
-      [--contributors ACTOR,... | --solo] [--dry-run] [--json]
+      [--contributors ACTOR,... | --solo] [--custody-dir DIR] [--dry-run]
+      [--json]
                                      Prepare a fetched delivery on its paired
                                      authority, as lead; return readiness and
                                      the local judgment still owed.
@@ -860,9 +861,15 @@ RUN A CHANGE
   unless already held, before the events that cite them are published, and
   the summary counts installed, held and unavailable content. Unavailable
   entries stay unavailable and the import says incomplete. Importing a bundle
-  that binds a sidecar without one says how many references stay unavailable.
-  Importing the same bundle again with a repaired sidecar installs the missing
-  content without recording events. Neither export nor import initializes a
+  that binds a sidecar without one says how many references stay unavailable,
+  which manifest digest the bundle binds and that --custody-dir installs it;
+  `arc accept` says the same. Custody is reported installed only after the
+  events are published. A failure installing it after publication says the
+  events are published, and repeating the import finishes the installation
+  without recording events, as does importing with a repaired sidecar. The
+  export writes the sidecar beside its directory and moves it into place only
+  once the bundle is written, so a failed export leaves neither a partial
+  sidecar nor a bundle naming one. Neither export nor import initializes a
   replica.
   Full and delta histories use active, uncontradicted rewrites admitted with
   rewrite authority to prove a falsification's failure identity. A publisher
@@ -1269,6 +1276,13 @@ PREPARE A DELIVERED CHANGE
   moved beyond that base, acceptance stops with explicit rebase, snapshot, and
   fresh review guidance; content replay requires the lead's own decision.
   Provisional ancestry requires canonical prerequisites and explicit replay.
+
+  A delivery whose bundle binds an arc-custody-bundle/1 sidecar installs it
+  with --custody-dir DIR, judged exactly as `arc import --custody-dir` judges
+  it, in the import preview and before any effect; a refusal stops acceptance
+  at import-preview. Without the flag, acceptance still imports, and the
+  import-preview and import steps and next_steps say custody is unavailable,
+  name the manifest digest the bundle binds and the flag that installs it.
 
   Acceptance reuses a clean registered checkout of the branch or allocates an
   owned checkout under the configured worktree root. --worktree selects an

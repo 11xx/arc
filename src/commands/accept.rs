@@ -18,6 +18,8 @@ pub struct AcceptArgs {
     pub solo: bool,
     pub dry_run: bool,
     pub json: bool,
+    /// An arc-custody-bundle/1 sidecar the delivery's bundle binds.
+    pub custody_dir: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -85,6 +87,7 @@ fn exit_code(error: &anyhow::Error) -> i32 {
 struct AcceptancePlan {
     bytes: Vec<u8>,
     bundle: ValidatedBundle,
+    sidecar: Option<crate::custody::Sidecar>,
     store: Store,
     state: ChangeState,
     delivered_head: String,
@@ -210,56 +213,67 @@ fn plan_acceptance(
     args: &AcceptArgs,
     result: &mut AcceptanceResult,
 ) -> Result<AcceptancePlan> {
-    let (bytes, bundle) = step(
-        result,
-        ctx,
-        "import-preview",
-        command([
-            "import",
-            &args.input,
-            "--publisher",
-            &args.publisher,
-            "--received-sha256",
-            &args.received_sha256,
-            "--dry-run",
-        ]),
-        || {
-            let bytes = if args.input == "-" {
-                let mut bytes = Vec::new();
-                std::io::stdin().read_to_end(&mut bytes)?;
-                bytes
-            } else {
-                std::fs::read(&args.input)
-                    .with_context(|| format!("cannot read delivery {}", args.input))?
-            };
-            crate::import_authorization::verify_received_digest(
-                &bytes,
-                Some(&args.received_sha256),
-            )?;
-            let validated = Bundle::parse(&bytes)?;
-            for object in validated.bundle.objects.as_deref().unwrap_or_default() {
-                if gitio::git(&ctx.cwd, &["cat-file", "-e", &object.oid]).is_err() {
-                    return refuse(6, format!("missing {} object {}; fetch the delivery's Git objects before accepting", object.role, object.oid));
-                }
-            }
-            let preview = bundle_io::import_validated(
-                ctx,
-                &bytes,
-                &validated,
-                true,
-                false,
-                Some(&args.publisher),
-                Some(&args.received_sha256),
-            )?;
-            if preview.exit_code != 0 {
+    let mut preview_argv = command([
+        "import",
+        &args.input,
+        "--publisher",
+        &args.publisher,
+        "--received-sha256",
+        &args.received_sha256,
+        "--dry-run",
+    ]);
+    if let Some(dir) = &args.custody_dir {
+        preview_argv.extend(["--custody-dir".into(), dir.clone()]);
+    }
+    let (bytes, bundle, sidecar) = step(result, ctx, "import-preview", preview_argv, || {
+        let bytes = if args.input == "-" {
+            let mut bytes = Vec::new();
+            std::io::stdin().read_to_end(&mut bytes)?;
+            bytes
+        } else {
+            std::fs::read(&args.input)
+                .with_context(|| format!("cannot read delivery {}", args.input))?
+        };
+        crate::import_authorization::verify_received_digest(&bytes, Some(&args.received_sha256))?;
+        let validated = Bundle::parse(&bytes)?;
+        for object in validated.bundle.objects.as_deref().unwrap_or_default() {
+            if gitio::git(&ctx.cwd, &["cat-file", "-e", &object.oid]).is_err() {
                 return refuse(
-                    preview.exit_code,
-                    "import preview refused; nothing was imported",
+                    6,
+                    format!(
+                        "missing {} object {}; fetch the delivery's Git objects before accepting",
+                        object.role, object.oid
+                    ),
                 );
             }
-            Ok((bytes, validated))
-        },
-    )?;
+        }
+        let sidecar = bundle_io::load_custody_sidecar(&validated, args.custody_dir.as_deref())?;
+        let preview = bundle_io::import_validated_guarded(
+            ctx,
+            &bytes,
+            &validated,
+            true,
+            false,
+            Some(&args.publisher),
+            Some(&args.received_sha256),
+            None,
+            sidecar.as_ref(),
+        )?;
+        if preview.exit_code != 0 {
+            return refuse(
+                preview.exit_code,
+                "import preview refused; nothing was imported",
+            );
+        }
+        Ok((bytes, validated, sidecar))
+    })?;
+    if let (Some(binding), None) = (&bundle.bundle.custody, &sidecar) {
+        result.next_steps.push(format!(
+            "custody unavailable: the delivery binds custody manifest {}; accept again with \
+             --custody-dir <dir> to install the sidecar it names",
+            binding.manifest_sha256
+        ));
+    }
     result.change_id = Some(bundle.bundle.change_id.clone());
     result.delivered_head = bundle
         .patchsets
@@ -507,6 +521,7 @@ fn plan_acceptance(
             Ok(AcceptancePlan {
                 bytes,
                 bundle,
+                sidecar,
                 store,
                 state,
                 delivered_head,
@@ -651,6 +666,9 @@ fn acceptance_argv(args: &AcceptArgs) -> Vec<String> {
     }
     if args.solo {
         argv.push("--solo".into());
+    }
+    if let Some(dir) = &args.custody_dir {
+        argv.extend(["--custody-dir".into(), dir.clone()]);
     }
     if args.json {
         argv.push("--json".into());
@@ -975,7 +993,7 @@ fn execute_acceptance(
             Some(&args.publisher),
             Some(&args.received_sha256),
             Some(&|| revalidate(ctx, plan, &plan.head)),
-            None,
+            plan.sidecar.as_ref(),
         )?;
         if imported.exit_code != 0 {
             return refuse(

@@ -1756,3 +1756,154 @@ fn accept_delivery_text_binding_failure_names_retained_owner_and_unpublished_bin
             .args(["show", &d.change, "--json"]),
     );
 }
+
+impl Delivery {
+    /// Record an observation whose content is in the source's custody and
+    /// export the delivery with its custody sidecar. Returns the sidecar and
+    /// the digest of its manifest, which the bundle binds.
+    fn deliver_with_custody(&self) -> (PathBuf, String) {
+        let supplied = self.source.home.join("supplied");
+        super::forge_custody::materialize(&supplied, &["first", "{}"]);
+        let observation = self.source.home.join("observation.json");
+        fs::write(
+            &observation,
+            super::forge_observation::document("read-1", "g1", "first", None).to_string(),
+        )
+        .unwrap();
+        stdout(self.source.arc(&self.source.root).args([
+            "forge",
+            "observe",
+            &self.change,
+            "--file",
+            observation.to_str().unwrap(),
+            "--custody-dir",
+            supplied.to_str().unwrap(),
+        ]));
+        let sidecar = self.source.home.join("delivery.custody");
+        stdout(self.source.arc(&self.source.root).args([
+            "export",
+            &self.change,
+            "--output",
+            self.input.to_str().unwrap(),
+            "--custody-dir",
+            sidecar.to_str().unwrap(),
+        ]));
+        let manifest = hex::encode(Sha256::digest(
+            fs::read(sidecar.join("manifest.json")).unwrap(),
+        ));
+        (sidecar, manifest)
+    }
+
+    fn run(&self, extra: &[&str], code: i32) -> serde_json::Value {
+        let output = self
+            .command()
+            .args(extra)
+            .assert()
+            .code(code)
+            .get_output()
+            .clone();
+        serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|error| panic!("{error}: {}", String::from_utf8_lossy(&output.stdout)))
+    }
+}
+
+fn step_outcome<'a>(result: &'a serde_json::Value, name: &str) -> &'a str {
+    result["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"] == name)
+        .unwrap_or_else(|| panic!("no {name} step: {result}"))["outcome"]
+        .as_str()
+        .unwrap()
+}
+
+#[test]
+fn accept_delivery_names_unavailable_custody_and_the_flag_that_installs_it() {
+    let d = Delivery::new();
+    d.gates("true");
+    let (_, manifest) = d.deliver_with_custody();
+    let note = "custody: sidecar not supplied; 2 references unavailable";
+
+    let preview = d.run(&["--dry-run"], 0);
+    assert!(step_outcome(&preview, "import-preview").contains(note));
+    let advice = preview["next_steps"].to_string();
+    assert!(
+        advice.contains("custody unavailable")
+            && advice.contains(&manifest)
+            && advice.contains("--custody-dir"),
+        "{advice}"
+    );
+
+    let result = d.run(&[], 3);
+    let imported = step_outcome(&result, "import");
+    assert!(
+        imported.contains(note)
+            && imported.contains(&manifest)
+            && imported.contains("--custody-dir"),
+        "{imported}"
+    );
+    assert!(result["next_steps"].to_string().contains(&manifest));
+    assert!(!d.receiver.root.join(".git/arc/custody").exists());
+}
+
+#[test]
+fn accept_delivery_installs_a_supplied_custody_sidecar() {
+    let d = Delivery::new();
+    d.gates("true");
+    let (sidecar, manifest) = d.deliver_with_custody();
+    let dir = sidecar.to_str().unwrap();
+
+    let preview = d.run(&["--dry-run", "--custody-dir", dir], 0);
+    assert!(
+        step_outcome(&preview, "import-preview")
+            .contains("custody: 2 would install, 0 held, 0 unavailable"),
+        "{preview}"
+    );
+    assert!(!preview["next_steps"]
+        .to_string()
+        .contains("custody unavailable"));
+    assert!(!d.receiver.root.join(".git/arc/custody").exists());
+
+    // A sidecar that fails judgment stops the acceptance before any effect.
+    let damaged = d.source.home.join("damaged.custody");
+    let content = fs::read_dir(sidecar.join("sha256"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+    fs::create_dir_all(damaged.join("sha256")).unwrap();
+    for entry in fs::read_dir(&sidecar).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_file() {
+            fs::copy(entry.path(), damaged.join(entry.file_name())).unwrap();
+        }
+    }
+    for entry in fs::read_dir(sidecar.join("sha256")).unwrap() {
+        let entry = entry.unwrap();
+        fs::copy(entry.path(), damaged.join("sha256").join(entry.file_name())).unwrap();
+    }
+    fs::write(
+        damaged.join("sha256").join(content.file_name()),
+        "damaged!!",
+    )
+    .unwrap();
+    let refused = d.run(&["--custody-dir", damaged.to_str().unwrap()], 1);
+    assert_eq!(refused["stopped_at"], "import-preview");
+    assert!(!d.receiver.root.join(".git/arc/changes").exists());
+    assert!(!d.receiver.root.join(".git/arc/custody").exists());
+
+    let result = d.run(&["--custody-dir", dir], 3);
+    let imported = step_outcome(&result, "import");
+    assert!(
+        imported.contains("custody: 2 installed, 0 held, 0 unavailable (complete)"),
+        "{imported}"
+    );
+    assert!(!result["next_steps"].to_string().contains(&manifest));
+    for body in ["first", "{}"] {
+        assert_eq!(
+            fs::read(super::forge_custody::custody_file(&d.receiver, body)).unwrap(),
+            body.as_bytes()
+        );
+    }
+}

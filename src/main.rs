@@ -1165,7 +1165,9 @@ enum Cmd {
     /// ledger custody holds, copied once per digest beside a manifest.json.
     /// Content absent or damaged here gets an explicit unavailable entry and
     /// the manifest and summary say incomplete; no archive claims complete
-    /// custody it does not hold. The bundle binds the manifest's digest.
+    /// custody it does not hold. The bundle binds the manifest's digest. The
+    /// sidecar is written beside the directory and moved into place only once
+    /// the bundle is written, so a failed export leaves neither.
     /// Records no events and initializes no replica; ledger reads do not
     /// require a parseable append policy.
     Export {
@@ -1218,10 +1220,12 @@ enum Cmd {
     /// path, length and sha256, and the absence of symlinks are all checked
     /// before any event, ref or file is written, and corrupt content or an
     /// unsafe path refuses the whole import. Content already held is not
-    /// copied again. Unavailable entries stay unavailable and the summary
-    /// says incomplete. A bundle that binds a sidecar imported without one
-    /// reports how many references stay unavailable. Import initializes no
-    /// replica. A listed `observed-commit` held here is pinned under
+    /// copied again, and installation is reported only after the events are
+    /// published; a failure there says so and repeating the import finishes
+    /// it. Unavailable entries stay unavailable and the summary says
+    /// incomplete. A bundle that binds a sidecar imported without one reports
+    /// how many references stay unavailable, the manifest it binds and the
+    /// flag that installs it. Import initializes no replica. A listed `observed-commit` held here is pinned under
     /// `refs/arc/retained/` for the imported change.
     /// Candidate events stamp store format 7, including evaluations,
     /// selections, and promotions without a registration in the bundle.
@@ -1272,6 +1276,10 @@ enum Cmd {
     /// Dry-run validates admission and local state without allocating, signing,
     /// executing checks, creating objects, or recording evidence; future outcomes
     /// are conditional. JSON emits one arc-accept/1 transcript.
+    /// A delivery whose bundle binds an arc-custody-bundle/1 sidecar installs it
+    /// with --custody-dir, judged as `arc import --custody-dir` judges it, in the
+    /// import preview and before any effect. Without the flag the transcript
+    /// says custody is unavailable, names the bound manifest digest and the flag.
     Accept {
         /// Delivered arc-bundle/6 or /5 file ('-' for stdin)
         input: String,
@@ -1306,6 +1314,9 @@ enum Cmd {
         /// Emit one arc-accept/1 document, including retained effects and readiness
         #[arg(long)]
         json: bool,
+        /// Install the arc-custody-bundle/1 sidecar the delivery's bundle binds
+        #[arg(long, value_name = "DIR")]
+        custody_dir: Option<String>,
     },
     /// Pair independent stores and move integration authority with files.
     /// Checkout paths and ownership belong to the recording replica. Local
@@ -4783,6 +4794,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             solo,
             dry_run,
             json,
+            custody_dir,
         } => commands::accept(
             &ctx,
             commands::AcceptArgs {
@@ -4796,6 +4808,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 solo,
                 dry_run,
                 json,
+                custody_dir,
             },
         ),
         Cmd::Import {

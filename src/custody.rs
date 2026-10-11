@@ -468,15 +468,52 @@ impl Exported {
     }
 }
 
-/// Write the sidecar for `wanted` into a new or empty directory. Available
-/// bytes are copied once per digest; a source that is absent or damaged gets
-/// an explicit unavailable entry, and the manifest says it is incomplete.
+/// A sidecar written beside its destination and not yet in place. Dropping it
+/// without publishing removes it, so an export that fails leaves nothing
+/// behind.
+pub struct Staged {
+    staging: Option<PathBuf>,
+    destination: PathBuf,
+}
+
+impl Staged {
+    /// Move the finished sidecar into place. The destination is replaced only
+    /// when it is absent or an empty directory.
+    pub fn publish(mut self) -> Result<()> {
+        let staging = self.staging.as_deref().expect("a staged sidecar");
+        fs::rename(staging, &self.destination)
+            .with_context(|| format!("cannot publish {}", self.destination.display()))?;
+        self.staging = None;
+        if let Some(parent) = self
+            .destination
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+        {
+            File::open(parent)?.sync_all()?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        if let Some(staging) = &self.staging {
+            let _ = fs::remove_dir_all(staging);
+        }
+    }
+}
+
+/// Write the sidecar for `wanted`, to be published at `dir`, which must be
+/// absent or empty. Available bytes are copied once per digest; a source that
+/// is absent or damaged gets an explicit unavailable entry, and the manifest
+/// says it is incomplete. Everything is written beside `dir` first, so `dir`
+/// holds either the whole sidecar or what it held before.
 pub fn export_sidecar(
     custody: &Custody,
     change_id: &str,
     wanted: &BTreeSet<Content>,
     dir: &Path,
-) -> Result<Exported> {
+) -> Result<(Exported, Staged)> {
     match fs::read_dir(dir) {
         Ok(mut entries) => ensure!(
             entries.next().is_none(),
@@ -486,7 +523,22 @@ pub fn export_sidecar(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error).with_context(|| format!("cannot use {}", dir.display())),
     }
-    create_dirs(&dir.join(LAYOUT), Visibility::Shared)?;
+    let name = dir
+        .file_name()
+        .context("a custody sidecar needs a directory name")?
+        .to_string_lossy();
+    let parent = dir
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    create_dirs(parent, Visibility::Shared)?;
+    let staging = parent.join(format!(".{name}.{}.staging", crate::ids::new_identifier()));
+    fs::create_dir(&staging).with_context(|| format!("cannot create {}", staging.display()))?;
+    let staged = Staged {
+        staging: Some(staging.clone()),
+        destination: dir.to_path_buf(),
+    };
+    create_dirs(&staging.join(LAYOUT), Visibility::Shared)?;
     let mut entries = Vec::new();
     for content in wanted {
         let state = custody.availability(content);
@@ -502,7 +554,7 @@ pub fn export_sidecar(
                 let path = format!("{LAYOUT}/{}", content.sha256);
                 publish_verified(
                     &custody.path(&content.sha256),
-                    &dir.join(&path),
+                    &staging.join(&path),
                     content,
                     Visibility::Shared,
                 )?;
@@ -526,16 +578,19 @@ pub fn export_sidecar(
     };
     let mut bytes = serde_json::to_vec_pretty(&manifest)?;
     bytes.push(b'\n');
-    write_atomic(&dir.join(MANIFEST_FILE), &bytes, Visibility::Shared)?;
-    Ok(Exported {
-        binding: Binding {
-            schema: SIDECAR_SCHEMA.to_string(),
-            manifest_sha256: hex::encode(Sha256::digest(&bytes)),
+    write_atomic(&staging.join(MANIFEST_FILE), &bytes, Visibility::Shared)?;
+    Ok((
+        Exported {
+            binding: Binding {
+                schema: SIDECAR_SCHEMA.to_string(),
+                manifest_sha256: hex::encode(Sha256::digest(&bytes)),
+            },
+            entries: manifest.entries.len(),
+            available,
+            unavailable: manifest.entries.len() - available,
         },
-        entries: manifest.entries.len(),
-        available,
-        unavailable: manifest.entries.len() - available,
-    })
+        staged,
+    ))
 }
 
 /// A sidecar judged against its bundle: every file checked, nothing published.
@@ -746,6 +801,15 @@ impl Sidecar {
     }
 }
 
+/// What a bundle that binds a sidecar says when none is supplied: how much
+/// stays unavailable, which manifest would supply it, and how to install it.
+pub fn unsupplied_note(binding: &Binding, unavailable: usize) -> String {
+    format!(
+        "{unavailable} references unavailable (bundle binds manifest {}; pass --custody-dir <dir> to install it)",
+        binding.manifest_sha256
+    )
+}
+
 /// How many of `referenced` this custody cannot supply.
 pub fn unavailable_among(custody: &Custody, referenced: &BTreeSet<Content>) -> usize {
     referenced
@@ -858,5 +922,26 @@ mod tests {
         assert!(custody.install(&hostile, dir.path()).is_err());
         assert!(!is_digest(&"A".repeat(64)));
         assert!(is_digest(&"a".repeat(64)));
+    }
+
+    #[test]
+    fn a_staged_sidecar_is_removed_unless_it_is_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let custody = Custody::at(dir.path());
+        let destination = dir.path().join("out").join("sidecar");
+        let (exported, staged) =
+            export_sidecar(&custody, "change", &BTreeSet::new(), &destination).unwrap();
+        assert!(exported.complete());
+        assert!(!destination.exists());
+        let siblings = |path: &Path| fs::read_dir(path).unwrap().count();
+        assert_eq!(siblings(&dir.path().join("out")), 1);
+        drop(staged);
+        assert_eq!(siblings(&dir.path().join("out")), 0);
+
+        let (_, staged) =
+            export_sidecar(&custody, "change", &BTreeSet::new(), &destination).unwrap();
+        staged.publish().unwrap();
+        assert!(destination.join(MANIFEST_FILE).is_file());
+        assert_eq!(siblings(&dir.path().join("out")), 1);
     }
 }

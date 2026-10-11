@@ -6,19 +6,19 @@ use serde_json::{json, Value};
 
 const PAGE: &str = "{}";
 
-fn digest(bytes: &str) -> String {
+pub(crate) fn digest(bytes: &str) -> String {
     format!("{:x}", Sha256::digest(bytes.as_bytes()))
 }
 
 /// An adapter's materialization directory: `DIR/sha256/<digest>` per body.
-fn materialize(dir: &Path, bodies: &[&str]) {
+pub(crate) fn materialize(dir: &Path, bodies: &[&str]) {
     fs::create_dir_all(dir.join("sha256")).unwrap();
     for body in bodies {
         fs::write(dir.join("sha256").join(digest(body)), body).unwrap();
     }
 }
 
-fn custody_file(repo: &Repo, body: &str) -> PathBuf {
+pub(crate) fn custody_file(repo: &Repo, body: &str) -> PathBuf {
     repo.root.join(".git/arc/custody/sha256").join(digest(body))
 }
 
@@ -748,7 +748,7 @@ fn forge_custody_corruption_and_unsafe_paths_refuse_before_publication() {
             "{label}: custody was published"
         );
         assert_eq!(
-            event_count_if_any(&replica, &source_id),
+            published_batches(&replica),
             0,
             "{label}: events were published"
         );
@@ -859,7 +859,7 @@ fn forge_custody_corruption_and_unsafe_paths_refuse_before_publication() {
         .assert()
         .failure();
     assert!(!replica.root.join(".git/arc/custody").exists());
-    assert_eq!(event_count_if_any(&replica, &source_id), 0);
+    assert_eq!(published_batches(&replica), 0);
 
     // The same sidecar, untouched, imports.
     let replica = Repo::new();
@@ -870,12 +870,11 @@ fn forge_custody_corruption_and_unsafe_paths_refuse_before_publication() {
         .success();
 }
 
-fn event_count_if_any(repo: &Repo, change_id: &str) -> usize {
-    if event_dir(repo, change_id).exists() {
-        event_count(repo, change_id)
-    } else {
-        0
-    }
+/// Import batches the store has published; imported events live in them.
+fn published_batches(repo: &Repo) -> usize {
+    fs::read_dir(repo.root.join(".git/arc/imports"))
+        .map(|entries| entries.count())
+        .unwrap_or(0)
 }
 
 fn copy_dir(from: &Path, to: &Path) {
@@ -907,4 +906,194 @@ fn admitted_change_command(repo: &Repo, path: &Path) -> AssertCommand {
         &format!("{:x}", Sha256::digest(&bytes)),
     ]);
     command
+}
+
+/// Export a change with one observation whose content is in custody, and the
+/// sidecar beside the bundle. Returns the bundle, the sidecar and the repo.
+fn exported_with_custody() -> (Repo, String, PathBuf, PathBuf) {
+    let (source, id) = setup();
+    let supplied = source.home.join("supplied");
+    materialize(&supplied, &["first", PAGE]);
+    observe_in(
+        &source,
+        &id,
+        &document("read-1", "g1", "first", None),
+        Some(&supplied),
+    );
+    let bundle = source.home.join("forge.json");
+    let sidecar = source.home.join("forge.custody");
+    stdout(source.arc(&source.root).args([
+        "export",
+        &id,
+        "--output",
+        bundle.to_str().unwrap(),
+        "--custody-dir",
+        sidecar.to_str().unwrap(),
+    ]));
+    (source, id, bundle, sidecar)
+}
+
+#[cfg(debug_assertions)]
+fn spawn_paused(template: AssertCommand, phase: &str) -> Child {
+    let mut command = Command::new(template.get_program());
+    command
+        .args(template.get_args())
+        .current_dir(template.get_current_dir().unwrap())
+        .env("ARC_TEST_IMPORT_RENDEZVOUS", phase)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in template.get_envs() {
+        if let Some(value) = value {
+            command.env(key, value);
+        } else {
+            command.env_remove(key);
+        }
+    }
+    command.spawn().unwrap()
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn forge_custody_is_not_reported_installed_when_publication_fails() {
+    use std::io::Write;
+    let (source, _id, bundle, sidecar) = exported_with_custody();
+    let replica = Repo::new();
+    deliver_git_objects(&source, &replica);
+    let mut template = admitted_change_command(&replica, &bundle);
+    template.args(["--custody-dir", sidecar.to_str().unwrap()]);
+    let mut child = spawn_paused(template, "format");
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    stderr.read_line(&mut line).unwrap();
+    assert_eq!(line, "arc test: import format\n");
+    // The publisher's enrollment changes between admission and publication.
+    let source_id = serde_json::from_slice::<Value>(&fs::read(&bundle).unwrap()).unwrap()
+        ["source_replica_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    replica.declare_gates_locally(&format!("[[replica.publishers]]\nprincipal='fixture-change'\nsource_replica_id='{source_id}'\n[[replica.publishers.origins]]\nreplica_id='{source_id}'\nroles=['review-input']\nactors=[]\n"));
+    child.stdin.take().unwrap().write_all(b"+").unwrap();
+    let output = child.wait_with_output().unwrap();
+    let out = String::from_utf8_lossy(&output.stdout);
+    assert!(!output.status.success(), "{out}");
+    assert!(
+        !out.contains("installed"),
+        "custody claimed installed though nothing published: {out}"
+    );
+    assert!(!replica.root.join(".git/arc/custody").exists());
+    assert_eq!(published_batches(&replica), 0);
+}
+
+#[test]
+fn forge_custody_installs_after_publication_and_a_failure_names_the_published_events() {
+    let (source, _id, bundle, sidecar) = exported_with_custody();
+    let replica = Repo::new();
+    deliver_git_objects(&source, &replica);
+    // A custody directory that cannot be created fails after publication.
+    fs::create_dir_all(replica.root.join(".git/arc")).unwrap();
+    fs::write(replica.root.join(".git/arc/custody"), "in the way").unwrap();
+    let output = admitted_change_command(&replica, &bundle)
+        .args(["--custody-dir", sidecar.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&output.stdout);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{out}{err}");
+    assert!(!out.contains("installed"), "{out}");
+    assert!(
+        err.contains("events are published") && err.contains("--custody-dir"),
+        "{err}"
+    );
+    assert_eq!(published_batches(&replica), 1);
+
+    // The same import again finishes the installation and records nothing.
+    fs::remove_file(replica.root.join(".git/arc/custody")).unwrap();
+    let again = stdout(
+        admitted_change_command(&replica, &bundle)
+            .args(["--custody-dir", sidecar.to_str().unwrap()]),
+    );
+    assert!(
+        again.contains("custody: 2 installed, 0 held, 0 unavailable"),
+        "{again}"
+    );
+    assert_eq!(published_batches(&replica), 1);
+}
+
+#[test]
+fn forge_failed_custody_export_leaves_nothing_behind() {
+    let (source, id) = setup();
+    let supplied = source.home.join("supplied");
+    materialize(&supplied, &["first", PAGE]);
+    observe_in(
+        &source,
+        &id,
+        &document("read-1", "g1", "first", None),
+        Some(&supplied),
+    );
+    let parent = source.home.join("outgoing");
+    fs::create_dir(&parent).unwrap();
+    let sidecar = parent.join("forge.custody");
+    // The bundle cannot be written, so the sidecar must not be left behind.
+    source
+        .arc(&source.root)
+        .args([
+            "export",
+            &id,
+            "--output",
+            source.home.join("missing/dir/forge.json").to_str().unwrap(),
+            "--custody-dir",
+            sidecar.to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+    assert!(files_in(&parent).is_empty(), "{:?}", files_in(&parent));
+
+    // An existing empty directory stays as it was.
+    fs::create_dir(&sidecar).unwrap();
+    source
+        .arc(&source.root)
+        .args([
+            "export",
+            &id,
+            "--output",
+            source.home.join("missing/dir/forge.json").to_str().unwrap(),
+            "--custody-dir",
+            sidecar.to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+    assert_eq!(files_in(&parent), ["forge.custody"]);
+    assert!(files_in(&sidecar).is_empty());
+
+    // A refused non-empty directory is not touched.
+    fs::write(sidecar.join("keep"), "mine").unwrap();
+    source
+        .arc(&source.root)
+        .args([
+            "export",
+            &id,
+            "--output",
+            source.home.join("forge.json").to_str().unwrap(),
+            "--custody-dir",
+            sidecar.to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+    assert_eq!(files_in(&sidecar), ["keep"]);
+    assert_eq!(files_in(&parent), ["forge.custody"]);
+
+    // Success replaces the empty directory with the finished sidecar alone.
+    fs::remove_file(sidecar.join("keep")).unwrap();
+    stdout(source.arc(&source.root).args([
+        "export",
+        &id,
+        "--output",
+        source.home.join("forge.json").to_str().unwrap(),
+        "--custody-dir",
+        sidecar.to_str().unwrap(),
+    ]));
+    assert_eq!(files_in(&parent), ["forge.custody"]);
+    assert_eq!(files_in(&sidecar), ["manifest.json", "sha256"]);
 }
