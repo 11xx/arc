@@ -23,7 +23,9 @@ pub fn export_bundle(
                 .chain(&bundle.repository_events)
                 .map(crate::bundle::parse_typed_event)
                 .collect::<Result<Vec<_>>>()?;
-            let wanted = crate::custody::referenced(events.iter().flatten().map(|e| &e.payload));
+            let mut events: Vec<_> = events.into_iter().flatten().collect();
+            events.extend(bundle.related_events()?);
+            let wanted = crate::custody::referenced(events.iter().map(|e| &e.payload));
             crate::custody::export_sidecar(
                 &crate::custody::Custody::at(&store.root),
                 &change_id,
@@ -125,12 +127,18 @@ fn referenced_content(
     validated: &ValidatedBundle,
 ) -> std::collections::BTreeSet<crate::custody::Content> {
     // Repository events were judged well-formed when the bundle parsed.
-    let repository: Vec<_> = validated
+    let mut repository: Vec<_> = validated
         .bundle
         .repository_events
         .iter()
         .filter_map(|value| crate::bundle::parse_typed_event(value).ok().flatten())
         .collect();
+    repository.extend(
+        validated
+            .bundle
+            .related_events()
+            .expect("validated related histories"),
+    );
     crate::custody::referenced(
         validated
             .events
@@ -192,6 +200,70 @@ pub(super) fn import_validated_guarded(
     before_publish: Option<&dyn Fn() -> Result<()>>,
     sidecar: Option<&crate::custody::Sidecar>,
 ) -> Result<crate::import_authorization::ImportResult> {
+    let mut members = Vec::new();
+    for related in &validated.bundle.related_changes {
+        let mut member = Bundle::parse(&related.to_bytes()?)?;
+        member.bundle.related_changes = validated
+            .bundle
+            .related_changes
+            .iter()
+            .filter(|b| b.change_id != related.change_id)
+            .cloned()
+            .collect();
+        let mut primary = validated.bundle.clone();
+        primary.related_changes.clear();
+        primary.custody = None;
+        member.bundle.related_changes.push(primary);
+        let preflight = import_events(
+            ctx,
+            bytes,
+            &member,
+            true,
+            provenance_only,
+            publisher,
+            received_sha256,
+            None,
+            None,
+        )?;
+        if preflight.exit_code != 0 {
+            return Ok(preflight);
+        }
+        members.push(member);
+    }
+    if !members.is_empty() {
+        let preflight = import_events(
+            ctx,
+            bytes,
+            validated,
+            true,
+            provenance_only,
+            publisher,
+            received_sha256,
+            None,
+            sidecar,
+        )?;
+        if preflight.exit_code != 0 {
+            return Ok(preflight);
+        }
+        if !dry_run {
+            for member in &members {
+                let imported = import_events(
+                    ctx,
+                    bytes,
+                    member,
+                    false,
+                    provenance_only,
+                    publisher,
+                    received_sha256,
+                    before_publish,
+                    None,
+                )?;
+                if imported.exit_code != 0 {
+                    return Ok(imported);
+                }
+            }
+        }
+    }
     let result = import_events(
         ctx,
         bytes,
@@ -1134,6 +1206,25 @@ fn validate_import_candidate(
         candidate.clone()
     };
     crate::forge_observation::validate_import_admission(&admission_history, &new_events)?;
+    let mut round_trip_history = store
+        .map(crate::forge_round_trip::held_events)
+        .transpose()?
+        .unwrap_or_default();
+    round_trip_history.retain(|e| e.change_id != validated.bundle.change_id);
+    round_trip_history.extend(candidate.clone());
+    round_trip_history.extend(combined_repository_events(store, repository)?);
+    round_trip_history.extend(validated.bundle.related_events()?);
+    round_trip_history.sort_by(|a, b| a.event_id.cmp(&b.event_id));
+    for pair in round_trip_history.windows(2) {
+        if pair[0].event_id == pair[1].event_id {
+            anyhow::ensure!(
+                serde_json::to_value(&pair[0])? == serde_json::to_value(&pair[1])?,
+                "conflicting related event identity"
+            );
+        }
+    }
+    round_trip_history.dedup_by(|a, b| a.event_id == b.event_id);
+    crate::forge_round_trip::validate_history(&round_trip_history)?;
     let mut projected = state::reduce_with_rewrites(&candidate, rewrites)
         .context("combined local and bundled known events are not replayable")?;
     let repository_events = combined_repository_events(store, repository)?;

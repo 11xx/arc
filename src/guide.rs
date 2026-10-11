@@ -1684,7 +1684,8 @@ PROFILES (--profile, default local)
            REVIEW COVERAGE AND DEBT, resolved style (built-in fast-forward).
   forge    A hosted PR adds a remote record, inline discussion, clean runner
            evidence, or branch protection. local underneath; project only public
-           integration facts into the PR.
+           integration facts into the PR. Delivery and disclosure evidence is
+           local, non-authorizing context; forge closure grants no approval.
   release  Deployment, publishing, irreversible migration, security-sensitive
            work. forge plus explicit release and rollback gates.
 
@@ -1716,6 +1717,70 @@ FORGE
   bytes weaken only claims that need them; they imply neither empty content,
   zero cost nor a missing judgment. forge show records nothing and creates
   no ledger directories, refs, reports or snapshots.
+  The local round trip joins recorded forge generations to declared preparation
+  origins or candidate parent/adoption paths, recorded selection/promotion,
+  accepting patchset and local closure. `show --json` names these under
+  round_trip; its candidate_paths retain origin changes and exact promotion
+  patchsets/revisions. The local_integration_revision and provider lifecycle are
+  independent: closed is closed-unmerged; merged names the observed merge SHA.
+  A local cherry-pick, accepted candidate or public closure proves no forge
+  merge or independent approval. Manual preparation declares its origin with
+  `context declare --forge-origin CHANGE:OBSERVATION:GENERATION`.
+
+  `message CHANGE --type note --summary TEXT --delivery-file FILE` admits
+  arc-forge-delivery/1: message_id, attempt_id, evidence_id, optional
+  previous_evidence, run, transport_request, sources and separate delivery,
+  acknowledgement and acted_on objects. Sources name change_id, observation
+  event ID and generation. Each outcome has standing (observed, uncertain,
+  not-observed), detail, evidence RetainedContentRefs and source generations.
+  Observed outcomes require evidence. Identical attempt/evidence and message
+  retries return the original event; conflicting reuse refuses. A later outcome
+  names previous_evidence on the same immutable attempt; earlier uncertainty
+  remains recorded. A transport request cannot name two attempts. A delivered
+  message never implies acknowledgement, action, paid execution or authority.
+  Messages and all imported evidence remain non-authorizing.
+
+  `context declare --disclosure-file FILE [--custody-dir DIR]` admits
+  arc-disclosure/1 privately. It records disclosure_id, optional
+  previous_disclosure, selected source generations/fields with access_basis
+  (accessible-git, accessible-forge, withheld-private-assertion), allowlist_version,
+  validator_version, author, optional reviewer/editor, discloser,
+  recipient_access_basis, omissions, outgoing RetainedContentRef and exact
+  readback source generation. A selected source names a forge generation,
+  a ledger event (change_id/event), or Git support (change_id/commit); Git
+  support uses a full held commit ID and travels with the object closure.
+  Outgoing and readback digests and lengths must
+  agree, and verified exact bytes must be in custody before append. A missing
+  or corrupt file refuses a local declaration. Import preserves the historical
+  manifest when bytes are unavailable; current availability remains separate.
+  Arc records evidence of actual bytes, never renders or publishes externally,
+  and a validator version is an attributed assertion, not a security proof.
+
+  An optional comment object retains comment_id, act_id, material authors,
+  source_frontiers, source_statements, renderer_version, roles and an optional
+  opaque cost reference. Each author names the original act and either a human
+  name or optional harness/model/effort with act-specific model_observation.
+  Absent effort has no guessed suffix. Material synthesis names each author
+  and its source statements; quoted, transported and implementation participants
+  remain roles and never become authors automatically. Corrections name an
+  editor and previous_disclosure, preserve original authors, and bind the
+  outgoing/readback generation independently of the original judgment.
+  Local readers can project one compact line: Author: harness:model#effort ·
+  Review cost: unmeasured. Multiple material authors use Authors. Missing model
+  evidence reads model not recorded. A cost reference carries reference, as_of,
+  scope=review-exchange, basis, coverage and source_frontier; it is separately
+  owned evidence, not a number or a whole-session/implementation allocation.
+  Arc never infers monetary amounts or numerical zero. A later reconciliation
+  is another linked annotation/disclosure, preserving its disclosed frontier.
+
+  Export includes flat full related_changes histories for source/context and
+  candidate adoption closure, plus their custody references and held Git objects.
+  Related members share the root custody manifest. Import validates every
+  member before publication, then admits each through normal guarded imports.
+  Publication is atomic per change; an interruption can leave already-admitted
+  related histories, and an identical retry completes the remaining members.
+  Missing bytes degrade only dependent claims. Export never initializes a replica.
+
   forge observe CHANGE --file frontier.json [--json] admits an adapter's
   arc-forge-observation/1 document. Admission never changes readiness. A valid
   failed or truncated read succeeds; invalid schemas, digests, references and
@@ -2681,6 +2746,8 @@ CONTEXT
                         (--cites | --relies-on | --considers)
                         (--path <path> [--at <revision>] | --artifact <file>)
                         [--citation <tool-record-id>]
+                        [--forge-origin CHANGE:OBSERVATION:GENERATION]
+                        [--disclosure-file FILE [--custody-dir DIR]]
     arc context capture --record <tool-record-id> [--subject <…>]
                         (--pinned | --unpinned)
 
@@ -3281,6 +3348,8 @@ SCHEMAS
     `arc-bundle/6`                   arc export / arc import
     `arc-bundle-objects/1`           arc export --objects-json
     `arc-custody-bundle/1`           arc export / import --custody-dir
+    `arc-forge-delivery/1`           arc message --delivery-file
+    `arc-disclosure/1`               arc context declare --disclosure-file
     `arc-forge-observation/1`        arc forge observe --file
     `arc-forge-receipt/1`            arc forge observe|link|checks|pr-state --json
     `arc-received-evidence/1`        arc candidate register --evidence-file

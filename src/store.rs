@@ -1648,6 +1648,13 @@ impl Store {
         let mut state = crate::state::reduce_following(events, rewrites)?;
         state.apply_privilege_scope(Arc::clone(scope), events);
         crate::replica::localize_change(&self.repository_id, events, &mut state);
+        let mut round_trip = std::mem::take(&mut state.round_trip);
+        round_trip.join(
+            &state,
+            &self.load_repository_events()?,
+            &crate::custody::Custody::at(&self.root),
+        );
+        state.round_trip = round_trip;
         Ok(state)
     }
 
@@ -1703,6 +1710,13 @@ impl Store {
                 let mut state = crate::state::reduce_following(&events, read.rewrites()?)?;
                 state.apply_privilege_scope(Arc::clone(read.scope()?), &events);
                 crate::replica::localize_change(&self.repository_id, &events, &mut state);
+                let mut round_trip = std::mem::take(&mut state.round_trip);
+                round_trip.join(
+                    &state,
+                    &self.load_repository_events()?,
+                    &crate::custody::Custody::at(&self.root),
+                );
+                state.round_trip = round_trip;
                 Ok(state)
             });
             match result {

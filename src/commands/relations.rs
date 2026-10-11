@@ -495,6 +495,9 @@ pub struct DeclareArgs {
     pub at: Option<String>,
     pub artifact: Option<String>,
     pub citation: Option<String>,
+    pub disclosure_file: Option<PathBuf>,
+    pub custody_dir: Option<PathBuf>,
+    pub forge_origin: Option<String>,
 }
 
 pub fn declare(ctx: &Ctx, args: DeclareArgs) -> Result<()> {
@@ -521,6 +524,39 @@ pub fn declare(ctx: &Ctx, args: DeclareArgs) -> Result<()> {
         }
         _ => bail!("name exactly one of --path or --artifact"),
     };
+    let disclosure: Option<crate::forge_round_trip::Disclosure> = args
+        .disclosure_file
+        .map(|file| {
+            serde_json::from_slice(&std::fs::read(file)?).context("invalid disclosure file")
+        })
+        .transpose()?;
+    let origin = args
+        .forge_origin
+        .map(|raw| -> Result<_> {
+            let parts: Vec<_> = raw.split(':').collect();
+            anyhow::ensure!(parts.len() == 3, "expected CHANGE:OBSERVATION:GENERATION");
+            Ok(crate::forge_round_trip::SourceGeneration {
+                change_id: store.resolve_change(parts[0])?,
+                observation: parts[1].into(),
+                generation: parts[2].into(),
+            })
+        })
+        .transpose()?;
+    let held = crate::forge_round_trip::held_events(&store)?;
+    if let Some(source) = &origin {
+        source.resolve(&held)?;
+    }
+    if let Some(disclosure) = &disclosure {
+        disclosure.validate_readback(&held)?;
+        for selection in &disclosure.selected {
+            if let crate::forge_round_trip::DisclosureSource::Git(source) = &selection.source {
+                anyhow::ensure!(
+                    gitio::commit_exists(&ctx.cwd, &source.commit)?,
+                    "selected Git support commit is unavailable"
+                );
+            }
+        }
+    }
     if let Some(citation) = &args.citation {
         ledger.check_citation(&subject.subject, citation)?;
     }
@@ -535,11 +571,40 @@ pub fn declare(ctx: &Ctx, args: DeclareArgs) -> Result<()> {
             relation: args.relation,
             target: target.clone(),
             citation: args.citation.clone(),
+            disclosure: disclosure.clone(),
+            origin,
         },
     )?;
+    let mut history = held;
+    history.push((*event).clone());
+    crate::forge_round_trip::validate_history(&history)?;
     ledger.record(&event)?;
     ctx.ensure_declared_actor(&store)?;
+    if let Some(disclosure) = &disclosure {
+        let wanted =
+            std::collections::BTreeSet::from([crate::custody::Content::from(&disclosure.outgoing)]);
+        let custody = crate::custody::Custody::at(&store.root);
+        if let Some(dir) = &args.custody_dir {
+            crate::custody::plan_materialization(dir, &wanted)?.publish(&custody)?;
+        }
+        for content in &wanted {
+            anyhow::ensure!(
+                custody.availability(content).is_available(),
+                "disclosure outgoing/readback bytes unavailable or corrupt"
+            );
+        }
+    }
     subject.append(&store, &mut event)?;
+    for commit in crate::forge_round_trip::disclosure_commits(&event.payload) {
+        gitio::update_ref(
+            &ctx.cwd,
+            &gitio::retained_ref(subject.ledger_scope(), &event.event_id, commit),
+            commit,
+        )?;
+    }
+    if let Some(comment) = disclosure.as_ref().and_then(|d| d.comment.as_ref()) {
+        println!("{}", comment.compact_line());
+    }
     println!(
         "declared: {} {} {target}",
         subject.subject.label(),

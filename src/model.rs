@@ -875,6 +875,8 @@ pub enum Payload {
         detail: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         metadata: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delivery: Option<crate::forge_round_trip::ForgeDelivery>,
     },
     BriefRecorded {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -1757,6 +1759,10 @@ pub enum Payload {
         /// A read record on the same subject the claim points at.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         citation: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        disclosure: Option<crate::forge_round_trip::Disclosure>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<crate::forge_round_trip::SourceGeneration>,
     },
     /// What the provider reported for the retention of a read record's
     /// recording. A claim about retention, attributed to its declarant.

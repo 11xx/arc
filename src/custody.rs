@@ -51,6 +51,16 @@ pub fn referenced<'a>(payloads: impl Iterator<Item = &'a Payload>) -> BTreeSet<C
             Payload::CandidateEvidenceReceived { evidence, .. } => {
                 found.extend(evidence.receipts.iter().map(Content::from));
             }
+            Payload::Message {
+                delivery: Some(delivery),
+                ..
+            } => found.extend(delivery.contents().map(Content::from)),
+            Payload::ContextDeclared {
+                disclosure: Some(disclosure),
+                ..
+            } => {
+                found.insert(Content::from(&disclosure.outgoing));
+            }
             _ => {}
         }
     }

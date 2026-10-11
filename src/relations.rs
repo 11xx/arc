@@ -39,6 +39,8 @@ pub struct Declaration {
     pub relation: DeclaredRelation,
     pub target: DeclaredTarget,
     pub citation: Option<String>,
+    pub disclosure: Option<crate::forge_round_trip::Disclosure>,
+    pub origin: Option<crate::forge_round_trip::SourceGeneration>,
     pub event_id: String,
     pub declarant: String,
     pub recorded_at: DateTime<Utc>,
@@ -189,6 +191,8 @@ impl Relations {
                 relation,
                 target,
                 citation,
+                disclosure,
+                origin,
             } => {
                 match target {
                     DeclaredTarget::Path { path, .. } => well_named("path", path),
@@ -203,6 +207,8 @@ impl Relations {
                     relation: *relation,
                     target: target.clone(),
                     citation: citation.clone(),
+                    disclosure: disclosure.clone(),
+                    origin: origin.clone(),
                     event_id: event.event_id.clone(),
                     declarant,
                     recorded_at: event.created_at,

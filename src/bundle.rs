@@ -34,7 +34,7 @@ pub struct BundleObject {
     pub role: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bundle {
     pub schema: String,
     pub repository_id: String,
@@ -70,6 +70,9 @@ pub struct Bundle {
     /// replaced or foreign sidecar is refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custody: Option<crate::custody::Binding>,
+    /// Full related change histories required by source references and adoption.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related_changes: Vec<Bundle>,
     // Validated at parse, not at write: an import that discovered a malformed
     // one halfway through would already have written change events.
 }
@@ -86,6 +89,95 @@ impl Bundle {
     /// `events_sha256` remains the checksum of the whole history so the
     /// receiver can verify the suffix against that prefix.
     pub fn export(store: &Store, cwd: &Path, change_id: &str, since: Option<&str>) -> Result<Self> {
+        let mut bundle = Self::export_one(store, cwd, change_id, since)?;
+        let repository = store.load_repository_events()?;
+        let mut pending = vec![change_id.to_string()];
+        let mut seen = BTreeSet::new();
+        let mut related = BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let events = store.load_events(&id)?;
+            for event in events.iter().chain(&repository) {
+                if event.change_id == Store::REPOSITORY_SCOPE {
+                    pending.extend(crate::forge_round_trip::source_changes(&event.payload));
+                }
+                if event.change_id == id {
+                    pending.extend(crate::forge_round_trip::source_changes(&event.payload));
+                    if let Payload::ChangeClosed {
+                        superseded_by: Some(successor),
+                        ..
+                    } = &event.payload
+                    {
+                        pending.push(successor.clone());
+                    }
+                }
+                if let Payload::CandidateSelected {
+                    candidate_id,
+                    destination,
+                    ..
+                } = &event.payload
+                {
+                    if destination != &id {
+                        continue;
+                    }
+                    let mut candidates = vec![candidate_id.clone()];
+                    let mut visited = BTreeSet::new();
+                    while let Some(candidate) = candidates.pop() {
+                        if !visited.insert(candidate.clone()) {
+                            continue;
+                        }
+                        for registered in &repository {
+                            match &registered.payload {
+                                Payload::CandidateRegistered {
+                                    candidate_id,
+                                    brief,
+                                    parents,
+                                    adopts,
+                                    ..
+                                } if candidate_id == &candidate => {
+                                    pending.push(brief.change_id.clone());
+                                    candidates.extend(parents.iter().chain(adopts).cloned());
+                                }
+                                Payload::ContextDeclared {
+                                    subject:
+                                        crate::model::RelationSubject::Candidate { candidate_id },
+                                    ..
+                                } if candidate_id == &candidate => {
+                                    pending.extend(crate::forge_round_trip::source_changes(
+                                        &registered.payload,
+                                    ));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+            if id != change_id {
+                related.insert(id);
+            }
+        }
+        for id in related {
+            bundle
+                .related_changes
+                .push(Self::export_one(store, cwd, &id, None)?);
+        }
+        let mut objects: BTreeSet<_> = bundle
+            .objects
+            .take()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        for related in &bundle.related_changes {
+            objects.extend(related.objects.clone().unwrap_or_default());
+        }
+        bundle.objects = Some(objects.into_iter().collect());
+        Ok(bundle)
+    }
+
+    fn export_one(store: &Store, cwd: &Path, change_id: &str, since: Option<&str>) -> Result<Self> {
         ids::validate_id_component(change_id)?;
         let (raw, repository_events) = {
             let _cursor = store.lock_event_cursor()?;
@@ -191,7 +283,17 @@ impl Bundle {
             objects: Some(objects),
             repository_events,
             custody: None,
+            related_changes: Vec::new(),
         })
+    }
+
+    pub fn related_events(&self) -> Result<Vec<Event>> {
+        self.related_changes
+            .iter()
+            .flat_map(|b| b.events.iter().chain(&b.repository_events))
+            .map(parse_typed_event)
+            .collect::<Result<Vec<_>>>()
+            .map(|v| v.into_iter().flatten().collect())
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
@@ -406,6 +508,25 @@ impl Bundle {
             });
         }
 
+        let mut related_ids = BTreeSet::from([bundle.change_id.clone()]);
+        for related in &bundle.related_changes {
+            anyhow::ensure!(
+                related.related_changes.is_empty()
+                    && related.since.is_none()
+                    && related.custody.is_none(),
+                "related change must be a flat full history sharing the root custody manifest"
+            );
+            anyhow::ensure!(
+                related.source_replica_id == bundle.source_replica_id
+                    && related.project_id == bundle.project_id,
+                "related change identity disagrees with exporting bundle"
+            );
+            anyhow::ensure!(
+                related_ids.insert(related.change_id.clone()),
+                "duplicate related change"
+            );
+            Self::parse(&related.to_bytes()?)?;
+        }
         Ok(ValidatedBundle {
             bundle,
             events,

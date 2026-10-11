@@ -15,6 +15,7 @@ mod explain;
 mod forge;
 mod forge_observation;
 mod forge_view;
+mod forge_round_trip;
 mod gates;
 mod gitio;
 mod guide;
@@ -899,6 +900,9 @@ enum Cmd {
         /// Optional JSON object stored verbatim as metadata
         #[arg(long)]
         json: Option<String>,
+        /// arc-forge-delivery/1 attempt and separate outcome evidence; identical retries are idempotent. Authorizes nothing
+        #[arg(long)]
+        delivery_file: Option<PathBuf>,
         /// Advisory severity
         #[arg(long, value_enum, default_value = "info")]
         severity: MessageSeverity,
@@ -3190,6 +3194,9 @@ enum ForgeCmd {
         detail: Option<String>,
     },
     /// Record the provider-observed PR lifecycle state.
+    /// Local integration is independent of provider closure: closed means
+    /// closed-unmerged; merged requires an observed merge SHA. Neither grants
+    /// a local verdict or approval.
     /// The head is the current link's observed head, never its local successor.
     /// Applicability requires its stable provider/native PR identity; matching
     /// display URLs, numbers or refs do not identify a replacement native PR.
@@ -3786,6 +3793,9 @@ enum ContextCmd {
     /// relies on, or considers a path (optionally at a revision) or a
     /// journal artifact.
     ///
+    /// --disclosure-file verifies outgoing/readback byte identity against custody;
+    /// accessible Git/forge support and withheld private assertions stay labelled.
+    /// It records locally and never renders or publishes externally.
     /// A declaration is attributed to its declarant, never checked against
     /// what was read, and never becomes a read. `--citation` points it at a
     /// read record on the same subject; one that resolves to no recorded
@@ -3818,6 +3828,15 @@ enum ContextCmd {
         /// A tool record id recorded as a read on the same subject
         #[arg(long)]
         citation: Option<String>,
+        /// arc-disclosure/1 selection, omissions, act provenance and exact outgoing/readback bytes. Records locally; never publishes
+        #[arg(long)]
+        disclosure_file: Option<PathBuf>,
+        /// Materialized sha256 files for disclosure outgoing bytes; hashes are checked before append
+        #[arg(long, requires = "disclosure_file")]
+        custody_dir: Option<PathBuf>,
+        /// Explicit manual-preparation origin: CHANGE:OBSERVATION:GENERATION
+        #[arg(long)]
+        forge_origin: Option<String>,
     },
     /// Record what the provider reported for the retention of a read
     /// record's recording (`tapes capture <session> --json` is that report).
@@ -4753,8 +4772,18 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             detail,
             json,
             severity,
+            delivery_file,
         } => {
-            commands::message(&ctx, &change, message_type, summary, detail, json, severity)?;
+            commands::message(
+                &ctx,
+                &change,
+                message_type,
+                summary,
+                detail,
+                json,
+                severity,
+                delivery_file,
+            )?;
             Ok(0)
         }
         Cmd::Messages {
@@ -5900,6 +5929,9 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 at,
                 artifact,
                 citation,
+                disclosure_file,
+                custody_dir,
+                forge_origin,
             } => commands::relations::declare(
                 &ctx,
                 commands::relations::DeclareArgs {
@@ -5915,6 +5947,9 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     at,
                     artifact,
                     citation,
+                    disclosure_file,
+                    custody_dir,
+                    forge_origin,
                 },
             )
             .map(|_| 0),

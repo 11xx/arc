@@ -920,6 +920,8 @@ pub struct MessageEntry {
     pub summary: String,
     pub detail: Option<String>,
     pub metadata: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<crate::forge_round_trip::ForgeDelivery>,
     pub actor: String,
     pub harness: Option<String>,
     pub session: Option<String>,
@@ -1124,6 +1126,7 @@ pub struct ChangeState {
     pub holds: BTreeMap<String, HoldState>,
     pub closure: Option<ClosureState>,
     pub forge: crate::forge::ForgeState,
+    pub round_trip: crate::forge_round_trip::RoundTrip,
 }
 
 impl ChangeState {
@@ -1741,6 +1744,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     closure: None,
                     kept: Vec::new(),
                     forge: crate::forge::ForgeState::default(),
+                    round_trip: crate::forge_round_trip::RoundTrip::default(),
                 },
                 ev,
             ),
@@ -1896,6 +1900,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 summary,
                 detail,
                 metadata,
+                delivery,
             } => state.messages.push(MessageEntry {
                 event_id: ev.event_id.clone(),
                 message_type: *message_type,
@@ -1903,6 +1908,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 summary: summary.clone(),
                 detail: detail.clone(),
                 metadata: metadata.clone(),
+                delivery: delivery.clone(),
                 actor: ev.actor.clone(),
                 harness: ev.harness.clone(),
                 session: ev.session.clone(),
@@ -3123,11 +3129,11 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
             | Payload::CandidateSelected { .. }
             | Payload::CandidatePromoted { .. }
             | Payload::ContextRead { .. }
-            | Payload::ContextDeclared { .. }
             | Payload::ContextCaptureReported { .. } => {}
             // An event this build does not recognize. Typed loading skips
             // unknown events before replay, so this arm is defensive: keep the
             // raw history intact without mutating the derived view.
+            Payload::ContextDeclared { .. } => state.round_trip.observe(&ev.payload),
             Payload::Unknown => {}
         }
     }

@@ -23,6 +23,7 @@ mod forge;
 mod forge_custody;
 mod forge_observation;
 mod forge_view;
+mod forge_round_trip;
 mod fork;
 mod gate_declarations;
 mod gate_environment;

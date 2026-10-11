@@ -446,6 +446,7 @@ fn validate_pass_member(member: &str) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn message(
     ctx: &Ctx,
     reference: &str,
@@ -454,6 +455,7 @@ pub fn message(
     detail: Option<String>,
     json: Option<String>,
     severity: MessageSeverity,
+    delivery_file: Option<PathBuf>,
 ) -> Result<()> {
     let summary = summary.trim();
     if summary.is_empty() {
@@ -480,6 +482,40 @@ pub fn message(
 
     let store = ctx.store()?;
     let (change_id, _st) = ctx.load_state(&store, reference)?;
+    let _lock = store.lock_transition(&change_id)?;
+    let delivery: Option<crate::forge_round_trip::ForgeDelivery> = delivery_file
+        .map(|file| serde_json::from_slice(&std::fs::read(file)?).context("invalid delivery file"))
+        .transpose()?;
+    let events = store.load_events(&change_id)?;
+    if let Some(delivery) = &delivery {
+        delivery.validate()?;
+        for event in &events {
+            if let Payload::Message {
+                delivery: Some(old),
+                summary: old_summary,
+                detail: old_detail,
+                metadata: old_metadata,
+                message_type: old_type,
+                severity: old_severity,
+            } = &event.payload
+            {
+                if old.attempt_id == delivery.attempt_id && old.evidence_id == delivery.evidence_id
+                {
+                    if old != delivery
+                        || old_summary != summary
+                        || old_detail != &detail
+                        || old_metadata != &metadata
+                        || *old_type != message_type
+                        || *old_severity != severity
+                    {
+                        bail!("conflicting delivery attempt/evidence reuse");
+                    }
+                    println!("already-recorded: {}", event.event_id);
+                    return Ok(());
+                }
+            }
+        }
+    }
     let mut event = ctx.event(
         &store,
         &change_id,
@@ -489,8 +525,12 @@ pub fn message(
             summary: summary.to_string(),
             detail,
             metadata,
+            delivery,
         },
     )?;
+    let mut history = crate::forge_round_trip::held_events(&store)?;
+    history.push((*event).clone());
+    crate::forge_round_trip::validate_history(&history)?;
     store.append_local_event(&mut event)?;
     println!("message: {} [{}]", message_type.as_str(), severity.as_str());
     println!("event: {}", event.event_id);
@@ -549,6 +589,7 @@ pub fn messages(
                 summary: &message.summary,
                 detail: message.detail.as_deref(),
                 metadata: message.metadata.as_ref(),
+                delivery: message.delivery.as_ref(),
                 actor: &message.actor,
                 harness: message.harness.as_deref(),
                 session: message.session.as_deref(),

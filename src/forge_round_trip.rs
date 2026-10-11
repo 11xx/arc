@@ -1,0 +1,864 @@
+//! Non-authorizing delivery, disclosure and comment-act evidence.
+use crate::forge_observation::RetainedContentRef;
+use crate::model::{Event, Payload};
+use anyhow::{ensure, Context, Result};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceGeneration {
+    pub change_id: String,
+    pub observation: String,
+    pub generation: String,
+}
+impl SourceGeneration {
+    pub fn validate(&self) -> Result<()> {
+        crate::ids::validate_id_component(&self.change_id)?;
+        named(&self.observation)?;
+        named(&self.generation)
+    }
+    pub fn resolve<'a>(&self, events: &'a [Event]) -> Result<&'a RetainedContentRef> {
+        self.validate()?;
+        let source_history: Vec<_> = events
+            .iter()
+            .filter(|e| e.change_id == self.change_id)
+            .cloned()
+            .collect();
+        let projected = crate::state::reduce(&source_history)?;
+        ensure!(
+            projected
+                .forge
+                .observations
+                .iter()
+                .any(|o| o.event_id == self.observation && o.usable()),
+            "source observation is conflicting or invalid"
+        );
+        let observation = events
+            .iter()
+            .find_map(|e| {
+                if e.change_id == self.change_id && e.event_id == self.observation {
+                    if let Payload::ForgeObservationRecorded { observation } = &e.payload {
+                        return Some(observation);
+                    }
+                }
+                None
+            })
+            .context("source observation is not recorded on the named change")?;
+        let item = observation
+            .items
+            .iter()
+            .find(|item| item.generation_id == self.generation)
+            .context("source generation is not present in the exact observation")?;
+        Ok(&item.content)
+    }
+}
+fn named(value: &str) -> Result<()> {
+    ensure!(
+        !value.trim().is_empty() && !value.contains(['\n', '\r']),
+        "expected a nonempty single-line value"
+    );
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ObservationStanding {
+    Observed,
+    Uncertain,
+    NotObserved,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutcomeObservation {
+    pub standing: ObservationStanding,
+    pub detail: String,
+    #[serde(default)]
+    pub evidence: Vec<RetainedContentRef>,
+    #[serde(default)]
+    pub sources: Vec<SourceGeneration>,
+}
+impl OutcomeObservation {
+    fn validate(&self) -> Result<()> {
+        named(&self.detail)?;
+        for reference in &self.evidence {
+            reference.validate()?;
+        }
+        for source in &self.sources {
+            source.validate()?;
+        }
+        ensure!(
+            self.standing != ObservationStanding::Observed
+                || !self.evidence.is_empty()
+                || !self.sources.is_empty(),
+            "an observed outcome needs evidence; use uncertain or not-observed otherwise"
+        );
+        Ok(())
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForgeDelivery {
+    pub schema: String,
+    pub message_id: String,
+    pub attempt_id: String,
+    /// A separately identified observation of this attempt's outcome.
+    pub evidence_id: String,
+    #[serde(default)]
+    pub previous_evidence: Option<String>,
+    pub run: String,
+    pub transport_request: String,
+    pub sources: Vec<SourceGeneration>,
+    pub delivery: OutcomeObservation,
+    pub acknowledgement: OutcomeObservation,
+    pub acted_on: OutcomeObservation,
+}
+impl ForgeDelivery {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.schema == "arc-forge-delivery/1",
+            "unsupported delivery schema"
+        );
+        for name in [
+            &self.message_id,
+            &self.attempt_id,
+            &self.evidence_id,
+            &self.run,
+            &self.transport_request,
+        ] {
+            named(name)?;
+        }
+        if let Some(previous) = &self.previous_evidence {
+            named(previous)?;
+            ensure!(
+                previous != &self.evidence_id,
+                "outcome evidence cannot name itself"
+            );
+        }
+        for source in &self.sources {
+            source.validate()?;
+        }
+        self.delivery.validate()?;
+        self.acknowledgement.validate()?;
+        self.acted_on.validate()
+    }
+    pub fn sources(&self) -> impl Iterator<Item = &SourceGeneration> {
+        self.sources
+            .iter()
+            .chain(&self.delivery.sources)
+            .chain(&self.acknowledgement.sources)
+            .chain(&self.acted_on.sources)
+    }
+    pub fn contents(&self) -> impl Iterator<Item = &RetainedContentRef> {
+        self.delivery
+            .evidence
+            .iter()
+            .chain(&self.acknowledgement.evidence)
+            .chain(&self.acted_on.evidence)
+    }
+    pub fn same_attempt(&self, other: &Self) -> bool {
+        self.message_id == other.message_id
+            && self.attempt_id == other.attempt_id
+            && self.run == other.run
+            && self.transport_request == other.transport_request
+            && self.sources == other.sources
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommentAuthor {
+    pub name: Option<String>,
+    pub harness: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    /// Coordinates of the original material authorship act, independent of publication.
+    pub act: String,
+    pub model_observation: Option<String>,
+}
+impl CommentAuthor {
+    fn validate(&self) -> Result<()> {
+        named(&self.act)?;
+        ensure!(
+            self.name.is_none()
+                || (self.harness.is_none() && self.model.is_none() && self.effort.is_none()),
+            "human and agent authorship coordinates are separate"
+        );
+        for value in [
+            &self.name,
+            &self.harness,
+            &self.model,
+            &self.effort,
+            &self.model_observation,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            named(value)?;
+        }
+        ensure!(
+            self.effort.is_none() || self.model.is_some(),
+            "effort needs a model observation"
+        );
+        if let Some(name) = &self.name {
+            ensure!(
+                !name.contains(['/', '\\', ':', '@']),
+                "human author needs a name, not a trace or URL"
+            );
+        }
+        if let Some(harness) = &self.harness {
+            ensure!(
+                harness
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                "invalid authorship harness"
+            );
+        }
+        if let Some(model) = &self.model {
+            ensure!(
+                crate::coordinate::model_defect(model, None).is_none()
+                    && !model.contains(['#', ':'])
+                    && !model.starts_with('/'),
+                "invalid authorship model"
+            );
+            if let Some(effort) = &self.effort {
+                ensure!(
+                    !crate::coordinate::is_placeholder(effort)
+                        && effort
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                    "invalid authorship effort"
+                );
+            }
+            ensure!(self.harness.is_some(), "agent authorship needs harness");
+        }
+        Ok(())
+    }
+    fn coordinate(&self) -> String {
+        if let Some(name) = &self.name {
+            return name.clone();
+        }
+        match (&self.harness, &self.model) {
+            (Some(harness), Some(model)) if self.model_observation.is_some() => format!(
+                "{harness}:{model}{}",
+                self.effort
+                    .as_ref()
+                    .map(|e| format!("#{e}"))
+                    .unwrap_or_default()
+            ),
+            _ => "model not recorded".into(),
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CostReference {
+    pub reference: String,
+    pub as_of: String,
+    pub scope: String,
+    pub basis: String,
+    pub coverage: String,
+    pub source_frontier: Vec<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoleAttribution {
+    pub role: String,
+    pub participant: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommentProvenance {
+    pub comment_id: String,
+    pub act_id: String,
+    pub authors: Vec<CommentAuthor>,
+    pub source_frontiers: Vec<String>,
+    pub source_statements: Vec<String>,
+    pub renderer_version: String,
+    pub roles: Vec<RoleAttribution>,
+    #[serde(default)]
+    pub cost: Option<CostReference>,
+}
+impl CommentProvenance {
+    fn validate(&self) -> Result<()> {
+        named(&self.comment_id)?;
+        named(&self.act_id)?;
+        named(&self.renderer_version)?;
+        for author in &self.authors {
+            author.validate()?;
+        }
+        ensure!(
+            self.compact_line().chars().count() <= 512,
+            "compact provenance exceeds 512 characters; use separate comments"
+        );
+        let mut authors = BTreeSet::new();
+        for author in &self.authors {
+            ensure!(
+                authors.insert((&author.act, author.coordinate())),
+                "duplicate material author"
+            );
+        }
+        ensure!(
+            self.authors.len() < 2 || !self.source_statements.is_empty(),
+            "material synthesis needs source statements"
+        );
+        for value in self.source_frontiers.iter().chain(&self.source_statements) {
+            named(value)?;
+        }
+        for role in &self.roles {
+            named(&role.role)?;
+            named(&role.participant)?;
+        }
+        if let Some(cost) = &self.cost {
+            ensure!(cost.scope == "review-exchange", "comment cost must be scoped to review-exchange, never implementation or whole-session");
+            for value in [&cost.reference, &cost.as_of, &cost.basis, &cost.coverage] {
+                named(value)?;
+            }
+            ensure!(
+                !cost.source_frontier.is_empty(),
+                "cost reference needs its as-of source frontier"
+            );
+            for value in &cost.source_frontier {
+                named(value)?;
+            }
+        }
+        Ok(())
+    }
+    pub fn compact_line(&self) -> String {
+        let authors = if self.authors.is_empty() {
+            "model not recorded".into()
+        } else {
+            self.authors
+                .iter()
+                .map(CommentAuthor::coordinate)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        format!(
+            "{}: {authors} · Review cost: unmeasured.",
+            if self.authors.len() > 1 {
+                "Authors"
+            } else {
+                "Author"
+            }
+        )
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AccessBasis {
+    AccessibleGit,
+    AccessibleForge,
+    WithheldPrivateAssertion,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DisclosureSource {
+    Forge(SourceGeneration),
+    Ledger(LedgerSource),
+    Git(GitSource),
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LedgerSource {
+    pub change_id: String,
+    pub event: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitSource {
+    pub change_id: String,
+    pub commit: String,
+}
+impl DisclosureSource {
+    fn change_id(&self) -> &str {
+        match self {
+            Self::Forge(s) => &s.change_id,
+            Self::Ledger(s) => &s.change_id,
+            Self::Git(s) => &s.change_id,
+        }
+    }
+    fn validate(&self) -> Result<()> {
+        crate::ids::validate_id_component(self.change_id())?;
+        match self {
+            Self::Forge(s) => s.validate(),
+            Self::Ledger(s) => named(&s.event),
+            Self::Git(s) => {
+                ensure!(
+                    matches!(s.commit.len(), 40 | 64)
+                        && s.commit.bytes().all(|c| c.is_ascii_hexdigit()),
+                    "Git disclosure source needs a full object ID"
+                );
+                Ok(())
+            }
+        }
+    }
+    fn resolve(&self, events: &[Event]) -> Result<()> {
+        self.validate()?;
+        match self {
+            Self::Forge(s) => {
+                s.resolve(events)?;
+            }
+            Self::Ledger(s) => {
+                ensure!(
+                    events
+                        .iter()
+                        .any(|e| e.change_id == s.change_id && e.event_id == s.event),
+                    "selected ledger source is not recorded"
+                );
+            }
+            Self::Git(_) => {}
+        }
+        Ok(())
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisclosureSelection {
+    pub source: DisclosureSource,
+    pub fields: Vec<String>,
+    pub access_basis: AccessBasis,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Disclosure {
+    pub schema: String,
+    pub disclosure_id: String,
+    #[serde(default)]
+    pub previous_disclosure: Option<String>,
+    pub selected: Vec<DisclosureSelection>,
+    pub allowlist_version: String,
+    pub validator_version: String,
+    pub author: String,
+    pub reviewer: Option<String>,
+    pub editor: Option<String>,
+    pub discloser: String,
+    pub recipient_access_basis: String,
+    pub omissions: Vec<String>,
+    pub outgoing: RetainedContentRef,
+    pub readback: SourceGeneration,
+    pub comment: Option<CommentProvenance>,
+}
+impl Disclosure {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.schema == "arc-disclosure/1",
+            "unsupported disclosure schema"
+        );
+        for value in [
+            &self.disclosure_id,
+            &self.allowlist_version,
+            &self.validator_version,
+            &self.author,
+            &self.discloser,
+            &self.recipient_access_basis,
+        ] {
+            named(value)?;
+        }
+        for value in [&self.previous_disclosure, &self.reviewer, &self.editor]
+            .into_iter()
+            .flatten()
+        {
+            named(value)?;
+        }
+        for selection in &self.selected {
+            selection.source.validate()?;
+            ensure!(
+                !selection.fields.is_empty(),
+                "disclosure selection needs explicit fields"
+            );
+            for field in &selection.fields {
+                named(field)?;
+            }
+        }
+        for omission in &self.omissions {
+            named(omission)?;
+        }
+        self.outgoing.validate()?;
+        self.readback.validate()?;
+        if let Some(comment) = &self.comment {
+            comment.validate()?;
+        }
+        Ok(())
+    }
+    pub fn sources(&self) -> impl Iterator<Item = &SourceGeneration> {
+        self.selected
+            .iter()
+            .filter_map(|selection| {
+                if let DisclosureSource::Forge(source) = &selection.source {
+                    Some(source)
+                } else {
+                    None
+                }
+            })
+            .chain(std::iter::once(&self.readback))
+    }
+    pub fn validate_readback(&self, events: &[Event]) -> Result<()> {
+        self.validate()?;
+        for selection in &self.selected {
+            selection.source.resolve(events)?;
+        }
+        self.readback.resolve(events)?;
+        let readback = self.readback.resolve(events)?;
+        ensure!(
+            self.outgoing.sha256 == readback.sha256
+                && self.outgoing.byte_length == readback.byte_length,
+            "outgoing bytes disagree with the exact readback generation"
+        );
+        Ok(())
+    }
+}
+
+/// Validate foreign delivery/disclosure shapes and their immutable lineage before publication.
+pub fn validate_history(events: &[Event]) -> Result<()> {
+    let deliveries: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            Payload::Message {
+                delivery: Some(delivery),
+                ..
+            } => Some(delivery),
+            _ => None,
+        })
+        .collect();
+    let disclosures: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            Payload::ContextDeclared {
+                disclosure: Some(disclosure),
+                ..
+            } => Some(disclosure),
+            _ => None,
+        })
+        .collect();
+    for event in events {
+        if let Payload::ContextDeclared {
+            origin: Some(origin),
+            ..
+        } = &event.payload
+        {
+            origin.resolve(events)?;
+        }
+        match &event.payload {
+            Payload::Message {
+                delivery: Some(delivery),
+                ..
+            } => {
+                delivery.validate()?;
+                for source in delivery.sources() {
+                    source.resolve(events)?;
+                }
+                for old in &deliveries {
+                    if old.attempt_id == delivery.attempt_id {
+                        ensure!(
+                            old.same_attempt(delivery),
+                            "conflicting delivery attempt reuse"
+                        );
+                        if old.evidence_id == delivery.evidence_id {
+                            ensure!(*old == delivery, "conflicting delivery evidence reuse");
+                        }
+                    }
+                    ensure!(
+                        old.transport_request != delivery.transport_request
+                            || old.same_attempt(delivery),
+                        "transport request reused for another attempt"
+                    );
+                }
+                if let Some(previous) = &delivery.previous_evidence {
+                    ensure!(
+                        deliveries
+                            .iter()
+                            .any(|old| old.same_attempt(delivery) && &old.evidence_id == previous),
+                        "unknown prior outcome evidence"
+                    );
+                } else {
+                    ensure!(
+                        !deliveries
+                            .iter()
+                            .any(|old| old.attempt_id == delivery.attempt_id
+                                && old.evidence_id != delivery.evidence_id
+                                && old.previous_evidence.is_none()),
+                        "later outcomes need previous_evidence"
+                    );
+                }
+                let mut seen = BTreeSet::new();
+                let mut cursor = Some(delivery);
+                while let Some(current) = cursor {
+                    ensure!(
+                        seen.insert(&current.evidence_id),
+                        "cyclic delivery outcome evidence"
+                    );
+                    cursor = current.previous_evidence.as_ref().and_then(|previous| {
+                        deliveries
+                            .iter()
+                            .copied()
+                            .find(|old| old.same_attempt(delivery) && &old.evidence_id == previous)
+                    });
+                }
+            }
+            Payload::ContextDeclared {
+                disclosure: Some(disclosure),
+                ..
+            } => {
+                disclosure.validate_readback(events)?;
+                if let Some(previous) = &disclosure.previous_disclosure {
+                    let old = disclosures
+                        .iter()
+                        .find(|old| &old.disclosure_id == previous)
+                        .context("unknown prior disclosure")?;
+                    ensure!(
+                        old.comment.is_none() || disclosure.comment.is_some(),
+                        "correction cannot drop original comment provenance"
+                    );
+                    if let (Some(before), Some(after)) = (&old.comment, &disclosure.comment) {
+                        ensure!(
+                            before.comment_id == after.comment_id
+                                && before.authors == after.authors,
+                            "correction must retain original material authors"
+                        );
+                    }
+                    ensure!(
+                        disclosure.editor.is_some(),
+                        "correction needs distinct editor attribution"
+                    );
+                }
+                ensure!(
+                    !disclosures
+                        .iter()
+                        .any(|old| old.disclosure_id == disclosure.disclosure_id
+                            && *old != disclosure),
+                    "conflicting disclosure identity reuse"
+                );
+                let mut seen = BTreeSet::new();
+                let mut cursor = Some(disclosure);
+                while let Some(current) = cursor {
+                    ensure!(
+                        seen.insert(&current.disclosure_id),
+                        "cyclic disclosure edit lineage"
+                    );
+                    cursor = current.previous_disclosure.as_ref().and_then(|previous| {
+                        disclosures
+                            .iter()
+                            .copied()
+                            .find(|old| &old.disclosure_id == previous)
+                    });
+                }
+            }
+            Payload::ContextDeclared {
+                origin: Some(source),
+                ..
+            } => {
+                source.resolve(events)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Held histories, including repository-scoped candidate context.
+pub fn held_events(store: &crate::store::Store) -> Result<Vec<Event>> {
+    let mut events = store.load_repository_events()?;
+    for change in store.list_change_ids()? {
+        events.extend(store.load_events(&change)?);
+    }
+    events.sort_by(|a, b| a.event_id.cmp(&b.event_id));
+    Ok(events)
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RoundTrip {
+    pub disclosures: Vec<Disclosure>,
+    pub origins: Vec<SourceGeneration>,
+    pub candidate_paths: Vec<CandidateOutcome>,
+    pub local_integration_revision: Option<String>,
+    pub accepting_patchset: Option<String>,
+    pub provider_lifecycle: Option<String>,
+    pub observed_merge_sha: Option<String>,
+    pub disclosure_availability: Vec<DisclosureAvailability>,
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct DisclosureAvailability {
+    pub disclosure_id: String,
+    pub outgoing_bytes: String,
+    pub compact_provenance: Option<String>,
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct CandidateOutcome {
+    pub candidate_id: String,
+    pub parents: Vec<String>,
+    pub adopts: Vec<String>,
+    pub origin_change: String,
+    pub origin_sources: Vec<SourceGeneration>,
+    pub selection: String,
+    pub promotion: Option<String>,
+    pub patchset: Option<String>,
+    pub revision: Option<String>,
+}
+impl RoundTrip {
+    pub fn observe(&mut self, payload: &Payload) {
+        if let Payload::ContextDeclared {
+            disclosure, origin, ..
+        } = payload
+        {
+            self.disclosures.extend(disclosure.clone());
+            self.origins.extend(origin.clone());
+        }
+    }
+    pub fn join(
+        &mut self,
+        state: &crate::state::ChangeState,
+        repository: &[Event],
+        custody: &crate::custody::Custody,
+    ) {
+        self.disclosure_availability = self
+            .disclosures
+            .iter()
+            .map(|d| DisclosureAvailability {
+                disclosure_id: d.disclosure_id.clone(),
+                outgoing_bytes: custody
+                    .availability(&crate::custody::Content::from(&d.outgoing))
+                    .label()
+                    .into(),
+                compact_provenance: d.comment.as_ref().map(CommentProvenance::compact_line),
+            })
+            .collect();
+        self.local_integration_revision = state
+            .closure
+            .as_ref()
+            .and_then(|c| c.integrated_commit.clone());
+        self.accepting_patchset = state
+            .closure
+            .as_ref()
+            .and_then(|c| c.source_patchset_id.clone());
+        if let Some(lifecycle) = state.forge.current_pr_state() {
+            self.provider_lifecycle = Some(match lifecycle.state {
+                crate::forge::ForgePrState::Closed => "closed-unmerged".into(),
+                other => other.as_str().into(),
+            });
+            self.observed_merge_sha = lifecycle.observed_merge_sha.clone();
+        }
+        self.candidate_paths.clear();
+        for event in repository {
+            let Payload::CandidateSelected {
+                candidate_id,
+                destination,
+                ..
+            } = &event.payload
+            else {
+                continue;
+            };
+            if destination != &state.change_id {
+                continue;
+            }
+            let promotion = repository.iter().find(|e| matches!(&e.payload, Payload::CandidatePromoted { selection, .. } if selection == &event.event_id));
+            let mut pending = vec![candidate_id.clone()];
+            let mut seen = BTreeSet::new();
+            while let Some(id) = pending.pop() {
+                if !seen.insert(id.clone()) {
+                    continue;
+                }
+                let Some((parents, adopts, brief)) = repository.iter().find_map(|e| {
+                    if let Payload::CandidateRegistered {
+                        candidate_id,
+                        parents,
+                        adopts,
+                        brief,
+                        ..
+                    } = &e.payload
+                    {
+                        if candidate_id == &id {
+                            return Some((parents, adopts, brief));
+                        }
+                    }
+                    None
+                }) else {
+                    continue;
+                };
+                pending.extend(parents.iter().chain(adopts).cloned());
+                let (patchset, revision) = promotion
+                    .and_then(|e| {
+                        if let Payload::CandidatePromoted {
+                            patchset_id,
+                            revision,
+                            ..
+                        } = &e.payload
+                        {
+                            Some((Some(patchset_id.clone()), Some(revision.clone())))
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
+                self.candidate_paths.push(CandidateOutcome {
+                    candidate_id: id.clone(),
+                    parents: parents.clone(),
+                    adopts: adopts.clone(),
+                    origin_change: brief.change_id.clone(),
+                    origin_sources: repository
+                        .iter()
+                        .filter_map(|event| match &event.payload {
+                            Payload::ContextDeclared {
+                                subject: crate::model::RelationSubject::Candidate { candidate_id },
+                                origin: Some(origin),
+                                ..
+                            } if candidate_id == &id => Some(origin.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                    selection: event.event_id.clone(),
+                    promotion: promotion.map(|e| e.event_id.clone()),
+                    patchset,
+                    revision,
+                });
+            }
+        }
+    }
+}
+
+/// Change references needed to reconstruct a context relationship.
+pub fn source_changes(payload: &Payload) -> BTreeSet<String> {
+    let mut changes = BTreeSet::new();
+    match payload {
+        Payload::Message {
+            delivery: Some(delivery),
+            ..
+        } => changes.extend(delivery.sources().map(|s| s.change_id.clone())),
+        Payload::ContextDeclared {
+            disclosure, origin, ..
+        } => {
+            if let Some(disclosure) = disclosure {
+                changes.extend(disclosure.sources().map(|s| s.change_id.clone()));
+                changes.extend(
+                    disclosure
+                        .selected
+                        .iter()
+                        .map(|s| s.source.change_id().to_string()),
+                );
+            }
+            if let Some(origin) = origin {
+                changes.insert(origin.change_id.clone());
+            }
+        }
+        _ => {}
+    }
+    changes
+}
+
+/// Full Git support references remain separate from outgoing text custody.
+pub fn disclosure_commits(payload: &Payload) -> Vec<&str> {
+    match payload {
+        Payload::ContextDeclared {
+            disclosure: Some(disclosure),
+            ..
+        } => disclosure
+            .selected
+            .iter()
+            .filter_map(|s| match &s.source {
+                DisclosureSource::Git(s) => Some(s.commit.as_str()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}

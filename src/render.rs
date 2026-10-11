@@ -935,6 +935,52 @@ pub fn markdown(
         }
     }
 
+    if !state.round_trip.disclosures.is_empty()
+        || !state.round_trip.origins.is_empty()
+        || state.round_trip.local_integration_revision.is_some()
+    {
+        let _ = writeln!(w, "\n## Forge round trip\n");
+        let _ = writeln!(
+            w,
+            "- Local integration: {}",
+            state
+                .round_trip
+                .local_integration_revision
+                .as_deref()
+                .unwrap_or("not recorded")
+        );
+        let _ = writeln!(
+            w,
+            "- Provider lifecycle: {}; observed merge: {}",
+            state
+                .round_trip
+                .provider_lifecycle
+                .as_deref()
+                .unwrap_or("not recorded"),
+            state
+                .round_trip
+                .observed_merge_sha
+                .as_deref()
+                .unwrap_or("not observed")
+        );
+        for availability in &state.round_trip.disclosure_availability {
+            let _ = writeln!(
+                w,
+                "- Disclosure {} outgoing/readback bytes: {}",
+                availability.disclosure_id, availability.outgoing_bytes
+            );
+            if let Some(line) = &availability.compact_provenance {
+                let _ = writeln!(w, "  {line}");
+            }
+        }
+        for origin in &state.round_trip.origins {
+            let _ = writeln!(
+                w,
+                "- Preparation origin: {}:{}:{} (declared context)",
+                origin.change_id, origin.observation, origin.generation
+            );
+        }
+    }
     if let Some(forge) = &report.forge {
         if let Some(view) = &report.forge_view {
             let _ = writeln!(w, "{}", crate::forge_view::render(view));
@@ -2048,8 +2094,8 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             ("metadata-updated", parts.join(", "))
         }
         Payload::Message {
-            severity, summary, ..
-        } => ("message", format!("[{severity:?}] {summary}")),
+            severity, summary, delivery, ..
+        } => ("message", format!("[{severity:?}] {summary}{}", delivery.as_ref().map(|d| format!("; attempt {} outcome {}; delivery {:?}; acknowledgement {:?}; acted-on {:?}", d.attempt_id, d.evidence_id, d.delivery.standing, d.acknowledgement.standing, d.acted_on.standing)).unwrap_or_default())),
         Payload::BriefRecorded { title, .. } => (
             "brief-recorded",
             title.clone().unwrap_or_else(|| "brief".into()),

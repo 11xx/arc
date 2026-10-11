@@ -1232,6 +1232,8 @@ struct MessageView<'a> {
     detail: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     metadata: Option<&'a serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delivery: Option<&'a crate::forge_round_trip::ForgeDelivery>,
     actor: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     harness: Option<&'a str>,
@@ -1375,6 +1377,7 @@ mod tests {
             retired_claim_ids: BTreeSet::new(),
             holds: BTreeMap::new(),
             forge: crate::forge::ForgeState::default(),
+            round_trip: crate::forge_round_trip::RoundTrip::default(),
             closure: closure.map(|outcome| crate::state::ClosureState {
                 origin_replica_id: "repo".into(),
                 shape: None,
