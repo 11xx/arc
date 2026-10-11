@@ -2459,6 +2459,7 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             change,
             fork,
             range,
+            journal,
             note,
             ..
         } => {
@@ -2472,11 +2473,30 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             if let Some(range) = range {
                 summary.push_str(&format!(" range={}", one_line(&range.as_str())));
             }
+            if let Some(journal) = journal {
+                summary.push_str(&format!(" journal={}", one_line(&journal.file)));
+            }
             if let Some(note) = note {
                 summary.push_str(" — ");
                 summary.push_str(&one_line(note));
             }
             ("run-dispatched", summary)
+        }
+        Payload::RunBound {
+            dispatch_event_id,
+            executor_harness,
+            executor_session,
+            handle,
+        } => {
+            let mut summary = format!(
+                "{dispatch_event_id} executor={} session={}",
+                one_line(executor_harness),
+                one_line(executor_session)
+            );
+            if let Some(handle) = handle {
+                summary.push_str(&format!(" handle={}", one_line(handle)));
+            }
+            ("run-bound", summary)
         }
         Payload::RunEnded {
             dispatch_event_id,

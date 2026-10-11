@@ -97,7 +97,9 @@ pub use review::{comment, finding, keep, read_review, reply, resolve, review, Re
 pub use rewrite::{
     instructions_git, sign as rewrite_sign, trailers as rewrite_trailers, SignArgs, TrailerArgs,
 };
-pub use run::{dispatch_run, end_run, list_runs, DispatchInput, EndingInput};
+pub use run::{
+    bind_run, dispatch_run, end_run, list_runs, BindingInput, DispatchInput, EndingInput,
+};
 use serde::Serialize;
 pub use squash::squash;
 pub use stats::{stats, StatsSelection, StatsView};

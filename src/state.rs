@@ -3120,6 +3120,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
             | Payload::ReviewPassCompleted { .. }
             | Payload::ReviewPassAbandoned { .. }
             | Payload::RunDispatched { .. }
+            | Payload::RunBound { .. }
             | Payload::RunEnded { .. }
             | Payload::CandidateRegistered { .. }
             | Payload::CandidateJudged { .. }

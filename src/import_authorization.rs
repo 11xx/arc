@@ -192,6 +192,7 @@ pub fn required_roles(payload: &Payload) -> Option<Vec<Vec<Role>>> {
         | ReviewPassCompleted { .. }
         | ReviewPassAbandoned { .. }
         | RunDispatched { .. }
+        | RunBound { .. }
         | RunEnded { .. }
         | CandidateRegistered { .. }
         | CandidateJudged { .. }

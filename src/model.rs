@@ -1553,10 +1553,11 @@ pub enum Payload {
     ///
     /// Exactly one subject is named. A ledger change is one shape a delegation
     /// takes, not the only one: the loop of bounded rounds runs just as often
-    /// on a fork, which is outside the lifecycle by design, or on a bare
-    /// commit range in a repository whose ledger holds nothing yet. A record
-    /// that could bind only to a change would be unavailable to exactly the
-    /// work that most needs it.
+    /// on a fork, which is outside the lifecycle by design, on a bare commit
+    /// range in a repository whose ledger holds nothing yet, or on a journal
+    /// artifact that no change has been begun from. A record that could bind
+    /// only to a change would be unavailable to exactly the work that most
+    /// needs it.
     RunDispatched {
         route: String,
         worktree: String,
@@ -1568,10 +1569,30 @@ pub enum Payload {
         /// The commit range this run was dispatched against.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         range: Option<CommitRange>,
+        /// The journal artifact this run was dispatched against.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        journal: Option<RunJournalSubject>,
         #[serde(skip_serializing_if = "Option::is_none")]
         brief_event_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+    },
+    /// A caller told arc which backend session executed a dispatched run.
+    ///
+    /// The caller learns the executor's session only after launch, so the
+    /// binding is its own fact, written once per dispatch at any time after
+    /// it, an ending included. A follow-up or a resume is its own dispatch
+    /// with its own binding: two dispatches bound to one executor session are
+    /// two spans of one measurement scope, never one run.
+    RunBound {
+        dispatch_event_id: String,
+        /// The harness that ran the executor session.
+        executor_harness: String,
+        /// The executor's native session id in that harness.
+        executor_session: String,
+        /// The delegate's handle for the run, when the caller has one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        handle: Option<String>,
     },
     /// A caller told arc that a dispatched run reached a terminal outcome.
     /// `unknown` records that no more specific outcome is known.
@@ -2200,6 +2221,7 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         | Payload::ReviewPassCompleted { .. }
         | Payload::ReviewPassAbandoned { .. } => AppendPermission::AnyPhaseFact,
         | Payload::RunDispatched { .. }
+        | Payload::RunBound { .. }
         | Payload::RunEnded { .. }
         | Payload::CandidateRegistered { .. }
         | Payload::CandidateJudged { .. }
@@ -2591,6 +2613,18 @@ impl CommitRange {
     pub fn as_str(&self) -> String {
         format!("{}..{}", self.base, self.head)
     }
+}
+
+/// The journal artifact a run was dispatched against: the reference as it
+/// was given, resolved the way `begin --from-journal` resolves one, and the
+/// body it named then. A kind transition retires the artifact under its old
+/// name, and the `supersedes` chain leads from either name to the other.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunJournalSubject {
+    /// A filename in this project's journal, or `<journal-dir>::<file>`.
+    pub file: String,
+    /// `sha256:` over the body read at dispatch.
+    pub digest: String,
 }
 
 /// One finding a round raised. Severity is optional because a round that

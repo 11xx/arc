@@ -14166,6 +14166,50 @@ pub fn artifact_digest(ctx: &Ctx, reference: &str) -> Result<String> {
     ))
 }
 
+/// An artifact's names across its kind transitions, oldest first: each
+/// artifact it supersedes, itself, and each successor a published transition
+/// gave it. A reference in another project's journal yields references in the
+/// same `<journal-dir>::<file>` form, so each entry resolves as given.
+pub(crate) fn transition_lineage(ctx: &Ctx, reference: &str) -> Result<Vec<String>> {
+    let location = locate_artifact(ctx, reference)?;
+    let events = read_events(&location.hot)?;
+    let edges: Vec<(&str, &str)> = events
+        .iter()
+        .filter(|event| {
+            event.known()
+                && event.event == "transition"
+                && event.creates_artifact(&location.hot, &events)
+        })
+        .filter_map(|event| Some((event.supersedes.as_deref()?, event.file.as_deref()?)))
+        .collect();
+    let mut chain = std::collections::VecDeque::from([location.file.as_str()]);
+    while let Some(&(source, _)) = edges
+        .iter()
+        .find(|(_, successor)| Some(successor) == chain.front())
+    {
+        if chain.contains(&source) {
+            break;
+        }
+        chain.push_front(source);
+    }
+    while let Some(&(_, successor)) = edges
+        .iter()
+        .find(|(source, _)| Some(source) == chain.back())
+    {
+        if chain.contains(&successor) {
+            break;
+        }
+        chain.push_back(successor);
+    }
+    let prefix = split_qualified(reference)
+        .map(|(dir, _)| format!("{dir}{REFERENCE_SEPARATOR}"))
+        .unwrap_or_default();
+    Ok(chain
+        .into_iter()
+        .map(|file| format!("{prefix}{file}"))
+        .collect())
+}
+
 /// Validate that a reference identifies an existing plan in the hot journal
 /// or its cold archive.
 #[allow(dead_code)]

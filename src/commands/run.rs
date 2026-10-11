@@ -2,7 +2,8 @@
 
 use super::*;
 use crate::model::{
-    CommitRange, DeferredFinding, Event, Payload, RunFinding, RunOutcome, Severity,
+    CommitRange, DeferredFinding, Event, Payload, RunFinding, RunJournalSubject, RunOutcome,
+    Severity,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -12,14 +13,16 @@ use std::collections::HashMap;
 ///
 /// Rounds are ordinals within a subject, so the subject is what makes a
 /// sequence of dispatches one conversation rather than a list. A ledger change
-/// is one shape it takes; a fork and a bare commit range are the others, and
-/// the loop of bounded rounds runs on all three.
+/// is one shape it takes; a fork, a bare commit range, and a journal artifact
+/// are the others, and the loop of bounded rounds runs on all four. A journal
+/// subject is the reference as the dispatch gave it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum RunSubject {
     Change { id: String },
     Fork { slug: String },
     Range { base: String, head: String },
+    Journal { file: String },
 }
 
 impl RunSubject {
@@ -29,17 +32,21 @@ impl RunSubject {
             change,
             fork,
             range,
+            journal,
             ..
         } = payload
         else {
             return None;
         };
-        match (change, fork, range) {
-            (Some(id), _, _) => Some(Self::Change { id: id.clone() }),
-            (_, Some(slug), _) => Some(Self::Fork { slug: slug.clone() }),
-            (_, _, Some(range)) => Some(Self::Range {
+        match (change, fork, range, journal) {
+            (Some(id), _, _, _) => Some(Self::Change { id: id.clone() }),
+            (_, Some(slug), _, _) => Some(Self::Fork { slug: slug.clone() }),
+            (_, _, Some(range), _) => Some(Self::Range {
                 base: range.base.clone(),
                 head: range.head.clone(),
+            }),
+            (_, _, _, Some(journal)) => Some(Self::Journal {
+                file: journal.file.clone(),
             }),
             _ => None,
         }
@@ -51,17 +58,20 @@ impl RunSubject {
             Self::Change { id } => format!("change {id}"),
             Self::Fork { slug } => format!("fork {slug}"),
             Self::Range { base, head } => format!("range {base}..{head}"),
+            Self::Journal { file } => format!("journal {file}"),
         }
     }
 }
 
-/// One dispatch, its ordinal within its subject, and its ending.
+/// One dispatch, its ordinal within its subject, its backend binding, and its
+/// ending.
 pub struct Round<'a> {
     /// Absent on a dispatch recorded without a subject. Such a run belongs to
     /// no sequence, so it is numbered in none.
     pub subject: Option<RunSubject>,
     pub round: Option<usize>,
     pub dispatch: &'a Event,
+    pub binding: Option<RunBinding<'a>>,
     pub ending: Option<RunEnding<'a>>,
 }
 
@@ -110,6 +120,7 @@ pub fn rounds(events: &[Event]) -> Vec<Round<'_>> {
             subject,
             round,
             dispatch: event,
+            binding: binding_for(events, &event.event_id),
             ending: ending_for(events, &event.event_id),
         });
     }
@@ -176,9 +187,17 @@ struct RunRow {
     fork: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     range: Option<CommitRange>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    journal: Option<RunJournalSubject>,
+    /// The journal subject's names across its kind transitions, oldest first,
+    /// when its journal resolves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    journal_lineage: Option<Vec<String>>,
     brief_event_id: Option<String>,
     note: Option<String>,
     dispatched_at: DateTime<Utc>,
+    /// The backend session that executed the run; null while unbound.
+    binding: Option<BindingRow>,
     ending_event_id: Option<String>,
     ended_at: Option<DateTime<Utc>>,
     outcome: Option<RunOutcome>,
@@ -196,6 +215,16 @@ struct RunRow {
     open_deferrals: Vec<DeferredFinding>,
 }
 
+#[derive(Debug, Serialize)]
+struct BindingRow {
+    event_id: String,
+    executor_harness: String,
+    executor_session: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    handle: Option<String>,
+    bound_at: DateTime<Utc>,
+}
+
 /// Everything one dispatch records.
 pub struct DispatchInput {
     pub route: String,
@@ -203,6 +232,7 @@ pub struct DispatchInput {
     pub change: Option<String>,
     pub fork: Option<String>,
     pub range: Option<String>,
+    pub journal: Option<String>,
     pub brief_event_id: Option<String>,
     pub note: Option<String>,
 }
@@ -215,6 +245,7 @@ pub fn dispatch_run(ctx: &Ctx, dispatch: DispatchInput) -> Result<()> {
         change,
         fork,
         range,
+        journal,
         brief_event_id,
         note,
     } = dispatch;
@@ -222,13 +253,14 @@ pub fn dispatch_run(ctx: &Ctx, dispatch: DispatchInput) -> Result<()> {
         change.as_ref().map(|_| "--change"),
         fork.as_ref().map(|_| "--fork"),
         range.as_ref().map(|_| "--range"),
+        journal.as_ref().map(|_| "--journal"),
     ]
     .into_iter()
     .flatten()
     .collect();
     if named.is_empty() {
         bail!(
-            "run dispatch refused: name what the run is against with --change <id>, --fork <slug>, or --range <base>..<head>"
+            "run dispatch refused: name what the run is against with --change <id>, --fork <slug>, --range <base>..<head>, or --journal <file>"
         );
     }
     if named.len() > 1 {
@@ -242,6 +274,13 @@ pub fn dispatch_run(ctx: &Ctx, dispatch: DispatchInput) -> Result<()> {
         .map(CommitRange::parse)
         .transpose()
         .map_err(|error| anyhow::anyhow!("run dispatch refused: {error}"))?;
+    let journal = journal
+        .map(|file| {
+            crate::journal::artifact_digest(ctx, &file)
+                .map(|digest| RunJournalSubject { file, digest })
+        })
+        .transpose()
+        .map_err(|error| anyhow::anyhow!("run dispatch refused: {error:#}"))?;
 
     let store = ctx.store()?;
     let _repository_events = store.lock_repository_events()?;
@@ -255,6 +294,7 @@ pub fn dispatch_run(ctx: &Ctx, dispatch: DispatchInput) -> Result<()> {
             change,
             fork,
             range,
+            journal,
             brief_event_id,
             note,
         },
@@ -294,22 +334,7 @@ pub fn end_run(ctx: &Ctx, dispatch_event_id: &str, ending: EndingInput) -> Resul
     let store = ctx.store()?;
     let _repository_events = store.lock_repository_events()?;
     let events = store.load_repository_events()?;
-    let Some(dispatch) = events
-        .iter()
-        .find(|event| event.event_id == dispatch_event_id)
-    else {
-        if let Some(event) = find_change_event(&store, dispatch_event_id)? {
-            let kind = crate::render::event_kind_summary(&event.payload).0;
-            bail!(
-                "run end refused: event {dispatch_event_id} is {kind}, not a repository-scoped run-dispatched event"
-            );
-        }
-        bail!("run end refused: no event has id {dispatch_event_id}");
-    };
-    if !matches!(dispatch.payload, Payload::RunDispatched { .. }) {
-        let kind = crate::render::event_kind_summary(&dispatch.payload).0;
-        bail!("run end refused: event {dispatch_event_id} is {kind}, not a run-dispatched event");
-    }
+    let dispatch = find_dispatch(&store, &events, dispatch_event_id, "run end")?;
     if let Some(existing) = ending_for(&events, dispatch_event_id) {
         bail!(
             "run end refused: dispatch {dispatch_event_id} already ended with {} in event {}",
@@ -362,6 +387,127 @@ pub fn end_run(ctx: &Ctx, dispatch_event_id: &str, ending: EndingInput) -> Resul
     }
     println!("event: {}", event.event_id);
     Ok(())
+}
+
+/// Who executed a dispatched run, as the caller learned it.
+pub struct BindingInput {
+    pub executor_harness: String,
+    pub executor_session: String,
+    pub handle: Option<String>,
+}
+
+/// Record which backend session executed a previously recorded dispatch.
+///
+/// A dispatch has one binding. Writing the same values again records nothing
+/// and names the binding already held, so a caller that retries after an
+/// interruption converges; different values refuse, because two executors for
+/// one dispatch would make every later measurement of it ambiguous.
+pub fn bind_run(ctx: &Ctx, dispatch_event_id: &str, binding: BindingInput) -> Result<()> {
+    let BindingInput {
+        executor_harness,
+        executor_session,
+        handle,
+    } = binding;
+    for (flag, value, harness) in [
+        ("--executor-harness", Some(&executor_harness), true),
+        ("--executor-session", Some(&executor_session), false),
+        ("--handle", handle.as_ref(), false),
+    ] {
+        if let Some(defect) = value.and_then(|value| binding_defect(value, harness)) {
+            bail!(
+                "run bind refused: {flag} {:?}: {defect}; omit a value nobody established",
+                value.expect("a defect names a supplied value")
+            );
+        }
+    }
+
+    let store = ctx.store()?;
+    let _repository_events = store.lock_repository_events()?;
+    let events = store.load_repository_events()?;
+    find_dispatch(&store, &events, dispatch_event_id, "run bind")?;
+    if let Some(existing) = binding_for(&events, dispatch_event_id) {
+        if existing.executor_harness == &executor_harness
+            && existing.executor_session == &executor_session
+            && existing.handle == &handle
+        {
+            println!(
+                "run already bound: {} session {}",
+                existing.executor_harness, existing.executor_session
+            );
+            println!("event: {}", existing.event.event_id);
+            return Ok(());
+        }
+        bail!(
+            "run bind refused: dispatch {dispatch_event_id} is already bound to {} in event {}",
+            existing.describe(),
+            existing.event.event_id
+        );
+    }
+
+    let mut event = ctx.event(
+        &store,
+        Store::REPOSITORY_SCOPE,
+        Payload::RunBound {
+            dispatch_event_id: dispatch_event_id.to_string(),
+            executor_harness: executor_harness.clone(),
+            executor_session: executor_session.clone(),
+            handle,
+        },
+    )?;
+    store.append_local_repository_event(&mut event)?;
+    println!("run bound: {executor_harness} session {executor_session}");
+    println!("event: {}", event.event_id);
+    Ok(())
+}
+
+/// Why a binding value cannot be recorded, or nothing when it can. A harness
+/// is a name, so it carries no `:` and is no session id; every value is one
+/// token that names something, never a placeholder standing in for nothing.
+fn binding_defect(value: &str, harness: bool) -> Option<&'static str> {
+    use crate::coordinate::{is_placeholder, is_session_id};
+    if value.trim().is_empty() {
+        return Some("an empty value names nothing");
+    }
+    if is_placeholder(value) {
+        return Some("a placeholder is not an identity");
+    }
+    if value.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Some("an identity carries no whitespace or control characters");
+    }
+    if harness && value.contains(':') {
+        return Some("a harness name carries no ':'");
+    }
+    if harness && is_session_id(value, None) {
+        return Some("a session id is not a harness");
+    }
+    None
+}
+
+/// The repository-scoped dispatch `dispatch_event_id` names, or the refusal
+/// `verb` gives for an id that names nothing or names another kind of event.
+fn find_dispatch<'a>(
+    store: &Store,
+    events: &'a [Event],
+    dispatch_event_id: &str,
+    verb: &str,
+) -> Result<&'a Event> {
+    let Some(dispatch) = events
+        .iter()
+        .find(|event| event.event_id == dispatch_event_id)
+    else {
+        if let Some(event) = find_change_event(store, dispatch_event_id)? {
+            let kind = crate::render::event_kind_summary(&event.payload).0;
+            bail!(
+                "{verb} refused: event {dispatch_event_id} is {kind}, not a repository-scoped run-dispatched event"
+            );
+        }
+        bail!("{verb} refused: no event has id {dispatch_event_id}");
+    };
+    if !matches!(dispatch.payload, Payload::RunDispatched { .. }) {
+        let kind = crate::render::event_kind_summary(&dispatch.payload).0;
+        bail!("{verb} refused: event {dispatch_event_id} is {kind}, not a run-dispatched event");
+    }
+    Ok(dispatch)
 }
 
 /// A finding as a caller writes it. A deferral may name its own ID; every
@@ -434,16 +580,27 @@ fn read_deferred(source: Option<&str>) -> Result<Vec<DeferredFinding>> {
 }
 
 /// List every recorded dispatch grouped by the subject it ran against, with
-/// the rounds numbered within each. An absent ending remains visible as
-/// `open`.
+/// the rounds numbered within each and the backend session each is bound to.
+/// An absent ending remains visible as `open`, an absent binding as
+/// `unbound`.
 pub fn list_runs(ctx: &Ctx, json: bool) -> Result<()> {
     let store = ctx.store()?;
     let events = store.load_repository_events()?;
     let open = open_deferrals(&events);
+    let mut lineages: HashMap<String, Option<Vec<String>>> = HashMap::new();
     let rows = rounds(&events)
         .iter()
         .rev()
-        .map(|round| run_row(round, &open))
+        .map(|round| {
+            let lineage = match &round.subject {
+                Some(RunSubject::Journal { file }) => lineages
+                    .entry(file.clone())
+                    .or_insert_with(|| crate::journal::transition_lineage(ctx, file).ok())
+                    .clone(),
+                _ => None,
+            };
+            run_row(round, &open, lineage)
+        })
         .collect::<Vec<_>>();
 
     if json {
@@ -463,15 +620,26 @@ pub fn list_runs(ctx: &Ctx, json: bool) -> Result<()> {
         }
     }
     for subject in order {
-        let heading = subject
-            .as_ref()
-            .map(RunSubject::label)
-            .unwrap_or_else(|| "unattributed".to_string());
         let group = rows
             .iter()
             .rev()
             .filter(|row| row.subject == subject)
             .collect::<Vec<_>>();
+        let mut heading = subject
+            .as_ref()
+            .map(RunSubject::label)
+            .unwrap_or_else(|| "unattributed".to_string());
+        if let (Some(RunSubject::Journal { file }), Some(current)) = (
+            &subject,
+            group
+                .first()
+                .and_then(|row| row.journal_lineage.as_ref())
+                .and_then(|lineage| lineage.last()),
+        ) {
+            if current != file {
+                heading.push_str(&format!(" (now {current})"));
+            }
+        }
         println!("{heading}  {} round(s)", group.len());
         for row in group {
             print_round(row);
@@ -502,6 +670,20 @@ fn print_round(row: &RunRow) {
         line.push_str(&format!("  ending-note={}", crate::render::one_line(note)));
     }
     println!("{line}");
+    match &row.binding {
+        Some(binding) => {
+            let mut bound = format!(
+                "    executor={} session={}",
+                crate::render::one_line(&binding.executor_harness),
+                crate::render::one_line(&binding.executor_session)
+            );
+            if let Some(handle) = &binding.handle {
+                bound.push_str(&format!(" handle={}", crate::render::one_line(handle)));
+            }
+            println!("{bound}");
+        }
+        None => println!("    unbound"),
+    }
 
     let mut ending = Vec::new();
     if let Some(head) = &row.reviewed_head {
@@ -533,13 +715,18 @@ fn print_round(row: &RunRow) {
     }
 }
 
-fn run_row(round: &Round<'_>, open: &[OpenDeferral]) -> RunRow {
+fn run_row(
+    round: &Round<'_>,
+    open: &[OpenDeferral],
+    journal_lineage: Option<Vec<String>>,
+) -> RunRow {
     let Payload::RunDispatched {
         route,
         worktree,
         change,
         fork,
         range,
+        journal,
         brief_event_id,
         note,
     } = &round.dispatch.payload
@@ -569,9 +756,18 @@ fn run_row(round: &Round<'_>, open: &[OpenDeferral]) -> RunRow {
         change: change.clone(),
         fork: fork.clone(),
         range: range.clone(),
+        journal: journal.clone(),
+        journal_lineage,
         brief_event_id: brief_event_id.clone(),
         note: note.clone(),
         dispatched_at: round.dispatch.created_at,
+        binding: round.binding.as_ref().map(|binding| BindingRow {
+            event_id: binding.event.event_id.clone(),
+            executor_harness: binding.executor_harness.clone(),
+            executor_session: binding.executor_session.clone(),
+            handle: binding.handle.clone(),
+            bound_at: binding.event.created_at,
+        }),
         ending_event_id: ending.map(|ending| ending.event.event_id.clone()),
         ended_at: ending.map(|ending| ending.event.created_at),
         outcome: ending.map(|ending| *ending.outcome),
@@ -619,6 +815,48 @@ fn ending_for<'a>(events: &'a [Event], dispatch_event_id: &str) -> Option<RunEnd
             raised,
             deferred,
             collects,
+        }),
+        _ => None,
+    })
+}
+
+/// The backend binding recorded against one dispatch, with the payload
+/// already read.
+pub struct RunBinding<'a> {
+    pub event: &'a Event,
+    pub executor_harness: &'a String,
+    pub executor_session: &'a String,
+    pub handle: &'a Option<String>,
+}
+
+impl RunBinding<'_> {
+    /// The binding as a refusal names it.
+    fn describe(&self) -> String {
+        let mut described = format!(
+            "{} session {}",
+            self.executor_harness, self.executor_session
+        );
+        if let Some(handle) = self.handle {
+            described.push_str(&format!(" handle {handle}"));
+        }
+        described
+    }
+}
+
+/// The first binding recorded against one dispatch. `run bind` writes one at
+/// most, so a later one can arrive only by import, and the first stands.
+pub fn binding_for<'a>(events: &'a [Event], dispatch_event_id: &str) -> Option<RunBinding<'a>> {
+    events.iter().find_map(|event| match &event.payload {
+        Payload::RunBound {
+            dispatch_event_id: id,
+            executor_harness,
+            executor_session,
+            handle,
+        } if id == dispatch_event_id => Some(RunBinding {
+            event,
+            executor_harness,
+            executor_session,
+            handle,
         }),
         _ => None,
     })

@@ -568,3 +568,422 @@ fn a_deferral_without_a_reason_is_refused() {
         "a refused ending records nothing"
     );
 }
+
+fn dispatch_against(repo: &Repo, subject: &str, value: &str) -> String {
+    event_id(&stdout(repo.arc(&repo.root).args([
+        "run",
+        "dispatch",
+        "--route",
+        "codex:model-a#high",
+        "--worktree",
+        "/work/run",
+        subject,
+        value,
+    ])))
+}
+
+fn file_todo(repo: &Repo, topic: &str) -> String {
+    let path = stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "todo", topic, "--body-file", "-"])
+            .write_stdin("# Work item\n\nBody.\n"),
+    );
+    Path::new(path.trim())
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string()
+}
+
+fn row_for<'a>(rows: &'a serde_json::Value, dispatch_id: &str) -> &'a serde_json::Value {
+    rows.as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["dispatch_event_id"] == dispatch_id)
+        .unwrap_or_else(|| panic!("no row for {dispatch_id}: {rows}"))
+}
+
+fn bind(repo: &Repo, dispatch_id: &str, extra: &[&str]) -> AssertCommand {
+    let mut command = repo.arc(&repo.root);
+    command.args(["run", "bind", dispatch_id]).args(extra);
+    command
+}
+
+#[test]
+fn a_dispatch_against_a_change_is_listed_unbound() {
+    let repo = Repo::new();
+    let dispatch_id = dispatch_against(&repo, "--change", "bound-change");
+    let rows = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    let row = row_for(&rows, &dispatch_id);
+    assert_eq!(row["subject"]["kind"], "change", "{rows}");
+    assert_eq!(row["subject"]["id"], "bound-change", "{rows}");
+    assert!(row["binding"].is_null(), "{rows}");
+    assert!(row.get("journal").is_none(), "{rows}");
+    let listed = stdout(repo.arc(&repo.root).args(["run", "list"]));
+    assert!(listed.contains("unbound"), "{listed}");
+}
+
+#[test]
+fn a_dispatch_against_a_journal_artifact_names_it_as_the_subject() {
+    let repo = Repo::new();
+    let file = file_todo(&repo, "journal-subject");
+    let dispatched = stdout(repo.arc(&repo.root).args([
+        "run",
+        "dispatch",
+        "--route",
+        "r",
+        "--worktree",
+        "w",
+        "--journal",
+        &file,
+    ]));
+    assert!(
+        dispatched.contains(&format!("round: 1 of journal {file}")),
+        "{dispatched}"
+    );
+    let dispatch_id = event_id(&dispatched);
+    let second = dispatch_against(&repo, "--journal", &file);
+
+    let rows = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    let row = row_for(&rows, &dispatch_id);
+    assert_eq!(row["subject"]["kind"], "journal", "{rows}");
+    assert_eq!(row["subject"]["file"], file.as_str(), "{rows}");
+    assert_eq!(row["journal"]["file"], file.as_str(), "{rows}");
+    assert!(
+        row["journal"]["digest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:")),
+        "{rows}"
+    );
+    assert!(row["change"].is_null(), "{rows}");
+    assert_eq!(row_for(&rows, &second)["round"], 2, "{rows}");
+    let listed = stdout(repo.arc(&repo.root).args(["run", "list"]));
+    assert!(
+        listed.contains(&format!("journal {file}  2 round(s)")),
+        "{listed}"
+    );
+
+    // Still one subject per dispatch, and only an artifact resolves.
+    let two = repo
+        .arc(&repo.root)
+        .args([
+            "run",
+            "dispatch",
+            "--route",
+            "r",
+            "--worktree",
+            "w",
+            "--change",
+            "c",
+            "--journal",
+            &file,
+        ])
+        .assert()
+        .failure();
+    let two_stderr = String::from_utf8_lossy(&two.get_output().stderr);
+    assert!(
+        two_stderr.contains("--change and --journal"),
+        "{two_stderr}"
+    );
+    for missing in [
+        "20260101T000000Z-absent-todo.md",
+        "notes/20260101T000000Z-absent-todo.md",
+    ] {
+        repo.arc(&repo.root)
+            .args([
+                "run",
+                "dispatch",
+                "--route",
+                "r",
+                "--worktree",
+                "w",
+                "--journal",
+                missing,
+            ])
+            .assert()
+            .failure();
+    }
+    let none = repo
+        .arc(&repo.root)
+        .args(["run", "dispatch", "--route", "r", "--worktree", "w"])
+        .assert()
+        .failure();
+    let none_stderr = String::from_utf8_lossy(&none.get_output().stderr);
+    assert!(none_stderr.contains("--journal"), "{none_stderr}");
+    let after = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    assert_eq!(after.as_array().unwrap().len(), 2, "{after}");
+}
+
+#[test]
+fn a_binding_written_after_launch_and_after_the_ending_is_listed() {
+    let repo = Repo::new();
+    let dispatch_id = dispatch_against(&repo, "--change", "late-binding");
+    let ending = event_id(&stdout(repo.arc(&repo.root).args([
+        "run",
+        "end",
+        &dispatch_id,
+        "--outcome",
+        "completed",
+    ])));
+    let bound = stdout(&mut bind(
+        &repo,
+        &dispatch_id,
+        &[
+            "--executor-harness",
+            "codex",
+            "--executor-session",
+            "exec-session-1",
+            "--handle",
+            "delegate-handle-1",
+        ],
+    ));
+    let binding_id = event_id(&bound);
+    assert_ne!(binding_id, ending);
+
+    let rows = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    let row = row_for(&rows, &dispatch_id);
+    assert_eq!(row["binding"]["event_id"], binding_id.as_str(), "{rows}");
+    assert_eq!(row["binding"]["executor_harness"], "codex", "{rows}");
+    assert_eq!(
+        row["binding"]["executor_session"], "exec-session-1",
+        "{rows}"
+    );
+    assert_eq!(row["binding"]["handle"], "delegate-handle-1", "{rows}");
+    assert!(row["binding"]["bound_at"].is_string(), "{rows}");
+    assert_eq!(row["outcome"], "completed", "{rows}");
+    let listed = stdout(repo.arc(&repo.root).args(["run", "list"]));
+    assert!(
+        listed.contains("executor=codex session=exec-session-1 handle=delegate-handle-1"),
+        "{listed}"
+    );
+
+    // A binding to anything but a dispatch refuses, as an ending does.
+    let refused = bind(
+        &repo,
+        &ending,
+        &["--executor-harness", "codex", "--executor-session", "s"],
+    )
+    .assert()
+    .failure();
+    let stderr = String::from_utf8_lossy(&refused.get_output().stderr);
+    assert!(stderr.contains("not a run-dispatched event"), "{stderr}");
+    bind(
+        &repo,
+        "01NOTHINGHASTHISID",
+        &["--executor-harness", "codex", "--executor-session", "s"],
+    )
+    .assert()
+    .failure();
+}
+
+#[test]
+fn rebinding_identical_values_records_nothing_and_different_values_refuse() {
+    let repo = Repo::new();
+    let dispatch_id = dispatch_against(&repo, "--fork", "rebind");
+    let values = [
+        "--executor-harness",
+        "claude",
+        "--executor-session",
+        "exec-session-2",
+    ];
+    let first = event_id(&stdout(&mut bind(&repo, &dispatch_id, &values)));
+    let repeated = stdout(&mut bind(&repo, &dispatch_id, &values));
+    assert_eq!(event_id(&repeated), first, "{repeated}");
+    assert!(repeated.contains("already bound"), "{repeated}");
+
+    for different in [
+        &[
+            "--executor-harness",
+            "claude",
+            "--executor-session",
+            "exec-session-3",
+        ][..],
+        &[
+            "--executor-harness",
+            "codex",
+            "--executor-session",
+            "exec-session-2",
+        ][..],
+        &[
+            "--executor-harness",
+            "claude",
+            "--executor-session",
+            "exec-session-2",
+            "--handle",
+            "added-later",
+        ][..],
+    ] {
+        let refused = bind(&repo, &dispatch_id, different).assert().failure();
+        let stderr = String::from_utf8_lossy(&refused.get_output().stderr);
+        assert!(stderr.contains("already bound"), "{stderr}");
+        assert!(stderr.contains(&first), "{stderr}");
+    }
+    let events = stdout(repo.arc(&repo.root).args(["events", "--repository"]));
+    assert_eq!(
+        events.matches("\"run-bound\"").count(),
+        1,
+        "exactly one binding is recorded: {events}"
+    );
+}
+
+/// A follow-up or resume is its own dispatch with its own binding, so two
+/// dispatches bound to one executor session are two spans of one scope.
+#[test]
+fn a_follow_up_opens_a_second_span_on_the_same_session() {
+    let repo = Repo::new();
+    let first = dispatch_against(&repo, "--change", "follow-up");
+    let values = [
+        "--executor-harness",
+        "codex",
+        "--executor-session",
+        "shared-session",
+        "--handle",
+        "h-1",
+    ];
+    stdout(&mut bind(&repo, &first, &values));
+    stdout(
+        repo.arc(&repo.root)
+            .args(["run", "end", &first, "--outcome", "completed"]),
+    );
+    let second = dispatch_against(&repo, "--change", "follow-up");
+    stdout(&mut bind(&repo, &second, &values));
+
+    let rows = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    let (first_row, second_row) = (row_for(&rows, &first), row_for(&rows, &second));
+    assert_eq!(first_row["round"], 1, "{rows}");
+    assert_eq!(second_row["round"], 2, "{rows}");
+    for row in [first_row, second_row] {
+        assert_eq!(
+            row["binding"]["executor_session"], "shared-session",
+            "{rows}"
+        );
+    }
+    assert_ne!(
+        first_row["binding"]["event_id"], second_row["binding"]["event_id"],
+        "{rows}"
+    );
+}
+
+#[test]
+fn a_placeholder_or_malformed_binding_refuses_and_records_nothing() {
+    let repo = Repo::new();
+    let dispatch_id = dispatch_against(&repo, "--change", "placeholder-binding");
+    let cases: [(&[&str], &str); 9] = [
+        (
+            &["--executor-harness", "unknown", "--executor-session", "s"],
+            "placeholder",
+        ),
+        (
+            &["--executor-harness", "codex", "--executor-session", "None"],
+            "placeholder",
+        ),
+        (
+            &[
+                "--executor-harness",
+                "codex",
+                "--executor-session",
+                "<synthetic>",
+            ],
+            "placeholder",
+        ),
+        (
+            &[
+                "--executor-harness",
+                "codex",
+                "--executor-session",
+                "s",
+                "--handle",
+                "?",
+            ],
+            "placeholder",
+        ),
+        (
+            &["--executor-harness", "", "--executor-session", "s"],
+            "empty",
+        ),
+        (
+            &[
+                "--executor-harness",
+                "codex",
+                "--executor-session",
+                "two words",
+            ],
+            "whitespace",
+        ),
+        (
+            &[
+                "--executor-harness",
+                "codex:model",
+                "--executor-session",
+                "s",
+            ],
+            "':'",
+        ),
+        (
+            &[
+                "--executor-harness",
+                "019f0000-0000-7000-8000-00000000000a",
+                "--executor-session",
+                "s",
+            ],
+            "session id",
+        ),
+        (
+            &[
+                "--executor-harness",
+                "codex",
+                "--executor-session",
+                "s",
+                "--handle",
+                " ",
+            ],
+            "empty",
+        ),
+    ];
+    for (args, reason) in cases {
+        let refused = bind(&repo, &dispatch_id, args).assert().failure();
+        let stderr = String::from_utf8_lossy(&refused.get_output().stderr);
+        assert!(stderr.contains("run bind refused"), "{args:?}: {stderr}");
+        assert!(stderr.contains(reason), "{args:?}: {stderr}");
+    }
+    let rows = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    assert!(row_for(&rows, &dispatch_id)["binding"].is_null(), "{rows}");
+}
+
+#[test]
+fn a_journal_subject_stays_resolvable_through_supersedes_after_transition() {
+    let repo = Repo::new();
+    let file = file_todo(&repo, "transitioning-subject");
+    let dispatch_id = dispatch_against(&repo, "--journal", &file);
+    repo.arc(&repo.root)
+        .args(["journal", "transition", &file, "--to", "discussion"])
+        .assert()
+        .success();
+    let successor = json_stdout(repo.arc(&repo.root).args([
+        "journal",
+        "latest",
+        "transitioning-subject",
+        "--kind",
+        "discussion",
+        "--json",
+    ]))["file"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(successor, file);
+
+    let rows = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    let row = row_for(&rows, &dispatch_id);
+    assert_eq!(row["subject"]["file"], file.as_str(), "{rows}");
+    assert_eq!(
+        row["journal_lineage"],
+        serde_json::json!([file, successor]),
+        "{rows}"
+    );
+    let listed = stdout(repo.arc(&repo.root).args(["run", "list"]));
+    assert!(
+        listed.contains(&format!("journal {file} (now {successor})")),
+        "{listed}"
+    );
+}

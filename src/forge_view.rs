@@ -204,6 +204,9 @@ fn workflow_facts(
                 || match &e.payload {
                     crate::model::Payload::RunEnded {
                         dispatch_event_id, ..
+                    }
+                    | crate::model::Payload::RunBound {
+                        dispatch_event_id, ..
                     } => dispatches.iter().any(|d| &d.event_id == dispatch_event_id),
                     _ => false,
                 }

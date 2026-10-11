@@ -3032,9 +3032,23 @@ RULES THAT CHANGE WHAT YOU DO
     intact rather than blocking the command. `arc catchup` lists every spool
     still waiting in an open change's worktree.
   - `arc run dispatch` names exactly one subject: `--change <id>`, `--fork
-    <slug>`, or `--range <base>..<head>`. A round is its ordinal within that
-    subject, so the loop of bounded rounds records on a fork or a bare commit
-    range as readily as on a ledger change.
+    <slug>`, `--range <base>..<head>`, or `--journal <file>`. A round is its
+    ordinal within that subject, so the loop of bounded rounds records on a
+    fork, a bare commit range, or a journal artifact as readily as on a ledger
+    change. A journal subject resolves as `begin --from-journal` resolves it
+    and is recorded as given, with the digest of the body read then; after a
+    kind transition its `supersedes` chain leads from either name to the
+    other, and `run list` names the newest.
+  - `arc run bind <dispatch> --executor-harness <h> --executor-session <id>
+    [--handle <handle>]` records which backend session executed a dispatch,
+    at any time after it, its ending included. The global `--session` names
+    the caller; the binding names the executor. A dispatch has one binding:
+    the same values again record nothing and print the event already held,
+    and different values refuse. An empty value, a placeholder, whitespace, a
+    harness carrying `:`, and a session id given as the harness refuse. A
+    follow-up or resume is its own dispatch with its own binding, so two
+    dispatches bound to one executor session are two spans of one
+    measurement scope. `run list` shows each binding, or `unbound`.
   - A bounded round records what it deliberately left, so the next round
     inherits a list instead of a memory: `arc run end <dispatch> --outcome
     <o> --reviewed-head <sha> --raised-json <path|-> --deferred-json <path|->`.

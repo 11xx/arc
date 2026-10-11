@@ -1395,6 +1395,12 @@ impl Store {
             // An older reader skips a post-integration disposition and reports
             // the finding with no disposition after it shipped.
             Payload::PostIntegrationDispositionRecorded { .. } => Some(7),
+            // An older reader lists a journal-subject dispatch as unattributed
+            // and skips a binding, reporting a bound run as unbound.
+            Payload::RunDispatched {
+                journal: Some(_), ..
+            }
+            | Payload::RunBound { .. } => Some(7),
             // An older reader projects a record that a change needs no entry
             // as an entry with an empty category and body.
             Payload::ChangelogRecorded {
@@ -1439,6 +1445,14 @@ impl Store {
             | Some("change-roles-asserted")
             | Some("change-checkout-bound") => Some(7),
             Some("post-integration-disposition-recorded") => Some(7),
+            Some("run-bound") => Some(7),
+            Some("run-dispatched")
+                if value
+                    .and_then(|value| value.get("journal"))
+                    .is_some_and(|journal| !journal.is_null()) =>
+            {
+                Some(7)
+            }
             Some("changelog-recorded")
                 if value
                     .and_then(|value| value.get("no_entry_reason"))
@@ -2693,6 +2707,65 @@ mod tests {
                     mismatches.push(format!(
                         "{} {path}: {}",
                         value["event_type"], stored.schema_version
+                    ));
+                }
+            }
+        }
+        assert!(mismatches.is_empty(), "{}", mismatches.join("; "));
+    }
+
+    /// A binding and a journal-subject dispatch stamp format 7 on every
+    /// append path; a dispatch against an older subject stamps nothing.
+    #[test]
+    fn run_bindings_and_journal_subjects_stamp_seven_on_every_path() {
+        let fixtures = [
+            (
+                serde_json::json!({"event_type": "run-bound", "dispatch_event_id": "dispatch", "executor_harness": "codex", "executor_session": "session", "handle": "handle"}),
+                7,
+            ),
+            (
+                serde_json::json!({"event_type": "run-dispatched", "route": "r", "worktree": "w", "journal": {"file": "20260101T000000Z-topic-todo.md", "digest": "sha256:00"}}),
+                7,
+            ),
+            (
+                serde_json::json!({"event_type": "run-dispatched", "route": "r", "worktree": "w", "change": "c"}),
+                1,
+            ),
+        ];
+        let mut mismatches = Vec::new();
+        for (value, expected) in fixtures {
+            let payload: Payload = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&payload).unwrap(), value);
+            for path in ["typed", "raw-change", "raw-repository"] {
+                let dir = tempfile::tempdir().unwrap();
+                let config = StoreConfig {
+                    schema_version: 1,
+                    repository_id: "repo".into(),
+                    created_at: chrono::Utc::now(),
+                };
+                fs::write(
+                    dir.path().join("config.json"),
+                    serde_json::to_vec(&config).unwrap(),
+                )
+                .unwrap();
+                let store = test_store(dir.path());
+                let bytes = serde_json::to_vec(&value).unwrap();
+                match path {
+                    "typed" => store.stamp_format_for(&payload).unwrap(),
+                    "raw-change" => {
+                        store.append_raw_event("change", "event", &bytes).unwrap();
+                    }
+                    _ => {
+                        store.append_raw_repository_event("event", &bytes).unwrap();
+                    }
+                }
+                let stored: StoreConfig =
+                    serde_json::from_slice(&fs::read(dir.path().join("config.json")).unwrap())
+                        .unwrap();
+                if stored.schema_version != expected {
+                    mismatches.push(format!(
+                        "{value} {path}: {} (expected {expected})",
+                        stored.schema_version
                     ));
                 }
             }

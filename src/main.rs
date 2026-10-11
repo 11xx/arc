@@ -2422,7 +2422,8 @@ enum Cmd {
         #[command(subcommand)]
         cmd: PassCmd,
     },
-    /// Record delegated run dispatches and their terminal outcomes
+    /// Record delegated run dispatches, the backend sessions that executed
+    /// them, and their terminal outcomes
     Run {
         #[command(subcommand)]
         cmd: RunCmd,
@@ -3925,8 +3926,11 @@ enum PassCmd {
 #[derive(Subcommand)]
 enum RunCmd {
     /// Record that a caller dispatched a run through a resolved route.
-    /// Exactly one subject is named: rounds are numbered within it, so a run
-    /// against nothing belongs to no sequence
+    /// Exactly one subject is named among --change, --fork, --range, and
+    /// --journal: rounds are numbered within it, so a run against nothing
+    /// belongs to no sequence. Prints the round and `event: <id>`, the id
+    /// `run bind` and `run end` take. A follow-up or resume is its own
+    /// dispatch with its own binding
     Dispatch {
         /// Resolved route used for dispatch
         #[arg(long)]
@@ -3944,12 +3948,38 @@ enum RunCmd {
         /// no ledger change
         #[arg(long)]
         range: Option<String>,
+        /// Journal artifact the run is against: a filename in this project's
+        /// journal or <journal-dir>::<file> in another's, resolved as `begin
+        /// --from-journal` resolves it. Records the reference as given and
+        /// the digest of the body read now; after a kind transition the
+        /// `supersedes` chain leads from either name to the other
+        #[arg(long, value_name = "FILE")]
+        journal: Option<String>,
         /// Brief event given to the run, when one exists
         #[arg(long = "brief-event")]
         brief_event_id: Option<String>,
         /// Free-text dispatch note
         #[arg(long)]
         note: Option<String>,
+    },
+    /// Record which backend session executed a dispatched run. Written any
+    /// time after the dispatch, its ending included; prints `event: <id>`.
+    /// A dispatch has one binding: the same values again record nothing and
+    /// print the binding already held, and different values refuse. An empty
+    /// value, a placeholder (unknown, none, n/a, ...), whitespace, a harness
+    /// carrying ':' and a session id given as the harness refuse
+    Bind {
+        /// RunDispatched event ID being bound
+        dispatch_event_id: String,
+        /// Harness that ran the executor session, e.g. claude, codex, pi
+        #[arg(long = "executor-harness", value_name = "H")]
+        executor_harness: String,
+        /// The executor's native session id in that harness
+        #[arg(long = "executor-session", value_name = "ID")]
+        executor_session: String,
+        /// The delegate's handle for the run
+        #[arg(long)]
+        handle: Option<String>,
     },
     /// Record the terminal outcome of a dispatched run, with what the round
     /// reviewed, raised, and deliberately left
@@ -3979,8 +4009,13 @@ enum RunCmd {
         #[arg(long)]
         note: Option<String>,
     },
-    /// List every dispatched run grouped by subject, with rounds numbered and
-    /// deferrals still open
+    /// List every dispatched run grouped by subject, with rounds numbered,
+    /// each run's backend binding (`unbound` until one is recorded), and
+    /// deferrals still open. A journal subject carries its digest and, when
+    /// its journal resolves, `journal_lineage`: its names across kind
+    /// transitions, oldest first; text names the newest as `(now <file>)`.
+    /// JSON rows carry `binding` as null or {event_id, executor_harness,
+    /// executor_session, handle, bound_at}
     /// Records no events; ledger reads do not require a parseable append policy.
     List {
         /// Emit the machine-readable JSON view instead of text
@@ -5997,6 +6032,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 change,
                 fork,
                 range,
+                journal,
                 brief_event_id,
                 note,
             } => {
@@ -6008,8 +6044,26 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                         change,
                         fork,
                         range,
+                        journal,
                         brief_event_id,
                         note,
+                    },
+                )?;
+                Ok(0)
+            }
+            RunCmd::Bind {
+                dispatch_event_id,
+                executor_harness,
+                executor_session,
+                handle,
+            } => {
+                commands::bind_run(
+                    &ctx,
+                    &dispatch_event_id,
+                    commands::BindingInput {
+                        executor_harness,
+                        executor_session,
+                        handle,
                     },
                 )?;
                 Ok(0)
@@ -6263,6 +6317,7 @@ mod tests {
             "pass complete",
             "pass abandon",
             "run dispatch",
+            "run bind",
             "run end",
             "policy write",
             "forge observe",
