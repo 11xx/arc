@@ -3073,17 +3073,26 @@ RULES THAT CHANGE WHAT YOU DO
     sum across harnesses is refused and other cross-harness token sums are
     withheld; an unbound dispatch withholds its work totals; a missing amount
     leaves a total absent beside its known subtotal, never zero. Measurement,
-    assignment, and identity coverage are reported apart, and a session that
-    acted on a selected change unbound, such as a lead, is named outside
+    assignment, and identity coverage are reported apart. Every direct,
+    inclusive, and union figure groups recorded parent, child, and fork
+    relations transitively. Unknown or bounded lineage may overlap any other
+    session. Overlapping groups make identity incomplete and withhold exact
+    totals; each group's consumption is bounded by its largest member and
+    the sum of its members. Disjoint group bounds add. Missing or incomplete
+    measurements qualify the bounds as covering only known recorded amounts.
+    Per-session figures remain available. The top-level identity status
+    summarizes the figures. A session that acted on a selected change
+    unbound, such as a lead, is named outside
     assignment coverage with no figure. Pi entries on abandoned branches and
     the residual between a recorded total and its requests are reported as
     incomplete or withheld while the pinned reader cannot measure them.
   - `arc cost retain <change|journal-file>` keeps, per bound session, the
     facts a fresh read gives: reader and calculation versions, source
     frontier and digest, counters with their basis and coverage, and any
-    harness-written dollar figure. The source bytes stay in the harness
-    store. Identical facts record nothing; retained facts are observations
-    at their frontier and are never added to one another.
+    harness-written dollar figure, plus lineage relations and read failures.
+    The source bytes stay in the harness store. Identical facts record
+    nothing; retained facts are observations at their frontier and are never
+    added to one another.
   - A bounded round records what it deliberately left, so the next round
     inherits a list instead of a memory: `arc run end <dispatch> --outcome
     <o> --reviewed-head <sha> --raised-json <path|-> --deferred-json <path|->`.

@@ -11,7 +11,7 @@
 
 use super::run::{rounds, RunSubject};
 use super::*;
-use crate::model::{CostCounters, CostFacts, Event, Payload};
+use crate::model::{CostCounters, CostFacts, CostLineage, CostRelative, Event, Payload};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -94,6 +94,7 @@ struct SessionRow {
     spans: Vec<Span>,
     membership: BTreeSet<WorkKey>,
     measured: Measured,
+    overlap: BTreeSet<String>,
 }
 
 impl SessionRow {
@@ -108,7 +109,7 @@ pub fn show_cost(ctx: &Ctx, target: &str, json: bool) -> Result<()> {
     let events = store.load_repository_events()?;
     let selection = select(ctx, &store, target, &events)?;
     let (runs, sessions) = assign(&selection, &events);
-    let sessions: Vec<SessionRow> = sessions
+    let mut sessions: Vec<SessionRow> = sessions
         .into_iter()
         .map(|((harness, session), (spans, membership))| {
             let measured = measure(&events, &harness, &session);
@@ -118,9 +119,18 @@ pub fn show_cost(ctx: &Ctx, target: &str, json: bool) -> Result<()> {
                 spans,
                 membership,
                 measured,
+                overlap: BTreeSet::new(),
             }
         })
         .collect();
+    let groups = lineage_groups(&sessions);
+    for row in &mut sessions {
+        row.overlap = groups
+            .iter()
+            .find(|group| group.contains(&row.key()))
+            .cloned()
+            .unwrap_or_default();
+    }
     let lead = outside_sessions(&store, &selection, &sessions)?;
     let report = render_report(&selection, &runs, &sessions, &lead);
     if json {
@@ -361,8 +371,8 @@ fn measure(events: &[Event], harness: &str, session: &str) -> Measured {
                     json!({
                         "retained_event_id": event.event_id,
                         "frontier": held.frontier,
-                        "retained": {"digest": held.digest, "counters": held.counters, "harness_estimate_usd": held.harness_estimate_usd},
-                        "fresh": {"digest": fresh.digest, "counters": fresh.counters, "harness_estimate_usd": fresh.harness_estimate_usd},
+                        "retained": {"digest": held.digest, "counters": held.counters, "harness_estimate_usd": held.harness_estimate_usd, "lineage": held.lineage},
+                        "fresh": {"digest": fresh.digest, "counters": fresh.counters, "harness_estimate_usd": fresh.harness_estimate_usd, "lineage": fresh.lineage},
                     })
                 });
             Measured {
@@ -390,6 +400,7 @@ fn same_measurement(left: &CostFacts, right: &CostFacts) -> bool {
     left.digest == right.digest
         && left.counters == right.counters
         && left.harness_estimate_usd == right.harness_estimate_usd
+        && left.lineage == right.lineage
 }
 
 /// Measure one session through the pinned tapes reader, over its whole
@@ -419,7 +430,46 @@ fn read_fresh(harness: &str, session: &str) -> std::result::Result<CostFacts, St
             view.session.id
         ));
     }
-    Ok(normalize(&view))
+    let mut facts = normalize(&view);
+    facts.lineage = Some(
+        match agent_tapes_core::lineage_with_backends(
+            &backends,
+            agent_tapes_core::Selection::IdInHarness {
+                id: session,
+                harness,
+            },
+        ) {
+            Ok(view) if view.session.id == session => {
+                let mut unknown = view.notes;
+                if view.truncated {
+                    unknown.push("the lineage read was bounded".to_string());
+                }
+                CostLineage {
+                    parent: view.lineage.parent.map(|parent| parent.native_id),
+                    children: view
+                        .lineage
+                        .children
+                        .into_iter()
+                        .map(|child| CostRelative {
+                            harness: child.harness,
+                            session: child.session_id.unwrap_or(child.reference),
+                        })
+                        .collect(),
+                    forked_from: view.lineage.forked_from,
+                    unknown,
+                }
+            }
+            Ok(_) => CostLineage {
+                unknown: vec!["lineage resolved to a different session".to_string()],
+                ..CostLineage::default()
+            },
+            Err(error) => CostLineage {
+                unknown: vec![crate::session_store::bounded_reason(&format!("{error:#}"))],
+                ..CostLineage::default()
+            },
+        },
+    );
+    Ok(facts)
 }
 
 fn kebab<T: serde::Serialize>(value: T) -> Option<String> {
@@ -473,6 +523,7 @@ fn normalize(view: &agent_tapes_core::usage::UsageView) -> CostFacts {
             .map(|digest| format!("sha256:{}", digest.value)),
         basis,
         coverage,
+        lineage: None,
         counters: CostCounters {
             input: tokens.and_then(|tokens| tokens.input),
             output: tokens.and_then(|tokens| tokens.output),
@@ -522,10 +573,64 @@ fn round_amount(value: f64) -> f64 {
     (value * 1e10).round() / 1e10
 }
 
-/// Totals over `members`, each quantity kind on its own. `withheld` names the
-/// assignment gaps that withhold a work total; a member without a figure
-/// leaves the total absent, and an incomplete measurement leaves it
-/// incomplete, each with the known subtotal beside it and never zero.
+/// Connected components include named relatives outside the selected figure.
+fn lineage_groups(sessions: &[SessionRow]) -> Vec<BTreeSet<String>> {
+    let mut groups: Vec<BTreeSet<String>> = Vec::new();
+    for row in sessions {
+        let mut group = BTreeSet::from([row.key()]);
+        if let Some(lineage) = row
+            .measured
+            .facts
+            .as_ref()
+            .and_then(|facts| facts.lineage.as_ref())
+        {
+            for relative in [&lineage.parent, &lineage.forked_from]
+                .into_iter()
+                .flatten()
+            {
+                group.insert(format!("{}:{relative}", row.harness));
+            }
+            for child in &lineage.children {
+                group.insert(format!("{}:{}", child.harness, child.session));
+            }
+        }
+        let mut index = 0;
+        while index < groups.len() {
+            if !group.is_disjoint(&groups[index]) {
+                group.extend(groups.remove(index));
+                index = 0;
+            } else {
+                index += 1;
+            }
+        }
+        groups.push(group);
+    }
+    groups
+}
+
+fn identity_groups(members: &[&SessionRow]) -> Vec<Vec<String>> {
+    let keys: BTreeSet<String> = members.iter().map(|row| row.key()).collect();
+    if members.len() > 1 && members.iter().any(|row| lineage_unknown(row)) {
+        return vec![keys.into_iter().collect()];
+    }
+    members
+        .iter()
+        .map(|row| row.overlap.intersection(&keys).cloned().collect::<Vec<_>>())
+        .filter(|group| group.len() > 1)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn lineage_unknown(row: &SessionRow) -> bool {
+    row.measured
+        .facts
+        .as_ref()
+        .and_then(|facts| facts.lineage.as_ref())
+        .is_none_or(|lineage| !lineage.unknown.is_empty())
+}
+
+/// Each quantity retains its measurement and assignment gaps independently.
 fn totals(members: &[&SessionRow], withheld: &[String], scope: &str) -> Value {
     let keys: Vec<String> = members.iter().map(|row| row.key()).collect();
     let mut quantities = Vec::new();
@@ -581,7 +686,24 @@ fn totals(members: &[&SessionRow], withheld: &[String], scope: &str) -> Value {
             ));
         }
     }
-    json!({"sessions": keys, "quantities": quantities})
+    let groups = identity_groups(members);
+    let unknown: BTreeMap<String, Vec<String>> = members
+        .iter()
+        .filter_map(|row| {
+            let reasons = row
+                .measured
+                .facts
+                .as_ref()
+                .and_then(|facts| facts.lineage.as_ref())
+                .map(|lineage| lineage.unknown.clone())
+                .unwrap_or_else(|| vec!["lineage is unavailable".to_string()]);
+            (!reasons.is_empty()).then(|| (row.key(), reasons))
+        })
+        .collect();
+    json!({"sessions": keys, "quantities": quantities, "identity": {
+        "status": if groups.is_empty() && unknown.is_empty() { "complete" } else { "incomplete" },
+        "groups": groups, "unknown": unknown,
+    }})
 }
 
 fn base_tokens(category: &str, scope: &str) -> Value {
@@ -605,6 +727,7 @@ struct Aggregate {
     amount: Option<f64>,
     known: Option<f64>,
     reasons: Vec<String>,
+    bounds: Option<(f64, f64, bool)>,
 }
 
 fn aggregate(
@@ -614,6 +737,7 @@ fn aggregate(
 ) -> Aggregate {
     if !withheld.is_empty() {
         return Aggregate {
+            bounds: None,
             status: "withheld",
             amount: None,
             known: None,
@@ -622,6 +746,7 @@ fn aggregate(
     }
     if members.is_empty() {
         return Aggregate {
+            bounds: None,
             status: "absent",
             amount: None,
             known: None,
@@ -646,8 +771,50 @@ fn aggregate(
         }
     }
     let known = known.map(round_amount);
+    let groups = identity_groups(members);
+    if !groups.is_empty() {
+        let mut lower = 0.0;
+        let mut upper = 0.0;
+        let mut available = false;
+        let mut grouped = BTreeSet::new();
+        for group in &groups {
+            let amounts: Vec<f64> = members
+                .iter()
+                .filter(|row| group.contains(&row.key()))
+                .filter_map(|row| row.measured.facts.as_ref().and_then(&value))
+                .collect();
+            available |= !amounts.is_empty();
+            lower += amounts.iter().copied().fold(0.0, f64::max);
+            upper += amounts.iter().sum::<f64>();
+            grouped.extend(group.iter().cloned());
+        }
+        for row in members.iter().filter(|row| !grouped.contains(&row.key())) {
+            if let Some(amount) = row.measured.facts.as_ref().and_then(&value) {
+                available = true;
+                lower += amount;
+                upper += amount;
+            }
+        }
+        return Aggregate {
+            status: "withheld",
+            amount: None,
+            known: None,
+            bounds: available.then(|| {
+                (
+                    round_amount(lower),
+                    round_amount(upper),
+                    !missing.is_empty() || !incomplete.is_empty(),
+                )
+            }),
+            reasons: vec![format!(
+                "incomplete identity: sessions may overlap in groups {}",
+                serde_json::to_string(&groups).unwrap()
+            )],
+        };
+    }
     if !missing.is_empty() {
         return Aggregate {
+            bounds: None,
             status: "absent",
             amount: None,
             known,
@@ -656,6 +823,7 @@ fn aggregate(
     }
     if !incomplete.is_empty() {
         return Aggregate {
+            bounds: None,
             status: "incomplete",
             amount: None,
             known,
@@ -666,6 +834,7 @@ fn aggregate(
         };
     }
     Aggregate {
+        bounds: None,
         status: "complete",
         amount: known,
         known: None,
@@ -684,6 +853,11 @@ fn quantity(mut base: Value, aggregate: Aggregate) -> Value {
         }
     };
     let (amount, known) = (aggregate.amount.map(number), aggregate.known.map(number));
+    if let Some((lower, upper, known_only)) = aggregate.bounds {
+        let field = if known_only { "known_bound" } else { "bound" };
+        base[field] = json!({"scope": if known_only { "known recorded amounts" } else { "whole figure" },"at_least": number(lower), "at_most": number(upper),
+            "basis": "sum of disjoint groups; each overlapping group is at least its largest member and at most its sum"});
+    }
     base["status"] = json!(aggregate.status);
     if let Some(amount) = amount {
         base["amount"] = amount;
@@ -801,6 +975,17 @@ fn render_report(
         })
         .collect();
     let unbound: Vec<String> = all.iter().flat_map(|key| unbound_in(key)).collect();
+    let mut identities = vec![json!({"scope": "union", "identity": union["identity"]})];
+    for item in &work {
+        for scope in ["direct", "inclusive"] {
+            if item[scope].is_object() {
+                identities.push(json!({"work": item["key"], "scope": scope, "identity": item[scope]["identity"]}));
+            }
+        }
+    }
+    let identity_complete = identities
+        .iter()
+        .all(|figure| figure["identity"]["status"] == "complete");
     json!({
         "schema": COST_SCHEMA,
         "target": selection.target,
@@ -825,9 +1010,9 @@ fn render_report(
                 },
             },
             "identity": {
-                "status": "complete",
+                "status": if identity_complete { "complete" } else { "incomplete" },
                 "key": "executor harness and native session",
-                "notes": ["the pinned reader exposes no request identity, so a union counts each executor session once and takes distinct sessions as disjoint consumption"],
+                "figures": identities,
             },
         },
     })
@@ -859,6 +1044,7 @@ fn session_json(row: &SessionRow) -> Value {
             measurement["calculation"] = json!(facts.calculation);
             measurement["frontier"] = json!(facts.frontier);
             measurement["digest"] = json!(facts.digest);
+            measurement["lineage"] = json!(facts.lineage);
             measurement["basis"] = json!(facts.basis);
             measurement["coverage"] = json!(facts.coverage);
         }
@@ -903,6 +1089,17 @@ fn describe_quantity(quantity: &Value) -> String {
         (_, Value::Number(known)) => {
             format!("{label} {status} (known subtotal {known} {unit})")
         }
+        _ if quantity["bound"].is_object() || quantity["known_bound"].is_object() => {
+            let (bound, qualifier) = if quantity["bound"].is_object() {
+                (&quantity["bound"], "")
+            } else {
+                (&quantity["known_bound"], "known recorded amounts: ")
+            };
+            format!(
+                "{label} {status} ({qualifier}at least {} {unit}, at most {} {unit})",
+                bound["at_least"], bound["at_most"]
+            )
+        }
         _ => format!("{label} {status}"),
     }
 }
@@ -911,6 +1108,10 @@ fn print_totals(indent: &str, heading: &str, totals: &Value) {
     let quantities = totals["quantities"].as_array().cloned().unwrap_or_default();
     let parts: Vec<String> = quantities.iter().map(describe_quantity).collect();
     println!("{indent}{heading}: {}", parts.join("; "));
+    println!(
+        "{indent}  identity: {}",
+        totals["identity"]["status"].as_str().unwrap_or_default()
+    );
     let reasons: BTreeSet<String> = quantities
         .iter()
         .flat_map(|quantity| {

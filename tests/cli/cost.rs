@@ -416,9 +416,13 @@ fn an_absent_amount_stays_absent_never_zero() {
 
     let report = report(&repo, "absent");
     let estimate = quantity(&report["union"], USD, None);
-    assert_eq!(estimate["status"], "absent", "{report}");
+    assert_eq!(estimate["status"], "withheld", "{report}");
     assert!(estimate.get("amount").is_none(), "{report}");
-    assert_eq!(estimate["known_subtotal"].as_f64(), Some(0.05), "{report}");
+    assert!(estimate.get("known_subtotal").is_none(), "{report}");
+    assert!(estimate.get("bound").is_none(), "{report}");
+    assert_eq!(estimate["known_bound"]["at_least"], 0.05);
+    assert_eq!(estimate["known_bound"]["at_most"], 0.05);
+    assert_eq!(report["union"]["identity"]["status"], "incomplete");
     let codex = session(&report, &format!("codex:{codex_id}"));
     let codex_estimate = quantity(&codex["totals"], USD, None);
     assert_eq!(codex_estimate["status"], "absent", "{report}");
@@ -587,4 +591,234 @@ fn the_report_records_nothing() {
     report(&repo, "quiet");
     let after = stdout(repo.arc(&repo.root).args(["events", "--repository"]));
     assert_eq!(before, after);
+}
+
+fn name_pi_parent(path: &Path, parent: &str) {
+    let mut lines: Vec<Value> = fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    lines[0]["parentSession"] = json!(parent);
+    write_lines(path, &lines);
+}
+
+#[test]
+fn a_bound_fork_withholds_exact_unions_and_retains_identity_after_rotation() {
+    let repo = Repo::new();
+    let plan = file_artifact(&repo, "plan", "fork-plan");
+    let change = begin_without_checkout(&repo, "fork-work", &["--from-journal", &plan]);
+    let parent = pi_recording(&repo, "parent", &[0.04], false);
+    let fork = pi_recording(&repo, "fork", &[0.04, 0.02], false);
+    name_pi_parent(&fork, "parent");
+    bind(&repo, &dispatch(&repo, "--journal", &plan), "pi", "parent");
+    bind(&repo, &dispatch(&repo, "--change", &change), "pi", "fork");
+    let fresh = report(&repo, &change);
+    let inclusive = &work(&fresh, &format!("change:{change}"))["inclusive"];
+    for total in [&fresh["union"], inclusive] {
+        assert_eq!(total["identity"]["status"], "incomplete", "{fresh}");
+        assert_eq!(
+            total["identity"]["groups"],
+            json!([["pi:fork", "pi:parent"]])
+        );
+        let estimate = quantity(total, USD, None);
+        assert_eq!(estimate["status"], "withheld");
+        assert!(estimate.get("amount").is_none());
+        assert!(estimate.get("known_subtotal").is_none());
+        assert_eq!(estimate["bound"]["at_least"], 0.06);
+        assert_eq!(estimate["bound"]["at_most"], 0.10);
+    }
+    assert_eq!(fresh["coverage"]["identity"]["status"], "incomplete");
+    assert_eq!(
+        work(&fresh, &format!("change:{change}"))["direct"]["identity"]["status"],
+        "complete"
+    );
+    assert_eq!(usd(&session(&fresh, "pi:parent")["totals"]), Some(0.04));
+    assert_eq!(usd(&session(&fresh, "pi:fork")["totals"]), Some(0.06));
+    stdout(repo.arc(&repo.root).args(["cost", "retain", &change]));
+    fs::remove_file(parent).unwrap();
+    fs::remove_file(fork).unwrap();
+    let rotated = report(&repo, &change);
+    assert_eq!(rotated["union"], fresh["union"]);
+    assert_eq!(
+        rotated["coverage"]["identity"],
+        fresh["coverage"]["identity"]
+    );
+    assert_eq!(
+        session(&rotated, "pi:fork")["measurement"]["lineage"]["parent"],
+        "parent"
+    );
+    let text = stdout(repo.arc(&repo.root).args(["cost", "show", &change]));
+    assert!(
+        text.contains("at least 0.06 USD, at most 0.1 USD"),
+        "{text}"
+    );
+    assert!(text.contains("identity: incomplete"), "{text}");
+}
+
+#[test]
+fn unrelated_bound_sessions_have_exact_complete_identity() {
+    let repo = Repo::new();
+    for (id, amount) in [("first", 0.02), ("second", 0.03)] {
+        pi_recording(&repo, id, &[amount], false);
+        bind(&repo, &dispatch(&repo, "--change", "unrelated"), "pi", id);
+    }
+    let report = report(&repo, "unrelated");
+    assert_eq!(usd(&report["union"]), Some(0.05));
+    assert_eq!(report["union"]["identity"]["status"], "complete");
+    assert_eq!(report["union"]["identity"]["groups"], json!([]));
+    assert_eq!(report["coverage"]["identity"]["status"], "complete");
+    assert_eq!(
+        work(&report, "change:unrelated")["direct"]["identity"]["status"],
+        "complete"
+    );
+}
+
+#[test]
+fn a_failed_lineage_read_is_unknown_and_survives_retention() {
+    let repo = Repo::new();
+    let id = "44444444-4444-4444-8444-444444444444";
+    let recording = claude_recording(&repo, id, 100);
+    let child_dir = recording.with_extension("").join("subagents");
+    fs::create_dir_all(child_dir.parent().unwrap()).unwrap();
+    fs::write(&child_dir, "not a directory").unwrap();
+    let other = claude_recording(&repo, "55555555-5555-4555-8555-555555555555", 200);
+    for session in [id, "55555555-5555-4555-8555-555555555555"] {
+        bind(
+            &repo,
+            &dispatch(&repo, "--change", "failed-lineage"),
+            "claude",
+            session,
+        );
+    }
+    let fresh = report(&repo, "failed-lineage");
+    let measured = &session(&fresh, &format!("claude:{id}"))["measurement"];
+    assert_eq!(measured["status"], "complete", "{fresh}");
+    assert!(
+        measured["lineage"]["unknown"][0]
+            .as_str()
+            .unwrap()
+            .contains("Subagent enumeration"),
+        "{fresh}"
+    );
+    assert_eq!(fresh["coverage"]["identity"]["status"], "incomplete");
+    let input = quantity(&fresh["union"], "resource-quantity", Some("input"));
+    assert_eq!(input["status"], "withheld");
+    assert!(input.get("amount").is_none());
+    assert_eq!(input["bound"]["at_least"], 200);
+    assert_eq!(input["bound"]["at_most"], 300);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "retain", "failed-lineage"]),
+    );
+    fs::remove_file(recording).unwrap();
+    fs::remove_file(other).unwrap();
+    let rotated = report(&repo, "failed-lineage");
+    assert_eq!(rotated["union"], fresh["union"]);
+    assert_eq!(
+        rotated["coverage"]["identity"],
+        fresh["coverage"]["identity"]
+    );
+}
+
+#[test]
+fn transitive_relatives_form_one_overlap_group_beside_disjoint_consumption() {
+    let repo = Repo::new();
+    for (id, parent, amount) in [
+        ("first", None, 0.02),
+        ("second", Some("first"), 0.03),
+        ("third", Some("second"), 0.04),
+        ("disjoint", None, 0.01),
+    ] {
+        let path = pi_recording(&repo, id, &[amount], false);
+        if let Some(parent) = parent {
+            name_pi_parent(&path, parent);
+        }
+        bind(&repo, &dispatch(&repo, "--change", "transitive"), "pi", id);
+    }
+    let report = report(&repo, "transitive");
+    for total in [
+        &report["union"],
+        &work(&report, "change:transitive")["direct"],
+    ] {
+        assert_eq!(
+            total["identity"]["groups"],
+            json!([["pi:first", "pi:second", "pi:third"]])
+        );
+        let estimate = quantity(total, USD, None);
+        assert_eq!(estimate["bound"]["at_least"], 0.05);
+        assert_eq!(estimate["bound"]["at_most"], 0.10);
+        assert!(estimate.get("amount").is_none());
+    }
+}
+
+#[test]
+fn a_codex_fork_header_withholds_token_unions() {
+    let repo = Repo::new();
+    let parent = "66666666-6666-4666-8666-666666666666";
+    let fork = "77777777-7777-4777-8777-777777777777";
+    codex_recording(&repo, parent, 500);
+    let path = codex_recording(&repo, fork, 700);
+    let mut lines: Vec<Value> = fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    lines[0]["payload"]["forked_from_id"] = json!(parent);
+    write_lines(&path, &lines);
+    for id in [parent, fork] {
+        bind(
+            &repo,
+            &dispatch(&repo, "--change", "codex-fork"),
+            "codex",
+            id,
+        );
+    }
+    let report = report(&repo, "codex-fork");
+    assert_eq!(report["union"]["identity"]["status"], "incomplete");
+    let input = quantity(&report["union"], "resource-quantity", Some("input"));
+    assert!(input.get("amount").is_none());
+    assert_eq!(input["bound"]["at_least"], 700);
+    assert_eq!(input["bound"]["at_most"], 1200);
+    assert_eq!(
+        session(&report, &format!("codex:{fork}"))["measurement"]["lineage"]["forked_from"],
+        parent
+    );
+}
+
+#[test]
+fn unknown_lineage_does_not_spoil_figures_that_exclude_that_session() {
+    let repo = Repo::new();
+    let plan = file_artifact(&repo, "plan", "unknown-plan");
+    let change = begin_without_checkout(&repo, "known-work", &["--from-journal", &plan]);
+    for id in ["first", "second"] {
+        pi_recording(&repo, id, &[0.02], false);
+        bind(&repo, &dispatch(&repo, "--change", &change), "pi", id);
+    }
+    bind(&repo, &dispatch(&repo, "--journal", &plan), "pi", "missing");
+    let report = report(&repo, &change);
+    let item = work(&report, &format!("change:{change}"));
+    assert_eq!(item["direct"]["identity"]["status"], "complete");
+    assert_eq!(usd(&item["direct"]), Some(0.04));
+    assert_eq!(item["inclusive"]["identity"]["status"], "incomplete");
+    assert!(usd(&item["inclusive"]).is_none());
+    assert_eq!(report["coverage"]["identity"]["status"], "incomplete");
+}
+
+#[test]
+fn siblings_naming_an_unbound_parent_may_overlap() {
+    let repo = Repo::new();
+    for id in ["first", "second"] {
+        let path = pi_recording(&repo, id, &[0.02], false);
+        name_pi_parent(&path, "unbound-parent");
+        bind(&repo, &dispatch(&repo, "--change", "siblings"), "pi", id);
+    }
+    let report = report(&repo, "siblings");
+    assert_eq!(
+        report["union"]["identity"]["groups"],
+        json!([["pi:first", "pi:second"]])
+    );
+    let estimate = quantity(&report["union"], USD, None);
+    assert_eq!(estimate["bound"]["at_least"], 0.02);
+    assert_eq!(estimate["bound"]["at_most"], 0.04);
 }

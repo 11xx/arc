@@ -2652,6 +2652,10 @@ pub struct CostFacts {
     /// Token counters by tapes' categories. Reasoning is a subset of output.
     #[serde(default)]
     pub counters: CostCounters,
+    /// Recorded relatives and any uncertainty in the lineage read.
+    /// Absence means lineage was not retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<CostLineage>,
     /// The dollar figure the harness wrote: a harness-calculated estimate
     /// with an unknown pricing basis, never a charge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2659,6 +2663,23 @@ pub struct CostFacts {
     /// Why the measurement is incomplete. Empty when it covers the session.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub incomplete: Vec<String>,
+}
+
+/// Native session relations used to detect potentially overlapping recordings.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CostLineage {
+    pub parent: Option<String>,
+    pub children: Vec<CostRelative>,
+    pub forked_from: Option<String>,
+    /// Failed or bounded reads cannot establish absence of other relatives.
+    pub unknown: Vec<String>,
+}
+
+/// A child in its harness's native session namespace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CostRelative {
+    pub harness: String,
+    pub session: String,
 }
 
 /// Token counters by tapes' categories, each absent when the source recorded
