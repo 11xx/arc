@@ -822,3 +822,113 @@ fn siblings_naming_an_unbound_parent_may_overlap() {
     assert_eq!(estimate["bound"]["at_least"], 0.02);
     assert_eq!(estimate["bound"]["at_most"], 0.04);
 }
+
+fn bind_fork(repo: &Repo, dispatch_id: &str, harness: &str, session: &str, origin: &str) {
+    stdout(repo.arc(&repo.root).args([
+        "run",
+        "bind",
+        dispatch_id,
+        "--executor-harness",
+        harness,
+        "--executor-session",
+        session,
+        "--forked-from",
+        origin,
+    ]));
+}
+
+#[test]
+fn a_declared_claude_fork_withholds_union_after_retention_and_rotation() {
+    let repo = Repo::new();
+    let origin_id = "88888888-8888-4888-8888-888888888888";
+    let fork_id = "99999999-9999-4999-8999-999999999999";
+    let origin = claude_recording(&repo, origin_id, 100);
+    let fork = claude_recording(&repo, fork_id, 200);
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "claude-fork"),
+        "claude",
+        origin_id,
+    );
+    bind_fork(
+        &repo,
+        &dispatch(&repo, "--change", "claude-fork"),
+        "claude",
+        fork_id,
+        origin_id,
+    );
+    let fresh = report(&repo, "claude-fork");
+    assert_eq!(fresh["union"]["identity"]["status"], "incomplete");
+    assert_eq!(
+        work(&fresh, "change:claude-fork")["direct"]["identity"]["status"],
+        "incomplete"
+    );
+    let input = quantity(&fresh["union"], "resource-quantity", Some("input"));
+    assert_eq!(input["status"], "withheld");
+    assert!(input.get("amount").is_none());
+    assert_eq!(input["bound"]["at_least"], 200);
+    assert_eq!(input["bound"]["at_most"], 300);
+    let fork_row = session(&fresh, &format!("claude:{fork_id}"));
+    assert!(fork_row["measurement"]["lineage"]["forked_from"].is_null());
+    assert_eq!(fork_row["spans"][0]["forked_from"], origin_id);
+    assert_eq!(
+        quantity(&fork_row["totals"], "resource-quantity", Some("input"))["amount"],
+        200
+    );
+    stdout(repo.arc(&repo.root).args(["cost", "retain", "claude-fork"]));
+    fs::remove_file(origin).unwrap();
+    fs::remove_file(fork).unwrap();
+    let rotated = report(&repo, "claude-fork");
+    assert_eq!(rotated["union"], fresh["union"]);
+    assert_eq!(
+        rotated["coverage"]["identity"],
+        fresh["coverage"]["identity"]
+    );
+    assert_eq!(
+        session(&rotated, &format!("claude:{fork_id}"))["measurement"]["source"],
+        "retained"
+    );
+}
+
+#[test]
+fn a_declared_claude_fork_is_exact_when_its_origin_is_outside_the_figure() {
+    let repo = Repo::new();
+    let origin_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let fork_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    let unrelated_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    claude_recording(&repo, origin_id, 100);
+    let fork = claude_recording(&repo, fork_id, 200);
+    let unrelated = claude_recording(&repo, unrelated_id, 50);
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "other-work"),
+        "claude",
+        origin_id,
+    );
+    bind_fork(
+        &repo,
+        &dispatch(&repo, "--change", "fork-only"),
+        "claude",
+        fork_id,
+        origin_id,
+    );
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "fork-only"),
+        "claude",
+        unrelated_id,
+    );
+    let fresh = report(&repo, "fork-only");
+    assert_eq!(fresh["sessions"].as_array().unwrap().len(), 2);
+    assert_eq!(fresh["union"]["identity"]["status"], "complete");
+    assert_eq!(fresh["coverage"]["identity"]["status"], "complete");
+    assert_eq!(
+        quantity(&fresh["union"], "resource-quantity", Some("input"))["amount"],
+        250
+    );
+    stdout(repo.arc(&repo.root).args(["cost", "retain", "fork-only"]));
+    fs::remove_file(fork).unwrap();
+    fs::remove_file(unrelated).unwrap();
+    let rotated = report(&repo, "fork-only");
+    assert_eq!(rotated["union"], fresh["union"]);
+}

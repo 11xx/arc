@@ -3040,8 +3040,9 @@ RULES THAT CHANGE WHAT YOU DO
     kind transition its `supersedes` chain leads from either name to the
     other, and `run list` names the newest.
   - `arc run bind <dispatch> --executor-harness <h> --executor-session <id>
-    [--handle <handle>]` records which backend session executed a dispatch,
-    at any time after it, its ending included. The global `--session` names
+    [--handle <handle>] [--forked-from <session>]` records which backend
+    session executed a dispatch, at any time after it, its ending included.
+    The global `--session` names
     the caller; the binding names the executor. A dispatch has one binding:
     the same values again record nothing and print the event already held,
     and different values refuse. An empty value, a placeholder, whitespace, a
@@ -3055,6 +3056,9 @@ RULES THAT CHANGE WHAT YOU DO
     dispatch refuses; no tuple establishes an exclusive assignment.
     Binding identities carry no `/`, `\` or `~`; a refusal names the field
     and a fixed reason without echoing a private locator.
+    `--forked-from` names the session in the executor's harness whose
+    history it began as a copy of, and follows the validation and retry
+    rules of `--executor-session`. Fork origins participate in binding tuples.
   - `arc cost show <change|journal-file> [--json]` reports what the executor
     sessions bound to the selected runs consumed, and records nothing. A
     change selects itself and the artifact it was begun from; an artifact
@@ -3075,8 +3079,12 @@ RULES THAT CHANGE WHAT YOU DO
     leaves a total absent beside its known subtotal, never zero. Measurement,
     assignment, and identity coverage are reported apart. Every direct,
     inclusive, and union figure groups recorded parent, child, and fork
-    relations transitively. Unknown or bounded lineage may overlap any other
-    session. Overlapping groups make identity incomplete and withhold exact
+    relations transitively, including a binding's declared `--forked-from`.
+    An origin outside the figure contributes no consumption and does not
+    make the figure's identity incomplete by itself. Binding relations are
+    durable alongside retained usage facts, so source rotation preserves
+    these groups. Unknown or bounded lineage may overlap any other session.
+    Overlapping groups make identity incomplete and withhold exact
     totals; each group's consumption is bounded by its largest member and
     the sum of its members. Disjoint group bounds add. Missing or incomplete
     measurements qualify the bounds as covering only known recorded amounts.

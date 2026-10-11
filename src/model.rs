@@ -1593,6 +1593,9 @@ pub enum Payload {
         /// The delegate's handle for the run, when the caller has one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         handle: Option<String>,
+        /// Session in the executor's harness whose history it began as a copy of.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        forked_from: Option<String>,
     },
     /// Normalized consumption facts arc read from one executor session, kept
     /// so the cost view's arithmetic replays after the source rotates. The

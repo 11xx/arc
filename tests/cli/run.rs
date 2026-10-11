@@ -813,6 +813,14 @@ fn rebinding_identical_values_records_nothing_and_different_values_refuse() {
             "--handle",
             "added-later",
         ][..],
+        &[
+            "--executor-harness",
+            "claude",
+            "--executor-session",
+            "exec-session-2",
+            "--forked-from",
+            "origin-added-later",
+        ][..],
     ] {
         let refused = bind(&repo, &dispatch_id, different).assert().failure();
         let stderr = String::from_utf8_lossy(&refused.get_output().stderr);
@@ -1092,4 +1100,77 @@ fn a_journal_subject_stays_resolvable_through_supersedes_after_transition() {
         listed.contains(&format!("journal {file} (now {successor})")),
         "{listed}"
     );
+}
+
+#[test]
+fn fork_origin_is_listed_and_participates_in_binding_retry_rules() {
+    let repo = Repo::new();
+    let dispatch_id = dispatch_against(&repo, "--change", "fork-binding");
+    let values = [
+        "--executor-harness",
+        "claude",
+        "--executor-session",
+        "fork-session",
+        "--forked-from",
+        "origin-session",
+    ];
+    let first = event_id(&stdout(&mut bind(&repo, &dispatch_id, &values)));
+    let repeated = stdout(&mut bind(&repo, &dispatch_id, &values));
+    assert_eq!(event_id(&repeated), first);
+    assert!(repeated.contains("already bound"));
+    for changed in [Some("different-origin"), None] {
+        let mut values = vec![
+            "--executor-harness",
+            "claude",
+            "--executor-session",
+            "fork-session",
+        ];
+        if let Some(origin) = changed {
+            values.extend(["--forked-from", origin]);
+        }
+        let refused = bind(&repo, &dispatch_id, &values).assert().failure();
+        let stderr = String::from_utf8_lossy(&refused.get_output().stderr);
+        assert!(stderr.contains("already bound"), "{stderr}");
+        assert!(stderr.contains("forked-from origin-session"), "{stderr}");
+    }
+    let rows = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    assert_eq!(
+        row_for(&rows, &dispatch_id)["binding"]["forked_from"],
+        "origin-session"
+    );
+    let listed = stdout(repo.arc(&repo.root).args(["run", "list"]));
+    assert!(listed.contains("forked-from=origin-session"), "{listed}");
+    let events = stdout(repo.arc(&repo.root).args(["events", "--repository"]));
+    assert_eq!(events.matches("\"run-bound\"").count(), 1);
+}
+
+#[test]
+fn fork_origin_is_validated_like_an_executor_session() {
+    let repo = Repo::new();
+    let dispatch_id = dispatch_against(&repo, "--change", "invalid-origin");
+    for (origin, reason) in [
+        ("", "empty"),
+        ("None", "placeholder"),
+        ("two words", "whitespace"),
+    ] {
+        let refused = bind(
+            &repo,
+            &dispatch_id,
+            &[
+                "--executor-harness",
+                "claude",
+                "--executor-session",
+                "fork-session",
+                "--forked-from",
+                origin,
+            ],
+        )
+        .assert()
+        .failure();
+        let stderr = String::from_utf8_lossy(&refused.get_output().stderr);
+        assert!(stderr.contains("--forked-from"), "{stderr}");
+        assert!(stderr.contains(reason), "{stderr}");
+    }
+    let rows = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    assert!(row_for(&rows, &dispatch_id)["binding"].is_null());
 }

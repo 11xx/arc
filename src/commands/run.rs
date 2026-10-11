@@ -222,6 +222,8 @@ struct BindingRow {
     executor_session: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     handle: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    forked_from: Option<String>,
     bound_at: DateTime<Utc>,
     /// Other distinct binding tuples held for this dispatch.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -397,6 +399,7 @@ pub struct BindingInput {
     pub executor_harness: String,
     pub executor_session: String,
     pub handle: Option<String>,
+    pub forked_from: Option<String>,
 }
 
 /// Record which backend session executed a previously recorded dispatch.
@@ -410,11 +413,13 @@ pub fn bind_run(ctx: &Ctx, dispatch_event_id: &str, binding: BindingInput) -> Re
         executor_harness,
         executor_session,
         handle,
+        forked_from,
     } = binding;
     for (flag, value, harness) in [
         ("--executor-harness", Some(&executor_harness), true),
         ("--executor-session", Some(&executor_session), false),
         ("--handle", handle.as_ref(), false),
+        ("--forked-from", forked_from.as_ref(), false),
     ] {
         if let Some(defect) = value.and_then(|value| binding_defect(value, harness)) {
             bail!("run bind refused: {flag}: {defect}; omit a value nobody established");
@@ -432,6 +437,7 @@ pub fn bind_run(ctx: &Ctx, dispatch_event_id: &str, binding: BindingInput) -> Re
         if existing.executor_harness == &executor_harness
             && existing.executor_session == &executor_session
             && existing.handle == &handle
+            && existing.forked_from == &forked_from
         {
             println!(
                 "run already bound: {} session {}",
@@ -455,6 +461,7 @@ pub fn bind_run(ctx: &Ctx, dispatch_event_id: &str, binding: BindingInput) -> Re
             executor_harness: executor_harness.clone(),
             executor_session: executor_session.clone(),
             handle,
+            forked_from,
         },
     )?;
     store.append_local_repository_event(&mut event)?;
@@ -689,6 +696,9 @@ fn print_round(row: &RunRow) {
             if let Some(handle) = &binding.handle {
                 bound.push_str(&format!(" handle={}", crate::render::one_line(handle)));
             }
+            if let Some(origin) = &binding.forked_from {
+                bound.push_str(&format!(" forked-from={}", crate::render::one_line(origin)));
+            }
             println!("{bound}");
             for conflict in &binding.conflicts {
                 println!(
@@ -806,6 +816,7 @@ fn binding_row(binding: &RunBinding<'_>) -> BindingRow {
         executor_harness: binding.executor_harness.clone(),
         executor_session: binding.executor_session.clone(),
         handle: binding.handle.clone(),
+        forked_from: binding.forked_from.clone(),
         bound_at: binding.event.created_at,
         conflicts: binding.conflicts.iter().map(binding_row).collect(),
     }
@@ -856,6 +867,7 @@ pub struct RunBinding<'a> {
     pub handle: &'a Option<String>,
     /// Distinct tuples observed for the same dispatch; equal tuples are duplicates.
     pub conflicts: Vec<RunBinding<'a>>,
+    pub forked_from: &'a Option<String>,
 }
 
 impl RunBinding<'_> {
@@ -867,6 +879,9 @@ impl RunBinding<'_> {
         );
         if let Some(handle) = self.handle {
             described.push_str(&format!(" handle {handle}"));
+        }
+        if let Some(origin) = self.forked_from {
+            described.push_str(&format!(" forked-from {origin}"));
         }
         described
     }
@@ -881,12 +896,14 @@ pub fn binding_for<'a>(events: &'a [Event], dispatch_event_id: &str) -> Option<R
             executor_harness,
             executor_session,
             handle,
+            forked_from,
         } if id == dispatch_event_id => Some(RunBinding {
             event,
             executor_harness,
             executor_session,
             handle,
             conflicts: Vec::new(),
+            forked_from,
         }),
         _ => None,
     });
@@ -896,6 +913,7 @@ pub fn binding_for<'a>(events: &'a [Event], dispatch_event_id: &str) -> Option<R
             held.executor_harness == binding.executor_harness
                 && held.executor_session == binding.executor_session
                 && held.handle == binding.handle
+                && held.forked_from == binding.forked_from
         };
         if !same(&first) && !first.conflicts.iter().any(same) {
             first.conflicts.push(binding);

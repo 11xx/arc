@@ -3989,6 +3989,9 @@ enum RunCmd {
         /// The delegate's handle for the run
         #[arg(long)]
         handle: Option<String>,
+        /// Session in the same harness whose history the executor began as a copy of
+        #[arg(long, value_name = "SESSION")]
+        forked_from: Option<String>,
     },
     /// Record the terminal outcome of a dispatched run, with what the round
     /// reviewed, raised, and deliberately left
@@ -4024,7 +4027,7 @@ enum RunCmd {
     /// its journal resolves, `journal_lineage`: its names across kind
     /// transitions, oldest first; text names the newest as `(now <file>)`.
     /// JSON rows carry `binding` as null or {event_id, executor_harness,
-    /// executor_session, handle, bound_at}, with `conflicts` listing other
+    /// executor_session, handle, forked_from, bound_at}, with `conflicts` listing other
     /// distinct tuples when imports disagree. Equal tuples are harmless
     /// duplicate observations; a conflict names every distinct tuple
     /// Records no events; ledger reads do not require a parseable append policy.
@@ -4056,8 +4059,12 @@ enum CostCmd {
     /// sums across harnesses are withheld, an unbound dispatch withholds its
     /// work totals, and a missing amount leaves a total absent beside the
     /// known subtotal, never zero. Measurement, assignment, and identity
-    /// coverage are reported apart; sessions that acted on a selected change
-    /// without a binding, such as a lead, are named outside assignment
+    /// coverage are reported apart. Recorded lineage and binding fork origins
+    /// group potentially overlapping sessions transitively; exact unions of
+    /// those groups are withheld beside bounds from the largest member to
+    /// their sum. An origin outside the figure adds no consumption. Sessions
+    /// that acted on a selected change without a binding, such as a lead,
+    /// are named outside assignment
     /// coverage with no figure. Transitions and `begin --from-journal` add
     /// no consumption. `--json` emits `arc-cost/1`
     /// Records no events; ledger reads do not require a parseable append policy.
@@ -4072,8 +4079,10 @@ enum CostCmd {
     /// Retain the normalized facts a fresh read of each bound session gives:
     /// the reader and calculation versions, the source frontier and digest,
     /// the counters by tapes' categories with their basis and coverage, and
-    /// any harness-written dollar figure. The source bytes stay in the
-    /// harness store. Facts identical to ones already retained for a session
+    /// any harness-written dollar figure, plus lineage relations and read
+    /// failures. Binding fork origins remain in the run records. The source
+    /// bytes stay in the harness store. Facts identical to ones already
+    /// retained for a session
     /// record nothing and print the held event; a session whose source does
     /// not answer is reported and skipped
     Retain {
@@ -6115,6 +6124,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 executor_harness,
                 executor_session,
                 handle,
+                forked_from,
             } => {
                 commands::bind_run(
                     &ctx,
@@ -6123,6 +6133,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                         executor_harness,
                         executor_session,
                         handle,
+                        forked_from,
                     },
                 )?;
                 Ok(0)

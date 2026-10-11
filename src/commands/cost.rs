@@ -71,6 +71,7 @@ struct Selection {
 /// One dispatch bound to an executor session.
 struct Span {
     dispatch_event_id: String,
+    forked_from: Option<String>,
     round: Option<usize>,
     work: WorkKey,
 }
@@ -327,6 +328,10 @@ fn assign(selection: &Selection, events: &[Event]) -> (Runs, Sessions) {
             membership.insert(work.clone());
             spans.push(Span {
                 dispatch_event_id: round.dispatch.event_id.clone(),
+                forked_from: round
+                    .binding
+                    .as_ref()
+                    .and_then(|binding| binding.forked_from.clone()),
                 round: round.round,
                 work,
             });
@@ -578,6 +583,13 @@ fn lineage_groups(sessions: &[SessionRow]) -> Vec<BTreeSet<String>> {
     let mut groups: Vec<BTreeSet<String>> = Vec::new();
     for row in sessions {
         let mut group = BTreeSet::from([row.key()]);
+        for origin in row
+            .spans
+            .iter()
+            .filter_map(|span| span.forked_from.as_ref())
+        {
+            group.insert(format!("{}:{origin}", row.harness));
+        }
         if let Some(lineage) = row
             .measured
             .facts
@@ -1060,6 +1072,7 @@ fn session_json(row: &SessionRow) -> Value {
         "session": row.session,
         "spans": row.spans.iter().map(|span| json!({
             "dispatch_event_id": span.dispatch_event_id,
+            "forked_from": span.forked_from,
             "round": span.round,
             "work": span.work.label(),
         })).collect::<Vec<_>>(),

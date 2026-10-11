@@ -2487,6 +2487,7 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             executor_harness,
             executor_session,
             handle,
+            ..
         } => {
             let mut summary = format!(
                 "{dispatch_event_id} executor={} session={}",
