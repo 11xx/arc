@@ -1,5 +1,35 @@
 use super::common::*;
 
+#[test]
+fn json_run_list_has_a_versioned_envelope_for_empty_and_populated_lists() {
+    let repo = Repo::new();
+    let empty = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    assert_eq!(empty["schema"], "arc-run-list/1", "{empty}");
+    assert_eq!(empty["runs"], serde_json::json!([]), "{empty}");
+
+    let dispatch_id = dispatch_against(&repo, "--change", "envelope-change");
+    let populated = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    assert_eq!(populated["schema"], "arc-run-list/1", "{populated}");
+    assert_eq!(populated["runs"].as_array().unwrap().len(), 1);
+    assert_eq!(populated["runs"][0]["dispatch_event_id"], dispatch_id);
+}
+
+#[test]
+fn run_list_help_describes_the_versioned_envelope() {
+    let repo = Repo::new();
+    let help = stdout(repo.arc(&repo.root).args(["run", "list", "--help"]));
+    assert!(help.contains("arc-run-list/1"), "{help}");
+    assert!(help.contains("`schema`"), "{help}");
+    assert!(help.contains("`runs`"), "{help}");
+}
+
+fn run_rows(repo: &Repo) -> serde_json::Value {
+    let mut document = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    assert_eq!(document["schema"], "arc-run-list/1", "{document}");
+    assert!(document["runs"].is_array(), "{document}");
+    document["runs"].take()
+}
+
 fn event_id(output: &str) -> String {
     output
         .lines()
@@ -52,7 +82,7 @@ fn dispatch_stays_open_until_a_terminal_outcome_is_recorded() {
         "{listed}"
     );
     assert!(!listed.contains(&ending_id), "{listed}");
-    let rows = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    let rows = run_rows(&repo);
     assert_eq!(rows[0]["ending_event_id"], ending_id, "{rows}");
 }
 
@@ -137,7 +167,7 @@ fn json_lists_optional_dispatch_fields_and_unknown_is_terminal() {
         "started from the brief",
     ])));
 
-    let open = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    let open = run_rows(&repo);
     assert_eq!(open.as_array().unwrap().len(), 1);
     let row = &open[0];
     assert_eq!(row["dispatch_event_id"], dispatch_id);
@@ -153,7 +183,7 @@ fn json_lists_optional_dispatch_fields_and_unknown_is_terminal() {
         repo.arc(&repo.root)
             .args(["run", "end", &dispatch_id, "--outcome", "unknown"]),
     );
-    let ended = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    let ended = run_rows(&repo);
     assert_eq!(ended[0]["outcome"], "unknown");
     assert!(ended[0]["ending_event_id"].is_string());
     assert!(ended[0]["ended_at"].is_string());
@@ -256,7 +286,7 @@ fn a_fork_and_a_range_are_dispatch_subjects_like_a_change() {
         "{listed}"
     );
 
-    let rows = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    let rows = run_rows(&repo);
     let subjects: Vec<&serde_json::Value> = rows
         .as_array()
         .unwrap()
@@ -311,7 +341,7 @@ fn rounds_are_numbered_within_their_subject() {
     assert!(listed.contains("fork loop  2 round(s)"), "{listed}");
     assert!(listed.contains("fork other  1 round(s)"), "{listed}");
 
-    let rows = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    let rows = run_rows(&repo);
     let round_of = |id: &str| {
         rows.as_array()
             .unwrap()
@@ -375,7 +405,7 @@ fn an_ending_records_what_the_round_reviewed_raised_and_deferred() {
         .to_string();
     assert!(deferral_id.starts_with("def-"), "{ended}");
 
-    let rows = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    let rows = run_rows(&repo);
     let row = &rows[0];
     assert_eq!(
         row["reviewed_head"],
@@ -453,7 +483,7 @@ fn a_later_round_collects_a_deferral_and_closes_it() {
     let listed = stdout(repo.arc(&repo.root).args(["run", "list"]));
     assert!(!listed.contains("open def-known"), "{listed}");
     assert!(listed.contains("collects=def-known"), "{listed}");
-    let rows = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    let rows = run_rows(&repo);
     let first_row = rows
         .as_array()
         .unwrap()
@@ -614,7 +644,7 @@ fn bind(repo: &Repo, dispatch_id: &str, extra: &[&str]) -> AssertCommand {
 fn a_dispatch_against_a_change_is_listed_unbound() {
     let repo = Repo::new();
     let dispatch_id = dispatch_against(&repo, "--change", "bound-change");
-    let rows = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    let rows = run_rows(&repo);
     let row = row_for(&rows, &dispatch_id);
     assert_eq!(row["subject"]["kind"], "change", "{rows}");
     assert_eq!(row["subject"]["id"], "bound-change", "{rows}");
@@ -645,7 +675,7 @@ fn a_dispatch_against_a_journal_artifact_names_it_as_the_subject() {
     let dispatch_id = event_id(&dispatched);
     let second = dispatch_against(&repo, "--journal", &file);
 
-    let rows = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    let rows = run_rows(&repo);
     let row = row_for(&rows, &dispatch_id);
     assert_eq!(row["subject"]["kind"], "journal", "{rows}");
     assert_eq!(row["subject"]["file"], file.as_str(), "{rows}");
@@ -711,7 +741,7 @@ fn a_dispatch_against_a_journal_artifact_names_it_as_the_subject() {
         .failure();
     let none_stderr = String::from_utf8_lossy(&none.get_output().stderr);
     assert!(none_stderr.contains("--journal"), "{none_stderr}");
-    let after = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    let after = run_rows(&repo);
     assert_eq!(after.as_array().unwrap().len(), 2, "{after}");
 }
 
@@ -741,7 +771,7 @@ fn a_binding_written_after_launch_and_after_the_ending_is_listed() {
     let binding_id = event_id(&bound);
     assert_ne!(binding_id, ending);
 
-    let rows = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    let rows = run_rows(&repo);
     let row = row_for(&rows, &dispatch_id);
     assert_eq!(row["binding"]["event_id"], binding_id.as_str(), "{rows}");
     assert_eq!(row["binding"]["executor_harness"], "codex", "{rows}");
@@ -882,7 +912,7 @@ fn imported_binding_tuples_expose_conflicts_and_equal_observations_are_harmless(
             repo.arc(&repo.root)
                 .args(["import", path.to_str().unwrap()]),
         );
-        let rows = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+        let rows = run_rows(&repo);
         let binding = &row_for(&rows, &dispatch)["binding"];
         let text = stdout(repo.arc(&repo.root).args(["run", "list"]));
         if field == "equal" {
@@ -943,7 +973,7 @@ fn binding_private_locators_are_refused_without_echoing_them() {
             assert!(!String::from_utf8_lossy(&output.stderr).contains(locator));
         }
     }
-    let rows = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    let rows = run_rows(&repo);
     assert!(row_for(&rows, &dispatch)["binding"].is_null());
 }
 
@@ -1070,7 +1100,7 @@ fn a_follow_up_opens_a_second_span_on_the_same_session() {
     let second = dispatch_against(&repo, "--change", "follow-up");
     stdout(&mut bind(&repo, &second, &values));
 
-    let rows = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    let rows = run_rows(&repo);
     let (first_row, second_row) = (row_for(&rows, &first), row_for(&rows, &second));
     assert_eq!(first_row["round"], 1, "{rows}");
     assert_eq!(second_row["round"], 2, "{rows}");
@@ -1168,7 +1198,7 @@ fn a_placeholder_or_malformed_binding_refuses_and_records_nothing() {
         assert!(stderr.contains("run bind refused"), "{args:?}: {stderr}");
         assert!(stderr.contains(reason), "{args:?}: {stderr}");
     }
-    let rows = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    let rows = run_rows(&repo);
     assert!(row_for(&rows, &dispatch_id)["binding"].is_null(), "{rows}");
 }
 
@@ -1194,7 +1224,7 @@ fn a_journal_subject_stays_resolvable_through_supersedes_after_transition() {
         .to_string();
     assert_ne!(successor, file);
 
-    let rows = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    let rows = run_rows(&repo);
     let row = row_for(&rows, &dispatch_id);
     assert_eq!(row["subject"]["file"], file.as_str(), "{rows}");
     assert_eq!(
@@ -1240,7 +1270,7 @@ fn fork_origin_is_listed_and_participates_in_binding_retry_rules() {
         assert!(stderr.contains("already bound"), "{stderr}");
         assert!(stderr.contains("forked-from origin-session"), "{stderr}");
     }
-    let rows = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    let rows = run_rows(&repo);
     assert_eq!(
         row_for(&rows, &dispatch_id)["binding"]["forked_from"],
         "origin-session"
@@ -1278,6 +1308,6 @@ fn fork_origin_is_validated_like_an_executor_session() {
         assert!(stderr.contains("--forked-from"), "{stderr}");
         assert!(stderr.contains(reason), "{stderr}");
     }
-    let rows = json_stdout(repo.arc(&repo.root).args(["run", "list", "--json"]));
+    let rows = run_rows(&repo);
     assert!(row_for(&rows, &dispatch_id)["binding"].is_null());
 }

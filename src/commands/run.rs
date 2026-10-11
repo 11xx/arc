@@ -9,6 +9,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+const RUN_LIST_SCHEMA: &str = "arc-run-list/1";
+
 /// What a delegated run was dispatched against.
 ///
 /// Rounds are ordinals within a subject, so the subject is what makes a
@@ -171,6 +173,12 @@ pub fn open_deferrals(events: &[Event]) -> Vec<OpenDeferral> {
     }
     open.sort_by_key(|deferral| std::cmp::Reverse(deferral.deferred_at));
     open
+}
+
+#[derive(Debug, Serialize)]
+struct RunListDocument {
+    schema: &'static str,
+    runs: Vec<RunRow>,
 }
 
 #[derive(Debug, Serialize)]
@@ -619,7 +627,11 @@ pub fn list_runs(ctx: &Ctx, json: bool) -> Result<()> {
         .collect::<Vec<_>>();
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&rows)?);
+        let document = RunListDocument {
+            schema: RUN_LIST_SCHEMA,
+            runs: rows,
+        };
+        println!("{}", serde_json::to_string_pretty(&document)?);
         return Ok(());
     }
     if rows.is_empty() {

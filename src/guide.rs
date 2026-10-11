@@ -3039,6 +3039,11 @@ RULES THAT CHANGE WHAT YOU DO
     and is recorded as given, with the digest of the body read then; after a
     kind transition its `supersedes` chain leads from either name to the
     other, and `run list` names the newest.
+  - `arc run list --json` emits an `arc-run-list/1` object with `schema` and
+    `runs`, an array in most-recent-dispatch order. Each row carries its
+    subject, round, binding and terminal outcome; journal subjects carry
+    `journal` and, when their journal resolves, `journal_lineage`. An empty
+    list carries `runs: []`.
   - `arc run bind <dispatch> --executor-harness <h> --executor-session <id>
     [--handle <handle>] [--forked-from <session>]` records which backend
     session executed a dispatch, at any time after it, its ending included.
@@ -3453,6 +3458,7 @@ SCHEMAS
     `arc-changelog/1`                arc changelog --json
     `arc-changelog-render-request/1` stdin of a command changelog renderer
     `arc-forks/3`                    arc fork list --json
+    `arc-run-list/1`                 arc run list --json
     `arc-doctor/6`                   arc doctor --json
     `arc-workspace/2`                arc workspace list|inbox --json
     `arc-workspace-backlog/19`       arc workspace backlog --json

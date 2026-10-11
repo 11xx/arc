@@ -4033,7 +4033,8 @@ enum RunCmd {
     /// deferrals still open. A journal subject carries its digest and, when
     /// its journal resolves, `journal_lineage`: its names across kind
     /// transitions, oldest first; text names the newest as `(now <file>)`.
-    /// JSON rows carry `binding` as null or {event_id, executor_harness,
+    /// JSON is an `arc-run-list/1` object carrying `schema` and a `runs`
+    /// array. Rows carry `binding` as null or {event_id, executor_harness,
     /// executor_session, handle, forked_from, bound_at}, with `conflicts` listing other
     /// distinct tuples when imports disagree. Equal tuples are harmless
     /// duplicate observations; a conflict names every distinct tuple,
@@ -4041,7 +4042,7 @@ enum RunCmd {
     /// echoing it
     /// Records no events; ledger reads do not require a parseable append policy.
     List {
-        /// Emit the machine-readable JSON view instead of text
+        /// Emit an `arc-run-list/1` JSON object with `schema` and `runs`
         #[arg(long)]
         json: bool,
     },
