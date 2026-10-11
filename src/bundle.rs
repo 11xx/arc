@@ -252,6 +252,9 @@ impl Bundle {
                     envelope.change_id
                 );
             }
+            if value["event_type"] == "cost-facts-retained" {
+                parse_typed_event(&value)?;
+            }
             all.push(value);
         }
         all.sort_by(|a, b| {
@@ -877,8 +880,15 @@ pub fn parse_typed_event(value: &Value) -> Result<Option<Event>> {
         return Ok(None);
     }
     match &event.payload {
-        Payload::CostFactsRetained { facts, .. } if !facts.portable() => {
-            bail!("cost facts transport refused: relatives must be plain session ids and reasons must be fixed categories");
+        Payload::CostFactsRetained {
+            executor_harness,
+            executor_session,
+            facts,
+        } if !crate::model::plain_session_id(executor_harness)
+            || !crate::model::plain_session_id(executor_session)
+            || !facts.portable() =>
+        {
+            bail!("cost facts transport refused: identities, metadata, quantities and reason categories must be portable");
         }
         Payload::ClaimSet {
             claim_id,

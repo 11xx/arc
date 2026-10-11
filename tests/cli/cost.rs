@@ -188,7 +188,37 @@ fn quantity<'a>(totals: &'a Value, kind: &str, category: Option<&str>) -> &'a Va
 }
 
 fn usd(totals: &Value) -> Option<f64> {
-    quantity(totals, USD, None)["amount"].as_f64()
+    let figure = quantity(totals, USD, None);
+    figure["amount"]
+        .as_f64()
+        .or_else(|| figure["known_subtotal"].as_f64())
+}
+
+fn recorded_bound(quantity: &Value) -> &Value {
+    if quantity["bound"].is_object() {
+        &quantity["bound"]
+    } else {
+        &quantity["known_bound"]
+    }
+}
+
+#[test]
+fn recorded_token_counters_preserve_integers_above_the_float_exact_range() {
+    let repo = Repo::new();
+    let id = "22222222-2222-4222-8222-222222222222";
+    let input = 9_007_199_254_740_993_u64;
+    codex_recording(&repo, id, input);
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "large-counter"),
+        "codex",
+        id,
+    );
+    let view = report(&repo, "large-counter");
+    assert_eq!(
+        quantity(&view["union"], "resource-quantity", Some("input"))["amount"],
+        input
+    );
 }
 
 fn session<'a>(report: &'a Value, key: &str) -> &'a Value {
@@ -239,21 +269,23 @@ fn review_pre_dispatch_consumption_withholds_assignment_after_retention() {
 fn review_native_pi_parent_path_is_unknown_and_never_transported() {
     let repo = Repo::new();
     let change = begin_without_checkout(&repo, "native-fork", &[]);
-    let parent = pi_recording(&repo, "native-parent", &[0.03], false);
-    let original = pi_recording(&repo, "native-fork", &[0.03, 0.02], false);
+    let parent_id = "11111111-1111-4111-8111-111111111111";
+    let fork_id = "22222222-2222-4222-8222-222222222222";
+    let parent = pi_recording(&repo, parent_id, &[0.03], false);
+    let original = pi_recording(&repo, fork_id, &[0.03, 0.02], false);
     let mut lines = recording_lines(&original);
     lines[0]["timestamp"] = json!("2026-10-01T10:00:00Z");
     let fork = original
         .parent()
         .unwrap()
-        .join("2026-10-01T10-00-00-000Z_native-fork.jsonl");
+        .join(format!("2026-10-01T10-00-00-000Z_{fork_id}.jsonl"));
     write_lines(&fork, &lines);
     fs::remove_file(original).unwrap();
     // Pi createBranchedSession and forkFrom write the source recording path.
     name_pi_parent(&fork, parent.to_str().unwrap());
-    for id in ["native-parent", "native-fork"] {
+    for id in [parent_id, fork_id] {
         let run = dispatch(&repo, "--change", &change);
-        if id == "native-fork" {
+        if id == fork_id {
             dispatch_time(&repo, &run, "2026-10-01T09:59:00Z");
         }
         bind(&repo, &run, "pi", id);
@@ -268,7 +300,7 @@ fn review_native_pi_parent_path_is_unknown_and_never_transported() {
     assert!(fresh["coverage"]["assignment"]["reasons"]
         .to_string()
         .contains("pre-dispatch consumption"));
-    let lineage = &session(&fresh, "pi:native-fork")["measurement"]["lineage"];
+    let lineage = &session(&fresh, &format!("pi:{fork_id}"))["measurement"]["lineage"];
     assert!(lineage["parent"].is_null());
     assert_eq!(
         lineage["unknown"],
@@ -336,6 +368,43 @@ fn review_lineage_error_text_is_replaced_by_fixed_categories() {
             .to_string()
             .contains(repo.home.to_str().unwrap()));
     }
+}
+
+#[test]
+fn native_lineage_notes_are_counted_as_unknown_without_retaining_their_text() {
+    let repo = Repo::new();
+    let parent_id = "33333333-3333-4333-8333-333333333333";
+    let parent = claude_recording(&repo, parent_id, 100);
+    let child_dir = parent.with_extension("").join("subagents");
+    fs::create_dir_all(&child_dir).unwrap();
+    fs::write(child_dir.join("agent-aa11bb22.jsonl"), "\n").unwrap();
+    fs::write(child_dir.join("agent-aa11bb22.meta.json"), "not json").unwrap();
+    claude_recording(&repo, "44444444-4444-4444-8444-444444444444", 200);
+    let change = begin_without_checkout(&repo, "lineage-notes", &[]);
+    for id in [parent_id, "44444444-4444-4444-8444-444444444444"] {
+        bind(&repo, &dispatch(&repo, "--change", &change), "claude", id);
+    }
+    let view = report(&repo, &change);
+    let unknown =
+        &session(&view, &format!("claude:{parent_id}"))["measurement"]["lineage"]["unknown"];
+    assert!(
+        unknown
+            .as_array()
+            .unwrap()
+            .contains(&json!("1 lineage notes")),
+        "{unknown}"
+    );
+    assert_eq!(view["coverage"]["identity"]["status"], "incomplete");
+    assert!(!view.to_string().contains(child_dir.to_str().unwrap()));
+    stdout(repo.arc(&repo.root).args(["cost", "retain", &change]));
+    let bundle = repo.home.join("notes.json");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["export", &change, "--output", bundle.to_str().unwrap()]),
+    );
+    assert!(!fs::read_to_string(bundle)
+        .unwrap()
+        .contains(child_dir.to_str().unwrap()));
 }
 
 #[test]
@@ -490,7 +559,8 @@ fn a_shared_plan_counts_once_in_the_union_and_in_each_inclusive_view() {
     let estimate = quantity(&plan_report["union"], USD, None);
     assert_eq!(estimate["unit"], "USD");
     assert_eq!(estimate["pricing_basis"], "unknown");
-    assert_eq!(estimate["status"], "complete");
+    assert_eq!(estimate["status"], "incomplete");
+    assert!(estimate.get("amount").is_none());
 
     let change_report = report(&repo, &change_a);
     assert_eq!(usd(&work(&change_report, &a_key)["direct"]), Some(0.05));
@@ -618,7 +688,7 @@ fn a_claude_and_codex_set_refuses_a_raw_input_sum() {
         "resource-quantity",
         Some("input"),
     );
-    assert_eq!(claude_input["amount"], 300, "{report}");
+    assert_eq!(claude_input["known_subtotal"], 300, "{report}");
     let codex_input = quantity(
         &session(&report, &format!("codex:{codex_id}"))["totals"],
         "resource-quantity",
@@ -902,8 +972,8 @@ fn a_bound_fork_withholds_exact_unions_and_retains_identity_after_rotation() {
         assert_eq!(estimate["status"], "withheld");
         assert!(estimate.get("amount").is_none());
         assert!(estimate.get("known_subtotal").is_none());
-        assert_eq!(estimate["bound"]["at_least"], 0.06);
-        assert_eq!(estimate["bound"]["at_most"], 0.10);
+        assert_eq!(recorded_bound(estimate)["at_least"], 0.06);
+        assert_eq!(recorded_bound(estimate)["at_most"], 0.10);
     }
     assert_eq!(fresh["coverage"]["identity"]["status"], "incomplete");
     assert_eq!(
@@ -1020,8 +1090,8 @@ fn transitive_relatives_form_one_overlap_group_beside_disjoint_consumption() {
             json!([["pi:first", "pi:second", "pi:third"]])
         );
         let estimate = quantity(total, USD, None);
-        assert_eq!(estimate["bound"]["at_least"], 0.05);
-        assert_eq!(estimate["bound"]["at_most"], 0.10);
+        assert_eq!(recorded_bound(estimate)["at_least"], 0.05);
+        assert_eq!(recorded_bound(estimate)["at_most"], 0.10);
         assert!(estimate.get("amount").is_none());
     }
 }
@@ -1052,8 +1122,8 @@ fn a_codex_fork_header_withholds_token_unions() {
     assert_eq!(report["union"]["identity"]["status"], "incomplete");
     let input = quantity(&report["union"], "resource-quantity", Some("input"));
     assert!(input.get("amount").is_none());
-    assert_eq!(input["bound"]["at_least"], 700);
-    assert_eq!(input["bound"]["at_most"], 1200);
+    assert_eq!(recorded_bound(input)["at_least"], 700);
+    assert_eq!(recorded_bound(input)["at_most"], 1200);
     assert_eq!(
         session(&report, &format!("codex:{fork}"))["measurement"]["lineage"]["forked_from"],
         parent
@@ -1093,8 +1163,8 @@ fn siblings_naming_an_unbound_parent_may_overlap() {
         json!([["pi:first", "pi:second"]])
     );
     let estimate = quantity(&report["union"], USD, None);
-    assert_eq!(estimate["bound"]["at_least"], 0.02);
-    assert_eq!(estimate["bound"]["at_most"], 0.04);
+    assert_eq!(recorded_bound(estimate)["at_least"], 0.02);
+    assert_eq!(recorded_bound(estimate)["at_most"], 0.04);
 }
 
 fn bind_fork(repo: &Repo, dispatch_id: &str, harness: &str, session: &str, origin: &str) {
@@ -1140,13 +1210,13 @@ fn a_declared_claude_fork_withholds_union_after_retention_and_rotation() {
     let input = quantity(&fresh["union"], "resource-quantity", Some("input"));
     assert_eq!(input["status"], "withheld");
     assert!(input.get("amount").is_none());
-    assert_eq!(input["bound"]["at_least"], 200);
-    assert_eq!(input["bound"]["at_most"], 300);
+    assert_eq!(recorded_bound(input)["at_least"], 200);
+    assert_eq!(recorded_bound(input)["at_most"], 300);
     let fork_row = session(&fresh, &format!("claude:{fork_id}"));
     assert!(fork_row["measurement"]["lineage"]["forked_from"].is_null());
     assert_eq!(fork_row["spans"][0]["forked_from"], origin_id);
     assert_eq!(
-        quantity(&fork_row["totals"], "resource-quantity", Some("input"))["amount"],
+        quantity(&fork_row["totals"], "resource-quantity", Some("input"))["known_subtotal"],
         200
     );
     stdout(repo.arc(&repo.root).args(["cost", "retain", "claude-fork"]));
@@ -1165,7 +1235,7 @@ fn a_declared_claude_fork_withholds_union_after_retention_and_rotation() {
 }
 
 #[test]
-fn a_declared_claude_fork_is_exact_when_its_origin_is_outside_the_figure() {
+fn a_declared_claude_fork_has_complete_identity_when_its_origin_is_outside_the_figure() {
     let repo = Repo::new();
     let origin_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     let fork_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -1197,7 +1267,7 @@ fn a_declared_claude_fork_is_exact_when_its_origin_is_outside_the_figure() {
     assert_eq!(fresh["union"]["identity"]["status"], "complete");
     assert_eq!(fresh["coverage"]["identity"]["status"], "complete");
     assert_eq!(
-        quantity(&fresh["union"], "resource-quantity", Some("input"))["amount"],
+        quantity(&fresh["union"], "resource-quantity", Some("input"))["known_subtotal"],
         250
     );
     stdout(repo.arc(&repo.root).args(["cost", "retain", "fork-only"]));
@@ -1286,4 +1356,168 @@ fn unreadable_journal_membership_refuses_a_partial_cost_view() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("journal membership read failed"));
     assert!(!stderr.contains(alias.to_str().unwrap()));
+}
+
+#[test]
+fn review_mixed_claude_accounting_bases_withhold_combined_quantities() {
+    let repo = Repo::new();
+    claude_recording(&repo, "requests", 10);
+    let path = claude_recording(&repo, "cumulative", 100);
+    let mut lines = recording_lines(&path);
+    lines.push(json!({"type":"cost-state", "sessionId":"cumulative", "totalCostUSD":0.03,
+        "modelUsage":{"fixture-model":{"inputTokens":100,"outputTokens":30,"cacheReadInputTokens":200,"cacheCreationInputTokens":40}}}));
+    write_lines(&path, &lines);
+    for id in ["requests", "cumulative"] {
+        bind(
+            &repo,
+            &dispatch(&repo, "--change", "mixed-basis"),
+            "claude",
+            id,
+        );
+    }
+    let view = report(&repo, "mixed-basis");
+    for totals in [&view["union"], &work(&view, "change:mixed-basis")["direct"]] {
+        let input = quantity(totals, "resource-quantity", Some("input"));
+        assert_eq!(input["status"], "withheld", "{view}");
+        assert!(input.get("amount").is_none() && input.get("known_subtotal").is_none());
+        let bases: Vec<&str> = totals["quantities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|q| q["category"] == "input" && q.get("harness").is_some())
+            .filter_map(|q| q["accounting_basis"].as_str())
+            .collect();
+        assert_eq!(bases, ["recorded-total", "summed-requests"]);
+    }
+}
+
+#[test]
+fn review_partial_event_counters_are_known_subtotals_per_category() {
+    let repo = Repo::new();
+    let path = pi_recording(&repo, "partial-counters", &[0.01, 0.02], false);
+    let mut lines = recording_lines(&path);
+    lines[3]["message"]["usage"]
+        .as_object_mut()
+        .unwrap()
+        .remove("input");
+    write_lines(&path, &lines);
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "partial-counters"),
+        "pi",
+        "partial-counters",
+    );
+    let view = report(&repo, "partial-counters");
+    let input = quantity(
+        &view["sessions"][0]["totals"],
+        "resource-quantity",
+        Some("input"),
+    );
+    assert_eq!(input["status"], "incomplete", "{view}");
+    assert!(input.get("amount").is_none());
+    assert_eq!(input["known_subtotal"], 10);
+    assert!(quantity(
+        &view["sessions"][0]["totals"],
+        "resource-quantity",
+        Some("output")
+    )["status"]
+        .is_string());
+}
+
+#[test]
+fn review_zero_price_beside_nonzero_usage_is_unmeasured() {
+    let repo = Repo::new();
+    pi_recording(&repo, "zero-price", &[0.0], false);
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "zero-price"),
+        "pi",
+        "zero-price",
+    );
+    let view = report(&repo, "zero-price");
+    for total in [&view["union"], &view["sessions"][0]["totals"]] {
+        let estimate = quantity(total, USD, None);
+        assert_ne!(estimate["status"], "complete", "{view}");
+        assert!(estimate.get("amount").is_none() && estimate.get("known_subtotal").is_none());
+    }
+}
+
+#[test]
+fn missing_categories_qualify_only_the_affected_recorded_total() {
+    let repo = Repo::new();
+    let first = "11111111-1111-4111-8111-111111111111";
+    let second = "22222222-2222-4222-8222-222222222222";
+    codex_recording(&repo, first, 700);
+    let path = codex_recording(&repo, second, 300);
+    let mut lines = recording_lines(&path);
+    for field in ["total_token_usage", "last_token_usage"] {
+        lines[4]["payload"]["info"][field]
+            .as_object_mut()
+            .unwrap()
+            .remove("input_tokens");
+    }
+    write_lines(&path, &lines);
+    for id in [first, second] {
+        bind(
+            &repo,
+            &dispatch(&repo, "--change", "category-gaps"),
+            "codex",
+            id,
+        );
+    }
+    let view = report(&repo, "category-gaps");
+    let input = quantity(&view["union"], "resource-quantity", Some("input"));
+    assert_ne!(input["status"], "complete");
+    assert!(input.get("amount").is_none());
+    assert_eq!(input["known_subtotal"], 700);
+    let output = quantity(&view["union"], "resource-quantity", Some("output"));
+    assert_eq!(output["status"], "complete");
+    assert_eq!(output["amount"], 100);
+}
+
+#[test]
+fn mixed_zero_and_positive_request_prices_remain_qualified_after_retention() {
+    let repo = Repo::new();
+    let path = pi_recording(&repo, "mixed-price", &[0.0, 0.02], false);
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "mixed-price"),
+        "pi",
+        "mixed-price",
+    );
+    let fresh = report(&repo, "mixed-price");
+    let estimate = quantity(&fresh["union"], USD, None);
+    assert_eq!(estimate["status"], "incomplete");
+    assert!(estimate.get("amount").is_none());
+    assert_eq!(estimate["known_subtotal"], 0.02);
+    stdout(repo.arc(&repo.root).args(["cost", "retain", "mixed-price"]));
+    fs::remove_file(path).unwrap();
+    assert_eq!(report(&repo, "mixed-price")["union"], fresh["union"]);
+}
+
+#[test]
+fn unknown_source_opening_withholds_assignment_without_losing_measurement() {
+    let repo = Repo::new();
+    let path = pi_recording(&repo, "unknown-opening", &[0.03], false);
+    let mut lines = recording_lines(&path);
+    for line in &mut lines {
+        line.as_object_mut().unwrap().remove("timestamp");
+        if let Some(message) = line["message"].as_object_mut() {
+            message.remove("timestamp");
+        }
+    }
+    write_lines(&path, &lines);
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "unknown-opening"),
+        "pi",
+        "unknown-opening",
+    );
+    let view = report(&repo, "unknown-opening");
+    assert_eq!(view["coverage"]["assignment"]["status"], "incomplete");
+    assert!(view["coverage"]["assignment"]["reasons"]
+        .to_string()
+        .contains("unknown source start"));
+    assert!(usd(&view["union"]).is_none());
+    assert_eq!(usd(&view["sessions"][0]["totals"]), Some(0.03));
 }

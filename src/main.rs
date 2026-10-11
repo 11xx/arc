@@ -1185,8 +1185,9 @@ enum Cmd {
     /// custody it does not hold. The bundle binds the manifest's digest. The
     /// sidecar is written beside the directory and moved into place only once
     /// the bundle is written, so a failed export leaves neither.
-    /// Cost facts with private lineage locators or unclassified reasons
-    /// refuse transport; recorded events are preserved.
+    /// Nonportable cost facts refuse transport; recording
+    /// locators and unclassified cost reasons are never emitted. Recorded
+    /// events are preserved.
     /// Records no events and initializes no replica; ledger reads do not
     /// require a parseable append policy.
     Export {
@@ -1262,8 +1263,9 @@ enum Cmd {
     /// no command could have written: work after the change closed, an audit
     /// or post-integration disposition before it integrated, or a
     /// post-integration disposition on a finding that was resolved,
-    /// accepted-risk, or obsolete when the change shipped. Cost facts with
-    /// private lineage locators or unclassified reasons refuse transport
+    /// accepted-risk, or obsolete when the change shipped. Nonportable cost
+    /// facts refuse transport: recording locators and
+    /// unclassified cost reasons are not admitted
     Import {
         /// Input file ('-' for stdin)
         input: String,
@@ -4051,8 +4053,8 @@ enum CostCmd {
     /// membership refuses the view instead of silently omitting runs
     ///
     /// Each executor session bound to a selected run is measured through the
-    /// pinned tapes reader over its whole recording, or, when the source no
-    /// longer answers, from the facts `cost retain` kept, and the report says
+    /// pinned tapes reader over its whole recording, or, when the source
+    /// is unavailable, from the facts `cost retain` kept, and the report says
     /// which. A fresh read that disagrees with facts retained at the same
     /// frontier shows the conflict. Direct totals count sessions whose every
     /// span is the item's; inclusive totals for a change add the journal
@@ -4063,10 +4065,16 @@ enum CostCmd {
     /// a harness wrote is a harness-calculated estimate with an unknown
     /// pricing basis, and token counts are resource quantities by tapes'
     /// categories. A raw input sum across harnesses is refused, other token
-    /// sums across harnesses are withheld, an unbound or conflicting dispatch withholds its
-    /// work totals, and a missing amount leaves a total absent beside the
+    /// sums across harnesses are withheld, an unbound or conflicting dispatch
+    /// withholds its work totals, and a missing amount leaves a total absent beside the
     /// known subtotal, never zero. Measurement, assignment, and identity
     /// coverage are reported apart.
+    /// Every quantity names its accounting basis. Incompatible harness or
+    /// basis domains withhold the combined quantity and expose partitions.
+    /// Completeness is per category: request sums and per-model counter sums
+    /// remain known subtotals where the pinned reader supplies no category
+    /// coverage. A recorded zero price beside nonzero or unknown usage is
+    /// unmeasured. Token arithmetic preserves integers and refuses overflow.
     /// A recording that starts before its session's first dispatch has
     /// pre-dispatch consumption: assignment is incomplete and work totals
     /// are withheld. An unknown opening boundary likewise withholds them;
@@ -4092,11 +4100,12 @@ enum CostCmd {
     },
     /// Retain the normalized facts a fresh read of each bound session gives:
     /// the reader and calculation versions, the source frontier, digest and
-    /// opening boundary,
-    /// the counters by tapes' categories with their basis and coverage, and
+    /// opening boundary, the counters by tapes' categories with their basis,
+    /// coverage and category-specific gaps, and
     /// any harness-written dollar figure, plus lineage relations and read
     /// failures as fixed categories. Relatives are plain session ids; no
-    /// recording locator or raw error text is retained. Binding fork origins remain in the run records. The source
+    /// recording locator or raw error text is retained. Binding fork origins
+    /// remain in the run records. The source
     /// bytes stay in the harness store. Facts identical to ones already
     /// retained for a session
     /// record nothing and print the held event; a session whose source does

@@ -2658,6 +2658,10 @@ pub struct CostFacts {
     /// The read could not establish the source's complete opening boundary.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub source_start_uncertain: bool,
+    /// Completeness and validity gaps per counter category and `usd`.
+    /// Absence means category coverage was not retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantity_gaps: Option<BTreeMap<String, Vec<String>>>,
     /// Token counters by tapes' categories. Reasoning is a subset of output.
     #[serde(default)]
     pub counters: CostCounters,
@@ -2722,12 +2726,57 @@ pub(crate) fn portable_cost_reason(reason: &str) -> bool {
         || counted_reason(reason, " usage notes")
 }
 
+pub(crate) fn portable_quantity_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        "recorded category is absent"
+            | "per-event counter coverage is unknown"
+            | "per-model counter coverage is unknown"
+            | "per-event price coverage is unknown"
+            | "recorded zero price accompanies nonzero or unknown usage"
+            | "recorded price is invalid"
+            | "quantity coverage was not retained"
+            | "accounting basis is unknown"
+    )
+}
+
+pub(crate) fn portable_cost_metadata(value: &str) -> bool {
+    !value.contains(['/', '\\', '~']) && !value.chars().any(char::is_control)
+}
+
 impl CostFacts {
     /// Transport admits session relatives and fixed reason categories only.
     pub(crate) fn portable(&self) -> bool {
-        self.incomplete
-            .iter()
-            .all(|reason| portable_cost_reason(reason))
+        portable_cost_metadata(&self.reader)
+            && portable_cost_metadata(&self.calculation)
+            && self
+                .basis
+                .as_deref()
+                .is_none_or(|basis| matches!(basis, "recorded-total" | "summed-requests"))
+            && self.coverage.as_deref().is_none_or(|coverage| {
+                matches!(coverage, "session" | "read-window" | "since-reset")
+            })
+            && self
+                .digest
+                .as_ref()
+                .is_none_or(|digest| portable_cost_metadata(digest))
+            && self
+                .harness_estimate_usd
+                .is_none_or(|amount| amount.is_finite() && amount >= 0.0)
+            && self.quantity_gaps.as_ref().is_none_or(|gaps| {
+                gaps.iter().all(|(category, reasons)| {
+                    matches!(
+                        category.as_str(),
+                        "input" | "output" | "reasoning" | "cache_read" | "cache_write" | "usd"
+                    ) && reasons
+                        .iter()
+                        .all(|reason| portable_quantity_reason(reason))
+                })
+            })
+            && self
+                .incomplete
+                .iter()
+                .all(|reason| portable_cost_reason(reason))
             && self.lineage.as_ref().is_none_or(|lineage| {
                 [&lineage.parent, &lineage.forked_from]
                     .into_iter()

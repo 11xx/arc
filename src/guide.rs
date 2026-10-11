@@ -3082,6 +3082,14 @@ RULES THAT CHANGE WHAT YOU DO
     withheld; an unbound or conflicting dispatch withholds its work totals.
     A missing amount leaves a total absent beside its known subtotal, never
     zero. Measurement, assignment, and identity coverage are reported apart.
+    Every quantity names its accounting basis. Incompatible harness or basis
+    domains withhold the combined quantity and expose separate partitions.
+    Completeness is per category. Request sums and per-model token sums remain
+    known subtotals where the pinned reader supplies no category coverage.
+    A recorded zero price beside nonzero or unknown usage is unmeasured.
+    Token arithmetic preserves integers and refuses overflow. Currency sums
+    round to ten fractional places, preserving smaller nonzero values;
+    currency bounds round outwards.
     A recording beginning before its session's first dispatch has
     pre-dispatch consumption: assignment is incomplete and work totals are
     withheld. An unknown opening boundary also withholds them. Sessions
@@ -3109,11 +3117,13 @@ RULES THAT CHANGE WHAT YOU DO
     incomplete or withheld while the pinned reader cannot measure them.
   - `arc cost retain <change|journal-file>` keeps, per bound session, the
     facts a fresh read gives: reader and calculation versions, source
-    frontier, digest and opening boundary, counters with their basis and coverage, and any
+    frontier, digest and opening boundary, counters with their basis,
+    coverage and category-specific gaps, and any
     harness-written dollar figure, plus lineage relations and read failures
     as fixed categories. Retained facts carry no recording locators or raw
     errors. Display sanitizes older facts; bundle import and export refuse
-    nonportable cost facts without changing recorded events.
+    nonportable identities, metadata, quantities or reason categories without
+    changing recorded events.
     The source bytes stay in the harness store. Identical facts record
     nothing; retained facts are observations at their frontier and are never
     added to one another.

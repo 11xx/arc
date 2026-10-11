@@ -12,8 +12,8 @@
 use super::run::{rounds, RunSubject};
 use super::*;
 use crate::model::{
-    plain_session_id, portable_cost_reason, portable_lineage_reason, CostCounters, CostFacts,
-    CostLineage, CostRelative, Event, Payload,
+    plain_session_id, portable_cost_metadata, portable_cost_reason, portable_lineage_reason,
+    portable_quantity_reason, CostCounters, CostFacts, CostLineage, CostRelative, Event, Payload,
 };
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -440,8 +440,8 @@ fn measure(events: &[Event], harness: &str, session: &str) -> Measured {
                     json!({
                         "retained_event_id": event.event_id,
                         "frontier": held.frontier,
-                        "retained": {"digest": held.digest, "counters": held.counters, "harness_estimate_usd": held.harness_estimate_usd, "lineage": held.lineage},
-                        "fresh": {"digest": fresh.digest, "counters": fresh.counters, "harness_estimate_usd": fresh.harness_estimate_usd, "lineage": fresh.lineage},
+                        "retained": {"digest": held.digest, "counters": held.counters, "harness_estimate_usd": held.harness_estimate_usd, "lineage": held.lineage, "accounting_basis": held.basis, "coverage": held.coverage, "source_started_at": held.source_started_at, "source_start_uncertain": held.source_start_uncertain, "quantity_gaps": held.quantity_gaps, "incomplete": held.incomplete},
+                        "fresh": {"digest": fresh.digest, "counters": fresh.counters, "harness_estimate_usd": fresh.harness_estimate_usd, "lineage": fresh.lineage, "accounting_basis": fresh.basis, "coverage": fresh.coverage, "source_started_at": fresh.source_started_at, "source_start_uncertain": fresh.source_start_uncertain, "quantity_gaps": fresh.quantity_gaps, "incomplete": fresh.incomplete},
                     })
                 });
             Measured {
@@ -474,6 +474,8 @@ fn same_measurement(left: &CostFacts, right: &CostFacts) -> bool {
         && left.coverage == right.coverage
         && left.source_started_at == right.source_started_at
         && left.source_start_uncertain == right.source_start_uncertain
+        && left.quantity_gaps == right.quantity_gaps
+        && left.incomplete == right.incomplete
 }
 
 /// Measure one session through the pinned tapes reader, over its whole
@@ -508,7 +510,7 @@ fn read_fresh(harness: &str, session: &str) -> std::result::Result<CostFacts, St
         .stream_session(&resolved.session, &read)
         .map_err(|_| "usage read failed".to_string())?;
     let view = agent_tapes_core::usage::streamed(&whole, tally, &read);
-    let mut facts = normalize(&view);
+    let mut facts = normalize(&view, harness);
     facts.source_started_at = earliest.into_iter().chain(whole.started_at).min();
     facts.source_start_uncertain = whole.start_uncertain
         || view.truncated
@@ -595,16 +597,81 @@ fn safe_relative(id: String, unknown: &mut Vec<String>) -> Option<String> {
 
 fn sanitized_facts(held: &CostFacts) -> CostFacts {
     let mut facts = held.clone();
+    for value in [&mut facts.reader, &mut facts.calculation] {
+        if !portable_cost_metadata(value) {
+            *value = "retained metadata unavailable".to_string();
+            facts
+                .incomplete
+                .push("retained measurement gap".to_string());
+        }
+    }
+    if facts
+        .basis
+        .as_deref()
+        .is_some_and(|basis| !matches!(basis, "recorded-total" | "summed-requests"))
+    {
+        facts.basis = None;
+        facts
+            .incomplete
+            .push("retained measurement gap".to_string());
+    }
+    if facts
+        .coverage
+        .as_deref()
+        .is_some_and(|coverage| !matches!(coverage, "session" | "read-window" | "since-reset"))
+    {
+        facts.coverage = None;
+        facts
+            .incomplete
+            .push("retained measurement gap".to_string());
+    }
+    if facts
+        .digest
+        .as_ref()
+        .is_some_and(|digest| !portable_cost_metadata(digest))
+    {
+        facts.digest = None;
+        facts
+            .incomplete
+            .push("retained measurement gap".to_string());
+    }
+    if let Some(gaps) = &mut facts.quantity_gaps {
+        let unknown_category = gaps
+            .keys()
+            .any(|key| key != "usd" && !CATEGORIES.contains(&key.as_str()));
+        gaps.retain(|key, _| key == "usd" || CATEGORIES.contains(&key.as_str()));
+        if unknown_category {
+            for category in std::iter::once("usd").chain(CATEGORIES) {
+                gaps.entry(category.to_string())
+                    .or_default()
+                    .push("quantity coverage was not retained".to_string());
+            }
+        }
+        for reason in gaps.values_mut().flatten() {
+            if !portable_quantity_reason(reason) {
+                *reason = "quantity coverage was not retained".to_string();
+            }
+        }
+    }
+    qualify_price(&mut facts);
     for reason in &mut facts.incomplete {
         if !portable_cost_reason(reason) {
             *reason = "retained measurement gap".to_string();
         }
     }
     if let Some(lineage) = &mut facts.lineage {
-        for reason in &mut lineage.unknown {
-            if !portable_lineage_reason(reason) {
-                *reason = "lineage read failed".to_string();
-            }
+        let unclassified = lineage
+            .unknown
+            .iter()
+            .filter(|reason| !portable_lineage_reason(reason))
+            .count();
+        lineage
+            .unknown
+            .retain(|reason| portable_lineage_reason(reason));
+        if unclassified > 0 {
+            lineage
+                .unknown
+                .push(format!("{unclassified} lineage notes"));
         }
         lineage.parent = lineage
             .parent
@@ -638,7 +705,7 @@ fn kebab<T: serde::Serialize>(value: T) -> Option<String> {
 /// The facts arc keeps from one usage answer. The counters and the dollar
 /// figure are the reader's, unchanged; what keeps them from covering the
 /// session is named rather than corrected.
-fn normalize(view: &agent_tapes_core::usage::UsageView) -> CostFacts {
+fn normalize(view: &agent_tapes_core::usage::UsageView, harness: &str) -> CostFacts {
     let mut incomplete = Vec::new();
     let (basis, coverage) = match &view.accounting {
         Some(accounting) => (kebab(accounting.basis), kebab(accounting.coverage)),
@@ -677,7 +744,7 @@ fn normalize(view: &agent_tapes_core::usage::UsageView) -> CostFacts {
         incomplete.push("the reader established no source frontier".to_string());
     }
     let tokens = view.tokens.as_ref();
-    CostFacts {
+    let mut facts = CostFacts {
         reader: TAPES_READER.to_string(),
         calculation: COST_CALCULATION.to_string(),
         frontier: read.map_or(0, |read| read.source_length),
@@ -688,6 +755,7 @@ fn normalize(view: &agent_tapes_core::usage::UsageView) -> CostFacts {
         coverage,
         source_started_at: view.session.started_at,
         source_start_uncertain: false,
+        quantity_gaps: Some(BTreeMap::new()),
         lineage: None,
         counters: CostCounters {
             input: tokens.and_then(|tokens| tokens.input),
@@ -698,6 +766,77 @@ fn normalize(view: &agent_tapes_core::usage::UsageView) -> CostFacts {
         },
         harness_estimate_usd: view.cost.as_ref().map(|cost| cost.usd),
         incomplete,
+    };
+    let mut gaps = BTreeMap::new();
+    for category in CATEGORIES {
+        let reason = if counter(&facts.counters, category).is_none() {
+            Some("recorded category is absent")
+        } else if facts.basis.is_none() {
+            Some("accounting basis is unknown")
+        } else if facts.basis.as_deref() == Some("summed-requests") {
+            Some("per-event counter coverage is unknown")
+        } else if harness != "codex" {
+            Some("per-model counter coverage is unknown")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            gaps.insert(category.to_string(), vec![reason.to_string()]);
+        }
+    }
+    if facts.harness_estimate_usd.is_none() {
+        gaps.insert(
+            "usd".to_string(),
+            vec!["recorded category is absent".to_string()],
+        );
+    } else if facts.basis.is_none() {
+        gaps.insert(
+            "usd".to_string(),
+            vec!["accounting basis is unknown".to_string()],
+        );
+    } else if facts.basis.as_deref() == Some("summed-requests") {
+        gaps.insert(
+            "usd".to_string(),
+            vec!["per-event price coverage is unknown".to_string()],
+        );
+    }
+    facts.quantity_gaps = Some(gaps);
+    qualify_price(&mut facts);
+    facts
+}
+
+fn qualify_price(facts: &mut CostFacts) {
+    let reason = facts.harness_estimate_usd.and_then(|amount| {
+        if !amount.is_finite() || amount < 0.0 {
+            Some("recorded price is invalid")
+        } else if amount == 0.0
+            && CATEGORIES
+                .into_iter()
+                .any(|category| counter(&facts.counters, category) != Some(0))
+        {
+            Some("recorded zero price accompanies nonzero or unknown usage")
+        } else {
+            None
+        }
+    });
+    if let Some(reason) = reason {
+        facts.harness_estimate_usd = None;
+        facts
+            .quantity_gaps
+            .get_or_insert_with(|| {
+                std::iter::once("usd")
+                    .chain(CATEGORIES)
+                    .map(|category| {
+                        (
+                            category.to_string(),
+                            vec!["quantity coverage was not retained".to_string()],
+                        )
+                    })
+                    .collect()
+            })
+            .entry("usd".to_string())
+            .or_default()
+            .push(reason.to_string());
     }
 }
 
@@ -735,7 +874,12 @@ fn outside_sessions(
 }
 
 fn round_amount(value: f64) -> f64 {
-    (value * 1e10).round() / 1e10
+    let scaled = value * 1e10;
+    if (value != 0.0 && value.abs() < 1e-10) || !scaled.is_finite() {
+        value
+    } else {
+        scaled.round() / 1e10
+    }
 }
 
 /// Connected components include named relatives outside the selected figure.
@@ -807,55 +951,57 @@ fn totals(members: &[&SessionRow], withheld: &[String], scope: &str) -> Value {
     let keys: Vec<String> = members.iter().map(|row| row.key()).collect();
     let mut quantities = Vec::new();
 
-    let usd = aggregate(members, withheld, |facts| facts.harness_estimate_usd);
-    quantities.push(quantity(
-        json!({"kind": USD_KIND, "unit": "USD", "pricing_basis": "unknown",
-            "source": "harness recording", "precision": "as the harness wrote it", "scope": scope}),
-        usd,
-    ));
-
     let harnesses: BTreeSet<&str> = members.iter().map(|row| row.harness.as_str()).collect();
-    for category in CATEGORIES {
-        let base = base_tokens(category, scope);
-        if harnesses.len() > 1 && withheld.is_empty() {
+    let mut domains: BTreeMap<(&str, Option<&str>), Vec<&SessionRow>> = BTreeMap::new();
+    for row in members {
+        let basis = row
+            .measured
+            .facts
+            .as_ref()
+            .and_then(|facts| facts.basis.as_deref());
+        domains.entry((&row.harness, basis)).or_default().push(row);
+    }
+    let bases: BTreeSet<Option<&str>> = domains.keys().map(|(_, basis)| *basis).collect();
+    let common_basis = (bases.len() == 1)
+        .then(|| bases.first().copied().flatten())
+        .flatten();
+    for category in std::iter::once("usd").chain(CATEGORIES) {
+        let base = |harness: Option<&str>, basis: Option<&str>| {
+            let mut base = if category == "usd" {
+                json!({"kind": USD_KIND, "unit": "USD", "pricing_basis": "unknown",
+                    "source": "harness recording", "precision": "currency sums rounded to ten fractional places; smaller nonzero values preserved", "scope": scope})
+            } else {
+                base_tokens(category, scope)
+            };
+            base["accounting_basis"] = json!(basis);
+            if let Some(harness) = harness {
+                base["harness"] = json!(harness);
+            }
+            base
+        };
+        let mut combined = base(None, common_basis);
+        if category != "usd" && harnesses.len() > 1 && withheld.is_empty() {
             let named = harnesses.iter().copied().collect::<Vec<_>>().join(", ");
             let (status, reason) = if category == "input" {
-                (
-                    "refused",
-                    format!("a raw input sum across harnesses ({named}) is refused: their input conventions differ"),
-                )
+                ("refused", format!("a raw input sum across harnesses ({named}) is refused: their input conventions differ"))
             } else {
-                (
-                    "withheld",
-                    format!("summing {category} across harnesses ({named}) waits for tapes' disjoint-token-categories, which the pinned reader does not carry"),
-                )
+                ("withheld", format!("summing {category} across harnesses ({named}) waits for tapes' disjoint-token-categories, which the pinned reader does not carry"))
             };
-            let mut value = base;
-            value["status"] = json!(status);
-            value["reasons"] = json!([reason]);
-            quantities.push(value);
-            for harness in &harnesses {
-                let within: Vec<&SessionRow> = members
-                    .iter()
-                    .copied()
-                    .filter(|row| row.harness == *harness)
-                    .collect();
-                let mut base = base_tokens(category, scope);
-                base["harness"] = json!(harness);
+            combined["status"] = json!(status);
+            combined["reasons"] = json!([reason]);
+            quantities.push(combined);
+        } else {
+            quantities.push(quantity(combined, aggregate(members, withheld, category)));
+        }
+        if domains.len() > 1 {
+            for ((harness, basis), partition) in &domains {
+                let mut partition_base = base(Some(harness), *basis);
+                partition_base["partition"] = json!(true);
                 quantities.push(quantity(
-                    base,
-                    aggregate(&within, withheld, |facts| {
-                        counter(&facts.counters, category).map(|count| count as f64)
-                    }),
+                    partition_base,
+                    aggregate(partition, withheld, category),
                 ));
             }
-        } else {
-            quantities.push(quantity(
-                base,
-                aggregate(members, withheld, |facts| {
-                    counter(&facts.counters, category).map(|count| count as f64)
-                }),
-            ));
         }
     }
     let groups = identity_groups(members);
@@ -893,28 +1039,100 @@ fn counter(counters: &CostCounters, category: &str) -> Option<u64> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Amount {
+    Tokens(u64),
+    Usd(f64),
+}
+
+impl Amount {
+    fn add(self, other: Self) -> Option<Self> {
+        match (self, other) {
+            (Self::Tokens(left), Self::Tokens(right)) => left.checked_add(right).map(Self::Tokens),
+            (Self::Usd(left), Self::Usd(right)) => {
+                let sum = left + right;
+                sum.is_finite().then_some(Self::Usd(sum))
+            }
+            _ => None,
+        }
+    }
+
+    fn max(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Tokens(left), Self::Tokens(right)) => Self::Tokens(left.max(right)),
+            (Self::Usd(left), Self::Usd(right)) => Self::Usd(left.max(right)),
+            _ => unreachable!("one quantity has one unit"),
+        }
+    }
+
+    fn json(self) -> Value {
+        match self {
+            Self::Tokens(count) => json!(count),
+            Self::Usd(amount) => json!(round_amount(amount)),
+        }
+    }
+
+    fn bound_json(self, upper: bool) -> Value {
+        match self {
+            Self::Usd(value) if value.abs() >= 1e-10 && (value * 1e10).is_finite() => {
+                let scaled = value * 1e10;
+                json!(if upper {
+                    scaled.ceil() / 1e10
+                } else {
+                    scaled.floor() / 1e10
+                })
+            }
+            _ => self.json(),
+        }
+    }
+}
+
+fn sum_amounts(
+    amounts: impl IntoIterator<Item = Amount>,
+) -> std::result::Result<Option<Amount>, &'static str> {
+    amounts
+        .into_iter()
+        .try_fold(None, |sum: Option<Amount>, amount| match sum {
+            Some(sum) => sum
+                .add(amount)
+                .map(Some)
+                .ok_or("quantity arithmetic overflowed"),
+            None => Ok(Some(amount)),
+        })
+}
+
+fn recorded_amount(facts: &CostFacts, category: &str) -> Option<Amount> {
+    if category == "usd" {
+        facts.harness_estimate_usd.map(Amount::Usd)
+    } else {
+        counter(&facts.counters, category).map(Amount::Tokens)
+    }
+}
+
 /// The status, amount, known subtotal, and reasons of one quantity.
 struct Aggregate {
     status: &'static str,
-    amount: Option<f64>,
-    known: Option<f64>,
+    amount: Option<Amount>,
+    known: Option<Amount>,
     reasons: Vec<String>,
-    bounds: Option<(f64, f64, bool)>,
+    bounds: Option<(Amount, Amount, bool)>,
 }
 
-fn aggregate(
-    members: &[&SessionRow],
-    withheld: &[String],
-    value: impl Fn(&CostFacts) -> Option<f64>,
-) -> Aggregate {
-    if !withheld.is_empty() {
-        return Aggregate {
-            bounds: None,
+impl Aggregate {
+    fn withheld(reasons: Vec<String>) -> Self {
+        Self {
             status: "withheld",
             amount: None,
             known: None,
-            reasons: withheld.to_vec(),
-        };
+            reasons,
+            bounds: None,
+        }
+    }
+}
+
+fn aggregate(members: &[&SessionRow], withheld: &[String], category: &str) -> Aggregate {
+    if !withheld.is_empty() {
+        return Aggregate::withheld(withheld.to_vec());
     }
     if members.is_empty() {
         return Aggregate {
@@ -925,84 +1143,130 @@ fn aggregate(
             reasons: vec!["no bound session is assigned here".to_string()],
         };
     }
-    let mut known = None::<f64>;
+    let domains: BTreeSet<(&str, Option<&str>)> = members
+        .iter()
+        .map(|row| {
+            (
+                row.harness.as_str(),
+                row.measured
+                    .facts
+                    .as_ref()
+                    .and_then(|facts| facts.basis.as_deref()),
+            )
+        })
+        .collect();
+    if domains.len() > 1 {
+        let names = domains
+            .iter()
+            .map(|(harness, basis)| format!("{harness}/{}", basis.unwrap_or("unknown")))
+            .collect::<Vec<_>>();
+        return Aggregate::withheld(vec![format!("incompatible accounting domains: {}; quantities are partitioned by harness and accounting basis", names.join(", "))]);
+    }
+    let mut amounts = Vec::new();
     let mut missing = Vec::new();
-    let mut incomplete = Vec::new();
+    let mut gaps = BTreeSet::new();
     for row in members {
         match row.measured.facts.as_ref() {
             Some(facts) => {
-                match value(facts) {
-                    Some(amount) => *known.get_or_insert(0.0) += amount,
+                match recorded_amount(facts, category) {
+                    Some(amount) => amounts.push(amount),
                     None => missing.push(row.key()),
                 }
-                if !facts.incomplete.is_empty() {
-                    incomplete.push(row.key());
+                for reason in &facts.incomplete {
+                    gaps.insert(format!("{}: {reason}", row.key()));
+                }
+                match &facts.quantity_gaps {
+                    Some(categories) => {
+                        for reason in categories.get(category).into_iter().flatten() {
+                            gaps.insert(format!("{}: {reason}", row.key()));
+                        }
+                    }
+                    None => {
+                        gaps.insert(format!("{}: quantity coverage was not retained", row.key()));
+                    }
+                }
+                if facts.basis.is_none() {
+                    gaps.insert(format!("{}: accounting basis is unknown", row.key()));
                 }
             }
             None => missing.push(row.key()),
         }
     }
-    let known = known.map(round_amount);
+    let known = match sum_amounts(amounts) {
+        Ok(known) => known,
+        Err(reason) => return Aggregate::withheld(vec![reason.to_string()]),
+    };
     let groups = identity_groups(members);
     if !groups.is_empty() {
-        let mut lower = 0.0;
-        let mut upper = 0.0;
-        let mut available = false;
+        let mut lower_terms = Vec::new();
         let mut grouped = BTreeSet::new();
         for group in &groups {
-            let amounts: Vec<f64> = members
+            if let Some(largest) = members
                 .iter()
                 .filter(|row| group.contains(&row.key()))
-                .filter_map(|row| row.measured.facts.as_ref().and_then(&value))
-                .collect();
-            available |= !amounts.is_empty();
-            lower += amounts.iter().copied().fold(0.0, f64::max);
-            upper += amounts.iter().sum::<f64>();
+                .filter_map(|row| {
+                    row.measured
+                        .facts
+                        .as_ref()
+                        .and_then(|facts| recorded_amount(facts, category))
+                })
+                .reduce(Amount::max)
+            {
+                lower_terms.push(largest);
+            }
             grouped.extend(group.iter().cloned());
         }
-        for row in members.iter().filter(|row| !grouped.contains(&row.key())) {
-            if let Some(amount) = row.measured.facts.as_ref().and_then(&value) {
-                available = true;
-                lower += amount;
-                upper += amount;
-            }
+        lower_terms.extend(
+            members
+                .iter()
+                .filter(|row| !grouped.contains(&row.key()))
+                .filter_map(|row| {
+                    row.measured
+                        .facts
+                        .as_ref()
+                        .and_then(|facts| recorded_amount(facts, category))
+                }),
+        );
+        let lower = match sum_amounts(lower_terms) {
+            Ok(lower) => lower,
+            Err(reason) => return Aggregate::withheld(vec![reason.to_string()]),
+        };
+        let mut reasons = vec![format!(
+            "incomplete identity: sessions may overlap in groups {}",
+            serde_json::to_string(&groups).unwrap()
+        )];
+        reasons.extend(gaps.iter().cloned());
+        if !missing.is_empty() {
+            reasons.push(format!("no recorded amount for {}", missing.join(", ")));
         }
         return Aggregate {
             status: "withheld",
             amount: None,
             known: None,
-            bounds: available.then(|| {
-                (
-                    round_amount(lower),
-                    round_amount(upper),
-                    !missing.is_empty() || !incomplete.is_empty(),
-                )
-            }),
-            reasons: vec![format!(
-                "incomplete identity: sessions may overlap in groups {}",
-                serde_json::to_string(&groups).unwrap()
-            )],
+            bounds: lower
+                .zip(known)
+                .map(|(lower, upper)| (lower, upper, !missing.is_empty() || !gaps.is_empty())),
+            reasons,
         };
     }
     if !missing.is_empty() {
+        let mut reasons = vec![format!("no recorded amount for {}", missing.join(", "))];
+        reasons.extend(gaps);
         return Aggregate {
             bounds: None,
             status: "absent",
             amount: None,
             known,
-            reasons: vec![format!("no recorded amount for {}", missing.join(", "))],
+            reasons,
         };
     }
-    if !incomplete.is_empty() {
+    if !gaps.is_empty() {
         return Aggregate {
             bounds: None,
             status: "incomplete",
             amount: None,
             known,
-            reasons: vec![format!(
-                "incomplete measurement for {}",
-                incomplete.join(", ")
-            )],
+            reasons: gaps.into_iter().collect(),
         };
     }
     Aggregate {
@@ -1015,30 +1279,32 @@ fn aggregate(
 }
 
 fn quantity(mut base: Value, aggregate: Aggregate) -> Value {
-    // Token counts are whole numbers; only a currency amount carries a
-    // fraction.
-    let number = |value: f64| {
-        if base["unit"] == "tokens" {
-            json!(value as u64)
-        } else {
-            json!(value)
-        }
-    };
-    let (amount, known) = (aggregate.amount.map(number), aggregate.known.map(number));
     if let Some((lower, upper, known_only)) = aggregate.bounds {
         let field = if known_only { "known_bound" } else { "bound" };
-        base[field] = json!({"scope": if known_only { "known recorded amounts" } else { "whole figure" },"at_least": number(lower), "at_most": number(upper),
+        base[field] = json!({"scope": if known_only { "known recorded amounts" } else { "whole figure" },
+            "at_least": lower.bound_json(false), "at_most": upper.bound_json(true),
             "basis": "sum of disjoint groups; each overlapping group is at least its largest member and at most its sum"});
     }
     base["status"] = json!(aggregate.status);
-    if let Some(amount) = amount {
-        base["amount"] = amount;
+    if let Some(amount) = aggregate.amount {
+        base["amount"] = amount.json();
     }
-    if let Some(known) = known {
-        base["known_subtotal"] = known;
+    if let Some(known) = aggregate.known {
+        base["known_subtotal"] = known.json();
     }
     base["reasons"] = json!(aggregate.reasons);
     base
+}
+
+fn measurement_reasons(facts: &CostFacts) -> Vec<String> {
+    let mut reasons: BTreeSet<String> = facts.incomplete.iter().cloned().collect();
+    match &facts.quantity_gaps {
+        Some(gaps) => reasons.extend(gaps.values().flatten().cloned()),
+        None => {
+            reasons.insert("quantity coverage was not retained".to_string());
+        }
+    }
+    reasons.into_iter().collect()
 }
 
 fn render_report(
@@ -1174,8 +1440,8 @@ fn render_report(
         .iter()
         .filter_map(|row| match (&row.measured.facts, &row.measured.source) {
             (None, Source::Unavailable(reason)) => Some((row.key(), vec![reason.clone()])),
-            (Some(facts), _) if !facts.incomplete.is_empty() => {
-                Some((row.key(), facts.incomplete.clone()))
+            (Some(facts), _) if !measurement_reasons(facts).is_empty() => {
+                Some((row.key(), measurement_reasons(facts)))
             }
             _ => None,
         })
@@ -1253,12 +1519,14 @@ fn session_json(row: &SessionRow) -> Value {
     }
     match &measured.facts {
         Some(facts) => {
-            measurement["status"] = json!(if facts.incomplete.is_empty() {
+            let reasons = measurement_reasons(facts);
+            measurement["status"] = json!(if reasons.is_empty() {
                 "complete"
             } else {
                 "incomplete"
             });
-            measurement["reasons"] = json!(facts.incomplete);
+            measurement["reasons"] = json!(reasons);
+            measurement["quantity_gaps"] = json!(facts.quantity_gaps);
             measurement["reader"] = json!(facts.reader);
             measurement["calculation"] = json!(facts.calculation);
             measurement["frontier"] = json!(facts.frontier);
@@ -1305,6 +1573,10 @@ fn describe_quantity(quantity: &Value) -> String {
     let label = match quantity["harness"].as_str() {
         Some(harness) => format!("{label} ({harness})"),
         None => label,
+    };
+    let label = match quantity["accounting_basis"].as_str() {
+        Some(basis) => format!("{label} [{basis}]"),
+        None => format!("{label} [accounting basis unknown]"),
     };
     let status = quantity["status"].as_str().unwrap_or_default();
     match (&quantity["amount"], &quantity["known_subtotal"]) {
