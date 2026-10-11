@@ -226,39 +226,44 @@ fn import_batches_with_paths(root: &Path) -> Result<Vec<(PathBuf, ImportBatch)>>
     paths.sort();
     let mut batches = Vec::new();
     for path in paths {
-        let batch: ImportBatch = serde_json::from_slice(&fs::read(&path)?)
-            .with_context(|| format!("malformed import batch {}", path.display()))?;
-        if batch.schema != "arc-import-batch/1" {
-            bail!("unsupported import batch schema {}", batch.schema);
-        }
-        ids::validate_id_component(&batch.change_id)?;
-        for value in &batch.events {
-            if value["change_id"].as_str() != Some(batch.change_id.as_str()) {
-                bail!(
-                    "batch event {} belongs to another change",
-                    value["event_id"]
-                );
-            }
-        }
-        if let Some(receipt) = &batch.authorization {
-            let values: Vec<_> = batch
-                .events
-                .iter()
-                .cloned()
-                .map(|value| ("change".into(), value))
-                .chain(
-                    batch
-                        .repository_events
-                        .iter()
-                        .cloned()
-                        .map(|value| ("repository".into(), value)),
-                )
-                .collect();
-            crate::import_authorization::validate_receipt_events(receipt, &values)?;
-        }
+        let batch = read_import_batch(&path)?;
         batches.push((path, batch));
     }
     Ok(batches)
+}
+
+pub(crate) fn read_import_batch(path: &Path) -> Result<ImportBatch> {
+    let batch: ImportBatch = serde_json::from_slice(&fs::read(path)?)
+        .with_context(|| format!("malformed import batch {}", path.display()))?;
+    if batch.schema != "arc-import-batch/1" {
+        bail!("unsupported import batch schema {}", batch.schema);
+    }
+    ids::validate_id_component(&batch.change_id)?;
+    for value in &batch.events {
+        if value["change_id"].as_str() != Some(batch.change_id.as_str()) {
+            bail!(
+                "batch event {} belongs to another change",
+                value["event_id"]
+            );
+        }
+    }
+    if let Some(receipt) = &batch.authorization {
+        let values: Vec<_> = batch
+            .events
+            .iter()
+            .cloned()
+            .map(|value| ("change".into(), value))
+            .chain(
+                batch
+                    .repository_events
+                    .iter()
+                    .cloned()
+                    .map(|value| ("repository".into(), value)),
+            )
+            .collect();
+        crate::import_authorization::validate_receipt_events(receipt, &values)?;
+    }
+    Ok(batch)
 }
 
 fn event_file_stems(dir: &Path) -> Result<BTreeSet<String>> {
