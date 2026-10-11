@@ -1661,7 +1661,8 @@ FORGE
   projections. Stored facts are retained without making replay an admission
   gate; historical bindings are read against their recorded links.
   arc-forge-receipt/1 carries command, change, event/observation/read IDs,
-  generation IDs, coverage, outcome and reference availability diagnostics.
+  generation IDs, coverage, outcome and, for each reference, the claim it
+  supports and its availability (available, unavailable or corrupt).
 
   Observations carry adapter identity, a provider/host/repository/PR snapshot,
   nullable full observed head/base SHAs, adapter read_at, optional provider
@@ -1670,8 +1671,29 @@ FORGE
   Missing revisions on failed reads stay absent. Each response and item names
   its SHA-256, byte length and RetainedContentRef: provider, opaque handle,
   sha256, byte_length, media_type and reported capture (pinned or unpinned).
-  References are claims; availability is unmaterialized. Arc never resolves
-  handles or verifies content bytes through a provider.
+
+  A reference is a claim until ledger custody holds its bytes. Custody keeps
+  content under `custody/sha256/<digest>` in the ledger directory
+  (`<git-common-dir>/arc/` unless configured otherwise), writes each file
+  atomically, and re-verifies the recorded length and sha256 on every read. A
+  reference reads as available; unavailable, when no bytes are held; or
+  corrupt, when held bytes fail verification. Absent bytes are never empty
+  content, and missing content degrades only the generations and responses
+  that reference it, never a retained fact or judgment. A provider's reported
+  capture and arc's verification are separate facts. Arc never resolves a
+  provider handle: bytes arrive as files an adapter materialized.
+
+  `forge observe --custody-dir DIR` copies materialized files. For each
+  digest the document references, DIR/sha256/<digest> (lowercase hex) is the
+  adapter's file: a regular file inside DIR, directly or through a symlink that
+  stays inside it, with exactly the reference's length and sha256. Every file
+  is verified before the first event or custody file is written, and each is
+  verified again as it is copied. A mismatch, a non-regular file, a symlink
+  leaving DIR or a DIR without a sha256/ directory refuses. Files the document
+  does not reference are never read, and a reference with no file stays
+  unavailable. Repeating a read with --custody-dir publishes bytes that are
+  missing or damaged. Receipts name each reference's claim: a response with
+  its response_id, or an item with its item_kind, node_id and generation_id.
 
   coverage has overall and collections entries. Each has state (complete,
   truncated or failed), scope, optional frontier and failure_reason (required
@@ -2767,7 +2789,8 @@ RULES THAT CHANGE WHAT YOU DO
 
 EXIT CODES
   forge observe exits 0 for admitted complete, truncated or failed reads and
-  identical retries. Invalid input or conflicting read IDs exit 1; CLI usage
+  identical retries, whatever the availability of their content. Invalid
+  input, conflicting read IDs or a refused --custody-dir exit 1; CLI usage
   errors exit 2. forge link policy/tuple/host mismatches exit 10.
 
   `arc check` is the integration preflight and its code names the blocker.
@@ -2866,10 +2889,12 @@ FILES
   User configuration is `<ai-home>/arc/config.toml`; the AI data home is
   `~/.local/ai/` unless ARC_AI_HOME or AI_HOME names another. ARC_WORKTREES_DIR and
   ARC_DATA_ROOT override their keys, and ARC_DATA_DIR names one exact ledger
-  directory for one repository, above both. `arc config` prints the resolved
-  paths. Only a missing configuration selects built-in settings. Access,
-  filesystem and parse errors remain errors for every configuration consumer;
-  advisory consumers name their fallback and the error on stderr.
+  directory for one repository, above both. That directory holds the change
+  events and, under `custody/sha256/<digest>`, retained forge content.
+  `arc config` prints the resolved paths. Only a missing configuration
+  selects built-in settings. Access, filesystem and parse errors remain
+  errors for every configuration consumer; advisory consumers name their
+  fallback and the error on stderr.
 
     worktrees_dir = "~/.worktrees"       where change worktrees are created
     data_root = "<dir>"                  ledgers at <dir>/<repo-path-slug>/

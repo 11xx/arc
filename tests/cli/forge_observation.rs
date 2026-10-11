@@ -1,7 +1,7 @@
 use super::common::*;
 use serde_json::{json, Value};
 
-fn setup() -> (Repo, String) {
+pub(crate) fn setup() -> (Repo, String) {
     let repo = Repo::new();
     let id = opened_change_id(&stdout(repo.arc(&repo.root).args([
         "begin",
@@ -28,7 +28,12 @@ fn setup() -> (Repo, String) {
     ]));
     (repo, id)
 }
-fn document(read: &str, generation: &str, body: &str, predecessor: Option<&str>) -> Value {
+pub(crate) fn document(
+    read: &str,
+    generation: &str,
+    body: &str,
+    predecessor: Option<&str>,
+) -> Value {
     let mut v: Value =
         serde_json::from_str(include_str!("../fixtures/forge/frontier.json")).unwrap();
     let digest = format!("{:x}", Sha256::digest(body.as_bytes()));
@@ -43,7 +48,7 @@ fn document(read: &str, generation: &str, body: &str, predecessor: Option<&str>)
     v["generations"][0]["predecessor"] = json!(predecessor);
     v
 }
-fn facts(v: &mut Value, kind: &str, value: Value) {
+pub(crate) fn facts(v: &mut Value, kind: &str, value: Value) {
     v["items"][0]["kind"] = json!(kind);
     v["items"][0]["node_id"] = json!(format!("{kind}-1"));
     v["generations"][0]["kind"] = json!(kind);
@@ -62,7 +67,7 @@ fn observe(repo: &Repo, id: &str, v: &Value) -> Value {
     ])))
     .unwrap()
 }
-fn state(repo: &Repo, id: &str) -> Value {
+pub(crate) fn state(repo: &Repo, id: &str) -> Value {
     serde_json::from_str(&stdout(repo.arc(&repo.root).args(["show", id, "--json"]))).unwrap()
 }
 fn refuses(repo: &Repo, id: &str, v: &Value) {
@@ -333,7 +338,7 @@ fn forge_observations_round_trip_unchanged_and_do_not_change_readiness() {
     assert!(before.is_boolean(), "readiness must be a Boolean: {before}");
     let receipt = observe(&repo, &id, &document("r1", "g1", "first", None));
     assert_eq!(receipt["schema"], "arc-forge-receipt/1");
-    assert_eq!(receipt["availability"][0]["availability"], "unmaterialized");
+    assert_eq!(receipt["availability"][0]["availability"], "unavailable");
     let original = state(&repo, &id);
     let after = status(&repo, &id)["forge"]["forge_ready"].clone();
     assert!(after.is_boolean());

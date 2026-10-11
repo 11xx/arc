@@ -112,21 +112,59 @@ fn current_link<'a>(
     }
     Ok(current)
 }
+/// Each reference a read carries, the claim it supports and whether custody
+/// can supply its bytes. Availability is read from the bytes at the moment of
+/// the receipt; the recorded facts never depend on it.
+fn references(
+    document: &ForgeObservation,
+    custody: &crate::custody::Custody,
+) -> Vec<(serde_json::Value, crate::custody::Availability)> {
+    let responses = document.responses.iter().map(|r| {
+        (
+            &r.content,
+            serde_json::json!({"kind":"response","response_id":r.response_id}),
+        )
+    });
+    let items = document.items.iter().map(|i| {
+        (
+            &i.content,
+            serde_json::json!({"kind":"item","item_kind":i.kind,"node_id":i.node_id,"generation_id":i.generation_id}),
+        )
+    });
+    responses
+        .chain(items)
+        .map(|(content, supports)| {
+            let availability = custody.availability(&crate::custody::Content::from(content));
+            let mut entry = serde_json::json!({
+                "provider":content.provider, "handle":content.handle,
+                "sha256":content.sha256, "byte_length":content.byte_length,
+                "reported_capture":content.capture, "supports":supports,
+                "availability":availability.label(),
+            });
+            if let crate::custody::Availability::Corrupt(reason) = &availability {
+                entry["detail"] = serde_json::json!(reason);
+            }
+            (entry, availability)
+        })
+        .collect()
+}
 fn receipt(
     command: &str,
     change: &str,
     event_id: &str,
     obs: Option<&ObservationRecord>,
+    custody: &crate::custody::Custody,
     outcome: &str,
     json: bool,
 ) -> Result<()> {
     let doc = obs.map(|o| &o.document);
+    let references = doc.map(|d| references(d, custody)).unwrap_or_default();
     let result = serde_json::json!({
         "schema":"arc-forge-receipt/1", "command":command, "change":change,
         "event_ids":[event_id], "observation_id":obs.map(|o| &o.event_id),
         "read_id":doc.map(|d| &d.read_id), "generation_ids":doc.map(|d| d.generations.iter().map(|g| &g.generation_id).collect::<Vec<_>>()).unwrap_or_default(),
         "outcome":outcome, "coverage":doc.map(|d| &d.coverage),
-        "availability":doc.map(|d| d.responses.iter().map(|r| &r.content).chain(d.items.iter().map(|i| &i.content)).map(|r| serde_json::json!({"provider":r.provider,"handle":r.handle,"sha256":r.sha256,"byte_length":r.byte_length,"reported_capture":r.capture,"availability":"unmaterialized"})).collect::<Vec<_>>()).unwrap_or_default()
+        "availability":references.iter().map(|(entry, _)| entry).collect::<Vec<_>>()
     });
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
@@ -135,10 +173,24 @@ fn receipt(
         println!("event: {event_id}");
         if let Some(d) = doc {
             println!("read: {} observation: {}", d.read_id, obs.unwrap().event_id);
+            let count = |wanted: &str| {
+                references
+                    .iter()
+                    .filter(|(_, availability)| availability.label() == wanted)
+                    .count()
+            };
+            let corrupt = count("corrupt");
             println!(
-                "coverage: {:?}; generations: {}; references: unmaterialized",
+                "coverage: {:?}; generations: {}; references: {} available, {} unavailable{}",
                 d.coverage.overall.state,
-                d.generations.len()
+                d.generations.len(),
+                count("available"),
+                count("unavailable"),
+                if corrupt > 0 {
+                    format!(", {corrupt} corrupt")
+                } else {
+                    String::new()
+                }
             );
         } else {
             println!("unretained assertion; acquisition time: unknown");
@@ -147,12 +199,19 @@ fn receipt(
     Ok(())
 }
 
-pub fn forge_observe(ctx: &Ctx, reference: &str, file: &str, json: bool) -> Result<()> {
+pub fn forge_observe(
+    ctx: &Ctx,
+    reference: &str,
+    file: &str,
+    custody_dir: Option<&str>,
+    json: bool,
+) -> Result<()> {
     let document: ForgeObservation = serde_json::from_slice(&std::fs::read(file)?)?;
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
     let st = store.state(&change_id)?;
+    let custody = crate::custody::Custody::at(&store.root);
     if let Some(original) = st
         .forge
         .observations
@@ -165,11 +224,13 @@ pub fn forge_observe(ctx: &Ctx, reference: &str, file: &str, json: bool) -> Resu
         if original.document != document {
             bail!("read_id conflicts with recorded observation");
         }
+        materialize(&custody, &document, custody_dir)?;
         return receipt(
             "observe",
             &change_id,
             &original.event_id,
             Some(original),
+            &custody,
             "already-recorded",
             json,
         );
@@ -180,6 +241,12 @@ pub fn forge_observe(ctx: &Ctx, reference: &str, file: &str, json: bool) -> Resu
     };
     crate::forge_observation::validate_projection(&payload, &st.forge)?;
     ensure_append_allowed(&st, &payload)?;
+    // Verified bytes land before the event that cites them, and a refusal in
+    // either step leaves the other unwritten.
+    let planned = plan_materialization(&document, custody_dir)?;
+    if let Some(planned) = &planned {
+        planned.publish(&custody)?;
+    }
     let mut event = ctx.event(&store, &change_id, payload)?;
     store.append_local_event(&mut event)?;
     let obs = ObservationRecord {
@@ -195,9 +262,37 @@ pub fn forge_observe(ctx: &Ctx, reference: &str, file: &str, json: bool) -> Resu
         &change_id,
         &event.event_id,
         Some(&obs),
+        &custody,
         "recorded",
         json,
     )
+}
+
+/// Adapter-supplied files for the references a read carries, all verified.
+fn plan_materialization(
+    document: &ForgeObservation,
+    custody_dir: Option<&str>,
+) -> Result<Option<crate::custody::Materialization>> {
+    let Some(dir) = custody_dir else {
+        return Ok(None);
+    };
+    let wanted = document
+        .contents()
+        .map(crate::custody::Content::from)
+        .collect();
+    crate::custody::plan_materialization(std::path::Path::new(dir), &wanted)
+        .with_context(|| format!("custody directory {dir} refused; nothing was recorded"))
+        .map(Some)
+}
+fn materialize(
+    custody: &crate::custody::Custody,
+    document: &ForgeObservation,
+    custody_dir: Option<&str>,
+) -> Result<()> {
+    if let Some(planned) = plan_materialization(document, custody_dir)? {
+        planned.publish(custody)?;
+    }
+    Ok(())
 }
 
 pub fn forge_link(ctx: &Ctx, reference: &str, args: ForgeLinkArgs) -> Result<i32> {
@@ -251,6 +346,7 @@ pub fn forge_link(ctx: &Ctx, reference: &str, args: ForgeLinkArgs) -> Result<i32
         &change_id,
         &event.event_id,
         obs,
+        &crate::custody::Custody::at(&store.root),
         "recorded",
         args.json,
     )?;
@@ -311,6 +407,7 @@ pub fn forge_checks(ctx: &Ctx, reference: &str, args: ForgeChecksArgs) -> Result
         &change_id,
         &event.event_id,
         obs,
+        &crate::custody::Custody::at(&store.root),
         "recorded",
         args.json,
     )
@@ -380,6 +477,7 @@ pub fn forge_pr_state(
         &change_id,
         &event.event_id,
         obs,
+        &crate::custody::Custody::at(&store.root),
         "recorded",
         json,
     )

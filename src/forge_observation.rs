@@ -404,6 +404,13 @@ impl ForgeObservation {
         );
         Ok(())
     }
+    /// Every retained-content reference the read carries.
+    pub fn contents(&self) -> impl Iterator<Item = &RetainedContentRef> {
+        self.responses
+            .iter()
+            .map(|r| &r.content)
+            .chain(self.items.iter().map(|i| &i.content))
+    }
     pub fn complete(&self, collection: &str) -> bool {
         self.coverage
             .collections

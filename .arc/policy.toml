@@ -124,6 +124,10 @@ paths = [
   # lets the commit a verdict read be collected after a rewrite moves its
   # pin, and the approval loses the object it judged.
   "src/retention.rs",
+  # Holds the bytes a ledger reference names and installs foreign bytes at
+  # import. A defect reads damaged or substituted bytes as the evidence the
+  # reference claims, or writes outside the ledger's private root.
+  "src/custody.rs",
   # Artifact storage operations move the only copy of journal history.
   "src/journal.rs",
   # Bundle import writes foreign artifact bodies and events into the journal.

@@ -947,7 +947,7 @@ pub fn markdown(
         }
         for observation in &forge.observations {
             let d = &observation.document;
-            let _ = writeln!(w, "- Observation `{}`: read `{}` at {}; coverage {:?}; {} generations; references unmaterialized", observation.event_id, d.read_id, d.read_at, d.coverage.overall.state, d.generations.len());
+            let _ = writeln!(w, "- Observation `{}`: read `{}` at {}; coverage {:?}; {} generations; {} content references", observation.event_id, d.read_id, d.read_at, d.coverage.overall.state, d.generations.len(), d.contents().count());
             for g in &d.generations {
                 let _ = writeln!(
                     w,

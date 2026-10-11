@@ -9,6 +9,7 @@ mod commands;
 mod config;
 mod context;
 mod coordinate;
+mod custody;
 mod declarations;
 mod explain;
 mod forge;
@@ -2964,12 +2965,28 @@ enum ForgeCmd {
     /// Admission refuses invalid input. Replay coalesces identical replica reads,
     /// retains conflicts and invalid facts with diagnostics, and quarantines
     /// their projections; it never refuses a stored fact on validation alone.
+    /// --custody-dir copies adapter-materialized bytes into the ledger's
+    /// custody: for each reference the document names, the file at
+    /// DIR/sha256/<digest> (digest in lowercase hex), if the adapter supplied
+    /// one. Each file must be a regular file inside DIR with exactly the
+    /// reference's length and sha256; a symlink leaving DIR, a non-regular
+    /// file or a mismatch refuses before any event or file is written. Files
+    /// the document does not reference are never read, and a reference with no
+    /// file stays unavailable. Arc resolves no provider handle. The receipt
+    /// reads each reference as available, unavailable (no bytes held) or
+    /// corrupt (held bytes fail length or sha256), and says which generation
+    /// or response it supports; absent bytes are never read as empty. A retry
+    /// of an already recorded read with --custody-dir publishes bytes that
+    /// are missing or damaged.
     Observe {
         /// Change whose append-only ledger receives the read
         change: String,
         /// Local arc-forge-observation/1 JSON document
         #[arg(long)]
         file: String,
+        /// Directory of adapter-materialized files at sha256/<digest>
+        #[arg(long, value_name = "DIR")]
+        custody_dir: Option<String>,
         /// Emit arc-forge-receipt/1 metadata without response bodies
         #[arg(long)]
         json: bool,
@@ -5417,8 +5434,13 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             Ok(0)
         }
         Cmd::Forge { cmd } => match cmd {
-            ForgeCmd::Observe { change, file, json } => {
-                commands::forge_observe(&ctx, &change, &file, json)?;
+            ForgeCmd::Observe {
+                change,
+                file,
+                custody_dir,
+                json,
+            } => {
+                commands::forge_observe(&ctx, &change, &file, custody_dir.as_deref(), json)?;
                 Ok(0)
             }
             ForgeCmd::Declare {
