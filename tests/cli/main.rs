@@ -22,6 +22,7 @@ mod findings;
 mod forge;
 mod forge_custody;
 mod forge_observation;
+mod forge_view;
 mod fork;
 mod gate_declarations;
 mod gate_environment;
