@@ -353,7 +353,9 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          bare .md filename held only by another known journal
                          is refused with its owning journal and project.
                          Artifact claims require a declared actor, harness,
-                         and session.
+                         and session. Renewal with --ttl replaces the lease
+                         duration, measured from the renewal timestamp;
+                         omission retains its current duration.
   arc journal checkpoint <file.md> --body-file -
                          Where the work stands and what a successor should
                          read, appended to the artifact and recorded with a

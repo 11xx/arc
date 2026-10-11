@@ -1341,7 +1341,9 @@ enum Cmd {
         /// Omitted, the change is inferred from the current branch, then from
         /// the worktree the command runs in
         change: Option<String>,
-        /// Lease duration (positive integer with s, m, or h suffix; default 2h)
+        /// Lease duration (positive integer with s, m, or h suffix; default 2h).
+        /// A journal artifact renewal retains its current duration when omitted;
+        /// a supplied duration replaces it and runs from the renewal timestamp
         #[arg(long)]
         ttl: Option<String>,
         /// Override one stage budget as <name>=<duration> (repeatable; a

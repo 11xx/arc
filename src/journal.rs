@@ -9856,7 +9856,12 @@ fn artifact_claims(events: &[JournalEvent], file: &str) -> Vec<ArtifactClaim> {
             continue;
         }
         match event.event.as_str() {
-            "claim-renewed" => claim.state.last_activity_at = timestamp,
+            "claim-renewed" => {
+                if let Some(ttl) = event.ttl_seconds {
+                    claim.state.ttl_seconds = ttl;
+                }
+                claim.state.last_activity_at = timestamp;
+            }
             "claim-stage" => {
                 let Some(stage) = event.stage.as_deref().and_then(parse_claim_stage) else {
                     continue;

@@ -17798,3 +17798,36 @@ fn question_text_recovers_at_recorded_marker_after_open_fence() {
     );
     assert!(output.contains("Which choice?"), "{output}");
 }
+
+#[test]
+fn claim_renewal_replaces_ttl_and_controls_expiry() {
+    for (initial, renewed, age, expired) in [("1h", "1m", 120, true), ("1m", "1h", 120, false)] {
+        let repo = Repo::new();
+        let file = evidence_artifact(&repo, "todo", "renewed-lease", "# Work\n");
+        repo.arc(&repo.root)
+            .args(["claim", &file, "--ttl", initial])
+            .assert()
+            .success();
+        repo.arc(&repo.root)
+            .args(["claim", &file, "--ttl", renewed])
+            .assert()
+            .success();
+        repo.arc(&repo.root)
+            .args(["claim", &file])
+            .assert()
+            .success();
+        age_journal_events(&journal_dir(&repo), age);
+        let availability = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+        let row = &availability["open"][0];
+        assert_eq!(
+            row["availability"],
+            if expired { "reclaimable" } else { "occupied" },
+            "{availability}"
+        );
+        assert_eq!(
+            row["claims"][0]["ttl_seconds"],
+            if renewed == "1m" { 60 } else { 3600 },
+            "{availability}"
+        );
+    }
+}
