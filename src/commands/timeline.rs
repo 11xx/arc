@@ -19,5 +19,16 @@ pub fn log(ctx: &Ctx, reference: &str, reverse: bool) -> Result<()> {
             println!("{line}");
         }
     }
+    let state = store.state(&change_id)?;
+    if state.profile == "forge" || !state.forge.is_empty() {
+        print!(
+            "{}",
+            crate::forge_view::render(&crate::forge_view::build(
+                &store,
+                &state,
+                &Default::default()
+            )?)
+        );
+    }
     Ok(())
 }

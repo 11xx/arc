@@ -339,6 +339,15 @@ impl Store {
         Self::discover_with(cwd, true)
     }
 
+    /// Open held history without initializing or repairing ledger files.
+    pub fn discover_existing_for_reading(cwd: &Path) -> Result<Option<Store>> {
+        let mut store = Self::open_at_for(&Self::resolve_root(cwd)?, cwd)?;
+        if let Some(store) = store.as_mut() {
+            store.read_only = true;
+        }
+        Ok(store)
+    }
+
     fn discover_with(cwd: &Path, read_only: bool) -> Result<Store> {
         let root = Self::resolve_root(cwd)?;
         // Read the invoking checkout's policy before creating anything. An
@@ -1091,6 +1100,7 @@ impl Store {
                     .find(|finding| finding.finding_id == finding_id)
                     .expect("matched inline finding remains present");
                 resolved.payload = Payload::FindingAdded {
+                    forge_sources: finding.forge_sources.clone(),
                     finding_id: finding.finding_id.clone(),
                     blocking: finding.blocking,
                     severity: finding.severity,

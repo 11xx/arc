@@ -198,6 +198,7 @@ acknowledged_safe = [
   # caller says it launched: nothing reads either to decide whether work ships.
   "src/commands/changelog.rs",
   "src/commands/run.rs",
+  "src/forge_view.rs",
   "src/forge.rs",
   "src/commands/forge_cmd.rs",
   # A pass records what a caller says it opened and nothing reads it to decide

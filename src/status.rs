@@ -699,6 +699,8 @@ pub struct StatusReport {
     /// events that are not on the `forge` profile. Additive in arc-status/5.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forge: Option<crate::forge::ForgeStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forge_view: Option<serde_json::Value>,
     #[serde(skip)]
     pub provenance_check_enabled: bool,
 }
@@ -1922,6 +1924,7 @@ fn build_report(
         dirty_tree_waiver: dirty_tree_waiver_in_force,
         audit_verdicts: state.audit_verdicts.clone(),
         forge,
+        forge_view: None,
         provenance_check_enabled,
     })
 }

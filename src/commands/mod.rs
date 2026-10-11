@@ -117,6 +117,7 @@ pub use workspace::{
 /// checkout's append policy and refuses every append, and the guide prints its
 /// list from here.
 pub(crate) const READ_ONLY_COMMANDS: &[&str] = &[
+    "forge show",
     "status",
     "trailers",
     "show",
@@ -810,6 +811,11 @@ impl Ctx {
             &self.store()?,
             &state.change_id,
         )?;
+        if report.forge.is_some() {
+            report.forge_view = Some(crate::forge_view::build(
+                &self.store()?, state, &Default::default(),
+            ).unwrap_or_else(|error| serde_json::json!({"schema":"arc-forge-view/1","availability":"unavailable","diagnostic":error.to_string()})));
+        }
         Ok(report)
     }
 
@@ -846,6 +852,10 @@ impl Ctx {
             crate::replica::integration_refusal(store)?,
         );
         provisional::attach_pending_transition(&mut report, &self.cwd, store, &state.change_id)?;
+        if report.forge.is_some() {
+            report.forge_view = Some(crate::forge_view::build(store, state, &Default::default())
+                .unwrap_or_else(|error| serde_json::json!({"schema":"arc-forge-view/1","availability":"unavailable","diagnostic":error.to_string()})));
+        }
         Ok(report)
     }
 }
@@ -1195,6 +1205,7 @@ pub enum ListFormat {
 }
 
 pub struct QueryArgs {
+    pub forge: Option<String>,
     pub status: Option<String>,
     pub target: Option<String>,
     pub tags: Vec<String>,

@@ -39,6 +39,7 @@ fn is_false(value: &bool) -> bool {
 /// shipped, and the dispositions recorded after integration.
 #[derive(Serialize)]
 struct ReviewOpenFinding<'a> {
+    forge_sources: &'a [crate::forge_observation::ForgeSource],
     #[serde(flatten)]
     summary: &'a FindingSummary,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -47,6 +48,9 @@ struct ReviewOpenFinding<'a> {
 
 #[derive(Serialize)]
 struct ReviewVerdict<'a> {
+    forge_sources: &'a [crate::forge_observation::ForgeSource],
+    forge_frontier: &'a Option<Vec<String>>,
+    forge_drift: Vec<String>,
     verdict: Verdict,
     causes: &'a [ReviewCause],
     patchset_id: &'a str,
@@ -99,6 +103,7 @@ pub fn read_review(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
             .filter_map(|summary| {
                 let finding = state.findings.get(&summary.id)?;
                 (!finding.released()).then(|| ReviewOpenFinding {
+                    forge_sources: &finding.forge_sources,
                     summary,
                     after_integration: finding.after_integration.iter().collect(),
                 })
@@ -144,6 +149,20 @@ pub fn read_review(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
                 "STALE for current head"
             }
         );
+        if !verdict.forge_sources.is_empty() || verdict.forge_frontier.is_some() {
+            println!(
+                "  - forge sources: {}",
+                serde_json::to_string(&verdict.forge_sources)?
+            );
+            println!(
+                "  - recorded forge frontier: {}",
+                serde_json::to_string(&verdict.forge_frontier)?
+            );
+            println!(
+                "  - later forge observations: {}",
+                serde_json::to_string(&verdict.forge_drift)?
+            );
+        }
         if let Some(reason) = verdict.provisional {
             println!(
                 "  - provisional{}: {}",
@@ -271,6 +290,9 @@ fn review_verdict<'a>(
         .iter()
         .find(|patchset| patchset.id == verdict.patchset_id);
     ReviewVerdict {
+        forge_sources: &verdict.forge_sources,
+        forge_frontier: &verdict.forge_frontier,
+        forge_drift: crate::forge_view::drift(state, verdict),
         verdict: verdict.verdict,
         causes: &verdict.causes,
         patchset_id: &verdict.patchset_id,
@@ -972,6 +994,7 @@ pub fn finding(
     severity: Severity,
     patchset: Option<String>,
     anchor_args: &AnchorArgs,
+    forge_source: &[String],
 ) -> Result<()> {
     let store = ctx.store()?;
     let (change_id, _transition, st) = locked_state(&store, reference)?;
@@ -979,6 +1002,7 @@ pub fn finding(
     let anchor = build_anchor(ctx, &st, patchset_id.as_deref(), anchor_args)?;
     let finding_id = ids::new_finding_id();
     let payload = Payload::FindingAdded {
+        forge_sources: crate::forge_observation::resolve_sources(&st.forge, forge_source)?,
         finding_id: finding_id.clone(),
         blocking,
         severity,
@@ -1138,6 +1162,7 @@ pub fn resolve(
 }
 
 pub struct ReviewArgs {
+    pub forge_source: Vec<String>,
     pub verdict: Verdict,
     pub relation: VerdictRelationKind,
     pub body: Option<String>,
@@ -1156,6 +1181,7 @@ pub struct ReviewArgs {
 
 pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
     let ReviewArgs {
+        forge_source,
         verdict,
         relation,
         body,
@@ -1219,6 +1245,13 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
     // Authority remains fixed through the judgment's recorded observation.
     let _authority = crate::replica::lock(&store)?;
     let transition = store.lock_transition(&change_id)?;
+    let source_state = store.state(&change_id)?;
+    let forge_sources =
+        crate::forge_observation::resolve_sources(&source_state.forge, &forge_source)?;
+    let inline_sources = finding_inputs
+        .iter()
+        .map(|f| crate::forge_observation::resolve_sources(&source_state.forge, &f.forge_sources))
+        .collect::<Result<Vec<_>>>()?;
     let snapshot_patchset = if snapshot_first {
         let st = store.state(&change_id)?;
         if gitio::current_branch(&ctx.cwd)?.as_deref() != Some(st.branch.as_str())
@@ -1269,7 +1302,11 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
 
     let inline: Vec<InlineFinding> = finding_inputs
         .into_iter()
-        .map(|f| {
+        .zip(inline_sources)
+        .map(|(f, mut sources)| {
+            sources.extend(forge_sources.clone());
+            sources.sort();
+            sources.dedup();
             let anchor = f.anchor.map(|a| {
                 let anchor_args = AnchorArgs {
                     path: Some(a.path),
@@ -1283,6 +1320,7 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
                     .flatten()
             });
             InlineFinding {
+                forge_sources: sources,
                 finding_id: ids::new_finding_id(),
                 blocking: f.blocking,
                 severity: f.severity,
@@ -1298,6 +1336,14 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
         println!("relation: {}", relation.description());
     }
     let payload = Payload::VerdictRecorded {
+        forge_sources,
+        forge_frontier: Some(
+            st.forge
+                .observations
+                .iter()
+                .map(|r| r.event_id.clone())
+                .collect(),
+        ),
         patchset_id: patchset_id.clone(),
         verdict,
         authority_observed: crate::replica::observed_authority(&store)?,
@@ -1448,7 +1494,14 @@ struct InputFields {
 /// ignores one.
 const FINDING_FIELDS: InputFields = InputFields {
     reads: "a finding",
-    fields: &["blocking", "severity", "summary", "body", "anchor"],
+    fields: &[
+        "blocking",
+        "severity",
+        "summary",
+        "body",
+        "anchor",
+        "forge_sources",
+    ],
     aliases: &[
         ("block", "blocking"),
         ("blocked", "blocking"),
@@ -1630,10 +1683,14 @@ pub(crate) fn parse_inline_findings(src: Option<&str>) -> Result<Vec<InlineFindi
     read_finding_inputs(src)?
         .into_iter()
         .map(|f| {
+            if !f.forge_sources.is_empty() {
+                bail!("audit findings do not accept forge_sources; use a local review binding");
+            }
             if f.anchor.is_some() {
                 bail!("audit findings cannot carry a line anchor; anchors resolve through a patchset diff");
             }
             Ok(InlineFinding {
+                forge_sources: Vec::new(),
                 finding_id: ids::new_finding_id(),
                 blocking: f.blocking,
                 severity: f.severity,

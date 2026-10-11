@@ -303,6 +303,33 @@ impl Custody {
         inspect(&self.path(&content.sha256), content)
     }
 
+    /// Read exact bytes from one regular descriptor, checking its length and digest.
+    pub fn read_bytes(&self, content: &Content) -> Result<Vec<u8>> {
+        ensure!(is_digest(&content.sha256), "invalid custody digest");
+        const O_NOFOLLOW: i32 = 0x20000;
+        const O_NONBLOCK: i32 = 0x800;
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW | O_NONBLOCK)
+            .open(self.path(&content.sha256))?;
+        ensure!(
+            file.metadata()?.is_file(),
+            "custody source is not a regular file"
+        );
+        let mut bytes = Vec::new();
+        file.take(content.byte_length.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() as u64 == content.byte_length,
+            "custody length mismatch"
+        );
+        ensure!(
+            hex::encode(Sha256::digest(&bytes)) == content.sha256,
+            "custody digest mismatch"
+        );
+        Ok(bytes)
+    }
+
     /// Publish a regular file's bytes under their digest. Bytes already held
     /// and verified are left alone; damaged ones are replaced.
     pub fn install(&self, content: &Content, source: &Path) -> Result<Installed> {

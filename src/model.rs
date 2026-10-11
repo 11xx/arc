@@ -122,10 +122,21 @@ pub struct ExternalThreadRef {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum BriefCause {
-    Finding { finding_id: String },
-    Verdict { event_id: String },
-    BlockedOnStage { event_id: String },
-    External { summary: String },
+    Finding {
+        finding_id: String,
+    },
+    Verdict {
+        event_id: String,
+    },
+    BlockedOnStage {
+        event_id: String,
+    },
+    External {
+        summary: String,
+    },
+    Forge {
+        source: crate::forge_observation::ForgeSource,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -992,6 +1003,8 @@ pub enum Payload {
         anchor: Option<Anchor>,
     },
     FindingAdded {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        forge_sources: Vec<crate::forge_observation::ForgeSource>,
         finding_id: String,
         blocking: bool,
         severity: Severity,
@@ -1023,6 +1036,10 @@ pub enum Payload {
         supersedes: Vec<String>,
     },
     VerdictRecorded {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        forge_sources: Vec<crate::forge_observation::ForgeSource>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        forge_frontier: Option<Vec<String>>,
         patchset_id: String,
         verdict: Verdict,
         /// Publication authority observed while recording the judgment; grants no review eligibility.
@@ -2316,6 +2333,8 @@ pub struct Anchor {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InlineFinding {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forge_sources: Vec<crate::forge_observation::ForgeSource>,
     pub finding_id: String,
     pub blocking: bool,
     pub severity: Severity,
@@ -2343,6 +2362,8 @@ pub struct ExternalFinding {
 /// assigned by the CLI at write time.
 #[derive(Debug, Clone, Deserialize)]
 pub struct FindingInput {
+    #[serde(default)]
+    pub forge_sources: Vec<String>,
     #[serde(default)]
     pub blocking: bool,
     pub severity: Severity,

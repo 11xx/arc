@@ -48,7 +48,7 @@ pub fn parse_promotion_ref(reference: &str) -> Option<(&str, &str)> {
         .split_once('/')
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Registration {
     pub candidate_id: String,
     pub tree: String,
@@ -83,7 +83,7 @@ pub struct Judgement {
 
 /// Execution evidence a candidate received from outside this ledger. It
 /// is the sender's claim and no evaluation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Received {
     pub evidence: ReceivedEvidence,
     pub event_id: String,
@@ -108,7 +108,7 @@ pub struct Evaluation {
 }
 
 /// A permitted selection and the basis it rests on.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Selection {
     pub event_id: String,
     pub candidate_id: String,
@@ -128,7 +128,7 @@ pub struct Selection {
 }
 
 /// A selection's observed effect.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Promotion {
     pub event_id: String,
     pub change_id: String,

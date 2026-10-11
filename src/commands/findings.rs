@@ -44,6 +44,12 @@ pub fn findings(ctx: &Ctx, reference: &str, format: FindingsFormat, audit: bool)
                     finding.severity,
                     finding.summary
                 );
+                for source in &finding.forge_sources {
+                    println!(
+                        "  forge source: {}:{}",
+                        source.observation_id, source.generation_id
+                    );
+                }
                 if let Some(patchset_id) = &finding.patchset_id {
                     println!("  against: {patchset_id}");
                 }
@@ -136,7 +142,7 @@ pub fn findings(ctx: &Ctx, reference: &str, format: FindingsFormat, audit: bool)
                         // The one-line summary stays addressable on its own,
                         // for a consumer that wants a label rather than the
                         // whole finding.
-                        "properties": { "summary": finding.summary },
+                        "properties": { "summary": finding.summary, "forge_sources": finding.forge_sources },
                     });
                     if let Some(anchor) = &finding.anchor {
                         // A region whose end precedes its start is not valid

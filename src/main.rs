@@ -14,6 +14,7 @@ mod declarations;
 mod explain;
 mod forge;
 mod forge_observation;
+mod forge_view;
 mod gates;
 mod gitio;
 mod guide;
@@ -465,6 +466,9 @@ enum Cmd {
         /// matches this revision (unique prefix accepted)
         #[arg(long)]
         commit: Option<String>,
+        /// Recorded identities, including superseded links: PROVIDER:HOST/OWNER/REPO#NUMBER
+        #[arg(long, conflicts_with = "commit")]
+        forge: Option<String>,
         /// Only changes that integrated owing a review nobody has recorded yet
         #[arg(long = "debt")]
         debt: bool,
@@ -477,7 +481,8 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Render one change (Markdown, or full state with --json)
+    /// Render one change with offline forge reconstruction, freshness, custody
+    /// availability and review drift (Markdown, or full state with --json)
     /// Forge views preserve provider-observed SHAs beside nullable local rewrite
     /// successors; observed and resolved head matches compare with the
     /// patchset's approval anchor, not a content or trailer rewrite successor.
@@ -555,6 +560,8 @@ enum Cmd {
     /// print as model not recorded. JSON production identities and review coverage retain raw values
     /// with model_recorded: false; valid models omit the flag.
     /// Audit and verdict detail text validates models against their recorded sessions.
+    /// Forge content follows change knowledge; repository and rewrite frontiers
+    /// and current custody availability remain separately named reads
     Explain {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -573,7 +580,8 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Print the change's recorded facts one line each, in ledger order. A
+    /// Print recorded facts and offline forge reconstruction with freshness,
+    /// custody availability and review drift. Events are in ledger order. A
     /// review batch records several, so it renders as several lines. This is
     /// the ledger, not Git history: for commits, use `git log`. Model sources,
     /// observation coordinates, and declaration disagreements accompany each fact
@@ -762,7 +770,7 @@ enum Cmd {
         withdraw_probe: Vec<String>,
         /// Earlier ledger fact that caused this version (repeatable):
         /// finding:<id>, verdict:<event> naming a changes-requested verdict,
-        /// or blocked-on:<event>, each on this change. v1 refuses a cause;
+        /// blocked-on:<event>, or forge:<observation>:<generation>, each on this change. v1 refuses a cause;
         /// every later version requires at least one, from this flag or
         /// --cause-note
         #[arg(long)]
@@ -1584,6 +1592,9 @@ enum Cmd {
         /// Patchset the finding is against (defaults to the latest)
         #[arg(long)]
         patchset: Option<String>,
+        /// Exact observed content used by this finding (repeatable OBS:GENERATION)
+        #[arg(long)]
+        forge_source: Vec<String>,
         #[command(flatten)]
         anchor: AnchorOpts,
     },
@@ -1685,6 +1696,11 @@ enum Cmd {
         /// verdict
         #[arg(long, value_enum)]
         cause: Vec<ReviewCause>,
+        /// Exact observed content used by this judgment and inline findings
+        /// (repeatable OBS:GENERATION). Later forge edits expose drift and
+        /// never invalidate this local verdict
+        #[arg(long)]
+        forge_source: Vec<String>,
         /// Findings batch: a path to a JSON array, or '-' for stdin. Each
         /// element is an object with a required `severity` (critical, major,
         /// minor, or note) and `summary` (string), and optional `blocking`
@@ -1697,7 +1713,8 @@ enum Cmd {
         /// `line_end`, or one edit away) refuses the batch; any other is
         /// ignored with a warning, except a finding's `id`, ignored silently
         /// because IDs are assigned by arc. An approval cannot carry a
-        /// blocking finding
+        /// blocking finding. Optional forge_sources is an array of exact
+        /// OBS:GENERATION references; review-level sources are inherited
         #[arg(long)]
         findings_json: Option<String>,
         /// What this verdict does to the verdicts already standing on the
@@ -3012,6 +3029,34 @@ enum HooksCmd {
 
 #[derive(Subcommand)]
 enum ForgeCmd {
+    /// Reconstruct recorded forge content offline. Observation selection freezes
+    /// forge content; local rewrite resolution and custody availability are current
+    /// reads. This command records nothing and never contacts a provider.
+    Show {
+        #[arg(conflicts_with_all = ["provider", "host", "repo", "pr"])]
+        change: Option<String>,
+        #[arg(long, requires_all = ["host", "repo", "pr"])]
+        provider: Option<String>,
+        #[arg(long, requires_all = ["provider", "repo", "pr"])]
+        host: Option<String>,
+        #[arg(long, requires_all = ["provider", "host", "pr"])]
+        repo: Option<String>,
+        #[arg(long, requires_all = ["provider", "host", "repo"])]
+        pr: Option<u64>,
+        /// Include every observation through the selected read
+        #[arg(long)]
+        history: bool,
+        /// Exact observation event or read ID; exposes historical acquisition freshness
+        #[arg(long)]
+        observation: Option<String>,
+        /// Emit exact custody bytes to stdout, metadata to stderr. JSON uses
+        /// base64; unavailable bytes are null, never an invented empty body
+        #[arg(long)]
+        body: Option<String>,
+        /// Emit arc-forge-view/1
+        #[arg(long)]
+        json: bool,
+    },
     /// Admit an adapter arc-forge-observation/1 file, including failed or
     /// truncated reads. Records references only, never fetches bytes or
     /// changes readiness. Retries of identical read IDs return the receipt.
@@ -4504,6 +4549,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             actor,
             harness,
             commit,
+            forge,
             debt,
             provisional,
             json,
@@ -4514,6 +4560,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 commands::query(
                     &ctx,
                     QueryArgs {
+                        forge,
                         status,
                         target,
                         tags: tag,
@@ -5146,6 +5193,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             severity,
             patchset,
             anchor,
+            forge_source,
         } => {
             let change = infer(change.as_deref())?;
             let text = match (&body.body, &body.body_file) {
@@ -5161,6 +5209,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 severity,
                 patchset,
                 &anchor.to_args(),
+                &forge_source,
             )?;
             Ok(0)
         }
@@ -5204,6 +5253,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             attribution,
             patchset,
             cause,
+            forge_source,
             findings_json,
             provisional,
             route_version,
@@ -5218,6 +5268,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     &ctx,
                     &change,
                     commands::ReviewArgs {
+                        forge_source,
                         verdict,
                         relation,
                         body,
@@ -5237,6 +5288,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     || snapshot
                     || patchset.is_some()
                     || !cause.is_empty()
+                    || !forge_source.is_empty()
                     || findings_json.is_some()
                 {
                     anyhow::bail!("--verdict is required for the review write path");
@@ -5557,6 +5609,42 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             Ok(0)
         }
         Cmd::Forge { cmd } => match cmd {
+            ForgeCmd::Show {
+                change,
+                provider,
+                host,
+                repo,
+                pr,
+                history,
+                observation,
+                body,
+                json,
+            } => {
+                let identity = provider
+                    .map(|provider| {
+                        forge_view::Identity::parse(&format!(
+                            "{}:{}/{}#{}",
+                            provider,
+                            host.unwrap(),
+                            repo.unwrap(),
+                            pr.unwrap()
+                        ))
+                    })
+                    .transpose()?;
+                forge_view::show(
+                    &ctx,
+                    change.as_deref(),
+                    identity,
+                    forge_view::Options {
+                        history,
+                        observation,
+                        body,
+                        ..Default::default()
+                    },
+                    json,
+                )?;
+                Ok(0)
+            }
             ForgeCmd::Observe {
                 change,
                 file,

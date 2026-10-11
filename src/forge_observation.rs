@@ -752,6 +752,7 @@ pub fn validate_import_admission(
         if !introduced.contains(&event.event_id) {
             continue;
         }
+        validate_binding_references(&events[..index], &event.payload)?;
         let source = match &event.payload {
             Payload::ForgeObservationRecorded { observation } => Some(observation),
             Payload::ForgeLink {
@@ -897,4 +898,121 @@ mod tests {
         renamed.repository = "other/project".into();
         assert!(!named.same_pr_identity_as(&renamed));
     }
+}
+
+/// Exact immutable source content used by a local judgment or contract.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForgeSource {
+    pub observation_id: String,
+    pub generation_id: String,
+}
+
+pub fn resolve_source(forge: &crate::forge::ForgeState, raw: &str) -> Result<ForgeSource> {
+    let (observation, generation) = raw
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("forge source must be OBS:GENERATION"))?;
+    let record = find_observation(forge, observation)?;
+    ensure!(
+        record
+            .document
+            .generations
+            .iter()
+            .any(|g| g.generation_id == generation),
+        "generation {generation} is not on observation {observation}"
+    );
+    Ok(ForgeSource {
+        observation_id: record.event_id.clone(),
+        generation_id: generation.into(),
+    })
+}
+
+pub fn find_observation<'a>(
+    forge: &'a crate::forge::ForgeState,
+    raw: &str,
+) -> Result<&'a ObservationRecord> {
+    let records: Vec<_> = forge
+        .observations
+        .iter()
+        .filter(|r| r.names_event(raw) || r.document.read_id == raw)
+        .collect();
+    match records.as_slice() {
+        [record] if record.usable() => Ok(record),
+        _ => bail!("observation {raw} must name one usable exact recorded read"),
+    }
+}
+
+pub fn resolve_sources(
+    forge: &crate::forge::ForgeState,
+    raw: &[String],
+) -> Result<Vec<ForgeSource>> {
+    let mut sources = raw
+        .iter()
+        .map(|s| resolve_source(forge, s))
+        .collect::<Result<Vec<_>>>()?;
+    sources.sort();
+    sources.dedup();
+    Ok(sources)
+}
+
+/// Bindings name original events and generations, independently of later
+/// observation conflicts, body edits or custody loss.
+fn validate_binding_references(
+    history: &[crate::model::Event],
+    payload: &crate::model::Payload,
+) -> Result<()> {
+    use crate::model::{BriefCause, Payload};
+    let sources: Vec<&ForgeSource> = match payload {
+        Payload::FindingAdded { forge_sources, .. } => forge_sources.iter().collect(),
+        Payload::VerdictRecorded {
+            forge_sources,
+            findings,
+            ..
+        } => forge_sources
+            .iter()
+            .chain(findings.iter().flat_map(|f| &f.forge_sources))
+            .collect(),
+        Payload::BriefRecorded { caused_by, .. } => caused_by
+            .iter()
+            .filter_map(|cause| match cause {
+                BriefCause::Forge { source } => Some(source),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    for source in sources {
+        let document = history
+            .iter()
+            .find_map(|event| match &event.payload {
+                Payload::ForgeObservationRecorded { observation }
+                    if event.event_id == source.observation_id =>
+                {
+                    Some(observation)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| anyhow::anyhow!("forge binding names no prior observation event"))?;
+        ensure!(
+            document
+                .generations
+                .iter()
+                .any(|g| g.generation_id == source.generation_id),
+            "forge binding names no generation on its observation"
+        );
+    }
+    if let Payload::VerdictRecorded {
+        forge_frontier: Some(frontier),
+        ..
+    } = payload
+    {
+        ensure!(
+            frontier
+                .iter()
+                .all(|id| history.iter().any(|event| &event.event_id == id
+                    && matches!(event.payload, Payload::ForgeObservationRecorded { .. }))),
+            "verdict forge frontier names no prior observation event"
+        );
+    }
+    Ok(())
 }

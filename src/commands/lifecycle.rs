@@ -660,15 +660,36 @@ pub fn query(ctx: &Ctx, args: QueryArgs) -> Result<()> {
             );
         }
     }
-    let store = ctx.store()?;
+    let forge_identity = args
+        .forge
+        .as_deref()
+        .map(crate::forge_view::Identity::parse)
+        .transpose()?;
+    let store = if args.forge.is_some() {
+        match crate::store::Store::discover_existing_for_reading(&ctx.cwd)? {
+            Some(store) => store,
+            None => {
+                if args.json {
+                    println!("[]");
+                }
+                return Ok(());
+            }
+        }
+    } else {
+        ctx.store()?
+    };
     let states = store.readable_states()?;
     let tags = normalize_tags(args.tags)?;
     let selected = states
         .values()
         .filter(|state| {
-            args.status
-                .as_deref()
-                .is_none_or(|wanted| status_matches(state, wanted))
+            forge_identity
+                .as_ref()
+                .is_none_or(|identity| identity.matches(state))
+                && args
+                    .status
+                    .as_deref()
+                    .is_none_or(|wanted| status_matches(state, wanted))
                 && args
                     .target
                     .as_deref()
@@ -755,6 +776,9 @@ fn resolve_brief_causes(
             bail!("--caused-by {raw} has an empty reference");
         }
         causes.push(match kind {
+            "forge" => BriefCause::Forge {
+                source: crate::forge_observation::resolve_source(&state.forge, reference)?,
+            },
             "finding" => BriefCause::Finding {
                 finding_id: state.resolve_finding_id(reference)?,
             },
@@ -784,7 +808,9 @@ fn resolve_brief_causes(
                     "blocked-on stage",
                 )?,
             },
-            other => bail!("unknown cause kind {other}; expected finding, verdict, or blocked-on"),
+            other => {
+                bail!("unknown cause kind {other}; expected finding, verdict, blocked-on, or forge")
+            }
         });
     }
     if let Some(summary) = cause_note {
@@ -1329,7 +1355,15 @@ pub fn status_cmd(
             status_output(ctx, &store, &st)?
         }
     };
-    print_projected(serde_json::to_value(output)?, get, fields)?;
+    let mut value = serde_json::to_value(output)?;
+    if let Some(at) = at {
+        if let Some(view) = value.get_mut("forge_view") {
+            view["reader_options"]["change_at"] = serde_json::json!(at);
+            view["frontiers"]["change_knowledge_at"] = serde_json::json!(at);
+            view["freshness_scope"] = serde_json::json!("change knowledge at event");
+        }
+    }
+    print_projected(value, get, fields)?;
     Ok(())
 }
 
@@ -1518,7 +1552,18 @@ fn show(
         None => store.state(&change_id)?,
     };
     if json {
-        println!("{}", serde_json::to_string_pretty(&st)?);
+        let mut value = serde_json::to_value(&st)?;
+        if st.profile == "forge" || !st.forge.is_empty() {
+            value["forge_view"] = crate::forge_view::build(
+                &store,
+                &st,
+                &crate::forge_view::Options {
+                    change_at: at.map(str::to_string),
+                    ..Default::default()
+                },
+            )?;
+        }
+        println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         let states = store.readable_states()?;
         let report = match at {

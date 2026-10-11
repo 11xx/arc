@@ -434,6 +434,8 @@ pub struct CaptureRow {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Explanation {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forge_view: Option<serde_json::Value>,
     pub schema: &'static str,
     pub change_id: String,
     pub slug: String,
@@ -460,7 +462,15 @@ pub fn explain(ctx: &Ctx, reference: &str, at: Option<&str>, json: bool) -> Resu
     if json {
         println!("{}", serde_json::to_string_pretty(&explanation)?);
     } else {
-        print!("{}", render(&explanation));
+        print!(
+            "{}{}",
+            render(&explanation),
+            explanation
+                .forge_view
+                .as_ref()
+                .map(crate::forge_view::render)
+                .unwrap_or_default()
+        );
     }
     Ok(())
 }
@@ -576,6 +586,18 @@ fn build(ctx: &Ctx, reference: &str, at: Option<&str>) -> Result<Explanation> {
     }
 
     Ok(Explanation {
+        forge_view: if subject_state.profile == "forge" || !subject_state.forge.is_empty() {
+            Some(crate::forge_view::build(
+                &store,
+                &subject_state,
+                &crate::forge_view::Options {
+                    change_at: at.map(str::to_string),
+                    ..Default::default()
+                },
+            )?)
+        } else {
+            None
+        },
         schema: EXPLAIN_SCHEMA,
         change_id: full.change_id.clone(),
         slug: full.slug.clone(),
@@ -1613,6 +1635,10 @@ fn describe(detail: &Detail) -> String {
             Some(BriefCause::BlockedOnStage { event_id }) => {
                 format!("caused by blocked-on stage {event_id}")
             }
+            Some(BriefCause::Forge { source }) => format!(
+                "caused by forge {}:{}",
+                source.observation_id, source.generation_id
+            ),
             Some(BriefCause::External { summary }) => format!("caused by: {summary}"),
             None => "cause".to_string(),
         },

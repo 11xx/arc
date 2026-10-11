@@ -1119,6 +1119,8 @@ mod tests {
                 "2",
                 45,
                 Payload::VerdictRecorded {
+                    forge_frontier: None,
+                    forge_sources: Vec::new(),
                     patchset_id: "ps-01".into(),
                     verdict: Verdict::Approved,
                     authority_observed: None,

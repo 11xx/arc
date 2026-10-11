@@ -277,6 +277,7 @@ pub struct DispositionEntry {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FindingState {
+    pub forge_sources: Vec<crate::forge_observation::ForgeSource>,
     pub id: String,
     pub blocking: bool,
     pub severity: Severity,
@@ -383,6 +384,8 @@ impl FindingState {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct VerdictEntry {
+    pub forge_sources: Vec<crate::forge_observation::ForgeSource>,
+    pub forge_frontier: Option<Vec<String>>,
     pub origin_replica_id: String,
     pub event_id: String,
     pub patchset_id: String,
@@ -2256,6 +2259,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 replies: Vec::new(),
             }),
             Payload::FindingAdded {
+                forge_sources,
                 finding_id,
                 blocking,
                 severity,
@@ -2267,6 +2271,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 state.findings.insert(
                     finding_id.clone(),
                     FindingState {
+                        forge_sources: forge_sources.clone(),
                         id: finding_id.clone(),
                         blocking: *blocking,
                         severity: *severity,
@@ -2315,6 +2320,8 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 });
             }
             Payload::VerdictRecorded {
+                forge_sources,
+                forge_frontier,
                 patchset_id,
                 verdict,
                 authority_observed,
@@ -2329,6 +2336,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     state.findings.insert(
                         inline.finding_id.clone(),
                         FindingState {
+                            forge_sources: inline.forge_sources.clone(),
                             id: inline.finding_id.clone(),
                             blocking: inline.blocking,
                             severity: inline.severity,
@@ -2347,6 +2355,8 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     );
                 }
                 state.verdicts.push(VerdictEntry {
+                    forge_sources: forge_sources.clone(),
+                    forge_frontier: forge_frontier.clone(),
                     origin_replica_id: ev.repository_id.clone(),
                     event_id: ev.event_id.clone(),
                     patchset_id: patchset_id.clone(),
@@ -2499,6 +2509,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     state.audit_findings.insert(
                         inline.finding_id.clone(),
                         FindingState {
+                            forge_sources: inline.forge_sources.clone(),
                             id: inline.finding_id.clone(),
                             blocking: inline.blocking,
                             severity: inline.severity,
@@ -2542,6 +2553,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 state.audit_findings.insert(
                     finding_id.clone(),
                     FindingState {
+                        forge_sources: Vec::new(),
                         id: finding_id.clone(),
                         blocking: *blocking,
                         severity: *severity,
@@ -3790,6 +3802,7 @@ mod tests {
             supersedes: supersedes.iter().map(|id| id.to_string()).collect(),
         };
         let finding = |dispositions, after_integration| FindingState {
+            forge_sources: Vec::new(),
             id: "f1".into(),
             blocking: false,
             severity: Severity::Minor,
@@ -3938,6 +3951,8 @@ mod tests {
         ev(
             change,
             Payload::VerdictRecorded {
+                forge_frontier: None,
+                forge_sources: Vec::new(),
                 patchset_id: patchset.into(),
                 verdict: Verdict::Approved,
                 authority_observed: None,
@@ -4130,6 +4145,7 @@ mod tests {
         events.push(ev(
             change,
             Payload::FindingAdded {
+                forge_sources: Vec::new(),
                 finding_id: "f1".into(),
                 blocking: true,
                 severity: Severity::Major,

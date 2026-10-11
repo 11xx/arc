@@ -516,6 +516,8 @@ mod tests {
 
     fn verdict(verdict: Verdict, actor: &str) -> VerdictEntry {
         VerdictEntry {
+            forge_frontier: None,
+            forge_sources: Vec::new(),
             origin_replica_id: "repo".into(),
             event_id: format!("verdict-{actor}"),
             patchset_id: "ps-2".into(),

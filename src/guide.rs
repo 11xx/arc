@@ -1692,6 +1692,30 @@ PROFILES (--profile, default local)
   Never keep an undersized profile just because the change started there.
 
 FORGE
+  query --forge PROVIDER:HOST/OWNER/REPO#NUMBER searches all recorded identities,
+  including superseded links, returning every matching change. Arc never
+  contacts a provider. forge show CHANGE [--history] [--observation OBS]
+  [--body GENERATION] [--json] reconstructs held evidence. The alternate
+  forge show --provider P --host H --repo OWNER/REPO --pr N returns all matches.
+  arc-forge-view/1 includes observations, generations, coverage, custody
+  availability, patchsets, candidates, runs, acceptance and review bindings.
+  show, status, log and explain carry the same reconstruction facts.
+  show --json and status keep recorded forge state in forge and current reads
+  in forge_view. Exact provider lookup requires a recorded provider identity;
+  a legacy link without one does not establish a provider coordinate.
+  --observation names an exact event or read ID and freezes forge content and
+  its acquisition-history frontier. Local rewrite resolution and current byte
+  availability are separate reads. Change and repository event frontiers and
+  reader options are included; explain --at bounds change knowledge, while
+  repository history, rewrite resolution and retained bytes are current reads.
+  Freshness names the last successful read, latest attempt, age and clock
+  anomalies. A failed acquisition does not erase a successful retained read;
+  recording time never establishes present provider agreement.
+  --body emits exact verified retained bytes to stdout with metadata on stderr.
+  JSON carries base64 bytes or null with an availability diagnostic. Missing
+  bytes weaken only claims that need them; they imply neither empty content,
+  zero cost nor a missing judgment. forge show records nothing and creates
+  no ledger directories, refs, reports or snapshots.
   forge observe CHANGE --file frontier.json [--json] admits an adapter's
   arc-forge-observation/1 document. Admission never changes readiness. A valid
   failed or truncated read succeeds; invalid schemas, digests, references and
@@ -2065,6 +2089,15 @@ REVIEW COVERAGE AND DEBT
   independent-review debt owed.
 
 REVIEW AND REPAIR
+  finding and review accept repeatable --forge-source OBS:GENERATION. Exact
+  references must name a usable recorded observation and one of its generations;
+  canonical observation event IDs and generation IDs remain immutable. Inline
+  findings accept forge_sources as an array of OBS:GENERATION strings and
+  inherit the review's sources. A local verdict retains the forge frontier
+  present when recorded. Later observations expose drift without superseding
+  or invalidating that verdict. A received public review creates no local
+  verdict; only an explicit local judgment does. Integration authority remains
+  governed by local verdicts, findings and gates.
   Before a repair path is chosen, a finding carries the trigger and the wrong
   observable behavior, the violated contract and its source, the constraints
   a correction must preserve, and discriminating acceptance evidence in the
@@ -2637,6 +2670,8 @@ CANDIDATES
   root reaches whose pin is gone.
 
 CONTEXT
+  A brief cause forge:OBS:GENERATION binds a contract revision to exact recorded
+  forge content. It conveys source context, never operator or review authority.
     arc context read --subject <change|candidate> --episode <claim>
                      (--record <tool-record-id> --path <path> --digest <sha256:…>
                       [--lines <from>-<to> | --whole] | --from-tapes <file.json>)
@@ -3192,6 +3227,7 @@ SCHEMAS
   `arc-trailer-edits/1` are two.
 
   Commitments, derived views:
+    `arc-forge-view/1`               arc forge show --json; forge reconstruction
     `arc-state/3`                    arc show --json
     `arc-trailers/1`                 arc trailers --json
     `arc-status/27`                  arc status
