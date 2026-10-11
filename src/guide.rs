@@ -1743,7 +1743,12 @@ FORGE
   Provider-observed commits (observed head and base, merge commits, link,
   checks and lifecycle heads) are held by retention refs when this
   repository has them, and `arc export` lists them as `observed-commit`.
-  Custody travels beside an export (see export and import above).
+  Custody travels beside an export (see export and import above). `arc doctor`
+  advises `custody-content-mismatch` for a custody file whose bytes do not hash
+  to its name, which arc reads as corrupt, and `custody-temp-orphaned` for a
+  hidden temporary file an interrupted write left more than an hour ago. It
+  removes and rewrites nothing, and neither finding fails the command. A
+  custody directory that cannot be read is the problem `custody-unreadable`.
 
   coverage has overall and collections entries. Each has state (complete,
   truncated or failed), scope, optional frontier and failure_reason (required

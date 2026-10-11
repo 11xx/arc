@@ -818,6 +818,80 @@ pub fn unavailable_among(custody: &Custody, referenced: &BTreeSet<Content>) -> u
         .count()
 }
 
+/// A write that is not finished this long after it began has been abandoned.
+const ORPHANED_AFTER: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// A custody file that does not hold what its name says, or a temporary file
+/// an interrupted write left behind.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Damage {
+    Mismatch { path: PathBuf, reason: String },
+    Orphaned { path: PathBuf },
+}
+
+/// Inspect every file in custody without changing any. A file named for a
+/// digest must be a regular file whose bytes hash to that digest; a hidden
+/// temporary file is an orphan once it is old enough that no write can still
+/// be filling it. Mismatches come first.
+pub fn audit(ledger_root: &Path, now: std::time::SystemTime) -> Result<Vec<Damage>> {
+    let objects = ledger_root.join("custody").join(LAYOUT);
+    let entries = match fs::read_dir(&objects) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("cannot read {}", objects.display()))
+        }
+    };
+    let mut names = entries
+        .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    names.sort();
+    let mut mismatched = Vec::new();
+    let mut orphaned = Vec::new();
+    for name in names {
+        let path = objects.join(&name);
+        let metadata = fs::symlink_metadata(&path)?;
+        if is_digest(&name) {
+            let reason = if !metadata.file_type().is_file() {
+                Some("not a regular file".to_string())
+            } else {
+                match hash_file(&path) {
+                    Ok(actual) if actual == name => None,
+                    Ok(actual) => Some(format!("its bytes hash to {actual}")),
+                    Err(error) => Some(format!("unreadable: {error}")),
+                }
+            };
+            if let Some(reason) = reason {
+                mismatched.push(Damage::Mismatch { path, reason });
+            }
+        } else if name.starts_with('.') && name.ends_with(".tmp") {
+            let age = metadata
+                .modified()
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .unwrap_or_default();
+            if age >= ORPHANED_AFTER {
+                orphaned.push(Damage::Orphaned { path });
+            }
+        }
+    }
+    mismatched.extend(orphaned);
+    Ok(mismatched)
+}
+
+fn hash_file(path: &Path) -> std::io::Result<String> {
+    let mut file = File::open(path)?;
+    let mut hash = Sha256::new();
+    let mut buffer = vec![0u8; CHUNK];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(hex::encode(hash.finalize()));
+        }
+        hash.update(&buffer[..read]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -943,5 +1017,37 @@ mod tests {
         staged.publish().unwrap();
         assert!(destination.join(MANIFEST_FILE).is_file());
         assert_eq!(siblings(&dir.path().join("out")), 1);
+    }
+
+    #[test]
+    fn an_audit_names_damage_and_leaves_every_file_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let custody = Custody::at(dir.path());
+        let source = dir.path().join("source");
+        fs::write(&source, "body").unwrap();
+        let body = content("body");
+        custody.install(&body, &source).unwrap();
+        let now = std::time::SystemTime::now();
+        assert_eq!(audit(dir.path(), now).unwrap(), Vec::new());
+
+        fs::write(custody.path(&body.sha256), "bodies").unwrap();
+        let objects = dir.path().join("custody/sha256");
+        let temporary = objects.join(".x.tmp");
+        fs::write(&temporary, "partial").unwrap();
+        // A temporary file is an orphan only once nothing can still be writing it.
+        assert_eq!(audit(dir.path(), now).unwrap().len(), 1);
+        let later = now + ORPHANED_AFTER + std::time::Duration::from_secs(1);
+        let found = audit(dir.path(), later).unwrap();
+        assert!(
+            matches!(&found[0], Damage::Mismatch { path, .. } if path == &custody.path(&body.sha256))
+        );
+        assert_eq!(
+            found[1],
+            Damage::Orphaned {
+                path: temporary.clone()
+            }
+        );
+        assert_eq!(fs::read(custody.path(&body.sha256)).unwrap(), b"bodies");
+        assert!(temporary.exists());
     }
 }

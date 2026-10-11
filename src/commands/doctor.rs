@@ -166,6 +166,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     inspect_dangling_revisions(&ctx.cwd, &store, &states, &mut problems, &mut advice)?;
     inspect_refs(ctx, &states, &known_patchsets, &mut advice)?;
     inspect_retention(ctx, &store, &mut problems, &mut advice)?;
+    inspect_custody(&store, &mut problems, &mut advice);
     inspect_candidates(ctx, &store, &mut problems, &mut advice)?;
     // Doctor diagnoses the invoking checkout, including uncommitted
     // declarations and tracked files. A change's target would hide local
@@ -667,6 +668,45 @@ fn inspect_retention(
         });
     }
     Ok(())
+}
+
+/// The bytes custody holds against the digests that name them.
+///
+/// Custody never reads a file whose bytes fail their digest as content, so
+/// damage costs availability and nothing else: it is advice, with what
+/// restores the bytes. A hidden temporary file left by a write that never
+/// finished is housekeeping. Inspection removes and rewrites nothing.
+fn inspect_custody(store: &Store, problems: &mut Vec<Finding>, advice: &mut Vec<Finding>) {
+    let damage = match crate::custody::audit(&store.root, std::time::SystemTime::now()) {
+        Ok(damage) => damage,
+        Err(error) => {
+            problems.push(Finding {
+                code: "custody-unreadable",
+                detail: format!("{error:#}"),
+            });
+            return;
+        }
+    };
+    for damage in damage {
+        advice.push(match damage {
+            crate::custody::Damage::Mismatch { path, reason } => Finding {
+                code: "custody-content-mismatch",
+                detail: format!(
+                    "{} does not hold the bytes its name digests ({reason}), so arc reads \
+                     the content as corrupt; delete it and supply the bytes again with \
+                     `arc forge observe --custody-dir` or `arc import --custody-dir`",
+                    path.display()
+                ),
+            },
+            crate::custody::Damage::Orphaned { path } => Finding {
+                code: "custody-temp-orphaned",
+                detail: format!(
+                    "{} was left by a write that never finished; delete it",
+                    path.display()
+                ),
+            },
+        });
+    }
 }
 
 /// The candidate ledger against the pins that hold its content.

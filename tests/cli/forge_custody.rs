@@ -1097,3 +1097,67 @@ fn forge_failed_custody_export_leaves_nothing_behind() {
     assert_eq!(files_in(&parent), ["forge.custody"]);
     assert_eq!(files_in(&sidecar), ["manifest.json", "sha256"]);
 }
+
+fn doctor_custody(repo: &Repo) -> Vec<(String, String)> {
+    let report = json_stdout_any_status(repo.arc(&repo.root).args(["doctor", "--json"]));
+    ["problems", "advice"]
+        .iter()
+        .flat_map(|list| report[list].as_array().unwrap().clone())
+        .filter(|finding| finding["code"].as_str().unwrap().starts_with("custody-"))
+        .map(|finding| {
+            (
+                finding["code"].as_str().unwrap().to_string(),
+                finding["detail"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn doctor_reports_damaged_custody_and_orphaned_temporary_files() {
+    let (repo, id) = setup();
+    let supplied = repo.home.join("supplied");
+    materialize(&supplied, &["first", PAGE]);
+    observe_in(
+        &repo,
+        &id,
+        &document("read-1", "g1", "first", None),
+        Some(&supplied),
+    );
+    assert!(doctor_custody(&repo).is_empty());
+
+    let objects = repo.root.join(".git/arc/custody/sha256");
+    // A write in progress is not an orphan.
+    let fresh = objects.join(format!(".{}.fresh.tmp", digest("first")));
+    fs::write(&fresh, "partial").unwrap();
+    assert!(doctor_custody(&repo).is_empty());
+
+    let orphan = objects.join(format!(".{}.interrupted.tmp", digest("first")));
+    fs::write(&orphan, "partial").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&orphan)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(7 * 3600))
+        .unwrap();
+    fs::write(custody_file(&repo, "first"), "FIRST").unwrap();
+    let held_before = fs::read(custody_file(&repo, PAGE)).unwrap();
+
+    let found = doctor_custody(&repo);
+    let codes: Vec<_> = found.iter().map(|(code, _)| code.as_str()).collect();
+    assert_eq!(
+        codes,
+        ["custody-content-mismatch", "custody-temp-orphaned"],
+        "{found:?}"
+    );
+    assert!(found[0].1.contains(&digest("first")), "{found:?}");
+    assert!(found[1].1.contains("interrupted.tmp"), "{found:?}");
+    assert!(!found.iter().any(|(_, detail)| detail.contains("fresh.tmp")));
+
+    // Doctor only reports: nothing is removed or rewritten.
+    assert!(orphan.exists() && fresh.exists());
+    assert_eq!(fs::read(custody_file(&repo, "first")).unwrap(), b"FIRST");
+    assert_eq!(fs::read(custody_file(&repo, PAGE)).unwrap(), held_before);
+    // The damaged file is a finding that does not fail the command.
+    repo.arc(&repo.root).args(["doctor"]).assert().success();
+}

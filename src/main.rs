@@ -2437,8 +2437,13 @@ enum Cmd {
     /// retained intent and exact recovery command as problems.
     /// A `refs/arc/retained` ref whose object is gone is the problem
     /// `retained-object-missing`; a commit the ledger cites as a patchset head
-    /// or a verdict's revision that no ref reaches is the advice
-    /// `unretained-commit`, with the `git update-ref` that holds it.
+    /// or a verdict's revision, or that a forge fact records as the provider's
+    /// own, that no ref reaches is the advice `unretained-commit`, with the
+    /// `git update-ref` that holds it. A custody file whose bytes do not hash
+    /// to its name is the advice `custody-content-mismatch`, and a temporary
+    /// file an interrupted custody write left over an hour ago is the advice
+    /// `custody-temp-orphaned`; neither is removed. An unreadable custody
+    /// directory is the problem `custody-unreadable`.
     /// A failed reachability walk is the problem `retention-reachability-failed`;
     /// the report retains all findings collected before that failure.
     /// A change whose events fail to reduce is the problem `unreplayable-change`,
