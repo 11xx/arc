@@ -845,7 +845,7 @@ fn typed_consumers_tolerate_imported_unknown_event_type() {
 
 #[test]
 fn forge_rewrite_preserves_observed_shas_until_real_readback() {
-    use super::rewrite::{git_signing, signing_key};
+    use super::rewrite::{arc_signing, git_signing, signing_key};
     let repo = Repo::new();
     let key = signing_key(&repo).expect("forge successor requires a fixture signing key");
     let (_id, wt, a) = forge_change(&repo, "observed");
@@ -860,31 +860,15 @@ fn forge_rewrite_preserves_observed_shas_until_real_readback() {
         "--state",
         "passed",
     ]));
-    git_signing(
-        &wt,
-        &key,
-        &[
-            "-c",
-            &format!("user.signingkey={}", key.fingerprint),
-            "commit",
-            "--amend",
-            "-S",
-            "--no-edit",
-        ],
-    );
+    // Crossing a timestamp boundary must preserve every non-signature byte.
+    thread::sleep(Duration::from_secs(2));
+    arc_signing(&repo, &key, &wt)
+        .args(["rewrite", "sign", "--from", &a, "--key", &key.fingerprint])
+        .assert()
+        .success();
     git_signing(&wt, &key, &["verify-commit", "HEAD"]);
     let b = repo.head(&wt);
     assert_ne!(a, b);
-    let map = repo.home.join("forge-map");
-    fs::write(&map, format!("{a} {b}\n")).unwrap();
-    stdout(repo.arc(&wt).args([
-        "history",
-        "rewrite",
-        "--map",
-        map.to_str().unwrap(),
-        "--reason",
-        "signed successor",
-    ]));
     for _ in 0..2 {
         let shown: serde_json::Value =
             serde_json::from_str(&stdout(repo.arc(&wt).args(["show", "observed", "--json"])))
