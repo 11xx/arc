@@ -1764,6 +1764,21 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
         })
         .collect();
 
+    let recording_origins: BTreeMap<&str, &str> = events
+        .iter()
+        .map(|event| (event.event_id.as_str(), event.repository_id.as_str()))
+        .collect();
+    let legacy_link = |links: &[crate::forge::ForgeLinkRecord], event: &Event| {
+        links
+            .iter()
+            .rev()
+            .find(|link| {
+                recording_origins.get(link.event_id.as_str()).copied()
+                    == Some(event.repository_id.as_str())
+            })
+            .map(|link| link.event_id.clone())
+    };
+    let mut legacy_checks_binding = false;
     for ev in iter {
         crate::forge_observation::validate_projection(&ev.payload, &state.forge)?;
         match &ev.payload {
@@ -2967,12 +2982,14 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 state.forge.link = Some(record);
             }
             Payload::ForgeChecks {
+                binding_recorded,
                 link_event_id,
                 observation,
                 pr_head,
                 state: check_state,
                 detail,
             } => {
+                legacy_checks_binding = !binding_recorded && link_event_id.is_none();
                 state.forge.checks = Some(crate::forge::ForgeChecksRecord {
                     observation: observation.clone(),
                     acquisition: if observation.is_some() {
@@ -2986,9 +3003,11 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                         .map(|r| r.document.read_at),
                     observed_pr_head: pr_head.clone(),
                     resolved_pr_head: Some(pr_head.clone()),
-                    link_event_id: link_event_id
-                        .clone()
-                        .or_else(|| state.forge.link.as_ref().map(|link| link.event_id.clone())),
+                    link_event_id: if legacy_checks_binding {
+                        legacy_link(&state.forge.links, ev)
+                    } else {
+                        link_event_id.clone()
+                    },
                     state: *check_state,
                     detail: detail.clone(),
                 });
@@ -3000,16 +3019,13 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 link_event_id,
                 pr_head,
             } => {
-                // A binding naming a link this change has not recorded yet
-                // cannot describe any PR the ledger knows about. In a
-                // well-formed ledger that is impossible — events replay in ID
-                // order — so it means an imported or hand-edited history, and
-                // the honest reading is that the fact binds to nothing.
+                // Explicit bindings name a recorded link and head. Legacy
+                // readings need a prior link from their recording repository.
                 let unresolved_binding = match (link_event_id, pr_head) {
                     (Some(id), Some(_)) => {
                         !state.forge.links.iter().any(|link| link.event_id == *id)
                     }
-                    (None, None) => false,
+                    (None, None) => legacy_link(&state.forge.links, ev).is_none(),
                     _ => true,
                 };
                 state
@@ -3059,6 +3075,11 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
             // unknown events before replay, so this arm is defensive: keep the
             // raw history intact without mutating the derived view.
             Payload::Unknown => {}
+        }
+    }
+    if legacy_checks_binding && state.forge.relinked() {
+        if let Some(checks) = &mut state.forge.checks {
+            checks.link_event_id = None;
         }
     }
     for reply in replies {

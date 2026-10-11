@@ -1804,7 +1804,7 @@ fn build_report(
         &state.profile,
         latest_patchset
             .as_ref()
-            .map(|patchset| patchset.head.as_str()),
+            .map(|patchset| patchset.approved_head.as_str()),
         !state.holds.is_empty(),
     );
 

@@ -1695,9 +1695,16 @@ FORGE
   revision has a null successor. Stored event fields are raw observations.
 
   show and status expose observed_head_match and resolved_head_match against
-  the approved patchset head. A local rewrite correspondence does not supply
+  the patchset's approval anchor, which follows signature-only rewrites.
+  A content or trailer rewrite keeps the open patchset's approval anchor;
+  a fresh snapshot binds the successor. A local rewrite correspondence does not supply
   provider evidence at its successor. checks_record preserves the rollup's
-  observed_pr_head, resolved_pr_head and the link present when recorded.
+  observed_pr_head, resolved_pr_head and the link persisted when recorded.
+  Checks persist whether a binding was recorded, including an absent link.
+  Import order never supplies an explicit binding. Unbound older checks and
+  lifecycle facts can use an earlier link from their recording repository
+  only while the complete history contains one distinct link. A foreign
+  link or ambiguous history leaves the legacy binding unknown.
   Without a recorded link its PR identity is unknown. Hosted checks apply
   only to that PR identity and observed head; checks_applicable also requires
   that observed head to equal the approved head. A different PR or head

@@ -1041,3 +1041,198 @@ fn forge_checks_do_not_cross_pr_identity_at_same_head() {
         "stale"
     );
 }
+
+fn import_interleaved_checks(legacy: bool, linked: bool) {
+    let source = Repo::new();
+    let (id, wt, head) = forge_change(&source, "interleaved-checks");
+    declare_same_repo(&source, &id, "arc/interleaved-checks");
+    if linked {
+        link_at(&source, &id, "1", &head, "arc/interleaved-checks");
+    }
+    let seed = source.home.join("seed.json");
+    stdout(
+        source
+            .arc(&source.root)
+            .args(["export", &id, "--output", seed.to_str().unwrap()]),
+    );
+    let replica = Repo::new();
+    deliver_git_objects(&source, &replica);
+    stdout(
+        replica
+            .arc(&replica.root)
+            .args(["import", seed.to_str().unwrap()]),
+    );
+    link_at(&replica, &id, "2", &head, "arc/interleaved-checks");
+    stdout(
+        replica
+            .arc(&replica.root)
+            .args(["forge", "pr-state", &id, "--state", "open"]),
+    );
+    stdout(source.arc(&wt).args([
+        "forge",
+        "checks",
+        &id,
+        "--pr-head",
+        &head,
+        "--state",
+        "passed",
+    ]));
+    if legacy {
+        rewrite_event(&source, &id, "forge-checks", |e| {
+            e.as_object_mut().unwrap().remove("link_event_id");
+            e.as_object_mut().unwrap().remove("binding_recorded");
+        });
+        if linked {
+            assert_eq!(status_json(&source, &id)["forge"]["checks"], "passed");
+        }
+    }
+    let bundle = source.home.join("checks.json");
+    stdout(
+        source
+            .arc(&source.root)
+            .args(["export", &id, "--output", bundle.to_str().unwrap()]),
+    );
+    stdout(
+        replica
+            .arc(&replica.root)
+            .args(["import", bundle.to_str().unwrap()]),
+    );
+    let status = status_json(&replica, &id);
+    assert_eq!(status["forge"]["link"]["pr_number"], 2);
+    assert_eq!(status["forge"]["pr_state"]["state"], "open");
+    assert_eq!(status["forge"]["checks_applicable"], false, "{status}");
+    assert_eq!(status["forge"]["forge_ready"], false, "{status}");
+    let reexport = replica.home.join("reexport.json");
+    stdout(replica.arc(&replica.root).args([
+        "export",
+        &id,
+        "--output",
+        reexport.to_str().unwrap(),
+    ]));
+    let third = Repo::new();
+    deliver_git_objects(&source, &third);
+    stdout(
+        third
+            .arc(&third.root)
+            .args(["import", reexport.to_str().unwrap()]),
+    );
+    assert_eq!(
+        status_json(&third, &id)["forge"]["checks_applicable"],
+        false
+    );
+}
+
+#[test]
+fn forge_import_interleaving_preserves_explicit_checks_binding() {
+    import_interleaved_checks(false, true);
+}
+
+#[test]
+fn forge_import_interleaving_does_not_infer_ambiguous_legacy_checks_binding() {
+    import_interleaved_checks(true, true);
+}
+
+#[test]
+fn forge_unlinked_checks_cannot_acquire_an_imported_pr_binding() {
+    import_interleaved_checks(false, false);
+}
+
+#[test]
+fn forge_content_rewrite_compares_observations_to_approval_anchor() {
+    let repo = Repo::new();
+    let (id, wt, a) = forge_change(&repo, "approval-anchor");
+    declare_same_repo(&repo, &id, "arc/approval-anchor");
+    fs::write(wt.join("approval-anchor.txt"), "different content\n").unwrap();
+    git(&wt, &["add", "."]);
+    git(&wt, &["commit", "--amend", "--no-edit"]);
+    let b = repo.head(&wt);
+    let map = repo.home.join("content-map");
+    fs::write(&map, format!("{a} {b}\n")).unwrap();
+    stdout(repo.arc(&wt).args([
+        "history",
+        "rewrite",
+        "--map",
+        map.to_str().unwrap(),
+        "--reason",
+        "content rewrite",
+    ]));
+    let shown: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&wt).args(["show", &id, "--json"]))).unwrap();
+    assert_eq!(shown["patchsets"][0]["head"], b);
+    assert_ne!(a, b);
+    link_at(&repo, &id, "1", &b, "arc/approval-anchor");
+    stdout(
+        repo.arc(&wt)
+            .args(["forge", "checks", &id, "--pr-head", &b, "--state", "passed"]),
+    );
+    stdout(
+        repo.arc(&wt)
+            .args(["forge", "pr-state", &id, "--state", "open"]),
+    );
+    let status = status_json(&repo, &id);
+    assert_eq!(status["forge"]["observed_head_match"], false, "{status}");
+    assert_eq!(status["forge"]["checks_applicable"], false, "{status}");
+    assert_eq!(status["forge"]["forge_ready"], false, "{status}");
+    stdout(repo.arc(&wt).args(["snapshot", &id]));
+    assert_eq!(status_json(&repo, &id)["forge"]["forge_ready"], true);
+}
+
+#[test]
+fn forge_legacy_lifecycle_cannot_acquire_a_foreign_link_on_import() {
+    let source = Repo::new();
+    let (id, wt, head) = forge_change(&source, "legacy-lifecycle");
+    declare_same_repo(&source, &id, "arc/legacy-lifecycle");
+    let seed = source.home.join("seed.json");
+    stdout(
+        source
+            .arc(&source.root)
+            .args(["export", &id, "--output", seed.to_str().unwrap()]),
+    );
+    let replica = Repo::new();
+    deliver_git_objects(&source, &replica);
+    stdout(
+        replica
+            .arc(&replica.root)
+            .args(["import", seed.to_str().unwrap()]),
+    );
+    link_at(&replica, &id, "2", &head, "arc/legacy-lifecycle");
+    stdout(replica.arc(&replica.root).args([
+        "forge",
+        "checks",
+        &id,
+        "--pr-head",
+        &head,
+        "--state",
+        "passed",
+    ]));
+    stdout(source.arc(&wt).args([
+        "forge",
+        "checks",
+        &id,
+        "--pr-head",
+        &head,
+        "--state",
+        "pending",
+    ]));
+    rewrite_event(&source, &id, "forge-checks", |e| {
+        e["event_type"] = serde_json::json!("forge-pr-state");
+        e["state"] = serde_json::json!("open");
+        for field in ["pr_head", "detail", "link_event_id", "observation"] {
+            e.as_object_mut().unwrap().remove(field);
+        }
+    });
+    let bundle = source.home.join("lifecycle.json");
+    stdout(
+        source
+            .arc(&source.root)
+            .args(["export", &id, "--output", bundle.to_str().unwrap()]),
+    );
+    stdout(
+        replica
+            .arc(&replica.root)
+            .args(["import", bundle.to_str().unwrap()]),
+    );
+    let status = status_json(&replica, &id);
+    assert!(status["forge"]["pr_state"].is_null(), "{status}");
+    assert_eq!(status["forge"]["forge_ready"], false, "{status}");
+}

@@ -477,7 +477,8 @@ enum Cmd {
     },
     /// Render one change (Markdown, or full state with --json)
     /// Forge views preserve provider-observed SHAs beside nullable local rewrite
-    /// successors; observed and resolved head matches are separate diagnostics.
+    /// successors; observed and resolved head matches compare with the
+    /// patchset's approval anchor, not a content or trailer rewrite successor.
     /// Closed head drift compares with the closure's source patchset when
     /// recorded, otherwise with the newest snapshot
     /// Aggregate reads name unreadable changes with their errors on stderr
@@ -986,7 +987,8 @@ enum Cmd {
     },
     /// Machine-readable status report (the versioned arc-status/27 schema).
     /// Forge observed and resolved head matches are separate; hosted checks apply
-    /// only to their recorded PR identity and provider-observed approved head.
+    /// only to their recorded PR identity and the patchset's approval anchor.
+    /// Content and trailer rewrite successors require a fresh snapshot.
     /// Every verdict names its recorded origin, actor claims and admission
     /// provenance. Content coverage is separate from receiver gating eligibility.
     /// Readiness uses the integration shape resolved for the recorded target.
@@ -2356,6 +2358,7 @@ enum Cmd {
     /// Record local forge facts without contacting providers. Typed observation
     /// admission preserves coverage, acquisition time and generation references;
     /// legacy flag forms assert unretained facts with unknown acquisition time.
+    /// Recorded PR bindings survive import; ambiguous unbound history stays unknown.
     Forge {
         #[command(subcommand)]
         cmd: ForgeCmd,
@@ -3018,8 +3021,10 @@ enum ForgeCmd {
         head_sha: Option<String>,
     },
     /// Record the provider-observed hosted-check rollup at an exact PR head.
-    /// The current link binds its PR identity. Local rewrites never establish
-    /// hosted checks at a successor; a provider readback supplies that evidence.
+    /// The current link's identity is persisted at recording. Import order
+    /// never rebinds it; ambiguous legacy bindings remain unknown. Applicability
+    /// compares the raw head to the patchset's approval anchor. Content and
+    /// trailer rewrite successors require a fresh snapshot.
     Checks {
         /// Recorded observation event or read ID; explicit flags must agree.
         /// Without it, values are unretained assertions with unknown read time.
@@ -3046,6 +3051,8 @@ enum ForgeCmd {
     },
     /// Record the provider-observed PR lifecycle state.
     /// The head is the current link's observed head, never its local successor.
+    /// Unbound older facts need a prior link from their recording repository
+    /// and an unambiguous link history to describe the current PR.
     PrState {
         /// Recorded observation event or read ID; explicit flags must agree.
         /// Without it, values are unretained assertions with unknown read time.

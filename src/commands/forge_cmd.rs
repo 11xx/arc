@@ -287,6 +287,7 @@ pub fn forge_checks(ctx: &Ctx, reference: &str, args: ForgeChecksArgs) -> Result
         "pr-head",
     )?;
     let payload = Payload::ForgeChecks {
+        binding_recorded: true,
         link_event_id: st.forge.link.as_ref().map(|link| link.event_id.clone()),
         observation: obs.map(|r| r.event_id.clone()),
         pr_head,

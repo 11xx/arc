@@ -197,10 +197,9 @@ pub struct ForgePrStateRecord {
     /// The PR head this was observed at. `None` predates binding.
     pub observed_pr_head: Option<String>,
     pub resolved_pr_head: Option<String>,
-    /// The binding named a link this change had not recorded when the fact
-    /// was written, or named only half of one. Neither describes any PR this
-    /// ledger knows about, so the fact is never current — and it is not
-    /// legacy either, because it did try to bind.
+    /// The history cannot establish this fact's PR binding. Explicit
+    /// bindings need a recorded link and both coordinates; legacy readings
+    /// need an earlier link from their recording repository.
     #[serde(skip_serializing_if = "std::ops::Not::not", default)]
     pub unresolved_binding: bool,
 }
@@ -267,9 +266,8 @@ impl ForgeState {
     /// observed more than once at the same head.
     ///
     /// A fact written before lifecycle binding names no link or head. It is
-    /// read as current only while the change has recorded exactly one link:
-    /// with nothing to have relinked from, there is no other PR it could
-    /// have described.
+    /// read as current only with an earlier link from its recording repository
+    /// and exactly one distinct link in the complete history.
     pub fn current_pr_state(&self) -> Option<&ForgePrStateRecord> {
         let link = self.link.as_ref()?;
         // Recording the same link twice is one PR observed twice, not a

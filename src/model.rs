@@ -1443,6 +1443,8 @@ pub enum Payload {
     /// Observed hosted-check rollup at an exact PR head. Zero checks is
     /// `not-configured`/`not-triggered`, never `passed`.
     ForgeChecks {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        binding_recorded: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         link_event_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
