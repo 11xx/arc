@@ -50,7 +50,7 @@ struct ReviewOpenFinding<'a> {
 struct ReviewVerdict<'a> {
     forge_sources: &'a [crate::forge_observation::ForgeSource],
     forge_frontier: &'a Option<Vec<String>>,
-    forge_drift: Vec<String>,
+    forge_drift: Option<Vec<String>>,
     verdict: Verdict,
     causes: &'a [ReviewCause],
     patchset_id: &'a str,

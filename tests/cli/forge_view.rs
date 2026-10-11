@@ -543,3 +543,27 @@ fn forge_source_bindings_round_trip_with_their_original_frontier() {
     let held = view(&destination, &id, &["--body", "g1"]);
     assert_eq!(held["body"]["bytes"], "Zmlyc3Q=");
 }
+
+#[test]
+fn forge_legacy_verdict_has_unknown_frontier_and_drift() {
+    let (repo, id) = setup();
+    retained_pair(&repo, &id);
+    let wt = snapshot(&repo, &id);
+    stdout(
+        repo.arc(&wt)
+            .args(["review", &id, "--verdict", "comment-only"]),
+    );
+    for entry in fs::read_dir(event_dir(&repo, &id)).unwrap() {
+        let path = entry.unwrap().path();
+        let mut event: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        if event["event_type"] == "verdict-recorded" {
+            event.as_object_mut().unwrap().remove("forge_frontier");
+            fs::write(path, event.to_string()).unwrap();
+        }
+    }
+    let review: Value =
+        serde_json::from_str(&stdout(repo.arc(&wt).args(["review", &id, "--json"]))).unwrap();
+    assert!(review["verdicts"][0]["forge_frontier"].is_null());
+    assert!(review["verdicts"][0]["forge_drift"].is_null());
+    assert!(view(&repo, &id, &[])["review_bindings"][0]["later_observations"].is_null());
+}

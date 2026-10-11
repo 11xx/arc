@@ -3033,14 +3033,19 @@ enum ForgeCmd {
     /// forge content; local rewrite resolution and custody availability are current
     /// reads. This command records nothing and never contacts a provider.
     Show {
+        /// Change whose recorded forge content is reconstructed
         #[arg(conflicts_with_all = ["provider", "host", "repo", "pr"])]
         change: Option<String>,
+        /// Recorded provider identifier
         #[arg(long, requires_all = ["host", "repo", "pr"])]
         provider: Option<String>,
+        /// Recorded forge host
         #[arg(long, requires_all = ["provider", "repo", "pr"])]
         host: Option<String>,
+        /// Recorded repository as OWNER/REPO
         #[arg(long, requires_all = ["provider", "host", "pr"])]
         repo: Option<String>,
+        /// Recorded positive pull request number
         #[arg(long, requires_all = ["provider", "host", "repo"])]
         pr: Option<u64>,
         /// Include every observation through the selected read

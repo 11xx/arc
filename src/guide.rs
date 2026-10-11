@@ -2095,7 +2095,8 @@ REVIEW AND REPAIR
   findings accept forge_sources as an array of OBS:GENERATION strings and
   inherit the review's sources. A local verdict retains the forge frontier
   present when recorded. Later observations expose drift without superseding
-  or invalidating that verdict. A received public review creates no local
+  or invalidating that verdict. A verdict without a recorded frontier has
+  unknown drift. A received public review creates no local
   verdict; only an explicit local judgment does. Integration authority remains
   governed by local verdicts, findings and gates.
   Before a repair path is chosen, a finding carries the trigger and the wrong

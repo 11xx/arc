@@ -73,20 +73,16 @@ impl Identity {
     }
 }
 
-pub fn drift(state: &ChangeState, verdict: &VerdictEntry) -> Vec<String> {
-    verdict
-        .forge_frontier
-        .as_ref()
-        .map(|frontier| {
-            state
-                .forge
-                .observations
-                .iter()
-                .filter(|r| !frontier.iter().any(|id| r.names_event(id)))
-                .map(|r| r.event_id.clone())
-                .collect()
-        })
-        .unwrap_or_default()
+pub fn drift(state: &ChangeState, verdict: &VerdictEntry) -> Option<Vec<String>> {
+    verdict.forge_frontier.as_ref().map(|frontier| {
+        state
+            .forge
+            .observations
+            .iter()
+            .filter(|r| !frontier.iter().any(|id| r.names_event(id)))
+            .map(|r| r.event_id.clone())
+            .collect()
+    })
 }
 
 fn freshness(records: &[&observation::ObservationRecord], now: DateTime<Utc>) -> Value {

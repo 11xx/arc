@@ -578,7 +578,7 @@ fn findings_json_refuses_a_misspelled_field_and_warns_on_other_unknown_fields() 
     .assert()
     .success()
     .stderr(predicates::str::contains(
-        "warning: finding 1 has unknown field `tool`, which arc ignores (a finding reads blocking, severity, summary, body, anchor)",
+        "warning: finding 1 has unknown field `tool`, which arc ignores (a finding reads blocking, severity, summary, body, anchor, forge_sources)",
     ));
     assert_eq!(event_count(&repo, &change_id), before + 1);
     let findings =
