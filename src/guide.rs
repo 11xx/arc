@@ -3055,6 +3055,35 @@ RULES THAT CHANGE WHAT YOU DO
     dispatch refuses; no tuple establishes an exclusive assignment.
     Binding identities carry no `/`, `\` or `~`; a refusal names the field
     and a fixed reason without echoing a private locator.
+  - `arc cost show <change|journal-file> [--json]` reports what the executor
+    sessions bound to the selected runs consumed, and records nothing. A
+    change selects itself and the artifact it was begun from; an artifact
+    selects its `supersedes` lineage and the changes begun from any name in
+    it. A citation selects nothing, and transitions and `begin
+    --from-journal` add no consumption. Each session is measured through
+    the pinned tapes reader, or from retained facts when its source no longer
+    answers, and the report says which; a fresh read that disagrees with
+    facts retained at the same frontier shows the conflict. Direct totals
+    hold sessions whose every span is the item's, inclusive totals add the
+    artifact a change was begun from, and the union counts each session once.
+    A session spanning several items is shared beside the totals, and one
+    with several spans has no per-run figure. A harness-written dollar
+    figure is a harness-calculated estimate with an unknown pricing basis;
+    token counts are resource quantities by tapes' categories. A raw input
+    sum across harnesses is refused and other cross-harness token sums are
+    withheld; an unbound dispatch withholds its work totals; a missing amount
+    leaves a total absent beside its known subtotal, never zero. Measurement,
+    assignment, and identity coverage are reported apart, and a session that
+    acted on a selected change unbound, such as a lead, is named outside
+    assignment coverage with no figure. Pi entries on abandoned branches and
+    the residual between a recorded total and its requests are reported as
+    incomplete or withheld while the pinned reader cannot measure them.
+  - `arc cost retain <change|journal-file>` keeps, per bound session, the
+    facts a fresh read gives: reader and calculation versions, source
+    frontier and digest, counters with their basis and coverage, and any
+    harness-written dollar figure. The source bytes stay in the harness
+    store. Identical facts record nothing; retained facts are observations
+    at their frontier and are never added to one another.
   - A bounded round records what it deliberately left, so the next round
     inherits a list instead of a memory: `arc run end <dispatch> --outcome
     <o> --reviewed-head <sha> --raised-json <path|-> --deferred-json <path|->`.
@@ -3364,6 +3393,7 @@ SCHEMAS
     `arc-stats/1`                    arc stats --json
     `arc-stats-by-model/1`           arc stats --by-model --json
     `arc-stats-provenance/1`         arc stats --provenance --json
+    `arc-cost/1`                     arc cost show --json
     `arc-changelog/1`                arc changelog --json
     `arc-changelog-render-request/1` stdin of a command changelog renderer
     `arc-forks/3`                    arc fork list --json

@@ -2428,6 +2428,12 @@ enum Cmd {
         #[command(subcommand)]
         cmd: RunCmd,
     },
+    /// Report what the executor sessions bound to a change's or a journal
+    /// artifact's runs consumed, and retain the facts the report rests on
+    Cost {
+        #[command(subcommand)]
+        cmd: CostCmd,
+    },
     /// Read or write policy kept with this repository's local Arc ledger
     Policy {
         #[command(subcommand)]
@@ -4026,6 +4032,54 @@ enum RunCmd {
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum CostCmd {
+    /// Report the work cost of a change, or of a journal artifact with its
+    /// `supersedes` lineage and the changes begun from any name in it.
+    ///
+    /// Each executor session bound to a selected run is measured through the
+    /// pinned tapes reader over its whole recording, or, when the source no
+    /// longer answers, from the facts `cost retain` kept, and the report says
+    /// which. A fresh read that disagrees with facts retained at the same
+    /// frontier shows the conflict. Direct totals count sessions whose every
+    /// span is the item's; inclusive totals for a change add the journal
+    /// artifact it was begun from; the union counts each session once over
+    /// the selection. A session with spans on several items is listed as
+    /// shared beside the totals, and a session with several spans carries no
+    /// per-run figure. Every total names its quantity kind: the dollar figure
+    /// a harness wrote is a harness-calculated estimate with an unknown
+    /// pricing basis, and token counts are resource quantities by tapes'
+    /// categories. A raw input sum across harnesses is refused, other token
+    /// sums across harnesses are withheld, an unbound dispatch withholds its
+    /// work totals, and a missing amount leaves a total absent beside the
+    /// known subtotal, never zero. Measurement, assignment, and identity
+    /// coverage are reported apart; sessions that acted on a selected change
+    /// without a binding, such as a lead, are named outside assignment
+    /// coverage with no figure. Transitions and `begin --from-journal` add
+    /// no consumption. `--json` emits `arc-cost/1`
+    /// Records no events; ledger reads do not require a parseable append policy.
+    Show {
+        /// Change ID or unique prefix, or a journal artifact: a filename in
+        /// this project's journal or <journal-dir>::<file>
+        target: String,
+        /// Emit the machine-readable JSON view instead of text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Retain the normalized facts a fresh read of each bound session gives:
+    /// the reader and calculation versions, the source frontier and digest,
+    /// the counters by tapes' categories with their basis and coverage, and
+    /// any harness-written dollar figure. The source bytes stay in the
+    /// harness store. Facts identical to ones already retained for a session
+    /// record nothing and print the held event; a session whose source does
+    /// not answer is reported and skipped
+    Retain {
+        /// Change ID or unique prefix, or a journal artifact, as `cost show`
+        /// takes it
+        target: String,
     },
 }
 
@@ -6101,6 +6155,10 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 Ok(0)
             }
         },
+        Cmd::Cost { cmd } => match cmd {
+            CostCmd::Show { target, json } => commands::show_cost(&ctx, &target, json).map(|_| 0),
+            CostCmd::Retain { target } => commands::retain_cost(&ctx, &target).map(|_| 0),
+        },
         Cmd::Policy { cmd } => match cmd {
             PolicyCmd::Show => commands::policy_show(&ctx),
             PolicyCmd::Path => commands::policy_path(&ctx),
@@ -6324,6 +6382,7 @@ mod tests {
             "run dispatch",
             "run bind",
             "run end",
+            "cost retain",
             "policy write",
             "forge observe",
             "forge declare",

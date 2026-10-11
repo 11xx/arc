@@ -12,6 +12,7 @@ mod claims;
 mod common;
 mod context;
 mod contribution;
+mod cost;
 mod cross_links;
 mod diff;
 mod doctor;

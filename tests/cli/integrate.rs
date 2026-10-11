@@ -1212,6 +1212,7 @@ fn every_read_only_command_reads_past_a_broken_policy() {
         vec!["candidate", "list", "--json"],
         vec!["pass", "list", "--json"],
         vec!["run", "list", "--json"],
+        vec!["cost", "show", "missing", "--json"],
         vec!["policy", "path"],
         vec!["config", "--check-writable", "--json"],
         vec!["sandbox", "diff", manual_dir, "--json"],
