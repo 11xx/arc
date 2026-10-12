@@ -528,8 +528,11 @@ SETTLE A QUESTION (before it is work)
                          of indentation; indented code is prose. Unrecorded
                          fenced entry, question, and answer examples are prose;
                          recorded position, evidence, question, and answer
-                         markers terminate an open fence. Question readers,
-                         discussion tallies, and doctor share quotation rules.
+                         markers terminate an open fence, and a heading that
+                         repeats an entry ID already met is a quotation.
+                         Entry bodies keep their indentation. Question readers,
+                         `show --json`, discussion tallies, and doctor share
+                         quotation and stance rules.
   arc journal doctor
                          Matches position and evidence blocks with typed events
                          for every artifact kind in hot and cold storage. Either

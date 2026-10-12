@@ -561,7 +561,8 @@ pub enum JournalCmd {
     /// and evidence blocks are matched to their typed events for every artifact
     /// kind in both storage tiers; either missing half is a problem. Indented
     /// code and unrecorded fenced entry examples are prose; recorded position,
-    /// evidence, question, and answer markers terminate an open fence.
+    /// evidence, question, and answer markers terminate an open fence, and a
+    /// heading repeating an entry ID already met is a quotation.
     /// Records no events; ledger reads do not require a parseable append policy.
     Doctor {
         /// Emit JSON with the journal dir, the problems, and the advice
@@ -891,7 +892,8 @@ pub enum JournalCmd {
     /// argued — and `answer` is where the reply comes back. `--json` carries
     /// the same, for building the prompt without parsing text. Indented code
     /// and unrecorded fenced question and answer examples are prose; recorded
-    /// entry, question, and answer markers terminate an open fence
+    /// entry, question, and answer markers terminate an open fence, and a
+    /// heading repeating an entry ID already met is a quotation.
     /// Records no events; ledger reads do not require a parseable append policy.
     /// Recorded models that are missing, placeholders or session ids print as
     /// model not recorded, qualified by the harness when it is established.
@@ -1196,7 +1198,10 @@ pub enum JournalCmd {
         /// unmatched blocks have null recorded identity and detached events
         /// have null heading and body. Indented code and unrecorded fenced
         /// entry examples are prose; recorded position, evidence, question, and
-        /// answer markers terminate an open fence. Corrections and retractions
+        /// answer markers terminate an open fence, and a heading repeating an
+        /// entry ID already met is a quotation. Entry bodies keep their
+        /// indentation, and a position's stance is the line the discussion
+        /// tally reads. Corrections and retractions
         /// list typed amendment events in log order. A correction that fails validation reads
         /// `planner_status: malformed` and credits no planner.
         #[arg(long)]
@@ -1226,7 +1231,8 @@ pub enum JournalCmd {
     /// The tally counts `Position: for | against | amend` lines inside
     /// `### Position` blocks, and flags blocks that state no stance. Indented
     /// code and unrecorded fenced entry examples are prose; recorded position,
-    /// evidence, question, and answer markers terminate an open fence. Reports
+    /// evidence, question, and answer markers terminate an open fence, and a
+    /// heading repeating an entry ID already met is a quotation. Reports
     /// each open question with the positions argued under every option, so a
     /// branch nobody explored is visible before the question is answered.
     /// Resolve a discussion with `journal consume --outcome done --decision
@@ -4723,13 +4729,55 @@ fn read_body_verbatim(body_file: &str) -> Result<String> {
     }
 }
 
+/// The text after `Position:` on a line already stripped of block indentation.
 fn position_stance_text(line: &str) -> Option<&str> {
-    line.trim_start().strip_prefix("Position:")
+    line.strip_prefix("Position:")
+}
+
+/// What follows `Position:` on the line that states a block's stance.
+///
+/// A block's stance is its first non-blank line, read the way block syntax
+/// reads it: indented code, fenced examples, rules and headings never state
+/// one. This is the single reading the tally, `show --json`, and the
+/// `--stance` duplicate check all share.
+fn block_stance_line<'a>(
+    content: &'a str,
+    events: &[JournalEvent],
+    filename: &str,
+) -> Option<&'a str> {
+    let mut scan = EntryScan::default();
+    for line in content.lines() {
+        if quoted_entry_line(line, &mut scan, events, filename) {
+            return None;
+        }
+        let Some(trimmed) = markdown_syntax_line(line) else {
+            if line.trim().is_empty() {
+                continue;
+            }
+            return None;
+        };
+        if is_horizontal_rule(trimmed) || trimmed.starts_with('#') {
+            return None;
+        }
+        if trimmed.is_empty() {
+            continue;
+        }
+        return position_stance_text(trimmed);
+    }
+    None
+}
+
+/// The first word of a block's stance line.
+fn block_stance_word<'a>(
+    content: &'a str,
+    events: &[JournalEvent],
+    filename: &str,
+) -> Option<&'a str> {
+    block_stance_line(content, events, filename).and_then(|rest| rest.split_whitespace().next())
 }
 
 fn opening_position_stance(body: &str) -> Option<String> {
-    let line = body.lines().find(|line| !line.trim().is_empty())?;
-    let rest = position_stance_text(line)?;
+    let rest = block_stance_line(body, &[], "")?;
     Some(
         rest.split_whitespace()
             .next()
@@ -6375,9 +6423,10 @@ fn evidence(ctx: &Ctx, filename: &str, body_file: &str) -> Result<i32> {
     // Check target availability before waiting on a body source.
     open_artifact(ctx, filename)?;
     let body = read_body_verbatim(body_file)?;
-    let mut fence = None;
+    let recorded = read_events(&resolve_dir(&ctx.cwd)?)?;
+    let mut scan = EntryScan::after_recorded(&recorded, filename);
     for line in body.lines() {
-        if !quoted_entry_line(line, &mut fence, &[], filename) && is_position_heading(line) {
+        if !quoted_entry_line(line, &mut scan, &recorded, filename) && is_position_heading(line) {
             bail!("evidence cannot contain a structural position heading; quote the example or use journal position");
         }
     }
@@ -7643,9 +7692,9 @@ fn question_text(
     filename: &str,
 ) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
-    let mut fence = None;
+    let mut scan = EntryScan::default();
     let mut lines = text.lines().skip_while(|line| {
-        quoted_entry_line(line, &mut fence, events, filename)
+        quoted_entry_line(line, &mut scan, events, filename)
             || !markdown_syntax_line(line)
                 .and_then(|line| line.strip_prefix("### Question "))
                 .and_then(|rest| rest.strip_prefix(question_id))
@@ -13473,13 +13522,13 @@ fn artifact_entry_blocks<'a>(
 ) -> Vec<ArtifactEntryBlock<'a>> {
     let mut blocks = Vec::new();
     let mut open: Option<(&str, Option<String>, &str, usize)> = None;
-    let mut fence = None;
+    let mut scan = EntryScan::default();
     let mut offset = 0;
     for line in body.split_inclusive('\n') {
         let heading = entry_heading(line);
         let start = offset;
         offset += line.len();
-        if quoted_entry_line(line, &mut fence, events, filename) {
+        if quoted_entry_line(line, &mut scan, events, filename) {
             continue;
         }
         let trimmed = markdown_syntax_line(line).unwrap_or("");
@@ -13503,7 +13552,7 @@ fn artifact_entry_blocks<'a>(
                     kind,
                     id,
                     heading,
-                    body: body[content..start].trim(),
+                    body: entry_body(&body[content..start]),
                 });
             }
         }
@@ -13516,10 +13565,23 @@ fn artifact_entry_blocks<'a>(
             kind,
             id,
             heading,
-            body: body[content..].trim(),
+            body: entry_body(&body[content..]),
         });
     }
     blocks
+}
+
+/// An entry's text without its leading blank lines or trailing whitespace;
+/// indentation on the first line is content.
+fn entry_body(text: &str) -> &str {
+    let mut start = 0;
+    for line in text.split_inclusive('\n') {
+        if !line.trim().is_empty() {
+            break;
+        }
+        start += line.len();
+    }
+    text[start..].trim_end()
 }
 
 fn entry_id(event: &JournalEvent) -> Option<&str> {
@@ -13629,9 +13691,7 @@ fn structured_entries(
             .and_then(|block| block.id.as_deref())
             .or_else(|| event.and_then(entry_id));
         let field = |name, value| id.map_or(value, |id| amendments.field(id, name, value));
-        let stance = block
-            .and_then(|block| block.body.lines().next())
-            .and_then(position_stance_value);
+        let stance = block.and_then(|block| block_stance_word(block.body, events, file));
         let mut value = serde_json::json!({
             "id": id,
             "heading": block.map(|block| block.heading),
@@ -14469,9 +14529,9 @@ fn question_heading(line: &str) -> Option<(&'static str, &str)> {
 
 fn question_block_ids(body: &str, events: &[JournalEvent], filename: &str) -> QuestionBlockIds {
     let mut ids = QuestionBlockIds::default();
-    let mut fence = None;
+    let mut scan = EntryScan::default();
     for line in body.lines() {
-        if quoted_entry_line(line, &mut fence, events, filename) {
+        if quoted_entry_line(line, &mut scan, events, filename) {
             continue;
         }
         if let Some((kind, id)) = question_heading(line) {
@@ -14748,23 +14808,79 @@ fn fence_marker(line: &str) -> Option<(u8, usize, bool)> {
     (run >= 3).then_some((first, run, bare))
 }
 
+/// The reading state of an entry scan: the open fence, and the entries whose
+/// headings have already been met.
+///
+/// An entry ID names one entry. Its first heading is the entry; a later
+/// heading carrying the same ID is a quotation of it and stays prose, so
+/// quoting a recorded entry can neither close a fence nor become a second
+/// entry.
+#[derive(Default)]
+struct EntryScan {
+    fence: Option<(u8, usize)>,
+    seen: HashSet<(&'static str, String)>,
+}
+
+impl EntryScan {
+    /// A scan that has already met every entry the log records on `filename`,
+    /// for judging text that will be appended after them.
+    fn after_recorded(events: &[JournalEvent], filename: &str) -> Self {
+        let mut scan = Self::default();
+        for event in events
+            .iter()
+            .filter(|event| event.known() && event.file.as_deref() == Some(filename))
+        {
+            let key = match event.event.as_str() {
+                "position" | "evidence" => entry_id(event).map(|id| (event_kind(event), id)),
+                "question" => event.question_id.as_deref().map(|id| ("question", id)),
+                _ => None,
+            };
+            if let Some((kind, id)) = key {
+                scan.seen.insert((kind, id.to_string()));
+            }
+        }
+        scan
+    }
+}
+
+fn event_kind(event: &JournalEvent) -> &'static str {
+    if event.event == "position" {
+        "position"
+    } else {
+        "evidence"
+    }
+}
+
+/// The identity of the entry a heading line opens, when its ID is unique to it.
+/// Answers are not keyed: a reopened question takes several.
+fn entry_key(line: &str) -> Option<(&'static str, String)> {
+    if let Some((kind, Some(id))) = entry_heading(line) {
+        return Some((kind, id));
+    }
+    match question_heading(line) {
+        Some(("question", id)) => Some(("question", id.to_string())),
+        _ => None,
+    }
+}
+
 /// Whether a line is quoted rather than entry structure. Only a typed entry
-/// recorded on this artifact can recover from an unterminated fence.
+/// recorded on this artifact, met for the first time, can recover from an
+/// unterminated fence; a repeated heading is a quotation.
 fn quoted_entry_line(
     line: &str,
-    fence: &mut Option<(u8, usize)>,
+    scan: &mut EntryScan,
     events: &[JournalEvent],
     filename: &str,
 ) -> bool {
-    match (*fence, fence_marker(line)) {
+    match (scan.fence, fence_marker(line)) {
         (None, Some((marker, run, _))) => {
-            *fence = Some((marker, run));
+            scan.fence = Some((marker, run));
             true
         }
         (Some((marker, opened)), Some((closing, run, bare)))
             if marker == closing && run >= opened && bare =>
         {
-            *fence = None;
+            scan.fence = None;
             true
         }
         (Some(_), _) => {
@@ -14786,26 +14902,25 @@ fn quoted_entry_line(
                                 && entry_id(event) == id.as_deref()
                         })
                 });
-            if recorded {
-                *fence = None;
+            let repeated = entry_key(line).is_some_and(|key| scan.seen.contains(&key));
+            if recorded && !repeated {
+                scan.fence = None;
+                if let Some(key) = entry_key(line) {
+                    scan.seen.insert(key);
+                }
+                return false;
             }
-            !recorded
+            true
         }
-        (None, None) => false,
+        (None, None) => match entry_key(line) {
+            Some(key) => !scan.seen.insert(key),
+            None => false,
+        },
     }
 }
 
 fn is_position_heading(line: &str) -> bool {
     matches!(entry_heading(line), Some(("position", _)))
-}
-
-/// The complete `pos-…` token on a Markdown position heading, if valid.
-fn position_heading_id(line: &str) -> Option<String> {
-    entry_heading(line).and_then(|(kind, id)| (kind == "position").then_some(id).flatten())
-}
-
-fn position_stance_value(line: &str) -> Option<&str> {
-    position_stance_text(line).and_then(|rest| rest.split_whitespace().next())
 }
 
 /// Count position blocks, and the stance each one states.
@@ -14817,54 +14932,15 @@ fn position_stance_value(line: &str) -> Option<&str> {
 /// settled result — and a `Position:` line anywhere else, including inside a
 /// fenced example, is prose.
 fn position_blocks(body: &str, events: &[JournalEvent], filename: &str) -> Vec<PositionBlock> {
-    let mut blocks: Vec<PositionBlock> = Vec::new();
-    // A block ends at the next heading, at a horizontal rule, or at the end of
-    // the file, and one that ended without stating a stance keeps the
-    // `Unstated` it was opened with.
-    let mut open_block = false;
-    let mut decided = false;
-    let mut fence: Option<(u8, usize)> = None;
-    for line in body.lines() {
-        if quoted_entry_line(line, &mut fence, events, filename) {
-            decided = true;
-            continue;
-        }
-        let Some(trimmed) = markdown_syntax_line(line) else {
-            if !line.trim().is_empty() {
-                decided = true;
-            }
-            continue;
-        };
-        if is_horizontal_rule(trimmed) {
-            open_block = false;
-            continue;
-        }
-        if is_position_heading(line) {
-            blocks.push(PositionBlock {
-                id: position_heading_id(line),
-                stance: BlockStance::Unstated,
-            });
-            open_block = true;
-            decided = false;
-            continue;
-        }
-        if trimmed.starts_with('#') {
-            open_block = false;
-            continue;
-        }
-        if !open_block || decided || trimmed.is_empty() {
-            continue;
-        }
-        decided = true;
-        // The block opens by arguing rather than voting.
-        let Some(value) = position_stance_value(trimmed) else {
-            continue;
-        };
-        if let Some(block) = blocks.last_mut() {
-            block.stance = parse_block_stance(value);
-        }
-    }
-    blocks
+    artifact_entry_blocks(body, events, filename)
+        .into_iter()
+        .filter(|block| block.kind == "position")
+        .map(|block| PositionBlock {
+            id: block.id,
+            stance: block_stance_word(block.body, events, filename)
+                .map_or(BlockStance::Unstated, parse_block_stance),
+        })
+        .collect()
 }
 
 /// One `### Position` block as the artifact carries it.
@@ -17002,7 +17078,7 @@ mod question_text_tests {
 
 #[cfg(test)]
 mod heading_id_tests {
-    use super::position_heading_id;
+    use super::entry_heading;
 
     #[test]
     fn heading_indentation_respects_markdown_columns() {
@@ -17018,6 +17094,10 @@ mod heading_id_tests {
                 None
             );
         }
+    }
+
+    fn position_heading_id(line: &str) -> Option<String> {
+        entry_heading(line).and_then(|(kind, id)| (kind == "position").then_some(id).flatten())
     }
 
     /// The id is the whole word or nothing. Reading up to the first character

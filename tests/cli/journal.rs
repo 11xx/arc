@@ -17530,6 +17530,171 @@ fn journal_entries_ignore_indented_headings_and_fences() {
     }
 }
 
+/// The tally and `show --json` read one stance for each position block, and
+/// a body keeps the indentation it was written with.
+#[test]
+fn show_json_reads_the_stance_the_tally_reads_and_keeps_body_indentation() {
+    let cases: [(&str, Option<&str>); 8] = [
+        ("    Position: for\n", None),
+        ("\tPosition: for\n", None),
+        ("   Position: against\n", Some("against")),
+        ("\n\n  Position: amend\nBody.\n", Some("amend")),
+        ("```\nPosition: for\n```\n", None),
+        ("It argues first.\nPosition: for\n", None),
+        ("Position: for\n    Position: against\n", Some("for")),
+        ("Position: maybe\n", Some("maybe")),
+    ];
+    for (body, expected) in cases {
+        let repo = Repo::new();
+        let file = discussion_named(&repo, "stance-reading", "# Debate\n");
+        stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "position", &file, "--body-file", "-"])
+                .write_stdin(body),
+        );
+        let shown = json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "show", &file, "--json"]),
+        );
+        let summary =
+            json_stdout(
+                repo.arc(&repo.root)
+                    .args(["journal", "discussion", &file, "--json"]),
+            );
+        let stances = &summary["stances"];
+        let tallied = |name: &str| stances[name].as_u64().unwrap();
+        let from_tally = match expected {
+            Some("for") => tallied("for") == 1,
+            Some("against") => tallied("against") == 1,
+            Some("amend") => tallied("amend") == 1,
+            Some(_) => tallied("other") == 1,
+            None => tallied("unstated") == 1,
+        };
+        assert!(from_tally, "{body:?}: {summary}");
+        assert_eq!(
+            shown["positions"][0]["stance"],
+            serde_json::json!(expected),
+            "{body:?}: {shown}"
+        );
+    }
+}
+
+#[test]
+fn evidence_body_keeps_its_initial_indentation() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "evidence-indent", "# Debate\n");
+    let body = "\n    let code = 1;\n    more();\nProse after.\n";
+    stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "evidence", &file, "--body-file", "-"])
+            .write_stdin(body),
+    );
+    let shown = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "show", &file, "--json"]),
+    );
+    assert_eq!(
+        shown["evidence"][0]["body"], "    let code = 1;\n    more();\nProse after.",
+        "{shown}"
+    );
+}
+
+#[test]
+fn position_stance_flag_ignores_an_indented_example_stance_line() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "stance-flag", "# Debate\n");
+    stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "position",
+                &file,
+                "--stance",
+                "for",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("    Position: against\n"),
+    );
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+    assert_eq!(summary["stances"]["for"], 1, "{summary}");
+    assert_eq!(summary["stances"]["against"], 0, "{summary}");
+}
+
+/// An entry ID names one entry: a later heading repeating it is a quotation,
+/// whichever body carries it.
+#[test]
+fn quoting_a_recorded_entry_id_creates_no_second_entry() {
+    for writer in ["evidence", "position", "question"] {
+        let repo = Repo::new();
+        let file = discussion_named(&repo, "quoted-id", "# Debate\n");
+        stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "position", &file, "--body-file", "-"])
+                .write_stdin("Position: for\nThe original.\n"),
+        );
+        let first = json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "show", &file, "--json"]),
+        );
+        let id = first["positions"][0]["id"].as_str().unwrap().to_string();
+        let quotation = format!("Quoting it:\n\n```md\n### Position {id} (someone, 2026-01-01T00:00:00Z)\n\nPosition: against\nInside the example.\n```\n\nAfter.\n");
+        let mut command = repo.arc(&repo.root);
+        match writer {
+            "question" => command.args([
+                "journal",
+                "question",
+                &file,
+                "--placement",
+                "closing",
+                "--option",
+                "A",
+                "--option",
+                "B",
+                "--body-file",
+                "-",
+            ]),
+            kind => command.args(["journal", kind, &file, "--body-file", "-"]),
+        };
+        let body = if writer == "position" {
+            format!("Position: amend\n{quotation}")
+        } else {
+            quotation
+        };
+        stdout(command.write_stdin(body));
+        let shown = json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "show", &file, "--json"]),
+        );
+        let positions = shown["positions"].as_array().unwrap();
+        let ids: Vec<_> = positions.iter().map(|row| row["id"].clone()).collect();
+        assert_eq!(
+            positions.len(),
+            if writer == "position" { 2 } else { 1 },
+            "{writer}: {ids:?}"
+        );
+        let summary =
+            json_stdout(
+                repo.arc(&repo.root)
+                    .args(["journal", "discussion", &file, "--json"]),
+            );
+        assert_eq!(summary["stances"]["against"], 0, "{writer}: {summary}");
+        assert_eq!(
+            summary["positions"],
+            if writer == "position" { 2 } else { 1 },
+            "{writer}: {summary}"
+        );
+        repo.arc(&repo.root)
+            .args(["journal", "doctor"])
+            .assert()
+            .success();
+    }
+}
+
 #[test]
 fn journal_entries_recover_recorded_markers_after_unclosed_fences() {
     for fence in ["```md", "~~~md"] {
