@@ -1002,11 +1002,21 @@ impl Store {
             .truncate(false)
             .open(&path)
             .with_context(|| format!("cannot open {description} lock {}", path.display()))?;
-        let deadline = Instant::now() + timeout;
+        let mut deadline = Instant::now() + timeout;
+        #[cfg(debug_assertions)]
+        let mut contended = false;
         loop {
             match file.try_lock() {
                 Ok(()) => return Ok(TransitionLock(file)),
                 Err(std::fs::TryLockError::WouldBlock) => {
+                    // A test pauses here, once the lock is known to be held,
+                    // and the pause does not count against the timeout.
+                    #[cfg(debug_assertions)]
+                    if !std::mem::replace(&mut contended, true) {
+                        let phase = format!("{}-contended", name.trim_end_matches(".lock"));
+                        crate::import_authorization::test_rendezvous(&phase)?;
+                        deadline = Instant::now() + timeout;
+                    }
                     if Instant::now() >= deadline {
                         bail!(
                             "{description} lock {} is busy; retry the command",

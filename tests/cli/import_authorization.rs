@@ -1466,8 +1466,10 @@ fn policy_revocation_during_format_wait_refuses_without_writes() {
         .open(&lock_path)
         .unwrap();
     locked.lock().unwrap();
-    let mut child = spawn_received(&receiver, &input, "format");
-    await_import_rendezvous(&mut child, "format");
+    // The import is paused once it has found the format lock held, so the
+    // policy moves while it waits on the lock.
+    let mut child = spawn_received(&receiver, &input, "format-contended");
+    await_import_rendezvous(&mut child, "format-contended");
     let policy = receiver.home.join("revoked.toml");
     fs::write(&policy,format!("[[replica.publishers]]\nprincipal='channel'\nsource_replica_id='{}'\n[[replica.publishers.origins]]\nreplica_id='{}'\nroles=['facts','review-input']\nactors=[]\n",bundle["source_replica_id"].as_str().unwrap(),bundle["repository_id"].as_str().unwrap())).unwrap();
     stdout(receiver.arc(&receiver.root).args([
