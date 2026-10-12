@@ -262,6 +262,9 @@ pub enum LaneCmd {
     /// A lane's owner is the declared harness and session together, so both
     /// must be given. Opening replaces only that owner's own previous lane;
     /// another harness presenting the same session string keeps its lane.
+    /// Liveness follows the owner's latest recorded activity by timestamp,
+    /// whatever order records reached the log in; a spooled write promoted
+    /// late never lowers it.
     /// Ownership checks and lane changes share the journal transition lock.
     Open {
         /// Kebab-case topic slug naming the lane
@@ -9915,7 +9918,7 @@ fn artifact_claims(events: &[JournalEvent], file: &str) -> Vec<ArtifactClaim> {
                 if let Some(ttl) = event.ttl_seconds {
                     claim.state.ttl_seconds = ttl;
                 }
-                claim.state.last_activity_at = timestamp;
+                claim.state.last_activity_at = claim.state.last_activity_at.max(timestamp);
             }
             "claim-stage" => {
                 let Some(stage) = event.stage.as_deref().and_then(parse_claim_stage) else {
@@ -9928,7 +9931,7 @@ fn artifact_claims(events: &[JournalEvent], file: &str) -> Vec<ArtifactClaim> {
                     blocker: event.blocker.as_deref().map(artifact_blocker_ref),
                     changed_at: timestamp,
                 });
-                claim.state.last_activity_at = timestamp;
+                claim.state.last_activity_at = claim.state.last_activity_at.max(timestamp);
             }
             "checkpoint" => {
                 claim.checkpoints.push(ArtifactCheckpoint {
@@ -9944,7 +9947,7 @@ fn artifact_claims(events: &[JournalEvent], file: &str) -> Vec<ArtifactClaim> {
                         .unwrap_or_default(),
                     digest: event.digest.clone().unwrap_or_default(),
                 });
-                claim.state.last_activity_at = timestamp;
+                claim.state.last_activity_at = claim.state.last_activity_at.max(timestamp);
             }
             "claim-released" => {
                 claim.closure = Some(ClaimClosure {
@@ -10664,7 +10667,10 @@ fn lanes_from_journal(events: &[JournalEvent], now: DateTime<Utc>) -> Vec<LaneEn
     let mut active: HashMap<String, ActiveLane> = HashMap::new();
     for event in events {
         if let (Some(owner), Some(timestamp)) = (event_owner(event), event.timestamp()) {
-            last_activity.insert(owner, timestamp);
+            last_activity
+                .entry(owner)
+                .and_modify(|latest| *latest = (*latest).max(timestamp))
+                .or_insert(timestamp);
         }
         if !event.known() {
             continue;
@@ -10857,9 +10863,9 @@ fn discussion_age_seconds(
 ) -> Option<u64> {
     events
         .iter()
-        .rev()
-        .find(|event| event.event == "position" && event.file.as_deref() == Some(filename))
-        .and_then(JournalEvent::timestamp)
+        .filter(|event| event.event == "position" && event.file.as_deref() == Some(filename))
+        .filter_map(JournalEvent::timestamp)
+        .max()
         .map(|activity| now.signed_duration_since(activity).num_seconds().max(0) as u64)
         .or_else(|| artifact_age_seconds(now, stamp))
 }
@@ -17320,6 +17326,48 @@ mod ownership_regressions {
                 );
             }
         }
+    }
+
+    /// Activity is the latest observed, so an older record reaching the log
+    /// late leaves a claim as recently active as it was.
+    #[test]
+    fn a_late_older_record_never_lowers_claim_or_discussion_activity() {
+        let file = "20260101T000000Z-work-todo.md";
+        for kind in ["claim-renewed", "claim-stage", "checkpoint"] {
+            let initial = event("claim-set");
+            let mut fresh = event(kind);
+            fresh.ts = "2026-01-01T00:00:50Z".into();
+            let mut late = event(kind);
+            late.ts = "2026-01-01T00:00:20Z".into();
+            let claims = artifact_claims(&[initial, fresh, late], file);
+            assert_eq!(
+                claims[0].state.last_activity_at.to_rfc3339(),
+                "2026-01-01T00:00:50+00:00",
+                "{kind}"
+            );
+        }
+        let position = |ts: &str| {
+            let mut position = event("position");
+            position.ts = ts.into();
+            position.file = Some("20260101T000000Z-debate-discussion.md".into());
+            position
+        };
+        let events = [
+            position("2026-01-01T00:10:00Z"),
+            position("2026-01-01T00:02:00Z"),
+        ];
+        let now = DateTime::parse_from_rfc3339("2026-01-01T00:12:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            discussion_age_seconds(
+                now,
+                "20260101T000000Z",
+                "20260101T000000Z-debate-discussion.md",
+                &events
+            ),
+            Some(120)
+        );
     }
 
     #[test]

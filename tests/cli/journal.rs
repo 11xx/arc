@@ -17089,6 +17089,58 @@ fn separate_writers_replay_delayed_spool_events_in_append_order() {
     assert_eq!(replay, append_order);
 }
 
+/// A lane's activity is the latest the owner has recorded, whatever order the
+/// records reached the log in.
+#[test]
+fn a_delayed_spool_replay_cannot_age_a_lane_that_was_recently_active() {
+    let repo = Repo::new();
+    let owner = |command: &mut assert_cmd::Command| {
+        command
+            .env("ARC_HARNESS", "codex")
+            .env("ARC_SESSION", "lane-owner");
+    };
+    let spooled = {
+        let mut command = repo.arc(&repo.root);
+        owner(&mut command);
+        stdout(command.args(["journal", "log", "lane-order", "delayed note", "--spool"]))
+    };
+    let path = PathBuf::from(spooled.trim().strip_prefix("spooled: ").unwrap());
+    let mut spool: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let old = chrono::Utc::now() - chrono::Duration::minutes(45);
+    spool["event"]["ts"] = old
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        .into();
+    fs::write(&path, serde_json::to_vec(&spool).unwrap()).unwrap();
+    for args in [
+        &["journal", "lane", "open", "lane-order", "--ttl", "30m"][..],
+        &["journal", "log", "lane-order", "fresh note"][..],
+        &["journal", "spool", "--promote"][..],
+    ] {
+        let mut command = repo.arc(&repo.root);
+        owner(&mut command);
+        command.args(args).assert().success();
+    }
+    let lanes = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "lane", "list", "--json"]),
+    );
+    assert_eq!(lanes["lanes"][0]["state"], "live", "{lanes}");
+    repo.arc(&repo.root)
+        .env("ARC_HARNESS", "codex")
+        .env("ARC_SESSION", "lane-foreign")
+        .args([
+            "journal",
+            "lane",
+            "close",
+            "lane-order",
+            "--outcome",
+            "expired",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("conflict"));
+}
+
 #[test]
 fn journal_doctor_and_question_state_follow_append_order() {
     let repo = Repo::new();
