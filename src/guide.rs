@@ -2393,8 +2393,11 @@ REVIEW ASSURANCE
   - live fraction: the share of the lines the change's diff added that
     `git blame` still attributes to the change's own commits at HEAD, with a
     file moved since followed. The answer is cached under the ledger's
-    `cache/assurance` directory by HEAD revision and change, so a second read
-    at the same HEAD does not blame again. A change whose range is not
+    `cache/assurance` directory, one entry per change recording the HEAD it was
+    read at and the paths it read. A later HEAD reuses the entry when that HEAD
+    descends from the recorded one and nothing between touched those paths, a
+    move included; otherwise the change is blamed again and the entry
+    rewritten in place, so the cache never outgrows the changes. A change whose range is not
     reachable from HEAD has an unknown fraction, not a zero;
   - exposure: whether the change's diff touches the declared `[danger]
     paths`, and how many of them;
@@ -3859,7 +3862,7 @@ SCHEMAS
     `arc-replica-import/3`           receipt of an imported replica bundle
     `arc-journal-exchange-import/1`  receipt of an imported journal bundle
     `arc-sandbox/2`                  .arc-sandbox.json
-    assurance blame cache            <ledger>/cache/assurance/<head>-<change>.json
+    assurance blame cache            <ledger>/cache/assurance/<change>.json
     `journal-binding/1`              bindings.jsonl
 
 WHAT ARC WILL NOT DO

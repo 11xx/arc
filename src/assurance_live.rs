@@ -2,8 +2,9 @@
 //! its diff added that `git blame` still attributes to the change's own
 //! commits at a revision.
 //!
-//! The answer is a reading of git at one revision, cached per revision and
-//! change so a second read at the same revision does not blame again. A
+//! The answer is a reading of git at one revision, cached once per change
+//! and reused at any later revision that has not touched a path the blame
+//! read, so a moving HEAD does not blame every change again. A
 //! change whose range or files cannot be read is unknown, with a fixed reason;
 //! it is never a zero, because a zero says nothing is left to refresh.
 
@@ -13,7 +14,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// The on-disk cache layout; a file of another layout is ignored.
-const CACHE_FORMAT: u32 = 1;
+const CACHE_FORMAT: u32 = 2;
 
 /// Added lines of a change, and how many of them survive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,44 +38,82 @@ pub const NOT_REACHABLE_FROM_HEAD: Reason = "not-reachable-from-head";
 pub const BLAME_FAILED: Reason = "blame-failed";
 pub const NO_ADDED_LINES: Reason = "no-added-lines";
 
+/// What one change's blame came to, and what it depended on. One entry per
+/// change, rewritten in place as HEAD moves.
 #[derive(Serialize, Deserialize)]
 struct CacheEntry {
     format: u32,
+    /// The revision the blame was read at.
     head: String,
     change_id: String,
+    /// Every path the blame read, as the change named it and as `head` names
+    /// it. A later commit touching none of them cannot have moved a live line.
+    paths: Vec<String>,
     #[serde(flatten)]
     survival: Survival,
 }
 
-fn cache_path(directory: &Path, head: &str, change_id: &str) -> PathBuf {
-    directory.join(format!("{head}-{change_id}.json"))
+fn cache_path(directory: &Path, change_id: &str) -> PathBuf {
+    directory.join(format!("{change_id}.json"))
 }
 
-fn cached(directory: &Path, head: &str, change_id: &str) -> Option<Survival> {
-    let bytes = std::fs::read(cache_path(directory, head, change_id)).ok()?;
+fn cached(directory: &Path, change_id: &str) -> Option<CacheEntry> {
+    let bytes = std::fs::read(cache_path(directory, change_id)).ok()?;
     let entry: CacheEntry = serde_json::from_slice(&bytes).ok()?;
-    (entry.format == CACHE_FORMAT && entry.head == head && entry.change_id == change_id)
-        .then_some(entry.survival)
+    (entry.format == CACHE_FORMAT && entry.change_id == change_id).then_some(entry)
+}
+
+/// Every path a diff between two revisions names, either side of a rename.
+fn paths_touched(cwd: &Path, from: &str, to: &str) -> anyhow::Result<HashSet<String>> {
+    let out = gitio::git(cwd, &["diff", "-z", "--name-status", "-M", from, to])?;
+    let mut touched = HashSet::new();
+    let mut fields = out.split('\0');
+    while let Some(status) = fields.next() {
+        let Some(kind) = status.chars().next() else {
+            continue;
+        };
+        let names = if matches!(kind, 'R' | 'C') { 2 } else { 1 };
+        for _ in 0..names {
+            if let Some(path) = fields.next() {
+                touched.insert(path.to_string());
+            }
+        }
+    }
+    Ok(touched)
+}
+
+/// Whether the entry still describes `head`: it was read at an ancestor, and
+/// nothing between touched a path it read. Anything unreadable is a no.
+fn holds_at(cwd: &Path, entry: &CacheEntry, head: &str) -> bool {
+    if entry.head == head {
+        return true;
+    }
+    gitio::is_ancestor(cwd, &entry.head, head).unwrap_or(false)
+        && paths_touched(cwd, &entry.head, head)
+            .is_ok_and(|touched| entry.paths.iter().all(|path| !touched.contains(path)))
 }
 
 /// Best effort: a cache that cannot be written costs the next read a blame.
-fn remember(directory: &Path, head: &str, change_id: &str, survival: Survival) {
-    let entry = CacheEntry {
-        format: CACHE_FORMAT,
-        head: head.to_string(),
-        change_id: change_id.to_string(),
-        survival,
-    };
-    let Ok(bytes) = serde_json::to_vec(&entry) else {
+/// Writing an entry retires every file named by revision that earlier
+/// layouts kept for the same change.
+fn remember(directory: &Path, entry: &CacheEntry) {
+    let Ok(bytes) = serde_json::to_vec(entry) else {
         return;
     };
     if std::fs::create_dir_all(directory).is_err() {
         return;
     }
-    let path = cache_path(directory, head, change_id);
+    let path = cache_path(directory, &entry.change_id);
     let staged = path.with_extension(format!("{}.tmp", std::process::id()));
     if std::fs::write(&staged, bytes).is_ok() && std::fs::rename(&staged, path).is_err() {
         let _ = std::fs::remove_file(&staged);
+    }
+    let suffix = format!("-{}.json", entry.change_id);
+    for file in std::fs::read_dir(directory).into_iter().flatten().flatten() {
+        let name = file.file_name().to_string_lossy().to_string();
+        if name.strip_suffix(&suffix).is_some_and(is_object_name) {
+            let _ = std::fs::remove_file(file.path());
+        }
     }
 }
 
@@ -165,7 +204,13 @@ fn surviving_in(cwd: &Path, head: &str, path: &str, own: &HashSet<String>) -> an
         .count() as u64)
 }
 
-fn measure(cwd: &Path, head: &str, base: &str, tip: &str) -> Result<Survival, Reason> {
+/// The survival of a change and every path the measure read.
+fn measure(
+    cwd: &Path,
+    head: &str,
+    base: &str,
+    tip: &str,
+) -> Result<(Survival, Vec<String>), Reason> {
     if !gitio::is_ancestor(cwd, tip, head).map_err(|_| RANGE_UNREADABLE)? {
         return Err(NOT_REACHABLE_FROM_HEAD);
     }
@@ -177,22 +222,26 @@ fn measure(cwd: &Path, head: &str, base: &str, tip: &str) -> Result<Survival, Re
     let added = added_lines(cwd, base, tip).map_err(|_| RANGE_UNREADABLE)?;
     let moved = paths_at_head(cwd, tip, head).map_err(|_| RANGE_UNREADABLE)?;
     let mut survival = Survival { added: 0, live: 0 };
+    let mut paths = std::collections::BTreeSet::new();
     for (path, count) in &added {
         survival.added += count;
+        paths.insert(path.clone());
         let at_head = moved.get(path).map_or(path.as_str(), String::as_str);
         if at_head.is_empty() {
             continue;
         }
+        paths.insert(at_head.to_string());
         survival.live += surviving_in(cwd, head, at_head, &own).map_err(|_| BLAME_FAILED)?;
     }
     if survival.added == 0 {
         return Err(NO_ADDED_LINES);
     }
-    Ok(survival)
+    Ok((survival, paths.into_iter().collect()))
 }
 
 /// The survival of the change whose work is `base...tip`, read at `head`.
-/// `directory` is where an answer is kept between reads at one revision.
+/// `directory` holds one entry per change, reused for as long as no commit
+/// since it was read has touched a path it read.
 pub fn survival(
     cwd: &Path,
     directory: &Path,
@@ -201,10 +250,25 @@ pub fn survival(
     base: &str,
     tip: &str,
 ) -> Result<Survival, Reason> {
-    if let Some(known) = cached(directory, head, change_id) {
-        return Ok(known);
+    if let Some(mut entry) = cached(directory, change_id) {
+        if holds_at(cwd, &entry, head) {
+            if entry.head != head {
+                entry.head = head.to_string();
+                remember(directory, &entry);
+            }
+            return Ok(entry.survival);
+        }
     }
-    let measured = measure(cwd, head, base, tip)?;
-    remember(directory, head, change_id, measured);
+    let (measured, paths) = measure(cwd, head, base, tip)?;
+    remember(
+        directory,
+        &CacheEntry {
+            format: CACHE_FORMAT,
+            head: head.to_string(),
+            change_id: change_id.to_string(),
+            paths,
+            survival: measured,
+        },
+    );
     Ok(measured)
 }

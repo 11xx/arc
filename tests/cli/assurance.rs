@@ -585,40 +585,133 @@ fn an_author_routing_does_not_know_leaves_the_change_unknown() {
     );
 }
 
-#[test]
-fn the_blame_is_cached_per_head_and_change() {
+fn cache_dir(repo: &Repo) -> PathBuf {
+    repo.root.join(".git/arc/cache/assurance")
+}
+
+fn cache_files(repo: &Repo) -> Vec<String> {
+    let mut names = fs::read_dir(cache_dir(repo))
+        .map(|entries| {
+            entries
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// Say something else of a change's cached live lines, so a read that
+/// reports it came from the cache and one that reports 3 measured again.
+fn plant_live(repo: &Repo, id: &str, live: u64) -> serde_json::Value {
+    let file = cache_dir(repo).join(format!("{id}.json"));
+    let mut entry: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    entry["live"] = serde_json::json!(live);
+    fs::write(&file, entry.to_string()).unwrap();
+    entry
+}
+
+fn live_of(report: &serde_json::Value, id: &str) -> serde_json::Value {
+    row(report, id)["assurance"]["components"]["live_fraction"]["live"].clone()
+}
+
+/// A change integrated and read once, with its cache written.
+fn cached_change(slug: &str) -> (Repo, FakeRouting, String) {
     let repo = Repo::new();
     let fake = FakeRouting::new(&repo);
     fake.author("claude-sonnet-5-5#high", FRONTIER_TIER)
         .read("gpt-5-5#high", true, 1, "below");
-    let id = integrate(&repo, &change("cached", &["gpt-5-5#high"]));
+    let id = integrate(&repo, &change(slug, &["gpt-5-5#high"]));
+    let first = assurance(&fake, &repo, &["--stale"]);
+    assert_eq!(live_of(&first, &id), 3, "{first}");
+    (repo, fake, id)
+}
+
+#[test]
+fn the_blame_is_kept_once_per_change() {
+    let (repo, fake, id) = cached_change("cached");
+    assert_eq!(cache_files(&repo), vec![format!("{id}.json")]);
+
+    // A second read answers from the cache: an entry that says something else
+    // is what it reports.
+    plant_live(&repo, &id, 1);
+    let second = assurance(&fake, &repo, &["--stale"]);
+    assert_eq!(live_of(&second, &id), 1, "{second}");
+}
+
+#[test]
+fn an_unrelated_commit_leaves_the_cached_blame_in_force() {
+    let (repo, fake, id) = cached_change("unrelated");
+    plant_live(&repo, &id, 1);
+    repo.commit(&repo.root, "elsewhere.txt", "x\n", "unrelated");
     let head = repo.head(&repo.root);
 
-    let first = assurance(&fake, &repo, &["--stale"]);
-    assert_eq!(
-        row(&first, &id)["assurance"]["components"]["live_fraction"]["live"],
-        3
+    let report = assurance(&fake, &repo, &["--stale"]);
+    assert_eq!(live_of(&report, &id), 1, "{report}");
+    // The entry follows HEAD, so the next read diffs a shorter range, and
+    // the ledger holds one file for the change however many HEADs it saw.
+    let file = cache_dir(&repo).join(format!("{id}.json"));
+    let entry: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    assert_eq!(entry["head"], head.as_str());
+    assert_eq!(cache_files(&repo), vec![format!("{id}.json")]);
+}
+
+#[test]
+fn a_commit_touching_the_changes_file_measures_it_again() {
+    let (repo, fake, id) = cached_change("touched");
+    plant_live(&repo, &id, 1);
+    repo.commit(
+        &repo.root,
+        "touched.txt",
+        "one\ntwo\nthree\nfour\n",
+        "extend",
     );
-    let file = repo
-        .root
-        .join(".git/arc/cache/assurance")
-        .join(format!("{head}-{id}.json"));
-    assert!(file.exists(), "no cache file at {}", file.display());
+    let report = assurance(&fake, &repo, &["--stale"]);
+    assert_eq!(live_of(&report, &id), 3, "{report}");
 
-    // A second read at the same revision answers from the cache: an entry
-    // that says something else is what it reports.
-    let mut entry: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
-    entry["live"] = serde_json::json!(1);
-    fs::write(&file, entry.to_string()).unwrap();
-    let second = assurance(&fake, &repo, &["--stale"]);
-    let live = &row(&second, &id)["assurance"]["components"]["live_fraction"];
-    assert_eq!(live["live"], 1, "{second}");
+    // A move of the file counts as touching it.
+    plant_live(&repo, &id, 1);
+    git(&repo.root, &["mv", "touched.txt", "relocated.txt"]);
+    git(&repo.root, &["commit", "-m", "move it"]);
+    let report = assurance(&fake, &repo, &["--stale"]);
+    assert_eq!(live_of(&report, &id), 3, "{report}");
+    assert_eq!(cache_files(&repo), vec![format!("{id}.json")]);
+}
 
-    // A new revision is a new key, measured again.
+#[test]
+fn a_rewound_head_measures_the_change_again() {
+    let (repo, fake, id) = cached_change("rewound");
     repo.commit(&repo.root, "elsewhere.txt", "x\n", "unrelated");
-    let third = assurance(&fake, &repo, &["--stale"]);
-    let live = &row(&third, &id)["assurance"]["components"]["live_fraction"];
-    assert_eq!(live["live"], 3, "{third}");
+    assurance(&fake, &repo, &["--stale"]);
+    plant_live(&repo, &id, 1);
+    // The cached head is no longer behind HEAD.
+    git(&repo.root, &["reset", "--hard", "HEAD~1"]);
+    let report = assurance(&fake, &repo, &["--stale"]);
+    assert_eq!(live_of(&report, &id), 3, "{report}");
+}
+
+#[test]
+fn a_cache_file_named_by_head_is_ignored_and_removed() {
+    let (repo, fake, id) = cached_change("legacy");
+    let head = repo.head(&repo.root);
+    let old = cache_dir(&repo).join(format!("{head}-{id}.json"));
+    fs::write(
+        &old,
+        format!(
+            "{{\"format\":1,\"head\":\"{head}\",\"change_id\":\"{id}\",\"added\":3,\"live\":1}}"
+        ),
+    )
+    .unwrap();
+    // Another change's file of the same shape is left alone.
+    let other = cache_dir(&repo).join(format!("{head}-other-change.json"));
+    fs::write(&other, "{}").unwrap();
+    fs::remove_file(cache_dir(&repo).join(format!("{id}.json"))).unwrap();
+
+    let report = assurance(&fake, &repo, &["--stale"]);
+    assert_eq!(live_of(&report, &id), 3, "{report}");
+    assert!(!old.exists());
+    assert!(other.exists());
+    assert!(cache_dir(&repo).join(format!("{id}.json")).exists());
 }
 
 #[test]

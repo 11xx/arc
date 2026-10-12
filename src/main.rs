@@ -500,8 +500,8 @@ enum Cmd {
         /// counts only when routing assesses it eligible; a change with no
         /// eligible read is owed, and one routing cannot place is unknown with
         /// a reason, never fresh. Each row shows the frontier gap, the share
-        /// of its added lines still live at HEAD (git blame, cached per HEAD
-        /// and change), exposure to the policy's dangerous paths, and the age
+        /// of its added lines still live at HEAD (git blame, cached once per
+        /// change and reused until a commit touches a path it read), exposure to the policy's dangerous paths, and the age
         /// of its newest read; stale rows order by those, in that order. A
         /// change with no live lines is listed as no-live-lines, never stale.
         /// Staleness gates nothing
