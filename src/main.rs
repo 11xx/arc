@@ -3461,8 +3461,9 @@ enum HistoryCmd {
     Rewrite {
         /// Commit map (`<old> <new>` per line, as git filter-repo writes), or
         /// '-' for stdin. An old revision may abbreviate a cited SHA-1 or
-        /// SHA-256 commit from seven characters up to its full width;
-        /// retention holds the full cited commit
+        /// SHA-256 commit from seven characters up to its full width, in
+        /// either letter case; the map is recorded in lowercase and retention
+        /// holds the full cited commit
         #[arg(long)]
         map: String,
         /// Why the history was rewritten

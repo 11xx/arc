@@ -50,6 +50,18 @@ enum Step {
 /// objects, and one names a sixteenth of every object in the repository.
 pub(crate) const ABBREVIATION_FLOOR: usize = 7;
 
+/// A revision spelled the way the ledger stores it. Git reads an object name
+/// in either case and records it in lowercase, so a name spelled otherwise
+/// must compare as the commit it names. A token that is not hex is no object
+/// name and is left as written.
+pub(crate) fn canonical_revision(revision: &str) -> String {
+    if revision.chars().all(|c| c.is_ascii_hexdigit()) {
+        revision.to_ascii_lowercase()
+    } else {
+        revision.to_string()
+    }
+}
+
 /// One ref move a rewrite has planned: the value the ref held when the
 /// rewrite read it, and the value it is to hold instead.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -180,21 +192,25 @@ impl RewriteMap {
                     continue;
                 }
                 for (old, new) in mapping {
+                    // A recorded map may spell a revision in any case; the
+                    // map answers for the commit, whichever way it was typed.
+                    let old = canonical_revision(old);
+                    let new = new.as_deref().map(canonical_revision);
                     // Two rewrites may each move a revision — that is a chain,
                     // and following it is the point. But two *different*
                     // successors for the same revision is a contradiction, and
                     // silently keeping the last one would answer a question the
                     // ledger cannot answer.
-                    if let Some(existing) = steps.get(old) {
-                        if existing != new {
+                    if let Some(existing) = steps.get(&old) {
+                        if existing != &new {
                             anyhow::bail!(
                                 "recorded rewrites disagree about {old}: {} and {}",
                                 describe(existing),
-                                describe(new)
+                                describe(&new)
                             );
                         }
                     }
-                    steps.insert(old.clone(), new.clone());
+                    steps.insert(old, new);
                 }
                 // A claim about a revision the event does not map is not a
                 // claim about anything.
@@ -202,7 +218,7 @@ impl RewriteMap {
                     judged
                         .iter()
                         .filter(|old| mapping.contains_key(*old))
-                        .cloned(),
+                        .map(|old| canonical_revision(old)),
                 );
             }
         }
@@ -292,7 +308,7 @@ impl RewriteMap {
                     if !visited.insert(key.clone()) {
                         anyhow::bail!("recorded rewrites lead {revision} back to {key}; the chain names no surviving commit");
                     }
-                    reached |= next == successor;
+                    reached |= next == canonical_revision(successor);
                     current = next;
                 }
             }
@@ -356,6 +372,7 @@ impl RewriteMap {
     /// commit only from the length at which it names one.
     pub fn same(&self, left: &str, right: &str) -> Result<bool> {
         let (left, right) = (self.current(left)?, self.current(right)?);
+        let (left, right) = (canonical_revision(&left), canonical_revision(&right));
         if left == right {
             return Ok(!left.is_empty());
         }
@@ -367,6 +384,8 @@ impl RewriteMap {
     /// One hop: the recorded revision `revision` names, exactly where it names
     /// one and by abbreviation in either direction otherwise.
     fn step(&self, revision: &str) -> Result<Step> {
+        let revision = canonical_revision(revision);
+        let revision = revision.as_str();
         if let Some(fate) = self.steps.get(revision) {
             return Ok(Step::Mapped {
                 key: revision.to_string(),
@@ -476,14 +495,17 @@ pub fn parse_commit_map(text: &str) -> Result<BTreeMap<String, Option<String>>> 
         if !is_revision(old) {
             anyhow::bail!("line {}: {old:?} is not a revision", number + 1);
         }
+        let old = canonical_revision(old);
+        let old = old.as_str();
         let dropped = new.chars().all(|c| c == '0');
         if !dropped && !is_revision(new) {
             anyhow::bail!("line {}: {new:?} is not a revision", number + 1);
         }
+        let new = canonical_revision(new);
         if !dropped && new == old {
             continue;
         }
-        let fate = (!dropped).then(|| new.to_string());
+        let fate = (!dropped).then_some(new);
         if let Some(existing) = mapping.get(old) {
             if existing != &fate {
                 anyhow::bail!(
@@ -727,6 +749,48 @@ mod tests {
     fn a_conflicting_duplicate_is_refused() {
         assert!(parse_commit_map("aaaaaaaaaa bbbbbbbbbb\naaaaaaaaaa cccccccccc\n").is_err());
         assert!(parse_commit_map("aaaaaaaaaa bbbbbbbbbb\naaaaaaaaaa bbbbbbbbbb\n").is_ok());
+    }
+
+    #[test]
+    fn a_commit_map_is_recorded_in_the_case_git_stores() {
+        let parsed = parse_commit_map(
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\n\
+             CCCCCCCCCC cccccccccc\n\
+             DDDDDDDDDD EEEEEEEEEE\n\
+             dddddddddd eeeeeeeeee\n",
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.into_iter().collect::<Vec<_>>(),
+            vec![
+                ("a".repeat(40), Some("b".repeat(40))),
+                ("dddddddddd".to_string(), Some("eeeeeeeeee".to_string())),
+            ],
+            "an identity line is no rewrite whatever its case, and one revision spelled \
+             two ways is one revision"
+        );
+        assert!(parse_commit_map("AAAAAAAAAA bbbbbbbbbb\naaaaaaaaaa cccccccccc\n").is_err());
+    }
+
+    #[test]
+    fn a_map_recorded_in_upper_case_answers_for_the_commit_in_lower_case() {
+        let events = [
+            rewrite_event("01A", "AAAAAAAAAA", "BBBBBBBBBB", &["AAAAAAAAAA"]),
+            rewrite_event("01B", "BBBBBBBBBB", "cccccccccc", &[]),
+        ];
+        let map = RewriteMap::from_events(events.iter()).unwrap();
+        assert_eq!(map.current("aaaaaaaaaa").unwrap(), "cccccccccc");
+        assert_eq!(map.current("AAAAAAAAAA").unwrap(), "cccccccccc");
+        assert_eq!(map.current("aaaaaaaa").unwrap(), "cccccccccc");
+        assert_eq!(map.approved_successor("aaaaaaaaaa").unwrap(), "bbbbbbbbbb");
+        assert!(map.rewrites_to("aaaaaaaaaa", "BBBBBBBBBB").unwrap());
+        assert!(map.same("AAAAAAAAAA", "cccccccccc").unwrap());
+        assert!(map.same("aaaaaaaaaa", "CCCCCCCC").unwrap());
+        let contradiction = [
+            rewrite_event("01A", "AAAAAAAAAA", "bbbbbbbbbb", &[]),
+            rewrite_event("01B", "aaaaaaaaaa", "cccccccccc", &[]),
+        ];
+        assert!(RewriteMap::from_events(contradiction.iter()).is_err());
     }
 
     fn rewrite_event(id: &str, old: &str, new: &str, judged: &[&str]) -> crate::model::Event {

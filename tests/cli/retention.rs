@@ -381,6 +381,63 @@ fn recording_a_rewrite_made_elsewhere_retains_the_commits_the_ledger_cites() {
     assert!(has_object(&worktree, &old));
 }
 
+/// A map written by a tool that prints object names in upper case still
+/// names the commits the ledger cites, in full or abbreviated.
+fn assert_a_map_spelled_in_upper_case_retains(abbreviate: bool) {
+    let repo = repo_with_gates();
+    let (worktree, old) = approved_change(&repo, "alpha");
+    let change = only_change(&repo);
+    git(
+        &worktree,
+        &[
+            "commit",
+            "--amend",
+            "--no-edit",
+            "--date",
+            "2020-01-01T00:00:00Z",
+        ],
+    );
+    let new = repo.head(&worktree);
+    git(
+        &worktree,
+        &["update-ref", &format!("refs/arc/keep/{change}/ps-01"), &new],
+    );
+    let spelled = if abbreviate { &old[..12] } else { &old[..] };
+    let map = repo.home.join("map");
+    fs::write(
+        &map,
+        format!("{} {}\n", spelled.to_uppercase(), new.to_uppercase()),
+    )
+    .unwrap();
+
+    repo.arc(&repo.root)
+        .args([
+            "history",
+            "rewrite",
+            "--map",
+            map.to_str().unwrap(),
+            "--reason",
+            "amended elsewhere",
+        ])
+        .assert()
+        .success();
+
+    let name = retention_ref(&change, "ps-01", &old);
+    assert_eq!(retained(&repo), vec![format!("{name} {old}")]);
+    collect_garbage(&worktree);
+    assert!(has_object(&worktree, &old));
+}
+
+#[test]
+fn a_map_in_upper_case_retains_the_commit_the_ledger_cites() {
+    assert_a_map_spelled_in_upper_case_retains(false);
+}
+
+#[test]
+fn an_abbreviated_map_in_upper_case_retains_the_commit_the_ledger_cites() {
+    assert_a_map_spelled_in_upper_case_retains(true);
+}
+
 #[test]
 fn a_cited_commit_already_gone_is_reported_not_retained() {
     let repo = repo_with_gates();

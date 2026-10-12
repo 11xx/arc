@@ -201,17 +201,22 @@ pub fn plan(
 /// Whether a map replaces a commit. A map may spell what the ledger holds in
 /// full as an abbreviation, which names the commit only when it is long
 /// enough to.
-fn replaced_by(mapping: &BTreeMap<String, Option<String>>) -> impl Fn(&str) -> bool + '_ {
-    let abbreviated: Vec<&str> = mapping
+fn replaced_by(mapping: &BTreeMap<String, Option<String>>) -> impl Fn(&str) -> bool {
+    let keys: BTreeSet<String> = mapping
         .keys()
-        .map(String::as_str)
+        .map(|key| crate::rewrite::canonical_revision(key))
+        .collect();
+    let abbreviated: Vec<String> = keys
+        .iter()
         .filter(|key| key.len() >= crate::rewrite::ABBREVIATION_FLOOR)
+        .cloned()
         .collect();
     move |commit| {
-        mapping.contains_key(commit)
+        let commit = crate::rewrite::canonical_revision(commit);
+        keys.contains(&commit)
             || abbreviated
                 .iter()
-                .any(|key| key.len() < commit.len() && commit.starts_with(key))
+                .any(|key| key.len() < commit.len() && commit.starts_with(key.as_str()))
     }
 }
 
@@ -296,6 +301,21 @@ mod tests {
         }
         assert!(!replaced_by(&map(&[&commit[..6]]))(&commit));
         assert!(!replaced_by(&map(&[&commit[..48]]))(&"a".repeat(40)));
+    }
+
+    #[test]
+    fn a_map_replaces_a_commit_whatever_case_it_spells_it_in() {
+        let commit = "ab".repeat(20);
+        let upper = commit.to_ascii_uppercase();
+        assert!(replaced_by(&map(&[&upper]))(&commit));
+        assert!(replaced_by(&map(&[&upper[..8]]))(&commit));
+        assert!(replaced_by(&map(&[&commit]))(&upper));
+        assert!(replaced_by(&map(&[&commit[..8]]))(&upper));
+        assert!(!replaced_by(&map(&[&upper[..6]]))(&commit));
+        let sha256 = "ab".repeat(32);
+        assert!(replaced_by(&map(&[&sha256.to_ascii_uppercase()[..40]]))(
+            &sha256
+        ));
     }
 
     #[test]
