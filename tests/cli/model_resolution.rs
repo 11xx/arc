@@ -408,7 +408,7 @@ fn model_provenance_leaves_the_explain_projection_unchanged() {
     };
     let json = project(&["explain", &change, "--json"]);
     let view: Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(view["schema"], "arc-explain/1");
+    assert_eq!(view["schema"], "arc-explain/2");
     let markdown = project(&["explain", &change]);
     let events = event_dir(&repo, &change);
     let at = fs::read_dir(&events)

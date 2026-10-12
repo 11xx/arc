@@ -4544,7 +4544,7 @@ fn historical_producer_models_are_flagged_and_never_displayed_as_placeholders() 
         check_identity(&production["implementer"]);
         check_identity(&production["planner"]);
         let explain = json_stdout(repo.arc(&repo.root).args(["explain", &change, "--json"]));
-        assert_eq!(explain["schema"], "arc-explain/1");
+        assert_eq!(explain["schema"], "arc-explain/2");
         let debt = explain["coverage_at_acceptance"]["rows"]
             .as_array()
             .unwrap()

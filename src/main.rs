@@ -587,7 +587,7 @@ enum Cmd {
         /// event not on the change is refused
         #[arg(long)]
         at: Option<String>,
-        /// Emit `arc-explain/1` JSON instead of text
+        /// Emit `arc-explain/2` JSON instead of text
         #[arg(long)]
         json: bool,
     },

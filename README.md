@@ -92,7 +92,7 @@ absent, or unavailable — so nothing reads as stronger than its source:
 
 ```sh
 arc explain radio-refill-fix           # contract, context, reads, alternatives, evaluation, coverage
-arc explain radio-refill-fix --json    # the same, as arc-explain/1
+arc explain radio-refill-fix --json    # the same, as arc-explain/2
 ```
 
 When several attempts answer one brief, `arc candidate register` records each

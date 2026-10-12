@@ -250,7 +250,7 @@ fn integrated_change_renders_every_slot() {
         event_count(repo, &change_id),
         journal_event_log(&journal_dir).len(),
     );
-    assert_eq!(explanation["schema"], "arc-explain/1");
+    assert_eq!(explanation["schema"], "arc-explain/2");
     assert_eq!(explanation["outcome"], "integrated");
     assert_eq!(explanation["integration_event_id"], integration.as_str());
     for (slot, _) in SLOTS {

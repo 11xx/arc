@@ -365,7 +365,7 @@ fn explain_shows_a_read_at_risk_until_pinned() {
     assert!(text.contains("at risk"), "{text}");
     assert!(text.contains("(unknown)"), "{text}");
     let explained = explain_json(&repo, &change);
-    assert_eq!(explained["schema"], "arc-explain/1");
+    assert_eq!(explained["schema"], "arc-explain/2");
     assert_eq!(
         explained["observed_reads"]["rows"][0]["capture"]["at_risk"],
         true

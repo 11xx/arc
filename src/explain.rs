@@ -22,7 +22,7 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-pub const EXPLAIN_SCHEMA: &str = "arc-explain/1";
+pub const EXPLAIN_SCHEMA: &str = "arc-explain/2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]

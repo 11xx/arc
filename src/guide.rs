@@ -3522,7 +3522,7 @@ SCHEMAS
     `arc-catchup/12`                 arc catchup --json
     `arc-journal-catchup/9`          arc journal catchup --json
     `arc-resume/8`                   arc resume --json
-    `arc-explain/1`                  arc explain --json
+    `arc-explain/2`                  arc explain --json
     `arc-watch/1`                    arc watch --json, stdin of arc watch --exec
     `arc-config/1`                   arc config
     `arc-accept/1`                   arc accept --json
