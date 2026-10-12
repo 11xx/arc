@@ -53,7 +53,8 @@ SAY WHO YOU ARE (before the first write)
   `model_recorded: false` when it names no model; valid models omit that flag.
   Workspace report debt rows retain the raw implementer value with the same
   optional flag. Review coverage retains the originating session and validates
-  the model against it. Audit and verdict detail text validates models against
+  the model against it; coverage a debt declaration captured before it carried
+  a session reads that session from the verdict it was captured from. Audit and verdict detail text validates models against
   their recorded sessions.
 
   Local change, repository and replica IDs are totally ordered by issuance

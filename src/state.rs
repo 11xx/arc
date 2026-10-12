@@ -1154,6 +1154,66 @@ pub enum IntegrationKind {
     LegacyUnclassified,
 }
 
+/// The coverage a debt declaration captured, with each entry's session read
+/// from the verdict it was captured from when the declaration predates the
+/// field. A session is what tells a model from the key a recording was filed
+/// under, so an entry without one cannot be validated.
+///
+/// Declarations capture every verdict on the bound patchset in order, so an
+/// entry takes the session of the verdict at its position when that verdict
+/// has the same identity, and otherwise the one session every matching verdict
+/// shares. An entry that neither settles stays as recorded.
+fn captured_coverage(
+    captured: &[DebtCoverage],
+    verdicts: &[VerdictEntry],
+    patchset_id: Option<&str>,
+) -> Vec<DebtCoverage> {
+    let Some(patchset_id) = patchset_id else {
+        return captured.to_vec();
+    };
+    let held: Vec<DebtCoverage> = verdicts
+        .iter()
+        .filter(|verdict| verdict.patchset_id == patchset_id)
+        .map(|verdict| {
+            DebtCoverage::new(
+                verdict.effective_author().to_string(),
+                verdict.model.clone(),
+                verdict.session.clone(),
+                verdict.route_version.clone(),
+            )
+        })
+        .collect();
+    let same_identity = |entry: &DebtCoverage, verdict: &DebtCoverage| {
+        entry.reviewer == verdict.reviewer
+            && entry.model == verdict.model
+            && entry.route_version == verdict.route_version
+    };
+    captured
+        .iter()
+        .enumerate()
+        .map(|(position, entry)| {
+            let mut entry = entry.clone();
+            if entry.session.is_some() {
+                return entry;
+            }
+            let positional = (captured.len() == held.len())
+                .then(|| &held[position])
+                .filter(|verdict| same_identity(&entry, verdict))
+                .and_then(|verdict| verdict.session.clone());
+            let sessions: BTreeSet<&String> = held
+                .iter()
+                .filter(|verdict| same_identity(&entry, verdict))
+                .filter_map(|verdict| verdict.session.as_ref())
+                .collect();
+            entry.session = positional.or_else(|| match sessions.len() {
+                1 => sessions.into_iter().next().cloned(),
+                _ => None,
+            });
+            entry
+        })
+        .collect()
+}
+
 /// The current state of one change, derived by replaying its events in
 /// ULID order. The event ledger is authoritative; this is a view.
 #[derive(Debug, Clone, Serialize)]
@@ -2638,7 +2698,11 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     session_link: ev.session_link.clone(),
                     declared_at: ev.created_at,
                     missing: Some(*missing),
-                    coverage: Some(coverage.clone()),
+                    coverage: Some(captured_coverage(
+                        coverage,
+                        &state.verdicts,
+                        patchset_id.as_deref(),
+                    )),
                     production: production.clone(),
                     ineligible: ineligible.clone().map(|record| DebtRead {
                         record,
@@ -4037,6 +4101,93 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A declaration written before coverage carried the session: the
+    /// recording key stands where a model would, and only the verdict it was
+    /// captured from can say so.
+    fn legacy_declaration(coverage: serde_json::Value) -> Event {
+        let json = serde_json::json!({
+            "event_type": "debt-declared",
+            "reason": "review owed",
+            "patchset_id": "ps-01",
+            "missing": "independent-review",
+            "coverage": coverage,
+        });
+        let payload: Payload = serde_json::from_value(json).unwrap();
+        ev("fix", payload)
+    }
+
+    fn reviewed(session: &str, model: &str, actor: &str) -> Event {
+        let mut review = verdict("fix", "ps-01", None);
+        review.actor = actor.into();
+        review.session = Some(session.into());
+        review.model = Some(model.into());
+        review
+    }
+
+    fn declared_coverage(state: &ChangeState) -> Vec<serde_json::Value> {
+        state
+            .debt
+            .as_ref()
+            .unwrap()
+            .coverage
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|entry| serde_json::to_value(entry).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn legacy_coverage_takes_its_session_from_the_verdict_it_was_captured_from() {
+        let patch = ev(
+            "fix",
+            serde_json::from_value(serde_json::json!({
+                "event_type": "patchset-added", "patchset_id": "ps-01", "base": "b0", "head": "h1"
+            }))
+            .unwrap(),
+        );
+        let events = [
+            opened("fix"),
+            patch,
+            reviewed("recording-key", "recording-key#high", "reader"),
+            reviewed("session-b", "gpt-5.6-luna#max", "reader"),
+            legacy_declaration(serde_json::json!([
+                {"reviewer": "reader", "model": "recording-key#high", "effort": "high"},
+                {"reviewer": "reader", "model": "gpt-5.6-luna#max", "effort": "max"},
+            ])),
+        ];
+        let state = reduce(&events).unwrap();
+        let coverage = declared_coverage(&state);
+        assert_eq!(coverage[0]["session"], "recording-key");
+        assert_eq!(coverage[0]["model_recorded"], false, "{coverage:?}");
+        assert_eq!(coverage[1]["session"], "session-b");
+        assert!(coverage[1].get("model_recorded").is_none(), "{coverage:?}");
+    }
+
+    #[test]
+    fn legacy_coverage_without_a_determinable_session_stays_as_recorded() {
+        let patch = ev(
+            "fix",
+            serde_json::from_value(serde_json::json!({
+                "event_type": "patchset-added", "patchset_id": "ps-01", "base": "b0", "head": "h1"
+            }))
+            .unwrap(),
+        );
+        // Two sessions reviewed as one identity, and the declaration kept
+        // only one of them, so neither position nor identity settles it.
+        let events = [
+            opened("fix"),
+            patch,
+            reviewed("session-a", "gpt-5.6-luna#max", "reader"),
+            reviewed("session-b", "gpt-5.6-luna#max", "reader"),
+            legacy_declaration(serde_json::json!([
+                {"reviewer": "reader", "model": "gpt-5.6-luna#max", "effort": "max"},
+            ])),
+        ];
+        let coverage = declared_coverage(&reduce(&events).unwrap());
+        assert!(coverage[0].get("session").is_none(), "{coverage:?}");
     }
 
     #[test]

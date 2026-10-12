@@ -3365,6 +3365,56 @@ fn debt_coverage_preserves_an_unrecorded_model() {
 }
 
 #[test]
+fn legacy_debt_coverage_without_a_session_does_not_present_a_recording_key_as_a_model() {
+    let repo = repo_forbidding_self_approval();
+    let (change_id, worktree) = snapshotted_change_with_id(&repo, "legacy-coverage");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "Solo")
+        .args([
+            "--model",
+            "gpt-5.6-luna#max",
+            "review",
+            "legacy-coverage",
+            "--verdict",
+            "approved",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "integrate",
+            "legacy-coverage",
+            "--debt",
+            "reviewer unavailable",
+        ])
+        .assert()
+        .success();
+    // The declaration predates the coverage session field, and the verdict
+    // it captured was recorded under a recording key where a model belongs.
+    rewrite_event(&repo, &change_id, "verdict-recorded", |event| {
+        event["model"] = "recording-key#high".into();
+        event["session"] = "recording-key".into();
+    });
+    rewrite_event(&repo, &change_id, "debt-declared", |event| {
+        let entry = &mut event["coverage"][0];
+        entry["model"] = "recording-key#high".into();
+        entry["effort"] = "high".into();
+        entry.as_object_mut().unwrap().remove("session");
+    });
+
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "legacy-coverage", "--json"]),
+    );
+    let coverage = &status["debt"]["coverage"][0];
+    assert_eq!(coverage["session"], "recording-key", "{status}");
+    assert_eq!(coverage["model_recorded"], false, "{status}");
+    let human = stdout(repo.arc(&repo.root).args(["show", "legacy-coverage"]));
+    assert!(human.contains("Solo (model not recorded)"), "{human}");
+    assert!(!human.contains("recording-key#high"), "{human}");
+}
+
+#[test]
 fn debt_without_verdicts_has_empty_coverage() {
     let repo = repo_forbidding_self_approval();
     snapshotted_change(&repo, "empty-coverage");
