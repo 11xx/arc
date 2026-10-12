@@ -858,16 +858,17 @@ RUN A CHANGE
   over an unavailable entry or names a path other than `sha256/<digest>`; or
   when its content is a symlink, is not a regular file or differs in length
   or SHA-256 from its entry, or when the ledger's `custody/` or
-  `custody/sha256` directory is a symlink. Verified files are copied into ledger custody
-  unless already held, before the events that cite them are published, and
-  the summary counts installed, held and unavailable content. Unavailable
-  entries stay unavailable and the import says incomplete. Importing a bundle
-  that binds a sidecar without one says how many references stay unavailable,
-  which manifest digest the bundle binds and that --custody-dir installs it;
-  `arc accept` says the same. Custody is reported installed only after the
-  events are published. A failure installing it after publication says the
-  events are published, and repeating the import finishes the installation
-  without recording events, as does importing with a repaired sidecar. An
+  `custody/sha256` directory is a symlink. The events are published first;
+  verified files are then copied into ledger custody unless already held,
+  each verified again as it is copied, and the summary counts installed, held
+  and unavailable content. Custody is reported installed only after that, so
+  a failure installing it says the events are published, and repeating the
+  import finishes the installation without recording events, as does
+  importing with a repaired sidecar. Unavailable entries stay unavailable and
+  the import says incomplete. Importing a bundle that binds a sidecar without
+  one says how many references stay unavailable, which manifest digest the
+  bundle binds and that --custody-dir installs it; `arc accept` says the
+  same. An
   export refuses, before writing anything, `--output`, `--objects-json` and
   `--custody-dir` destinations that name one location or lie inside one
   another, and a file destination that is a directory. It finishes every
