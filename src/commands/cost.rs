@@ -26,6 +26,15 @@ use agent_tapes_core::measurement::{MeasurementCompleteness, MeasurementReason};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Append one formatted line to a text report.
+macro_rules! emit {
+    ($out:expr, $($arg:tt)*) => {{
+        $out.push_str(&format!($($arg)*));
+        $out.push('\n');
+    }};
+}
+pub(super) use emit;
+
 pub const COST_SCHEMA: &str = "arc-cost/1";
 
 /// The reader a fresh measurement names: tapes' core library at the release
@@ -216,8 +225,43 @@ impl SessionRow {
     }
 }
 
+/// A selected run: the work it is for, the executor model its route names,
+/// and the sessions its binding names.
+pub(super) struct ExecutorRun {
+    pub work: String,
+    pub model: Option<String>,
+    pub sessions: Vec<String>,
+}
+
+/// A session whose ledger events act on the selected work: the models it
+/// declared in each role, and why it has no figure when it has none.
+pub(super) struct Participant {
+    pub key: String,
+    pub models: BTreeMap<&'static str, BTreeSet<String>>,
+    pub unmeasured: Option<String>,
+}
+
+/// What one read of a target yields: the `arc-cost/1` document, and the
+/// facts that map a role to the sessions behind it.
+pub(super) struct CostView {
+    pub report: Value,
+    pub runs: Vec<ExecutorRun>,
+    pub participants: Vec<Participant>,
+}
+
 /// Print the read-only cost view of a change or a journal artifact.
 pub fn show_cost(ctx: &Ctx, target: &str, json: bool) -> Result<()> {
+    let view = read_cost(ctx, target)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&view.report)?);
+    } else {
+        print!("{}", report_text(&view.report));
+    }
+    Ok(())
+}
+
+/// Read the cost view of a change or a journal artifact.
+pub(super) fn read_cost(ctx: &Ctx, target: &str) -> Result<CostView> {
     let store = ctx.store()?;
     let mut read = CostRead::new(&store);
     let events = read.events(Store::REPOSITORY_SCOPE);
@@ -283,12 +327,40 @@ pub fn show_cost(ctx: &Ctx, target: &str, json: bool) -> Result<()> {
     let outside = outside_sessions(&ledger, &sessions, &unmeasured);
     selection.ledger_gaps = read.gaps;
     let report = render_report(&selection, &runs, &sessions, &outside, &ledger);
-    if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        print_report(&report);
-    }
-    Ok(())
+    let executor_runs = runs
+        .iter()
+        .flat_map(|(work, runs)| {
+            runs.iter().map(|run| ExecutorRun {
+                work: work.label(),
+                model: run.model.clone(),
+                sessions: if run.conflicting {
+                    Vec::new()
+                } else {
+                    run.candidates.clone()
+                },
+            })
+        })
+        .collect();
+    let participants = ledger
+        .participants()
+        .map(|((harness, session), person)| {
+            let key = format!("{harness}:{session}");
+            Participant {
+                models: person
+                    .models
+                    .iter()
+                    .map(|(role, models)| (role.name(), models.clone()))
+                    .collect(),
+                unmeasured: unmeasured.get(&(harness.clone(), session.clone())).cloned(),
+                key,
+            }
+        })
+        .collect();
+    Ok(CostView {
+        report,
+        runs: executor_runs,
+        participants,
+    })
 }
 
 /// Retain the normalized facts a fresh read of each bound or participating
@@ -360,8 +432,15 @@ pub fn retain_cost(ctx: &Ctx, target: &str) -> Result<()> {
 }
 
 fn print_read_gaps(selection: &[Value], ledger: &[Value]) {
+    let mut out = String::new();
+    write_read_gaps(&mut out, selection, ledger);
+    print!("{out}");
+}
+
+fn write_read_gaps(out: &mut String, selection: &[Value], ledger: &[Value]) {
     for gap in selection.iter().chain(ledger) {
-        println!(
+        emit!(
+            out,
             "coverage incomplete: {}: {}",
             gap["record"].as_str().unwrap_or("record"),
             gap["reason"].as_str().unwrap_or("record unavailable")
@@ -562,6 +641,8 @@ fn select(ctx: &Ctx, read: &mut CostRead<'_>, target: &str, events: &[Event]) ->
 
 struct AssignedRun {
     dispatch_event_id: String,
+    /// The executor model the dispatch's route names, effort dropped.
+    model: Option<String>,
     round: Option<usize>,
     candidates: Vec<String>,
     conflicting: bool,
@@ -696,8 +777,13 @@ fn assign(ctx: &Ctx, selection: &mut Selection, events: &[Event]) -> Assigned {
             .map(|binding| format!("{}:{}", binding.executor_harness, binding.executor_session))
             .collect();
         if selected.contains(&work) {
+            let model = match &round.dispatch.payload {
+                Payload::RunDispatched { route, .. } => model_of(route),
+                _ => None,
+            };
             runs.entry(work.clone()).or_default().push(AssignedRun {
                 dispatch_event_id: round.dispatch.event_id.clone(),
+                model,
                 round: round.round,
                 candidates: candidates.into_iter().collect(),
                 conflicting: bindings.len() > 1,
@@ -1558,6 +1644,12 @@ fn qualify_price(facts: &mut CostFacts) {
     }
 }
 
+/// The model of a `model[#effort]` coordinate, without its effort.
+fn model_of(coordinate: &str) -> Option<String> {
+    let model = coordinate.split('#').next().unwrap_or(coordinate).trim();
+    (!model.is_empty()).then(|| model.to_string())
+}
+
 /// A session the ledger's events name.
 #[derive(Default)]
 struct Person {
@@ -1565,6 +1657,9 @@ struct Person {
     membership: BTreeSet<WorkKey>,
     /// What its events on the selected work show it did.
     roles: BTreeSet<Role>,
+    /// The models its events declared in each role on the selected work,
+    /// effort dropped.
+    models: BTreeMap<Role, BTreeSet<String>>,
     /// Its events on the selected work, of any kind.
     selected_events: usize,
     /// It has an event of a role-bearing kind on the selected work.
@@ -1626,6 +1721,9 @@ fn read_ledger(
                     if let Some(role) = role {
                         person.acts = true;
                         person.roles.insert(role);
+                        if let Some(model) = event.model.as_deref().and_then(model_of) {
+                            person.models.entry(role).or_default().insert(model);
+                        }
                     }
                 }
             }
@@ -2645,11 +2743,12 @@ fn describe_quantity(quantity: &Value) -> String {
     }
 }
 
-fn print_totals(indent: &str, heading: &str, totals: &Value) {
+pub(super) fn write_totals(out: &mut String, indent: &str, heading: &str, totals: &Value) {
     let quantities = totals["quantities"].as_array().cloned().unwrap_or_default();
     let parts: Vec<String> = quantities.iter().map(describe_quantity).collect();
-    println!("{indent}{heading}: {}", parts.join("; "));
-    println!(
+    emit!(out, "{indent}{heading}: {}", parts.join("; "));
+    emit!(
+        out,
         "{indent}  identity: {}",
         totals["identity"]["status"].as_str().unwrap_or_default()
     );
@@ -2665,12 +2764,13 @@ fn print_totals(indent: &str, heading: &str, totals: &Value) {
         })
         .collect();
     for reason in reasons {
-        println!("{indent}  {}", crate::render::one_line(&reason));
+        emit!(out, "{indent}  {}", crate::render::one_line(&reason));
     }
     if let Some(unknown) = totals["identity"]["unknown"].as_object() {
         for (session, reasons) in unknown {
             for reason in reasons.as_array().into_iter().flatten() {
-                println!(
+                emit!(
+                    out,
                     "{indent}  {session}: {}",
                     reason.as_str().unwrap_or_default()
                 );
@@ -2679,7 +2779,14 @@ fn print_totals(indent: &str, heading: &str, totals: &Value) {
     }
 }
 
-fn print_report(report: &Value) {
+/// The text form of a cost report.
+pub(super) fn report_text(report: &Value) -> String {
+    let mut out = String::new();
+    write_report(&mut out, report);
+    out
+}
+
+fn write_report(out: &mut String, report: &Value) {
     let target = &report["target"];
     match target["kind"].as_str() {
         Some("journal") => {
@@ -2689,24 +2796,34 @@ fn print_report(report: &Value) {
                 .flatten()
                 .filter_map(Value::as_str)
                 .collect();
-            println!(
+            emit!(
+                out,
                 "cost: journal {}  lineage: {}",
                 target["file"].as_str().unwrap_or_default(),
                 lineage.join(" -> ")
             );
         }
-        _ => println!("cost: change {}", target["id"].as_str().unwrap_or_default()),
+        _ => emit!(
+            out,
+            "cost: change {}",
+            target["id"].as_str().unwrap_or_default()
+        ),
     }
     for item in report["work"].as_array().into_iter().flatten() {
         let runs = item["runs"].as_array().map_or(0, Vec::len);
-        println!("{}  runs={runs}", item["key"].as_str().unwrap_or_default());
+        emit!(
+            out,
+            "{}  runs={runs}",
+            item["key"].as_str().unwrap_or_default()
+        );
         for unbound in item["unbound"].as_array().into_iter().flatten() {
-            println!(
+            emit!(
+                out,
                 "  unbound dispatch {}",
                 unbound.as_str().unwrap_or_default()
             );
         }
-        print_totals("  ", "direct", &item["direct"]);
+        write_totals(out, "  ", "direct", &item["direct"]);
         let shared: Vec<&str> = item["shared"]
             .as_array()
             .into_iter()
@@ -2714,20 +2831,21 @@ fn print_report(report: &Value) {
             .filter_map(Value::as_str)
             .collect();
         if !shared.is_empty() {
-            println!("  shared: {}", shared.join(", "));
+            emit!(out, "  shared: {}", shared.join(", "));
         }
-        print_participants("  ", &item["participants"]);
+        write_participants(out, "  ", &item["participants"]);
         if item["inclusive"].is_object() {
-            print_totals("  ", "inclusive", &item["inclusive"]);
+            write_totals(out, "  ", "inclusive", &item["inclusive"]);
         }
     }
-    println!("union");
-    print_totals("  ", "total", &report["union"]);
-    print_participants("  ", &report["union"]["participants"]);
-    println!("sessions");
+    emit!(out, "union");
+    write_totals(out, "  ", "total", &report["union"]);
+    write_participants(out, "  ", &report["union"]["participants"]);
+    emit!(out, "sessions");
     for session in report["sessions"].as_array().into_iter().flatten() {
         let measurement = &session["measurement"];
-        println!(
+        emit!(
+            out,
             "  {}  {} {}  frontier={}  spans={}  {}",
             session["key"].as_str().unwrap_or_default(),
             measurement["source"].as_str().unwrap_or_default(),
@@ -2748,12 +2866,14 @@ fn print_report(report: &Value) {
             },
         );
         if measurement["conflict"].is_object() {
-            println!(
+            emit!(
+                out,
                 "    conflict: a fresh read disagrees with retained facts at the same frontier"
             );
         }
         if measurement["fresh_read"]["status"] == "unavailable" {
-            println!(
+            emit!(
+                out,
                 "    fresh read unavailable: {}",
                 measurement["fresh_read"]["reason"]
                     .as_str()
@@ -2761,19 +2881,22 @@ fn print_report(report: &Value) {
             );
         }
         if let Some(selection) = measurement["selection"].as_str() {
-            println!(
+            emit!(
+                out,
                 "    counts {selection}: {} events, {} beyond the active branch",
-                measurement["events"]["counted"], measurement["events"]["other_branches"]
+                measurement["events"]["counted"],
+                measurement["events"]["other_branches"]
             );
         }
         for reason in measurement["reasons"].as_array().into_iter().flatten() {
-            println!("    {}", reason.as_str().unwrap_or_default());
+            emit!(out, "    {}", reason.as_str().unwrap_or_default());
         }
-        print_totals("    ", "measured", &session["totals"]);
+        write_totals(out, "    ", "measured", &session["totals"]);
     }
     let coverage = &report["coverage"];
-    println!("coverage");
-    print_read_gaps(
+    emit!(out, "coverage");
+    write_read_gaps(
+        out,
         report["coverage"]["selection"]["records"]
             .as_array()
             .map(Vec::as_slice)
@@ -2783,14 +2906,16 @@ fn print_report(report: &Value) {
             .map(Vec::as_slice)
             .unwrap_or_default(),
     );
-    println!(
+    emit!(
+        out,
         "  measurement: {}",
         coverage["measurement"]["status"]
             .as_str()
             .unwrap_or_default()
     );
     let residual = &coverage["measurement"]["residual"];
-    println!(
+    emit!(
+        out,
         "  residual: {}",
         residual["status"].as_str().unwrap_or_default()
     );
@@ -2802,7 +2927,8 @@ fn print_report(report: &Value) {
             .filter(|(_, status)| *status != "reconciled")
             .map(|(counter, status)| format!("{counter} {}", status.as_str().unwrap_or_default()))
             .collect();
-        println!(
+        emit!(
+            out,
             "    {session}: {}{}{}",
             row["status"].as_str().unwrap_or_default(),
             row["unavailable"]
@@ -2815,7 +2941,8 @@ fn print_report(report: &Value) {
             }
         );
     }
-    println!(
+    emit!(
+        out,
         "  assignment: {}",
         coverage["assignment"]["status"]
             .as_str()
@@ -2826,16 +2953,22 @@ fn print_report(report: &Value) {
         .into_iter()
         .flatten()
     {
-        println!("    {}", reason.as_str().unwrap_or_default());
+        emit!(out, "    {}", reason.as_str().unwrap_or_default());
     }
-    println!(
+    emit!(
+        out,
         "  identity: {}",
         coverage["identity"]["status"].as_str().unwrap_or_default()
     );
     let outside = &coverage["assignment"]["outside"];
-    println!("  {}", outside["statement"].as_str().unwrap_or_default());
+    emit!(
+        out,
+        "  {}",
+        outside["statement"].as_str().unwrap_or_default()
+    );
     for session in outside["sessions"].as_array().into_iter().flatten() {
-        println!(
+        emit!(
+            out,
             "    {}:{} ({} events){}",
             session["harness"].as_str().unwrap_or_default(),
             session["session"].as_str().unwrap_or_default(),
@@ -2846,12 +2979,14 @@ fn print_report(report: &Value) {
         );
     }
     if outside["unattributed_events"].as_u64().unwrap_or(0) > 0 {
-        println!(
+        emit!(
+            out,
             "    {} acting events name no session",
             outside["unattributed_events"]
         );
     }
-    println!(
+    emit!(
+        out,
         "  {}",
         coverage["assignment"]["participants"]["statement"]
             .as_str()
@@ -2869,9 +3004,10 @@ fn role_names(roles: &Value) -> String {
         .join(", ")
 }
 
-fn print_participants(indent: &str, participants: &Value) {
+fn write_participants(out: &mut String, indent: &str, participants: &Value) {
     for participant in participants.as_array().into_iter().flatten() {
-        println!(
+        emit!(
+            out,
             "{indent}participant {} ({}) spans={} {}",
             participant["key"].as_str().unwrap_or_default(),
             role_names(&participant["roles"]),
@@ -2882,7 +3018,7 @@ fn print_participants(indent: &str, participants: &Value) {
                 "shared"
             }
         );
-        print_totals(&format!("{indent}  "), "whole", &participant["totals"]);
+        write_totals(out, &format!("{indent}  "), "whole", &participant["totals"]);
     }
 }
 
