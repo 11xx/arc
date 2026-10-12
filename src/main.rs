@@ -3219,7 +3219,9 @@ enum ForgeCmd {
         /// Include every observation through the selected read
         #[arg(long)]
         history: bool,
-        /// Exact observation event or read ID; exposes historical acquisition freshness
+        /// Exact observation event or read ID; exposes historical acquisition freshness.
+        /// A provider lookup applies it to the changes that hold the read, shows the
+        /// others without it, and refuses only when none holds it
         #[arg(long)]
         observation: Option<String>,
         /// Emit exact custody bytes to stdout, metadata to stderr. JSON uses

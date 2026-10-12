@@ -715,6 +715,53 @@ fn forge_change_bound_excludes_events_and_local_records_recorded_later() {
 }
 
 #[test]
+fn forge_identity_view_applies_the_observation_to_the_changes_that_hold_it() {
+    let (repo, id) = setup();
+    retained_pair(&repo, &id);
+    let second = begin_without_checkout(&repo, "another", &[]);
+    observe(
+        &repo,
+        &second,
+        &document("another-read", "g1", "first", None),
+    );
+    let identity = [
+        "forge",
+        "show",
+        "--provider",
+        "example",
+        "--host",
+        "forge.example.invalid",
+        "--repo",
+        "sample/project",
+        "--pr",
+        "1",
+        "--json",
+    ];
+    let views: Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root)
+            .args(identity)
+            .args(["--observation", "read-1"]),
+    ))
+    .unwrap();
+    let views = views.as_array().unwrap();
+    assert_eq!(views.len(), 2);
+    let holder = views.iter().find(|v| v["change_id"] == id).unwrap();
+    assert_eq!(holder["observations"][0]["document"]["read_id"], "read-1");
+    assert_eq!(holder["reader_options"]["observation"], "read-1");
+    let other = views.iter().find(|v| v["change_id"] == second).unwrap();
+    assert!(other["reader_options"]["observation"].is_null());
+    repo.arc(&repo.root)
+        .args(identity)
+        .args(["--observation", "read-absent"])
+        .assert()
+        .failure();
+    repo.arc(&repo.root)
+        .args(["forge", "show", &second, "--observation", "read-1"])
+        .assert()
+        .failure();
+}
+
+#[test]
 fn forge_observation_frontier_counts_only_the_drift_recorded_within_it() {
     let (repo, id) = setup();
     materialize(&repo.home.join("materialized"), &["first", "second", "{}"]);

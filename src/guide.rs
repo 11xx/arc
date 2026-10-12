@@ -1732,7 +1732,9 @@ FORGE
   rollup are those bound to observations in that history;
   local_resolution.checks is the last such rollup, null only when none was
   recorded there, and a review binding's later_observations counts only the
-  reads inside it. Local rewrite resolution and current byte availability are
+  reads inside it. A provider lookup applies it to the changes that hold the
+  read, shows the others without it, and refuses only when none does. Local
+  rewrite resolution and current byte availability are
   separate reads. Change and repository event frontiers and reader options
   are included. With --at, show, status and explain stop the change events,
   run references, local records and their source and byte references at that

@@ -556,9 +556,30 @@ pub fn show(
         options.body.is_none() || selected.len() == 1,
         "--body requires exactly one change"
     );
+    // A provider lookup spans changes, and only some of them hold the read.
+    // The others are shown without a frontier rather than refused.
+    let holds: Vec<bool> = selected
+        .iter()
+        .map(|state| {
+            options
+                .observation
+                .as_deref()
+                .is_none_or(|id| observation::find_observation(&state.forge, id).is_ok())
+        })
+        .collect();
+    if let Some(id) = options.observation.as_deref() {
+        ensure!(
+            holds.iter().any(|holds| *holds),
+            "observation {id} must name one usable exact recorded read"
+        );
+    }
     let mut views = Vec::new();
-    for state in selected {
-        let mut view = build(&store, &state, &options)?;
+    for (state, holds) in selected.into_iter().zip(holds) {
+        let bounded = Options {
+            observation: options.observation.clone().filter(|_| holds),
+            ..options.clone()
+        };
+        let mut view = build(&store, &state, &bounded)?;
         if let Some(generation) = &options.body {
             let records: Vec<_> = if let Some(obs) = &options.observation {
                 vec![observation::find_observation(&state.forge, obs)?]
