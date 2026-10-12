@@ -17,8 +17,9 @@ use crate::model::{
     portable_quantity_reason, portable_selection, CostCacheWrites, CostConvention,
     CostCounterResidual, CostCounters, CostDisjoint, CostEventCoverage, CostEventIdentity,
     CostEvents, CostFacts, CostLineage, CostPricing, CostRelative, CostResidual,
-    CostResidualSource, Event, Payload,
+    CostResidualSource, Event, Payload, DISJOINT_CATEGORIES,
 };
+use agent_tapes_core::measurement::{MeasurementCompleteness, MeasurementReason};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -745,32 +746,29 @@ fn read_fresh(harness: &str, session: &str) -> std::result::Result<CostFacts, St
     let backend = &backends[resolved.backend_index];
     let mut tally = agent_tapes_core::usage::TurnTally::default();
     let mut earliest = None;
-    let mut read = backend
+    let read = backend
         .stream_transcript(&resolved.session, None, &mut |turn| {
             earliest = earliest.into_iter().chain(turn.ts).min();
             tally.add(&turn);
             Ok(())
         })
         .map_err(|_| "usage read failed".to_string())?;
-    let stream_notes = read.notes.len();
-    read.notes
-        .extend(resolved.diagnostics.latest_warnings(&resolved.session));
+    let selection_warnings = resolved
+        .diagnostics
+        .latest_warnings(&resolved.session)
+        .len();
     let whole = backend
         .stream_session(&resolved.session, &read)
         .map_err(|_| "usage read failed".to_string())?;
     let view = agent_tapes_core::usage::streamed(&whole, tally, &read);
-    let accounting_notes = whole
-        .usage_detail
-        .as_ref()
-        .map_or(0, |detail| detail.accounting_notes.len());
-    let mut facts = normalize(&view, accounting_notes + stream_notes, harness);
+    let mut facts = normalize(&view, selection_warnings, harness);
     if harness == "claude" {
         facts.residual = Some(residual(
             backend.as_ref(),
             &resolved.session,
             facts.frontier,
         ));
-        qualify_residual(&mut facts);
+        qualify_residual(&mut facts, harness);
     }
     facts.source_started_at = earliest.into_iter().chain(whole.started_at).min();
     facts.source_start_uncertain = whole.start_uncertain
@@ -913,6 +911,28 @@ fn sanitized_facts(held: &CostFacts) -> CostFacts {
             .incomplete
             .push("retained measurement gap".to_string());
     }
+    if let Some(gaps) = facts
+        .disjoint
+        .as_mut()
+        .and_then(|disjoint| disjoint.gaps.as_mut())
+    {
+        let unknown_category = gaps
+            .keys()
+            .any(|key| !DISJOINT_CATEGORIES.contains(&key.as_str()));
+        gaps.retain(|key, _| DISJOINT_CATEGORIES.contains(&key.as_str()));
+        if unknown_category {
+            for category in DISJOINT_CATEGORIES {
+                gaps.entry(category.to_string())
+                    .or_default()
+                    .push("quantity coverage was not retained".to_string());
+            }
+        }
+        for reason in gaps.values_mut().flatten() {
+            if !portable_quantity_reason(reason) {
+                *reason = "quantity coverage was not retained".to_string();
+            }
+        }
+    }
     if facts
         .disjoint
         .as_ref()
@@ -1003,17 +1023,62 @@ fn kebab<T: serde::Serialize>(value: T) -> Option<String> {
         .and_then(|value| value.as_str().map(str::to_string))
 }
 
+/// The fixed reason arc reports for each reason tapes names. No reason
+/// carries a recording path, an error text, or a count of notes.
+fn arc_reason(reason: MeasurementReason) -> &'static str {
+    match reason {
+        MeasurementReason::MissingCounter => "some counted events did not record this category",
+        MeasurementReason::MissingPrice => "some counted events recorded no price",
+        MeasurementReason::Unpriced => ZERO_PRICE,
+        MeasurementReason::StoppedAttempt => "a request stopped before its usage was complete",
+        MeasurementReason::UnreadableRecord => "some source records could not be read",
+        MeasurementReason::ReadWindow => {
+            "the figure covers only the part of the recording the read reached"
+        }
+        MeasurementReason::SinceReset => "the counters restarted inside the recording",
+        MeasurementReason::UnestablishedScope => "no accounting establishes what the figure covers",
+        MeasurementReason::IncompleteAttribution => {
+            "some requests could not be attributed to a model"
+        }
+        MeasurementReason::Undetermined => "the recorded counters do not determine this category",
+    }
+}
+
+fn arc_reasons<'a>(reasons: impl IntoIterator<Item = &'a MeasurementReason>) -> Vec<String> {
+    let mut reasons: Vec<String> = reasons
+        .into_iter()
+        .map(|reason| arc_reason(*reason).to_string())
+        .collect();
+    reasons.sort();
+    reasons.dedup();
+    reasons
+}
+
+/// Reasons that say only that the figure holds no amount, which arc reports
+/// as its own absence of a recorded category.
+fn is_absence(reason: MeasurementReason) -> bool {
+    matches!(
+        reason,
+        MeasurementReason::MissingCounter | MeasurementReason::MissingPrice
+    )
+}
+
 /// The facts arc keeps from one usage answer. The counters and the dollar
 /// figure are the reader's, unchanged; what keeps them from covering the
 /// session is named rather than corrected. Where the reader sums consumption
 /// over every branch a recording retains, that sum is the measurement, not
-/// the active branch's.
+/// the active branch's. Why a counter is not completely measured is tapes'
+/// typed answer for the figure measured; the only prose arc still counts is
+/// the reader's `--latest` selection warnings, which no typed field carries.
 fn normalize(
     view: &agent_tapes_core::usage::UsageView,
-    superseded_notes: usize,
+    selection_warnings: usize,
     harness: &str,
 ) -> CostFacts {
     let consumption = view.consumption.as_ref();
+    let completeness = consumption.map_or(&view.measurement_completeness, |consumption| {
+        &consumption.measurement_completeness
+    });
     let mut incomplete = Vec::new();
     let accounting = consumption
         .map(|consumption| &consumption.accounting)
@@ -1040,31 +1105,11 @@ fn normalize(
     if view.truncated || !view.truncation.is_empty() {
         incomplete.push("the read was bounded and withheld part of the source".to_string());
     }
-    // The recording's accounting notes and the backend's own read notes
-    // qualify the active-branch figure a consumption sum replaces; notes from
-    // diagnostics and skipped records qualify either.
-    let notes = match consumption {
-        Some(_) => view.notes.len().saturating_sub(superseded_notes),
-        None => view.notes.len(),
-    };
-    if notes > 0 {
-        incomplete.push(format!("{notes} usage notes"));
+    if selection_warnings > 0 {
+        incomplete.push(format!("{selection_warnings} selection warnings"));
     }
     if let Some(read) = view.read.as_ref().filter(|read| !read.gaps.is_empty()) {
         incomplete.push(format!("{} source read gaps", read.gaps.len()));
-    }
-    if let Some(consumption) = consumption {
-        // Each counter with missing or unpriced events has its own note,
-        // which the per-category gaps below carry.
-        let per_counter = consumption
-            .measurement_coverage
-            .values()
-            .filter(|coverage| coverage.missing > 0 || coverage.unpriced > 0)
-            .count();
-        let other = consumption.incomplete.len().saturating_sub(per_counter);
-        if other > 0 {
-            incomplete.push(format!("{other} consumption notes"));
-        }
     }
     let read = view.read.as_ref();
     if read.is_none() {
@@ -1087,6 +1132,7 @@ fn normalize(
             .zip(agent_tapes_core::model::TokenConvention::of(harness))
             .map(|(tokens, convention)| {
                 agent_tapes_core::model::DisjointTokens::from_native(tokens, convention, None)
+                    .with_completeness(completeness)
             }),
         None => view.disjoint.clone(),
     };
@@ -1171,6 +1217,13 @@ fn normalize(
                 }),
                 output: disjoint.output,
                 reasoning: disjoint.reasoning,
+                gaps: Some(
+                    disjoint
+                        .measurement_completeness
+                        .iter()
+                        .map(|(category, reasons)| (category.to_string(), arc_reasons(reasons)))
+                        .collect(),
+                ),
             })
         }),
         cost_coverage: cost_coverage.map(|coverage| CostPricing {
@@ -1181,30 +1234,30 @@ fn normalize(
         events,
         residual: None,
     };
-    let summed = facts.basis.as_deref() == Some("summed-requests");
     let mut gaps: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let typed = |counter: &str, absent: bool| -> Vec<String> {
+        completeness
+            .iter()
+            .filter(|(name, _)| *name == counter)
+            .flat_map(|(_, reasons)| reasons)
+            .filter(|reason| !(absent && is_absence(**reason)))
+            .map(|reason| arc_reason(*reason).to_string())
+            .collect()
+    };
     for category in CATEGORIES {
-        let reason = if counter(&facts.counters, category).is_none() {
-            Some("recorded category is absent")
-        } else if facts.basis.is_none() {
-            Some("accounting basis is unknown")
-        } else if let Some(events) = &facts.events {
-            match events.coverage.get(category) {
-                Some(coverage) if coverage.missing > 0 || coverage.unpriced > 0 => {
-                    Some("some counted events did not record this category")
-                }
-                Some(_) => None,
-                None => Some("per-event counter coverage is unknown"),
-            }
-        } else if summed {
-            Some("per-event counter coverage is unknown")
-        } else if harness != "codex" {
-            Some("per-model counter coverage is unknown")
-        } else {
-            None
-        };
-        if let Some(reason) = reason {
-            gaps.insert(category.to_string(), vec![reason.to_string()]);
+        let absent = counter(&facts.counters, category).is_none();
+        let mut reasons = Vec::new();
+        if absent {
+            reasons.push("recorded category is absent".to_string());
+        }
+        if facts.basis.is_none() {
+            reasons.push("accounting basis is unknown".to_string());
+        }
+        reasons.extend(typed(category, absent));
+        if !reasons.is_empty() {
+            reasons.sort();
+            reasons.dedup();
+            gaps.insert(category.to_string(), reasons);
         }
     }
     let zero_written = facts.cost_coverage.as_ref().is_some_and(|coverage| {
@@ -1212,40 +1265,19 @@ fn normalize(
     });
     let mut usd = Vec::new();
     match facts.harness_estimate_usd {
-        None if kind_supported == Some(false) => usd.push("recorded cost kind is unsupported"),
-        None if zero_written => usd.push(ZERO_PRICE),
-        None => usd.push("recorded category is absent"),
-        Some(_) => {
-            if facts.basis.is_none() {
-                usd.push("accounting basis is unknown");
-            }
-            match (&facts.events, &facts.cost_coverage) {
-                (Some(events), _) => match events.coverage.get("cost") {
-                    Some(coverage) => {
-                        if coverage.unpriced > 0 {
-                            usd.push(ZERO_PRICE);
-                        }
-                        if coverage.missing > 0 {
-                            usd.push("some counted events recorded no price");
-                        }
-                    }
-                    None => usd.push("per-event price coverage is unknown"),
-                },
-                (None, Some(coverage)) if !coverage.complete => usd.push(if zero_written {
-                    ZERO_PRICE
-                } else {
-                    "some counted events recorded no price"
-                }),
-                (None, None) if summed => usd.push("per-event price coverage is unknown"),
-                _ => {}
-            }
+        None if kind_supported == Some(false) => {
+            usd.push("recorded cost kind is unsupported".to_string())
         }
+        None if zero_written => usd.push(ZERO_PRICE.to_string()),
+        None => usd.push("recorded category is absent".to_string()),
+        Some(_) if facts.basis.is_none() => usd.push("accounting basis is unknown".to_string()),
+        Some(_) => {}
     }
+    usd.extend(typed("cost", facts.harness_estimate_usd.is_none()));
     if !usd.is_empty() {
-        gaps.insert(
-            "usd".to_string(),
-            usd.into_iter().map(str::to_string).collect(),
-        );
+        usd.sort();
+        usd.dedup();
+        gaps.insert("usd".to_string(), usd);
     }
     facts.quantity_gaps = Some(gaps);
     qualify_price(&mut facts);
@@ -1335,7 +1367,7 @@ fn sanitize_residual(residual: &mut CostResidual) {
 
 /// A recorded total below the requests it should contain understates that
 /// counter.
-fn qualify_residual(facts: &mut CostFacts) {
+fn qualify_residual(facts: &mut CostFacts, harness: &str) {
     let conflicts: Vec<String> = facts
         .residual
         .iter()
@@ -1343,15 +1375,42 @@ fn qualify_residual(facts: &mut CostFacts) {
         .filter(|row| row.status == "conflict")
         .map(|row| row.counter.clone())
         .collect();
+    let convention = agent_tapes_core::model::TokenConvention::of(harness);
     for counter in conflicts {
-        let gaps = facts
-            .quantity_gaps
-            .get_or_insert_with(BTreeMap::new)
-            .entry(counter)
-            .or_default();
-        if !gaps.iter().any(|reason| reason == RESIDUAL_CONFLICT) {
-            gaps.push(RESIDUAL_CONFLICT.to_string());
+        // The categories restating the counter are the ones tapes derives
+        // from it.
+        let mut native = MeasurementCompleteness::default();
+        native.qualify(&counter, MeasurementReason::Undetermined);
+        let restated: Vec<String> = convention
+            .as_ref()
+            .map(|convention| native.disjoint(convention))
+            .iter()
+            .flat_map(|disjoint| disjoint.iter().map(|(category, _)| category.to_string()))
+            .collect();
+        if let Some(disjoint) = &mut facts.disjoint {
+            for category in restated {
+                push_reason(
+                    disjoint
+                        .gaps
+                        .get_or_insert_with(BTreeMap::new)
+                        .entry(category)
+                        .or_default(),
+                );
+            }
         }
+        push_reason(
+            facts
+                .quantity_gaps
+                .get_or_insert_with(BTreeMap::new)
+                .entry(counter)
+                .or_default(),
+        );
+    }
+}
+
+fn push_reason(reasons: &mut Vec<String>) {
+    if !reasons.iter().any(|reason| reason == RESIDUAL_CONFLICT) {
+        reasons.push(RESIDUAL_CONFLICT.to_string());
     }
 }
 
@@ -1656,34 +1715,6 @@ fn disjoint_amount(disjoint: &CostDisjoint, category: &str) -> Option<u64> {
     }
 }
 
-/// The native counters a disjoint category is derived from under the
-/// harness's convention; their gaps are its gaps.
-fn disjoint_sources(convention: &CostConvention, category: &str) -> Vec<&'static str> {
-    let input: &[&'static str] = if convention.input == "includes-cache-read" {
-        &["input", "cache_read", "cache_write"]
-    } else {
-        &["input"]
-    };
-    let output: &[&'static str] = if convention.output == "excludes-reasoning" {
-        &["output", "reasoning"]
-    } else {
-        &["output"]
-    };
-    match category {
-        "uncached_input" => input.to_vec(),
-        "cache_read" => vec!["cache_read"],
-        "output" => output.to_vec(),
-        "reasoning" => vec!["reasoning", "output"],
-        "total" => input
-            .iter()
-            .chain(&["cache_read", "cache_write"])
-            .chain(output)
-            .copied()
-            .collect(),
-        _ => vec!["cache_write"],
-    }
-}
-
 /// Why a session's figure is not a complete measurement of one quantity.
 fn figure_gaps(facts: &CostFacts, figure: Figure) -> Vec<String> {
     let Some(gaps) = &facts.quantity_gaps else {
@@ -1697,9 +1728,19 @@ fn figure_gaps(facts: &CostFacts, figure: Figure) -> Vec<String> {
             let Some(disjoint) = &facts.disjoint else {
                 return Vec::new();
             };
-            let mut reasons: BTreeSet<String> = disjoint_sources(&disjoint.convention, category)
-                .into_iter()
-                .flat_map(of)
+            let categories: &[&str] = match category {
+                "total" => &["uncached_input", "cache_read", "cache_write", "output"],
+                "cache_write_5m" | "cache_write_1h" | "cache_write_ttl_unrecorded" => {
+                    &["cache_write"]
+                }
+                _ => std::slice::from_ref(&category),
+            };
+            let Some(gaps) = &disjoint.gaps else {
+                return vec!["quantity coverage was not retained".to_string()];
+            };
+            let mut reasons: BTreeSet<String> = categories
+                .iter()
+                .flat_map(|category| gaps.get(*category).into_iter().flatten().cloned())
                 .collect();
             if matches!(category, "cache_write_5m" | "cache_write_1h")
                 && disjoint
@@ -2525,6 +2566,27 @@ fn print_report(report: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each reason tapes names has its own fixed reason, which travels.
+    #[test]
+    fn every_tapes_reason_maps_to_a_distinct_portable_reason() {
+        use MeasurementReason::*;
+        let reasons = [
+            MissingCounter,
+            MissingPrice,
+            Unpriced,
+            StoppedAttempt,
+            UnreadableRecord,
+            ReadWindow,
+            SinceReset,
+            UnestablishedScope,
+            IncompleteAttribution,
+            Undetermined,
+        ];
+        let mapped: BTreeSet<&str> = reasons.into_iter().map(arc_reason).collect();
+        assert_eq!(mapped.len(), reasons.len());
+        assert!(mapped.iter().all(|reason| portable_quantity_reason(reason)));
+    }
 
     /// The reader a measurement names is the release and revision Cargo.lock
     /// resolved for the library this build links.

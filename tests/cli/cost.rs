@@ -707,7 +707,7 @@ fn a_claude_and_codex_set_refuses_a_raw_input_sum() {
         "resource-quantity",
         Some("input"),
     );
-    assert_eq!(claude_input["known_subtotal"], 300, "{report}");
+    assert_eq!(claude_input["amount"], 300, "{report}");
     let codex_input = quantity(
         &session(&report, &format!("codex:{codex_id}"))["totals"],
         "resource-quantity",
@@ -1084,8 +1084,8 @@ fn a_failed_lineage_read_is_unknown_and_survives_retention() {
     let input = quantity(&fresh["union"], "resource-quantity", Some("input"));
     assert_eq!(input["status"], "withheld");
     assert!(input.get("amount").is_none());
-    assert_eq!(input["known_bound"]["at_least"], 200);
-    assert_eq!(input["known_bound"]["at_most"], 300);
+    assert_eq!(recorded_bound(input)["at_least"], 200);
+    assert_eq!(recorded_bound(input)["at_most"], 300);
     stdout(
         repo.arc(&repo.root)
             .args(["cost", "retain", "failed-lineage"]),
@@ -1251,7 +1251,7 @@ fn a_declared_claude_fork_withholds_union_after_retention_and_rotation() {
     assert!(fork_row["measurement"]["lineage"]["forked_from"].is_null());
     assert_eq!(fork_row["spans"][0]["forked_from"], origin_id);
     assert_eq!(
-        quantity(&fork_row["totals"], "resource-quantity", Some("input"))["known_subtotal"],
+        quantity(&fork_row["totals"], "resource-quantity", Some("input"))["amount"],
         200
     );
     stdout(repo.arc(&repo.root).args(["cost", "retain", "claude-fork"]));
@@ -1302,7 +1302,7 @@ fn a_declared_claude_fork_has_complete_identity_when_its_origin_is_outside_the_f
     assert_eq!(fresh["union"]["identity"]["status"], "complete");
     assert_eq!(fresh["coverage"]["identity"]["status"], "complete");
     assert_eq!(
-        quantity(&fresh["union"], "resource-quantity", Some("input"))["known_subtotal"],
+        quantity(&fresh["union"], "resource-quantity", Some("input"))["amount"],
         250
     );
     stdout(repo.arc(&repo.root).args(["cost", "retain", "fork-only"]));
@@ -1908,6 +1908,15 @@ fn a_claude_total_below_its_requests_is_a_conflict_never_clamped() {
     assert!(figure["reasons"]
         .to_string()
         .contains("recorded total is below its identified requests"));
+    // The disjoint category restating the understated counter inherits it.
+    for category in ["uncached_input", "total"] {
+        let restated = disjoint(&row["totals"], category);
+        assert_ne!(restated["status"], "complete", "{view}");
+        assert!(restated["reasons"]
+            .to_string()
+            .contains("recorded total is below its identified requests"));
+    }
+    assert_eq!(disjoint(&row["totals"], "output")["status"], "complete");
     assert_eq!(
         view["coverage"]["measurement"]["residual"]["status"],
         "incomplete"
@@ -1960,7 +1969,7 @@ fn an_unenumerable_claude_family_is_never_reconciled_and_leaves_the_measurement_
     );
     assert_eq!(usd(&row["totals"]), Some(0.03), "{view}");
     let input = quantity(&row["totals"], "resource-quantity", Some("input"));
-    assert_eq!(input["known_subtotal"], 100, "{view}");
+    assert_eq!(input["amount"], 100, "{view}");
     assert!(!view.to_string().contains(repo.home.to_str().unwrap()));
     assert!(!view.to_string().contains("not a directory"));
 }
@@ -2160,4 +2169,268 @@ fn tampered_retained_accounting_fields_degrade_field_by_field() {
         "absent",
         "{view}"
     );
+}
+
+/// Every figure's reasons, flattened, for a session's totals.
+fn all_reasons(totals: &Value) -> String {
+    totals["quantities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|figure| figure["reasons"].to_string())
+        .collect()
+}
+
+#[test]
+fn a_claude_request_sum_is_complete_where_tapes_states_every_counter() {
+    let repo = Repo::new();
+    let id = "88888888-8888-4888-8888-888888888888";
+    claude_recording(&repo, id, 300);
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "whole-sum"),
+        "claude",
+        id,
+    );
+    let view = report(&repo, "whole-sum");
+    let row = session(&view, &format!("claude:{id}"));
+    for (category, expected) in [
+        ("input", 300),
+        ("output", 30),
+        ("cache_read", 200),
+        ("cache_write", 40),
+    ] {
+        let figure = quantity(&row["totals"], "resource-quantity", Some(category));
+        assert_eq!(figure["status"], "complete", "{category}: {view}");
+        assert_eq!(figure["amount"], expected, "{category}: {view}");
+    }
+    for (category, expected) in [
+        ("uncached_input", 300),
+        ("cache_read", 200),
+        ("cache_write", 40),
+        ("output", 30),
+        ("total", 570),
+    ] {
+        let figure = disjoint(&row["totals"], category);
+        assert_eq!(figure["status"], "complete", "{category}: {view}");
+        assert_eq!(figure["amount"], expected, "{category}: {view}");
+    }
+    // Claude records no reasoning count: absent, and the only gap.
+    let reasoning = quantity(&row["totals"], "resource-quantity", Some("reasoning"));
+    assert_eq!(reasoning["status"], "absent", "{view}");
+    assert!(
+        !all_reasons(&row["totals"]).contains("coverage is unknown"),
+        "{view}"
+    );
+}
+
+#[test]
+fn a_claude_recorded_total_is_complete_where_its_models_each_record_a_counter() {
+    let repo = Repo::new();
+    let id = "99999999-9999-4999-8999-999999999999";
+    claude_with_total(&repo, id, 100, 0.03);
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "whole-total"),
+        "claude",
+        id,
+    );
+    let view = report(&repo, "whole-total");
+    let row = session(&view, &format!("claude:{id}"));
+    assert_eq!(row["measurement"]["basis"], "recorded-total", "{view}");
+    for category in ["input", "output", "cache_read", "cache_write"] {
+        let figure = quantity(&row["totals"], "resource-quantity", Some(category));
+        assert_eq!(figure["status"], "complete", "{category}: {view}");
+    }
+    assert_eq!(
+        disjoint(&row["totals"], "total")["status"],
+        "complete",
+        "{view}"
+    );
+    assert!(
+        !all_reasons(&row["totals"]).contains("coverage is unknown"),
+        "{view}"
+    );
+}
+
+#[test]
+fn a_stopped_request_and_an_unreadable_record_qualify_every_category_by_type() {
+    let repo = Repo::new();
+    let path = pi_recording(&repo, "stopped-unreadable", &[0.01, 0.02], false);
+    let mut lines = recording_lines(&path);
+    lines[3]["message"]["stopReason"] = json!("error");
+    let mut body: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    body.push_str("{ this record is not json\n");
+    fs::write(&path, body).unwrap();
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "stopped-unreadable"),
+        "pi",
+        "stopped-unreadable",
+    );
+    let fresh = report(&repo, "stopped-unreadable");
+    let row = session(&fresh, "pi:stopped-unreadable");
+    for category in ["input", "output", "cache_read", "cache_write"] {
+        let figure = quantity(&row["totals"], "resource-quantity", Some(category));
+        assert_eq!(figure["status"], "incomplete", "{category}: {fresh}");
+        let reasons = figure["reasons"].to_string();
+        assert!(
+            reasons.contains("a request stopped before its usage was complete"),
+            "{reasons}"
+        );
+        assert!(
+            reasons.contains("some source records could not be read"),
+            "{reasons}"
+        );
+    }
+    for category in [
+        "uncached_input",
+        "cache_read",
+        "cache_write",
+        "output",
+        "total",
+    ] {
+        let figure = disjoint(&row["totals"], category);
+        assert_eq!(figure["status"], "incomplete", "{category}: {fresh}");
+        assert!(figure["known_subtotal"].is_u64(), "{category}: {fresh}");
+    }
+    // No count of prose notes stands in for a typed reason.
+    let reasons = row["measurement"]["reasons"].to_string();
+    assert!(
+        !reasons.contains("consumption notes") && !reasons.contains("usage notes"),
+        "{reasons}"
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "retain", "stopped-unreadable"]),
+    );
+    fs::remove_file(path).unwrap();
+    let retained = report(&repo, "stopped-unreadable");
+    assert_eq!(retained["union"], fresh["union"]);
+    assert_eq!(
+        session(&retained, "pi:stopped-unreadable")["measurement"]["disjoint"]["gaps"],
+        row["measurement"]["disjoint"]["gaps"]
+    );
+}
+
+#[test]
+fn a_pi_disjoint_figure_carries_tapes_category_completeness() {
+    let repo = Repo::new();
+    let path = pi_recording(&repo, "category-completeness", &[0.01, 0.02], false);
+    let mut lines = recording_lines(&path);
+    lines[3]["message"]["usage"]
+        .as_object_mut()
+        .unwrap()
+        .remove("cacheRead");
+    write_lines(&path, &lines);
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "category-completeness"),
+        "pi",
+        "category-completeness",
+    );
+    let view = report(&repo, "category-completeness");
+    let row = session(&view, "pi:category-completeness");
+    let gaps = &row["measurement"]["disjoint"]["gaps"];
+    assert_eq!(
+        gaps["cache_read"],
+        json!(["some counted events did not record this category"]),
+        "{view}"
+    );
+    assert!(
+        gaps.get("output").is_none() && gaps.get("uncached_input").is_none(),
+        "{view}"
+    );
+    assert_eq!(
+        disjoint(&row["totals"], "output")["status"],
+        "complete",
+        "{view}"
+    );
+    assert_eq!(
+        disjoint(&row["totals"], "cache_read")["status"],
+        "incomplete",
+        "{view}"
+    );
+    assert_eq!(
+        disjoint(&row["totals"], "total")["status"],
+        "incomplete",
+        "{view}"
+    );
+}
+
+#[test]
+fn tampered_retained_disjoint_gaps_degrade_category_by_category() {
+    let repo = Repo::new();
+    let path = pi_recording(&repo, "tampered-gaps", &[0.01], false);
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "tampered-gaps"),
+        "pi",
+        "tampered-gaps",
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "retain", "tampered-gaps"]),
+    );
+    let leak = "/home/user/recording.jsonl";
+    for entry in fs::read_dir(repo.root.join(".git/arc/repository/events")).unwrap() {
+        let path = entry.unwrap().path();
+        let mut event: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        if event["event_type"] != "cost-facts-retained" {
+            continue;
+        }
+        event["facts"]["disjoint"]["gaps"] = json!({"output": [format!("cannot read {leak}")]});
+        fs::write(path, event.to_string()).unwrap();
+    }
+    fs::remove_file(path).unwrap();
+    let view = report(&repo, "tampered-gaps");
+    assert!(!view.to_string().contains(leak), "{view}");
+    let row = session(&view, "pi:tampered-gaps");
+    // The category whose reason was unreadable is qualified, never complete;
+    // the others keep their retained completeness.
+    let output = disjoint(&row["totals"], "output");
+    assert_eq!(output["status"], "incomplete", "{view}");
+    assert_eq!(output["known_subtotal"], 20, "{view}");
+    assert!(output["reasons"]
+        .to_string()
+        .contains("quantity coverage was not retained"));
+    assert_eq!(
+        disjoint(&row["totals"], "cache_read")["status"],
+        "complete",
+        "{view}"
+    );
+    assert_eq!(usd(&row["totals"]), Some(0.01), "{view}");
+}
+
+#[test]
+fn retained_disjoint_facts_without_category_gaps_are_not_complete() {
+    let repo = Repo::new();
+    let path = pi_recording(&repo, "no-gaps", &[0.01], false);
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "no-gaps"),
+        "pi",
+        "no-gaps",
+    );
+    stdout(repo.arc(&repo.root).args(["cost", "retain", "no-gaps"]));
+    for entry in fs::read_dir(repo.root.join(".git/arc/repository/events")).unwrap() {
+        let path = entry.unwrap().path();
+        let mut event: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        if event["event_type"] != "cost-facts-retained" {
+            continue;
+        }
+        event["facts"]["disjoint"]
+            .as_object_mut()
+            .unwrap()
+            .remove("gaps");
+        fs::write(path, event.to_string()).unwrap();
+    }
+    fs::remove_file(path).unwrap();
+    let view = report(&repo, "no-gaps");
+    let row = session(&view, "pi:no-gaps");
+    for category in ["uncached_input", "cache_read", "output", "total"] {
+        let figure = disjoint(&row["totals"], category);
+        assert_ne!(figure["status"], "complete", "{category}: {view}");
+        assert!(figure.get("amount").is_none(), "{category}: {view}");
+    }
 }

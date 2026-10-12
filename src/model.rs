@@ -2713,6 +2713,11 @@ pub struct CostDisjoint {
     pub output: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<u64>,
+    /// Why a category, by tapes' category name, is not completely measured.
+    /// A category absent from the map is complete; absence of the map means
+    /// category coverage was not retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gaps: Option<BTreeMap<String, Vec<String>>>,
 }
 
 /// How the harness's native counters divide a request's tokens, as tapes
@@ -2880,23 +2885,26 @@ pub(crate) fn portable_cost_reason(reason: &str) -> bool {
             | "the counters cover the since-reset, not the whole session"
             | "retained measurement gap"
     ) || counted_reason(reason, " source read gaps")
-        || counted_reason(reason, " usage notes")
-        || counted_reason(reason, " consumption notes")
+        || counted_reason(reason, " selection warnings")
 }
 
 pub(crate) fn portable_quantity_reason(reason: &str) -> bool {
     matches!(
         reason,
         "recorded category is absent"
-            | "per-event counter coverage is unknown"
-            | "per-model counter coverage is unknown"
-            | "per-event price coverage is unknown"
             | "recorded zero price accompanies nonzero or unknown usage"
             | "recorded price is invalid"
             | "quantity coverage was not retained"
             | "accounting basis is unknown"
             | "some counted events did not record this category"
             | "some counted events recorded no price"
+            | "a request stopped before its usage was complete"
+            | "some source records could not be read"
+            | "the figure covers only the part of the recording the read reached"
+            | "the counters restarted inside the recording"
+            | "no accounting establishes what the figure covers"
+            | "some requests could not be attributed to a model"
+            | "the recorded counters do not determine this category"
             | "recorded total is below its identified requests"
             | "recorded cost kind is unsupported"
     )
@@ -2927,6 +2935,15 @@ fn versioned_token(value: &str) -> bool {
     })
 }
 
+/// The disjoint categories tapes qualifies.
+pub(crate) const DISJOINT_CATEGORIES: [&str; 5] = [
+    "uncached_input",
+    "cache_read",
+    "cache_write",
+    "output",
+    "reasoning",
+];
+
 const COUNTER_CATEGORIES: [&str; 5] = ["input", "output", "reasoning", "cache_read", "cache_write"];
 
 pub(crate) fn portable_selection(selection: &str) -> bool {
@@ -2941,7 +2958,12 @@ impl CostDisjoint {
         ) && matches!(
             self.convention.output.as_str(),
             "includes-reasoning" | "excludes-reasoning"
-        )
+        ) && self.gaps.iter().flatten().all(|(category, reasons)| {
+            DISJOINT_CATEGORIES.contains(&category.as_str())
+                && reasons
+                    .iter()
+                    .all(|reason| portable_quantity_reason(reason))
+        })
     }
 }
 
