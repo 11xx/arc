@@ -3092,16 +3092,27 @@ RULES THAT CHANGE WHAT YOU DO
     A session spanning several items is shared beside the totals, and one
     with several spans has no per-run figure. A harness-written dollar
     figure is a harness-calculated estimate with an unknown pricing basis;
-    token counts are resource quantities by tapes' categories. A raw input
-    sum across harnesses is refused and other cross-harness token sums are
-    withheld; an unbound or conflicting dispatch withholds its work totals.
+    token counts are resource quantities by tapes' categories. A harness's
+    native counters add only within that harness: a raw input sum across
+    harnesses is refused and other native sums across harnesses are
+    withheld. Tapes' disjoint categories (uncached input, cache read, cache
+    write by TTL, output, reasoning as a subset of output, and their total)
+    add across harnesses, each with its harness's convention, within one
+    accounting basis. An unbound or conflicting dispatch withholds its work
+    totals.
     A missing amount leaves a total absent beside its known subtotal, never
     zero. Measurement, assignment, and identity coverage are reported apart.
     Every quantity names its accounting basis. Incompatible harness or basis
     domains withhold the combined quantity and expose separate partitions.
-    Completeness is per category. Request sums and per-model token sums remain
-    known subtotals where the pinned reader supplies no category coverage.
-    A recorded zero price beside nonzero or unknown usage is unmeasured.
+    Completeness is per category. A counter that some counted events did not
+    record is a known subtotal, as are per-model token sums, and a disjoint
+    category inherits the gaps of the counters it restates. A recording that
+    keeps several conversation paths, such as a rewound Pi session, counts
+    each consumption event once across every retained branch, with the
+    events, their per-counter coverage and how they are identified reported
+    beside the figure. A recorded zero price beside nonzero or unknown usage
+    is unpriced, never a measured zero, and pricing coverage is reported
+    with the cost.
     Token arithmetic preserves integers and refuses overflow. Currency sums
     round to ten fractional places, preserving smaller nonzero values;
     currency bounds round outwards.
@@ -3127,16 +3138,23 @@ RULES THAT CHANGE WHAT YOU DO
     Per-session figures remain available. The top-level identity status
     summarizes the figures. A session that acted on a selected change
     unbound, such as a lead, is named outside
-    assignment coverage with no figure. Pi entries on abandoned branches and
-    the residual between a recorded total and its requests are reported as
-    incomplete or withheld while the pinned reader cannot measure them.
+    assignment coverage with no figure. A Claude session's recorded total is
+    reconciled per counter with the requests its recording family
+    identifies. The residual is the signed difference, never clamped, with
+    tapes' status (`reconciled`, `conflict`, `discrepancy` or `withheld`) and
+    fixed reasons; a conflict, a recorded total below its requests, qualifies
+    the counter it understates, a withheld counter has no residual, and a
+    family that cannot be read leaves only the residual unavailable.
   - `arc cost retain <change|journal-file>` keeps, per bound session, the
     facts a fresh read gives: reader and calculation versions, source
     frontier, digest and opening boundary, counters with their basis,
-    coverage and category-specific gaps, and any
-    harness-written dollar figure, plus lineage relations and read failures
+    coverage and category-specific gaps, the disjoint categories with their
+    convention, the consumption events with their per-counter coverage and
+    identity, the Claude residual, and any harness-written dollar figure
+    with its pricing coverage, plus lineage relations and read failures
     as fixed categories. Retained facts carry no recording locators or raw
-    errors. Display sanitizes older facts; bundle import and export refuse
+    errors. Display sanitizes older facts field by field, so one unreadable
+    field leaves the rest of the measurement available; bundle import and export refuse
     nonportable identities, metadata, quantities or reason categories without
     changing recorded events.
     Unavailable journal membership and unreadable ledger peers are reported

@@ -4074,17 +4074,29 @@ enum CostCmd {
     /// per-run figure. Every total names its quantity kind: the dollar figure
     /// a harness wrote is a harness-calculated estimate with an unknown
     /// pricing basis, and token counts are resource quantities by tapes'
-    /// categories. A raw input sum across harnesses is refused, other token
-    /// sums across harnesses are withheld, an unbound or conflicting dispatch
-    /// withholds its work totals, and a missing amount leaves a total absent beside the
+    /// categories. A harness's native counters add only within that harness:
+    /// a raw input sum across harnesses is refused and other native sums are
+    /// withheld. Tapes' disjoint categories (uncached input, cache read,
+    /// cache write by TTL, output, reasoning as a subset of output, and their
+    /// total) add across harnesses with each harness's convention, within one
+    /// accounting basis. An unbound or conflicting dispatch withholds its
+    /// work totals, and a missing amount leaves a total absent beside the
     /// known subtotal, never zero. Measurement, assignment, and identity
     /// coverage are reported apart.
     /// Every quantity names its accounting basis. Incompatible harness or
     /// basis domains withhold the combined quantity and expose partitions.
-    /// Completeness is per category: request sums and per-model counter sums
-    /// remain known subtotals where the pinned reader supplies no category
-    /// coverage. A recorded zero price beside nonzero or unknown usage is
-    /// unmeasured. Token arithmetic preserves integers and refuses overflow.
+    /// Completeness is per category: a counter some counted events did not
+    /// record is a known subtotal, as are per-model counter sums, and a
+    /// disjoint category inherits the gaps of the counters it restates. A
+    /// recording that keeps several conversation paths, such as a rewound Pi
+    /// session, counts each consumption event once across every retained
+    /// branch and reports the events, their per-counter coverage and their
+    /// identity. A Claude session's recorded total is reconciled per counter
+    /// with the requests its family identifies: the residual is the signed
+    /// difference, never clamped, with tapes' status and reasons, and a
+    /// recorded total below its requests qualifies that counter. A recorded
+    /// zero price beside nonzero or unknown usage is unpriced, never a
+    /// measured zero. Token arithmetic preserves integers and refuses overflow.
     /// A recording that starts before its session's first dispatch has
     /// pre-dispatch consumption: assignment is incomplete and work totals
     /// are withheld. An unknown opening boundary likewise withholds them;
@@ -4112,8 +4124,10 @@ enum CostCmd {
     /// Retain the normalized facts a fresh read of each bound session gives:
     /// the reader and calculation versions, the source frontier, digest and
     /// opening boundary, the counters by tapes' categories with their basis,
-    /// coverage and category-specific gaps, and
-    /// any harness-written dollar figure, plus lineage relations and read
+    /// coverage and category-specific gaps, the disjoint categories, the
+    /// consumption events with their coverage, the Claude residual, and
+    /// any harness-written dollar figure with its pricing coverage, plus
+    /// lineage relations and read
     /// failures as fixed categories. Relatives are plain session ids; no
     /// recording locator or raw error text is retained. Binding fork origins
     /// remain in the run records. Unavailable journal membership, unreadable
