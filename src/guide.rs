@@ -3227,7 +3227,8 @@ RULES THAT CHANGE WHAT YOU DO
     history it began as a copy of, and follows the validation and retry
     rules of `--executor-session`. Fork origins participate in binding tuples.
   - `arc cost show <change|journal-file> [--json]` reports what the executor
-    sessions bound to the selected runs consumed, and records nothing. A
+    sessions bound to the selected runs, and the participants that act on the
+    selected work, consumed, and records nothing. A
     change selects itself and the artifact it was begun from; an artifact
     selects its `supersedes` lineage and the changes begun from any name in
     it. Membership compares resolved journal and artifact identity, so bare,
@@ -3303,17 +3304,38 @@ RULES THAT CHANGE WHAT YOU DO
     the sum of its members. Disjoint group bounds add. Missing or incomplete
     measurements qualify the bounds as covering only known recorded amounts.
     Per-session figures remain available. The top-level identity status
-    summarizes the figures. A session that acted on a selected change
-    unbound, such as a lead, is named outside
-    assignment coverage with no figure. A Claude session's recorded total is
+    summarizes the figures. A participant is a session no dispatch binds
+    whose ledger events act on the selected work; a session a dispatch binds
+    is an executor and never a participant. The kind of an event is the
+    only source of its roles: a snapshot or a verdict makes the session a
+    reviewer, an integration, a debt or a closure an integrator, and a
+    dispatch an orchestrator; any other kind makes no participant, and
+    prose and trailers name none. A participant is measured whole through
+    the same reader as an executor, or from retained facts when its source no
+    longer answers, and is never split by time or by event. Its membership is
+    every change in this ledger whose events carry it, read in one pass.
+    It counts as direct only where the item holds every member; otherwise it
+    is listed under `shared` and in `participants` with its whole figure,
+    roles and span count, the number of members. A union counts it once when
+    the selection covers its whole membership. A recording cannot show
+    whether its session is still running, so a participant's figure is as of
+    its read frontier and says so as incomplete measurement. A session may
+    also act in other repositories' ledgers, which this ledger cannot see.
+    An unreadable ledger record leaves a participant's membership incomplete,
+    so it is never counted as the work's alone. Acting events with no
+    harness or session, or one that is not a plain id, are counted under
+    `unattributed_events` and make assignment incomplete. A session that
+    acted on the selected work and is not measured, such as one the store
+    cannot resolve, is named outside assignment coverage with its event
+    count, never zero. A Claude session's recorded total is
     reconciled per counter with the requests its recording family
     identifies. The residual is the signed difference, never clamped, with
     tapes' status (`reconciled`, `conflict`, `discrepancy` or `withheld`) and
     fixed reasons; a conflict, a recorded total below its requests, qualifies
     the counter it understates, a withheld counter has no residual, and a
     family that cannot be read leaves only the residual unavailable.
-  - `arc cost retain <change|journal-file>` keeps, per bound session, the
-    facts a fresh read gives: reader and calculation versions, source
+  - `arc cost retain <change|journal-file>` keeps, per bound or participating
+    session, the facts a fresh read gives: reader and calculation versions, source
     frontier, digest and opening boundary, counters with their basis,
     coverage and category-specific gaps, the disjoint categories with their
     convention and gaps, the consumption events with their per-counter coverage and
@@ -3325,7 +3347,8 @@ RULES THAT CHANGE WHAT YOU DO
     nonportable identities, metadata, quantities or reason categories without
     changing recorded events.
     Unavailable journal membership and unreadable ledger peers are reported
-    as coverage gaps; readable bound sessions are still retained. A session
+    as coverage gaps; readable bound and participating sessions are still
+    retained. A session
     whose source does not answer is reported and skipped independently.
     The source bytes stay in the harness store. Identical facts record
     nothing; retained facts are observations at their frontier and are never

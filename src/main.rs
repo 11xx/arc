@@ -4228,10 +4228,10 @@ enum CostCmd {
     /// A query refuses only when neither target metadata nor any relevant
     /// dispatch or session can be read
     ///
-    /// Each executor session bound to a selected run is measured through the
-    /// pinned tapes reader over its whole recording, or, when the source
-    /// is unavailable, from the facts `cost retain` kept, and the report says
-    /// which. A fresh read that disagrees with facts retained at the same
+    /// Each executor session bound to a selected run, and each participant, is
+    /// measured through the pinned tapes reader over its whole recording, or,
+    /// when the source is unavailable, from the facts `cost retain` kept, and
+    /// the report says which. A fresh read that disagrees with facts retained at the same
     /// frontier shows the conflict. Direct totals count sessions whose every
     /// span is the item's; inclusive totals for a change add the journal
     /// artifact it was begun from; the union counts each session once over
@@ -4280,11 +4280,29 @@ enum CostCmd {
     /// Recorded lineage and binding fork origins group potentially
     /// overlapping sessions transitively; exact unions of
     /// those groups are withheld beside bounds from the largest member to
-    /// their sum. An origin outside the figure adds no consumption. Sessions
-    /// that acted on a selected change without a binding, such as a lead,
-    /// are named outside assignment
-    /// coverage with no figure. Transitions and `begin --from-journal` add
-    /// no consumption. Nonportable binding metadata qualifies the affected
+    /// their sum. An origin outside the figure adds no consumption.
+    ///
+    /// A participant is a session no dispatch binds whose ledger events act
+    /// on the selected work; a session a dispatch binds is an executor and
+    /// never a participant. Its roles come only from the kinds of its events:
+    /// a snapshot or a verdict is a reviewer's, an integration, a debt or a
+    /// closure an integrator's, a dispatch an orchestrator's. It is measured
+    /// whole and never split. Its membership is every change in this ledger
+    /// whose events carry it; it counts as direct only where the item holds
+    /// every member, and is otherwise listed under `shared` and in
+    /// `participants` with its whole figure, roles and span count (its
+    /// members). A union counts it once when the selection covers its whole
+    /// membership. A recording cannot show whether its session is still
+    /// running, so a participant's figure is as of its read frontier and
+    /// reports incomplete measurement. A session may also act in other
+    /// repositories' ledgers, which this ledger cannot see, and an unreadable
+    /// ledger record leaves the membership incomplete, so the participant is
+    /// never counted as the work's alone. Acting events without a usable
+    /// harness and session are counted as `unattributed_events` and make
+    /// assignment incomplete. A session that acted on the selected work and
+    /// is not measured, such as one the store cannot resolve, is named
+    /// outside assignment coverage with its event count, never zero.
+    /// Transitions and `begin --from-journal` add no consumption. Nonportable binding metadata qualifies the affected
     /// assignment with a fixed diagnostic. `--json` emits `arc-cost/1`
     /// Records no events; ledger reads do not require a parseable append policy.
     Show {
@@ -4295,7 +4313,8 @@ enum CostCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Retain the normalized facts a fresh read of each bound session gives:
+    /// Retain the normalized facts a fresh read of each bound or participating
+    /// session gives:
     /// the reader and calculation versions, the source frontier, digest and
     /// opening boundary, the counters by tapes' categories with their basis,
     /// coverage and category-specific gaps (each a fixed reason, one of them

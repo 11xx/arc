@@ -1,13 +1,16 @@
-//! The work cost view: what the executor sessions bound to a change's or a
-//! journal artifact's dispatched runs consumed, measured through tapes, and
-//! the retained facts that let the arithmetic replay after a source rotates.
+//! The work cost view: what the sessions that act on a change's or a journal
+//! artifact's work consumed, measured through tapes, and the retained facts
+//! that let the arithmetic replay after a source rotates.
 //!
 //! Measurement and assignment are separate facts. A session is measured by
-//! the pinned tapes reader, or by facts retained from an earlier read; it is
-//! assigned to work only through the dispatches bound to it. Consumption no
-//! dispatch names is outside assignment coverage and never counted as zero.
-//! A total names its quantity kind and is withheld, refused, or absent rather
-//! than understated.
+//! the pinned tapes reader, or by facts retained from an earlier read. An
+//! executor session is assigned to work through the dispatches bound to it. A
+//! participant is a session with no binding whose ledger events act on the
+//! work: it is measured whole and never split, so it counts as direct only
+//! for work that holds every change its events name, and is shared otherwise.
+//! A session whose recording cannot be measured is outside assignment coverage
+//! and never counted as zero. A total names its quantity kind and is
+//! withheld, refused, or absent rather than understated.
 
 use super::cost_read::CostRead;
 use super::run::{rounds, RunSubject};
@@ -114,9 +117,6 @@ fn journal_item(ctx: &Ctx, reference: &str) -> Result<WorkItem> {
 struct Selection {
     target: Value,
     items: Vec<WorkItem>,
-    /// Ledger changes among the items, whose own events name the sessions
-    /// that acted on them.
-    ledger_changes: Vec<String>,
     gaps: Vec<Value>,
     ledger_gaps: Vec<Value>,
     readable: bool,
@@ -144,6 +144,62 @@ struct Measured {
     conflict: Option<Value>,
 }
 
+/// What a participant's events show it did. The variants are the fixed role
+/// names, in the order the view lists them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Role {
+    Integrator,
+    Orchestrator,
+    Reviewer,
+}
+
+impl Role {
+    fn name(self) -> &'static str {
+        match self {
+            Role::Integrator => "integrator",
+            Role::Orchestrator => "orchestrator",
+            Role::Reviewer => "reviewer",
+        }
+    }
+}
+
+/// The one place an event kind names a role: a snapshot or a verdict is a
+/// reviewer's, an integration, a debt or a closure an integrator's, and a
+/// dispatch an orchestrator's. Any other kind makes its session no
+/// participant, and nothing else, prose or trailer, supplies a role.
+fn role_of(payload: &Payload) -> Option<Role> {
+    match payload {
+        Payload::PatchsetAdded { .. }
+        | Payload::VerdictRecorded { .. }
+        | Payload::ExternalVerdictRecorded { .. }
+        | Payload::AuditVerdictRecorded { .. } => Some(Role::Reviewer),
+        Payload::ChangeIntegrated { .. }
+        | Payload::ChangeProvisionallyIntegrated { .. }
+        | Payload::ProvisionalIntegrationResolved { .. }
+        | Payload::IntegrationAsserted { .. }
+        | Payload::DebtDeclared { .. }
+        | Payload::AuditDebtDeclared { .. }
+        | Payload::ChangeClosed { .. } => Some(Role::Integrator),
+        Payload::RunDispatched { .. } => Some(Role::Orchestrator),
+        _ => None,
+    }
+}
+
+/// Why a participant's figure is incomplete: a recording cannot show whether
+/// its session is still running, so the figure is as of the frontier read.
+const PARTICIPANT_FRONTIER: &str =
+    "participant session measured as of its read frontier; a recording cannot show whether it is still running";
+
+/// A session no dispatch binds, measured because its ledger events act on
+/// the selected work.
+struct Participation {
+    roles: BTreeSet<Role>,
+    /// The ledger read had no gap, so the membership names every change the
+    /// session acted on. Otherwise a record that could name another one is
+    /// unreadable and the session is never counted as the work's alone.
+    membership_complete: bool,
+}
+
 struct SessionRow {
     harness: String,
     session: String,
@@ -151,6 +207,7 @@ struct SessionRow {
     membership: BTreeSet<WorkKey>,
     measured: Measured,
     overlap: BTreeSet<String>,
+    participation: Option<Participation>,
 }
 
 impl SessionRow {
@@ -166,10 +223,12 @@ pub fn show_cost(ctx: &Ctx, target: &str, json: bool) -> Result<()> {
     let events = read.events(Store::REPOSITORY_SCOPE);
     let mut selection = select(ctx, &mut read, target, &events)?;
     qualify_ledger(&mut selection, &read.gaps);
-    let (runs, sessions) = assign(ctx, &mut selection, &events);
-    if !selection.readable && runs.is_empty() && sessions.is_empty() {
+    let assigned = assign(ctx, &mut selection, &events);
+    if !selection.readable && assigned.runs.is_empty() && assigned.sessions.is_empty() {
         bail!("cost target has no readable metadata");
     }
+    let ledger = read_ledger(&mut read, &selection, &events, &assigned);
+    let Assigned { runs, sessions, .. } = assigned;
     let mut sessions: Vec<SessionRow> = sessions
         .into_iter()
         .map(|((harness, session), (spans, membership))| {
@@ -181,9 +240,38 @@ pub fn show_cost(ctx: &Ctx, target: &str, json: bool) -> Result<()> {
                 membership,
                 measured,
                 overlap: BTreeSet::new(),
+                participation: None,
             }
         })
         .collect();
+    let mut unmeasured = BTreeMap::new();
+    for ((harness, session), person) in ledger.participants() {
+        let mut measured = measure(&events, harness, session);
+        match measured.facts.as_mut() {
+            Some(facts) => {
+                facts.incomplete.push(PARTICIPANT_FRONTIER.to_string());
+                sessions.push(SessionRow {
+                    harness: harness.clone(),
+                    session: session.clone(),
+                    spans: Vec::new(),
+                    membership: person.membership.clone(),
+                    measured,
+                    overlap: BTreeSet::new(),
+                    participation: Some(Participation {
+                        roles: person.roles.clone(),
+                        membership_complete: ledger.complete,
+                    }),
+                });
+            }
+            None => {
+                let reason = match measured.source {
+                    Source::Unavailable(reason) => reason,
+                    _ => "usage read failed".to_string(),
+                };
+                unmeasured.insert((harness.clone(), session.clone()), reason);
+            }
+        }
+    }
     let groups = lineage_groups(&sessions);
     for row in &mut sessions {
         row.overlap = groups
@@ -192,9 +280,9 @@ pub fn show_cost(ctx: &Ctx, target: &str, json: bool) -> Result<()> {
             .cloned()
             .unwrap_or_default();
     }
-    let lead = outside_sessions(&mut read, &selection, &sessions);
+    let outside = outside_sessions(&ledger, &sessions, &unmeasured);
     selection.ledger_gaps = read.gaps;
-    let report = render_report(&selection, &runs, &sessions, &lead);
+    let report = render_report(&selection, &runs, &sessions, &outside, &ledger);
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -203,27 +291,31 @@ pub fn show_cost(ctx: &Ctx, target: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// Retain the normalized facts a fresh read of each bound session gives.
-/// Facts identical to ones already retained for the session record nothing.
+/// Retain the normalized facts a fresh read of each bound or participating
+/// session gives. Facts identical to ones already retained for the session
+/// record nothing.
 pub fn retain_cost(ctx: &Ctx, target: &str) -> Result<()> {
     let store = ctx.store()?;
     let mut read = CostRead::new(&store);
     let events = read.events(Store::REPOSITORY_SCOPE);
     let mut selection = select(ctx, &mut read, target, &events)?;
     qualify_ledger(&mut selection, &read.gaps);
-    let (runs, sessions) = assign(ctx, &mut selection, &events);
-    if !selection.readable && runs.is_empty() && sessions.is_empty() {
+    let assigned = assign(ctx, &mut selection, &events);
+    if !selection.readable && assigned.runs.is_empty() && assigned.sessions.is_empty() {
         bail!("cost target has no readable metadata");
     }
+    let ledger = read_ledger(&mut read, &selection, &events, &assigned);
     print_read_gaps(&selection.gaps, &read.gaps);
-    if sessions.is_empty() {
-        println!("no bound sessions");
+    let mut keys: BTreeSet<(String, String)> = assigned.sessions.into_keys().collect();
+    keys.extend(ledger.participants().map(|(key, _)| key.clone()));
+    if keys.is_empty() {
+        println!("no bound or participating sessions");
         return Ok(());
     }
     // Read every source before taking the ledger lock: a recording can be
     // large, and other writers wait on the lock.
-    let reads: Vec<(String, String, std::result::Result<CostFacts, String>)> = sessions
-        .into_keys()
+    let reads: Vec<(String, String, std::result::Result<CostFacts, String>)> = keys
+        .into_iter()
         .map(|(harness, session)| {
             let read = read_fresh(&harness, &session);
             (harness, session, read)
@@ -377,7 +469,6 @@ fn select(ctx: &Ctx, read: &mut CostRead<'_>, target: &str, events: &[Event]) ->
         let journal = item.key.clone();
         let lineage = item.lineage.clone();
         let mut items = vec![item];
-        let mut ledger_changes = Vec::new();
         for change_id in read.change_ids() {
             let change_events = read.events(&change_id);
             match opened_reference(&change_events) {
@@ -391,7 +482,6 @@ fn select(ctx: &Ctx, read: &mut CostRead<'_>, target: &str, events: &[Event]) ->
                                 source: Some(journal.clone()),
                                 complete: true,
                             });
-                            ledger_changes.push(change_id);
                         }
                         Ok(_) if items[0].complete => {}
                         _ => selection_gap(
@@ -414,7 +504,6 @@ fn select(ctx: &Ctx, read: &mut CostRead<'_>, target: &str, events: &[Event]) ->
         return Ok(Selection {
             target: json!({"kind": "journal", "file": target, "lineage": lineage}),
             items,
-            ledger_changes,
             gaps,
             ledger_gaps: Vec::new(),
             readable: crate::journal::artifact_digest(ctx, target).is_ok(),
@@ -465,7 +554,6 @@ fn select(ctx: &Ctx, read: &mut CostRead<'_>, target: &str, events: &[Event]) ->
     Ok(Selection {
         target: json!({"kind": "change", "id": change_id.clone()}),
         items,
-        ledger_changes: if held { vec![change_id] } else { Vec::new() },
         gaps,
         ledger_gaps: Vec::new(),
         readable,
@@ -483,12 +571,23 @@ struct AssignedRun {
 type Runs = BTreeMap<WorkKey, Vec<AssignedRun>>;
 type Sessions = BTreeMap<(String, String), (Vec<Span>, BTreeSet<WorkKey>)>;
 
-/// The selected runs per work item, and every bound session with at least
+/// What the dispatches assign.
+struct Assigned {
+    runs: Runs,
+    /// The bound sessions with a span in the selection.
+    sessions: Sessions,
+    /// The work each dispatch is for, selected or not.
+    dispatches: BTreeMap<String, WorkKey>,
+    /// Every session any dispatch binds, selected or not.
+    bound: BTreeSet<(String, String)>,
+}
+
+/// The selected runs per work item, every bound session with at least
 /// one span in the selection, with all of its spans across the repository:
 /// a span on unselected work makes the session shared beyond the view. A run
 /// is a change's when its dispatch names that change's exact id, so what a
 /// run is assigned to never moves as other changes are opened.
-fn assign(ctx: &Ctx, selection: &mut Selection, events: &[Event]) -> (Runs, Sessions) {
+fn assign(ctx: &Ctx, selection: &mut Selection, events: &[Event]) -> Assigned {
     let selected: BTreeSet<WorkKey> = selection
         .items
         .iter()
@@ -496,6 +595,8 @@ fn assign(ctx: &Ctx, selection: &mut Selection, events: &[Event]) -> (Runs, Sess
         .collect();
     let mut runs: Runs = BTreeMap::new();
     let mut sessions: Sessions = BTreeMap::new();
+    let mut dispatches = BTreeMap::new();
+    let mut bound = BTreeSet::new();
     let mut possible_sessions = BTreeSet::new();
     for round in rounds(events) {
         let mut uncertain = Vec::new();
@@ -561,6 +662,7 @@ fn assign(ctx: &Ctx, selection: &mut Selection, events: &[Event]) -> (Runs, Sess
             Some(subject) => WorkKey::Other(subject.label()),
             None => WorkKey::Other("unattributed".to_string()),
         };
+        dispatches.insert(round.dispatch.event_id.clone(), work.clone());
         if !uncertain.is_empty() {
             selection_gap(
                 &mut selection.gaps,
@@ -619,6 +721,7 @@ fn assign(ctx: &Ctx, selection: &mut Selection, events: &[Event]) -> (Runs, Sess
                 binding.executor_harness.clone(),
                 binding.executor_session.clone(),
             );
+            bound.insert(key.clone());
             if !uncertain.is_empty() {
                 possible_sessions.insert(key.clone());
             }
@@ -640,7 +743,12 @@ fn assign(ctx: &Ctx, selection: &mut Selection, events: &[Event]) -> (Runs, Sess
     sessions.retain(|key, (_, membership)| {
         possible_sessions.contains(key) || membership.iter().any(|work| selected.contains(work))
     });
-    (runs, sessions)
+    Assigned {
+        runs,
+        sessions,
+        dispatches,
+        bound,
+    }
 }
 
 /// Every retained observation of one session, oldest first.
@@ -1450,34 +1558,132 @@ fn qualify_price(facts: &mut CostFacts) {
     }
 }
 
-/// Sessions that acted on the selected changes without being bound to any
-/// dispatch: a lead, a reviewer, anyone who wrote the change's events. Their
-/// consumption is outside assignment coverage, and the view names them
-/// without a figure.
-fn outside_sessions(
+/// A session the ledger's events name.
+#[derive(Default)]
+struct Person {
+    /// Every work item in this ledger whose events carry the session.
+    membership: BTreeSet<WorkKey>,
+    /// What its events on the selected work show it did.
+    roles: BTreeSet<Role>,
+    /// Its events on the selected work, of any kind.
+    selected_events: usize,
+    /// It has an event of a role-bearing kind on the selected work.
+    acts: bool,
+    /// A dispatch binds it, so it is an executor and no participant.
+    bound: bool,
+}
+
+/// The sessions every event in this ledger names, read once, and the acting
+/// events that name none.
+struct Ledger {
+    people: BTreeMap<(String, String), Person>,
+    /// Acting events on the selected work without a usable harness and
+    /// session: whoever wrote them cannot be named or measured.
+    unattributed_events: usize,
+    /// No ledger record went unread.
+    complete: bool,
+}
+
+impl Ledger {
+    /// The sessions measured as participants: unbound, and acting on the
+    /// selected work.
+    fn participants(&self) -> impl Iterator<Item = (&(String, String), &Person)> {
+        self.people
+            .iter()
+            .filter(|(_, person)| person.acts && !person.bound)
+    }
+}
+
+/// One pass over the repository's dispatches and every change's events, so a
+/// session's membership names each change it acted on, not only the selected
+/// ones.
+fn read_ledger(
     read: &mut CostRead<'_>,
     selection: &Selection,
-    sessions: &[SessionRow],
-) -> Vec<Value> {
-    let mut counts: BTreeMap<(String, String), usize> = BTreeMap::new();
-    for change_id in &selection.ledger_changes {
-        for event in read.events(change_id) {
-            if let (Some(harness), Some(session)) = (&event.harness, &event.session) {
-                *counts
+    repository: &[Event],
+    assigned: &Assigned,
+) -> Ledger {
+    let selected: BTreeSet<&WorkKey> = selection.items.iter().map(|item| &item.key).collect();
+    let mut ledger = Ledger {
+        people: BTreeMap::new(),
+        unattributed_events: 0,
+        complete: false,
+    };
+    let mut note = |event: &Event, work: WorkKey| {
+        let role = role_of(&event.payload);
+        let on_selection = selected.contains(&work);
+        match (&event.harness, &event.session) {
+            (Some(harness), Some(session))
+                if plain_session_id(harness) && plain_session_id(session) =>
+            {
+                let person = ledger
+                    .people
                     .entry((harness.clone(), session.clone()))
-                    .or_default() += 1;
+                    .or_default();
+                person.membership.insert(work);
+                if on_selection {
+                    person.selected_events += 1;
+                    if let Some(role) = role {
+                        person.acts = true;
+                        person.roles.insert(role);
+                    }
+                }
+            }
+            _ => {
+                if on_selection && role.is_some() {
+                    ledger.unattributed_events += 1;
+                }
             }
         }
+    };
+    for event in repository {
+        if let Some(work) = assigned.dispatches.get(&event.event_id) {
+            note(event, work.clone());
+        }
     }
-    counts
-        .into_iter()
-        .filter(|((harness, session), _)| {
-            !sessions
-                .iter()
-                .any(|row| &row.harness == harness && &row.session == session)
+    for change_id in read.change_ids() {
+        for event in read.events(&change_id) {
+            note(&event, WorkKey::Change(change_id.clone()));
+        }
+    }
+    for (key, person) in &mut ledger.people {
+        person.bound = assigned.bound.contains(key);
+    }
+    ledger.complete = read.gaps.is_empty();
+    ledger
+}
+
+/// Sessions that acted on the selected work and are not among the measured
+/// rows: a session that holds no acting event kind, one bound to a dispatch
+/// elsewhere, and a participant whose recording the store cannot resolve,
+/// with the reason. Their consumption is outside assignment coverage, and
+/// the view names them without a figure.
+fn outside_sessions(
+    ledger: &Ledger,
+    sessions: &[SessionRow],
+    unmeasured: &BTreeMap<(String, String), String>,
+) -> Vec<Value> {
+    ledger
+        .people
+        .iter()
+        .filter(|((harness, session), person)| {
+            person.selected_events > 0
+                && !sessions
+                    .iter()
+                    .any(|row| &row.harness == harness && &row.session == session)
         })
-        .map(|((harness, session), events)| {
-            json!({"harness": harness, "session": session, "events": events})
+        .map(|(key, person)| {
+            let ((harness, session), events) = (key, person.selected_events);
+            let mut row = json!({"harness": harness, "session": session, "events": events});
+            if let Some(reason) = unmeasured.get(key) {
+                row["roles"] = json!(person
+                    .roles
+                    .iter()
+                    .map(|role| role.name())
+                    .collect::<Vec<_>>());
+                row["reason"] = json!(reason);
+            }
+            row
         })
         .collect()
 }
@@ -2020,7 +2226,8 @@ fn render_report(
     selection: &Selection,
     runs: &Runs,
     sessions: &[SessionRow],
-    lead: &[Value],
+    outside: &[Value],
+    ledger: &Ledger,
 ) -> Value {
     let unbound_in = |key: &WorkKey| -> Vec<String> {
         runs.get(key)
@@ -2049,10 +2256,11 @@ fn render_report(
                 ));
             }
         }
-        for row in sessions
-            .iter()
-            .filter(|row| row.membership.iter().any(|work| keys.contains(&work)))
-        {
+        // A participant has no dispatch to start from: its whole recording is
+        // its figure.
+        for row in sessions.iter().filter(|row| {
+            row.participation.is_none() && row.membership.iter().any(|work| keys.contains(&work))
+        }) {
             let first = row.spans.iter().map(|span| span.dispatched_at).min();
             match row.measured.facts.as_ref() {
                 Some(facts)
@@ -2085,17 +2293,45 @@ fn render_report(
         }
         reasons
     };
+    // A session counts for these items alone when they hold every work item
+    // it acted on, and for a participant when that membership is complete.
+    let counted = |row: &SessionRow, keys: &[&WorkKey]| -> bool {
+        row.participation
+            .as_ref()
+            .is_none_or(|participation| participation.membership_complete)
+            && row.membership.iter().all(|work| keys.contains(&work))
+    };
     let within = |keys: &[&WorkKey]| -> (Vec<&SessionRow>, Vec<String>) {
         let mut inside = Vec::new();
         let mut shared = Vec::new();
         for row in sessions {
-            if row.membership.iter().all(|work| keys.contains(&work)) {
+            if counted(row, keys) {
                 inside.push(row);
             } else if row.membership.iter().any(|work| keys.contains(&work)) {
                 shared.push(row.key());
             }
         }
         (inside, shared)
+    };
+    // Every participant that acted on these items, with its whole figure. It
+    // is `counted` where the items hold every change its events name.
+    let participants_in = |keys: &[&WorkKey]| -> Vec<Value> {
+        sessions
+            .iter()
+            .filter_map(|row| {
+                let participation = row.participation.as_ref()?;
+                if !row.membership.iter().any(|work| keys.contains(&work)) {
+                    return None;
+                }
+                Some(json!({
+                    "key": row.key(),
+                    "roles": participation.roles.iter().map(|role| role.name()).collect::<Vec<_>>(),
+                    "spans": row.membership.len(),
+                    "counted": counted(row, keys),
+                    "totals": totals(&[row], &[], &format!("session {}", row.key())),
+                }))
+            })
+            .collect()
     };
     let span_count = |key: &str| {
         sessions
@@ -2130,6 +2366,7 @@ fn render_report(
             "unbound": unbound_in(&item.key),
             "direct": totals(&direct, &withheld_for(&[&item.key], "direct"), "direct"),
             "shared": shared,
+            "participants": participants_in(&[&item.key]),
         });
         match &item.key {
             WorkKey::Change(id) => {
@@ -2149,6 +2386,7 @@ fn render_report(
             let mut totals = totals(&inclusive, &withheld_for(&keys, "inclusive"), "inclusive");
             totals["members"] = json!([item.key.label(), source.label()]);
             totals["shared"] = json!(beyond);
+            totals["participants"] = json!(participants_in(&keys));
             entry["inclusive"] = totals;
         }
         work.push(entry);
@@ -2159,6 +2397,7 @@ fn render_report(
     let mut union = totals(&union_members, &withheld_for(&all, "union"), "union");
     union["members"] = json!(all.iter().map(|key| key.label()).collect::<Vec<_>>());
     union["shared"] = json!(union_shared);
+    union["participants"] = json!(participants_in(&all));
 
     let session_rows: Vec<Value> = sessions.iter().map(session_json).collect();
     let unmeasured: BTreeMap<String, Vec<String>> = sessions
@@ -2173,6 +2412,17 @@ fn render_report(
         .collect();
     let unbound: Vec<String> = all.iter().flat_map(|key| unbound_in(key)).collect();
     let mut assignment_gaps = withheld_for(&all, "union");
+    if !ledger.complete && sessions.iter().any(|row| row.participation.is_some()) {
+        assignment_gaps.push(
+            "ledger records are unreadable, so a participant's membership may be incomplete and it is never counted as the work's alone".to_string(),
+        );
+    }
+    if ledger.unattributed_events > 0 {
+        assignment_gaps.push(format!(
+            "{} acting events carry no session identity, so their sessions are not measured here",
+            ledger.unattributed_events
+        ));
+    }
     assignment_gaps.extend(selection.gaps.iter().map(|gap| {
         format!(
             "{}: {}",
@@ -2219,9 +2469,18 @@ fn render_report(
                 "status": if assignment_gaps.is_empty() { "complete" } else { "incomplete" },
                 "unbound": unbound,
                 "reasons": assignment_gaps,
+                "participants": {
+                    "statement": "a participant is a session no dispatch binds whose ledger events act on the selected work; it is measured whole and never split, and it may also act in other repositories' ledgers, which this ledger cannot see",
+                    "sessions": sessions
+                        .iter()
+                        .filter(|row| row.participation.is_some())
+                        .map(SessionRow::key)
+                        .collect::<Vec<_>>(),
+                },
                 "outside": {
-                    "statement": "consumption no dispatch names, such as a lead session, is outside assignment coverage: it is not measured here and is never zero",
-                    "sessions": lead,
+                    "statement": "a session that acted on the selected work without a measured recording, such as one the store cannot resolve, is outside assignment coverage: it is not measured here and is never zero",
+                    "sessions": outside,
+                    "unattributed_events": ledger.unattributed_events,
                 },
             },
             "identity": {
@@ -2316,10 +2575,11 @@ fn session_json(row: &SessionRow) -> Value {
         measurement["conflict"] = conflict.clone();
     }
     let scope = format!("session {}", row.key());
-    json!({
+    let mut value = json!({
         "key": row.key(),
         "harness": row.harness,
         "session": row.session,
+        "kind": if row.participation.is_some() { "participant" } else { "executor" },
         "spans": row.spans.iter().map(|span| json!({
             "dispatch_event_id": span.dispatch_event_id,
             "dispatched_at": span.dispatched_at,
@@ -2328,10 +2588,17 @@ fn session_json(row: &SessionRow) -> Value {
             "work": span.work.label(),
         })).collect::<Vec<_>>(),
         "membership": row.membership.iter().map(WorkKey::label).collect::<Vec<_>>(),
-        "per_run": if row.spans.len() > 1 { "shared-among-spans" } else { "whole-session" },
+        "per_run": if row.participation.is_some() { "not-a-run" } else if row.spans.len() > 1 { "shared-among-spans" } else { "whole-session" },
         "measurement": measurement,
         "totals": totals(&[row], &[], &scope),
-    })
+    });
+    if let Some(participation) = &row.participation {
+        value["participant"] = json!({
+            "roles": participation.roles.iter().map(|role| role.name()).collect::<Vec<_>>(),
+            "spans": row.membership.len(),
+        });
+    }
+    value
 }
 
 fn describe_quantity(quantity: &Value) -> String {
@@ -2449,12 +2716,14 @@ fn print_report(report: &Value) {
         if !shared.is_empty() {
             println!("  shared: {}", shared.join(", "));
         }
+        print_participants("  ", &item["participants"]);
         if item["inclusive"].is_object() {
             print_totals("  ", "inclusive", &item["inclusive"]);
         }
     }
     println!("union");
     print_totals("  ", "total", &report["union"]);
+    print_participants("  ", &report["union"]["participants"]);
     println!("sessions");
     for session in report["sessions"].as_array().into_iter().flatten() {
         let measurement = &session["measurement"];
@@ -2464,8 +2733,19 @@ fn print_report(report: &Value) {
             measurement["source"].as_str().unwrap_or_default(),
             measurement["status"].as_str().unwrap_or_default(),
             measurement["frontier"],
-            session["spans"].as_array().map_or(0, Vec::len),
-            session["per_run"].as_str().unwrap_or_default(),
+            if session["kind"] == "participant" {
+                session["participant"]["spans"].clone()
+            } else {
+                json!(session["spans"].as_array().map_or(0, Vec::len))
+            },
+            if session["kind"] == "participant" {
+                format!(
+                    "participant ({})",
+                    role_names(&session["participant"]["roles"])
+                )
+            } else {
+                session["per_run"].as_str().unwrap_or_default().to_string()
+            },
         );
         if measurement["conflict"].is_object() {
             println!(
@@ -2556,11 +2836,53 @@ fn print_report(report: &Value) {
     println!("  {}", outside["statement"].as_str().unwrap_or_default());
     for session in outside["sessions"].as_array().into_iter().flatten() {
         println!(
-            "    {}:{} ({} events)",
+            "    {}:{} ({} events){}",
             session["harness"].as_str().unwrap_or_default(),
             session["session"].as_str().unwrap_or_default(),
-            session["events"]
+            session["events"],
+            session["reason"]
+                .as_str()
+                .map_or(String::new(), |reason| format!(": {reason}"))
         );
+    }
+    if outside["unattributed_events"].as_u64().unwrap_or(0) > 0 {
+        println!(
+            "    {} acting events name no session",
+            outside["unattributed_events"]
+        );
+    }
+    println!(
+        "  {}",
+        coverage["assignment"]["participants"]["statement"]
+            .as_str()
+            .unwrap_or_default()
+    );
+}
+
+fn role_names(roles: &Value) -> String {
+    roles
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn print_participants(indent: &str, participants: &Value) {
+    for participant in participants.as_array().into_iter().flatten() {
+        println!(
+            "{indent}participant {} ({}) spans={} {}",
+            participant["key"].as_str().unwrap_or_default(),
+            role_names(&participant["roles"]),
+            participant["spans"],
+            if participant["counted"] == true {
+                "counted"
+            } else {
+                "shared"
+            }
+        );
+        print_totals(&format!("{indent}  "), "whole", &participant["totals"]);
     }
 }
 

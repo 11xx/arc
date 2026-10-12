@@ -2516,3 +2516,426 @@ fn retained_disjoint_facts_without_category_gaps_are_not_complete() {
         assert!(figure.get("amount").is_none(), "{category}: {view}");
     }
 }
+
+const LEAD: &str = "lead-session";
+
+/// `arc` acting as a pi session, the way a lead that reads, approves and
+/// integrates writes its events.
+fn acting(repo: &Repo, cwd: &Path, session: &str) -> AssertCommand {
+    let mut command = repo.arc(cwd);
+    command.env("ARC_HARNESS", "pi").env("ARC_SESSION", session);
+    command
+}
+
+/// Open, snapshot, approve and integrate one change as `session`, and hand
+/// back its id.
+fn integrated_by(repo: &Repo, slug: &str, session: &str, extra: &[&str]) -> String {
+    let mut begin = acting(repo, &repo.root, session);
+    begin.args(["begin", slug]).args(extra);
+    let change = opened_change_id(&stdout(&mut begin));
+    let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+    repo.commit(
+        &worktree,
+        &format!("{slug}.txt"),
+        &format!("{slug}\n"),
+        &format!("feat: {slug}"),
+    );
+    stdout(acting(repo, &worktree, session).args(["snapshot", slug]));
+    acting(repo, &worktree, session)
+        .args(["review", slug, "--verdict", "approved"])
+        .assert()
+        .success();
+    acting(repo, &repo.root, session)
+        .args(["integrate", slug])
+        .assert()
+        .success();
+    change
+}
+
+fn participant<'a>(item: &'a Value, key: &str) -> &'a Value {
+    item["participants"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no participants: {item}"))
+        .iter()
+        .find(|row| row["key"] == key)
+        .unwrap_or_else(|| panic!("no participant {key}: {item}"))
+}
+
+fn outside_session<'a>(report: &'a Value, key: &str) -> Option<&'a Value> {
+    report["coverage"]["assignment"]["outside"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| {
+            format!(
+                "{}:{}",
+                row["harness"].as_str().unwrap(),
+                row["session"].as_str().unwrap()
+            ) == key
+        })
+}
+
+#[test]
+fn a_lead_acting_on_two_changes_is_shared_in_each_view_with_its_whole_figure() {
+    let repo = Repo::new();
+    pi_recording(&repo, LEAD, &[0.2], false);
+    let first = integrated_by(&repo, "first", LEAD, &[]);
+    let second = integrated_by(&repo, "second", LEAD, &[]);
+    // The lead also dispatched work on the first change.
+    let dispatched = event_id(&stdout(acting(&repo, &repo.root, LEAD).args([
+        "run",
+        "dispatch",
+        "--route",
+        "fixture-route",
+        "--worktree",
+        "/work/run",
+        "--change",
+        &first,
+    ])));
+    assert!(!dispatched.is_empty());
+
+    for (change, other) in [(&first, &second), (&second, &first)] {
+        let view = report(&repo, change);
+        let key = format!("change:{change}");
+        let item = work(&view, &key);
+        assert_eq!(item["shared"], json!(["pi:lead-session"]), "{view}");
+        let lead = participant(item, "pi:lead-session");
+        assert_eq!(lead["spans"], 2, "{view}");
+        assert_eq!(lead["counted"], false, "{view}");
+        let roles = if change == &first {
+            json!(["integrator", "orchestrator", "reviewer"])
+        } else {
+            json!(["integrator", "reviewer"])
+        };
+        assert_eq!(lead["roles"], roles, "{view}");
+        // The whole figure is shown, and the direct total takes none of it.
+        assert_eq!(usd(&lead["totals"]), Some(0.2), "{view}");
+        assert!(usd(&item["direct"]).is_none(), "{view}");
+        assert_eq!(item["direct"]["sessions"], json!([]), "{view}");
+        let row = session(&view, "pi:lead-session");
+        assert_eq!(row["kind"], "participant", "{view}");
+        assert_eq!(row["participant"]["spans"], 2, "{view}");
+        let membership = [format!("change:{change}"), format!("change:{other}")];
+        let mut membership = membership.to_vec();
+        membership.sort();
+        assert_eq!(row["membership"], json!(membership), "{view}");
+        assert!(
+            outside_session(&view, "pi:lead-session").is_none(),
+            "{view}"
+        );
+        // A session may act in other ledgers: the view says so.
+        assert!(
+            view["coverage"]["assignment"]["participants"]["statement"]
+                .as_str()
+                .unwrap()
+                .contains("other repositories' ledgers"),
+            "{view}"
+        );
+    }
+    let text = stdout(repo.arc(&repo.root).args(["cost", "show", &first]));
+    assert!(text.contains("pi:lead-session"), "{text}");
+    assert!(
+        text.contains("integrator, orchestrator, reviewer"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_union_over_both_changes_counts_the_lead_once() {
+    let repo = Repo::new();
+    pi_recording(&repo, LEAD, &[0.2], false);
+    let plan = file_artifact(&repo, "plan", "led-plan");
+    let first = integrated_by(&repo, "first", LEAD, &["--from-journal", &plan]);
+    let second = integrated_by(&repo, "second", LEAD, &["--from-journal", &plan]);
+
+    let view = report(&repo, &plan);
+    assert_eq!(usd(&view["union"]), Some(0.2), "{view}");
+    assert_eq!(
+        view["union"]["sessions"],
+        json!(["pi:lead-session"]),
+        "{view}"
+    );
+    assert_eq!(view["union"]["shared"], json!([]), "{view}");
+    assert_eq!(
+        participant(&view["union"], "pi:lead-session")["counted"],
+        true
+    );
+    for change in [&first, &second] {
+        let item = work(&view, &format!("change:{change}"));
+        assert_eq!(item["shared"], json!(["pi:lead-session"]), "{view}");
+        assert!(usd(&item["direct"]).is_none(), "{view}");
+    }
+}
+
+#[test]
+fn retention_keeps_a_participant_and_prices_it_after_its_source_is_deleted() {
+    let repo = Repo::new();
+    let path = pi_recording(&repo, LEAD, &[0.2], false);
+    let first = integrated_by(&repo, "first", LEAD, &[]);
+    integrated_by(&repo, "second", LEAD, &[]);
+
+    let fresh = report(&repo, &first);
+    let output = stdout(repo.arc(&repo.root).args(["cost", "retain", &first]));
+    assert!(output.contains("retained: pi:lead-session"), "{output}");
+    fs::remove_file(path).unwrap();
+
+    let rotated = report(&repo, &first);
+    let row = session(&rotated, "pi:lead-session");
+    assert_eq!(row["measurement"]["source"], "retained", "{rotated}");
+    let key = format!("change:{first}");
+    let item = work(&rotated, &key);
+    assert_eq!(
+        usd(&participant(item, "pi:lead-session")["totals"]),
+        Some(0.2),
+        "{rotated}"
+    );
+    assert_eq!(rotated["union"], fresh["union"], "{rotated}");
+    // Retaining again records nothing new.
+    let again = stdout(repo.arc(&repo.root).args(["cost", "retain", &first]));
+    assert!(again.contains("pi:lead-session"), "{again}");
+}
+
+#[test]
+fn a_participant_the_store_cannot_resolve_stays_outside_with_its_event_count() {
+    let repo = Repo::new();
+    let change = integrated_by(&repo, "ghosted", "ghost-session", &[]);
+    let held: usize = fs::read_dir(event_dir(&repo, &change))
+        .unwrap()
+        .filter(|entry| {
+            let event: Value =
+                serde_json::from_slice(&fs::read(entry.as_ref().unwrap().path()).unwrap()).unwrap();
+            event["session"] == "ghost-session"
+        })
+        .count();
+    assert!(
+        held >= 3,
+        "begin, snapshot, review and integrate wrote events"
+    );
+
+    let view = report(&repo, &change);
+    let ghost = outside_session(&view, "pi:ghost-session")
+        .unwrap_or_else(|| panic!("the unresolved session is outside: {view}"));
+    assert_eq!(ghost["events"], held, "{view}");
+    assert!(ghost.get("amount").is_none(), "{view}");
+    assert!(
+        view["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["key"] != "pi:ghost-session"),
+        "{view}"
+    );
+    let statement = view["coverage"]["assignment"]["outside"]["statement"]
+        .as_str()
+        .unwrap();
+    assert!(statement.contains("never zero"), "{statement}");
+}
+
+#[test]
+fn an_executor_session_that_also_wrote_events_stays_an_executor_row() {
+    let repo = Repo::new();
+    pi_recording(&repo, "exec-session", &[0.05], false);
+    let change = integrated_by(&repo, "executed", "exec-session", &[]);
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", &change),
+        "pi",
+        "exec-session",
+    );
+
+    let view = report(&repo, &change);
+    let rows: Vec<_> = view["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["key"] == "pi:exec-session")
+        .collect();
+    assert_eq!(rows.len(), 1, "{view}");
+    assert_eq!(rows[0]["kind"], "executor", "{view}");
+    assert!(rows[0].get("participant").is_none(), "{view}");
+    let item = work(&view, &format!("change:{change}"));
+    assert_eq!(usd(&item["direct"]), Some(0.05), "{view}");
+    assert!(
+        item["participants"]
+            .as_array()
+            .is_none_or(|rows| rows.iter().all(|row| row["key"] != "pi:exec-session")),
+        "{view}"
+    );
+    assert!(
+        outside_session(&view, "pi:exec-session").is_none(),
+        "{view}"
+    );
+}
+
+#[test]
+fn a_participant_that_acted_on_one_change_is_direct_for_it() {
+    let repo = Repo::new();
+    pi_recording(&repo, LEAD, &[0.2], false);
+    let change = integrated_by(&repo, "solo", LEAD, &[]);
+    let view = report(&repo, &change);
+    let item = work(&view, &format!("change:{change}"));
+    assert_eq!(item["shared"], json!([]), "{view}");
+    assert_eq!(
+        participant(item, "pi:lead-session")["counted"],
+        true,
+        "{view}"
+    );
+    assert_eq!(usd(&item["direct"]), Some(0.2), "{view}");
+}
+
+#[test]
+fn a_participant_is_measured_as_of_its_read_frontier() {
+    let repo = Repo::new();
+    pi_recording(&repo, LEAD, &[0.2], false);
+    let change = integrated_by(&repo, "running", LEAD, &[]);
+    let view = report(&repo, &change);
+    let row = session(&view, "pi:lead-session");
+    assert_eq!(row["measurement"]["status"], "incomplete", "{view}");
+    assert!(
+        row["measurement"]["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason.as_str().unwrap().contains("read frontier")),
+        "{view}"
+    );
+    assert!(
+        row["measurement"]["frontier"].as_u64().unwrap() > 0,
+        "{view}"
+    );
+    let item = work(&view, &format!("change:{change}"));
+    let figure = quantity(&item["direct"], USD, None);
+    assert_eq!(figure["status"], "incomplete", "{view}");
+    assert!(figure.get("amount").is_none(), "{view}");
+    assert_eq!(figure["known_subtotal"].as_f64(), Some(0.2), "{view}");
+}
+
+#[test]
+fn one_unreadable_participant_leaves_the_others_figures_intact() {
+    let repo = Repo::new();
+    pi_recording(&repo, LEAD, &[0.2], false);
+    let change = opened_change_id(&stdout(
+        acting(&repo, &repo.root, LEAD).args(["begin", "mixed"]),
+    ));
+    let worktree = repo.home.join(".worktrees/repo-mixed");
+    repo.commit(&worktree, "mixed.txt", "mixed\n", "feat: mixed");
+    stdout(acting(&repo, &worktree, "broken").args(["snapshot", "mixed"]));
+    acting(&repo, &worktree, LEAD)
+        .args(["review", "mixed", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    let view = report(&repo, &change);
+    let item = work(&view, &format!("change:{change}"));
+    assert_eq!(
+        usd(&participant(item, "pi:lead-session")["totals"]),
+        Some(0.2),
+        "{view}"
+    );
+    let broken = outside_session(&view, "pi:broken")
+        .unwrap_or_else(|| panic!("the unreadable participant is outside: {view}"));
+    assert!(broken["events"].as_u64().unwrap() >= 1, "{view}");
+    assert!(
+        item["participants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["key"] != "pi:broken"),
+        "{view}"
+    );
+}
+
+#[test]
+fn participant_facts_carry_no_locator() {
+    let repo = Repo::new();
+    pi_recording(&repo, LEAD, &[0.2], false);
+    let change = integrated_by(&repo, "private", LEAD, &[]);
+    stdout(repo.arc(&repo.root).args(["cost", "retain", &change]));
+    let home = repo.home.to_string_lossy().to_string();
+    let mut retained = 0;
+    for entry in fs::read_dir(repo.root.join(".git/arc/repository/events")).unwrap() {
+        let text = fs::read_to_string(entry.unwrap().path()).unwrap();
+        if text.contains("cost-facts-retained") {
+            retained += 1;
+            assert!(!text.contains(&home), "{text}");
+            assert!(!text.contains(".jsonl"), "{text}");
+        }
+    }
+    assert_eq!(retained, 1);
+    let view = stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "show", &change, "--json"]),
+    );
+    assert!(!view.contains(&home), "{view}");
+}
+
+#[test]
+fn acting_events_without_a_session_are_counted_never_zero() {
+    let repo = Repo::new();
+    pi_recording(&repo, LEAD, &[0.2], false);
+    let change = opened_change_id(&stdout(
+        acting(&repo, &repo.root, LEAD).args(["begin", "anonymous"]),
+    ));
+    let worktree = repo.home.join(".worktrees/repo-anonymous");
+    repo.commit(&worktree, "work.txt", "work\n", "feat: work");
+    stdout(acting(&repo, &worktree, LEAD).args(["snapshot", "anonymous"]));
+    let before = report(&repo, &change);
+    let outside = &before["coverage"]["assignment"]["outside"];
+    assert_eq!(outside["unattributed_events"], 0, "{before}");
+
+    repo.commit(&worktree, "more.txt", "more\n", "feat: more");
+    repo.arc(&worktree)
+        .env_remove("ARC_HARNESS")
+        .env_remove("ARC_SESSION")
+        .args(["snapshot", "anonymous"])
+        .assert()
+        .success();
+    let view = report(&repo, &change);
+    let outside = &view["coverage"]["assignment"]["outside"];
+    assert_eq!(outside["unattributed_events"], 1, "{view}");
+    assert_eq!(
+        view["coverage"]["assignment"]["status"], "incomplete",
+        "{view}"
+    );
+    // The session that did name itself is still measured, whole.
+    let item = work(&view, &format!("change:{change}"));
+    assert_eq!(
+        usd(&participant(item, "pi:lead-session")["totals"]),
+        Some(0.2),
+        "{view}"
+    );
+}
+
+#[test]
+fn an_unreadable_ledger_record_keeps_a_participant_from_counting_as_the_works_alone() {
+    let repo = Repo::new();
+    pi_recording(&repo, LEAD, &[0.2], false);
+    let change = integrated_by(&repo, "solo-led", LEAD, &[]);
+    let peer = begin_without_checkout(&repo, "bad-peer", &[]);
+    let record = repo
+        .root
+        .join(".git/arc/changes")
+        .join(peer)
+        .join("events/bad-peer.json");
+    fs::write(record, "not json").unwrap();
+
+    let view = report(&repo, &change);
+    let item = work(&view, &format!("change:{change}"));
+    // The unreadable record might be the lead's event on another change.
+    assert_eq!(
+        participant(item, "pi:lead-session")["counted"],
+        false,
+        "{view}"
+    );
+    assert_eq!(item["shared"], json!(["pi:lead-session"]), "{view}");
+    assert!(usd(&item["direct"]).is_none(), "{view}");
+    assert_eq!(
+        usd(&participant(item, "pi:lead-session")["totals"]),
+        Some(0.2),
+        "{view}"
+    );
+    assert_eq!(
+        view["coverage"]["assignment"]["status"], "incomplete",
+        "{view}"
+    );
+}

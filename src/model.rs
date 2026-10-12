@@ -1846,9 +1846,9 @@ pub enum Payload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         forked_from: Option<String>,
     },
-    /// Normalized consumption facts arc read from one executor session, kept
-    /// so the cost view's arithmetic replays after the source rotates. The
-    /// facts name the reader and calculation that produced them and the
+    /// Normalized consumption facts arc read from one executor or participant
+    /// session, kept so the cost view's arithmetic replays after the source
+    /// rotates. The facts name the reader and calculation that produced them and the
     /// source frontier and digest they describe; the source bytes stay in the
     /// harness's own store. A later retention for the same session supersedes
     /// nothing: each is an observation at its frontier, never added to
