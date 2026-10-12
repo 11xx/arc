@@ -3641,7 +3641,11 @@ enum CandidateCmd {
     /// code, an empty section not named in `omissions`); `evidence-tree-mismatch`
     /// for a held commit whose tree differs; `evidence-head-type` for a held
     /// raw tag, blob or tree used as a head. Absent heads remain external claims.
-    /// Import applies the same checks before publication. Held original commits
+    /// Import applies the same checks before publication to each evidence event
+    /// the bundle adds, and the refusal names that event. Evidence already held
+    /// is not re-judged: a head that arrives later with another tree shows as
+    /// `diagnostics` in `candidate show` and as `held-evidence-mismatch` advice
+    /// in `arc doctor`, and blocks no import. Held original commits
     /// have retention refs across rewrites and garbage collection.
     /// A --custody-dir file that fails verification refuses before publication.
     /// With --id and --evidence-file, a retry can finish the original request
@@ -3702,7 +3706,9 @@ enum CandidateCmd {
     /// recorded rewrites (itself, its successor, or null when dropped);
     /// `tested_tree_is_registered_tree`; provenance by role; each receipt with
     /// its custody availability (available, unavailable or corrupt); commands,
-    /// environment, applicability and omissions. It is null without evidence,
+    /// environment, applicability and omissions; and `diagnostics`, the heads
+    /// whose commit is held here with another tree or as another kind of
+    /// object (code, role, commit, detail). It is null without evidence,
     /// and none of it is an evaluation. `--json` emits `arc-candidate/1`
     /// Records no events; ledger reads do not require a parseable append policy.
     Show {

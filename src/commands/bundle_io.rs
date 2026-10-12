@@ -1120,18 +1120,26 @@ fn plan_repository_events(
             .collect(),
         None => BTreeSet::new(),
     };
+    let mut novel = Vec::new();
     for value in &validated.bundle.repository_events {
         if let Some(event) = crate::bundle::parse_typed_event(value)? {
             if !held.contains(&event.event_id) {
+                novel.push(event.clone());
                 combined.push(event);
             }
         }
     }
-    for event in &combined {
+    // Only what the bundle adds is judged against the objects held here.
+    // Evidence already held was admitted earlier, and a later contradiction
+    // of it is a read-time diagnostic, never a reason to refuse an import.
+    for event in &novel {
         if let Payload::CandidateEvidenceReceived { evidence, .. } = &event.payload {
-            evidence
-                .validate_held_heads(cwd)
-                .context("the bundle's received heads are refused; nothing was imported")?;
+            evidence.validate_held_heads(cwd).with_context(|| {
+                format!(
+                    "the bundle's received evidence event {} is refused; nothing was imported",
+                    event.event_id
+                )
+            })?;
         }
     }
     combined.sort_by(|a, b| a.event_id.cmp(&b.event_id));

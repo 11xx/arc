@@ -2729,11 +2729,16 @@ CANDIDATES
   move the tested head, and the tested head need not descend from either.
   Arc records original commits as reported and resolves each through recorded
   rewrites beside them, as `resolved_commit`: itself, its successor, or null
-  when a rewrite dropped it. Registration and import require each held raw
-  head object to be a commit with the claimed tree. Tags are not peeled; held
-  tags, blobs and trees refuse as `evidence-head-type`, and a held commit with
-  a different tree refuses as `evidence-tree-mismatch`. Absent commits remain
-  external claims. Held originals have retention refs through rewrites and
+  when a rewrite dropped it. Registration, and an import for each evidence
+  event the bundle adds, require each held raw head object to be a commit with
+  the claimed tree. Tags are not peeled; held tags, blobs and trees refuse as
+  `evidence-head-type`, and a held commit with a different tree refuses as
+  `evidence-tree-mismatch`; an import's refusal names the evidence event.
+  Absent commits remain external claims. Evidence already held is never
+  re-judged by an import: a commit that arrives later with another tree is a
+  diagnostic on `candidate show` (`diagnostics`: code, role, commit, detail)
+  and the `held-evidence-mismatch` advice of `arc doctor`, and blocks no
+  import. Held originals have retention refs through rewrites and
   garbage collection, including after import. One commit named twice
   carries one tree. Omissions are explicit: provenance, receipts, commands and
   environment each appear in `omissions`, with a reason, exactly when empty,

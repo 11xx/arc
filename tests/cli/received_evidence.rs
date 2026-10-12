@@ -991,6 +991,141 @@ fn held_raw_heads_refuse_both_intake_paths_before_publication() {
     }
 }
 
+/// A claim about a commit this repository lacks is admitted. When the commit
+/// arrives with another tree the held claim is contradicted, and that is a
+/// diagnostic: later imports judge only what they bring.
+#[test]
+fn a_head_arriving_after_admission_is_a_diagnostic_and_blocks_no_import() {
+    let f = Fixture::new();
+    let origin = Repo::new();
+    let origin_root = git_out(&origin.root, &["rev-parse", "HEAD"]);
+    let late = revision(&origin, "late", &[("late.txt", "late\n")], &origin_root);
+    let mut evidence = f.evidence();
+    evidence["heads"]["source"] = json!({"commit": late.commit, "tree": f.tested.tree});
+    f.registered("c1", &f.report.commit, &evidence);
+    let bundle = f.repo.home.join("bundle.json");
+    let sidecar = f.repo.home.join("sidecar");
+    stdout(f.repo.arc(&f.repo.root).args([
+        "export",
+        &f.change,
+        "--output",
+        bundle.to_str().unwrap(),
+        "--custody-dir",
+        sidecar.to_str().unwrap(),
+    ]));
+    let other = begin_without_checkout(&f.repo, "other", &[]);
+    let unrelated = f.repo.home.join("other.json");
+    stdout(f.repo.arc(&f.repo.root).args([
+        "export",
+        &other,
+        "--output",
+        unrelated.to_str().unwrap(),
+    ]));
+
+    let receiver = Repo::new();
+    deliver_git_objects(&f.repo, &receiver);
+    let import = |path: &Path| {
+        let mut cmd = import_command(&receiver, path);
+        if path == bundle {
+            cmd.args(["--custody-dir", sidecar.to_str().unwrap()]);
+        }
+        cmd.output().unwrap()
+    };
+    let first = import(&bundle);
+    assert!(first.status.success(), "{first:?}");
+    let before = event_types(&receiver, &f.change);
+
+    git(
+        &receiver.root,
+        &[
+            "fetch",
+            "--no-tags",
+            origin.root.to_str().unwrap(),
+            "refs/heads/evidence-late:refs/evidence/late",
+        ],
+    );
+
+    for path in [&bundle, &unrelated] {
+        let out = import(path);
+        assert!(
+            out.status.success(),
+            "{path:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert_eq!(event_types(&receiver, &f.change), before);
+
+    let shown =
+        json_stdout(
+            receiver
+                .arc(&receiver.root)
+                .args(["candidate", "show", "c1", "--json"]),
+        );
+    let diagnostics = &shown["candidates"][0]["received_evidence"]["diagnostics"];
+    assert_eq!(diagnostics.as_array().unwrap().len(), 1, "{diagnostics}");
+    assert_eq!(diagnostics[0]["code"], "evidence-tree-mismatch");
+    assert_eq!(diagnostics[0]["role"], "source");
+    assert_eq!(diagnostics[0]["commit"], late.commit);
+    let text = stdout(
+        receiver
+            .arc(&receiver.root)
+            .args(["candidate", "show", "c1"]),
+    );
+    assert!(text.contains("evidence-tree-mismatch"), "{text}");
+
+    let doctor = json_stdout_any_status(receiver.arc(&receiver.root).args(["doctor", "--json"]));
+    let held = doctor["advice"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["code"] == "held-evidence-mismatch")
+        .unwrap_or_else(|| panic!("{doctor}"));
+    let detail = held["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("c1") && detail.contains(&late.commit),
+        "{detail}"
+    );
+    assert!(
+        !detail.contains(receiver.root.to_str().unwrap()),
+        "{detail}"
+    );
+}
+
+/// A claim a bundle brings is judged on arrival, and the refusal names the
+/// event that carries it.
+#[test]
+fn a_novel_contradicting_claim_is_refused_naming_its_event() {
+    let f = Fixture::new();
+    let receiver = Repo::new();
+    let root = git_out(&receiver.root, &["rev-parse", "HEAD"]);
+    let held = revision(&receiver, "held", &[("answer.txt", "held")], &root);
+    let mut evidence = f.evidence();
+    evidence["heads"]["source"] = json!({"commit": held.commit, "tree": f.tested.tree});
+    f.registered("c1", &f.report.commit, &evidence);
+    let event = repository_events(&f.repo, "candidate-evidence-received")[0]["event_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let bundle = f.repo.home.join("bundle.json");
+    let sidecar = f.repo.home.join("sidecar");
+    stdout(f.repo.arc(&f.repo.root).args([
+        "export",
+        &f.change,
+        "--output",
+        bundle.to_str().unwrap(),
+        "--custody-dir",
+        sidecar.to_str().unwrap(),
+    ]));
+    deliver_git_objects(&f.repo, &receiver);
+    let mut cmd = import_command(&receiver, &bundle);
+    cmd.args(["--custody-dir", sidecar.to_str().unwrap()]);
+    let out = cmd.output().unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("evidence-tree-mismatch"), "{stderr}");
+    assert!(stderr.contains(&event), "{stderr}");
+}
+
 #[test]
 #[cfg(debug_assertions)]
 fn interrupted_registration_retries_preserve_unavailable_claims_and_event_identity() {

@@ -56,23 +56,89 @@ impl ReceivedEvidence {
     /// Validate claims against held raw objects without fetching absent heads.
     pub fn validate_held_heads(&self, cwd: &std::path::Path) -> Result<()> {
         self.validate()?;
+        match self.head_mismatches(cwd)?.into_iter().next() {
+            Some(mismatch) => bail!("{}: {}", mismatch.code(), mismatch.detail()),
+            None => Ok(()),
+        }
+    }
+
+    /// The heads whose commit this repository holds and contradicts: held as
+    /// something other than a commit, or with a tree other than the claimed
+    /// one. An absent commit contradicts nothing.
+    pub fn head_mismatches(&self, cwd: &std::path::Path) -> Result<Vec<HeadMismatch>> {
+        let mut found = Vec::new();
         for (role, head) in self.heads.each() {
             let Some(kind) = crate::gitio::object_type(cwd, &head.commit)? else {
                 continue;
             };
-            ensure!(
-                kind == "commit",
-                "evidence-head-type: the {} head {} is a held {}, not a commit",
-                role.as_str(),
-                head.commit,
-                kind
-            );
+            if kind != "commit" {
+                found.push(HeadMismatch {
+                    role,
+                    commit: head.commit.clone(),
+                    problem: HeadProblem::NotACommit { held: kind },
+                });
+                continue;
+            }
             let held = crate::gitio::resolve_tree(cwd, &head.commit)?;
-            ensure!(held.as_deref() == Some(head.tree.as_str()),
-                "evidence-tree-mismatch: the {} head {} is held here with tree {}, not the claimed {}",
-                role.as_str(), head.commit, held.as_deref().unwrap_or("none"), head.tree);
+            if held.as_deref() != Some(head.tree.as_str()) {
+                found.push(HeadMismatch {
+                    role,
+                    commit: head.commit.clone(),
+                    problem: HeadProblem::TreeDiffers {
+                        held,
+                        claimed: head.tree.clone(),
+                    },
+                });
+            }
         }
-        Ok(())
+        Ok(found)
+    }
+}
+
+/// A claimed head that the objects held here contradict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadMismatch {
+    pub role: HeadRole,
+    pub commit: String,
+    pub problem: HeadProblem,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeadProblem {
+    NotACommit {
+        held: String,
+    },
+    TreeDiffers {
+        held: Option<String>,
+        claimed: String,
+    },
+}
+
+impl HeadMismatch {
+    pub fn code(&self) -> &'static str {
+        match self.problem {
+            HeadProblem::NotACommit { .. } => "evidence-head-type",
+            HeadProblem::TreeDiffers { .. } => "evidence-tree-mismatch",
+        }
+    }
+
+    /// What the objects held here say against the claim. Object IDs and
+    /// kinds only.
+    pub fn detail(&self) -> String {
+        let role = self.role.as_str();
+        match &self.problem {
+            HeadProblem::NotACommit { held } => {
+                format!(
+                    "the {role} head {} is a held {held}, not a commit",
+                    self.commit
+                )
+            }
+            HeadProblem::TreeDiffers { held, claimed } => format!(
+                "the {role} head {} is held here with tree {}, not the claimed {claimed}",
+                self.commit,
+                held.as_deref().unwrap_or("none"),
+            ),
+        }
     }
 }
 

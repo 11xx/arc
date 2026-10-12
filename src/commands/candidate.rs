@@ -486,6 +486,9 @@ struct ReceivedView {
     run_handle: String,
     packet: String,
     heads: HeadsView,
+    /// Claims this repository's own objects contradict. Empty while every
+    /// named commit is absent or agrees.
+    diagnostics: Vec<DiagnosticView>,
     /// Whether the tree the run reports having tested is the registered tree.
     /// A claim about a tree, never an evaluation of it.
     tested_tree_is_registered_tree: bool,
@@ -495,6 +498,41 @@ struct ReceivedView {
     environment: Option<Environment>,
     applicability: Applicability,
     omissions: Vec<Omission>,
+}
+
+/// One claimed head the objects held here contradict. Object IDs and kinds
+/// only.
+#[derive(Serialize)]
+pub(crate) struct DiagnosticView {
+    pub(crate) code: &'static str,
+    role: &'static str,
+    commit: String,
+    pub(crate) detail: String,
+}
+
+/// The diagnostics of one evidence document. A repository that cannot be
+/// read reports the one it cannot judge, without the cause.
+pub(crate) fn held_diagnostics(
+    cwd: &std::path::Path,
+    evidence: &ReceivedEvidence,
+) -> Vec<DiagnosticView> {
+    match evidence.head_mismatches(cwd) {
+        Ok(mismatches) => mismatches
+            .into_iter()
+            .map(|mismatch| DiagnosticView {
+                code: mismatch.code(),
+                role: mismatch.role.as_str(),
+                commit: mismatch.commit.clone(),
+                detail: mismatch.detail(),
+            })
+            .collect(),
+        Err(_) => vec![DiagnosticView {
+            code: "evidence-heads-unverifiable",
+            role: "all",
+            commit: String::new(),
+            detail: "the held objects could not be read to judge the claimed heads".to_string(),
+        }],
+    }
 }
 
 #[derive(Serialize)]
@@ -719,7 +757,7 @@ fn emit(ctx: &Ctx, ledger: &Ledger, selected: Vec<&Registration>, json: bool) ->
                 registration,
                 &pins,
                 &interrupted,
-                (rewrites.as_ref(), &custody),
+                (rewrites.as_ref(), &custody, ctx.cwd.as_path()),
             )
         })
         .collect::<Result<Vec<_>>>()?;
@@ -742,13 +780,13 @@ fn view(
     registration: &Registration,
     pins: &BTreeMap<String, String>,
     interrupted: &[super::selection::Interrupted],
-    (rewrites, custody): (Option<&RewriteMap>, &custody::Custody),
+    (rewrites, custody, cwd): (Option<&RewriteMap>, &custody::Custody, &std::path::Path),
 ) -> Result<CandidateView> {
     let value = pins.get(&registration.candidate_id).cloned();
     let id = registration.candidate_id.as_str();
     let received_evidence = ledger
         .received_by(id)
-        .map(|received| received_view(received, registration, rewrites, custody))
+        .map(|received| received_view(received, registration, (rewrites, custody, cwd)))
         .transpose()?;
     Ok(CandidateView {
         candidate_id: registration.candidate_id.clone(),
@@ -848,8 +886,7 @@ fn view(
 fn received_view(
     received: &Received,
     registration: &Registration,
-    rewrites: Option<&RewriteMap>,
-    custody: &custody::Custody,
+    (rewrites, custody, cwd): (Option<&RewriteMap>, &custody::Custody, &std::path::Path),
 ) -> Result<ReceivedView> {
     let evidence = &received.evidence;
     let head = |head: &received_evidence::Head| -> Result<HeadView> {
@@ -877,6 +914,7 @@ fn received_view(
             tested: head(&evidence.heads.tested)?,
             report: head(&evidence.heads.report)?,
         },
+        diagnostics: held_diagnostics(cwd, evidence),
         tested_tree_is_registered_tree: evidence.heads.tested.tree == registration.tree,
         provenance: evidence.provenance.clone(),
         receipts: evidence
@@ -1099,6 +1137,9 @@ fn render_received(received: &ReceivedView) {
             "    {role} head: {} (tree {}){resolved}",
             head.commit, head.tree
         );
+    }
+    for diagnostic in &received.diagnostics {
+        println!("    diagnostic {}: {}", diagnostic.code, diagnostic.detail);
     }
     println!(
         "    applies to: {} head; the tested tree is {} the registered tree",

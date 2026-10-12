@@ -781,6 +781,23 @@ fn inspect_candidates(
             ),
         });
     }
+    for registration in ledger.registrations() {
+        let Some(received) = ledger.received_by(&registration.candidate_id) else {
+            continue;
+        };
+        for diagnostic in commands::candidate::held_diagnostics(&ctx.cwd, &received.evidence) {
+            advice.push(Finding {
+                code: "held-evidence-mismatch",
+                detail: format!(
+                    "candidate {} received evidence {}: {}: {}",
+                    registration.candidate_id,
+                    received.event_id,
+                    diagnostic.code,
+                    diagnostic.detail
+                ),
+            });
+        }
+    }
     if !ledger.is_empty() {
         let declared = gitio::toplevel(&ctx.cwd)
             .ok()
