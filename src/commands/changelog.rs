@@ -56,7 +56,7 @@ struct RenderRequest<'a> {
     target: &'a str,
     target_content: Option<&'a str>,
     include_provenance: bool,
-    projection: &'a ChangelogProjection<'a>,
+    projection: serde_json::Value,
 }
 
 #[derive(Serialize)]
@@ -926,13 +926,50 @@ fn provenance_line(entry: &ProjectedEntry<'_>) -> String {
     )
 }
 
+fn mask_session(value: &str, session: Option<&str>) -> String {
+    match session.filter(|session| !session.is_empty()) {
+        Some(session) => value.replace(session, "[session]"),
+        None => value.to_owned(),
+    }
+}
+
+/// The projection as a command renderer reads it: text output is bounded by
+/// the same privacy as `--provenance`, so each entry's session field is null
+/// and its id is masked as [session] in the metadata values that can embed it.
+fn masked_projection(projection: &ChangelogProjection<'_>) -> Result<serde_json::Value> {
+    let mut value = serde_json::to_value(projection)?;
+    let entries = value["entries"].as_array_mut().into_iter().flatten();
+    for (entry, projected) in entries.zip(&projection.entries) {
+        let session = projected.recorded.session;
+        if let Some(change) = entry.get_mut("change") {
+            *change = mask_session(projected.change, session).into();
+        }
+        let Some(recorded) = entry.get_mut("recorded").and_then(|r| r.as_object_mut()) else {
+            continue;
+        };
+        for field in [
+            "event_id",
+            "actor",
+            "on_behalf_of",
+            "effective_author",
+            "harness",
+        ] {
+            if let Some(masked) = recorded
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .map(|text| mask_session(text, session))
+            {
+                recorded.insert(field.to_owned(), masked.into());
+            }
+        }
+        recorded.insert("session".to_owned(), serde_json::Value::Null);
+    }
+    Ok(value)
+}
+
 fn provenance_text(values: [&str; 6], session: Option<&str>) -> String {
-    let [change, event, actor, on_behalf_of, harness, created_at] = values.map(
-        |value| match session.filter(|session| !session.is_empty()) {
-            Some(session) => value.replace(session, "[session]"),
-            None => value.to_owned(),
-        },
-    );
+    let [change, event, actor, on_behalf_of, harness, created_at] =
+        values.map(|value| mask_session(value, session));
     format!(
         "> arc provenance: change={change} event={event} actor={actor} on_behalf_of={on_behalf_of} harness={harness} created_at={created_at}"
     )
@@ -1072,7 +1109,7 @@ fn render_with_command(
         target: &config.target,
         target_content: target_content.as_deref(),
         include_provenance: provenance,
-        projection,
+        projection: masked_projection(projection)?,
     };
     let request = serde_json::to_vec(&request)?;
     let outcome = changelog_render::run(&command.argv, &root, &request, command.timeout)?;

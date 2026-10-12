@@ -1266,6 +1266,9 @@ RUN A CHANGE
   changelog`, reads an `arc-changelog-render-request/1` document on stdin,
   and answers on stdout: the rendering for a read, and for `--write` the
   complete replacement file, written atomically after it exits 0.
+  The request's projection is the text-side view: each entry's recorded
+  session is null and its id is masked as [session] in the other recorded
+  values, with or without --provenance.
 
 PREPARE A DELIVERED CHANGE
   Fetch the delivery's Git objects and recorded branch through your transport,

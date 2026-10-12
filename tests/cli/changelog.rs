@@ -1239,8 +1239,10 @@ fn command_renderer_writes_a_target_in_its_own_format() {
         "",
     );
     let request_out = repo.home.join("request.json");
-    let projection = json_stdout(repo.arc(&repo.root).args(["changelog", "--json"]));
+    let mut projection = json_stdout(repo.arc(&repo.root).args(["changelog", "--json"]));
     assert_eq!(projection["renderer"], "command");
+    // The renderer reads the text-side projection: the session field is null.
+    projection["entries"][0]["recorded"]["session"] = serde_json::Value::Null;
 
     repo.arc(&repo.root)
         .env("REQUEST_OUT", &request_out)
@@ -1609,5 +1611,63 @@ fn provenance_masking_preserves_labels_for_overlapping_sessions() {
             };
             assert!(line.contains(&format!("actor={actor}")), "{line}");
         }
+    }
+}
+
+#[test]
+fn command_renderer_request_never_carries_the_recording_session() {
+    let session = "renderer-fixture-session";
+    let repo = Repo::new();
+    fs::create_dir(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/changelog.toml"),
+        "target = \"NEWS\"\nrenderer = \"command\"\nrenderer_command = [\"sh\", \"render.sh\"]\n",
+    )
+    .unwrap();
+    fs::write(repo.root.join("render.sh"), "cat\n").unwrap();
+    git(&repo.root, &["add", "."]);
+    git(
+        &repo.root,
+        &["commit", "-m", "chore: configure an echoing renderer"],
+    );
+    begin(&repo, "echoed");
+    let worktree = repo.home.join(".worktrees/repo-echoed");
+    repo.arc(&worktree)
+        .env_remove("ARC_ACTOR")
+        .env("ARC_SESSION", session)
+        .args([
+            "changelog",
+            "echoed",
+            "--category",
+            "fixed",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("- preserve recording privacy\n")
+        .assert()
+        .success();
+    integrate(&repo, "echoed");
+
+    let json = json_stdout(repo.arc(&repo.root).args(["changelog", "--json"]));
+    assert_eq!(json["entries"][0]["recorded"]["session"], session);
+
+    for args in [
+        vec!["changelog"],
+        vec!["changelog", "--provenance"],
+        vec!["changelog", "--write"],
+    ] {
+        let write = args.contains(&"--write");
+        let assert = repo.arc(&repo.root).args(args).assert().success();
+        let text = if write {
+            fs::read_to_string(repo.root.join("NEWS")).unwrap()
+        } else {
+            String::from_utf8(assert.get_output().stdout.clone()).unwrap()
+        };
+        assert!(!text.contains(session), "{text}");
+        let request: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let recorded = &request["projection"]["entries"][0]["recorded"];
+        assert_eq!(recorded["session"], serde_json::Value::Null, "{text}");
+        assert_eq!(recorded["actor"], "test:[session]", "{text}");
+        assert_eq!(recorded["effective_author"], "test:[session]", "{text}");
     }
 }

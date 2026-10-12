@@ -834,7 +834,10 @@ enum Cmd {
     /// with the authority of whoever runs arc changelog. It reads an
     /// arc-changelog-render-request/1 document on stdin and answers on stdout;
     /// `renderer_timeout` bounds it (default 60s), and its process group is
-    /// killed at the deadline. `--json` never runs it.
+    /// killed at the deadline. `--json` never runs it. The request's
+    /// projection is the text-side view: each entry's recorded session is null
+    /// and its id is masked as [session] in the other recorded values, with or
+    /// without --provenance.
     ///
     /// Read-only projections name unreadable changes with their errors on
     /// stderr and retain readable entries. --write requires every change to
