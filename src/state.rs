@@ -541,7 +541,35 @@ fn author_assumed(on_behalf_of: Option<&str>, source: Option<ActorSource>) -> bo
     on_behalf_of.is_none() && source.is_some_and(|source| !source.declared())
 }
 
-/// A declared, not-yet-discharged review obligation.
+/// Where a declared review obligation stands.
+///
+/// Distinct from readiness: `ChangeState::debt_outstanding` is true only for
+/// [`DebtStanding::Owed`], so a debt on a change that has not integrated is
+/// neither owed nor discharged. It is declared, and no review has answered it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DebtStanding {
+    /// Declared on a change that has not integrated.
+    Declared,
+    /// The change integrated and no eligible review has answered the debt.
+    Owed,
+    /// The change integrated and an eligible review answered the debt;
+    /// `Debt::discharged_by` names it.
+    Discharged,
+}
+
+impl DebtStanding {
+    /// The one line a presentation gives the standing of a debt.
+    pub fn label(self) -> &'static str {
+        match self {
+            DebtStanding::Declared => "declared, not yet integrated",
+            DebtStanding::Owed => "owed",
+            DebtStanding::Discharged => "discharged",
+        }
+    }
+}
+
+/// A declared review obligation and where it stands.
 #[derive(Debug, Clone, Serialize)]
 pub struct Debt {
     pub origin_replica_id: String,
@@ -582,6 +610,10 @@ pub struct Debt {
     pub discharged_by: Option<DebtCoverage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discharged_by_event_id: Option<String>,
+    /// Where the obligation stands, read from the closure and the discharge
+    /// predicate once every event is in. `discharged_by` is the discharger
+    /// only when this is [`DebtStanding::Discharged`].
+    pub standing: DebtStanding,
 }
 
 /// The read an `ineligible-review` debt names, as the ledger reads it now.
@@ -2569,6 +2601,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     ineligible: None,
                     discharged_by: None,
                     discharged_by_event_id: None,
+                    standing: DebtStanding::Declared,
                 });
             }
             Payload::DebtDeclared {
@@ -2602,6 +2635,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     }),
                     discharged_by: None,
                     discharged_by_event_id: None,
+                    standing: DebtStanding::Declared,
                 });
             }
             Payload::AuditVerdictRecorded {
@@ -3598,18 +3632,28 @@ impl ChangeState {
         later_clean_approval || later_audit
     }
 
+    /// Whether a review is still owed: the change integrated and nothing
+    /// eligible has answered the debt. Readiness and waivers read this; a
+    /// presentation of where the debt stands reads [`Self::debt_standing`],
+    /// because "not owed yet" is not "discharged".
     pub fn debt_outstanding(&self) -> bool {
-        let Some(debt) = &self.debt else {
-            return false;
-        };
-        if !self
+        self.debt_standing() == Some(DebtStanding::Owed)
+    }
+
+    /// Where the held debt stands, `None` when no debt was declared.
+    pub fn debt_standing(&self) -> Option<DebtStanding> {
+        let debt = self.debt.as_ref()?;
+        let integrated = self
             .closure
             .as_ref()
-            .is_some_and(|closure| closure.outcome == Closure::Integrated)
-        {
-            return false;
-        }
-        !self.debt_discharged(debt)
+            .is_some_and(|closure| closure.outcome == Closure::Integrated);
+        Some(if !integrated {
+            DebtStanding::Declared
+        } else if self.debt_discharged(debt) {
+            DebtStanding::Discharged
+        } else {
+            DebtStanding::Owed
+        })
     }
 
     /// The patchset a debt is read against: the one about to ship while the
@@ -3736,6 +3780,7 @@ impl ChangeState {
             return;
         };
         let discharged_by = self.debt_discharge(&debt);
+        let standing = self.debt_standing().expect("held debt");
         let read = debt.ineligible.as_ref().map(|read| {
             let verdict = self
                 .verdicts
@@ -3777,6 +3822,7 @@ impl ChangeState {
         current.discharged_by_event_id = discharged_by.as_ref().map(|(id, _)| id.clone());
         current.discharged_by = discharged_by.map(|(_, coverage)| coverage);
         current.ineligible = read;
+        current.standing = standing;
     }
 
     /// The verdict or audit that satisfies the existing discharge predicate.
@@ -4632,5 +4678,149 @@ mod tests {
         assert!(expired.expired);
         assert!(!expired.active);
         assert!(!expired.stale);
+    }
+
+    /// The events of a change holding one patchset, with `debt` declared on
+    /// it, integrated or left open, and `reviews` recorded after.
+    fn change_with_debt(debt: Event, integrated: bool, reviews: Vec<Event>) -> ChangeState {
+        let patch = ev(
+            "fix",
+            serde_json::from_value(serde_json::json!({
+                "event_type": "patchset-added", "patchset_id": "ps-01", "base": "b0", "head": "h1"
+            }))
+            .unwrap(),
+        );
+        let mut events = vec![opened("fix"), patch, debt];
+        if integrated {
+            events.push(ev(
+                "fix",
+                Payload::ChangeIntegrated {
+                    authority_grant_event_id: None,
+                    provisional_resolutions: Vec::new(),
+                    integrated_commit: "h1".into(),
+                    source_patchset_id: "ps-01".into(),
+                    source_head: "h1".into(),
+                    target_branch: "master".into(),
+                    target_before: "b0".into(),
+                    authorization: None,
+                    already_contained: false,
+                    shape: None,
+                },
+            ));
+        }
+        events.extend(reviews);
+        reduce(&events).unwrap()
+    }
+
+    fn independent_audit(assessment: Option<AuditAssessment>) -> Event {
+        let mut audit = ev(
+            "fix",
+            Payload::AuditVerdictRecorded {
+                revision: "h1".into(),
+                verdict: Verdict::Approved,
+                body: None,
+                findings: vec![],
+                route_version: None,
+                assessment,
+            },
+        );
+        audit.actor = "reader".into();
+        audit
+    }
+
+    fn legacy_debt() -> Event {
+        ev(
+            "fix",
+            Payload::AuditDebtDeclared {
+                reason: "review owed".into(),
+                patchset_id: Some("ps-01".into()),
+            },
+        )
+    }
+
+    fn standing_of(state: &ChangeState) -> Option<DebtStanding> {
+        state.debt_standing()
+    }
+
+    #[test]
+    fn a_debt_is_declared_until_the_change_integrates_then_owed_until_discharged() {
+        let open = change_with_debt(legacy_debt(), false, vec![]);
+        assert_eq!(standing_of(&open), Some(DebtStanding::Declared));
+        assert!(!open.debt_outstanding());
+        assert_eq!(
+            open.debt.as_ref().map(|debt| debt.standing),
+            Some(DebtStanding::Declared)
+        );
+
+        let owed = change_with_debt(legacy_debt(), true, vec![]);
+        assert_eq!(standing_of(&owed), Some(DebtStanding::Owed));
+        assert!(owed.debt_outstanding());
+
+        let discharged = change_with_debt(legacy_debt(), true, vec![independent_audit(None)]);
+        assert_eq!(standing_of(&discharged), Some(DebtStanding::Discharged));
+        assert!(!discharged.debt_outstanding());
+        assert_eq!(
+            discharged.debt.as_ref().map(|debt| debt.standing),
+            Some(DebtStanding::Discharged)
+        );
+    }
+
+    #[test]
+    fn a_change_with_no_debt_has_no_standing() {
+        let patch = ev(
+            "fix",
+            serde_json::from_value(serde_json::json!({
+                "event_type": "patchset-added", "patchset_id": "ps-01", "base": "b0", "head": "h1"
+            }))
+            .unwrap(),
+        );
+        let state = reduce(&[opened("fix"), patch]).unwrap();
+        assert_eq!(standing_of(&state), None);
+    }
+
+    #[test]
+    fn a_closed_change_that_did_not_integrate_never_owes_or_discharges() {
+        let abandoned = ev(
+            "fix",
+            Payload::ChangeClosed {
+                outcome: Closure::Abandoned,
+                integrated_commit: None,
+                superseded_by: None,
+            },
+        );
+        let state = change_with_debt(legacy_debt(), false, vec![abandoned]);
+        assert_eq!(standing_of(&state), Some(DebtStanding::Declared));
+        assert!(!state.debt_outstanding());
+    }
+
+    #[test]
+    fn a_verdict_never_clears_an_ineligible_review_debt() {
+        let declared = ev(
+            "fix",
+            Payload::DebtDeclared {
+                reason: "same-family read only".into(),
+                patchset_id: Some("ps-01".into()),
+                missing: DebtMissing::IneligibleReview,
+                coverage: Vec::new(),
+                production: None,
+                ineligible: Some(IneligibleRead {
+                    read: "01READ".into(),
+                    qualifiers: vec![ReviewQualifier::SameFamily],
+                    route_version: None,
+                    assessment: AssessmentBasis::Declared,
+                }),
+            },
+        );
+        let mut review = verdict("fix", "ps-01", None);
+        review.actor = "reader".into();
+        let owed = change_with_debt(declared.clone(), true, vec![review]);
+        assert_eq!(standing_of(&owed), Some(DebtStanding::Owed));
+        assert!(owed.debt_outstanding());
+
+        let plain_audit = change_with_debt(declared.clone(), true, vec![independent_audit(None)]);
+        assert_eq!(standing_of(&plain_audit), Some(DebtStanding::Owed));
+
+        let open = change_with_debt(declared, false, vec![]);
+        assert_eq!(standing_of(&open), Some(DebtStanding::Declared));
     }
 }
