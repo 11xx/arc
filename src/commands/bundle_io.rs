@@ -11,10 +11,19 @@ pub fn export_bundle(
 ) -> Result<()> {
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
+    let mut files = Vec::new();
+    if output != "-" {
+        files.push(("--output", Path::new(output)));
+    }
+    if let Some(path) = objects_json {
+        files.push(("--objects-json", Path::new(path)));
+    }
+    bundle_output::check_destinations(&files, custody_dir.map(Path::new))?;
     let mut bundle = Bundle::export(&store, &ctx.cwd, &change_id, since)?;
     // The sidecar is staged first because the bundle binds its manifest
-    // digest, and published only once the bundle is written: a failed export
-    // leaves neither a bundle naming a missing sidecar nor a partial one.
+    // digest. Nothing is published until every artifact is finished, and the
+    // sidecar is published first: a failed export leaves each destination as
+    // it was.
     let staged = custody_dir
         .map(|dir| {
             let events = bundle
@@ -43,13 +52,22 @@ pub fn export_bundle(
         None => (None, None),
     };
     let objects = bundle.objects.as_deref().unwrap_or_default();
+    let mut publication = bundle_output::Publication {
+        sidecar: staged,
+        files: Vec::new(),
+        stdout: None,
+    };
     if let Some(path) = objects_json {
         let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
             "schema": "arc-bundle-objects/1",
             "objects": objects,
         }))?;
         bytes.push(b'\n');
-        std::fs::write(path, bytes).with_context(|| format!("cannot write object list {path}"))?;
+        publication.files.push((
+            format!("cannot write object list {path}"),
+            bundle_output::StagedFile::stage(Path::new(path), &bytes)
+                .with_context(|| format!("cannot write object list {path}"))?,
+        ));
     }
     let mut counts = BTreeMap::new();
     for object in objects {
@@ -88,14 +106,15 @@ pub fn export_bundle(
         ));
     }
     if output == "-" {
-        std::io::stdout().write_all(&bytes)?;
+        publication.stdout = Some(bytes);
     } else {
-        std::fs::write(output, bytes)
-            .with_context(|| format!("cannot write export bundle {output}"))?;
+        publication.files.push((
+            format!("cannot write export bundle {output}"),
+            bundle_output::StagedFile::stage(Path::new(output), &bytes)
+                .with_context(|| format!("cannot write export bundle {output}"))?,
+        ));
     }
-    if let Some(staged) = staged {
-        staged.publish()?;
-    }
+    publication.commit()?;
     if output == "-" {
         eprintln!("{reported}\noutput: -");
     } else {

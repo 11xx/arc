@@ -867,11 +867,15 @@ RUN A CHANGE
   `arc accept` says the same. Custody is reported installed only after the
   events are published. A failure installing it after publication says the
   events are published, and repeating the import finishes the installation
-  without recording events, as does importing with a repaired sidecar. The
-  export writes the sidecar beside its directory and moves it into place only
-  once the bundle is written, so a failed export leaves neither a partial
-  sidecar nor a bundle naming one. Neither export nor import initializes a
-  replica.
+  without recording events, as does importing with a repaired sidecar. An
+  export refuses, before writing anything, `--output`, `--objects-json` and
+  `--custody-dir` destinations that name one location or lie inside one
+  another, and a file destination that is a directory. It finishes every
+  artifact beside its destination, publishes the sidecar first and then the
+  object list and the bundle, and on any failure removes what it published
+  and restores what it replaced: a previous file keeps its bytes and an empty
+  directory that was to hold the sidecar is empty again, so no bundle names a
+  missing sidecar. Neither export nor import initializes a replica.
   Full and delta histories use active, uncontradicted rewrites admitted with
   rewrite authority to prove a falsification's failure identity. A publisher
   lacking rewrite authority is refused; legacy transport without an

@@ -4,6 +4,7 @@ mod accept_checkout;
 mod accept_effects;
 mod audit;
 mod bundle_io;
+mod bundle_output;
 pub(crate) mod candidate;
 mod chain;
 mod changelog;

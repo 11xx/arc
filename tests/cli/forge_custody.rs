@@ -1364,3 +1364,199 @@ fn doctor_and_reads_do_not_follow_a_symlinked_custody_ancestor() {
         "followed the link: {receipt}"
     );
 }
+
+fn export_args<'a>(id: &'a str, output: &'a Path, extra: &[&'a str]) -> Vec<&'a str> {
+    let mut args = vec!["export", id, "--output", output.to_str().unwrap()];
+    args.extend_from_slice(extra);
+    args
+}
+
+#[test]
+fn overlapping_export_destinations_are_refused_before_any_write() {
+    let (source, id) = setup();
+    let supplied = source.home.join("supplied");
+    materialize(&supplied, &["first", PAGE]);
+    observe_in(
+        &source,
+        &id,
+        &document("read-1", "g1", "first", None),
+        Some(&supplied),
+    );
+    let dir = source.home.join("shared");
+    fs::create_dir(&dir).unwrap();
+    let d = dir.to_str().unwrap();
+    let inside = dir.join("bundle.json");
+    let objects = dir.join("objects.json");
+    let nested = dir.join("sha256").join("bundle.json");
+    let dotted = source.home.join("shared/./bundle.json");
+    let roundabout = format!("{d}/../shared");
+    let elsewhere = source.home.join("out.json");
+    let cases: Vec<Vec<&str>> = vec![
+        export_args(&id, &inside, &["--custody-dir", d]),
+        export_args(
+            &id,
+            &elsewhere,
+            &[
+                "--custody-dir",
+                d,
+                "--objects-json",
+                objects.to_str().unwrap(),
+            ],
+        ),
+        // The sidecar's own contents are as much its territory as the sidecar.
+        export_args(&id, &nested, &["--custody-dir", d]),
+        // One file cannot be both artifacts.
+        export_args(&id, &inside, &["--objects-json", inside.to_str().unwrap()]),
+        // Spelling the same directory another way is still the same directory.
+        export_args(&id, &dotted, &["--custody-dir", &roundabout]),
+    ];
+    for args in cases {
+        let output = source.arc(&source.root).args(&args).output().unwrap();
+        assert!(!output.status.success(), "{args:?}: {output:?}");
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert!(err.contains("overlap"), "{args:?}: {err}");
+        assert!(files_in(&dir).is_empty(), "{args:?}: {:?}", files_in(&dir));
+        assert!(!elsewhere.exists(), "{args:?}");
+    }
+}
+
+#[test]
+fn a_sidecar_that_cannot_be_published_leaves_every_artifact_as_it_was() {
+    let (source, id) = setup();
+    let supplied = source.home.join("supplied");
+    materialize(&supplied, &["first", PAGE]);
+    observe_in(
+        &source,
+        &id,
+        &document("read-1", "g1", "first", None),
+        Some(&supplied),
+    );
+    // A symlink to an empty directory passes the emptiness check and cannot
+    // be replaced by a directory, so only the sidecar's publication fails.
+    let target = source.home.join("target");
+    fs::create_dir(&target).unwrap();
+    let link = source.home.join("sidecar-link");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let bundle = source.home.join("existing.json");
+    let objects = source.home.join("objects.json");
+    fs::write(&bundle, "previous bundle").unwrap();
+    fs::write(&objects, "previous objects").unwrap();
+    let output = source
+        .arc(&source.root)
+        .args(export_args(
+            &id,
+            &bundle,
+            &[
+                "--custody-dir",
+                link.to_str().unwrap(),
+                "--objects-json",
+                objects.to_str().unwrap(),
+            ],
+        ))
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(fs::read_to_string(&bundle).unwrap(), "previous bundle");
+    assert_eq!(fs::read_to_string(&objects).unwrap(), "previous objects");
+    assert!(files_in(&target).is_empty());
+    assert!(fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(
+        files_in(&source.home)
+            .iter()
+            .filter(|name| name.starts_with('.') && name.ends_with(".tmp"))
+            .count(),
+        0,
+        "{:?}",
+        files_in(&source.home)
+    );
+}
+
+#[test]
+fn a_bundle_that_cannot_be_written_rolls_the_sidecar_back_and_keeps_prior_files() {
+    let (source, id) = setup();
+    let supplied = source.home.join("supplied");
+    materialize(&supplied, &["first", PAGE]);
+    observe_in(
+        &source,
+        &id,
+        &document("read-1", "g1", "first", None),
+        Some(&supplied),
+    );
+    let sidecar = source.home.join("sidecar");
+    fs::create_dir(&sidecar).unwrap();
+    let objects = source.home.join("objects.json");
+    fs::write(&objects, "previous objects").unwrap();
+    // The bundle's destination is a directory, so only its write fails.
+    let blocked = source.home.join("blocked");
+    fs::create_dir(&blocked).unwrap();
+    let output = source
+        .arc(&source.root)
+        .args(export_args(
+            &id,
+            &blocked,
+            &[
+                "--custody-dir",
+                sidecar.to_str().unwrap(),
+                "--objects-json",
+                objects.to_str().unwrap(),
+            ],
+        ))
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(files_in(&sidecar).is_empty(), "{:?}", files_in(&sidecar));
+    assert_eq!(fs::read_to_string(&objects).unwrap(), "previous objects");
+    assert!(files_in(&blocked).is_empty());
+}
+
+#[test]
+fn an_export_over_an_existing_file_keeps_its_mode_and_follows_a_link_to_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let (source, id) = setup();
+    let real = source.home.join("real.json");
+    fs::write(&real, "previous").unwrap();
+    fs::set_permissions(&real, fs::Permissions::from_mode(0o600)).unwrap();
+    let link = source.home.join("link.json");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    stdout(source.arc(&source.root).args(export_args(&id, &link, &[])));
+    assert!(fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(fs::read_to_string(&real).unwrap().contains("arc-bundle/"));
+    assert_eq!(
+        fs::metadata(&real).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let hidden: Vec<_> = files_in(&source.home)
+        .into_iter()
+        .filter(|name| name.starts_with('.') && (name.ends_with(".tmp") || name.ends_with(".bak")))
+        .collect();
+    assert!(hidden.is_empty(), "{hidden:?}");
+}
+
+#[test]
+fn an_export_to_standard_output_still_publishes_its_sidecar() {
+    let (source, id) = setup();
+    let supplied = source.home.join("supplied");
+    materialize(&supplied, &["first", PAGE]);
+    observe_in(
+        &source,
+        &id,
+        &document("read-1", "g1", "first", None),
+        Some(&supplied),
+    );
+    let sidecar = source.home.join("sidecar");
+    let output = source
+        .arc(&source.root)
+        .args(["export", &id, "--output", "-", "--custody-dir"])
+        .arg(&sidecar)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("arc-bundle/"));
+    assert!(sidecar.join("manifest.json").is_file());
+}

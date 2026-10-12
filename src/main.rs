@@ -1198,8 +1198,13 @@ enum Cmd {
     /// Content absent or damaged here gets an explicit unavailable entry and
     /// the manifest and summary say incomplete; no archive claims complete
     /// custody it does not hold. The bundle binds the manifest's digest. The
-    /// sidecar is written beside the directory and moved into place only once
-    /// the bundle is written, so a failed export leaves neither.
+    /// sidecar is finished beside its directory. --output, --objects-json and
+    /// --custody-dir must name separate locations, none inside another, and
+    /// the two files must not be directories; an overlap is refused before
+    /// anything is written. The sidecar is published first, then the object
+    /// list and the bundle; a failure removes what was published and restores
+    /// what it replaced, so a previous file keeps its bytes, an empty
+    /// directory stays empty and no bundle names a missing sidecar.
     /// Nonportable cost facts or bindings refuse transport; recording
     /// locators and unclassified cost reasons are never emitted. Recorded
     /// events are preserved.

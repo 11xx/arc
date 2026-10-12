@@ -577,22 +577,54 @@ impl Exported {
 pub struct Staged {
     staging: Option<PathBuf>,
     destination: PathBuf,
+    /// The permissions of the empty directory the sidecar will replace.
+    replaces: Option<fs::Permissions>,
+}
+
+/// A sidecar in place. It can be taken out again, restoring what it replaced.
+pub struct Published {
+    destination: PathBuf,
+    replaced: Option<fs::Permissions>,
 }
 
 impl Staged {
     /// Move the finished sidecar into place. The destination is replaced only
-    /// when it is absent or an empty directory.
-    pub fn publish(mut self) -> Result<()> {
+    /// when it is absent or an empty directory, and a failure leaves it as it
+    /// was.
+    pub fn publish(mut self) -> Result<Published> {
         let staging = self.staging.as_deref().expect("a staged sidecar");
         fs::rename(staging, &self.destination)
             .with_context(|| format!("cannot publish {}", self.destination.display()))?;
         self.staging = None;
-        if let Some(parent) = self
+        let published = Published {
+            destination: self.destination.clone(),
+            replaced: self.replaces.take(),
+        };
+        let synced = self
             .destination
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
-        {
-            File::open(parent)?.sync_all()?;
+            .map_or(Ok(()), |parent| File::open(parent)?.sync_all());
+        match synced {
+            Ok(()) => Ok(published),
+            Err(error) => {
+                let _ = published.withdraw();
+                Err(error).with_context(|| format!("cannot sync {}", self.destination.display()))
+            }
+        }
+    }
+}
+
+impl Published {
+    /// Remove the sidecar, leaving an absent destination absent and an empty
+    /// directory it replaced empty again.
+    pub fn withdraw(self) -> Result<()> {
+        fs::remove_dir_all(&self.destination)
+            .with_context(|| format!("cannot remove {}", self.destination.display()))?;
+        if let Some(permissions) = self.replaced {
+            fs::create_dir(&self.destination)
+                .and_then(|()| fs::set_permissions(&self.destination, permissions))
+                .with_context(|| format!("cannot restore {}", self.destination.display()))?;
         }
         Ok(())
     }
@@ -617,15 +649,18 @@ pub fn export_sidecar(
     wanted: &BTreeSet<Content>,
     dir: &Path,
 ) -> Result<(Exported, Staged)> {
-    match fs::read_dir(dir) {
-        Ok(mut entries) => ensure!(
-            entries.next().is_none(),
-            "refusing to write a custody sidecar into the non-empty {}",
-            dir.display()
-        ),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+    let replaces = match fs::read_dir(dir) {
+        Ok(mut entries) => {
+            ensure!(
+                entries.next().is_none(),
+                "refusing to write a custody sidecar into the non-empty {}",
+                dir.display()
+            );
+            Some(fs::metadata(dir)?.permissions())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error).with_context(|| format!("cannot use {}", dir.display())),
-    }
+    };
     let name = dir
         .file_name()
         .context("a custody sidecar needs a directory name")?
@@ -640,6 +675,7 @@ pub fn export_sidecar(
     let staged = Staged {
         staging: Some(staging.clone()),
         destination: dir.to_path_buf(),
+        replaces,
     };
     let staging_dir =
         Dir::open_root(&staging).with_context(|| format!("cannot open {}", staging.display()))?;
@@ -1127,6 +1163,32 @@ mod tests {
         staged.publish().unwrap();
         assert!(destination.join(MANIFEST_FILE).is_file());
         assert_eq!(siblings(&dir.path().join("out")), 1);
+    }
+
+    #[test]
+    fn a_withdrawn_sidecar_restores_what_it_replaced() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let custody = Custody::at(dir.path());
+        let wanted = BTreeSet::new();
+
+        let absent = dir.path().join("absent");
+        let (_, staged) = export_sidecar(&custody, "change", &wanted, &absent).unwrap();
+        staged.publish().unwrap().withdraw().unwrap();
+        assert!(!absent.exists());
+
+        let empty = dir.path().join("empty");
+        fs::create_dir(&empty).unwrap();
+        fs::set_permissions(&empty, fs::Permissions::from_mode(0o750)).unwrap();
+        let (_, staged) = export_sidecar(&custody, "change", &wanted, &empty).unwrap();
+        let published = staged.publish().unwrap();
+        assert!(empty.join(MANIFEST_FILE).is_file());
+        published.withdraw().unwrap();
+        assert_eq!(fs::read_dir(&empty).unwrap().count(), 0);
+        assert_eq!(
+            fs::metadata(&empty).unwrap().permissions().mode() & 0o777,
+            0o750
+        );
     }
 
     #[test]
