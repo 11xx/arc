@@ -182,9 +182,25 @@ fn quantity<'a>(totals: &'a Value, kind: &str, category: Option<&str>) -> &'a Va
         .find(|quantity| {
             quantity["kind"] == kind
                 && category.is_none_or(|category| quantity["category"] == category)
+                && quantity["categories"] != "disjoint"
                 && quantity.get("harness").is_none()
+                && quantity.get("partition").is_none()
         })
         .unwrap_or_else(|| panic!("no {kind} {category:?} quantity: {totals}"))
+}
+
+/// The combined figure of one disjoint token category.
+fn disjoint<'a>(totals: &'a Value, category: &str) -> &'a Value {
+    totals["quantities"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no quantities: {totals}"))
+        .iter()
+        .find(|quantity| {
+            quantity["categories"] == "disjoint"
+                && quantity["category"] == category
+                && quantity.get("partition").is_none()
+        })
+        .unwrap_or_else(|| panic!("no disjoint {category} quantity: {totals}"))
 }
 
 fn usd(totals: &Value) -> Option<f64> {
@@ -561,8 +577,9 @@ fn a_shared_plan_counts_once_in_the_union_and_in_each_inclusive_view() {
     let estimate = quantity(&plan_report["union"], USD, None);
     assert_eq!(estimate["unit"], "USD");
     assert_eq!(estimate["pricing_basis"], "unknown");
-    assert_eq!(estimate["status"], "incomplete");
-    assert!(estimate.get("amount").is_none());
+    // Every counted request recorded a price, so the sum is complete.
+    assert_eq!(estimate["status"], "complete", "{plan_report}");
+    assert_eq!(estimate["amount"].as_f64(), Some(0.10));
 
     let change_report = report(&repo, &change_a);
     assert_eq!(usd(&work(&change_report, &a_key)["direct"]), Some(0.05));
@@ -832,9 +849,9 @@ fn transition_and_begin_from_journal_add_no_consumption() {
 }
 
 #[test]
-fn a_pi_recording_with_abandoned_entries_is_incomplete_measurement() {
+fn a_rewound_pi_recording_counts_consumption_on_every_retained_branch() {
     let repo = Repo::new();
-    pi_recording(&repo, "rewound-session", &[0.05], true);
+    let path = pi_recording(&repo, "rewound-session", &[0.05], true);
     bind(
         &repo,
         &dispatch(&repo, "--change", "rewound"),
@@ -844,20 +861,36 @@ fn a_pi_recording_with_abandoned_entries_is_incomplete_measurement() {
 
     let report = report(&repo, "rewound");
     let measurement = &session(&report, "pi:rewound-session")["measurement"];
-    assert_eq!(measurement["status"], "incomplete", "{report}");
-    assert!(
-        measurement["reasons"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|reason| reason.as_str().unwrap().contains("abandoned")),
+    assert_eq!(measurement["selection"], "retained-branches", "{report}");
+    assert_eq!(measurement["basis"], "summed-requests");
+    let events = &measurement["events"];
+    assert_eq!(
+        (
+            &events["counted"],
+            &events["active_branch"],
+            &events["other_branches"]
+        ),
+        (&json!(2), &json!(1), &json!(1)),
         "{report}"
     );
-    assert_eq!(report["coverage"]["measurement"]["status"], "incomplete");
+    assert_eq!(events["identity"]["recording_entry"], 2, "{report}");
+    assert_eq!(measurement["status"], "complete", "{report}");
     let estimate = quantity(&work(&report, "change:rewound")["direct"], USD, None);
-    assert_eq!(estimate["status"], "incomplete", "{report}");
-    assert!(estimate.get("amount").is_none(), "{report}");
-    assert_eq!(estimate["known_subtotal"].as_f64(), Some(0.05), "{report}");
+    assert_eq!(estimate["status"], "complete", "{report}");
+    assert_eq!(estimate["amount"].as_f64(), Some(9.05), "{report}");
+    let input = quantity(&report["union"], "resource-quantity", Some("input"));
+    assert_eq!(
+        (&input["status"], &input["amount"]),
+        (&json!("complete"), &json!(20))
+    );
+    stdout(repo.arc(&repo.root).args(["cost", "retain", "rewound"]));
+    fs::remove_file(path).unwrap();
+    let rotated = super::cost::report(&repo, "rewound");
+    assert_eq!(rotated["union"], report["union"]);
+    assert_eq!(
+        session(&rotated, "pi:rewound-session")["measurement"]["events"],
+        *events
+    );
 }
 
 #[test]
@@ -1654,12 +1687,24 @@ fn review_partial_event_counters_are_known_subtotals_per_category() {
     assert_eq!(input["status"], "incomplete", "{view}");
     assert!(input.get("amount").is_none());
     assert_eq!(input["known_subtotal"], 10);
-    assert!(quantity(
+    assert!(input["reasons"]
+        .to_string()
+        .contains("some counted events did not record this category"));
+    let output = quantity(
         &view["sessions"][0]["totals"],
         "resource-quantity",
-        Some("output")
-    )["status"]
-        .is_string());
+        Some("output"),
+    );
+    assert_eq!(
+        (&output["status"], &output["amount"]),
+        (&json!("complete"), &json!(40)),
+        "{view}"
+    );
+    // The disjoint categories inherit the gaps of the counters they restate.
+    let totals = &view["sessions"][0]["totals"];
+    assert_eq!(disjoint(totals, "uncached_input")["status"], "incomplete");
+    assert_eq!(disjoint(totals, "total")["status"], "incomplete");
+    assert_eq!(disjoint(totals, "output")["amount"], 40);
 }
 
 #[test]
@@ -1725,8 +1770,17 @@ fn mixed_zero_and_positive_request_prices_remain_qualified_after_retention() {
     );
     let fresh = report(&repo, "mixed-price");
     let estimate = quantity(&fresh["union"], USD, None);
-    assert_eq!(estimate["status"], "absent");
-    assert!(estimate.get("amount").is_none() && estimate.get("known_subtotal").is_none());
+    assert_eq!(estimate["status"], "incomplete", "{fresh}");
+    assert!(estimate.get("amount").is_none());
+    assert_eq!(estimate["known_subtotal"], 0.02);
+    assert!(estimate["reasons"]
+        .to_string()
+        .contains("recorded zero price accompanies nonzero or unknown usage"));
+    let coverage = &session(&fresh, "pi:mixed-price")["measurement"]["events"]["coverage"]["cost"];
+    assert_eq!(
+        coverage,
+        &json!({"measured": 1, "missing": 0, "unpriced": 1})
+    );
     stdout(repo.arc(&repo.root).args(["cost", "retain", "mixed-price"]));
     fs::remove_file(path).unwrap();
     assert_eq!(report(&repo, "mixed-price")["union"], fresh["union"]);
@@ -1757,4 +1811,353 @@ fn unknown_source_opening_withholds_assignment_without_losing_measurement() {
         .contains("unknown source start"));
     assert!(usd(&view["union"]).is_none());
     assert_eq!(usd(&view["sessions"][0]["totals"]), Some(0.03));
+}
+
+/// A claude recording whose cumulative cost-state records `input` against
+/// one request that recorded 100.
+fn claude_with_total(repo: &Repo, id: &str, input: u64, usd: f64) -> PathBuf {
+    let path = claude_recording(repo, id, 100);
+    let mut lines = recording_lines(&path);
+    lines.push(json!({"type": "cost-state", "timestamp": "2026-01-01T10:00:02Z", "sessionId": id, "totalCostUSD": usd,
+        "modelUsage": {"fixture-model": {"inputTokens": input, "outputTokens": 30, "cacheReadInputTokens": 200,
+            "cacheCreationInputTokens": 40, "costUSD": usd}}}));
+    write_lines(&path, &lines);
+    path
+}
+
+fn residual_counter<'a>(residual: &'a Value, counter: &str) -> &'a Value {
+    residual["counters"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no residual counters: {residual}"))
+        .iter()
+        .find(|row| row["counter"] == counter)
+        .unwrap_or_else(|| panic!("no {counter} residual: {residual}"))
+}
+
+#[test]
+fn a_claude_total_reports_its_residual_per_counter_and_retains_it() {
+    let repo = Repo::new();
+    let id = "55555555-5555-4555-8555-555555555555";
+    let path = claude_with_total(&repo, id, 100, 0.03);
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "residual"),
+        "claude",
+        id,
+    );
+    let fresh = report(&repo, "residual");
+    let residual = &session(&fresh, &format!("claude:{id}"))["measurement"]["residual"];
+    assert_eq!(
+        residual["rules"], "tapes-claude-reconciliation/1",
+        "{fresh}"
+    );
+    let input = residual_counter(residual, "input");
+    assert_eq!(
+        (
+            &input["recorded"],
+            &input["identified"],
+            &input["difference"]
+        ),
+        (&json!(100), &json!(100), &json!(0)),
+        "{fresh}"
+    );
+    for row in residual["counters"].as_array().unwrap() {
+        assert!(
+            ["reconciled", "conflict", "discrepancy", "withheld"]
+                .contains(&row["status"].as_str().unwrap()),
+            "{row}"
+        );
+    }
+    assert!(
+        fresh["coverage"]["measurement"]["residual"]["sessions"][format!("claude:{id}")]
+            .is_object(),
+        "{fresh}"
+    );
+    assert!(!fresh.to_string().contains(repo.home.to_str().unwrap()));
+    stdout(repo.arc(&repo.root).args(["cost", "retain", "residual"]));
+    fs::remove_file(path).unwrap();
+    let rotated = super::cost::report(&repo, "residual");
+    assert_eq!(
+        session(&rotated, &format!("claude:{id}"))["measurement"]["residual"],
+        *residual
+    );
+    assert_eq!(
+        rotated["coverage"]["measurement"]["residual"],
+        fresh["coverage"]["measurement"]["residual"]
+    );
+}
+
+#[test]
+fn a_claude_total_below_its_requests_is_a_conflict_never_clamped() {
+    let repo = Repo::new();
+    let id = "66666666-6666-4666-8666-666666666666";
+    claude_with_total(&repo, id, 60, 0.03);
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "conflicted-total"),
+        "claude",
+        id,
+    );
+    let view = report(&repo, "conflicted-total");
+    let row = session(&view, &format!("claude:{id}"));
+    let input = residual_counter(&row["measurement"]["residual"], "input");
+    assert_eq!(input["status"], "conflict", "{view}");
+    assert_eq!(input["difference"], -40, "{view}");
+    let figure = quantity(&row["totals"], "resource-quantity", Some("input"));
+    assert_ne!(figure["status"], "complete", "{view}");
+    assert!(figure["reasons"]
+        .to_string()
+        .contains("recorded total is below its identified requests"));
+    assert_eq!(
+        view["coverage"]["measurement"]["residual"]["status"],
+        "incomplete"
+    );
+}
+
+#[test]
+fn a_claude_request_sum_reports_its_residual_withheld() {
+    let repo = Repo::new();
+    let id = "77777777-7777-4777-8777-777777777777";
+    claude_recording(&repo, id, 100);
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "no-total"),
+        "claude",
+        id,
+    );
+    let view = report(&repo, "no-total");
+    let residual = &session(&view, &format!("claude:{id}"))["measurement"]["residual"];
+    let input = residual_counter(residual, "input");
+    assert_eq!(input["status"], "withheld", "{view}");
+    assert!(input.get("difference").is_none(), "{view}");
+    assert!(!input["reasons"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn an_unenumerable_claude_family_is_never_reconciled_and_leaves_the_measurement_whole() {
+    let repo = Repo::new();
+    let id = "88888888-8888-4888-8888-888888888888";
+    let path = claude_with_total(&repo, id, 100, 0.03);
+    let children = path.with_extension("").join("subagents");
+    fs::create_dir_all(children.parent().unwrap()).unwrap();
+    fs::write(&children, "not a directory").unwrap();
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "unreadable-family"),
+        "claude",
+        id,
+    );
+    let view = report(&repo, "unreadable-family");
+    let row = session(&view, &format!("claude:{id}"));
+    let residual = &row["measurement"]["residual"];
+    assert_eq!(residual["scope_established"], false, "{view}");
+    let input = residual_counter(residual, "input");
+    assert_ne!(input["status"], "reconciled", "{view}");
+    assert_eq!(input["recorded"], 100, "{view}");
+    assert_eq!(
+        view["coverage"]["measurement"]["residual"]["status"],
+        "incomplete"
+    );
+    assert_eq!(usd(&row["totals"]), Some(0.03), "{view}");
+    let input = quantity(&row["totals"], "resource-quantity", Some("input"));
+    assert_eq!(input["known_subtotal"], 100, "{view}");
+    assert!(!view.to_string().contains(repo.home.to_str().unwrap()));
+    assert!(!view.to_string().contains("not a directory"));
+}
+
+#[test]
+fn a_written_zero_cost_beside_usage_stays_unpriced() {
+    let repo = Repo::new();
+    let id = "99999999-9999-4999-8999-999999999999";
+    claude_with_total(&repo, id, 100, 0.0);
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "zero-total"),
+        "claude",
+        id,
+    );
+    let view = report(&repo, "zero-total");
+    let row = session(&view, &format!("claude:{id}"));
+    let estimate = quantity(&row["totals"], USD, None);
+    assert_eq!(estimate["status"], "absent", "{view}");
+    assert!(estimate.get("amount").is_none() && estimate.get("known_subtotal").is_none());
+    assert!(estimate["reasons"]
+        .to_string()
+        .contains("recorded zero price accompanies nonzero or unknown usage"));
+    assert_eq!(
+        row["measurement"]["cost_coverage"]["complete"], false,
+        "{view}"
+    );
+    let text = stdout(repo.arc(&repo.root).args(["cost", "show", "zero-total"]));
+    assert!(!text.contains(" 0 USD"), "{text}");
+}
+
+#[test]
+fn disjoint_categories_total_tokens_across_harnesses_with_one_basis() {
+    let repo = Repo::new();
+    let claude_id = "11111111-1111-4111-8111-111111111111";
+    claude_recording(&repo, claude_id, 300);
+    pi_recording(&repo, "pi-session", &[0.01], false);
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "two-harnesses"),
+        "claude",
+        claude_id,
+    );
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "two-harnesses"),
+        "pi",
+        "pi-session",
+    );
+    let view = report(&repo, "two-harnesses");
+    let union = &view["union"];
+    assert_eq!(
+        quantity(union, "resource-quantity", Some("input"))["status"],
+        "refused"
+    );
+    let output = quantity(union, "resource-quantity", Some("output"));
+    assert_eq!(output["status"], "withheld", "{view}");
+    assert!(output["reasons"].to_string().contains("disjoint"), "{view}");
+    for (category, expected) in [
+        ("uncached_input", 310),
+        ("cache_read", 204),
+        ("cache_write", 45),
+        ("cache_write_ttl_unrecorded", 45),
+        ("output", 50),
+        ("total", 609),
+    ] {
+        let figure = disjoint(union, category);
+        assert_eq!(figure["accounting_basis"], "summed-requests", "{figure}");
+        assert_eq!(
+            figure["amount"]
+                .as_u64()
+                .or(figure["known_subtotal"].as_u64()),
+            Some(expected),
+            "{category}: {view}"
+        );
+    }
+    // Claude records no reasoning count, so the sum is only pi's.
+    let reasoning = disjoint(union, "reasoning");
+    assert_eq!(reasoning["status"], "absent", "{view}");
+    assert_eq!(reasoning["known_subtotal"], 3);
+    assert_eq!(
+        disjoint(union, "total")["conventions"],
+        json!({"claude": {"input": "excludes-cache", "output": "includes-reasoning"},
+            "pi": {"input": "excludes-cache", "output": "includes-reasoning"}})
+    );
+}
+
+#[test]
+fn disjoint_categories_across_accounting_bases_are_partitioned() {
+    let repo = Repo::new();
+    let claude_id = "11111111-1111-4111-8111-111111111111";
+    let codex_id = "22222222-2222-4222-8222-222222222222";
+    claude_recording(&repo, claude_id, 300);
+    codex_recording(&repo, codex_id, 700);
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "two-bases"),
+        "claude",
+        claude_id,
+    );
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "two-bases"),
+        "codex",
+        codex_id,
+    );
+    let view = report(&repo, "two-bases");
+    let cache_read = disjoint(&view["union"], "cache_read");
+    assert_eq!(cache_read["status"], "withheld", "{view}");
+    assert!(cache_read.get("amount").is_none() && cache_read.get("known_subtotal").is_none());
+    let partitions: Vec<(&str, Option<u64>)> = view["union"]["quantities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|q| {
+            q["categories"] == "disjoint" && q["category"] == "cache_read" && q["partition"] == true
+        })
+        .map(|q| {
+            (
+                q["accounting_basis"].as_str().unwrap(),
+                q["amount"].as_u64().or(q["known_subtotal"].as_u64()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        partitions,
+        [
+            ("recorded-total", Some(100)),
+            ("summed-requests", Some(200))
+        ],
+        "{view}"
+    );
+}
+
+#[test]
+fn tampered_retained_accounting_fields_degrade_field_by_field() {
+    let repo = Repo::new();
+    let claude_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let claude_path = claude_with_total(&repo, claude_id, 100, 0.03);
+    let pi_path = pi_recording(&repo, "tampered-pi", &[0.03], false);
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "tampered"),
+        "claude",
+        claude_id,
+    );
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "tampered"),
+        "pi",
+        "tampered-pi",
+    );
+    stdout(repo.arc(&repo.root).args(["cost", "retain", "tampered"]));
+    let leak = "/home/user/recording.jsonl";
+    for entry in fs::read_dir(repo.root.join(".git/arc/repository/events")).unwrap() {
+        let path = entry.unwrap().path();
+        let mut event: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        if event["event_type"] != "cost-facts-retained" {
+            continue;
+        }
+        let claude = event["executor_harness"] == "claude";
+        let facts = &mut event["facts"];
+        if claude {
+            facts["residual"]["counters"][0]["reasons"] = json!([format!("cannot read {leak}")]);
+        } else {
+            facts["selection"] = json!(leak);
+            facts["disjoint"]["convention"]["input"] = json!(leak);
+            facts["events"]["identity"]["account_namespace"] = json!(leak);
+        }
+        fs::write(path, event.to_string()).unwrap();
+    }
+    fs::remove_file(claude_path).unwrap();
+    fs::remove_file(pi_path).unwrap();
+    let view = report(&repo, "tampered");
+    assert!(!view.to_string().contains(leak), "{view}");
+    let claude = session(&view, &format!("claude:{claude_id}"));
+    assert_eq!(
+        claude["measurement"]["residual"],
+        json!({"unavailable": "retained reconciliation gap", "scope_established": false}),
+        "{view}"
+    );
+    assert_eq!(usd(&claude["totals"]), Some(0.03), "{view}");
+    let pi = session(&view, "pi:tampered-pi");
+    assert_eq!(usd(&pi["totals"]), Some(0.03), "{view}");
+    assert!(pi["measurement"]["selection"].is_null(), "{view}");
+    assert!(pi["measurement"]["events"].is_null(), "{view}");
+    assert!(pi["measurement"]["disjoint"].is_null(), "{view}");
+    assert!(
+        pi["measurement"]["reasons"]
+            .to_string()
+            .contains("retained measurement gap"),
+        "{view}"
+    );
+    // The withheld disjoint categories are absent, never zero.
+    assert_eq!(
+        disjoint(&pi["totals"], "total")["status"],
+        "absent",
+        "{view}"
+    );
 }

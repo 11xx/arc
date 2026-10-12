@@ -2676,6 +2676,163 @@ pub struct CostFacts {
     /// Why the measurement is incomplete. Empty when it covers the session.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub incomplete: Vec<String>,
+    /// Which records the counters select where a recording keeps more than
+    /// one conversation path: `active-branch` or `retained-branches`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<String>,
+    /// The counters restated in tapes' disjoint categories, which add across
+    /// harnesses. Absence means they were not retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disjoint: Option<CostDisjoint>,
+    /// Pricing completeness of the harness-written dollar figures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_coverage: Option<CostPricing>,
+    /// The consumption events a request sum counted, with per-quantity
+    /// coverage and how each event is identified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events: Option<CostEvents>,
+    /// The recorded total reconciled per counter with the requests its
+    /// recording family identifies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub residual: Option<CostResidual>,
+}
+
+/// Token counts in categories no token belongs to twice: uncached input,
+/// cache read, cache write by TTL, and output, with reasoning a subset of
+/// output. Each is absent when the native counters do not determine it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CostDisjoint {
+    pub convention: CostConvention,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uncached_input: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<CostCacheWrites>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<u64>,
+}
+
+/// How the harness's native counters divide a request's tokens, as tapes
+/// names it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CostConvention {
+    /// `excludes-cache` or `includes-cache-read`.
+    pub input: String,
+    /// `includes-reasoning` or `excludes-reasoning`.
+    pub output: String,
+}
+
+/// Cache writes by how long the provider keeps the entry. The buckets sum to
+/// the writes; `ttl_unrecorded` holds writes the source gave no TTL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CostCacheWrites {
+    pub ephemeral_5m: u64,
+    pub ephemeral_1h: u64,
+    pub ttl_unrecorded: u64,
+}
+
+impl CostCacheWrites {
+    pub fn total(&self) -> Option<u64> {
+        self.ephemeral_5m
+            .checked_add(self.ephemeral_1h)?
+            .checked_add(self.ttl_unrecorded)
+    }
+}
+
+/// Pricing completeness as tapes reports it. A written zero beside nonzero
+/// usage is unpriced, never a measured zero.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CostPricing {
+    pub complete: bool,
+    pub zero_written_requests: u64,
+    pub zero_written_observations: u64,
+}
+
+/// Consumption events a request sum counted, each once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CostEvents {
+    pub counted: u64,
+    pub active_branch: u64,
+    pub other_branches: u64,
+    /// Further observations of counted events; they add nothing.
+    pub repeats: u64,
+    /// Per counter category and `cost`: events that measured it, that did
+    /// not record it, and that wrote a zero price beside usage.
+    pub coverage: BTreeMap<String, CostEventCoverage>,
+    pub identity: CostEventIdentity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CostEventCoverage {
+    pub measured: u64,
+    pub missing: u64,
+    pub unpriced: u64,
+}
+
+/// How counted events are keyed: by a provider response, by an entry within
+/// this recording alone, or not at all. `account_namespace` is
+/// `established` or `unestablished` when provider responses key events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CostEventIdentity {
+    pub provider_response: u64,
+    pub recording_entry: u64,
+    pub unidentified: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_namespace: Option<String>,
+}
+
+/// A recorded total reconciled with its recording family's identified
+/// requests. `unavailable` names why no reconciliation was read; the other
+/// fields are tapes' answer, with statuses and reasons as tapes names them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CostResidual {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules: Option<String>,
+    #[serde(default)]
+    pub scope_established: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_coverage: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub counters: Vec<CostCounterResidual>,
+    /// Evidence that would establish the total's scope.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing: Vec<String>,
+    /// The family recordings read, by role, frontier and digest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<CostResidualSource>,
+}
+
+/// One counter's recorded total, identified union, and signed difference
+/// `recorded - identified`, never clamped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CostCounterResidual {
+    pub counter: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identified: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub difference: Option<i64>,
+    /// `reconciled`, `conflict`, `discrepancy` or `withheld`.
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CostResidualSource {
+    /// `parent` or `child`.
+    pub role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frontier: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+    pub complete: bool,
 }
 
 /// Native session relations used to detect potentially overlapping recordings.
@@ -2724,6 +2881,7 @@ pub(crate) fn portable_cost_reason(reason: &str) -> bool {
             | "retained measurement gap"
     ) || counted_reason(reason, " source read gaps")
         || counted_reason(reason, " usage notes")
+        || counted_reason(reason, " consumption notes")
 }
 
 pub(crate) fn portable_quantity_reason(reason: &str) -> bool {
@@ -2737,7 +2895,90 @@ pub(crate) fn portable_quantity_reason(reason: &str) -> bool {
             | "recorded price is invalid"
             | "quantity coverage was not retained"
             | "accounting basis is unknown"
+            | "some counted events did not record this category"
+            | "some counted events recorded no price"
+            | "recorded total is below its identified requests"
+            | "recorded cost kind is unsupported"
     )
+}
+
+pub(crate) fn portable_residual_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        "reconciliation read failed"
+            | "reconciliation frontier differs from the measurement"
+            | "retained reconciliation gap"
+    )
+}
+
+/// A category tapes names by a short kebab-case token.
+fn fixed_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+/// A versioned rule set, `<name>/<n>`.
+fn versioned_token(value: &str) -> bool {
+    value.split_once('/').is_some_and(|(name, version)| {
+        fixed_token(name) && !version.is_empty() && version.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
+const COUNTER_CATEGORIES: [&str; 5] = ["input", "output", "reasoning", "cache_read", "cache_write"];
+
+pub(crate) fn portable_selection(selection: &str) -> bool {
+    matches!(selection, "active-branch" | "retained-branches")
+}
+
+impl CostDisjoint {
+    pub(crate) fn portable(&self) -> bool {
+        matches!(
+            self.convention.input.as_str(),
+            "excludes-cache" | "includes-cache-read"
+        ) && matches!(
+            self.convention.output.as_str(),
+            "includes-reasoning" | "excludes-reasoning"
+        )
+    }
+}
+
+impl CostEvents {
+    pub(crate) fn portable(&self) -> bool {
+        self.coverage
+            .keys()
+            .all(|key| key == "cost" || COUNTER_CATEGORIES.contains(&key.as_str()))
+            && self
+                .identity
+                .account_namespace
+                .as_deref()
+                .is_none_or(|namespace| matches!(namespace, "established" | "unestablished"))
+    }
+}
+
+impl CostResidual {
+    pub(crate) fn portable(&self) -> bool {
+        self.unavailable
+            .as_deref()
+            .is_none_or(portable_residual_reason)
+            && self.rules.as_deref().is_none_or(versioned_token)
+            && self.identity_coverage.as_deref().is_none_or(fixed_token)
+            && self.missing.iter().all(|reason| fixed_token(reason))
+            && self.counters.iter().all(|counter| {
+                COUNTER_CATEGORIES.contains(&counter.counter.as_str())
+                    && matches!(
+                        counter.status.as_str(),
+                        "reconciled" | "conflict" | "discrepancy" | "withheld"
+                    )
+                    && counter.reasons.iter().all(|reason| fixed_token(reason))
+            })
+            && self.sources.iter().all(|source| {
+                matches!(source.role.as_str(), "parent" | "child")
+                    && source.digest.as_deref().is_none_or(portable_cost_metadata)
+            })
+    }
 }
 
 pub(crate) fn portable_cost_metadata(value: &str) -> bool {
@@ -2807,6 +3048,10 @@ impl CostFacts {
                         .iter()
                         .all(|reason| portable_lineage_reason(reason))
             })
+            && self.selection.as_deref().is_none_or(portable_selection)
+            && self.disjoint.as_ref().is_none_or(CostDisjoint::portable)
+            && self.events.as_ref().is_none_or(CostEvents::portable)
+            && self.residual.as_ref().is_none_or(CostResidual::portable)
     }
 }
 
@@ -3052,6 +3297,67 @@ mod tests {
             .is_none());
     }
     use super::*;
+
+    #[test]
+    fn cost_facts_transport_admits_only_fixed_accounting_categories() {
+        let facts: CostFacts = serde_json::from_value(serde_json::json!({
+            "reader": "reader", "calculation": "calculation", "frontier": 10,
+            "selection": "retained-branches",
+            "disjoint": {"convention": {"input": "excludes-cache", "output": "includes-reasoning"},
+                "cache_write": {"ephemeral_5m": 1, "ephemeral_1h": 0, "ttl_unrecorded": 2}},
+            "events": {"counted": 1, "active_branch": 1, "other_branches": 0, "repeats": 0,
+                "coverage": {"input": {"measured": 1, "missing": 0, "unpriced": 0}},
+                "identity": {"provider_response": 1, "recording_entry": 0, "unidentified": 0,
+                    "account_namespace": "unestablished"}},
+            "residual": {"rules": "tapes-claude-reconciliation/1", "scope_established": false,
+                "identity_coverage": "validated-family", "missing": ["recorded-total-membership"],
+                "counters": [{"counter": "input", "recorded": 5, "identified": 7, "difference": -2,
+                    "status": "conflict", "reasons": ["request-conflict"]}],
+                "sources": [{"role": "parent", "frontier": 10, "digest": "sha256:00", "complete": true}]},
+        }))
+        .unwrap();
+        assert!(facts.portable());
+        let refused = |edit: &dyn Fn(&mut CostFacts)| {
+            let mut facts = facts.clone();
+            edit(&mut facts);
+            !facts.portable()
+        };
+        assert!(refused(&|f| f.selection = Some("/home/user/branch".into())));
+        assert!(refused(&|f| f
+            .disjoint
+            .as_mut()
+            .unwrap()
+            .convention
+            .input = "native".into()));
+        assert!(refused(&|f| {
+            f.events.as_mut().unwrap().identity.account_namespace = Some("acct-123".into())
+        }));
+        assert!(refused(&|f| {
+            f.events.as_mut().unwrap().coverage.insert(
+                "/tmp/x".into(),
+                CostEventCoverage {
+                    measured: 0,
+                    missing: 0,
+                    unpriced: 0,
+                },
+            );
+        }));
+        let residual = |edit: &dyn Fn(&mut CostResidual)| {
+            refused(&|f: &mut CostFacts| edit(f.residual.as_mut().unwrap()))
+        };
+        assert!(residual(
+            &|r| r.counters[0].reasons = vec!["cannot read /home/user/a.jsonl".into()]
+        ));
+        assert!(residual(&|r| r.counters[0].status = "clamped".into()));
+        assert!(residual(&|r| r.missing = vec!["~/.claude".into()]));
+        assert!(residual(&|r| r.rules = Some("../rules".into())));
+        assert!(residual(
+            &|r| r.sources[0].digest = Some("/home/user/a.jsonl".into())
+        ));
+        assert!(residual(
+            &|r| r.unavailable = Some("No such file: /home/user".into())
+        ));
+    }
 
     #[test]
     fn dispositions_without_evidence_event_id_still_deserialize() {

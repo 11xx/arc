@@ -14,7 +14,10 @@ use super::run::{rounds, RunSubject};
 use super::*;
 use crate::model::{
     plain_session_id, portable_cost_metadata, portable_cost_reason, portable_lineage_reason,
-    portable_quantity_reason, CostCounters, CostFacts, CostLineage, CostRelative, Event, Payload,
+    portable_quantity_reason, portable_selection, CostCacheWrites, CostConvention,
+    CostCounterResidual, CostCounters, CostDisjoint, CostEventCoverage, CostEventIdentity,
+    CostEvents, CostFacts, CostLineage, CostPricing, CostRelative, CostResidual,
+    CostResidualSource, Event, Payload,
 };
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,11 +30,26 @@ pub const TAPES_READER: &str = env!("ARC_TAPES_READER");
 
 /// How arc normalizes a reader's usage answer into retained facts. It moves
 /// when that normalization does, so facts from an older one stay identifiable.
-pub const COST_CALCULATION: &str = "usage-normalization 2";
+pub const COST_CALCULATION: &str = "usage-normalization 3";
 
 const USD_KIND: &str = "harness-calculated-estimate";
 const TOKEN_KIND: &str = "resource-quantity";
 const CATEGORIES: [&str; 5] = ["input", "output", "reasoning", "cache_read", "cache_write"];
+/// tapes' disjoint categories, cache writes also by TTL, and the sum of the
+/// four categories.
+const DISJOINT: [&str; 9] = [
+    "uncached_input",
+    "cache_read",
+    "cache_write",
+    "cache_write_5m",
+    "cache_write_1h",
+    "cache_write_ttl_unrecorded",
+    "output",
+    "reasoning",
+    "total",
+];
+const ZERO_PRICE: &str = "recorded zero price accompanies nonzero or unknown usage";
+const RESIDUAL_CONFLICT: &str = "recorded total is below its identified requests";
 
 /// Work a dispatched run is assigned to, through the subject it names.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -656,13 +674,17 @@ fn measure(events: &[Event], harness: &str, session: &str) -> Measured {
         Ok(fresh) => {
             let conflict = retained
                 .as_ref()
-                .filter(|(_, held)| held.frontier == fresh.frontier && !same_measurement(held, &fresh))
+                .filter(|(_, held)| {
+                    held.frontier == fresh.frontier
+                        && held.calculation == fresh.calculation
+                        && !same_measurement(held, &fresh)
+                })
                 .map(|(event, held)| {
                     json!({
                         "retained_event_id": event.event_id,
                         "frontier": held.frontier,
-                        "retained": {"digest": held.digest, "counters": held.counters, "harness_estimate_usd": held.harness_estimate_usd, "lineage": held.lineage, "accounting_basis": held.basis, "coverage": held.coverage, "source_started_at": held.source_started_at, "source_start_uncertain": held.source_start_uncertain, "quantity_gaps": held.quantity_gaps, "incomplete": held.incomplete},
-                        "fresh": {"digest": fresh.digest, "counters": fresh.counters, "harness_estimate_usd": fresh.harness_estimate_usd, "lineage": fresh.lineage, "accounting_basis": fresh.basis, "coverage": fresh.coverage, "source_started_at": fresh.source_started_at, "source_start_uncertain": fresh.source_start_uncertain, "quantity_gaps": fresh.quantity_gaps, "incomplete": fresh.incomplete},
+                        "retained": measurement_facts(held),
+                        "fresh": measurement_facts(&fresh),
                     })
                 });
             Measured {
@@ -686,17 +708,22 @@ fn measure(events: &[Event], harness: &str, session: &str) -> Measured {
     }
 }
 
+/// Two reads measured the same thing, whichever reader made them.
 fn same_measurement(left: &CostFacts, right: &CostFacts) -> bool {
-    left.digest == right.digest
-        && left.counters == right.counters
-        && left.harness_estimate_usd == right.harness_estimate_usd
-        && left.lineage == right.lineage
-        && left.basis == right.basis
-        && left.coverage == right.coverage
-        && left.source_started_at == right.source_started_at
-        && left.source_start_uncertain == right.source_start_uncertain
-        && left.quantity_gaps == right.quantity_gaps
-        && left.incomplete == right.incomplete
+    let mut left = left.clone();
+    left.reader.clone_from(&right.reader);
+    left == *right
+}
+
+/// The facts a conflict compares, without the reader and calculation names.
+fn measurement_facts(facts: &CostFacts) -> Value {
+    let mut value = serde_json::to_value(facts).unwrap_or_default();
+    if let Some(object) = value.as_object_mut() {
+        for name in ["reader", "calculation", "frontier"] {
+            object.remove(name);
+        }
+    }
+    value
 }
 
 /// Measure one session through the pinned tapes reader, over its whole
@@ -725,18 +752,35 @@ fn read_fresh(harness: &str, session: &str) -> std::result::Result<CostFacts, St
             Ok(())
         })
         .map_err(|_| "usage read failed".to_string())?;
+    let stream_notes = read.notes.len();
     read.notes
         .extend(resolved.diagnostics.latest_warnings(&resolved.session));
     let whole = backend
         .stream_session(&resolved.session, &read)
         .map_err(|_| "usage read failed".to_string())?;
     let view = agent_tapes_core::usage::streamed(&whole, tally, &read);
-    let mut facts = normalize(&view, harness);
+    let accounting_notes = whole
+        .usage_detail
+        .as_ref()
+        .map_or(0, |detail| detail.accounting_notes.len());
+    let mut facts = normalize(&view, accounting_notes + stream_notes, harness);
+    if harness == "claude" {
+        facts.residual = Some(residual(
+            backend.as_ref(),
+            &resolved.session,
+            facts.frontier,
+        ));
+        qualify_residual(&mut facts);
+    }
     facts.source_started_at = earliest.into_iter().chain(whole.started_at).min();
     facts.source_start_uncertain = whole.start_uncertain
         || view.truncated
         || !view.truncation.is_empty()
         || view.read.as_ref().is_none_or(|read| !read.gaps.is_empty());
+    let fork_parent_unestablished = view
+        .consumption
+        .as_ref()
+        .is_some_and(|consumption| consumption.identity.fork_parent_unestablished);
     facts.lineage = Some(
         match agent_tapes_core::lineage_with_backends(
             &backends,
@@ -785,6 +829,9 @@ fn read_fresh(harness: &str, session: &str) -> std::result::Result<CostFacts, St
                     .lineage
                     .forked_from
                     .and_then(|id| safe_relative(id, &mut unknown));
+                if fork_parent_unestablished {
+                    unknown.push("lineage relative unresolved".to_string());
+                }
                 unknown.sort();
                 unknown.dedup();
                 CostLineage {
@@ -856,6 +903,39 @@ fn sanitized_facts(held: &CostFacts) -> CostFacts {
             .incomplete
             .push("retained measurement gap".to_string());
     }
+    if facts
+        .selection
+        .as_deref()
+        .is_some_and(|selection| !portable_selection(selection))
+    {
+        facts.selection = None;
+        facts
+            .incomplete
+            .push("retained measurement gap".to_string());
+    }
+    if facts
+        .disjoint
+        .as_ref()
+        .is_some_and(|disjoint| !disjoint.portable())
+    {
+        facts.disjoint = None;
+        facts
+            .incomplete
+            .push("retained measurement gap".to_string());
+    }
+    if facts
+        .events
+        .as_ref()
+        .is_some_and(|events| !events.portable())
+    {
+        facts.events = None;
+        facts
+            .incomplete
+            .push("retained measurement gap".to_string());
+    }
+    if let Some(residual) = &mut facts.residual {
+        sanitize_residual(residual);
+    }
     if let Some(gaps) = &mut facts.quantity_gaps {
         let unknown_category = gaps
             .keys()
@@ -925,14 +1005,28 @@ fn kebab<T: serde::Serialize>(value: T) -> Option<String> {
 
 /// The facts arc keeps from one usage answer. The counters and the dollar
 /// figure are the reader's, unchanged; what keeps them from covering the
-/// session is named rather than corrected.
-fn normalize(view: &agent_tapes_core::usage::UsageView, harness: &str) -> CostFacts {
+/// session is named rather than corrected. Where the reader sums consumption
+/// over every branch a recording retains, that sum is the measurement, not
+/// the active branch's.
+fn normalize(
+    view: &agent_tapes_core::usage::UsageView,
+    superseded_notes: usize,
+    harness: &str,
+) -> CostFacts {
+    let consumption = view.consumption.as_ref();
     let mut incomplete = Vec::new();
-    let (basis, coverage) = match &view.accounting {
-        Some(accounting) => (kebab(accounting.basis), kebab(accounting.coverage)),
+    let accounting = consumption
+        .map(|consumption| &consumption.accounting)
+        .or(view.accounting.as_ref());
+    let (basis, coverage, selection) = match accounting {
+        Some(accounting) => (
+            kebab(accounting.basis),
+            kebab(accounting.coverage),
+            accounting.selection.and_then(kebab),
+        ),
         None => {
             incomplete.push("the source recorded no usage counters".to_string());
-            (None, None)
+            (None, None, None)
         }
     };
     if let Some(coverage) = coverage
@@ -946,25 +1040,96 @@ fn normalize(view: &agent_tapes_core::usage::UsageView, harness: &str) -> CostFa
     if view.truncated || !view.truncation.is_empty() {
         incomplete.push("the read was bounded and withheld part of the source".to_string());
     }
-    if !view.notes.is_empty() {
-        incomplete.push(format!("{} usage notes", view.notes.len()));
+    // The recording's accounting notes and the backend's own read notes
+    // qualify the active-branch figure a consumption sum replaces; notes from
+    // diagnostics and skipped records qualify either.
+    let notes = match consumption {
+        Some(_) => view.notes.len().saturating_sub(superseded_notes),
+        None => view.notes.len(),
+    };
+    if notes > 0 {
+        incomplete.push(format!("{notes} usage notes"));
     }
     if let Some(read) = view.read.as_ref().filter(|read| !read.gaps.is_empty()) {
         incomplete.push(format!("{} source read gaps", read.gaps.len()));
     }
-    for note in &view.notes {
-        if note.contains("abandoned branch") {
-            incomplete.push(
-                "abandoned branch consumption is outside the pinned reader's active branch"
-                    .to_string(),
-            );
+    if let Some(consumption) = consumption {
+        // Each counter with missing or unpriced events has its own note,
+        // which the per-category gaps below carry.
+        let per_counter = consumption
+            .measurement_coverage
+            .values()
+            .filter(|coverage| coverage.missing > 0 || coverage.unpriced > 0)
+            .count();
+        let other = consumption.incomplete.len().saturating_sub(per_counter);
+        if other > 0 {
+            incomplete.push(format!("{other} consumption notes"));
         }
     }
     let read = view.read.as_ref();
     if read.is_none() {
         incomplete.push("the reader established no source frontier".to_string());
     }
-    let tokens = view.tokens.as_ref();
+    let (tokens, cost, cost_coverage) = match consumption {
+        Some(consumption) => (
+            consumption.tokens.as_ref(),
+            consumption.cost.as_ref(),
+            consumption.cost_coverage.as_ref(),
+        ),
+        None => (
+            view.tokens.as_ref(),
+            view.cost.as_ref(),
+            view.cost_coverage.as_ref(),
+        ),
+    };
+    let disjoint = match consumption {
+        Some(_) => tokens
+            .zip(agent_tapes_core::model::TokenConvention::of(harness))
+            .map(|(tokens, convention)| {
+                agent_tapes_core::model::DisjointTokens::from_native(tokens, convention, None)
+            }),
+        None => view.disjoint.clone(),
+    };
+    let events = consumption.map(|consumption| CostEvents {
+        counted: consumption.events.counted as u64,
+        active_branch: consumption.events.active_branch as u64,
+        other_branches: consumption.events.other_branches as u64,
+        repeats: consumption.events.repeats as u64,
+        coverage: consumption
+            .measurement_coverage
+            .iter()
+            .filter(|(name, _)| *name == "cost" || CATEGORIES.contains(&name.as_str()))
+            .map(|(name, coverage)| {
+                (
+                    name.clone(),
+                    CostEventCoverage {
+                        measured: coverage.measured as u64,
+                        missing: coverage.missing as u64,
+                        unpriced: coverage.unpriced as u64,
+                    },
+                )
+            })
+            .collect(),
+        identity: CostEventIdentity {
+            provider_response: consumption.identity.provider_response as u64,
+            recording_entry: consumption.identity.recording_entry as u64,
+            unidentified: consumption.identity.unidentified as u64,
+            account_namespace: consumption
+                .identity
+                .provider_account_namespace
+                .as_deref()
+                .map(|namespace| {
+                    if namespace == "unestablished" {
+                        "unestablished"
+                    } else {
+                        "established"
+                    }
+                    .to_string()
+                }),
+        },
+    });
+    let kind_supported =
+        cost.map(|cost| serde_json::to_value(cost).is_ok_and(|record| record["kind"] == USD_KIND));
     let mut facts = CostFacts {
         reader: TAPES_READER.to_string(),
         calculation: COST_CALCULATION.to_string(),
@@ -985,16 +1150,53 @@ fn normalize(view: &agent_tapes_core::usage::UsageView, harness: &str) -> CostFa
             cache_read: tokens.and_then(|tokens| tokens.cache_read),
             cache_write: tokens.and_then(|tokens| tokens.cache_write),
         },
-        harness_estimate_usd: view.cost.as_ref().map(|cost| cost.usd),
+        harness_estimate_usd: cost
+            .filter(|_| kind_supported == Some(true))
+            .map(|cost| cost.usd),
         incomplete,
+        selection,
+        disjoint: disjoint.as_ref().and_then(|disjoint| {
+            Some(CostDisjoint {
+                convention: CostConvention {
+                    input: kebab(disjoint.convention.input)?,
+                    output: kebab(disjoint.convention.output)?,
+                },
+                uncached_input: disjoint.uncached_input,
+                cache_read: disjoint.cache_read,
+                // The split sums to the writes, so an unrecorded bucket is empty.
+                cache_write: disjoint.cache_write.map(|writes| CostCacheWrites {
+                    ephemeral_5m: writes.ephemeral_5m.unwrap_or(0),
+                    ephemeral_1h: writes.ephemeral_1h.unwrap_or(0),
+                    ttl_unrecorded: writes.ttl_unrecorded.unwrap_or(0),
+                }),
+                output: disjoint.output,
+                reasoning: disjoint.reasoning,
+            })
+        }),
+        cost_coverage: cost_coverage.map(|coverage| CostPricing {
+            complete: coverage.complete,
+            zero_written_requests: coverage.zero_written_requests as u64,
+            zero_written_observations: coverage.zero_written_observations as u64,
+        }),
+        events,
+        residual: None,
     };
-    let mut gaps = BTreeMap::new();
+    let summed = facts.basis.as_deref() == Some("summed-requests");
+    let mut gaps: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for category in CATEGORIES {
         let reason = if counter(&facts.counters, category).is_none() {
             Some("recorded category is absent")
         } else if facts.basis.is_none() {
             Some("accounting basis is unknown")
-        } else if facts.basis.as_deref() == Some("summed-requests") {
+        } else if let Some(events) = &facts.events {
+            match events.coverage.get(category) {
+                Some(coverage) if coverage.missing > 0 || coverage.unpriced > 0 => {
+                    Some("some counted events did not record this category")
+                }
+                Some(_) => None,
+                None => Some("per-event counter coverage is unknown"),
+            }
+        } else if summed {
             Some("per-event counter coverage is unknown")
         } else if harness != "codex" {
             Some("per-model counter coverage is unknown")
@@ -1005,25 +1207,152 @@ fn normalize(view: &agent_tapes_core::usage::UsageView, harness: &str) -> CostFa
             gaps.insert(category.to_string(), vec![reason.to_string()]);
         }
     }
-    if facts.harness_estimate_usd.is_none() {
+    let zero_written = facts.cost_coverage.as_ref().is_some_and(|coverage| {
+        coverage.zero_written_requests > 0 || coverage.zero_written_observations > 0
+    });
+    let mut usd = Vec::new();
+    match facts.harness_estimate_usd {
+        None if kind_supported == Some(false) => usd.push("recorded cost kind is unsupported"),
+        None if zero_written => usd.push(ZERO_PRICE),
+        None => usd.push("recorded category is absent"),
+        Some(_) => {
+            if facts.basis.is_none() {
+                usd.push("accounting basis is unknown");
+            }
+            match (&facts.events, &facts.cost_coverage) {
+                (Some(events), _) => match events.coverage.get("cost") {
+                    Some(coverage) => {
+                        if coverage.unpriced > 0 {
+                            usd.push(ZERO_PRICE);
+                        }
+                        if coverage.missing > 0 {
+                            usd.push("some counted events recorded no price");
+                        }
+                    }
+                    None => usd.push("per-event price coverage is unknown"),
+                },
+                (None, Some(coverage)) if !coverage.complete => usd.push(if zero_written {
+                    ZERO_PRICE
+                } else {
+                    "some counted events recorded no price"
+                }),
+                (None, None) if summed => usd.push("per-event price coverage is unknown"),
+                _ => {}
+            }
+        }
+    }
+    if !usd.is_empty() {
         gaps.insert(
             "usd".to_string(),
-            vec!["recorded category is absent".to_string()],
-        );
-    } else if facts.basis.is_none() {
-        gaps.insert(
-            "usd".to_string(),
-            vec!["accounting basis is unknown".to_string()],
-        );
-    } else if facts.basis.as_deref() == Some("summed-requests") {
-        gaps.insert(
-            "usd".to_string(),
-            vec!["per-event price coverage is unknown".to_string()],
+            usd.into_iter().map(str::to_string).collect(),
         );
     }
     facts.quantity_gaps = Some(gaps);
     qualify_price(&mut facts);
     facts
+}
+
+fn unavailable_residual(reason: &str) -> CostResidual {
+    CostResidual {
+        unavailable: Some(reason.to_string()),
+        rules: None,
+        scope_established: false,
+        identity_coverage: None,
+        counters: Vec::new(),
+        missing: Vec::new(),
+        sources: Vec::new(),
+    }
+}
+
+/// The recording family's reconciliation, as tapes answers it. A failed read
+/// leaves only the residual unavailable; the session's measurement stands.
+/// Recording locators, notes and errors are not kept.
+fn residual(
+    backend: &dyn agent_tapes_core::backend::Backend,
+    session: &agent_tapes_core::model::Session,
+    frontier: u64,
+) -> CostResidual {
+    let Ok(answer) = backend.usage_reconciliation(session) else {
+        return unavailable_residual("reconciliation read failed");
+    };
+    let parent = answer
+        .sources
+        .iter()
+        .find(|source| source.role == agent_tapes_core::reconcile::SourceRole::Parent);
+    if parent.and_then(|source| source.length) != Some(frontier) {
+        return unavailable_residual("reconciliation frontier differs from the measurement");
+    }
+    let mut residual = CostResidual {
+        unavailable: None,
+        rules: Some(answer.rules.to_string()),
+        scope_established: answer.scope_established,
+        identity_coverage: Some(answer.identified.identity_coverage.to_string()),
+        counters: answer
+            .counters
+            .iter()
+            .map(|row| {
+                let difference = row.difference.map(i64::try_from);
+                let mut reasons: Vec<String> =
+                    row.reasons.iter().map(ToString::to_string).collect();
+                if matches!(difference, Some(Err(_))) {
+                    reasons.push("difference-out-of-range".to_string());
+                }
+                CostCounterResidual {
+                    counter: row.counter.to_string(),
+                    recorded: row.recorded,
+                    identified: row.identified,
+                    difference: difference.and_then(Result::ok),
+                    status: kebab(row.status).unwrap_or_else(|| "withheld".to_string()),
+                    reasons,
+                }
+            })
+            .collect(),
+        missing: answer.missing.iter().map(ToString::to_string).collect(),
+        sources: answer
+            .sources
+            .iter()
+            .map(|source| CostResidualSource {
+                role: kebab(source.role).unwrap_or_default(),
+                frontier: source.length,
+                digest: source
+                    .sha256
+                    .as_ref()
+                    .map(|digest| format!("sha256:{digest}")),
+                complete: source.complete,
+            })
+            .collect(),
+    };
+    sanitize_residual(&mut residual);
+    residual
+}
+
+/// A residual field arc cannot classify is withheld rather than kept.
+fn sanitize_residual(residual: &mut CostResidual) {
+    if !residual.portable() {
+        *residual = unavailable_residual("retained reconciliation gap");
+    }
+}
+
+/// A recorded total below the requests it should contain understates that
+/// counter.
+fn qualify_residual(facts: &mut CostFacts) {
+    let conflicts: Vec<String> = facts
+        .residual
+        .iter()
+        .flat_map(|residual| &residual.counters)
+        .filter(|row| row.status == "conflict")
+        .map(|row| row.counter.clone())
+        .collect();
+    for counter in conflicts {
+        let gaps = facts
+            .quantity_gaps
+            .get_or_insert_with(BTreeMap::new)
+            .entry(counter)
+            .or_default();
+        if !gaps.iter().any(|reason| reason == RESIDUAL_CONFLICT) {
+            gaps.push(RESIDUAL_CONFLICT.to_string());
+        }
+    }
 }
 
 fn qualify_price(facts: &mut CostFacts) {
@@ -1166,60 +1495,83 @@ fn lineage_unknown(row: &SessionRow) -> bool {
         .is_none_or(|lineage| !lineage.unknown.is_empty())
 }
 
+/// One reported quantity: the harness-written dollar figure, a native
+/// counter in its harness's own convention, or a disjoint token category.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Figure {
+    Usd,
+    Native(&'static str),
+    Disjoint(&'static str),
+}
+
+fn figures() -> impl Iterator<Item = Figure> {
+    std::iter::once(Figure::Usd)
+        .chain(CATEGORIES.into_iter().map(Figure::Native))
+        .chain(DISJOINT.into_iter().map(Figure::Disjoint))
+}
+
+/// The accounting domain a figure adds within. Native counters and dollar
+/// figures add within one harness and basis; disjoint categories add across
+/// harnesses within one basis.
+fn domain(row: &SessionRow, figure: Figure) -> (Option<&str>, Option<&str>) {
+    let basis = row
+        .measured
+        .facts
+        .as_ref()
+        .and_then(|facts| facts.basis.as_deref());
+    match figure {
+        Figure::Disjoint(_) => (None, basis),
+        _ => (Some(row.harness.as_str()), basis),
+    }
+}
+
+/// Each harness's native counter convention, as tapes names it.
+fn conventions(members: &[&SessionRow]) -> BTreeMap<String, Value> {
+    members
+        .iter()
+        .filter_map(|row| {
+            let convention = &row.measured.facts.as_ref()?.disjoint.as_ref()?.convention;
+            Some((row.harness.clone(), json!(convention)))
+        })
+        .collect()
+}
+
 /// Each quantity retains its measurement and assignment gaps independently.
 fn totals(members: &[&SessionRow], withheld: &[String], scope: &str) -> Value {
     let keys: Vec<String> = members.iter().map(|row| row.key()).collect();
     let mut quantities = Vec::new();
-
     let harnesses: BTreeSet<&str> = members.iter().map(|row| row.harness.as_str()).collect();
-    let mut domains: BTreeMap<(&str, Option<&str>), Vec<&SessionRow>> = BTreeMap::new();
-    for row in members {
-        let basis = row
-            .measured
-            .facts
-            .as_ref()
-            .and_then(|facts| facts.basis.as_deref());
-        domains.entry((&row.harness, basis)).or_default().push(row);
-    }
-    let bases: BTreeSet<Option<&str>> = domains.keys().map(|(_, basis)| *basis).collect();
-    let common_basis = (bases.len() == 1)
-        .then(|| bases.first().copied().flatten())
-        .flatten();
-    for category in std::iter::once("usd").chain(CATEGORIES) {
-        let base = |harness: Option<&str>, basis: Option<&str>| {
-            let mut base = if category == "usd" {
-                json!({"kind": USD_KIND, "unit": "USD", "pricing_basis": "unknown",
-                    "source": "harness recording", "precision": "currency sums rounded to ten fractional places; smaller nonzero values preserved", "scope": scope})
-            } else {
-                base_tokens(category, scope)
-            };
-            base["accounting_basis"] = json!(basis);
-            if let Some(harness) = harness {
-                base["harness"] = json!(harness);
+    for figure in figures() {
+        let mut domains: BTreeMap<(Option<&str>, Option<&str>), Vec<&SessionRow>> = BTreeMap::new();
+        for row in members {
+            domains.entry(domain(row, figure)).or_default().push(row);
+        }
+        let bases: BTreeSet<Option<&str>> = domains.keys().map(|(_, basis)| *basis).collect();
+        let common_basis = (bases.len() == 1)
+            .then(|| bases.first().copied().flatten())
+            .flatten();
+        let mut combined = base(figure, None, common_basis, scope, members);
+        match figure {
+            Figure::Native(category) if harnesses.len() > 1 && withheld.is_empty() => {
+                let named = harnesses.iter().copied().collect::<Vec<_>>().join(", ");
+                let (status, reason) = if category == "input" {
+                    ("refused", format!("a raw input sum across harnesses ({named}) is refused: their input conventions differ"))
+                } else {
+                    ("withheld", format!("native {category} counters follow each harness's own convention ({named}); the disjoint categories add across harnesses"))
+                };
+                combined["status"] = json!(status);
+                combined["reasons"] = json!([reason]);
+                quantities.push(combined);
             }
-            base
-        };
-        let mut combined = base(None, common_basis);
-        if category != "usd" && harnesses.len() > 1 && withheld.is_empty() {
-            let named = harnesses.iter().copied().collect::<Vec<_>>().join(", ");
-            let (status, reason) = if category == "input" {
-                ("refused", format!("a raw input sum across harnesses ({named}) is refused: their input conventions differ"))
-            } else {
-                ("withheld", format!("summing {category} across harnesses ({named}) waits for tapes' disjoint-token-categories, which the pinned reader does not carry"))
-            };
-            combined["status"] = json!(status);
-            combined["reasons"] = json!([reason]);
-            quantities.push(combined);
-        } else {
-            quantities.push(quantity(combined, aggregate(members, withheld, category)));
+            _ => quantities.push(quantity(combined, aggregate(members, withheld, figure))),
         }
         if domains.len() > 1 {
             for ((harness, basis), partition) in &domains {
-                let mut partition_base = base(Some(harness), *basis);
+                let mut partition_base = base(figure, *harness, *basis, scope, partition);
                 partition_base["partition"] = json!(true);
                 quantities.push(quantity(
                     partition_base,
-                    aggregate(partition, withheld, category),
+                    aggregate(partition, withheld, figure),
                 ));
             }
         }
@@ -1244,9 +1596,32 @@ fn totals(members: &[&SessionRow], withheld: &[String], scope: &str) -> Value {
     }})
 }
 
-fn base_tokens(category: &str, scope: &str) -> Value {
-    json!({"kind": TOKEN_KIND, "unit": "tokens", "category": category,
-        "convention": "tapes category; reasoning is a subset of output", "scope": scope})
+fn base(
+    figure: Figure,
+    harness: Option<&str>,
+    basis: Option<&str>,
+    scope: &str,
+    members: &[&SessionRow],
+) -> Value {
+    let mut base = match figure {
+        Figure::Usd => {
+            json!({"kind": USD_KIND, "unit": "USD", "pricing_basis": "unknown",
+                "source": "harness recording", "precision": "currency sums rounded to ten fractional places; smaller nonzero values preserved", "scope": scope})
+        }
+        Figure::Native(category) => json!({"kind": TOKEN_KIND, "unit": "tokens",
+            "categories": "native", "category": category,
+            "convention": "the harness's own counters; they add only within one harness",
+            "conventions": conventions(members), "scope": scope}),
+        Figure::Disjoint(category) => json!({"kind": TOKEN_KIND, "unit": "tokens",
+            "categories": "disjoint", "category": category,
+            "convention": "tapes' disjoint categories: uncached input, cache read, cache write by TTL, and output; reasoning is a subset of output; total sums the four",
+            "conventions": conventions(members), "scope": scope}),
+    };
+    base["accounting_basis"] = json!(basis);
+    if let Some(harness) = harness {
+        base["harness"] = json!(harness);
+    }
+    base
 }
 
 fn counter(counters: &CostCounters, category: &str) -> Option<u64> {
@@ -1256,6 +1631,85 @@ fn counter(counters: &CostCounters, category: &str) -> Option<u64> {
         "reasoning" => counters.reasoning,
         "cache_read" => counters.cache_read,
         _ => counters.cache_write,
+    }
+}
+
+fn disjoint_amount(disjoint: &CostDisjoint, category: &str) -> Option<u64> {
+    let writes = disjoint.cache_write.as_ref();
+    match category {
+        "uncached_input" => disjoint.uncached_input,
+        "cache_read" => disjoint.cache_read,
+        "cache_write" => writes.and_then(CostCacheWrites::total),
+        "cache_write_5m" => writes.map(|writes| writes.ephemeral_5m),
+        "cache_write_1h" => writes.map(|writes| writes.ephemeral_1h),
+        "cache_write_ttl_unrecorded" => writes.map(|writes| writes.ttl_unrecorded),
+        "output" => disjoint.output,
+        "reasoning" => disjoint.reasoning,
+        _ => [
+            disjoint.uncached_input,
+            disjoint.cache_read,
+            writes.and_then(CostCacheWrites::total),
+            disjoint.output,
+        ]
+        .into_iter()
+        .try_fold(0u64, |sum, count| sum.checked_add(count?)),
+    }
+}
+
+/// The native counters a disjoint category is derived from under the
+/// harness's convention; their gaps are its gaps.
+fn disjoint_sources(convention: &CostConvention, category: &str) -> Vec<&'static str> {
+    let input: &[&'static str] = if convention.input == "includes-cache-read" {
+        &["input", "cache_read", "cache_write"]
+    } else {
+        &["input"]
+    };
+    let output: &[&'static str] = if convention.output == "excludes-reasoning" {
+        &["output", "reasoning"]
+    } else {
+        &["output"]
+    };
+    match category {
+        "uncached_input" => input.to_vec(),
+        "cache_read" => vec!["cache_read"],
+        "output" => output.to_vec(),
+        "reasoning" => vec!["reasoning", "output"],
+        "total" => input
+            .iter()
+            .chain(&["cache_read", "cache_write"])
+            .chain(output)
+            .copied()
+            .collect(),
+        _ => vec!["cache_write"],
+    }
+}
+
+/// Why a session's figure is not a complete measurement of one quantity.
+fn figure_gaps(facts: &CostFacts, figure: Figure) -> Vec<String> {
+    let Some(gaps) = &facts.quantity_gaps else {
+        return vec!["quantity coverage was not retained".to_string()];
+    };
+    let of = |category: &str| gaps.get(category).into_iter().flatten().cloned();
+    match figure {
+        Figure::Usd => of("usd").collect(),
+        Figure::Native(category) => of(category).collect(),
+        Figure::Disjoint(category) => {
+            let Some(disjoint) = &facts.disjoint else {
+                return Vec::new();
+            };
+            let mut reasons: BTreeSet<String> = disjoint_sources(&disjoint.convention, category)
+                .into_iter()
+                .flat_map(of)
+                .collect();
+            if matches!(category, "cache_write_5m" | "cache_write_1h")
+                && disjoint
+                    .cache_write
+                    .is_some_and(|writes| writes.ttl_unrecorded > 0)
+            {
+                reasons.insert("some cache writes recorded no TTL".to_string());
+            }
+            reasons.into_iter().collect()
+        }
     }
 }
 
@@ -1321,11 +1775,15 @@ fn sum_amounts(
         })
 }
 
-fn recorded_amount(facts: &CostFacts, category: &str) -> Option<Amount> {
-    if category == "usd" {
-        facts.harness_estimate_usd.map(Amount::Usd)
-    } else {
-        counter(&facts.counters, category).map(Amount::Tokens)
+fn recorded_amount(facts: &CostFacts, figure: Figure) -> Option<Amount> {
+    match figure {
+        Figure::Usd => facts.harness_estimate_usd.map(Amount::Usd),
+        Figure::Native(category) => counter(&facts.counters, category).map(Amount::Tokens),
+        Figure::Disjoint(category) => facts
+            .disjoint
+            .as_ref()
+            .and_then(|disjoint| disjoint_amount(disjoint, category))
+            .map(Amount::Tokens),
     }
 }
 
@@ -1350,7 +1808,7 @@ impl Aggregate {
     }
 }
 
-fn aggregate(members: &[&SessionRow], withheld: &[String], category: &str) -> Aggregate {
+fn aggregate(members: &[&SessionRow], withheld: &[String], figure: Figure) -> Aggregate {
     if !withheld.is_empty() {
         return Aggregate::withheld(withheld.to_vec());
     }
@@ -1363,24 +1821,20 @@ fn aggregate(members: &[&SessionRow], withheld: &[String], category: &str) -> Ag
             reasons: vec!["no bound session is assigned here".to_string()],
         };
     }
-    let domains: BTreeSet<(&str, Option<&str>)> = members
-        .iter()
-        .map(|row| {
-            (
-                row.harness.as_str(),
-                row.measured
-                    .facts
-                    .as_ref()
-                    .and_then(|facts| facts.basis.as_deref()),
-            )
-        })
-        .collect();
+    let domains: BTreeSet<(Option<&str>, Option<&str>)> =
+        members.iter().map(|row| domain(row, figure)).collect();
     if domains.len() > 1 {
         let names = domains
             .iter()
-            .map(|(harness, basis)| format!("{harness}/{}", basis.unwrap_or("unknown")))
+            .map(|(harness, basis)| {
+                let basis = basis.unwrap_or("unknown");
+                harness.map_or(basis.to_string(), |harness| format!("{harness}/{basis}"))
+            })
             .collect::<Vec<_>>();
-        return Aggregate::withheld(vec![format!("incompatible accounting domains: {}; quantities are partitioned by harness and accounting basis", names.join(", "))]);
+        return Aggregate::withheld(vec![match figure {
+            Figure::Disjoint(_) => format!("incompatible accounting bases: {}; quantities are partitioned by accounting basis", names.join(", ")),
+            _ => format!("incompatible accounting domains: {}; quantities are partitioned by harness and accounting basis", names.join(", ")),
+        }]);
     }
     let mut amounts = Vec::new();
     let mut missing = Vec::new();
@@ -1388,22 +1842,15 @@ fn aggregate(members: &[&SessionRow], withheld: &[String], category: &str) -> Ag
     for row in members {
         match row.measured.facts.as_ref() {
             Some(facts) => {
-                match recorded_amount(facts, category) {
+                match recorded_amount(facts, figure) {
                     Some(amount) => amounts.push(amount),
                     None => missing.push(row.key()),
                 }
                 for reason in &facts.incomplete {
                     gaps.insert(format!("{}: {reason}", row.key()));
                 }
-                match &facts.quantity_gaps {
-                    Some(categories) => {
-                        for reason in categories.get(category).into_iter().flatten() {
-                            gaps.insert(format!("{}: {reason}", row.key()));
-                        }
-                    }
-                    None => {
-                        gaps.insert(format!("{}: quantity coverage was not retained", row.key()));
-                    }
+                for reason in figure_gaps(facts, figure) {
+                    gaps.insert(format!("{}: {reason}", row.key()));
                 }
                 if facts.basis.is_none() {
                     gaps.insert(format!("{}: accounting basis is unknown", row.key()));
@@ -1428,7 +1875,7 @@ fn aggregate(members: &[&SessionRow], withheld: &[String], category: &str) -> Ag
                     row.measured
                         .facts
                         .as_ref()
-                        .and_then(|facts| recorded_amount(facts, category))
+                        .and_then(|facts| recorded_amount(facts, figure))
                 })
                 .reduce(Amount::max)
             {
@@ -1444,7 +1891,7 @@ fn aggregate(members: &[&SessionRow], withheld: &[String], category: &str) -> Ag
                     row.measured
                         .facts
                         .as_ref()
-                        .and_then(|facts| recorded_amount(facts, category))
+                        .and_then(|facts| recorded_amount(facts, figure))
                 }),
         );
         let lower = match sum_amounts(lower_terms) {
@@ -1724,10 +2171,7 @@ fn render_report(
                 "status": if unmeasured.is_empty() && unavailable_sources.is_empty() { "complete" } else { "incomplete" },
                 "sessions": unmeasured,
                 "current_sources": {"status": if unavailable_sources.is_empty() { "complete" } else { "incomplete" }, "unavailable": unavailable_sources},
-                "residual": {
-                    "status": "withheld",
-                    "reason": "the residual between a recorded total and its requests waits for tapes' usage-total-request-reconciliation, which the pinned reader does not carry",
-                },
+                "residual": residual_coverage(sessions),
             },
             "assignment": {
                 "status": if assignment_gaps.is_empty() { "complete" } else { "incomplete" },
@@ -1744,6 +2188,43 @@ fn render_report(
                 "figures": identities,
             },
         },
+    })
+}
+
+/// Where each Claude session's recorded total stands against the requests its
+/// recording family identifies. A counter that is not `reconciled` keeps its
+/// tapes status; a withheld one is never read as zero.
+fn residual_coverage(sessions: &[SessionRow]) -> Value {
+    let mut rows = BTreeMap::new();
+    let mut complete = true;
+    for row in sessions {
+        let Some(residual) = row
+            .measured
+            .facts
+            .as_ref()
+            .and_then(|facts| facts.residual.as_ref())
+        else {
+            continue;
+        };
+        let counters: BTreeMap<&str, &str> = residual
+            .counters
+            .iter()
+            .map(|counter| (counter.counter.as_str(), counter.status.as_str()))
+            .collect();
+        let reconciled = residual.unavailable.is_none()
+            && !counters.is_empty()
+            && counters.values().all(|status| *status == "reconciled");
+        complete &= reconciled;
+        rows.insert(
+            row.key(),
+            json!({"status": if reconciled { "reconciled" } else if residual.unavailable.is_some() { "unavailable" } else { "unreconciled" },
+                "unavailable": residual.unavailable, "counters": counters}),
+        );
+    }
+    json!({
+        "status": if rows.is_empty() { "not-applicable" } else if complete { "complete" } else { "incomplete" },
+        "statement": "a recorded total is reconciled per counter with the requests its recording family identifies; the difference is signed and never clamped, and a withheld counter has no residual",
+        "sessions": rows,
     })
 }
 
@@ -1781,6 +2262,11 @@ fn session_json(row: &SessionRow) -> Value {
             measurement["coverage"] = json!(facts.coverage);
             measurement["source_started_at"] = json!(facts.source_started_at);
             measurement["source_start_uncertain"] = json!(facts.source_start_uncertain);
+            measurement["selection"] = json!(facts.selection);
+            measurement["disjoint"] = json!(facts.disjoint);
+            measurement["cost_coverage"] = json!(facts.cost_coverage);
+            measurement["events"] = json!(facts.events);
+            measurement["residual"] = json!(facts.residual);
         }
         None => measurement["status"] = json!("unmeasured"),
     }
@@ -1810,10 +2296,16 @@ fn describe_quantity(quantity: &Value) -> String {
     let unit = quantity["unit"].as_str().unwrap_or_default();
     let label = match quantity["kind"].as_str() {
         Some(USD_KIND) => "harness-calculated estimate".to_string(),
-        _ => quantity["category"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string(),
+        _ => match quantity["categories"].as_str() {
+            Some("disjoint") => format!(
+                "disjoint {}",
+                quantity["category"].as_str().unwrap_or_default()
+            ),
+            _ => quantity["category"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+        },
     };
     let label = match quantity["harness"].as_str() {
         Some(harness) => format!("{label} ({harness})"),
@@ -1946,6 +2438,12 @@ fn print_report(report: &Value) {
                     .unwrap_or_default()
             );
         }
+        if let Some(selection) = measurement["selection"].as_str() {
+            println!(
+                "    counts {selection}: {} events, {} beyond the active branch",
+                measurement["events"]["counted"], measurement["events"]["other_branches"]
+            );
+        }
         for reason in measurement["reasons"].as_array().into_iter().flatten() {
             println!("    {}", reason.as_str().unwrap_or_default());
         }
@@ -1969,12 +2467,32 @@ fn print_report(report: &Value) {
             .as_str()
             .unwrap_or_default()
     );
+    let residual = &coverage["measurement"]["residual"];
     println!(
-        "  residual: withheld — {}",
-        coverage["measurement"]["residual"]["reason"]
-            .as_str()
-            .unwrap_or_default()
+        "  residual: {}",
+        residual["status"].as_str().unwrap_or_default()
     );
+    for (session, row) in residual["sessions"].as_object().into_iter().flatten() {
+        let counters: Vec<String> = row["counters"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(_, status)| *status != "reconciled")
+            .map(|(counter, status)| format!("{counter} {}", status.as_str().unwrap_or_default()))
+            .collect();
+        println!(
+            "    {session}: {}{}{}",
+            row["status"].as_str().unwrap_or_default(),
+            row["unavailable"]
+                .as_str()
+                .map_or(String::new(), |reason| format!(" ({reason})")),
+            if counters.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", counters.join(", "))
+            }
+        );
+    }
     println!(
         "  assignment: {}",
         coverage["assignment"]["status"]
