@@ -130,6 +130,17 @@ paths = [
   # import. A defect reads damaged or substituted bytes as the evidence the
   # reference claims, or writes outside the ledger's private root.
   "src/custody.rs",
+  # Custody's only write and read path: every access resolves the ledger's
+  # custody directories without following a link and works inside the handle. A
+  # defect reads or writes bytes outside the ledger's private root.
+  "src/custody/anchored.rs",
+  # Decides what an export publishes and in what order: the sidecar, object
+  # list and bundle land together or are taken back. A defect leaves a bundle
+  # binding a sidecar that is missing, or replaces a file the caller kept.
+  "src/commands/bundle_output.rs",
+  # The binding that decides whether an audit's assessment clears an
+  # `ineligible-review` debt. A defect clears a debt the auditor did not earn.
+  "src/assessment.rs",
   # Artifact storage operations move the only copy of journal history.
   "src/journal.rs",
   # Bundle import writes foreign artifact bodies and events into the journal.
@@ -203,6 +214,10 @@ acknowledged_safe = [
   "src/forge_view.rs",
   "src/forge.rs",
   "src/commands/forge_cmd.rs",
+  # Cost views read recorded usage. `cost retain` writes an observation event
+  # that no authorization reads, so a defect renders a wrong figure.
+  "src/commands/cost.rs",
+  "src/commands/cost_read.rs",
   # A pass records what a caller says it opened and nothing reads it to decide
   # whether work ships.
   "src/commands/pass.rs",
