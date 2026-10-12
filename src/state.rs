@@ -1349,7 +1349,7 @@ impl ChangeState {
         for link in &self.forge.links {
             note(&link.observed_head_sha, "forge link head".to_string());
         }
-        if let Some(checks) = &self.forge.checks {
+        for checks in &self.forge.checks_history {
             note(&checks.observed_pr_head, "forge checks head".to_string());
         }
         for pr_state in &self.forge.pr_states {
@@ -3176,7 +3176,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 detail,
             } => {
                 legacy_checks_binding = !binding_recorded && link_event_id.is_none();
-                state.forge.checks = Some(crate::forge::ForgeChecksRecord {
+                let record = crate::forge::ForgeChecksRecord {
                     unresolved_binding: projection_error.is_some(),
                     observation: observation.clone(),
                     acquisition: if observation.is_some() {
@@ -3203,7 +3203,9 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     },
                     state: *check_state,
                     detail: detail.clone(),
-                });
+                };
+                state.forge.checks_history.push(record.clone());
+                state.forge.checks = Some(record);
             }
             Payload::ForgePrState {
                 observation,
@@ -3303,7 +3305,12 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
             .find(|link| link.event_id == id)
             .is_none_or(|link| link.unresolved_binding)
     };
-    if let Some(checks) = &mut state.forge.checks {
+    for checks in state
+        .forge
+        .checks
+        .iter_mut()
+        .chain(&mut state.forge.checks_history)
+    {
         checks.unresolved_binding |= checks.observation.as_deref().is_some_and(&unusable_source)
             || checks.link_event_id.as_deref().is_some_and(&bad_link);
         if checks.unresolved_binding {
@@ -3370,7 +3377,12 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
         }
     }
     if legacy_checks_binding && state.forge.relinked() {
-        if let Some(checks) = &mut state.forge.checks {
+        for checks in state
+            .forge
+            .checks
+            .iter_mut()
+            .chain(state.forge.checks_history.last_mut())
+        {
             checks.link_event_id = None;
         }
     }

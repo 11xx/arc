@@ -222,6 +222,10 @@ pub struct ForgeState {
     pub projection: Option<ForgeProjectionRecord>,
     pub link: Option<ForgeLinkRecord>,
     pub checks: Option<ForgeChecksRecord>,
+    /// Every observed check rollup, oldest first. `checks` is its last
+    /// element; the rest are the rollups a frontier earlier than the latest
+    /// reads.
+    pub checks_history: Vec<ForgeChecksRecord>,
     /// Every observed lifecycle fact, oldest first. The current state is
     /// whichever one matches the current link and head, not the newest.
     pub pr_states: Vec<ForgePrStateRecord>,
@@ -259,7 +263,7 @@ impl ForgeState {
                 resolve(rewrites, &link.observed_head_sha)?
             };
         }
-        if let Some(checks) = &mut self.checks {
+        for checks in self.checks.iter_mut().chain(&mut self.checks_history) {
             checks.resolved_pr_head = if checks.unresolved_binding {
                 None
             } else {
@@ -741,6 +745,7 @@ mod tests {
             projection: None,
             link: links.last().cloned(),
             checks: None,
+            checks_history: Vec::new(),
             pr_states,
             links,
         }

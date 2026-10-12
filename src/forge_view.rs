@@ -418,9 +418,10 @@ pub fn build(store: &Store, state: &ChangeState, options: &Options) -> Result<Va
         .collect();
     let checks = state
         .forge
-        .checks
-        .as_ref()
-        .filter(|checks| projection_in_view(&checks.observation));
+        .checks_history
+        .iter()
+        .rev()
+        .find(|checks| projection_in_view(&checks.observation));
     workflow["acceptance"]["provider_lifecycle"] = json!(state
         .forge
         .pr_states

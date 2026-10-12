@@ -1728,7 +1728,10 @@ FORGE
   in forge_view. Exact provider lookup requires a recorded provider identity;
   a legacy link without one does not establish a provider coordinate.
   --observation names an exact event or read ID and freezes forge content and
-  its acquisition-history frontier. Local rewrite resolution and current byte
+  its acquisition-history frontier. Links, lifecycle facts and the checks
+  rollup are those bound to observations in that history;
+  local_resolution.checks is the last such rollup, null only when none was
+  recorded there. Local rewrite resolution and current byte
   availability are separate reads. Change and repository event frontiers and
   reader options are included; explain --at bounds change knowledge, while
   repository history, rewrite resolution and retained bytes are current reads.

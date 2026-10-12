@@ -567,3 +567,69 @@ fn forge_legacy_verdict_has_unknown_frontier_and_drift() {
     assert!(review["verdicts"][0]["forge_drift"].is_null());
     assert!(view(&repo, &id, &[])["review_bindings"][0]["later_observations"].is_null());
 }
+
+fn checks_document(
+    read: &str,
+    generation: &str,
+    body: &str,
+    state: &str,
+    predecessor: Option<&str>,
+) -> Value {
+    let mut v = document(read, generation, body, predecessor);
+    facts(&mut v, "checks", json!({"kind":"checks","state":state,"count":1}));
+    v
+}
+fn record_checks(
+    repo: &Repo,
+    id: &str,
+    read: &str,
+    generation: &str,
+    body: &str,
+    state: &str,
+    predecessor: Option<&str>,
+) {
+    materialize(&repo.home.join("materialized"), &[body]);
+    observe(
+        repo,
+        id,
+        &checks_document(read, generation, body, state, predecessor),
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["forge", "checks", id, "--observation", read]),
+    );
+}
+fn event_ids(view: &Value) -> Vec<String> {
+    view["frontiers"]["change_events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| id.as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn forge_observation_frontier_reports_the_checks_recorded_there() {
+    let (repo, id) = setup();
+    retained_pair(&repo, &id);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["forge", "link", &id, "--observation", "read-1"]),
+    );
+    record_checks(&repo, &id, "checks-pass", "gp", "checks passed", "passed", None);
+    record_checks(&repo, &id, "checks-fail", "gf", "checks failed", "failed", Some("gp"));
+    assert_eq!(
+        view(&repo, &id, &[])["local_resolution"]["checks"]["state"],
+        "failed"
+    );
+    let passed = view(&repo, &id, &["--observation", "checks-pass"]);
+    assert_eq!(passed["local_resolution"]["checks"]["state"], "passed");
+    assert_eq!(
+        passed["local_resolution"]["checks"]["observation"],
+        passed["observations"][0]["event_id"]
+    );
+    let before_any = view(&repo, &id, &["--observation", "read-1"]);
+    assert!(before_any["local_resolution"]["checks"].is_null());
+    let failed = view(&repo, &id, &["--observation", "checks-fail"]);
+    assert_eq!(failed["local_resolution"]["checks"]["state"], "failed");
+}
