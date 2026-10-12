@@ -1220,3 +1220,94 @@ fn forge_legacy_lifecycle_cannot_acquire_a_foreign_link_on_import() {
     assert!(status["forge"]["pr_state"].is_null(), "{status}");
     assert_eq!(status["forge"]["forge_ready"], false, "{status}");
 }
+
+/// A foreign replica's link sorts before checks that were recorded with no
+/// link of their own. The checks stay unlinked through every hop.
+fn foreign_link_before_unlinked_checks(legacy: bool) {
+    let source = Repo::new();
+    let (id, wt, head) = forge_change(&source, "foreign-link");
+    declare_same_repo(&source, &id, "arc/foreign-link");
+    let seed = source.home.join("seed.json");
+    stdout(
+        source
+            .arc(&source.root)
+            .args(["export", &id, "--output", seed.to_str().unwrap()]),
+    );
+    let replica = Repo::new();
+    deliver_git_objects(&source, &replica);
+    stdout(
+        replica
+            .arc(&replica.root)
+            .args(["import", seed.to_str().unwrap()]),
+    );
+    link_at(&replica, &id, "2", &head, "arc/foreign-link");
+    stdout(
+        replica
+            .arc(&replica.root)
+            .args(["forge", "pr-state", &id, "--state", "open"]),
+    );
+    stdout(source.arc(&wt).args([
+        "forge",
+        "checks",
+        &id,
+        "--pr-head",
+        &head,
+        "--state",
+        "passed",
+    ]));
+    if legacy {
+        rewrite_event(&source, &id, "forge-checks", |e| {
+            e.as_object_mut().unwrap().remove("link_event_id");
+            e.as_object_mut().unwrap().remove("binding_recorded");
+        });
+    }
+    let bundle = source.home.join("checks.json");
+    stdout(
+        source
+            .arc(&source.root)
+            .args(["export", &id, "--output", bundle.to_str().unwrap()]),
+    );
+    stdout(
+        replica
+            .arc(&replica.root)
+            .args(["import", bundle.to_str().unwrap()]),
+    );
+    let mut holders = vec![replica];
+    for round in 0..2 {
+        let from = holders.last().unwrap();
+        let reexport = from.home.join(format!("reexport-{round}.json"));
+        stdout(
+            from.arc(&from.root)
+                .args(["export", &id, "--output", reexport.to_str().unwrap()]),
+        );
+        let next = Repo::new();
+        deliver_git_objects(&source, &next);
+        stdout(
+            next.arc(&next.root)
+                .args(["import", reexport.to_str().unwrap()]),
+        );
+        holders.push(next);
+    }
+    for repo in &holders {
+        let shown: serde_json::Value =
+            serde_json::from_str(&stdout(repo.arc(&repo.root).args(["show", &id, "--json"])))
+                .unwrap();
+        assert!(
+            shown["forge"]["checks"]["link_event_id"].is_null(),
+            "{shown}"
+        );
+        let status = status_json(repo, &id);
+        assert_eq!(status["forge"]["checks_applicable"], false, "{status}");
+        assert_eq!(status["forge"]["forge_ready"], false, "{status}");
+    }
+}
+
+#[test]
+fn forge_foreign_earlier_link_never_binds_recorded_unlinked_checks() {
+    foreign_link_before_unlinked_checks(false);
+}
+
+#[test]
+fn forge_foreign_earlier_link_never_binds_legacy_unlinked_checks() {
+    foreign_link_before_unlinked_checks(true);
+}

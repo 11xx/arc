@@ -1832,7 +1832,12 @@ FORGE
   generation relationships refuse before append. Identical read_id retries
   return the original event with already-recorded; conflicting content refuses.
   Import validates introduced facts before publication in their supplying
-  history. Independent replicas can supply different events for the same read.
+  history, each against the state it was recorded in: a read against the reads
+  before it; a projection against the read it names and, for checks and
+  lifecycle, the link it was bound to, and for a link, any earlier declaration
+  that admits its tuple. A link or declaration that merged history makes
+  current later never refuses what was recorded without it.
+  Independent replicas can supply different events for the same read.
   Replay coalesces identical documents and retains their event IDs as aliases.
   Conflicting documents mark every member of that read_id as conflict; invalid
   documents carry the validation reason in invalid. Both remain readable and

@@ -753,3 +753,324 @@ fn forge_admission_preserves_initially_ready_boolean_readiness() {
         .expect("Boolean readiness");
     assert_eq!(after, before);
 }
+
+/// Export `source`'s change, import it into a fresh repository that holds the
+/// source's Git objects, and return that receiver.
+fn relay(source: &Repo, id: &str, name: &str) -> Repo {
+    let bundle = source.home.join(format!("{name}.json"));
+    stdout(
+        source
+            .arc(&source.root)
+            .args(["export", id, "--output", bundle.to_str().unwrap()]),
+    );
+    let receiver = Repo::new();
+    deliver_git_objects(source, &receiver);
+    stdout(
+        receiver
+            .arc(&receiver.root)
+            .args(["import", bundle.to_str().unwrap()]),
+    );
+    receiver
+}
+
+/// Import `source`'s change into `receiver`, which already holds the change.
+fn merge_into(source: &Repo, receiver: &Repo, id: &str, name: &str) {
+    let bundle = source.home.join(format!("{name}.json"));
+    stdout(
+        source
+            .arc(&source.root)
+            .args(["export", id, "--output", bundle.to_str().unwrap()]),
+    );
+    deliver_git_objects(source, receiver);
+    stdout(
+        receiver
+            .arc(&receiver.root)
+            .args(["import", bundle.to_str().unwrap()]),
+    );
+}
+
+fn pr_read(repo: &Repo, read: &str, generation: &str, body: &str, previous: Option<(&str, &str)>) {
+    let mut v = document(read, generation, body, previous.map(|p| p.1));
+    v["observed_head_sha"] = json!(repo.head(&repo.root));
+    v["observed_base_sha"] = v["observed_head_sha"].clone();
+    v["previous_observation"] = json!(previous.map(|p| p.0));
+    facts(
+        &mut v,
+        "pull-request",
+        json!({"kind":"pull-request", "state":"open", "merge_sha":null}),
+    );
+    fs::write(repo.root.join("pr-read.json"), v.to_string()).unwrap();
+}
+
+fn observe_pr(
+    repo: &Repo,
+    id: &str,
+    read: &str,
+    generation: &str,
+    body: &str,
+    previous: Option<(&str, &str)>,
+) -> String {
+    pr_read(repo, read, generation, body, previous);
+    let receipt: Value = serde_json::from_str(&stdout(repo.arc(&repo.root).args([
+        "forge",
+        "observe",
+        id,
+        "--file",
+        "pr-read.json",
+        "--json",
+    ])))
+    .unwrap();
+    receipt["observation_id"].as_str().unwrap().to_string()
+}
+
+fn checks_read(repo: &Repo, id: &str, read: &str, generation: &str) -> String {
+    let mut v = document(read, generation, read, None);
+    v["observed_head_sha"] = json!(repo.head(&repo.root));
+    v["observed_base_sha"] = v["observed_head_sha"].clone();
+    facts(
+        &mut v,
+        "checks",
+        json!({"kind":"checks", "state":"passed", "count":1}),
+    );
+    fs::write(repo.root.join("checks-read.json"), v.to_string()).unwrap();
+    let receipt: Value = serde_json::from_str(&stdout(repo.arc(&repo.root).args([
+        "forge",
+        "observe",
+        id,
+        "--file",
+        "checks-read.json",
+        "--json",
+    ])))
+    .unwrap();
+    receipt["observation_id"].as_str().unwrap().to_string()
+}
+
+fn project(repo: &Repo, id: &str, verb: &str, observation: &str) {
+    stdout(
+        repo.arc(&repo.root)
+            .args(["forge", verb, id, "--observation", observation]),
+    );
+}
+
+/// Every projection a receiver holds resolves: the history was admitted, not
+/// merely replayed.
+fn assert_resolved(shown: &Value) {
+    let forge = &shown["forge"];
+    for list in ["links", "checks_history", "pr_states"] {
+        for record in forge[list].as_array().into_iter().flatten() {
+            assert!(
+                !record["unresolved_binding"].as_bool().unwrap_or(false),
+                "{list}: {shown}"
+            );
+        }
+    }
+    assert_eq!(forge["diagnostics"], json!([]), "{shown}");
+}
+
+#[test]
+fn forge_projections_sourced_from_an_amended_read_cross_two_replicas() {
+    let (source, id) = setup();
+    observe_pr(&source, &id, "r1", "g1", "first", None);
+    let r2 = observe_pr(&source, &id, "r2", "g2", "second", Some(("r1", "g1")));
+    project(&source, &id, "link", &r2);
+    project(&source, &id, "pr-state", &r2);
+    let first = relay(&source, &id, "amended-source");
+    let second = relay(&first, &id, "amended-reexport");
+    for receiver in [&first, &second] {
+        let shown = state(receiver, &id);
+        assert_eq!(shown["forge"]["observations"].as_array().unwrap().len(), 2);
+        assert_resolved(&shown);
+    }
+    assert_eq!(
+        state(&second, &id)["forge"]["links"],
+        state(&source, &id)["forge"]["links"]
+    );
+}
+
+/// Replica A records a link, replica B records an identical one, and A then
+/// records a typed fact bound to the link it held. Neither replica had seen
+/// the other's link when it recorded its own.
+fn interleaved_typed_fact(verb: &str) {
+    let (a, id) = setup();
+    let pr = observe_pr(&a, &id, "r1", "g1", "first", None);
+    project(&a, &id, "link", &pr);
+    let b = relay(&a, &id, "interleaved-seed");
+    project(&b, &id, "link", &pr);
+    let source = if verb == "checks" {
+        checks_read(&a, &id, "c1", "cg1")
+    } else {
+        pr
+    };
+    project(&a, &id, verb, &source);
+    merge_into(&b, &a, &id, "interleaved-link");
+    let merged = state(&a, &id);
+    assert_eq!(merged["forge"]["links"].as_array().unwrap().len(), 2);
+    assert_resolved(&merged);
+    let first = relay(&a, &id, "interleaved-merged");
+    let second = relay(&first, &id, "interleaved-reexport");
+    for receiver in [&first, &second] {
+        let shown = state(receiver, &id);
+        assert_eq!(shown["forge"]["links"], merged["forge"]["links"]);
+        assert_resolved(&shown);
+    }
+    let bound = if verb == "checks" {
+        &merged["forge"]["checks"]
+    } else {
+        &merged["forge"]["pr_states"][0]
+    };
+    assert_eq!(
+        bound["link_event_id"],
+        merged["forge"]["links"][0]["event_id"]
+    );
+}
+
+#[test]
+fn forge_typed_checks_keep_their_recorded_link_across_replicas() {
+    interleaved_typed_fact("checks");
+}
+
+#[test]
+fn forge_typed_lifecycle_keeps_its_recorded_link_across_replicas() {
+    interleaved_typed_fact("pr-state");
+}
+
+#[test]
+fn forge_link_recorded_under_one_declaration_survives_an_unseen_redeclaration() {
+    let (a, id) = setup();
+    let b = relay(&a, &id, "declaration-seed");
+    stdout(b.arc(&b.root).args([
+        "forge",
+        "declare",
+        &id,
+        "--host",
+        "forge.example.invalid",
+        "--base-repo",
+        "sample/project",
+        "--head-repo",
+        "sample/project",
+        "--base-ref",
+        "main",
+        "--head-ref",
+        "other",
+    ]));
+    let pr = observe_pr(&a, &id, "r1", "g1", "first", None);
+    project(&a, &id, "link", &pr);
+    merge_into(&b, &a, &id, "declaration-redeclared");
+    let merged = state(&a, &id);
+    assert_eq!(merged["forge"]["projection"]["head_ref"], "other");
+    let first = relay(&a, &id, "declaration-merged");
+    let second = relay(&first, &id, "declaration-reexport");
+    for receiver in [&first, &second] {
+        assert_eq!(
+            state(receiver, &id)["forge"]["links"],
+            merged["forge"]["links"]
+        );
+    }
+}
+
+#[test]
+fn forge_checks_sourced_from_an_amended_read_cross_two_replicas() {
+    let (source, id) = setup();
+    let pr = observe_pr(&source, &id, "r1", "g1", "first", None);
+    project(&source, &id, "link", &pr);
+    let mut first = document("c1", "cg1", "one", None);
+    let mut second = document("c2", "cg2", "two", Some("cg1"));
+    for (v, previous) in [(&mut first, None), (&mut second, Some("c1"))] {
+        v["observed_head_sha"] = json!(source.head(&source.root));
+        v["observed_base_sha"] = v["observed_head_sha"].clone();
+        v["previous_observation"] = json!(previous);
+        facts(
+            v,
+            "checks",
+            json!({"kind":"checks", "state":"passed", "count":1}),
+        );
+    }
+    let mut amended = String::new();
+    for v in [&first, &second] {
+        fs::write(source.root.join("checks-read.json"), v.to_string()).unwrap();
+        let receipt: Value = serde_json::from_str(&stdout(source.arc(&source.root).args([
+            "forge",
+            "observe",
+            &id,
+            "--file",
+            "checks-read.json",
+            "--json",
+        ])))
+        .unwrap();
+        amended = receipt["observation_id"].as_str().unwrap().to_string();
+    }
+    project(&source, &id, "checks", &amended);
+    let first = relay(&source, &id, "amended-checks");
+    let second = relay(&first, &id, "amended-checks-reexport");
+    for receiver in [&first, &second] {
+        assert_resolved(&state(receiver, &id));
+    }
+}
+
+/// Export a change holding a sourced link, checks and lifecycle, tamper with
+/// one event, and require the receiver to refuse the bundle.
+fn tampered_bundle_is_refused(event_type: &str, reason: &str, tamper: impl Fn(&mut Value)) {
+    let (source, id) = setup();
+    let pr = observe_pr(&source, &id, "r1", "g1", "first", None);
+    project(&source, &id, "link", &pr);
+    project(&source, &id, "pr-state", &pr);
+    let checks = checks_read(&source, &id, "c1", "cg1");
+    project(&source, &id, "checks", &checks);
+    let bundle = source.home.join("tampered.json");
+    stdout(
+        source
+            .arc(&source.root)
+            .args(["export", &id, "--output", bundle.to_str().unwrap()]),
+    );
+    let mut value: Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    let mut changed = false;
+    for event in value["events"].as_array_mut().unwrap() {
+        if event["event_type"] == event_type {
+            tamper(event);
+            changed = true;
+        }
+    }
+    assert!(changed, "no {event_type} event to tamper with");
+    refresh_bundle_checksum(&mut value);
+    fs::write(&bundle, value.to_string()).unwrap();
+    let receiver = Repo::new();
+    deliver_git_objects(&source, &receiver);
+    receiver
+        .arc(&receiver.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(reason));
+}
+
+#[test]
+fn forge_import_refuses_a_link_its_source_read_contradicts() {
+    tampered_bundle_is_refused("forge-link", "link values disagree with observation", |e| {
+        e["pr_number"] = json!(9)
+    });
+}
+
+#[test]
+fn forge_import_refuses_a_link_no_preceding_declaration_admits() {
+    tampered_bundle_is_refused(
+        "forge-projection",
+        "no preceding declaration admits the link",
+        |e| e["head_ref"] = json!("elsewhere"),
+    );
+}
+
+#[test]
+fn forge_import_refuses_checks_bound_to_no_recorded_link() {
+    tampered_bundle_is_refused("forge-checks", "projection link is not recorded", |e| {
+        e["link_event_id"] = json!("01ZZZZZZZZZZZZZZZZZZZZZZZZ")
+    });
+}
+
+#[test]
+fn forge_import_refuses_lifecycle_its_source_read_contradicts() {
+    tampered_bundle_is_refused(
+        "forge-pr-state",
+        "lifecycle state disagrees with observation",
+        |e| e["state"] = json!("closed"),
+    );
+}

@@ -491,6 +491,49 @@ pub fn projection_error(
         .err()
         .map(|error| error.to_string())
 }
+/// Judge a recorded projection by what it names. Checks and lifecycle facts
+/// answer to the link they were bound to. A link answers to some declaration
+/// that preceded it: replicas record under the declaration each one holds, and
+/// merged history cannot say which one that was.
+pub fn validate_historical_projection(
+    payload: &crate::model::Payload,
+    forge: &crate::forge::ForgeState,
+    declarations: &[crate::forge::ForgeProjectionRecord],
+) -> Result<()> {
+    validate_projection_inner(payload, forge, false)?;
+    let crate::model::Payload::ForgeLink {
+        observation: Some(source),
+        base_repo,
+        base_ref,
+        head_repo,
+        head_ref,
+        ..
+    } = payload
+    else {
+        return Ok(());
+    };
+    let host = &forge
+        .observations
+        .iter()
+        .find(|r| r.names_event(source))
+        .ok_or_else(|| anyhow::anyhow!("projection observation is not recorded"))?
+        .document
+        .provider_identity
+        .host;
+    let tuple = crate::forge::ForgeTuple {
+        base_repo: base_repo.clone(),
+        base_ref: base_ref.clone(),
+        head_repo: head_repo.clone(),
+        head_ref: head_ref.clone(),
+    };
+    ensure!(
+        declarations.iter().any(|declared| {
+            declared.host == *host && crate::forge::validate_link(Some(declared), &tuple).is_ok()
+        }),
+        "no preceding declaration admits the link"
+    );
+    Ok(())
+}
 fn validate_projection_inner(
     payload: &crate::model::Payload,
     forge: &crate::forge::ForgeState,
@@ -743,6 +786,11 @@ pub fn replay_observation(
 
 /// Imported facts are checked in their supplying history. Independent reads
 /// sharing an acquisition ID remain separate claims until merged replay.
+///
+/// A read is judged against the reads that precede it. A projection is judged
+/// against the facts it names: its source read, as already judged at its own
+/// acquisition, and the link it was bound to, never against the link or
+/// declaration that merged history makes current.
 pub fn validate_import_admission(
     events: &[crate::model::Event],
     introduced: &BTreeSet<&String>,
@@ -780,20 +828,53 @@ pub fn validate_import_admission(
         };
         if let Payload::ForgeObservationRecorded { observation } = &event.payload {
             ensure!(!events[..index].iter().any(|e| e.repository_id == event.repository_id && matches!(&e.payload, Payload::ForgeObservationRecorded { observation: old } if old.read_id == observation.read_id && old != observation)), "conflicting read_id in one recording repository");
+            // An identical earlier read already carries the judgement.
+            if events[..index].iter().any(|e| {
+                matches!(&e.payload, Payload::ForgeObservationRecorded { observation: old } if old == observation)
+            }) {
+                continue;
+            }
         }
         let prefix: Vec<_> = events[..index].iter().filter(|e| {
             !matches!((&e.payload, source), (Payload::ForgeObservationRecorded { observation: old }, Some(doc)) if old.read_id == doc.read_id && old != doc)
         }).cloned().collect();
         let state = crate::state::reduce(&prefix)?;
-        if let Some(document) = source {
-            document.validate(&state.forge.observations)?;
-        }
         match &event.payload {
-            Payload::ForgeObservationRecorded { .. } => {}
-            _ => validate_projection(&event.payload, &state.forge)?,
+            Payload::ForgeObservationRecorded { observation } => {
+                observation.validate(&state.forge.observations)?
+            }
+            _ => validate_historical_projection(
+                &event.payload,
+                &state.forge,
+                &declarations(&prefix),
+            )?,
         }
     }
     Ok(())
+}
+
+fn declarations(history: &[crate::model::Event]) -> Vec<crate::forge::ForgeProjectionRecord> {
+    history
+        .iter()
+        .filter_map(|event| match &event.payload {
+            crate::model::Payload::ForgeProjection {
+                host,
+                base_repo,
+                base_ref,
+                head_repo,
+                head_ref,
+                policy,
+            } => Some(crate::forge::ForgeProjectionRecord {
+                host: host.clone(),
+                base_repo: base_repo.clone(),
+                base_ref: base_ref.clone(),
+                head_repo: head_repo.clone(),
+                head_ref: head_ref.clone(),
+                policy: policy.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 #[cfg(test)]

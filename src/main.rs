@@ -3237,7 +3237,10 @@ enum ForgeCmd {
     /// changes readiness. Retries of identical read IDs return the receipt.
     /// Generations use stable provider/PR/item identity across retargeting;
     /// repository/ref and URL snapshots retain the values from each read.
-    /// Admission refuses invalid input. Replay coalesces identical replica reads,
+    /// Admission refuses invalid input. Import judges a received read against
+    /// the reads before it and a received projection against the read, link
+    /// and declaration it was recorded with, never against the state merged
+    /// history makes current. Replay coalesces identical replica reads,
     /// retains conflicts and invalid facts with diagnostics, and quarantines
     /// their projections; it never refuses a stored fact on validation alone.
     /// --custody-dir copies adapter-materialized bytes into the ledger's
