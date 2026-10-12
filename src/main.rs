@@ -4085,10 +4085,16 @@ enum CostCmd {
     /// coverage are reported apart.
     /// Every quantity names its accounting basis. Incompatible harness or
     /// basis domains withhold the combined quantity and expose partitions.
-    /// Completeness is per category: a counter some counted events did not
-    /// record is a known subtotal, as are per-model counter sums, and a
-    /// disjoint category inherits the gaps of the counters it restates. A
-    /// recording that keeps several conversation paths, such as a rewound Pi
+    /// Completeness is per category and is tapes' typed answer for the
+    /// figure measured, never a count of its prose notes. A counter or
+    /// disjoint category tapes qualifies is a known subtotal, with one fixed
+    /// reason per tapes reason: a missing counter or price, a written zero
+    /// price, a stopped request, an unreadable record, a read window or
+    /// counter reset, an unestablished scope, an unattributed request, or
+    /// a category the counters do not determine. A disjoint category carries
+    /// the reasons tapes gives it, and the total those of its four
+    /// categories. Only the reader's `--latest` selection warnings remain
+    /// prose, counted as such. A recording that keeps several conversation paths, such as a rewound Pi
     /// session, counts each consumption event once across every retained
     /// branch and reports the events, their per-counter coverage and their
     /// identity. A Claude session's recorded total is reconciled per counter
@@ -4124,8 +4130,8 @@ enum CostCmd {
     /// Retain the normalized facts a fresh read of each bound session gives:
     /// the reader and calculation versions, the source frontier, digest and
     /// opening boundary, the counters by tapes' categories with their basis,
-    /// coverage and category-specific gaps, the disjoint categories, the
-    /// consumption events with their coverage, the Claude residual, and
+    /// coverage and category-specific gaps, the disjoint categories with
+    /// their own gaps, the consumption events with their coverage, the Claude residual, and
     /// any harness-written dollar figure with its pricing coverage, plus
     /// lineage relations and read
     /// failures as fixed categories. Relatives are plain session ids; no

@@ -3104,9 +3104,16 @@ RULES THAT CHANGE WHAT YOU DO
     zero. Measurement, assignment, and identity coverage are reported apart.
     Every quantity names its accounting basis. Incompatible harness or basis
     domains withhold the combined quantity and expose separate partitions.
-    Completeness is per category. A counter that some counted events did not
-    record is a known subtotal, as are per-model token sums, and a disjoint
-    category inherits the gaps of the counters it restates. A recording that
+    Completeness is per category and is tapes' typed answer for the figure
+    measured, never a count of its prose notes. A counter or disjoint
+    category tapes qualifies is a known subtotal, with one fixed reason per
+    tapes reason: a missing counter or price, a written zero price, a
+    stopped request, an unreadable record, a read window or counter reset,
+    an unestablished scope, a request not attributed to a model, or a
+    category the counters do not determine. A counter holding no amount is
+    absent. A disjoint category carries the reasons tapes gives it, and the
+    total those of its four categories. Only the reader's `--latest`
+    selection warnings remain prose, counted as such. A recording that
     keeps several conversation paths, such as a rewound Pi session, counts
     each consumption event once across every retained branch, with the
     events, their per-counter coverage and how they are identified reported
@@ -3149,7 +3156,7 @@ RULES THAT CHANGE WHAT YOU DO
     facts a fresh read gives: reader and calculation versions, source
     frontier, digest and opening boundary, counters with their basis,
     coverage and category-specific gaps, the disjoint categories with their
-    convention, the consumption events with their per-counter coverage and
+    convention and gaps, the consumption events with their per-counter coverage and
     identity, the Claude residual, and any harness-written dollar figure
     with its pricing coverage, plus lineage relations and read failures
     as fixed categories. Retained facts carry no recording locators or raw
