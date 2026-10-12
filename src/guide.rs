@@ -3150,8 +3150,10 @@ RULES THAT CHANGE WHAT YOU DO
     category tapes qualifies is a known subtotal, with one fixed reason per
     tapes reason: a missing counter or price, a written zero price, a
     stopped request, an unreadable record, a read window or counter reset,
-    an unestablished scope, a request not attributed to a model, or a
-    category the counters do not determine. A counter holding no amount is
+    an unestablished scope, a request not attributed to a model, a
+    category the counters do not determine, or a record carrying usage that
+    no reading counted. A record carrying no usage, such as a harness's
+    attachment note, qualifies nothing. A counter holding no amount is
     absent. A disjoint category carries the reasons tapes gives it, and the
     total those of its four categories. Only the reader's `--latest`
     selection warnings remain prose, counted as such. A recording that

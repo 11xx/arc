@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "agent-tapes-core"
 version = "2026.9.29"
-source = "git+https://github.com/11xx/tapes?rev=073876b3d30a7e602c2dc72ca82b801dee42262b#073876b3d30a7e602c2dc72ca82b801dee42262b"
+source = "git+https://github.com/11xx/tapes?rev=3b168bf16c12445b8b385761aa87d853678b5ed3#3b168bf16c12445b8b385761aa87d853678b5ed3"
 dependencies = [
  "agent-tapes-discovery",
  "anyhow",
@@ -20,7 +20,7 @@ dependencies = [
 [[package]]
 name = "agent-tapes-discovery"
 version = "2026.9.29"
-source = "git+https://github.com/11xx/tapes?rev=073876b3d30a7e602c2dc72ca82b801dee42262b#073876b3d30a7e602c2dc72ca82b801dee42262b"
+source = "git+https://github.com/11xx/tapes?rev=3b168bf16c12445b8b385761aa87d853678b5ed3#3b168bf16c12445b8b385761aa87d853678b5ed3"
 dependencies = [
  "libc",
  "serde_json",

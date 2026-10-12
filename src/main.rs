@@ -4168,8 +4168,10 @@ enum CostCmd {
     /// disjoint category tapes qualifies is a known subtotal, with one fixed
     /// reason per tapes reason: a missing counter or price, a written zero
     /// price, a stopped request, an unreadable record, a read window or
-    /// counter reset, an unestablished scope, an unattributed request, or
-    /// a category the counters do not determine. A disjoint category carries
+    /// counter reset, an unestablished scope, an unattributed request, a
+    /// category the counters do not determine, or a record carrying usage
+    /// that no reading counted. Records that carry no usage, such as a
+    /// harness's attachment notes, qualify nothing. A disjoint category carries
     /// the reasons tapes gives it, and the total those of its four
     /// categories. Only the reader's `--latest` selection warnings remain
     /// prose, counted as such. A recording that keeps several conversation paths, such as a rewound Pi
@@ -4208,7 +4210,8 @@ enum CostCmd {
     /// Retain the normalized facts a fresh read of each bound session gives:
     /// the reader and calculation versions, the source frontier, digest and
     /// opening boundary, the counters by tapes' categories with their basis,
-    /// coverage and category-specific gaps, the disjoint categories with
+    /// coverage and category-specific gaps (each a fixed reason, one of them
+    /// that records carrying usage were not read), the disjoint categories with
     /// their own gaps, the consumption events with their coverage, the Claude residual, and
     /// any harness-written dollar figure with its pricing coverage, plus
     /// lineage relations and read

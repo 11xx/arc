@@ -1041,6 +1041,7 @@ fn arc_reason(reason: MeasurementReason) -> &'static str {
             "some requests could not be attributed to a model"
         }
         MeasurementReason::Undetermined => "the recorded counters do not determine this category",
+        MeasurementReason::UnrecognizedUsage => "some records carrying usage were not read",
     }
 }
 
@@ -2582,6 +2583,7 @@ mod tests {
             UnestablishedScope,
             IncompleteAttribution,
             Undetermined,
+            UnrecognizedUsage,
         ];
         let mapped: BTreeSet<&str> = reasons.into_iter().map(arc_reason).collect();
         assert_eq!(mapped.len(), reasons.len());

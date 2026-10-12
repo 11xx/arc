@@ -2224,6 +2224,88 @@ fn a_claude_request_sum_is_complete_where_tapes_states_every_counter() {
     );
 }
 
+/// A claude recording with `extra` records appended after its one request.
+fn claude_with_records(repo: &Repo, id: &str, extra: &[Value]) {
+    let path = claude_recording(repo, id, 300);
+    let mut lines = recording_lines(&path);
+    lines.extend_from_slice(extra);
+    write_lines(&path, &lines);
+}
+
+#[test]
+fn attachment_records_without_usage_leave_a_claude_measurement_complete() {
+    let repo = Repo::new();
+    let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    claude_with_records(
+        &repo,
+        id,
+        &[
+            json!({"type": "attachment", "sessionId": id, "uuid": "attachment-1", "timestamp": "2026-01-01T10:00:02Z",
+                "attachment": {"type": "date", "date": "2026-01-01"}}),
+            json!({"type": "attachment", "sessionId": id, "uuid": "attachment-2", "timestamp": "2026-01-01T10:00:03Z",
+                "attachment": {"type": "total_tokens_reminder", "message": "Tokens are counted."}}),
+        ],
+    );
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "attachments-only"),
+        "claude",
+        id,
+    );
+    let view = report(&repo, "attachments-only");
+    let row = session(&view, &format!("claude:{id}"));
+    for category in ["input", "output", "cache_read", "cache_write"] {
+        let figure = quantity(&row["totals"], "resource-quantity", Some(category));
+        assert_eq!(figure["status"], "complete", "{category}: {view}");
+    }
+    assert!(
+        !all_reasons(&row["totals"]).contains("records carrying usage were not read"),
+        "{view}"
+    );
+}
+
+#[test]
+fn a_usage_bearing_unrecognized_record_qualifies_every_category_and_the_dollar_figure() {
+    let repo = Repo::new();
+    let id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    claude_with_records(
+        &repo,
+        id,
+        &[
+            json!({"type": "mystery", "sessionId": id, "uuid": "mystery-1", "timestamp": "2026-01-01T10:00:02Z",
+                "message": {"usage": {"input_tokens": 7, "output_tokens": 3}}}),
+        ],
+    );
+    bind(
+        &repo,
+        &dispatch(&repo, "--change", "unread-usage"),
+        "claude",
+        id,
+    );
+    let view = report(&repo, "unread-usage");
+    let row = session(&view, &format!("claude:{id}"));
+    let reason = "some records carrying usage were not read";
+    for category in ["input", "output", "cache_read", "cache_write"] {
+        let figure = quantity(&row["totals"], "resource-quantity", Some(category));
+        assert_ne!(figure["status"], "complete", "{category}: {view}");
+        assert!(figure["reasons"].to_string().contains(reason), "{view}");
+    }
+    for category in [
+        "uncached_input",
+        "cache_read",
+        "cache_write",
+        "output",
+        "total",
+    ] {
+        let figure = disjoint(&row["totals"], category);
+        assert_eq!(figure["status"], "incomplete", "{category}: {view}");
+        assert!(figure["reasons"].to_string().contains(reason), "{view}");
+    }
+    let dollars = quantity(&row["totals"], USD, None);
+    assert_ne!(dollars["status"], "complete", "{view}");
+    assert!(dollars["reasons"].to_string().contains(reason), "{view}");
+}
+
 #[test]
 fn a_claude_recorded_total_is_complete_where_its_models_each_record_a_counter() {
     let repo = Repo::new();

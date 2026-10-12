@@ -3048,6 +3048,7 @@ pub(crate) fn portable_quantity_reason(reason: &str) -> bool {
             | "no accounting establishes what the figure covers"
             | "some requests could not be attributed to a model"
             | "the recorded counters do not determine this category"
+            | "some records carrying usage were not read"
             | "recorded total is below its identified requests"
             | "recorded cost kind is unsupported"
     )
