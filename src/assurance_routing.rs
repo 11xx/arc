@@ -142,7 +142,8 @@ fn parse(text: &str, asked: usize) -> Result<Answer, Reason> {
 }
 
 /// What a child printed and whether it succeeded, or why it could not run.
-fn run(author: &str, reads: &[String]) -> Result<(bool, String), Reason> {
+/// Routing prints its answer on stdout and a refusal document on stderr.
+fn run(author: &str, reads: &[String]) -> Result<Output, Reason> {
     let mut command = Command::new("agent-routing");
     command
         .args(["frontier", "--author", author])
@@ -156,13 +157,17 @@ fn run(author: &str, reads: &[String]) -> Result<(bool, String), Reason> {
         .arg("--json")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .process_group(0);
     let mut child = command.spawn().map_err(|_| ROUTING_UNAVAILABLE)?;
     let mut stdout = child.stdout.take().ok_or(ROUTING_UNAVAILABLE)?;
+    let mut stderr = child.stderr.take().ok_or(ROUTING_UNAVAILABLE)?;
     let reader = std::thread::spawn(move || {
         let mut text = String::new();
         stdout.read_to_string(&mut text).map(|_| text)
+    });
+    let diagnostics = std::thread::spawn(move || {
+        crate::process_group::read_tail(&mut stderr, crate::process_group::STDERR_TAIL_BYTES)
     });
     let deadline = Instant::now() + DEADLINE;
     let status = loop {
@@ -182,26 +187,48 @@ fn run(author: &str, reads: &[String]) -> Result<(bool, String), Reason> {
         .join()
         .map_err(|_| ROUTING_UNAVAILABLE)?
         .map_err(|_| ROUTING_UNAVAILABLE)?;
-    Ok((status.success(), text))
+    let diagnostics = diagnostics
+        .join()
+        .map_err(|_| ROUTING_UNAVAILABLE)?
+        .map_err(|_| ROUTING_UNAVAILABLE)?;
+    Ok(Output {
+        success: status.success(),
+        stdout: text,
+        stderr: diagnostics,
+    })
 }
 
-fn refusal(text: &str) -> Refused {
-    match serde_json::from_str::<RawRefusal>(text) {
-        Ok(refusal) if refusal.schema == REFUSAL_SCHEMA => match refusal.role.as_deref() {
+struct Output {
+    success: bool,
+    stdout: String,
+    stderr: String,
+}
+
+/// The refusal document among what a failed call printed, wherever it put it.
+fn refusal(output: &Output) -> Refused {
+    output
+        .stdout
+        .lines()
+        .chain(output.stderr.lines())
+        .find_map(|line| {
+            let refusal = serde_json::from_str::<RawRefusal>(line).ok()?;
+            (refusal.schema == REFUSAL_SCHEMA).then_some(refusal)
+        })
+        .map_or(Refused::Other, |refusal| match refusal.role.as_deref() {
             Some("author") => Refused::Author,
             Some("reviewer") => Refused::Reviewer,
             _ => Refused::Other,
-        },
-        _ => Refused::Other,
-    }
+        })
 }
 
 /// One spawn for `author` and `reads`. A refused reviewer coordinate fails the
 /// whole call in routing, so the caller falls back to one read at a time.
 fn ask_once(author: &str, reads: &[String]) -> Result<Answer, Refused> {
     match run(author, reads) {
-        Ok((true, text)) => parse(&text, reads.len()).map_err(|_| Refused::Other),
-        Ok((false, text)) => Err(refusal(&text)),
+        Ok(output) if output.success => {
+            parse(&output.stdout, reads.len()).map_err(|_| Refused::Other)
+        }
+        Ok(output) => Err(refusal(&output)),
         Err(_) => Err(Refused::Other),
     }
 }

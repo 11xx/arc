@@ -43,13 +43,13 @@ echo "$author$reads" >> "$d/calls"
 [ -f "$d/fail" ] && exit 3
 a=$(printf %s "$author" | tr '#' _)
 if [ ! -f "$d/author-$a.json" ]; then
-  echo '{"coordinate":"x","kind":"unknown-coordinate","message":"m","role":"author","schema":"agent-routing-refusal/1"}'
+  echo '{"coordinate":"x","kind":"unknown-coordinate","message":"m","role":"author","schema":"agent-routing-refusal/1"}' >&2
   exit 1
 fi
 for r in $reads; do
   k=$(printf %s "$r" | tr '#' _)
   if [ ! -f "$d/read-$a-$k.json" ] && [ ! -f "$d/read-$k.json" ]; then
-    echo '{"coordinate":"x","kind":"unknown-coordinate","message":"m","role":"reviewer","schema":"agent-routing-refusal/1"}'
+    echo '{"coordinate":"x","kind":"unknown-coordinate","message":"m","role":"reviewer","schema":"agent-routing-refusal/1"}' >&2
     exit 1
   fi
 done
@@ -566,6 +566,21 @@ fn a_read_routing_refuses_does_not_hide_the_others() {
     assert_eq!(
         row(&report, &mixed)["assurance"]["reason"],
         "read-unassessed",
+        "{report}"
+    );
+}
+
+#[test]
+fn an_author_routing_does_not_know_leaves_the_change_unknown() {
+    let repo = Repo::new();
+    let fake = FakeRouting::new(&repo);
+    fake.read("gpt-5-5#high", true, 1, "below");
+    let id = integrate(&repo, &change("stranger", &["gpt-5-5#high"]));
+    let report = assurance(&fake, &repo, &["--stale"]);
+    assert_eq!(standing(&report, &id), "unknown", "{report}");
+    assert_eq!(
+        row(&report, &id)["assurance"]["reason"],
+        "routing-refused",
         "{report}"
     );
 }
