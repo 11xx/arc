@@ -621,6 +621,31 @@ impl Ctx {
         true
     }
 
+    /// Say so when a verdict is recorded under the model of an
+    /// `Implemented-by` line in the range it judges, at any effort. Reports
+    /// whether it said anything.
+    pub(crate) fn warn_model_not_independent(
+        &self,
+        implementers: &[String],
+        verdict: Verdict,
+    ) -> bool {
+        if verdict != Verdict::Approved {
+            return false;
+        }
+        let Some(model) = self.resolve_model().model else {
+            return false;
+        };
+        let Some(value) = crate::trailers::naming_model(implementers, &model) else {
+            return false;
+        };
+        eprintln!(
+            "warning: recorded under model {model:?}, which the audited range's \
+             `Implemented-by: {value}` names; this verdict shows that a review happened, not \
+             that it was independent of whoever wrote the work."
+        );
+        true
+    }
+
     /// Build a local fact; publication assigns its identity under the ledger lock.
     fn event_at(
         &self,

@@ -9,8 +9,8 @@
 
 use crate::commands::{self, Ctx};
 use crate::model::{
-    AuditAssessment, AuditorBinding, AuthorizationBasis, BriefCause, CaptureState, DebtCoverage,
-    DebtMissing, DebtProduction, DeclaredRelation, DeclaredTarget, Event, JournalRefVia, Payload,
+    AuditAssessment, AuthorizationBasis, BriefCause, CaptureState, DebtCoverage, DebtMissing,
+    DebtProduction, DeclaredRelation, DeclaredTarget, Event, JournalRefVia, Payload,
     PlannerIdentity, ReadCoverage, RelationSubject,
 };
 use crate::relations::Relations;
@@ -1968,10 +1968,8 @@ fn describe(detail: &Detail) -> String {
                     assessment.independence.as_str(),
                     assessment
                         .binding
-                        .and_then(AuditorBinding::failure)
-                        .map(|reason| format!(
-                            ", but the assessment is not bound to this auditor: {reason}"
-                        ))
+                        .and_then(|binding| binding.failure_note(&assessment.uncovered_authors))
+                        .map(|note| format!(", but the assessment is {note}"))
                         .unwrap_or_default()
                 ))
                 .unwrap_or_default()
@@ -2095,19 +2093,7 @@ fn coverage_label(coverage: &DebtCoverage) -> String {
 }
 
 fn production_label(production: &DebtProduction) -> String {
-    let identity = crate::render::debt_identity_label;
-    match &production.planner {
-        Some(planner) => format!(
-            "planned by {}{}, implemented by {}",
-            identity(planner),
-            production
-                .brief_version
-                .map(|version| format!(" (brief v{version})"))
-                .unwrap_or_default(),
-            identity(&production.implementer)
-        ),
-        None => format!("implemented by {}", identity(&production.implementer)),
-    }
+    crate::render::debt_production_label(production)
 }
 
 #[cfg(test)]
@@ -2143,6 +2129,7 @@ mod recorded_model_tests {
                     model.map(str::to_string),
                     Some("recording-key".into()),
                 ),
+                trailer_implementers: None,
                 following_brief: false,
             };
             let label = production_label(&production);

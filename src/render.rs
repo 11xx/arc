@@ -1825,7 +1825,7 @@ pub(crate) fn debt_identity_label(identity: &DebtIdentity) -> String {
 
 /// How the work was produced, as `planned by <planner> (brief v<n>),
 /// implemented by <implementer>`. Unbriefed work names only its implementer.
-fn debt_production_label(production: &DebtProduction) -> String {
+pub(crate) fn debt_production_label(production: &DebtProduction) -> String {
     let mut parts = Vec::new();
     if let Some(planner) = &production.planner {
         let version = production
@@ -1841,7 +1841,11 @@ fn debt_production_label(production: &DebtProduction) -> String {
         "implemented by {}",
         debt_identity_label(&production.implementer)
     ));
-    parts.join(", ")
+    let label = parts.join(", ");
+    match production.trailer_note() {
+        Some(note) => format!("{label} ({note})"),
+        None => label,
+    }
 }
 
 /// One audit that left an `ineligible-review` obligation open, as the
@@ -1871,11 +1875,11 @@ pub fn later_read_label(later: &crate::state::LaterRead) -> String {
         }
         None => label.push_str("; no assessment"),
     }
-    if let Some(reason) = later
+    if let Some(note) = later
         .binding
-        .and_then(crate::model::AuditorBinding::failure)
+        .and_then(|binding| binding.failure_note(&later.uncovered_authors))
     {
-        let _ = write!(label, "; assessment not bound to this auditor: {reason}");
+        let _ = write!(label, "; assessment {note}");
     }
     if let Some(version) = &later.route_version {
         let _ = write!(label, "; route {version}");
@@ -3017,6 +3021,7 @@ mod recorded_model_tests {
                     model.map(str::to_string),
                     Some("recording-key".into()),
                 ),
+                trailer_implementers: None,
                 following_brief: false,
             };
             let label = debt_production_label(&production);

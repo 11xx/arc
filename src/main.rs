@@ -1681,6 +1681,13 @@ enum Cmd {
     /// invalidated its review head; run `arc snapshot` or use `--snapshot`.
     /// Explicit `--patchset` judgments may name historical work; they retain
     /// that patchset's review head and may be stale for the branch head.
+    ///
+    /// An approval recorded under the model of an `Implemented-by` line in the
+    /// patchset's range, at any effort, warns that it shows a review happened
+    /// and not that it was independent of whoever wrote the work. Where
+    /// `forbid_self_approval` applies, the gate rejects it as a self-approval,
+    /// exactly as it rejects a reviewer matching a contributor, and says so
+    /// when the verdict is recorded.
     #[command(group(clap::ArgGroup::new("snapshot_attribution").args(["contributors", "solo"]).requires("snapshot")))]
     /// Verdicts retain observed publication authority. A verified authority refusal
     /// on a provisional delivery remains applicable across authority transfer.
@@ -2321,6 +2328,10 @@ enum Cmd {
         /// The waiver binds to the patchset's review head, following only
         /// signature-only rewrites; a message or content rewrite requires a
         /// fresh snapshot and declaration.
+        /// The debt's production record names the `Implemented-by` values of
+        /// the commits in the patchset's range beside the identity that
+        /// recorded the patchset, verbatim; a range naming none records an
+        /// empty list.
         /// It never overrules a reviewer who read this patchset and asked for
         /// changes: that is a verdict, not a missing one. The obligation
         /// survives closure and `arc query --debt` finds it; discharge it
@@ -2374,6 +2385,9 @@ enum Cmd {
     /// A waiver binds to the patchset's review head, following only
     /// signature-only rewrites. A message or content rewrite requires a fresh
     /// snapshot and declaration before debt can waive review of that head.
+    /// The production record names the `Implemented-by` values of the commits
+    /// in the patchset's range beside the identity that recorded the
+    /// patchset, verbatim; a range naming none records an empty list.
     Debt {
         /// Change that owes the review
         change: String,
@@ -2428,6 +2442,18 @@ enum Cmd {
     /// both name one, must match the reviewer's `identities` and `effort`.
     /// Otherwise the audit is recorded, says why, and is listed beside the
     /// obligation, which stays open. Every other kind discharges as before.
+    ///
+    /// An `ineligible-review` debt is also cleared only when the assessment's
+    /// authors answer to the model of every `Implemented-by` line in the
+    /// audited range. An assessment that omits one is recorded with binding
+    /// `authors-uncovered`, names the omitted models, and leaves the debt
+    /// open.
+    ///
+    /// An approving audit recorded under the model of an `Implemented-by`
+    /// line in the audited range, at any effort, warns that it shows a review
+    /// happened and not that it was independent of whoever wrote the work.
+    /// Where `forbid_self_approval` is on it is refused, with the remedy a
+    /// contributor match gets. `--verdict changes-requested` is open to anyone.
     Audit {
         /// Change whose integrated revision was reviewed
         change: String,

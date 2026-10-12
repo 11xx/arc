@@ -1386,6 +1386,14 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
             ctx.warn_verdict_not_independent(patchset, verdict);
         }
     }
+    // The reviewer's model is a second identity, so it is said even where the
+    // gate already named the reviewer: the gate's reason is one fact, this is
+    // another.
+    if let Some(patchset) = st.patchsets.iter().find(|p| p.id == patchset_id) {
+        if let Some(implementers) = super::audit::range_implementers(ctx, patchset) {
+            ctx.warn_model_not_independent(&implementers, verdict);
+        }
+    }
     Ok(())
 }
 

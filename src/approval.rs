@@ -31,6 +31,8 @@ pub const UNDECLARED_APPROVAL_REASON: &str =
 pub struct ApprovalFacts<'a> {
     /// The newest patchset: the one an approval must name to count.
     pub latest_patchset: Option<&'a Patchset>,
+    /// The `Implemented-by` values of the newest patchset's commits.
+    pub implementers: &'a [String],
     /// The branch head, when the branch resolves.
     pub current_head: Option<&'a str>,
     /// The branch head is the newest patchset's head.
@@ -107,6 +109,10 @@ pub struct ApprovalOutcome {
 /// discharged on the same terms: the surfaces before and after integration
 /// answer independence identically.
 ///
+/// A reviewer whose model, at any effort, is the model of an `Implemented-by`
+/// line in the patchset's range is the author reading its own work, whatever
+/// identity it is recorded under.
+///
 /// Provenance recorded before arc kept it is *unknown*, not assumed, and is
 /// compared by name as it always was — otherwise upgrading arc would strand
 /// every existing ledger that uses this policy.
@@ -114,12 +120,21 @@ pub(crate) fn self_approval_rejection(
     patchset: &Patchset,
     verdict_author: &str,
     verdict_assumed: bool,
+    verdict_model: Option<&str>,
+    implementers: &[String],
 ) -> Option<String> {
     // Naming the contributor is the more specific fact, so it is the one
     // reported when both hold.
     if let Some(contributor) = patchset.contributor_match(verdict_author) {
         return Some(format!(
             "{SELF_APPROVAL_REASON}: reviewer matches contributor {contributor}"
+        ));
+    }
+    if let Some((model, value)) = verdict_model.and_then(|model| {
+        crate::trailers::naming_model(implementers, model).map(|value| (model, value))
+    }) {
+        return Some(format!(
+            "{SELF_APPROVAL_REASON}: reviewer's model {model} matches `Implemented-by: {value}`"
         ));
     }
     verdict_assumed.then(|| UNDECLARED_APPROVAL_REASON.to_string())
@@ -156,6 +171,8 @@ pub fn decide(facts: &ApprovalFacts) -> ApprovalOutcome {
                 patchset,
                 verdict.effective_author(),
                 verdict.author_assumed(),
+                verdict.model.as_deref(),
+                facts.implementers,
             )
         })
     });
@@ -573,6 +590,7 @@ mod tests {
     fn facts<'a>(patchset: &'a Patchset, danger: &'a DangerScope) -> ApprovalFacts<'a> {
         ApprovalFacts {
             latest_patchset: Some(patchset),
+            implementers: &[],
             current_head: Some(HEAD),
             head_matches: true,
             approved_head_matches: true,
@@ -588,6 +606,36 @@ mod tests {
             reviewed_only_by_brief_author: None,
             debt_outstanding: false,
         }
+    }
+
+    #[test]
+    fn a_reviewer_on_the_implementers_model_is_the_author_reading_its_own_work() {
+        let (patchset, danger) = (patchset(), dangerous());
+        let implementers = ["codex:gpt-6.1-sol#medium".to_string()];
+        let mut same = verdict(Verdict::Approved, "reviewer");
+        same.model = Some("gpt-6.1-sol#xhigh".into());
+        let outcome = decide(&ApprovalFacts {
+            latest_verdict: Some(&same),
+            verdict_tips: 1,
+            implementers: &implementers,
+            ..facts(&patchset, &danger)
+        });
+        assert!(!outcome.approval_valid);
+        let reason = outcome.approval_rejection_reason.unwrap();
+        assert!(
+            reason.contains("Implemented-by: codex:gpt-6.1-sol#medium"),
+            "{reason}"
+        );
+
+        let mut other = verdict(Verdict::Approved, "reviewer");
+        other.model = Some("fixture-opus#medium".into());
+        let outcome = decide(&ApprovalFacts {
+            latest_verdict: Some(&other),
+            verdict_tips: 1,
+            implementers: &implementers,
+            ..facts(&patchset, &danger)
+        });
+        assert!(outcome.approval_valid);
     }
 
     #[test]

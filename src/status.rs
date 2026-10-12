@@ -802,6 +802,7 @@ pub fn verdict_assessments(
     current_head: Option<&str>,
     policy: &crate::policy::PolicyFile,
     danger: &DangerScope,
+    implementers: &BTreeMap<String, Vec<String>>,
 ) -> Vec<VerdictAssessment> {
     let selected = state
         .latest_verdict()
@@ -832,6 +833,10 @@ pub fn verdict_assessments(
                                 patchset,
                                 verdict.effective_author(),
                                 verdict.author_assumed(),
+                                verdict.model.as_deref(),
+                                implementers
+                                    .get(&patchset.id)
+                                    .map_or(&[][..], Vec::as_slice),
                             )
                         })
                 });
@@ -1288,8 +1293,13 @@ fn build_report(
         })
         .cloned()
         .collect();
+    let implementers = reviewed_patchset_implementers(state, policy, cwd);
     let mut approval = approval::decide(&ApprovalFacts {
         latest_patchset: latest_patchset.as_ref(),
+        implementers: latest_patchset
+            .as_ref()
+            .and_then(|patchset| implementers.get(&patchset.id))
+            .map_or(&[][..], Vec::as_slice),
         current_head: current_head.as_deref(),
         head_matches,
         approved_head_matches,
@@ -1852,7 +1862,13 @@ fn build_report(
             .iter()
             .map(|verdict| verdict.event_id.clone())
             .collect(),
-        verdict_assessments: verdict_assessments(state, current_head.as_deref(), policy, &danger),
+        verdict_assessments: verdict_assessments(
+            state,
+            current_head.as_deref(),
+            policy,
+            &danger,
+            &implementers,
+        ),
         schema: STATUS_SCHEMA,
         change_id: state.change_id.clone(),
         slug: state.slug.clone(),
@@ -2253,6 +2269,32 @@ pub fn missing_changelog_advisory(state: &ChangeState, cwd: Option<&Path>) -> Op
     })
 }
 
+/// The `Implemented-by` values of each patchset a verdict names, where policy
+/// asks for an independent reviewer and the repository can be read. A range
+/// that cannot be read names nobody here; `role_trailer_advisories` says so.
+fn reviewed_patchset_implementers(
+    state: &ChangeState,
+    policy: &PolicyFile,
+    cwd: Option<&Path>,
+) -> BTreeMap<String, Vec<String>> {
+    let Some(cwd) = cwd.filter(|_| policy.policy.forbid_self_approval) else {
+        return BTreeMap::new();
+    };
+    let mut read = BTreeMap::new();
+    for patchset in state.patchsets.iter().filter(|patchset| {
+        state
+            .verdicts
+            .iter()
+            .any(|verdict| verdict.patchset_id == patchset.id)
+    }) {
+        if let Ok(values) = crate::trailers::range_implementers(cwd, &patchset.base, &patchset.head)
+        {
+            read.insert(patchset.id.clone(), values);
+        }
+    }
+    read
+}
+
 /// The brief's author, when every verdict on `final_patchset` came from it.
 ///
 /// Verdicts on the patchset that is shipping — not the review map, whose rows
@@ -2305,29 +2347,14 @@ pub(crate) fn role_trailer_advisories(
             detail,
         }]
     };
-    let commits = match gitio::git(
-        cwd,
-        &["rev-list", "--reverse", &format!("{target}..{head}")],
-    ) {
-        Ok(commits) => commits,
-        Err(error) => {
-            return unreadable(format!("could not inspect contribution trailers: {error}"))
-        }
-    };
-    let revisions: Vec<_> = commits.lines().collect();
-    let read = match gitio::read_commits(cwd, &revisions) {
-        Ok(read) => read,
+    let messages = match gitio::range_messages(cwd, target, head) {
+        Ok(messages) => messages,
         Err(error) => {
             return unreadable(format!(
                 "could not inspect contribution trailers: {error:#}"
             ))
         }
     };
-    let messages: Vec<_> = revisions
-        .into_iter()
-        .zip(read)
-        .map(|(revision, commit)| (revision.to_string(), commit.message))
-        .collect();
     missing_role_trailers_advisory(state, &messages)
         .into_iter()
         .chain(placeholder_role_trailers_advisory(&messages))

@@ -704,6 +704,18 @@ impl RawCommit {
     }
 }
 
+/// Every commit in `base..head`, oldest first, with its message.
+pub fn range_messages(cwd: &Path, base: &str, head: &str) -> Result<Vec<(String, Vec<u8>)>> {
+    let commits = git(cwd, &["rev-list", "--reverse", &format!("{base}..{head}")])?;
+    let revisions: Vec<_> = commits.lines().collect();
+    let read = read_commits(cwd, &revisions)?;
+    Ok(revisions
+        .into_iter()
+        .zip(read)
+        .map(|(revision, commit)| (revision.to_string(), commit.message))
+        .collect())
+}
+
 /// Read one commit object whole.
 pub fn read_commit(cwd: &Path, rev: &str) -> Result<RawCommit> {
     let raw = git_bytes(cwd, &["cat-file", "commit", rev])?;

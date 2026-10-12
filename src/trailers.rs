@@ -564,6 +564,63 @@ pub(crate) fn contains(message: &[u8], wanted: &str) -> bool {
     block_of(&lines).is_some_and(|block| lines[block].contains(&wanted.as_bytes()))
 }
 
+/// The values of the final trailer block's `Implemented-by` lines, in the
+/// order they appear, each without the whitespace around it.
+pub(crate) fn implemented_by(message: &[u8]) -> Vec<String> {
+    let lines: Vec<&[u8]> = message.split(|byte| *byte == b'\n').collect();
+    let Some(block) = block_of(&lines) else {
+        return Vec::new();
+    };
+    lines[block]
+        .iter()
+        .filter(|line| trailer_key(line).is_some_and(|key| same_key(&key, "Implemented-by")))
+        .map(|line| {
+            let value = &line[line.iter().position(|byte| *byte == b':').unwrap_or(0) + 1..];
+            String::from_utf8_lossy(trimmed(value)).into_owned()
+        })
+        .collect()
+}
+
+/// The model a role value names, without its effort: the `model` of
+/// `harness:model[#effort]`. A person, an unreadable value and a placeholder
+/// name none.
+pub(crate) fn coordinate_model(value: &str) -> Option<&str> {
+    if crate::coordinate::coordinate_defect(value, None).is_some() || value.contains('<') {
+        return None;
+    }
+    let (_, rest) = value.trim().split_once(':')?;
+    Some(rest.split_once('#').map_or(rest, |(model, _)| model).trim())
+}
+
+/// The first of `values` that names the model `model` declares, ignoring
+/// effort: the model of a `harness:model[#effort]` line against the
+/// `model[#effort]` a recorded identity carries.
+pub(crate) fn naming_model<'a>(values: &'a [String], model: &str) -> Option<&'a str> {
+    let model = model.split('#').next().unwrap_or(model).trim();
+    values
+        .iter()
+        .find(|value| !model.is_empty() && coordinate_model(value) == Some(model))
+        .map(String::as_str)
+}
+
+/// The `Implemented-by` values of every commit in `base..head`, verbatim, in
+/// the order first met and without repeats.
+pub(crate) fn range_implementers(
+    cwd: &std::path::Path,
+    base: &str,
+    head: &str,
+) -> anyhow::Result<Vec<String>> {
+    let mut seen = Vec::<String>::new();
+    for (_, message) in crate::gitio::range_messages(cwd, base, head)? {
+        for value in implemented_by(&message) {
+            if !seen.contains(&value) {
+                seen.push(value);
+            }
+        }
+    }
+    Ok(seen)
+}
+
 /// Portable contribution lines and unresolved attribution notes for a change.
 #[derive(serde::Serialize)]
 pub(crate) struct ChangeTrailers {
@@ -778,6 +835,49 @@ fn recorded_coordinate(state: &crate::state::ChangeState, actor: &str) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn implemented_by_reads_every_line_of_the_final_block() {
+        let message = b"feat: x\n\nbody\n\nPlanned-by: a:b#c\nimplemented-by:  codex:gpt-6.1-sol#medium \nImplemented-by: Person <p@example.invalid>\n";
+        assert_eq!(
+            implemented_by(message),
+            ["codex:gpt-6.1-sol#medium", "Person <p@example.invalid>"]
+        );
+        assert!(implemented_by(b"feat: x\n\nImplemented-by: a:b\n\nprose\n").is_empty());
+        assert!(implemented_by(b"Implemented-by: a:b").is_empty());
+    }
+
+    #[test]
+    fn an_effort_never_separates_a_model_from_its_implementer_line() {
+        let values = vec![
+            "Person <p@example.invalid>".to_string(),
+            "codex:gpt-6.1-sol#medium".to_string(),
+        ];
+        assert_eq!(
+            naming_model(&values, "gpt-6.1-sol#xhigh"),
+            Some("codex:gpt-6.1-sol#medium")
+        );
+        assert_eq!(
+            naming_model(&values, "gpt-6.1-sol"),
+            Some("codex:gpt-6.1-sol#medium")
+        );
+        assert_eq!(naming_model(&values, "gpt-6.1-terra#medium"), None);
+        assert_eq!(naming_model(&values, "#high"), None);
+    }
+
+    #[test]
+    fn a_role_value_names_a_model_only_as_a_coordinate() {
+        assert_eq!(
+            coordinate_model("codex:gpt-6.1-sol#medium"),
+            Some("gpt-6.1-sol")
+        );
+        assert_eq!(
+            coordinate_model("claude:claude-opus-5-5"),
+            Some("claude-opus-5-5")
+        );
+        assert_eq!(coordinate_model("Person <p@example.invalid>"), None);
+        assert_eq!(coordinate_model("not a coordinate"), None);
+    }
 
     fn edited(message: &str, drop: &[&str], append: &[&str]) -> String {
         let drop: Vec<String> = drop.iter().map(|key| key.to_string()).collect();

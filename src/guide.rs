@@ -1992,10 +1992,18 @@ REVIEW COVERAGE AND DEBT
   session, which is nobody's claim and so cannot be the second party. An assumed authoring identity
   refuses nothing on its own: a reviewer that declared a different name is
   independent of it, before the merge and in an audit after it alike. Two
-  assumed identities are refused, since neither side claimed anything. A
-  reviewer arc cannot place that way is reported as unknown attribution rather
-  than counted as independent or as self-review, whether it cast a verdict or
-  only filed findings.
+  assumed identities are refused, since neither side claimed anything. The
+  reviewing model is a second identity: a verdict or audit recorded under the
+  model, at any effort, of an `Implemented-by` line in the range it judges
+  warns that it shows a review happened and not that it was independent of
+  whoever wrote the work. Where self-approval is forbidden the gate rejects
+  the approval as it rejects a contributor match, and `arc audit` refuses to
+  record it; `--verdict changes-requested` is open to anyone. Models compare
+  as strings once the effort is dropped: arc holds no alias table, so a model
+  the trailers spell another way is not matched. A reviewer arc cannot place
+  that way is reported as unknown attribution rather than counted as
+  independent or as self-review, whether it cast a verdict or only filed
+  findings.
 
   Which changes need one is declared in `[danger] paths` in
   `.arc/policy.toml` or the operator policy at
@@ -2122,21 +2130,39 @@ REVIEW COVERAGE AND DEBT
 
   Only an audit clears it: `arc audit --assessment <file>` with
   `independence: eligible`, by an auditor who is also independent of the
-  contributors and whom the assessment describes. The assessment describes
-  the auditor when the model its audit event recorded is among the reviewer's
-  `identities` (every model string routing accepts for it) and, where both
-  name an effort, the effort equals the reviewer's `effort`. arc keeps only
-  the outcome on the audit's assessment: `bound`, `model-mismatch`,
-  `effort-mismatch`, `model-unrecorded` (an audit by a person records no
-  model) or `identities-unstated` (the file lists none). An audit without an
-  assessment, with an `ineligible` one, or whose binding is not `bound` is
-  recorded, says why, and is listed beside the obligation, which stays open;
-  a verdict recorded since carries no assessment and does not clear it.
+  contributors and whom the assessment describes, and whose assessment
+  covers the work: the `authors` it lists answer, through their `identities`,
+  to the model of every `Implemented-by` line in the integrated range. An
+  assessment that omits one is recorded with binding `authors-uncovered` and
+  the omitted models in `uncovered_authors`, and leaves the debt open;
+  readers list them beside the obligation. A range with no `Implemented-by`
+  line asks nothing of the authors, and no other kind has this rule. The
+  assessment describes the auditor when the model its audit event recorded is
+  among the reviewer's `identities` (every model string routing accepts for
+  it) and, where both name an effort, the effort equals the reviewer's
+  `effort`. arc keeps only the outcome on the audit's assessment: `bound`,
+  `model-mismatch`, `effort-mismatch`, `model-unrecorded` (an audit by a
+  person records no model), `identities-unstated` (the file lists none) or
+  `authors-uncovered` (the authors it lists omit a model of the range, named
+  beside it). An audit without an assessment, with an `ineligible` one, or
+  whose binding is not `bound` is recorded, says why, and is listed beside the
+  obligation, which stays open; a verdict recorded since carries no
+  assessment and does not clear it.
   `arc query --debt`, `arc catchup`, `arc inbox`, the workspace backlog, the
   debt advisory, `arc show` and `arc explain` show the qualifiers, the read's
   reviewer and model as its verdict recorded them, whether the assessment
   was assessed or declared, the route version, and the later reads that
   left it open.
+
+  Production also names the `Implemented-by` values of the commits in the
+  patchset's range, read when the debt is declared and kept verbatim, without
+  repeats, as `trailer_implementers`: a lead who snapshots and integrates an
+  executor's commits is the recorded implementer, and the trailers say who
+  did the work. A range whose commits carry none records an empty list,
+  which readers show as "no Implemented-by trailers"; a record kept before
+  the range was read has no list and says nothing of it. `arc catchup`, the
+  workspace backlog, `arc explain` and `arc show` show the list wherever it
+  is empty or names a harness and model other than the recorder's.
 
   Coverage names each verdict's reviewer, the model string it was cast under
   kept whole, the effort that string's trailing `#suffix` names, and the

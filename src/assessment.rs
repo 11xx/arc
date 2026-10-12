@@ -3,8 +3,8 @@
 //! Arc validates the shape and keeps the answer. It never computes a family,
 //! a tier or a floor, and it never stores the numbers the assessment carries:
 //! what survives is the independence verdict, the qualifier names, the route
-//! version and whether the reviewer it describes is the auditor that recorded
-//! it.
+//! version, whether the reviewer it describes is the auditor that recorded
+//! it, and which models of a range its authors leave out.
 
 use crate::model::{
     model_effort, validate_route_version, AuditorBinding, Independence, ReviewQualifier,
@@ -24,6 +24,16 @@ pub struct Assessment {
     pub qualifiers: Vec<ReviewQualifier>,
     pub route_version: Option<String>,
     reviewer: Reviewer,
+    /// Every model string routing accepts for each author it assessed against.
+    author_identities: Vec<String>,
+}
+
+/// An author an assessment was made against, as far as arc compares it with
+/// the models a range names. Never stored.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+struct Author {
+    #[serde(default)]
+    identities: Vec<String>,
 }
 
 /// The reviewer an assessment describes, as far as arc compares it with an
@@ -38,6 +48,23 @@ struct Reviewer {
 }
 
 impl Assessment {
+    /// The `models` that no author of this assessment answers to, in the order
+    /// given and without repeats.
+    pub fn uncovered<'a>(&self, models: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+        let mut uncovered = Vec::<String>::new();
+        for model in models {
+            if !self
+                .author_identities
+                .iter()
+                .any(|identity| identity == model)
+                && !uncovered.iter().any(|seen| seen == model)
+            {
+                uncovered.push(model.to_string());
+            }
+        }
+        uncovered
+    }
+
     /// Whether this assessment describes the auditor whose audit event
     /// recorded `model`, a model with an optional `#effort` suffix.
     pub fn bind(&self, model: Option<&str>) -> AuditorBinding {
@@ -65,8 +92,8 @@ impl Assessment {
     }
 }
 
-/// Only the fields arc keeps are named; the authors and every tier number are
-/// ignored.
+/// Only the fields arc keeps are named; every tier number is ignored, and an
+/// author is read for the model strings it answers to.
 #[derive(Deserialize)]
 struct Raw {
     schema: String,
@@ -77,6 +104,8 @@ struct Raw {
     route_version: Option<String>,
     #[serde(default)]
     reviewer: Reviewer,
+    #[serde(default)]
+    authors: Vec<Author>,
 }
 
 pub fn read(path: &Path) -> Result<Assessment> {
@@ -119,6 +148,11 @@ pub fn parse(text: &str) -> Result<Assessment> {
         qualifiers,
         route_version: raw.route_version,
         reviewer: raw.reviewer,
+        author_identities: raw
+            .authors
+            .into_iter()
+            .flat_map(|author| author.identities)
+            .collect(),
     })
 }
 

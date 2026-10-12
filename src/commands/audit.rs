@@ -117,6 +117,36 @@ impl IneligibleInputs {
     }
 }
 
+/// The `Implemented-by` values of the commits a patchset ships, or `None`
+/// when the range cannot be read, which is said once and never a refusal.
+pub(super) fn range_implementers(ctx: &Ctx, patchset: &Patchset) -> Option<Vec<String>> {
+    match crate::trailers::range_implementers(&ctx.cwd, &patchset.base, &patchset.head) {
+        Ok(values) => Some(values),
+        Err(error) => {
+            eprintln!(
+                "warning: could not read the Implemented-by trailers of {}: {error:#}",
+                patchset.id
+            );
+            None
+        }
+    }
+}
+
+/// The `Implemented-by` values of the work an audit judges: the list the
+/// debt's production record kept, else the shipped patchset's commits.
+fn audited_implementers(ctx: &Ctx, st: &ChangeState) -> Option<Vec<String>> {
+    let recorded = st
+        .debt
+        .as_ref()
+        .and_then(|debt| debt.production.as_ref())
+        .and_then(|production| production.trailer_implementers.clone());
+    recorded.or_else(|| {
+        st.debt_subject_patchset()
+            .or_else(|| st.latest_patchset())
+            .and_then(|patchset| range_implementers(ctx, patchset))
+    })
+}
+
 /// Record the obligation. Allowed while open (declared at integration time)
 /// and after integration (discovered later).
 pub fn declare_debt(
@@ -209,7 +239,10 @@ pub(super) fn declare_debt_locked(
     let coverage = subject
         .map(|subject| st.debt_coverage_for(subject))
         .unwrap_or_default();
-    let production = subject.map(|subject| st.debt_production_for(subject));
+    let production = subject.map(|subject| {
+        let implementers = range_implementers(ctx, subject);
+        st.debt_production_for(subject, implementers)
+    });
     // The caller's kind wins: arc reads the ledger, and the ledger cannot
     // distinguish a merge resolution from a repair.
     let missing = kind.unwrap_or_else(|| st.derive_debt_missing(subject));
@@ -319,7 +352,13 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
     let st = store.state(&change_id)?;
 
     let revision = integrated_revision(&st)?;
-    refuse_self_audit(ctx, &st, args.verdict)?;
+    let implementers = audited_implementers(ctx, &st);
+    refuse_self_audit(
+        ctx,
+        &st,
+        args.verdict,
+        implementers.as_deref().unwrap_or_default(),
+    )?;
     let inline = super::review::parse_inline_findings(args.findings_json.as_deref())?;
     if args.verdict == Verdict::Approved && inline.iter().any(|f| f.blocking) {
         bail!("cannot approve while recording blocking findings in the same audit");
@@ -330,13 +369,33 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
         .as_deref()
         .map(crate::assessment::read)
         .transpose()?
-        .map(|assessed| AuditAssessment {
-            independence: assessed.independence,
-            binding: Some(assessed.bind(ctx.resolve_model().model.as_deref())),
-            qualifiers: assessed.qualifiers,
-            route_version: assessed.route_version,
+        .map(|assessed| {
+            let mut binding = assessed.bind(ctx.resolve_model().model.as_deref());
+            let mut uncovered_authors = Vec::new();
+            if binding == AuditorBinding::Bound {
+                uncovered_authors = assessed.uncovered(
+                    implementers
+                        .iter()
+                        .flatten()
+                        .filter_map(|value| crate::trailers::coordinate_model(value)),
+                );
+                if !uncovered_authors.is_empty() {
+                    binding = AuditorBinding::AuthorsUncovered;
+                }
+            }
+            AuditAssessment {
+                independence: assessed.independence,
+                binding: Some(binding),
+                qualifiers: assessed.qualifiers,
+                route_version: assessed.route_version,
+                uncovered_authors,
+            }
         });
     let binding = assessment.as_ref().and_then(|assessed| assessed.binding);
+    let uncovered_authors = assessment
+        .as_ref()
+        .map(|assessed| assessed.uncovered_authors.clone())
+        .unwrap_or_default();
 
     let payload = Payload::AuditVerdictRecorded {
         revision: revision.clone(),
@@ -354,8 +413,8 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
         println!("finding: {id}");
     }
     println!("event: {}", event.event_id);
-    if let Some(reason) = binding.and_then(AuditorBinding::failure) {
-        println!("assessment not bound to this auditor: {reason}");
+    if let Some(note) = binding.and_then(|binding| binding.failure_note(&uncovered_authors)) {
+        println!("assessment {note}");
     }
     // Said once the audit exists, and only then: an assumed identity is not
     // refused where policy permits self-approval, because it cannot be
@@ -365,6 +424,11 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
     let named_auditor = st
         .latest_patchset()
         .is_some_and(|patchset| ctx.warn_verdict_not_independent(patchset, args.verdict));
+    // The model is a second identity: another actor name does not make an
+    // audit independent of the model that wrote the work.
+    let named_model =
+        ctx.warn_model_not_independent(implementers.as_deref().unwrap_or_default(), args.verdict);
+    let named_auditor = named_auditor || named_model;
     // The auditor's own identity is the stronger fact and subsumes this one.
     // An audit by a declared reviewer of work whose author arc invented is
     // still worth saying: the pass was independent of a name nobody claimed.
@@ -408,7 +472,12 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
 ///
 /// Only approval is restricted. Raising problems needs no independence, so an
 /// author auditing its own work into `changes-requested` is useful and allowed.
-fn refuse_self_audit(ctx: &Ctx, state: &ChangeState, verdict: Verdict) -> Result<()> {
+fn refuse_self_audit(
+    ctx: &Ctx,
+    state: &ChangeState,
+    verdict: Verdict,
+    implementers: &[String],
+) -> Result<()> {
     if verdict != Verdict::Approved {
         return Ok(());
     }
@@ -456,6 +525,19 @@ anyone independent looked at {}.\n\
     if let Some(contributor) = patchset.contributor_match(auditor) {
         bail!(
             "{auditor} matches contributor {contributor} on the audited work; {policy_source}, so this audit \
+             would discharge its own obligation.\n\
+  If another reviewer did the pass, record it as theirs:\n\
+    arc audit {} --verdict approved --actor '<reviewer>' --harness '<harness>' --model '<model>'\n\
+  If you are reporting problems rather than clearing the change, \
+--verdict changes-requested is open to anyone.",
+            state.change_id
+        );
+    }
+    if let Some((model, value)) = ctx.resolve_model().model.and_then(|model| {
+        crate::trailers::naming_model(implementers, &model).map(|value| (model, value))
+    }) {
+        bail!(
+            "model {model:?} matches `Implemented-by: {value}` on the audited work; {policy_source}, so this audit \
              would discharge its own obligation.\n\
   If another reviewer did the pass, record it as theirs:\n\
     arc audit {} --verdict approved --actor '<reviewer>' --harness '<harness>' --model '<model>'\n\

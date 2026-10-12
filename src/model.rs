@@ -718,6 +718,10 @@ pub enum AuditorBinding {
     ModelUnrecorded,
     /// The assessment lists no model strings for its reviewer.
     IdentitiesUnstated,
+    /// The assessment's authors do not include the model of every
+    /// `Implemented-by` line in the audited range; the audit lists the ones
+    /// it leaves out.
+    AuthorsUncovered,
 }
 
 impl AuditorBinding {
@@ -735,7 +739,27 @@ impl AuditorBinding {
             Self::IdentitiesUnstated => {
                 Some("the assessment names no model identities for its reviewer")
             }
+            Self::AuthorsUncovered => {
+                Some("the assessment's authors omit a model the range's Implemented-by lines name")
+            }
         }
+    }
+
+    /// What a binding that failed says of the assessment, as the remainder of
+    /// a sentence that begins with "assessment": where the models an
+    /// assessment's authors omit are known, they are named.
+    pub fn failure_note(self, uncovered: &[String]) -> Option<String> {
+        let reason = self.failure()?;
+        Some(match self {
+            Self::AuthorsUncovered if !uncovered.is_empty() => {
+                format!(
+                    "not bound to the audited work: {reason}: {}",
+                    uncovered.join(", ")
+                )
+            }
+            Self::AuthorsUncovered => format!("not bound to the audited work: {reason}"),
+            _ => format!("not bound to this auditor: {reason}"),
+        })
     }
 }
 
@@ -752,6 +776,10 @@ pub struct AuditAssessment {
     /// Absent on an assessment recorded without one, which binds nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding: Option<AuditorBinding>,
+    /// The models of the range's `Implemented-by` lines that no author of the
+    /// assessment answers to. Empty unless the binding is `authors-uncovered`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uncovered_authors: Vec<String>,
 }
 
 /// Whether `version` is a route version arc will record: one token, no
@@ -929,9 +957,38 @@ pub struct DebtProduction {
     pub brief_version: Option<usize>,
     /// Who recorded the shipped patchset.
     pub implementer: DebtIdentity,
+    /// The `Implemented-by` values of the commits in the patchset's range,
+    /// verbatim and without repeats. Empty records that the range names no
+    /// implementer; absent records that the range was not read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trailer_implementers: Option<Vec<String>>,
     /// Whether a brief exists and somebody other than its author implemented
     /// it. False for unbriefed work and for work its own planner wrote.
     pub following_brief: bool,
+}
+
+impl DebtProduction {
+    /// What the commits' `Implemented-by` lines say, when it is worth saying:
+    /// the range names no implementer, or one other than the recorder.
+    pub fn trailer_note(&self) -> Option<String> {
+        let named = self.trailer_implementers.as_ref()?;
+        if named.is_empty() {
+            return Some("no Implemented-by trailers".to_string());
+        }
+        let recorder = self
+            .implementer
+            .harness
+            .as_deref()
+            .zip(self.implementer.model.as_deref())
+            .map(|(harness, model)| (harness, model.split('#').next().unwrap_or(model)));
+        let only_recorder = named.iter().all(|value| {
+            let parts = value
+                .split_once(':')
+                .map(|(harness, rest)| (harness, rest.split('#').next().unwrap_or(rest)));
+            parts.is_some() && parts == recorder
+        });
+        (!only_recorder).then(|| format!("Implemented-by trailers: {}", named.join(", ")))
+    }
 }
 
 /// Where a promoted change's work came from: the fork it was taken from at
@@ -3426,6 +3483,51 @@ pub enum InferenceSource {
 
 #[cfg(test)]
 mod tests {
+    /// A production record kept before the range's trailers were read says
+    /// nothing of them: it reads as unread and writes back without the key.
+    #[test]
+    fn a_production_record_without_trailer_implementers_reads_and_writes_unchanged() {
+        let old = serde_json::json!({
+            "implementer": {"actor": "lead", "harness": "claude", "model": "opus#high"},
+            "following_brief": false
+        });
+        let production: DebtProduction = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(production.trailer_implementers, None);
+        assert_eq!(production.trailer_note(), None);
+        let written = serde_json::to_value(&production).unwrap();
+        assert!(written.get("trailer_implementers").is_none(), "{written}");
+        assert_eq!(written["following_brief"], false);
+
+        let mut read = production.clone();
+        read.trailer_implementers = Some(Vec::new());
+        assert_eq!(
+            read.trailer_note().as_deref(),
+            Some("no Implemented-by trailers")
+        );
+        read.trailer_implementers = Some(vec!["claude:opus#xhigh".into()]);
+        assert_eq!(
+            read.trailer_note(),
+            None,
+            "the recorder's own model, at another effort"
+        );
+        read.trailer_implementers = Some(vec!["claude:opus#xhigh".into(), "codex:sol".into()]);
+        assert_eq!(
+            read.trailer_note().as_deref(),
+            Some("Implemented-by trailers: claude:opus#xhigh, codex:sol")
+        );
+    }
+
+    /// An audit assessment recorded before the authors were compared reads as
+    /// naming no uncovered author and writes back without the key.
+    #[test]
+    fn an_assessment_without_uncovered_authors_reads_and_writes_unchanged() {
+        let old = serde_json::json!({"independence": "eligible", "binding": "bound"});
+        let assessment: AuditAssessment = serde_json::from_value(old).unwrap();
+        assert!(assessment.uncovered_authors.is_empty());
+        let written = serde_json::to_value(&assessment).unwrap();
+        assert!(written.get("uncovered_authors").is_none(), "{written}");
+    }
+
     /// Events recorded before the read fields existed carry neither key, read
     /// as the shapes they always meant, and serialize back without them.
     #[test]

@@ -691,6 +691,9 @@ pub struct LaterRead {
     /// Whether the assessment describes the auditor that recorded it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub binding: Option<AuditorBinding>,
+    /// The implementer models the assessment leaves out.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub uncovered_authors: Vec<String>,
 }
 
 impl Debt {
@@ -3731,7 +3734,14 @@ impl ChangeState {
     }
 
     /// Who set the contract one patchset answered, and who answered it.
-    pub fn debt_production_for(&self, subject: &Patchset) -> DebtProduction {
+    ///
+    /// `trailer_implementers` is what the range's commits name, or `None`
+    /// when no one read them.
+    pub fn debt_production_for(
+        &self,
+        subject: &Patchset,
+        trailer_implementers: Option<Vec<String>>,
+    ) -> DebtProduction {
         let planner = self.brief_for(subject).map(|brief| {
             DebtIdentity::new(
                 brief.actor.clone(),
@@ -3755,6 +3765,7 @@ impl ChangeState {
             planner,
             brief_version: subject.brief_version,
             implementer,
+            trailer_implementers,
             following_brief,
         }
     }
@@ -3814,6 +3825,11 @@ impl ChangeState {
                             .and_then(|a| a.route_version.clone())
                             .or_else(|| audit.route_version.clone()),
                         binding: audit.assessment.as_ref().and_then(|a| a.binding),
+                        uncovered_authors: audit
+                            .assessment
+                            .as_ref()
+                            .map(|a| a.uncovered_authors.clone())
+                            .unwrap_or_default(),
                     })
                     .collect(),
             }

@@ -30,6 +30,7 @@ mod fork;
 mod gate_declarations;
 mod gate_environment;
 mod hooks;
+mod implementer_trailers;
 mod import_authorization;
 mod ineligible_review;
 mod instructions;

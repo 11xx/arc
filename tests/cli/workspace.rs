@@ -1623,7 +1623,7 @@ fn workspace_backlog_debt_rows_carry_the_kind_and_its_coordinates() {
     assert!(
         text.contains(
             "debt: independent-review; planned by Planner@high (brief v1), \
-implemented by tester@max; coverage: Reviewer@low [route 2026.09]"
+implemented by tester@max (no Implemented-by trailers); coverage: Reviewer@low [route 2026.09]"
         ),
         "{text}"
     );
