@@ -2409,7 +2409,11 @@ enum Cmd {
     /// routing's word that the auditor is eligible: `--assessment <file>`
     /// with `independence: eligible`. Without one, or with an `ineligible`
     /// assessment, the audit is recorded and listed beside the obligation,
-    /// which stays open. Every other kind discharges as before.
+    /// which stays open. The assessment must also describe the auditor that
+    /// records the audit: the audit's recorded model, and its effort where
+    /// both name one, must match the reviewer's `identities` and `effort`.
+    /// Otherwise the audit is recorded, says why, and is listed beside the
+    /// obligation, which stays open. Every other kind discharges as before.
     Audit {
         /// Change whose integrated revision was reviewed
         change: String,
@@ -2433,10 +2437,14 @@ enum Cmd {
         route_version: Option<String>,
         /// Routing's assessment of this auditor: an `agent-routing assess
         /// --json` file (schema `agent-routing-assessment/1`). arc keeps its
-        /// independence, qualifiers and route version, never its tiers. A
-        /// debt of kind `ineligible-review` is discharged only by an
-        /// audit whose assessment says `eligible`; without one, or with an
-        /// `ineligible` one, the audit is recorded and listed beside the
+        /// independence, qualifiers and route version, never its tiers, and
+        /// whether its reviewer `identities` (every model string routing
+        /// accepts for the reviewer) and `effort` match the model this audit
+        /// records; only that outcome is kept: `bound`, `model-mismatch`,
+        /// `effort-mismatch`, `model-unrecorded` (a person, for example) or
+        /// `identities-unstated`. A debt of kind `ineligible-review` is
+        /// discharged only by an audit whose assessment says `eligible` and
+        /// is `bound`; otherwise the audit is recorded and listed beside the
         /// obligation, which stays open. The auditor must also be independent
         /// of the contributors, as for any audit. Other kinds ignore it
         #[arg(long = "assessment", value_name = "FILE")]

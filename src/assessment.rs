@@ -2,10 +2,13 @@
 //!
 //! Arc validates the shape and keeps the answer. It never computes a family,
 //! a tier or a floor, and it never stores the numbers the assessment carries:
-//! what survives is the independence verdict, the qualifier names and the
-//! route version.
+//! what survives is the independence verdict, the qualifier names, the route
+//! version and whether the reviewer it describes is the auditor that recorded
+//! it.
 
-use crate::model::{validate_route_version, Independence, ReviewQualifier};
+use crate::model::{
+    model_effort, validate_route_version, AuditorBinding, Independence, ReviewQualifier,
+};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::path::Path;
@@ -20,10 +23,50 @@ pub struct Assessment {
     /// Empty exactly when the reviewer is eligible.
     pub qualifiers: Vec<ReviewQualifier>,
     pub route_version: Option<String>,
+    reviewer: Reviewer,
 }
 
-/// Only the fields arc keeps are named; the reviewer, the authors and every
-/// tier number are ignored.
+/// The reviewer an assessment describes, as far as arc compares it with an
+/// auditor. Never stored.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+struct Reviewer {
+    /// Every model string routing accepts for the reviewer.
+    #[serde(default)]
+    identities: Vec<String>,
+    #[serde(default)]
+    effort: Option<String>,
+}
+
+impl Assessment {
+    /// Whether this assessment describes the auditor whose audit event
+    /// recorded `model`, a model with an optional `#effort` suffix.
+    pub fn bind(&self, model: Option<&str>) -> AuditorBinding {
+        if self.reviewer.identities.is_empty() {
+            return AuditorBinding::IdentitiesUnstated;
+        }
+        let Some(model) = model else {
+            return AuditorBinding::ModelUnrecorded;
+        };
+        let (name, _) = model.split_once('#').unwrap_or((model, ""));
+        if !self
+            .reviewer
+            .identities
+            .iter()
+            .any(|identity| identity == name)
+        {
+            return AuditorBinding::ModelMismatch;
+        }
+        match (model_effort(model), self.reviewer.effort.as_deref()) {
+            (Some(recorded), Some(assessed)) if recorded != assessed => {
+                AuditorBinding::EffortMismatch
+            }
+            _ => AuditorBinding::Bound,
+        }
+    }
+}
+
+/// Only the fields arc keeps are named; the authors and every tier number are
+/// ignored.
 #[derive(Deserialize)]
 struct Raw {
     schema: String,
@@ -32,6 +75,8 @@ struct Raw {
     qualifiers: Vec<String>,
     #[serde(default)]
     route_version: Option<String>,
+    #[serde(default)]
+    reviewer: Reviewer,
 }
 
 pub fn read(path: &Path) -> Result<Assessment> {
@@ -73,6 +118,7 @@ pub fn parse(text: &str) -> Result<Assessment> {
         independence: raw.independence,
         qualifiers,
         route_version: raw.route_version,
+        reviewer: raw.reviewer,
     })
 }
 
@@ -101,6 +147,44 @@ mod tests {
             [ReviewQualifier::SameFamily, ReviewQualifier::BelowFloor]
         );
         assert_eq!(kept.route_version.as_deref(), Some("2026.10.12"));
+    }
+
+    fn bound_to(identities: &str, effort: &str) -> Assessment {
+        parse(&text("eligible", "[]").replace(
+            r#""reviewer":{"model":"m","review_tier":2}"#,
+            &format!(r#""reviewer":{{"identities":{identities},"effort":{effort}}}"#),
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn binds_a_model_among_the_identities_at_the_effort_both_name() {
+        let assessed = bound_to(r#"["claude-opus-5-5","opus-5.5"]"#, r#""xhigh""#);
+        assert_eq!(assessed.bind(Some("opus-5.5#xhigh")), AuditorBinding::Bound);
+        assert_eq!(assessed.bind(Some("opus-5.5")), AuditorBinding::Bound);
+        assert_eq!(
+            assessed.bind(Some("opus-5.5#low")),
+            AuditorBinding::EffortMismatch
+        );
+        assert_eq!(
+            assessed.bind(Some("sonnet-5.5#xhigh")),
+            AuditorBinding::ModelMismatch
+        );
+        assert_eq!(assessed.bind(None), AuditorBinding::ModelUnrecorded);
+        let effortless = bound_to(r#"["opus-5.5"]"#, "null");
+        assert_eq!(effortless.bind(Some("opus-5.5#low")), AuditorBinding::Bound);
+    }
+
+    #[test]
+    fn an_assessment_without_identities_binds_nothing() {
+        assert_eq!(
+            parse(&text("eligible", "[]")).unwrap().bind(Some("m")),
+            AuditorBinding::IdentitiesUnstated
+        );
+        assert_eq!(
+            bound_to("[]", "null").bind(None),
+            AuditorBinding::IdentitiesUnstated
+        );
     }
 
     #[test]

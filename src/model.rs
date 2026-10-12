@@ -703,8 +703,45 @@ pub struct IneligibleRead {
     pub assessment: AssessmentBasis,
 }
 
+/// Whether an assessment describes the auditor that recorded it: the audit
+/// event's model against the model strings routing accepts for the assessed
+/// reviewer. Only the outcome is kept, never the strings compared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuditorBinding {
+    /// The recorded model is one the assessed reviewer answers to, at the
+    /// effort the assessment names where both sides name one.
+    Bound,
+    ModelMismatch,
+    EffortMismatch,
+    /// The audit recorded no model, as when a person audits.
+    ModelUnrecorded,
+    /// The assessment lists no model strings for its reviewer.
+    IdentitiesUnstated,
+}
+
+impl AuditorBinding {
+    /// The fixed sentence for a binding that failed.
+    pub fn failure(self) -> Option<&'static str> {
+        match self {
+            Self::Bound => None,
+            Self::ModelMismatch => {
+                Some("the auditor's recorded model is not one the assessed reviewer answers to")
+            }
+            Self::EffortMismatch => {
+                Some("the auditor's recorded effort differs from the assessed reviewer's")
+            }
+            Self::ModelUnrecorded => Some("the audit records no model to bind the assessment to"),
+            Self::IdentitiesUnstated => {
+                Some("the assessment names no model identities for its reviewer")
+            }
+        }
+    }
+}
+
 /// The slice of a routing assessment an audit keeps: enough to tell whether
-/// the auditor counts as independent, never the tiers behind the answer.
+/// the auditor counts as independent and whether the assessment describes it,
+/// never the tiers behind the answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditAssessment {
     pub independence: Independence,
@@ -712,6 +749,9 @@ pub struct AuditAssessment {
     pub qualifiers: Vec<ReviewQualifier>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_version: Option<String>,
+    /// Absent on an assessment recorded without one, which binds nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<AuditorBinding>,
 }
 
 /// Whether `version` is a route version arc will record: one token, no

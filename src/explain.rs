@@ -9,8 +9,8 @@
 
 use crate::commands::{self, Ctx};
 use crate::model::{
-    AuditAssessment, AuthorizationBasis, BriefCause, CaptureState, DebtCoverage, DebtMissing,
-    DebtProduction, DeclaredRelation, DeclaredTarget, Event, JournalRefVia, Payload,
+    AuditAssessment, AuditorBinding, AuthorizationBasis, BriefCause, CaptureState, DebtCoverage,
+    DebtMissing, DebtProduction, DeclaredRelation, DeclaredTarget, Event, JournalRefVia, Payload,
     PlannerIdentity, ReadCoverage, RelationSubject,
 };
 use crate::relations::Relations;
@@ -1918,8 +1918,15 @@ fn describe(detail: &Detail) -> String {
             assessment
                 .as_ref()
                 .map(|assessment| format!(
-                    "; routing assessed {}",
-                    assessment.independence.as_str()
+                    "; routing assessed {}{}",
+                    assessment.independence.as_str(),
+                    assessment
+                        .binding
+                        .and_then(AuditorBinding::failure)
+                        .map(|reason| format!(
+                            ", but the assessment is not bound to this auditor: {reason}"
+                        ))
+                        .unwrap_or_default()
                 ))
                 .unwrap_or_default()
         ),

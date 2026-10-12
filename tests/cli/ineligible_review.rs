@@ -58,7 +58,27 @@ fn read_change(repo: &Repo, slug: &str) -> String {
 }
 
 fn assessment(repo: &Repo, name: &str, independence: &str, qualifiers: &[&str]) -> PathBuf {
+    assessment_for(repo, name, independence, qualifiers, None, None)
+}
+
+/// An assessment whose reviewer lists the model strings routing accepts for
+/// it and, optionally, its effort, as `agent-routing assess --json` does.
+fn assessment_for(
+    repo: &Repo,
+    name: &str,
+    independence: &str,
+    qualifiers: &[&str],
+    identities: Option<&[&str]>,
+    effort: Option<&str>,
+) -> PathBuf {
     let path = repo.home.join(name);
+    let mut reviewer = serde_json::json!({"model": SAME_FAMILY_REVIEWER, "review_tier": 2});
+    if let Some(identities) = identities {
+        reviewer["identities"] = serde_json::json!(identities);
+    }
+    if let Some(effort) = effort {
+        reviewer["effort"] = serde_json::json!(effort);
+    }
     fs::write(
         &path,
         serde_json::json!({
@@ -66,7 +86,7 @@ fn assessment(repo: &Repo, name: &str, independence: &str, qualifiers: &[&str]) 
             "independence": independence,
             "qualifiers": qualifiers,
             "route_version": "2026.10.12",
-            "reviewer": {"model": SAME_FAMILY_REVIEWER, "review_tier": 2},
+            "reviewer": reviewer,
             "authors": [{"model": "fixture-opus#high", "author_floor": 3}],
         })
         .to_string(),
@@ -362,21 +382,69 @@ fn an_ineligible_assessment_on_an_audit_never_discharges() {
     );
 }
 
-#[test]
-fn an_audit_with_an_eligible_assessment_discharges_the_debt() {
-    let repo = repo_forbidding_self_approval();
-    owed_change(&repo, "cleared");
-    let file = assessment(&repo, "cleared.json", "eligible", &[]);
-    let output = stdout(repo.arc(&repo.root).env("ARC_ACTOR", "Auditor").args([
-        "--model",
-        "fixture-other#high",
+/// Audit `slug` as Auditor, at `model` when given, under an eligible
+/// assessment whose reviewer is `identities` at `effort`.
+fn audit_under(
+    repo: &Repo,
+    slug: &str,
+    model: Option<&str>,
+    identities: Option<&[&str]>,
+    effort: Option<&str>,
+) -> String {
+    let file = assessment_for(
+        repo,
+        &format!("{slug}.json"),
+        "eligible",
+        &[],
+        identities,
+        effort,
+    );
+    let mut command = repo.arc(&repo.root);
+    command.env("ARC_ACTOR", "Auditor");
+    if let Some(model) = model {
+        command.args(["--model", model]);
+    }
+    stdout(command.args([
         "audit",
-        "cleared",
+        slug,
         "--verdict",
         "approved",
         "--assessment",
         file.to_str().unwrap(),
-    ]));
+    ]))
+}
+
+/// The audit stayed open: what it said, and what the ledger lists beside the
+/// obligation.
+fn assert_unbound(repo: &Repo, slug: &str, output: &str, binding: &str, reason: &str) {
+    assert!(output.contains(reason), "{output}");
+    assert!(output.contains("still owes"), "{output}");
+    let debt = debt_of(repo, slug);
+    assert!(debt["discharged_by"].is_null(), "{debt}");
+    let later = &debt["ineligible"]["later_reads"][0];
+    assert_eq!(later["independence"], "eligible", "{debt}");
+    assert_eq!(later["binding"], binding, "{debt}");
+    let status = json_stdout(repo.arc(&repo.root).args(["status", slug, "--json"]));
+    assert_eq!(status["debt_outstanding"], true, "{status}");
+    assert_eq!(
+        status["audit_verdicts"][0]["assessment"]["binding"], binding,
+        "{status}"
+    );
+    let text = stdout(repo.arc(&repo.root).args(["show", slug]));
+    assert!(text.contains(reason), "{text}");
+}
+
+#[test]
+fn an_audit_with_an_eligible_assessment_discharges_the_debt() {
+    let repo = repo_forbidding_self_approval();
+    owed_change(&repo, "cleared");
+    let output = audit_under(
+        &repo,
+        "cleared",
+        Some("fixture-other#high"),
+        Some(&["fixture-other", "other-alias"]),
+        Some("high"),
+    );
     assert!(output.contains("debt discharged"), "{output}");
     let status = json_stdout(repo.arc(&repo.root).args(["status", "cleared", "--json"]));
     assert_eq!(status["debt_outstanding"], false, "{status}");
@@ -385,7 +453,101 @@ fn an_audit_with_an_eligible_assessment_discharges_the_debt() {
         status["audit_verdicts"][0]["assessment"]["independence"], "eligible",
         "{status}"
     );
+    assert_eq!(
+        status["audit_verdicts"][0]["assessment"]["binding"], "bound",
+        "{status}"
+    );
+    // Only the outcome is kept, never the identities routing listed.
+    assert!(!status.to_string().contains("other-alias"), "{status}");
     assert!(!stdout(repo.arc(&repo.root).args(["query", "--debt"])).contains("cleared"));
+}
+
+#[test]
+fn an_effort_only_one_side_records_does_not_unbind_the_assessment() {
+    let repo = repo_forbidding_self_approval();
+    owed_change(&repo, "effortless");
+    let output = audit_under(
+        &repo,
+        "effortless",
+        Some("fixture-other"),
+        Some(&["fixture-other"]),
+        Some("high"),
+    );
+    assert!(output.contains("debt discharged"), "{output}");
+}
+
+#[test]
+fn an_assessment_for_another_model_leaves_the_debt_open() {
+    let repo = repo_forbidding_self_approval();
+    owed_change(&repo, "wrong-model");
+    let output = audit_under(
+        &repo,
+        "wrong-model",
+        Some("fixture-other#high"),
+        Some(&["fixture-elsewhere"]),
+        Some("high"),
+    );
+    assert_unbound(
+        &repo,
+        "wrong-model",
+        &output,
+        "model-mismatch",
+        "the auditor's recorded model is not one the assessed reviewer answers to",
+    );
+}
+
+#[test]
+fn an_assessment_for_another_effort_leaves_the_debt_open() {
+    let repo = repo_forbidding_self_approval();
+    owed_change(&repo, "wrong-effort");
+    let output = audit_under(
+        &repo,
+        "wrong-effort",
+        Some("fixture-other#low"),
+        Some(&["fixture-other"]),
+        Some("high"),
+    );
+    assert_unbound(
+        &repo,
+        "wrong-effort",
+        &output,
+        "effort-mismatch",
+        "the auditor's recorded effort differs from the assessed reviewer's",
+    );
+}
+
+#[test]
+fn an_audit_recording_no_model_leaves_the_debt_open() {
+    let repo = repo_forbidding_self_approval();
+    owed_change(&repo, "no-model");
+    let output = audit_under(&repo, "no-model", None, Some(&["fixture-other"]), None);
+    assert_unbound(
+        &repo,
+        "no-model",
+        &output,
+        "model-unrecorded",
+        "the audit records no model to bind the assessment to",
+    );
+}
+
+#[test]
+fn an_assessment_without_identities_leaves_the_debt_open() {
+    let repo = repo_forbidding_self_approval();
+    owed_change(&repo, "no-identities");
+    let output = audit_under(
+        &repo,
+        "no-identities",
+        Some("fixture-other#high"),
+        None,
+        None,
+    );
+    assert_unbound(
+        &repo,
+        "no-identities",
+        &output,
+        "identities-unstated",
+        "the assessment names no model identities for its reviewer",
+    );
 }
 
 #[test]

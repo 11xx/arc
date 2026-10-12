@@ -1863,6 +1863,12 @@ pub fn later_read_label(later: &crate::state::LaterRead) -> String {
         }
         None => label.push_str("; no assessment"),
     }
+    if let Some(reason) = later
+        .binding
+        .and_then(crate::model::AuditorBinding::failure)
+    {
+        let _ = write!(label, "; assessment not bound to this auditor: {reason}");
+    }
     if let Some(version) = &later.route_version {
         let _ = write!(label, "; route {version}");
     }

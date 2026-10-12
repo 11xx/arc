@@ -2110,7 +2110,8 @@ REVIEW COVERAGE AND DEBT
 
   The assessment file is `agent-routing assess --json` output, schema
   `agent-routing-assessment/1`. arc keeps its `independence`, `qualifiers`
-  and `route_version`, never a tier, and validates shape only: qualifier
+  and `route_version`, never a tier or a model string (an audit's binding
+  to its auditor is the one comparison made, below), and validates shape only: qualifier
   names from the closed set, a one-token route version, qualifiers present
   exactly when the independence is `ineligible`. An `eligible` assessment is
   refused on this kind, because there is no debt to record. A tier is
@@ -2121,8 +2122,15 @@ REVIEW COVERAGE AND DEBT
 
   Only an audit clears it: `arc audit --assessment <file>` with
   `independence: eligible`, by an auditor who is also independent of the
-  contributors. An audit without an assessment, or with an `ineligible`
-  one, is recorded and listed beside the obligation, which stays open, and
+  contributors and whom the assessment describes. The assessment describes
+  the auditor when the model its audit event recorded is among the reviewer's
+  `identities` (every model string routing accepts for it) and, where both
+  name an effort, the effort equals the reviewer's `effort`. arc keeps only
+  the outcome on the audit's assessment: `bound`, `model-mismatch`,
+  `effort-mismatch`, `model-unrecorded` (an audit by a person records no
+  model) or `identities-unstated` (the file lists none). An audit without an
+  assessment, with an `ineligible` one, or whose binding is not `bound` is
+  recorded, says why, and is listed beside the obligation, which stays open;
   a verdict recorded since carries no assessment and does not clear it.
   `arc query --debt`, `arc catchup`, `arc inbox`, the workspace backlog, the
   debt advisory, `arc show` and `arc explain` show the qualifiers, the read's

@@ -656,6 +656,9 @@ pub struct LaterRead {
     pub qualifiers: Vec<ReviewQualifier>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route_version: Option<String>,
+    /// Whether the assessment describes the auditor that recorded it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binding: Option<AuditorBinding>,
 }
 
 impl Debt {
@@ -748,11 +751,13 @@ pub struct AuditVerdictEntry {
 
 impl AuditVerdictEntry {
     /// Whether this audit carries routing's assessment that its auditor is
-    /// independent of the authors.
+    /// independent of the authors, and that assessment describes the model
+    /// the audit recorded.
     pub fn clears_ineligible_review(&self) -> bool {
-        self.assessment
-            .as_ref()
-            .is_some_and(|assessment| assessment.independence == Independence::Eligible)
+        self.assessment.as_ref().is_some_and(|assessment| {
+            assessment.independence == Independence::Eligible
+                && assessment.binding == Some(AuditorBinding::Bound)
+        })
     }
 
     pub fn effective_author(&self) -> &str {
@@ -3763,6 +3768,7 @@ impl ChangeState {
                             .as_ref()
                             .and_then(|a| a.route_version.clone())
                             .or_else(|| audit.route_version.clone()),
+                        binding: audit.assessment.as_ref().and_then(|a| a.binding),
                     })
                     .collect(),
             }

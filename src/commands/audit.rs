@@ -332,9 +332,11 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
         .transpose()?
         .map(|assessed| AuditAssessment {
             independence: assessed.independence,
+            binding: Some(assessed.bind(ctx.resolve_model().model.as_deref())),
             qualifiers: assessed.qualifiers,
             route_version: assessed.route_version,
         });
+    let binding = assessment.as_ref().and_then(|assessed| assessed.binding);
 
     let payload = Payload::AuditVerdictRecorded {
         revision: revision.clone(),
@@ -352,6 +354,9 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
         println!("finding: {id}");
     }
     println!("event: {}", event.event_id);
+    if let Some(reason) = binding.and_then(AuditorBinding::failure) {
+        println!("assessment not bound to this auditor: {reason}");
+    }
     // Said once the audit exists, and only then: an assumed identity is not
     // refused where policy permits self-approval, because it cannot be
     // corrected after integration and refusing would leave the debt
@@ -382,7 +387,7 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
             let owed = match after.debt.as_ref().and_then(|debt| debt.missing) {
                 Some(DebtMissing::IneligibleReview) => {
                     "an eligible read: an audit with --assessment <file> saying the \
-                     auditor is eligible"
+                     auditor is eligible and describing the model it recorded"
                 }
                 _ => "an independent review",
             };
