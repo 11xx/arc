@@ -1,6 +1,7 @@
 mod absent_actor;
 mod absent_identity;
 mod accept;
+mod assurance;
 mod audit;
 mod briefs;
 mod bundle;

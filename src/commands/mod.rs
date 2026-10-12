@@ -1264,6 +1264,11 @@ pub struct QueryArgs {
     pub debt: bool,
     /// Only changes whose gating approval is still owed corroboration.
     pub provisional: bool,
+    /// Print the reads each integrated change received instead of the
+    /// selection's identifiers.
+    pub assurance: bool,
+    /// With `assurance`, ask routing where those reads stand now.
+    pub stale: bool,
     pub json: bool,
 }
 

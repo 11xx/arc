@@ -2335,6 +2335,77 @@ REVIEW COVERAGE AND DEBT
   verdict is a review that happened, not an independent one, and it leaves an
   independent-review debt owed.
 
+REVIEW ASSURANCE
+  Every integrated change carries a dated assurance record: the reads it
+  received, each with its model string as recorded, its effort, whether it was
+  a verdict or an audit, when it was recorded, and the route version that
+  selected the reviewer where one was recorded. A clean independent approval
+  is the zero-balance case of the same record, not an exit from it.
+
+  The record is derived, never written. It is a read-time projection of the
+  verdict and audit events the ledger already holds, so every past
+  integration has one without migration, and no tier, family, price or score
+  is ever stored.
+
+    arc query --assurance           one row per integrated change: its reads
+                                    and where its debt stands
+    arc query --assurance --stale   ask routing now, and list every change
+                                    not known fresh, stale work first
+    --json                          `arc-assurance/1`
+
+  Staleness is a question for routing at read time, never a stored fact. A
+  clearance goes stale when `agent-routing frontier` seats an eligible
+  reviewer stronger than every read the change received, re-read under the
+  current route version:
+
+  - The authors are the models of the shipped work's `Implemented-by` lines,
+    read from the debt's production record, else from the shipped range, else
+    the recorded patchset model. A change with several authors is stale when
+    it is stale for any one of them.
+  - A read counts only when routing assesses it eligible. A verdict counts
+    when it approves the shipped patchset, an audit when it approves.
+    Standing compares tiers only, so a same-family read at the frontier tier
+    still does not count: a change with no eligible read is `owed`, which its
+    debt view already says, and is never `stale`.
+  - A change is `fresh` when an eligible read stands at or above the
+    frontier, `stale` when every eligible read stands below it, `owed` with no
+    eligible read, and `unknown` when an answer is missing. `no-live-lines`
+    is a stale change none of whose lines remain.
+  - Absent is not zero. A read with no recorded model or effort, an author
+    nobody recorded, a read routing refuses, a routing that is missing,
+    failing or malformed, a floor routing has not established, an
+    unreadable range and an unreadable policy each leave that standing or
+    component `unknown` with a fixed reason. None is ever `fresh`, and one
+    failure never hides another row. A change is stale only when every
+    counting read was assessed, since one routing never saw may stand at the
+    frontier.
+  - Routing is asked once per distinct author and set of reads, not once per
+    change.
+
+  With `--stale` each row shows four components, in this order, each
+  displayed and none stored:
+
+  - frontier gap: the frontier's tier minus the best eligible read's tier, as
+    routing answered it now;
+  - live fraction: the share of the lines the change's diff added that
+    `git blame` still attributes to the change's own commits at HEAD, with a
+    file moved since followed. The answer is cached under the ledger's
+    `cache/assurance` directory by HEAD revision and change, so a second read
+    at the same HEAD does not blame again. A change whose range is not
+    reachable from HEAD has an unknown fraction, not a zero;
+  - exposure: whether the change's diff touches the declared `[danger]
+    paths`, and how many of them;
+  - age: since the newest read.
+
+  Stale changes order by frontier gap, then live fraction, then exposure,
+  then age: calendar age only orders changes whose other components are
+  equal, and date alone creates no debt. Only live code accrues: a stale
+  change whose lines were all rewritten or deleted has nothing to refresh and
+  is listed as `no-live-lines`, never as stale.
+
+  Staleness never gates anything. No readiness, integration or waiver path
+  reads it; it is a queue to sweep with spare quota.
+
 REVIEW AND REPAIR
   finding and review accept repeatable --forge-source OBS:GENERATION. Exact
   references must name a usable recorded observation and one of its generations;
@@ -3692,6 +3763,7 @@ SCHEMAS
     `arc-state/3`                    arc show --json
     `arc-trailers/1`                 arc trailers --json
     `arc-status/27`                  arc status
+    `arc-assurance/1`                arc query --assurance --json
     `arc-check/4`                    arc check --json
     `arc-inbox/11`                   arc inbox --json
     `arc-catchup/12`                 arc catchup --json
@@ -3784,6 +3856,7 @@ SCHEMAS
     `arc-replica-import/3`           receipt of an imported replica bundle
     `arc-journal-exchange-import/1`  receipt of an imported journal bundle
     `arc-sandbox/2`                  .arc-sandbox.json
+    assurance blame cache            <ledger>/cache/assurance/<head>-<change>.json
     `journal-binding/1`              bindings.jsonl
 
 WHAT ARC WILL NOT DO

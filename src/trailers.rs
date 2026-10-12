@@ -620,6 +620,14 @@ pub(crate) fn coordinate_model(value: &str) -> Option<&str> {
     Some(rest.split_once('#').map_or(rest, |(model, _)| model).trim())
 }
 
+/// The `model[#effort]` a role value names, as routing writes a coordinate:
+/// the `harness:model#effort` value without its harness. A person, an
+/// unreadable value and a placeholder name none.
+pub(crate) fn coordinate_model_effort(value: &str) -> Option<&str> {
+    coordinate_model(value)?;
+    value.trim().split_once(':').map(|(_, rest)| rest.trim())
+}
+
 /// The first of `values` that names the model `model` declares, ignoring
 /// effort: the model of a `harness:model[#effort]` line against the
 /// `model[#effort]` a recorded identity carries.

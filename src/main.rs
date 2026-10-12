@@ -1,6 +1,9 @@
 mod approval;
 mod artifacts;
 mod assessment;
+mod assurance;
+mod assurance_live;
+mod assurance_routing;
 mod blockers;
 mod bundle;
 mod candidate;
@@ -444,7 +447,8 @@ enum Cmd {
     },
     /// Filter changes and print matching IDs (or JSON)
     /// Unreadable changes are named with their errors on stderr; readable
-    /// changes remain in the output
+    /// changes remain in the output. With --assurance the output is the
+    /// dated review assurance of each integrated change instead
     Query {
         /// open | closed | integrated | abandoned | superseded
         #[arg(long)]
@@ -480,7 +484,31 @@ enum Cmd {
         /// approval of the same patchset, or from an audit
         #[arg(long)]
         provisional: bool,
+        /// One row per integrated change: the reads it received (model,
+        /// effort, verdict or audit, time, route version) and where its debt
+        /// stands. Reads are derived from recorded verdict and audit events;
+        /// nothing is written and no tier, price or score is ever stored.
+        /// Narrow with --target, --tag, --actor or --harness
+        #[arg(
+            long,
+            conflicts_with_all = ["commit", "forge", "status", "verdict", "debt", "provisional"]
+        )]
+        assurance: bool,
+        /// With --assurance: ask agent-routing now whether a stronger eligible
+        /// reviewer than every read a change holds can be seated, and list
+        /// each change that is not known fresh, stale work first. A read
+        /// counts only when routing assesses it eligible; a change with no
+        /// eligible read is owed, and one routing cannot place is unknown with
+        /// a reason, never fresh. Each row shows the frontier gap, the share
+        /// of its added lines still live at HEAD (git blame, cached per HEAD
+        /// and change), exposure to the policy's dangerous paths, and the age
+        /// of its newest read; stale rows order by those, in that order. A
+        /// change with no live lines is listed as no-live-lines, never stale.
+        /// Staleness gates nothing
+        #[arg(long, requires = "assurance")]
+        stale: bool,
         /// Emit the machine-readable JSON view instead of text
+        /// (`arc-assurance/1` with --assurance)
         #[arg(long)]
         json: bool,
     },
@@ -4992,6 +5020,8 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             forge,
             debt,
             provisional,
+            assurance,
+            stale,
             json,
         } => {
             if let Some(commit) = commit {
@@ -5009,6 +5039,8 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                         harness,
                         debt,
                         provisional,
+                        assurance,
+                        stale,
                         json,
                     },
                 )?;

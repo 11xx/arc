@@ -741,6 +741,9 @@ pub fn query(ctx: &Ctx, args: QueryArgs) -> Result<()> {
         });
     }
 
+    if args.assurance {
+        return crate::assurance::print(&ctx.cwd, &store.root, &selected, args.stale, args.json);
+    }
     if args.json {
         let rows = selected
             .iter()
