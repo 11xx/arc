@@ -593,7 +593,7 @@ fn exported_objects(
             continue;
         };
         for commit in crate::forge_round_trip::disclosure_commits(&event.payload) {
-            if crate::gitio::commit_exists(cwd, commit)? {
+            if crate::gitio::held_commit(cwd, commit)? {
                 insert_object(cwd, &mut objects, commit, "disclosure-commit")?;
             }
         }
@@ -612,7 +612,7 @@ fn exported_objects(
         // provider's, they travel only where this repository holds them.
         if let Payload::CandidateEvidenceReceived { evidence, .. } = &event.payload {
             for (_, head) in evidence.heads.each() {
-                if crate::gitio::commit_exists(cwd, &head.commit)? {
+                if crate::gitio::held_commit(cwd, &head.commit)? {
                     insert_object(cwd, &mut objects, &head.commit, "received-commit")?;
                 }
                 if crate::gitio::resolve_tree(cwd, &head.tree)?.as_deref() == Some(&head.tree) {

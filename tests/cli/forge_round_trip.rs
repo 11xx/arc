@@ -487,6 +487,134 @@ fn disclosure_labels_git_and_withheld_ledger_support_and_retains_commit() {
     assert_eq!(event_count(&repo, &id), before);
 }
 
+fn git_support(repo: &Repo, id: &str, observation: &str, commit: &str) -> AssertCommand {
+    let mut doc = disclosure(id, observation, "g1", "public bytes", None);
+    doc["selected"] = json!([
+        {"source":{"change_id":id,"commit":commit},"fields":["tree"],"access_basis":"accessible-git"}
+    ]);
+    declare(repo, id, &doc)
+}
+
+fn retained_refs(repo: &Repo) -> String {
+    git_out(
+        &repo.root,
+        &[
+            "for-each-ref",
+            "--format=%(objectname) %(objecttype)",
+            "refs/arc/retained/",
+        ],
+    )
+}
+
+#[test]
+fn disclosure_git_support_refuses_a_held_tag_blob_and_uppercase_commit_id() {
+    let (repo, id) = setup();
+    let head = repo.head(&repo.root);
+    let observation = observe(&repo, &id, "read-1", "g1", "public bytes", None);
+    git(
+        &repo.root,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "tag",
+            "-a",
+            "-m",
+            "annotated",
+            "v1",
+        ],
+    );
+    let tag = git_out(&repo.root, &["rev-parse", "v1"]);
+    assert_ne!(tag, head);
+    let blob = git_out(&repo.root, &["rev-parse", "HEAD:README.md"]);
+    let before = event_count(&repo, &id);
+    for (label, oid) in [
+        ("tag", tag),
+        ("blob", blob),
+        ("uppercase", head.to_uppercase()),
+    ] {
+        let failure = git_support(&repo, &id, &observation, &oid)
+            .assert()
+            .failure();
+        let stderr = String::from_utf8_lossy(&failure.get_output().stderr).to_string();
+        assert!(!stderr.is_empty(), "{label}");
+        assert_eq!(event_count(&repo, &id), before, "{label}");
+        assert_eq!(retained_refs(&repo), "", "{label}");
+    }
+    stdout(&mut git_support(&repo, &id, &observation, &head));
+    assert_eq!(retained_refs(&repo), format!("{head} commit"));
+}
+
+#[test]
+fn recorded_git_support_that_is_a_held_tag_is_unavailable_unexported_and_unpinned() {
+    let (repo, id) = setup();
+    let head = repo.head(&repo.root);
+    let observation = observe(&repo, &id, "read-1", "g1", "public bytes", None);
+    stdout(&mut git_support(&repo, &id, &observation, &head));
+    git(
+        &repo.root,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "tag",
+            "-a",
+            "-m",
+            "annotated",
+            "v1",
+        ],
+    );
+    let tag = git_out(&repo.root, &["rev-parse", "v1"]);
+    let control = repo.home.join("control-bundle.json");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["export", &id, "--output", control.to_str().unwrap()]),
+    );
+    let control: Value = serde_json::from_slice(&fs::read(&control).unwrap()).unwrap();
+    assert!(control["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|object| { object["oid"] == json!(head) && object["role"] == "disclosure-commit" }));
+    rewrite_event(&repo, &id, "context-declared", |event| {
+        event["disclosure"]["selected"][0]["source"]["commit"] = json!(tag);
+    });
+    let shown: Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["forge", "show", &id, "--json"]),
+    ))
+    .unwrap();
+    let availability: Vec<_> = shown["source_availability"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["reference"]["commit"] == json!(tag))
+        .collect();
+    assert_eq!(availability.len(), 1, "{shown}");
+    assert_eq!(availability[0]["availability"], "unavailable");
+    let bundle = repo.home.join("tag-bundle.json");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["export", &id, "--output", bundle.to_str().unwrap()]),
+    );
+    let exported: Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    let held_as_support = |oid: &str| {
+        exported["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|object| object["oid"] == json!(oid) && object["role"] == "disclosure-commit")
+    };
+    assert!(!held_as_support(&tag), "{exported}");
+    assert!(!held_as_support(&head), "{exported}");
+    let replica = Repo::new();
+    deliver_git_objects(&repo, &replica);
+    assert_eq!(git_out(&replica.root, &["cat-file", "-t", &tag]), "tag");
+    stdout(&mut admitted_round_trip(&replica, &bundle));
+    assert_eq!(retained_refs(&replica), "");
+}
+
 #[test]
 fn disclosure_repository_ledger_source_exports_without_a_fake_related_change() {
     let (repo, id) = setup();

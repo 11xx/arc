@@ -438,7 +438,7 @@ fn import_events(
     for event in &validated.events {
         if let Some(typed) = &event.typed {
             for commit in crate::forge_round_trip::disclosure_commits(&typed.payload) {
-                if gitio::commit_exists(&ctx.cwd, commit)? {
+                if gitio::held_commit(&ctx.cwd, commit)? {
                     pins.push((
                         gitio::retained_ref(&validated.bundle.change_id, &event.event_id, commit),
                         commit.to_string(),
@@ -456,7 +456,7 @@ fn import_events(
         for (_, commit) in observed {
             if matches!(commit.len(), 40 | 64)
                 && pinned_observed.insert(commit)
-                && gitio::commit_exists(&ctx.cwd, commit)?
+                && gitio::held_commit(&ctx.cwd, commit)?
             {
                 pins.push((
                     gitio::retained_ref(&validated.bundle.change_id, &event.event_id, commit),
@@ -501,7 +501,7 @@ fn import_events(
         {
             if let Some(change_id) = candidate_changes.get(candidate_id) {
                 for (_, head) in evidence.heads.each() {
-                    if gitio::object_type(&ctx.cwd, &head.commit)?.as_deref() == Some("commit") {
+                    if gitio::held_commit(&ctx.cwd, &head.commit)? {
                         pins.push((
                             gitio::retained_ref(change_id, candidate_id, &head.commit),
                             head.commit.clone(),
@@ -518,7 +518,7 @@ fn import_events(
             continue;
         };
         for commit in crate::forge_round_trip::disclosure_commits(&event.payload) {
-            if gitio::commit_exists(&ctx.cwd, commit)? {
+            if gitio::held_commit(&ctx.cwd, commit)? {
                 pins.push((
                     gitio::retained_ref(Store::REPOSITORY_SCOPE, &event.event_id, commit),
                     commit.to_string(),

@@ -606,6 +606,7 @@ fn build(ctx: &Ctx, reference: &str, at: Option<&str>) -> Result<Explanation> {
         forge_view: if crate::forge_round_trip::applies(&subject_state) {
             Some(crate::forge_view::build(
                 &store,
+                &ctx.cwd,
                 &subject_state,
                 &crate::forge_view::Options {
                     change_at: at.map(str::to_string),

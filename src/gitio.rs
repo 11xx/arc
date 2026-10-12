@@ -2345,6 +2345,22 @@ pub fn object_type(cwd: &Path, oid: &str) -> Result<Option<String>> {
     Ok((kind != "missing").then(|| kind.to_string()))
 }
 
+/// Whether a claimed object ID is spelled as a full ID: 40 or 64 lowercase hex
+/// digits. Abbreviations, uppercase spellings and revision expressions name no
+/// object by themselves.
+pub fn is_full_object_id(oid: &str) -> bool {
+    matches!(oid.len(), 40 | 64) && oid.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Whether a claimed full ID is, here, the raw commit it names. A held tag or
+/// blob is not one, and an object this repository lacks stays a claim.
+pub fn held_commit(cwd: &Path, oid: &str) -> Result<bool> {
+    if !is_full_object_id(oid) {
+        return Ok(false);
+    }
+    Ok(object_type(cwd, oid)?.as_deref() == Some("commit"))
+}
+
 pub fn commit_exists(cwd: &Path, oid: &str) -> Result<bool> {
     let object = format!("{oid}^{{commit}}");
     let out = git_command()
@@ -2411,6 +2427,29 @@ mod tests {
         )
         .unwrap();
         root
+    }
+
+    #[test]
+    fn a_held_commit_is_the_raw_commit_a_lowercase_full_id_names() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = fixture(&tmp, &[]);
+        let commit = git(&root, &["rev-parse", "HEAD"]).unwrap();
+        git(&root, &["tag", "-a", "-m", "annotated", "v1"]).unwrap();
+        let tag = git(&root, &["rev-parse", "v1"]).unwrap();
+        let blob = git(&root, &["rev-parse", "HEAD:one.txt"]).unwrap();
+        assert!(held_commit(&root, &commit).unwrap());
+        for refused in [
+            tag,
+            blob,
+            commit.to_uppercase(),
+            commit[..12].to_string(),
+            "HEAD".to_string(),
+            "b".repeat(40),
+        ] {
+            assert!(!held_commit(&root, &refused).unwrap(), "{refused}");
+        }
+        assert!(is_full_object_id(&"0".repeat(64)));
+        assert!(!is_full_object_id(&"A".repeat(40)));
     }
 
     #[test]

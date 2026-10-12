@@ -218,7 +218,12 @@ fn workflow_facts(
     )
 }
 
-pub fn build(store: &Store, state: &ChangeState, options: &Options) -> Result<Value> {
+pub fn build(
+    store: &Store,
+    cwd: &std::path::Path,
+    state: &ChangeState,
+    options: &Options,
+) -> Result<Value> {
     let now = Utc::now();
     let selected = options
         .observation
@@ -377,9 +382,9 @@ pub fn build(store: &Store, state: &ChangeState, options: &Options) -> Result<Va
                             .iter()
                             .any(|e| e.change_id == source.change_id && e.event_id == source.event),
                     ),
-                    crate::forge_round_trip::DisclosureSource::Git(source) => Some(
-                        crate::gitio::commit_exists(&std::env::current_dir()?, &source.commit)?,
-                    ),
+                    crate::forge_round_trip::DisclosureSource::Git(source) => {
+                        Some(crate::gitio::held_commit(cwd, &source.commit)?)
+                    }
                     crate::forge_round_trip::DisclosureSource::Forge(_) => None,
                 };
                 if let Some(available) = available {
@@ -579,7 +584,7 @@ pub fn show(
             observation: options.observation.clone().filter(|_| holds),
             ..options.clone()
         };
-        let mut view = build(&store, &state, &bounded)?;
+        let mut view = build(&store, &ctx.cwd, &state, &bounded)?;
         if let Some(generation) = &options.body {
             let records: Vec<_> = if let Some(obs) = &options.observation {
                 vec![observation::find_observation(&state.forge, obs)?]

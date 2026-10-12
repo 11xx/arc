@@ -554,10 +554,14 @@ pub fn declare(ctx: &Ctx, args: DeclareArgs) -> Result<()> {
         disclosure.validate_readback(&held)?;
         for selection in &disclosure.selected {
             if let crate::forge_round_trip::DisclosureSource::Git(source) = &selection.source {
-                anyhow::ensure!(
-                    gitio::commit_exists(&ctx.cwd, &source.commit)?,
-                    "selected Git support commit is unavailable"
-                );
+                match gitio::object_type(&ctx.cwd, &source.commit)?.as_deref() {
+                    Some("commit") => {}
+                    Some(kind) => anyhow::bail!(
+                        "selected Git support {} is a held {kind}, not a commit",
+                        source.commit
+                    ),
+                    None => anyhow::bail!("selected Git support commit is unavailable"),
+                }
             }
         }
     }

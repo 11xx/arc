@@ -25,6 +25,7 @@ pub fn log(ctx: &Ctx, reference: &str, reverse: bool) -> Result<()> {
             "{}",
             crate::forge_view::render(&crate::forge_view::build(
                 &store,
+                &ctx.cwd,
                 &state,
                 &Default::default()
             )?)

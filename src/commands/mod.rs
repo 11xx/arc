@@ -845,7 +845,7 @@ impl Ctx {
         )?;
         if crate::forge_round_trip::applies(state) {
             report.forge_view = Some(crate::forge_view::build(
-                &self.store()?, state, &Default::default(),
+                &self.store()?, &self.cwd, state, &Default::default(),
             ).unwrap_or_else(|error| serde_json::json!({"schema":"arc-forge-view/1","availability":"unavailable","diagnostic":error.to_string()})));
         }
         Ok(report)
@@ -892,6 +892,7 @@ impl Ctx {
         if crate::forge_round_trip::applies(state) {
             report.forge_view = Some(crate::forge_view::build(
                 store,
+                &self.cwd,
                 state,
                 &crate::forge_view::Options {
                     change_at: at.map(str::to_string),

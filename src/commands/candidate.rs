@@ -187,7 +187,7 @@ pub fn register(ctx: &Ctx, args: RegisterArgs) -> Result<()> {
     }
     if let Some(evidence) = ledger.received_by(&candidate_id) {
         for (_, head) in evidence.evidence.heads.each() {
-            if gitio::object_type(&ctx.cwd, &head.commit)?.as_deref() == Some("commit") {
+            if gitio::held_commit(&ctx.cwd, &head.commit)? {
                 gitio::update_ref(
                     &ctx.cwd,
                     &gitio::retained_ref(&brief.change_id, &candidate_id, &head.commit),

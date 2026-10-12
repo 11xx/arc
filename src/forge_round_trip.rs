@@ -442,9 +442,8 @@ impl DisclosureSource {
             Self::Ledger(s) => named(&s.event),
             Self::Git(s) => {
                 ensure!(
-                    matches!(s.commit.len(), 40 | 64)
-                        && s.commit.bytes().all(|c| c.is_ascii_hexdigit()),
-                    "Git disclosure source needs a full object ID"
+                    crate::gitio::is_full_object_id(&s.commit),
+                    "Git disclosure source needs a full lowercase object ID"
                 );
                 Ok(())
             }
