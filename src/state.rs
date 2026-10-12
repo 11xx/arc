@@ -571,12 +571,91 @@ pub struct Debt {
     /// when nothing was snapshotted, and on the legacy shape.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub production: Option<DebtProduction>,
+    /// The read an `ineligible-review` obligation names, with the reviewer
+    /// read off that verdict event and the audits since that did not clear
+    /// it. Absent on every other kind.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ineligible: Option<DebtRead>,
     /// The first verdict or audit that satisfies the existing discharge
     /// predicate, when one exists.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discharged_by: Option<DebtCoverage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discharged_by_event_id: Option<String>,
+}
+
+/// The read an `ineligible-review` debt names, as the ledger reads it now.
+///
+/// `record` is what was declared. The reviewer and the model are copied from
+/// the verdict event it names, so they are as recorded there and never a
+/// tier or a family. `later_reads` lists what has been recorded since without
+/// clearing the obligation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DebtRead {
+    #[serde(flatten)]
+    pub record: IneligibleRead,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviewer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviewer_model: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub later_reads: Vec<LaterRead>,
+}
+
+impl DebtRead {
+    /// One line naming what the read was and what routing said of it.
+    pub fn label(&self) -> String {
+        let reviewer = match (&self.reviewer, &self.reviewer_model) {
+            (Some(reviewer), Some(model)) => format!("{reviewer} ({model})"),
+            (Some(reviewer), None) => format!("{reviewer} (model unrecorded)"),
+            (None, _) => "reviewer unavailable".to_string(),
+        };
+        let mut line = format!(
+            "ineligible read: {}; reviewer {reviewer}; {}",
+            self.record
+                .qualifiers
+                .iter()
+                .map(|qualifier| qualifier.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            self.record.assessment.as_str()
+        );
+        if let Some(version) = &self.record.route_version {
+            line.push_str(&format!("; route {version}"));
+        }
+        if !self.later_reads.is_empty() {
+            line.push_str(&format!(
+                "; {} later read{} did not clear it",
+                self.later_reads.len(),
+                if self.later_reads.len() == 1 { "" } else { "s" }
+            ));
+        }
+        line
+    }
+
+    /// Triage within the kind: a read below the author's floor is the weakest.
+    pub fn below_floor(&self) -> bool {
+        self.record
+            .qualifiers
+            .contains(&ReviewQualifier::BelowFloor)
+    }
+}
+
+/// An audit recorded against an `ineligible-review` debt that did not clear
+/// it: listed beside the obligation, never counted against it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LaterRead {
+    pub event_id: String,
+    pub reviewer: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Routing's reading, when the audit carried an assessment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub independence: Option<Independence>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub qualifiers: Vec<ReviewQualifier>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_version: Option<String>,
 }
 
 impl Debt {
@@ -589,6 +668,7 @@ impl Debt {
             missing,
             coverage,
             production,
+            ineligible,
         } = &event.payload
         else {
             return false;
@@ -599,6 +679,7 @@ impl Debt {
             && self.missing == Some(*missing)
             && self.coverage.as_ref() == Some(coverage)
             && self.production == *production
+            && self.ineligible.as_ref().map(|read| &read.record) == ineligible.as_ref()
             && self.actor == event.actor
             && self.on_behalf_of == event.on_behalf_of
     }
@@ -653,6 +734,9 @@ pub struct AuditVerdictEntry {
     /// The routing version that selected the auditor. Absent means unrouted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_version: Option<String>,
+    /// Routing's assessment of the auditor, when the caller supplied one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assessment: Option<AuditAssessment>,
     pub actor: String,
     pub on_behalf_of: Option<String>,
     /// Where `actor` came from. `None` on audits recorded before arc kept the
@@ -663,6 +747,14 @@ pub struct AuditVerdictEntry {
 }
 
 impl AuditVerdictEntry {
+    /// Whether this audit carries routing's assessment that its auditor is
+    /// independent of the authors.
+    pub fn clears_ineligible_review(&self) -> bool {
+        self.assessment
+            .as_ref()
+            .is_some_and(|assessment| assessment.independence == Independence::Eligible)
+    }
+
     pub fn effective_author(&self) -> &str {
         self.on_behalf_of.as_deref().unwrap_or(&self.actor)
     }
@@ -1497,12 +1589,7 @@ impl ChangeState {
             }
         }
         self.privilege_scope = Some(scope);
-        if let Some(debt) = self.debt.clone() {
-            let discharged_by = self.debt_discharge(&debt);
-            let current = self.debt.as_mut().expect("held debt");
-            current.discharged_by_event_id = discharged_by.as_ref().map(|(id, _)| id.clone());
-            current.discharged_by = discharged_by.map(|(_, coverage)| coverage);
-        }
+        self.settle_debt();
     }
 
     pub fn verdict_contested(&self) -> bool {
@@ -2474,6 +2561,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     missing: None,
                     coverage: None,
                     production: None,
+                    ineligible: None,
                     discharged_by: None,
                     discharged_by_event_id: None,
                 });
@@ -2484,6 +2572,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 missing,
                 coverage,
                 production,
+                ineligible,
             } => {
                 state.debt = Some(Debt {
                     origin_replica_id: ev.repository_id.clone(),
@@ -2500,6 +2589,12 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     missing: Some(*missing),
                     coverage: Some(coverage.clone()),
                     production: production.clone(),
+                    ineligible: ineligible.clone().map(|record| DebtRead {
+                        record,
+                        reviewer: None,
+                        reviewer_model: None,
+                        later_reads: Vec::new(),
+                    }),
                     discharged_by: None,
                     discharged_by_event_id: None,
                 });
@@ -2510,6 +2605,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 body,
                 findings,
                 route_version,
+                assessment,
             } => {
                 for inline in findings {
                     state.audit_findings.insert(
@@ -2542,6 +2638,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     model: ev.model.clone(),
                     session: ev.session.clone(),
                     route_version: route_version.clone(),
+                    assessment: assessment.clone(),
                     actor: ev.actor.clone(),
                     on_behalf_of: ev.on_behalf_of.clone(),
                     actor_source: ev.actor_source,
@@ -3238,13 +3335,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
     for reply in replies {
         attach_reply(&mut state, reply);
     }
-    if let Some(debt) = state.debt.clone() {
-        let discharged_by = state.debt_discharge(&debt);
-        if let Some(current) = state.debt.as_mut() {
-            current.discharged_by_event_id = discharged_by.as_ref().map(|(id, _)| id.clone());
-            current.discharged_by = discharged_by.map(|(_, coverage)| coverage);
-        }
-    }
+    state.settle_debt();
     Ok(state)
 }
 
@@ -3632,9 +3723,60 @@ impl ChangeState {
         self.debt_discharge(debt).is_some()
     }
 
+    /// Settle what the ledger says of the held debt once every event is in:
+    /// what discharged it, and for an `ineligible-review` debt the read it
+    /// names and the audits since that left it open.
+    fn settle_debt(&mut self) {
+        let Some(debt) = self.debt.clone() else {
+            return;
+        };
+        let discharged_by = self.debt_discharge(&debt);
+        let read = debt.ineligible.as_ref().map(|read| {
+            let verdict = self
+                .verdicts
+                .iter()
+                .find(|verdict| verdict.event_id == read.record.read);
+            let cleared = discharged_by.as_ref().map(|(id, _)| id.as_str());
+            DebtRead {
+                record: read.record.clone(),
+                reviewer: verdict.map(|verdict| verdict.effective_author().to_string()),
+                reviewer_model: verdict.and_then(|verdict| verdict.model.clone()),
+                later_reads: self
+                    .audit_verdicts
+                    .iter()
+                    .filter(|audit| {
+                        audit.created_at >= debt.declared_at
+                            && Some(audit.event_id.as_str()) != cleared
+                    })
+                    .map(|audit| LaterRead {
+                        event_id: audit.event_id.clone(),
+                        reviewer: audit.effective_author().to_string(),
+                        model: audit.model.clone(),
+                        independence: audit.assessment.as_ref().map(|a| a.independence),
+                        qualifiers: audit
+                            .assessment
+                            .as_ref()
+                            .map(|a| a.qualifiers.clone())
+                            .unwrap_or_default(),
+                        route_version: audit
+                            .assessment
+                            .as_ref()
+                            .and_then(|a| a.route_version.clone())
+                            .or_else(|| audit.route_version.clone()),
+                    })
+                    .collect(),
+            }
+        });
+        let current = self.debt.as_mut().expect("held debt");
+        current.discharged_by_event_id = discharged_by.as_ref().map(|(id, _)| id.clone());
+        current.discharged_by = discharged_by.map(|(_, coverage)| coverage);
+        current.ineligible = read;
+    }
+
     /// The verdict or audit that satisfies the existing discharge predicate.
     /// The returned model is copied from that event and is never inferred.
     fn debt_discharge(&self, debt: &Debt) -> Option<(String, DebtCoverage)> {
+        let ineligible_review = debt.missing == Some(DebtMissing::IneligibleReview);
         // A debt that names an independent review as the thing missing cannot
         // be settled by the people who wrote the patchset, nor by an identity
         // arc invented. A name taken from `git config` is not a claim anybody
@@ -3656,6 +3798,7 @@ impl ChangeState {
         if let Some(audit) = self.audit_verdicts.iter().find(|audit| {
             self.review_eligible(&audit.event_id, &audit.origin_replica_id)
                 && audit.created_at >= debt.declared_at
+                && (!ineligible_review || audit.clears_ineligible_review())
                 && !audit.author_assumed()
                 && shipped_patchset.is_none_or(|patchset| {
                     patchset
@@ -3672,6 +3815,13 @@ impl ChangeState {
                     audit.route_version.clone(),
                 ),
             ));
+        }
+        // A verdict carries no routing assessment, so none can show that its
+        // reviewer is independent of the author in the way an
+        // `ineligible-review` debt is owed: only an audit that carries one
+        // clears that kind.
+        if ineligible_review {
+            return None;
         }
         // Only a verdict on the revision that actually shipped counts; a
         // verdict on an earlier draft judged something else.
@@ -3733,6 +3883,7 @@ mod tests {
                         body: None,
                         findings: vec![],
                         route_version: None,
+                        assessment: None,
                     },
                 )
             } else {

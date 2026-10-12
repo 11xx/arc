@@ -6,7 +6,116 @@
 //! available, which is what keeps the third one from being chosen.
 
 use super::*;
-use crate::state::ChangeState;
+use crate::state::{ChangeState, Patchset};
+
+/// What an `ineligible-review` debt is declared with: which read it names,
+/// and why routing did not count it, as the caller supplied them.
+#[derive(Debug, Default, Clone)]
+pub struct IneligibleInputs {
+    /// The verdict event of the read. Omitted, the latest verdict on the
+    /// bound patchset.
+    pub read: Option<String>,
+    /// An `agent-routing assess --json` file.
+    pub assessment: Option<PathBuf>,
+    /// Qualifiers named by hand, which makes the record declared.
+    pub qualifiers: Vec<ReviewQualifier>,
+    pub route_version: Option<String>,
+}
+
+impl IneligibleInputs {
+    fn is_empty(&self) -> bool {
+        self.read.is_none()
+            && self.assessment.is_none()
+            && self.qualifiers.is_empty()
+            && self.route_version.is_none()
+    }
+
+    /// The record these inputs declare, or `None` for any kind that takes no
+    /// read. Everything is checked before a debt is written, so a refusal
+    /// leaves the ledger as it was.
+    fn resolve(
+        &self,
+        st: &ChangeState,
+        subject: Option<&Patchset>,
+        kind: Option<DebtMissing>,
+    ) -> Result<Option<IneligibleRead>> {
+        if kind != Some(DebtMissing::IneligibleReview) {
+            if !self.is_empty() {
+                bail!(
+                    "--read, --assessment, --qualifier and --route-version describe an \
+                     ineligible read: they go with --kind ineligible-review"
+                );
+            }
+            return Ok(None);
+        }
+        let (qualifiers, route_version, assessment) = match &self.assessment {
+            Some(path) => {
+                let assessed = crate::assessment::read(path)?;
+                if assessed.independence == Independence::Eligible {
+                    bail!(
+                        "the assessment says the reviewer is eligible, so there is no \
+                         ineligible read to record; declare the debt with the kind its \
+                         ledger shows, or discharge it with the audit"
+                    );
+                }
+                (
+                    assessed.qualifiers,
+                    assessed.route_version,
+                    AssessmentBasis::Assessed,
+                )
+            }
+            None if self.qualifiers.is_empty() => bail!(
+                "--kind ineligible-review needs why the read does not count: \
+                 --assessment <agent-routing assess --json file>, or --qualifier <{}> \
+                 (repeatable)",
+                ReviewQualifier::NAMES.replace(", ", "|")
+            ),
+            None => (
+                ReviewQualifier::normalized(self.qualifiers.iter().copied()),
+                None,
+                AssessmentBasis::Declared,
+            ),
+        };
+        if let Some(version) = &self.route_version {
+            crate::model::validate_route_version(version)?;
+        }
+        let route_version = self.route_version.clone().or(route_version);
+        let verdicts = || {
+            st.verdicts
+                .iter()
+                .filter(|verdict| subject.is_some_and(|subject| verdict.patchset_id == subject.id))
+        };
+        let read = match &self.read {
+            Some(named) => verdicts()
+                .find(|verdict| &verdict.event_id == named)
+                .map(|verdict| verdict.event_id.clone())
+                .with_context(|| {
+                    format!(
+                        "--read {named} is not a verdict on the patchset this debt covers; \
+                         `arc status {} --json` lists them",
+                        st.change_id
+                    )
+                })?,
+            None => verdicts()
+                .max_by_key(|verdict| verdict.created_at)
+                .map(|verdict| verdict.event_id.clone())
+                .with_context(|| {
+                    format!(
+                        "{} has no verdict on the patchset this debt covers, so there is no \
+                         read to name; record the review first, or declare the kind arc \
+                         derives",
+                        st.change_id
+                    )
+                })?,
+        };
+        Ok(Some(IneligibleRead {
+            read,
+            qualifiers,
+            route_version,
+            assessment,
+        }))
+    }
+}
 
 /// Record the obligation. Allowed while open (declared at integration time)
 /// and after integration (discovered later).
@@ -15,6 +124,7 @@ pub fn declare_debt(
     reference: &str,
     reason: String,
     kind: Option<DebtMissing>,
+    inputs: &IneligibleInputs,
 ) -> Result<()> {
     let reason = reason.trim();
     if reason.is_empty() {
@@ -24,7 +134,7 @@ pub fn declare_debt(
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
     let st = store.state(&change_id)?;
-    declare_debt_locked(ctx, &store, &st, reason, kind).map(|_| ())
+    declare_debt_locked(ctx, &store, &st, reason, kind, inputs).map(|_| ())
 }
 
 /// What a debt declaration observed about its event: the event, and whether
@@ -78,6 +188,7 @@ pub(super) fn declare_debt_locked(
     st: &ChangeState,
     reason: &str,
     kind: Option<DebtMissing>,
+    inputs: &IneligibleInputs,
 ) -> Result<DebtReceipt> {
     let reason = reason.trim();
     if reason.is_empty() {
@@ -102,12 +213,14 @@ pub(super) fn declare_debt_locked(
     // The caller's kind wins: arc reads the ledger, and the ledger cannot
     // distinguish a merge resolution from a repair.
     let missing = kind.unwrap_or_else(|| st.derive_debt_missing(subject));
+    let ineligible = inputs.resolve(st, subject, kind)?;
     let payload = Payload::DebtDeclared {
         reason: reason.to_string(),
         patchset_id: patchset_id.clone(),
         missing,
         coverage,
         production,
+        ineligible,
     };
     ensure_append_allowed(st, &payload)?;
     let mut event = ctx.event(store, change_id, payload)?;
@@ -192,6 +305,10 @@ pub struct AuditArgs {
     /// The routing version that selected the auditor, as the caller declared
     /// it. `None` records an unrouted audit.
     pub route_version: Option<String>,
+    /// An `agent-routing assess --json` file for the auditor. An
+    /// `ineligible-review` debt is discharged only by an audit whose
+    /// assessment is eligible.
+    pub assessment: Option<PathBuf>,
 }
 
 /// Record a review performed after integration, discharging any debt.
@@ -208,6 +325,16 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
         bail!("cannot approve while recording blocking findings in the same audit");
     }
     let finding_ids: Vec<String> = inline.iter().map(|f| f.finding_id.clone()).collect();
+    let assessment = args
+        .assessment
+        .as_deref()
+        .map(crate::assessment::read)
+        .transpose()?
+        .map(|assessed| AuditAssessment {
+            independence: assessed.independence,
+            qualifiers: assessed.qualifiers,
+            route_version: assessed.route_version,
+        });
 
     let payload = Payload::AuditVerdictRecorded {
         revision: revision.clone(),
@@ -215,6 +342,7 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
         body: args.body,
         findings: inline,
         route_version: args.route_version,
+        assessment,
     };
     ensure_append_allowed(&st, &payload)?;
     let mut event = ctx.event(&store, &change_id, payload)?;
@@ -251,7 +379,14 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
     if st.debt.is_some() {
         let (_, after) = ctx.load_state(&store, &change_id)?;
         if after.debt_outstanding() {
-            println!("audit recorded; the debt still owes an independent review");
+            let owed = match after.debt.as_ref().and_then(|debt| debt.missing) {
+                Some(DebtMissing::IneligibleReview) => {
+                    "an eligible read: an audit with --assessment <file> saying the \
+                     auditor is eligible"
+                }
+                _ => "an independent review",
+            };
+            println!("audit recorded; the debt still owes {owed}");
         } else {
             println!("debt discharged");
         }

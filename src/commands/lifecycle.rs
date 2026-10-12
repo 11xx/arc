@@ -731,6 +731,11 @@ pub fn query(ctx: &Ctx, args: QueryArgs) -> Result<()> {
             (
                 debt.and_then(|debt| debt.missing)
                     .unwrap_or(DebtMissing::IndependentReview),
+                // Within `ineligible-review`, a read below the author's floor
+                // is the weakest and goes first.
+                !debt
+                    .and_then(|debt| debt.ineligible.as_ref())
+                    .is_some_and(|read| read.below_floor()),
                 debt.map(|debt| debt.declared_at),
             )
         });
@@ -1501,6 +1506,7 @@ fn list_row(state: &ChangeState, states: &BTreeMap<String, ChangeState>) -> serd
         "debt_missing": state.debt.as_ref().and_then(|debt| debt.missing).map(DebtMissing::as_str),
         "debt_coverage": state.debt.as_ref().and_then(|debt| debt.coverage.clone()),
         "debt_production": state.debt.as_ref().and_then(|debt| debt.production.clone()),
+        "debt_ineligible": state.debt.as_ref().and_then(|debt| debt.ineligible.clone()),
     })
 }
 

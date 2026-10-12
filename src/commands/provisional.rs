@@ -984,7 +984,14 @@ fn integrate_provisionally_inner(
         if fork::fork_slug_for_branch(&ctx.cwd, &state.branch)?.is_none() {
             if let Some(debt) = args.debt {
                 let operation = || {
-                    super::audit::declare_debt_locked(ctx, &store, &state, &debt.reason, debt.kind)
+                    super::audit::declare_debt_locked(
+                        ctx,
+                        &store,
+                        &state,
+                        &debt.reason,
+                        debt.kind,
+                        &debt.read,
+                    )
                 };
                 let (result, details) = if args.json {
                     crate::operation_output::capture(operation)

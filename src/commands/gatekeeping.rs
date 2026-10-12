@@ -2340,6 +2340,7 @@ fn resolve_hold(state: &ChangeState, reference: &str, change_id: &str) -> Result
 pub struct DebtDeclaration {
     pub reason: String,
     pub kind: Option<DebtMissing>,
+    pub read: super::audit::IneligibleInputs,
 }
 
 /// Everything an integration was asked for beyond which changes to land.
@@ -3244,7 +3245,14 @@ fn integrate_one(
     }
     if super::fork::fork_slug_for_branch(&ctx.cwd, &st.branch)?.is_none() {
         if let Some(debt) = debt {
-            super::audit::declare_debt_locked(ctx, &store, &st, &debt.reason, debt.kind)?;
+            super::audit::declare_debt_locked(
+                ctx,
+                &store,
+                &st,
+                &debt.reason,
+                debt.kind,
+                &debt.read,
+            )?;
             st = store.state(&change_id)?;
             st.target_branch = target.clone();
         }

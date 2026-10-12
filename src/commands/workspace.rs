@@ -893,6 +893,10 @@ struct DebtOwed {
     /// at. Absent on the legacy shape.
     #[serde(skip_serializing_if = "Option::is_none")]
     coverage: Option<Vec<DebtCoverage>>,
+    /// The read an `ineligible-review` obligation names and why routing did
+    /// not count it, as the ledger reads it now. Absent on every other kind.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ineligible: Option<crate::state::DebtRead>,
     /// Who set the contract and who answered it. Absent on the legacy shape,
     /// and when nothing was snapshotted.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1819,7 +1823,8 @@ fn workspace_backlog(
                 crate::render::debt_line(
                     Some(change.effective_missing),
                     change.production.as_ref(),
-                    change.coverage.as_deref()
+                    change.coverage.as_deref(),
+                    change.ineligible.as_ref()
                 )
                 .trim_end_matches(','),
                 if change.missing_basis == DebtMissingBasis::LegacyDefault {
@@ -2311,6 +2316,7 @@ fn ledger_queues(root: &Path, anchor: Option<&Path>) -> Result<LedgerQueues> {
                     },
                     typed: debt.missing.is_some(),
                     coverage: debt.coverage.clone(),
+                    ineligible: debt.ineligible.clone(),
                     production: debt.production.clone(),
                     declared_by: debt.actor.clone(),
                     reason: debt.reason.clone(),
@@ -2353,6 +2359,7 @@ fn ledger_queues(root: &Path, anchor: Option<&Path>) -> Result<LedgerQueues> {
     needs_review.sort_by(|a, b| a.change_id.cmp(&b.change_id));
     no_patchset.sort();
     debt_owed.sort_by(|a, b| a.change_id.cmp(&b.change_id));
+    let debt_owed = crate::inbox::below_floor_first(debt_owed, |debt| debt.ineligible.as_ref());
     Ok(LedgerQueues {
         shared_surfaces: shared_surfaces(&debt_owed),
         needs_review,

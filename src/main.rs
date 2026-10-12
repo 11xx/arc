@@ -1,5 +1,6 @@
 mod approval;
 mod artifacts;
+mod assessment;
 mod blockers;
 mod bundle;
 mod candidate;
@@ -53,8 +54,8 @@ use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
 use commands::{fork, AnchorArgs, Ctx, ListFormat, QueryArgs};
 use model::{
     ActorSource, DebtMissing, DispositionStatus, ExternalVerdict, MessageSeverity, MessageType,
-    ProbePhase, ReviewCause, RunOutcome, Severity, Side, Verdict, VerdictRelationKind,
-    VerifyResult,
+    ProbePhase, ReviewCause, ReviewQualifier, RunOutcome, Severity, Side, Verdict,
+    VerdictRelationKind, VerifyResult,
 };
 use std::path::{Path, PathBuf};
 
@@ -2318,9 +2319,41 @@ enum Cmd {
         debt: Option<String>,
         /// What kind of deficit the debt records. Omitted, arc derives it from
         /// the ledger; a declared kind wins, because arc cannot tell a merge
-        /// resolution from a repair
+        /// resolution from a repair. `ineligible-review` records that a read
+        /// happened by a reviewer routing does not count as independent of
+        /// the author: arc never derives it, and it takes why from
+        /// `--assessment` or `--qualifier`, and the read from `--read`
         #[arg(long = "kind", value_enum, requires = "debt")]
         debt_kind: Option<DebtMissing>,
+        /// The verdict event of the read an `ineligible-review` debt names.
+        /// Omitted, the latest verdict on the patchset the debt covers.
+        /// Refused when the patchset has no verdict, or the event is not one
+        /// of its verdicts
+        #[arg(long = "read", value_name = "EVENT", requires = "debt")]
+        read: Option<String>,
+        /// Why routing did not count that read: an `agent-routing assess
+        /// --json` file (schema `agent-routing-assessment/1`) whose
+        /// independence is `ineligible`. arc keeps its qualifiers, route
+        /// version and independence, and never its tiers; it validates the
+        /// shape and computes no family, tier or floor. The record reads as
+        /// assessed. An eligible assessment is refused: there is no debt to
+        /// record
+        #[arg(long = "assessment", value_name = "FILE", requires = "debt", conflicts_with_all = ["qualifiers", "route_version"])]
+        assessment: Option<PathBuf>,
+        /// A qualifier named by hand, repeatable: `same-model`, `same-family`,
+        /// `below-floor`, `floor-unknown`, `reviewer-unseated`. The record
+        /// reads as declared, which nothing corroborates
+        #[arg(
+            long = "qualifier",
+            value_name = "QUALIFIER",
+            value_enum,
+            requires = "debt"
+        )]
+        qualifiers: Vec<ReviewQualifier>,
+        /// The routing version that assessed the read, with `--qualifier`.
+        /// Recorded as a coordinate and nothing else
+        #[arg(long = "route-version", value_name = "VERSION", requires = "debt")]
+        route_version: Option<String>,
     },
     /// Record a review obligation this change carries but has not discharged
     ///
@@ -2338,14 +2371,49 @@ enum Cmd {
         reason: String,
         /// What kind of deficit this records. Omitted, arc derives it from the
         /// ledger; a declared kind wins, because arc cannot tell a merge
-        /// resolution from a repair
+        /// resolution from a repair. `ineligible-review` records that a read
+        /// happened by a reviewer routing does not count as independent of
+        /// the author: arc never derives it, and it takes why from
+        /// `--assessment` or `--qualifier`, and the read from `--read`
         #[arg(long, value_enum)]
         kind: Option<DebtMissing>,
+        /// The verdict event of the read an `ineligible-review` debt names.
+        /// Omitted, the latest verdict on the patchset the debt covers.
+        /// Refused when the patchset has no verdict, or the event is not one
+        /// of its verdicts
+        #[arg(long = "read", value_name = "EVENT")]
+        read: Option<String>,
+        /// Why routing did not count that read: an `agent-routing assess
+        /// --json` file (schema `agent-routing-assessment/1`) whose
+        /// independence is `ineligible`. arc keeps its qualifiers, route
+        /// version and independence, and never its tiers; it validates the
+        /// shape and computes no family, tier or floor. The record reads as
+        /// assessed. An eligible assessment is refused: there is no debt to
+        /// record
+        #[arg(long = "assessment", value_name = "FILE", conflicts_with_all = ["qualifiers", "route_version"])]
+        assessment: Option<PathBuf>,
+        /// A qualifier named by hand, repeatable: `same-model`, `same-family`,
+        /// `below-floor`, `floor-unknown`, `reviewer-unseated`. The record
+        /// reads as declared, which nothing corroborates
+        #[arg(long = "qualifier", value_name = "QUALIFIER", value_enum)]
+        qualifiers: Vec<ReviewQualifier>,
+        /// The routing version that assessed the read, with `--qualifier`.
+        /// Recorded as a coordinate and nothing else
+        #[arg(long = "route-version", value_name = "VERSION")]
+        route_version: Option<String>,
     },
     /// Record a review performed after integration (never a late verdict)
+    ///
+    /// An audit discharges a debt when its auditor is independent of the
+    /// work's contributors. A debt of kind `ineligible-review` also needs
+    /// routing's word that the auditor is eligible: `--assessment <file>`
+    /// with `independence: eligible`. Without one, or with an `ineligible`
+    /// assessment, the audit is recorded and listed beside the obligation,
+    /// which stays open. Every other kind discharges as before.
     Audit {
         /// Change whose integrated revision was reviewed
         change: String,
+        /// The auditor's verdict on the integrated revision
         #[arg(long, value_enum)]
         verdict: Verdict,
         /// Inline body text
@@ -2363,6 +2431,16 @@ enum Cmd {
         /// coordinate and nothing else. Omitted, the audit is unrouted
         #[arg(long = "route-version", value_name = "VERSION")]
         route_version: Option<String>,
+        /// Routing's assessment of this auditor: an `agent-routing assess
+        /// --json` file (schema `agent-routing-assessment/1`). arc keeps its
+        /// independence, qualifiers and route version, never its tiers. A
+        /// debt of kind `ineligible-review` is discharged only by an
+        /// audit whose assessment says `eligible`; without one, or with an
+        /// `ineligible` one, the audit is recorded and listed beside the
+        /// obligation, which stays open. The auditor must also be independent
+        /// of the contributors, as for any audit. Other kinds ignore it
+        #[arg(long = "assessment", value_name = "FILE")]
+        assessment: Option<PathBuf>,
     },
     /// Close a change without arc performing the merge
     ///
@@ -5707,6 +5785,10 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             shape,
             debt,
             debt_kind,
+            read,
+            assessment,
+            qualifiers,
+            route_version,
         } => {
             // A list names its own members; `--change` names one, and mixing
             // the two spellings leaves no reading of what the run was asked
@@ -5748,6 +5830,12 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     debt: debt.map(|reason| commands::DebtDeclaration {
                         reason,
                         kind: debt_kind,
+                        read: commands::IneligibleInputs {
+                            read,
+                            assessment,
+                            qualifiers,
+                            route_version,
+                        },
                     }),
                 },
             )
@@ -5756,8 +5844,18 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             change,
             reason,
             kind,
+            read,
+            assessment,
+            qualifiers,
+            route_version,
         } => {
-            commands::declare_debt(&ctx, &change, reason, kind)?;
+            let inputs = commands::IneligibleInputs {
+                read,
+                assessment,
+                qualifiers,
+                route_version,
+            };
+            commands::declare_debt(&ctx, &change, reason, kind, &inputs)?;
             Ok(0)
         }
         Cmd::Audit {
@@ -5767,6 +5865,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             body_file,
             findings_json,
             route_version,
+            assessment,
         } => {
             // An audit body is optional; read_body refuses an absent one.
             let body = match (&body, &body_file) {
@@ -5781,6 +5880,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     body,
                     findings_json,
                     route_version,
+                    assessment,
                 },
             )?;
             Ok(0)

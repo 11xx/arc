@@ -1179,6 +1179,12 @@ pub fn markdown(
                     }
                 }
             }
+            if let Some(read) = &debt.ineligible {
+                let _ = writeln!(w, "  - Read: `{}`; {}", read.record.read, read.label());
+                for later in &read.later_reads {
+                    let _ = writeln!(w, "    - Later read: {}", later_read_label(later));
+                }
+            }
             if let Some(discharged_by) = &debt.discharged_by {
                 let _ = writeln!(
                     w,
@@ -1830,6 +1836,39 @@ fn debt_production_label(production: &DebtProduction) -> String {
     parts.join(", ")
 }
 
+/// One audit that left an `ineligible-review` obligation open, as the
+/// reviewer and model it recorded and what routing said of it, when it said.
+pub fn later_read_label(later: &crate::state::LaterRead) -> String {
+    let mut label = format!(
+        "audit `{}` by {} ({})",
+        later.event_id,
+        later.reviewer,
+        later.model.as_deref().unwrap_or("model unrecorded")
+    );
+    match later.independence {
+        Some(independence) => {
+            let _ = write!(label, "; {}", independence.as_str());
+            if !later.qualifiers.is_empty() {
+                let _ = write!(
+                    label,
+                    ": {}",
+                    later
+                        .qualifiers
+                        .iter()
+                        .map(|qualifier| qualifier.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+        }
+        None => label.push_str("; no assessment"),
+    }
+    if let Some(version) = &later.route_version {
+        let _ = write!(label, "; route {version}");
+    }
+    label
+}
+
 /// One obligation as a line: what kind of deficit, who produced the work it
 /// covers, and what review that work did have. A coordinate the record does
 /// not carry is left out rather than filled in.
@@ -1837,6 +1876,7 @@ pub fn debt_line(
     missing: Option<DebtMissing>,
     production: Option<&DebtProduction>,
     coverage: Option<&[DebtCoverage]>,
+    ineligible: Option<&crate::state::DebtRead>,
 ) -> String {
     let mut line = format!(
         "debt: {}",
@@ -1855,6 +1895,9 @@ pub fn debt_line(
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+    }
+    if let Some(read) = ineligible {
+        let _ = write!(line, "; {}", read.label());
     }
     line
 }
@@ -2217,10 +2260,11 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             missing,
             coverage,
             production,
+            ineligible,
         } => (
             "debt-declared",
             format!(
-                "{}; missing {}; coverage: {}{}",
+                "{}; missing {}; coverage: {}{}{}",
                 match patchset_id {
                     Some(id) => format!("{id}: {reason}"),
                     None => reason.clone(),
@@ -2238,6 +2282,19 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
                 production
                     .as_ref()
                     .map(|production| format!("; {}", debt_production_label(production)))
+                    .unwrap_or_default(),
+                ineligible
+                    .as_ref()
+                    .map(|read| format!(
+                        "; read {} ({}; {})",
+                        read.read,
+                        read.qualifiers
+                            .iter()
+                            .map(|qualifier| qualifier.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        read.assessment.as_str()
+                    ))
                     .unwrap_or_default()
             ),
         ),

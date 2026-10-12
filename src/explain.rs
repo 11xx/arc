@@ -9,9 +9,9 @@
 
 use crate::commands::{self, Ctx};
 use crate::model::{
-    AuthorizationBasis, BriefCause, CaptureState, DebtCoverage, DebtMissing, DebtProduction,
-    DeclaredRelation, DeclaredTarget, Event, JournalRefVia, Payload, PlannerIdentity, ReadCoverage,
-    RelationSubject,
+    AuditAssessment, AuthorizationBasis, BriefCause, CaptureState, DebtCoverage, DebtMissing,
+    DebtProduction, DeclaredRelation, DeclaredTarget, Event, JournalRefVia, Payload,
+    PlannerIdentity, ReadCoverage, RelationSubject,
 };
 use crate::relations::Relations;
 use crate::state::{ChangeState, Patchset, VerificationEntry, VerificationRunTerminal};
@@ -329,6 +329,10 @@ pub enum Detail {
         coverage: Option<Vec<DebtCoverage>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         production: Option<Box<DebtProduction>>,
+        /// The read an `ineligible-review` debt names, and why routing did
+        /// not count it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ineligible: Option<Box<crate::state::DebtRead>>,
         /// The later-knowledge event that discharged this debt after the
         /// integration. The acceptance values above are unchanged by it.
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -343,6 +347,9 @@ pub enum Detail {
         model: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         session: Option<String>,
+        /// Routing's assessment of the auditor, when the audit carried one.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        assessment: Option<AuditAssessment>,
     },
     AuditFinding {
         event_id: String,
@@ -1372,6 +1379,7 @@ fn coverage_slot(
                     missing: debt.missing,
                     coverage: debt.coverage.clone(),
                     production: debt.production.clone().map(Box::new),
+                    ineligible: debt.ineligible.clone().map(Box::new),
                     discharged_later_by,
                 },
             ));
@@ -1392,6 +1400,7 @@ fn coverage_slot(
                 missing: None,
                 coverage: None,
                 production: None,
+                ineligible: None,
                 discharged_later_by: None,
             },
         )),
@@ -1404,6 +1413,7 @@ fn coverage_slot(
                 missing: None,
                 coverage: None,
                 production: None,
+                ineligible: None,
                 discharged_later_by: None,
             },
         )),
@@ -1424,6 +1434,7 @@ fn later_knowledge(events: &[Event], discharge: Option<&Discharge>, at: Option<&
                 revision,
                 verdict,
                 findings,
+                assessment,
                 ..
             } => {
                 rows.push(row(
@@ -1435,6 +1446,7 @@ fn later_knowledge(events: &[Event], discharge: Option<&Discharge>, at: Option<&
                         reviewer,
                         model: event.model.clone(),
                         session: event.session.clone(),
+                        assessment: assessment.clone(),
                     },
                 ));
                 for finding in findings {
@@ -1840,6 +1852,7 @@ fn describe(detail: &Detail) -> String {
             missing,
             coverage,
             production,
+            ineligible,
             discharged_later_by,
         } => {
             let Some(event_id) = event_id else {
@@ -1876,6 +1889,9 @@ fn describe(detail: &Detail) -> String {
                     .map(|production| production_label(production))
                     .unwrap_or_else(|| "not recorded".to_string())
             ));
+            if let Some(read) = ineligible {
+                text.push_str(&format!("; {}", read.label()));
+            }
             if let Some(later) = discharged_later_by {
                 text.push_str(&format!(
                     "; discharged later by `{later}`, see later knowledge"
@@ -1890,14 +1906,22 @@ fn describe(detail: &Detail) -> String {
             reviewer,
             model,
             session,
+            assessment,
         } => format!(
-            "audit {verdict} `{event_id}` at {revision} by {reviewer} ({})",
+            "audit {verdict} `{event_id}` at {revision} by {reviewer} ({}){}",
             crate::coordinate::display_model(
                 None,
                 model.as_deref(),
                 session.as_deref(),
                 crate::coordinate::ModelStyle::Coordinate
-            )
+            ),
+            assessment
+                .as_ref()
+                .map(|assessment| format!(
+                    "; routing assessed {}",
+                    assessment.independence.as_str()
+                ))
+                .unwrap_or_default()
         ),
         Detail::AuditFinding {
             event_id,

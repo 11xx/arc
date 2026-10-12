@@ -570,6 +570,9 @@ pub enum DebtMissing {
     RepairUnread,
     /// Verdicts on the shipped patchset, all of them from its contributors.
     ContributorOnly,
+    /// A read happened, by a reviewer routing does not count as independent
+    /// of the author; the record names the read and why.
+    IneligibleReview,
     /// A read by somebody independent, which nobody supplied. Also what an
     /// obligation recorded before kinds existed means.
     IndependentReview,
@@ -578,11 +581,12 @@ pub enum DebtMissing {
 impl DebtMissing {
     /// Every kind, in severity order. A count split over this covers every
     /// obligation exactly once, so a split and a total cannot disagree.
-    pub const ALL: [DebtMissing; 5] = [
+    pub const ALL: [DebtMissing; 6] = [
         DebtMissing::NothingRead,
         DebtMissing::MergeResolutionUnread,
         DebtMissing::RepairUnread,
         DebtMissing::ContributorOnly,
+        DebtMissing::IneligibleReview,
         DebtMissing::IndependentReview,
     ];
 
@@ -592,9 +596,139 @@ impl DebtMissing {
             Self::MergeResolutionUnread => "merge-resolution-unread",
             Self::RepairUnread => "repair-unread",
             Self::ContributorOnly => "contributor-only",
+            Self::IneligibleReview => "ineligible-review",
             Self::IndependentReview => "independent-review",
         }
     }
+}
+
+/// Why routing does not count a read as independent of its author. A closed
+/// set arc validates and never computes: routing assesses a reviewer against
+/// the authors, and arc keeps the names it was given. Declaration order is
+/// the order a record lists them in.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, clap::ValueEnum,
+)]
+#[serde(rename_all = "kebab-case")]
+#[clap(rename_all = "kebab-case")]
+pub enum ReviewQualifier {
+    /// The reviewer and an author are the same model, at any effort.
+    SameModel,
+    /// The reviewer is in an author's model family.
+    SameFamily,
+    /// The reviewer's review tier is below an author's floor.
+    BelowFloor,
+    /// An author's floor is unestablished.
+    FloorUnknown,
+    /// The reviewer holds no seated review tier, so no floor can place it.
+    ReviewerUnseated,
+}
+
+impl ReviewQualifier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SameModel => "same-model",
+            Self::SameFamily => "same-family",
+            Self::BelowFloor => "below-floor",
+            Self::FloorUnknown => "floor-unknown",
+            Self::ReviewerUnseated => "reviewer-unseated",
+        }
+    }
+
+    /// Every name the closed set accepts, for refusals that list them.
+    pub const NAMES: &'static str =
+        "same-model, same-family, below-floor, floor-unknown, reviewer-unseated";
+
+    /// A qualifier list as a record keeps it: deduplicated, in set order.
+    pub fn normalized(qualifiers: impl IntoIterator<Item = ReviewQualifier>) -> Vec<Self> {
+        qualifiers
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+}
+
+/// Whether routing's assessment of a read came from routing or from the
+/// caller's own declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AssessmentBasis {
+    /// The qualifiers came from an `agent-routing assess --json` file.
+    Assessed,
+    /// The caller named the qualifiers; nothing corroborates them.
+    Declared,
+}
+
+impl AssessmentBasis {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Assessed => "assessed",
+            Self::Declared => "declared",
+        }
+    }
+}
+
+/// Routing's reading of whether a reviewer counts as independent of the
+/// authors it read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Independence {
+    Eligible,
+    Ineligible,
+}
+
+impl Independence {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Eligible => "eligible",
+            Self::Ineligible => "ineligible",
+        }
+    }
+}
+
+/// The read an `ineligible-review` debt names, and why routing did not count
+/// it. Model strings and tiers are not here: the verdict event carries the
+/// reviewer's model verbatim, and a tier is routing's reading at read time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IneligibleRead {
+    /// The verdict event the read recorded.
+    pub read: String,
+    /// Never empty.
+    pub qualifiers: Vec<ReviewQualifier>,
+    /// The routing version that assessed the read, as a coordinate and
+    /// nothing else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_version: Option<String>,
+    pub assessment: AssessmentBasis,
+}
+
+/// The slice of a routing assessment an audit keeps: enough to tell whether
+/// the auditor counts as independent, never the tiers behind the answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditAssessment {
+    pub independence: Independence,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub qualifiers: Vec<ReviewQualifier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_version: Option<String>,
+}
+
+/// Whether `version` is a route version arc will record: one token, no
+/// whitespace or control characters.
+pub fn validate_route_version(version: &str) -> anyhow::Result<()> {
+    if version.is_empty()
+        || version.len() > 64
+        || version
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch.is_control())
+    {
+        anyhow::bail!(
+            "route version {version:?} is not well formed: one token of at most 64 characters, \
+             without whitespace"
+        );
+    }
+    Ok(())
 }
 
 /// The effort a model string names in a trailing `#suffix`, when it names one.
@@ -1126,6 +1260,10 @@ pub enum Payload {
         /// production was kept.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         production: Option<DebtProduction>,
+        /// The read an `ineligible-review` debt names. Present exactly when
+        /// `missing` is that kind and the debt was declared with its read.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ineligible: Option<IneligibleRead>,
     },
     /// Dirty-tree evidence allowed to count, for one revision.
     ///
@@ -1159,6 +1297,11 @@ pub enum Payload {
         /// declared it. Absent means the audit was unrouted.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         route_version: Option<String>,
+        /// Routing's assessment of this auditor against the authors, when the
+        /// caller supplied one. An `ineligible-review` debt is discharged only
+        /// by an audit whose assessment is eligible.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assessment: Option<AuditAssessment>,
     },
     /// A finding raised by a post-integration audit. An audit that could only
     /// say approved-or-not would be a rubber stamp.
@@ -3242,6 +3385,66 @@ pub enum InferenceSource {
 
 #[cfg(test)]
 mod tests {
+    /// Events recorded before the read fields existed carry neither key, read
+    /// as the shapes they always meant, and serialize back without them.
+    #[test]
+    fn events_without_the_read_fields_read_and_write_unchanged() {
+        let debt = serde_json::json!({
+            "event_type": "debt-declared", "reason": "owed", "patchset_id": "ps-01",
+            "missing": "independent-review", "coverage": []
+        });
+        let Payload::DebtDeclared { ineligible, .. } =
+            serde_json::from_value::<Payload>(debt.clone()).unwrap()
+        else {
+            panic!("not a debt");
+        };
+        assert_eq!(ineligible, None);
+        let rewritten =
+            serde_json::to_value(serde_json::from_value::<Payload>(debt).unwrap()).unwrap();
+        assert!(rewritten.get("ineligible").is_none(), "{rewritten}");
+
+        let audit = serde_json::json!({
+            "event_type": "audit-verdict-recorded", "revision": "h1", "verdict": "approved"
+        });
+        let Payload::AuditVerdictRecorded { assessment, .. } =
+            serde_json::from_value::<Payload>(audit.clone()).unwrap()
+        else {
+            panic!("not an audit");
+        };
+        assert_eq!(assessment, None);
+        let rewritten =
+            serde_json::to_value(serde_json::from_value::<Payload>(audit).unwrap()).unwrap();
+        assert!(rewritten.get("assessment").is_none(), "{rewritten}");
+    }
+
+    #[test]
+    fn the_new_kind_sits_between_contributor_only_and_independent_review() {
+        let order: Vec<_> = DebtMissing::ALL.iter().map(|kind| kind.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "nothing-read",
+                "merge-resolution-unread",
+                "repair-unread",
+                "contributor-only",
+                "ineligible-review",
+                "independent-review"
+            ]
+        );
+        assert!(DebtMissing::ALL.windows(2).all(|pair| pair[0] < pair[1]));
+        for kind in DebtMissing::ALL {
+            let value = serde_json::to_value(kind).unwrap();
+            assert_eq!(value, kind.as_str());
+        }
+    }
+
+    #[test]
+    fn route_versions_are_one_token() {
+        assert!(validate_route_version("2026.10.12").is_ok());
+        assert!(validate_route_version("").is_err());
+        assert!(validate_route_version("a b").is_err());
+        assert!(validate_route_version(&"x".repeat(65)).is_err());
+    }
 
     #[test]
     fn coverage_session_relative_model_is_unrecorded() {

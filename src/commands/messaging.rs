@@ -11,6 +11,7 @@ struct DebtEntry {
     missing: Option<DebtMissing>,
     production: Option<DebtProduction>,
     coverage: Option<Vec<DebtCoverage>>,
+    ineligible: Option<crate::state::DebtRead>,
     review_subject: Option<crate::status::ReviewSubject>,
     declared_at: DateTime<Utc>,
     surfaces: Option<Vec<String>>,
@@ -34,7 +35,8 @@ impl DebtEntry {
             crate::render::debt_line(
                 self.missing,
                 self.production.as_ref(),
-                self.coverage.as_deref()
+                self.coverage.as_deref(),
+                self.ineligible.as_ref()
             ),
             self.surface_detail(),
             self.review_subject
@@ -96,6 +98,7 @@ impl DebtSummary {
                     entry.missing,
                     entry.production.as_ref(),
                     entry.coverage.as_deref(),
+                    entry.ineligible.as_ref(),
                 );
                 match &entry.review_subject {
                     Some(subject) => println!(
@@ -172,6 +175,7 @@ pub(crate) fn collect_debts(
             missing: debt.missing,
             production: debt.production.clone(),
             coverage: debt.coverage.clone(),
+            ineligible: debt.ineligible.clone(),
             review_subject: state
                 .debt_subject_patchset()
                 .map(crate::status::review_subject_for_patchset),
@@ -180,6 +184,7 @@ pub(crate) fn collect_debts(
         });
     }
     entries.sort_by(|a, b| a.change_id.cmp(&b.change_id));
+    let entries = crate::inbox::below_floor_first(entries, |entry| entry.ineligible.as_ref());
     let oldest = entries
         .iter()
         .map(|entry| entry.declared_at)
@@ -763,6 +768,7 @@ pub fn inbox(ctx: &Ctx, assigned_to: Option<String>, json: bool) -> Result<()> {
                             row.debt_missing,
                             row.debt_production.as_ref(),
                             row.debt_coverage.as_deref(),
+                            row.debt_ineligible.as_ref(),
                         )
                     );
                 }

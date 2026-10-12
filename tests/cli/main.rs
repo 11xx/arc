@@ -30,6 +30,7 @@ mod gate_declarations;
 mod gate_environment;
 mod hooks;
 mod import_authorization;
+mod ineligible_review;
 mod instructions;
 mod integrate;
 mod journal;

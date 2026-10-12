@@ -145,6 +145,10 @@ pub struct InboxRow {
     /// Who planned and who implemented the work, on a debt row.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub debt_production: Option<DebtProduction>,
+    /// The read an `ineligible-review` debt row names, and why routing did
+    /// not count it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debt_ineligible: Option<crate::state::DebtRead>,
     /// Why this change sits here, when the bucket cannot say so by name.
     /// Carried by `unclassified` rows, which exist precisely because no
     /// bucket name explains them.
@@ -282,6 +286,7 @@ impl Inbox {
             debt_missing: None,
             debt_coverage: None,
             debt_production: None,
+            debt_ineligible: None,
             reason: None,
             review_options: report.review_options.clone(),
         };
@@ -304,6 +309,7 @@ impl Inbox {
                 debt_missing: None,
                 debt_coverage: None,
                 debt_production: None,
+                debt_ineligible: None,
                 reason: None,
                 review_options: Vec::new(),
             }
@@ -391,6 +397,9 @@ impl Inbox {
             .sort_by_key(|row| std::cmp::Reverse(row.priority));
         self.debt_owed
             .sort_by_key(|row| std::cmp::Reverse(row.priority));
+        self.debt_owed = below_floor_first(std::mem::take(&mut self.debt_owed), |row| {
+            row.debt_ineligible.as_ref()
+        });
         self.unclassified
             .sort_by_key(|row| std::cmp::Reverse(row.priority));
     }
@@ -415,6 +424,7 @@ impl Inbox {
             debt_missing: debt.and_then(|debt| debt.missing),
             debt_coverage: debt.and_then(|debt| debt.coverage.clone()),
             debt_production: debt.and_then(|debt| debt.production.clone()),
+            debt_ineligible: debt.and_then(|debt| debt.ineligible.clone()),
             reason: None,
             review_options: Vec::new(),
         });
@@ -423,6 +433,33 @@ impl Inbox {
         self.debt_owed_by_kind =
             debt_kind_counts(self.debt_owed.iter().map(|row| row.debt_missing));
     }
+}
+
+/// Order the `ineligible-review` entries of a list among the positions that
+/// kind holds there, a `below-floor` read first and every other order kept.
+/// Entries of other kinds stay where they were, so a list ordered by anything
+/// else keeps that order.
+pub fn below_floor_first<T>(
+    items: Vec<T>,
+    read: impl Fn(&T) -> Option<&crate::state::DebtRead>,
+) -> Vec<T> {
+    let mut slots: Vec<Option<T>> = items.into_iter().map(Some).collect();
+    let positions: Vec<usize> = (0..slots.len())
+        .filter(|&index| {
+            slots[index]
+                .as_ref()
+                .is_some_and(|item| read(item).is_some())
+        })
+        .collect();
+    let mut picked: Vec<T> = positions
+        .iter()
+        .filter_map(|&index| slots[index].take())
+        .collect();
+    picked.sort_by_key(|item| !read(item).is_some_and(|read| read.below_floor()));
+    for (&index, item) in positions.iter().zip(picked) {
+        slots[index] = Some(item);
+    }
+    slots.into_iter().flatten().collect()
 }
 
 /// One kind of deficit and how many outstanding obligations carry it.
