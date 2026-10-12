@@ -2081,6 +2081,8 @@ REVIEW COVERAGE AND DEBT
     merge-resolution-unread  approved, then a resolution nobody read
     repair-unread            approved, then authored work nobody read
     contributor-only         verdicts on the shipped patchset, all its own
+    ineligible-review        a read happened, by a reviewer routing does not
+                             count as independent of the author
     independent-review       a read by somebody independent, unsupplied
 
   arc derives the kind from the ledger; `--kind <k>` on `arc debt` and on
@@ -2090,6 +2092,43 @@ REVIEW COVERAGE AND DEBT
   carried as a label rather than a number: `arc query --debt` works through
   the list above in order, then by age, and every summary row splits its
   count by kind rather than reporting one total.
+
+  `ineligible-review` is declared, never derived: arc holds no family, tier
+  or floor, so only routing's reading can say a read does not count.
+  `arc integrate --debt <why> --kind ineligible-review` (and `arc debt`)
+  records beside the debt:
+
+    read         the verdict event of that read: `--read <event>`, else the
+                 latest verdict on the patchset the debt covers. Refused when
+                 there is none
+    qualifiers   why it does not count, from the closed set same-model,
+                 same-family, below-floor, floor-unknown, reviewer-unseated
+                 (a reviewer holding no seated review tier)
+    assessment   `assessed` when `--assessment <file>` supplied them,
+                 `declared` when `--qualifier <q>` flags did
+    route_version  `--route-version`, or the assessment's, as a coordinate
+
+  The assessment file is `agent-routing assess --json` output, schema
+  `agent-routing-assessment/1`. arc keeps its `independence`, `qualifiers`
+  and `route_version`, never a tier, and validates shape only: qualifier
+  names from the closed set, a one-token route version, qualifiers present
+  exactly when the independence is `ineligible`. An `eligible` assessment is
+  refused on this kind, because there is no debt to record. A tier is
+  routing's reading at the time it is read, so every read shows the record
+  as its route version and basis say, never as current. Within the kind,
+  `arc query --debt`, the inbox, catchup and the workspace backlog put a
+  `below-floor` read first.
+
+  Only an audit clears it: `arc audit --assessment <file>` with
+  `independence: eligible`, by an auditor who is also independent of the
+  contributors. An audit without an assessment, or with an `ineligible`
+  one, is recorded and listed beside the obligation, which stays open, and
+  a verdict recorded since carries no assessment and does not clear it.
+  `arc query --debt`, `arc catchup`, `arc inbox`, the workspace backlog, the
+  debt advisory, `arc show` and `arc explain` show the qualifiers, the read's
+  reviewer and model as its verdict recorded them, whether the assessment
+  was assessed or declared, the route version, and the later reads that
+  left it open.
 
   Coverage names each verdict's reviewer, the model string it was cast under
   kept whole, the effort that string's trailing `#suffix` names, and the
@@ -2142,6 +2181,8 @@ REVIEW COVERAGE AND DEBT
   the merge or `arc audit` after. The debt records that no verdict existed,
   not that one command must supply it. What the verdict concluded lives in
   the verdict and its findings; discharging the debt does not mean approval.
+  The `ineligible-review` kind is the exception stated above: only an audit
+  with an eligible assessment clears it.
 
   An audit is a separate event from the verdict that shipped, so attaching one
   never rewrites what shipped with what review. An approving audit must come
