@@ -1265,7 +1265,8 @@ enum Cmd {
     /// unsafe path refuses the whole import. Content already held is not
     /// copied again, and installation is reported only after the events are
     /// published; a failure there says so and repeating the import finishes
-    /// it. Unavailable entries stay unavailable and the summary says
+    /// it. A ledger `custody/` or `custody/sha256` directory that is a symlink
+    /// refuses the import before any event is published. Unavailable entries stay unavailable and the summary says
     /// incomplete. A bundle that binds a sidecar imported without one reports
     /// how many references stay unavailable, the manifest it binds and the
     /// flag that installs it. Import initializes no replica. A listed `observed-commit` held here is pinned under
@@ -2628,7 +2629,7 @@ enum Cmd {
     /// to its name is the advice `custody-content-mismatch`, and a temporary
     /// file an interrupted custody write left over an hour ago is the advice
     /// `custody-temp-orphaned`; neither is removed. An unreadable custody
-    /// directory is the problem `custody-unreadable`.
+    /// directory, or one that is a symlink, is the problem `custody-unreadable`.
     /// A failed reachability walk is the problem `retention-reachability-failed`;
     /// the report retains all findings collected before that failure.
     /// A change whose events fail to reduce is the problem `unreplayable-change`,
@@ -3244,7 +3245,8 @@ enum ForgeCmd {
     /// corrupt (held bytes fail length or sha256), and says which generation
     /// or response it supports; absent bytes are never read as empty. A retry
     /// of an already recorded read with --custody-dir publishes bytes that
-    /// are missing or damaged.
+    /// are missing or damaged. Custody never follows a symlink: a ledger
+    /// `custody/` or `custody/sha256` that is one refuses the write.
     Observe {
         /// Change whose append-only ledger receives the read
         change: String,

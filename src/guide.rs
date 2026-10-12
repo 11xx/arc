@@ -857,7 +857,8 @@ RUN A CHANGE
   lists other content than the bundled events reference, claims completeness
   over an unavailable entry or names a path other than `sha256/<digest>`; or
   when its content is a symlink, is not a regular file or differs in length
-  or SHA-256 from its entry. Verified files are copied into ledger custody
+  or SHA-256 from its entry, or when the ledger's `custody/` or
+  `custody/sha256` directory is a symlink. Verified files are copied into ledger custody
   unless already held, before the events that cite them are published, and
   the summary counts installed, held and unavailable content. Unavailable
   entries stay unavailable and the import says incomplete. Importing a bundle
@@ -1837,7 +1838,11 @@ FORGE
   A reference is a claim until ledger custody holds its bytes. Custody keeps
   content under `custody/sha256/<digest>` in the ledger directory
   (`<git-common-dir>/arc/` unless configured otherwise), writes each file
-  atomically, and re-verifies the recorded length and sha256 on every read. A
+  atomically, and re-verifies the recorded length and sha256 on every read. It
+  never follows a symlink: a `custody/` or `custody/sha256` directory that is
+  one is refused by every read and write, so nothing is created, replaced or
+  read outside the ledger, and a symlink in place of a digest's file reads as
+  corrupt and is replaced rather than followed. A
   reference reads as available; unavailable, when no bytes are held; or
   corrupt, when held bytes fail verification. Absent bytes are never empty
   content, and missing content degrades only the generations and responses
@@ -1865,7 +1870,8 @@ FORGE
   to its name, which arc reads as corrupt, and `custody-temp-orphaned` for a
   hidden temporary file an interrupted write left more than an hour ago. It
   removes and rewrites nothing, and neither finding fails the command. A
-  custody directory that cannot be read is the problem `custody-unreadable`.
+  custody directory that cannot be read, or is a symlink, is the problem
+  `custody-unreadable`.
 
   coverage has overall and collections entries. Each has state (complete,
   truncated or failed), scope, optional frontier and failure_reason (required

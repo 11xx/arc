@@ -8,14 +8,17 @@
 //! resolves a provider handle: bytes arrive as files an adapter materialized
 //! or inside a sidecar an export wrote, and are verified before they are
 //! published.
+mod anchored;
+
 use crate::model::Payload;
+use anchored::{Dir, Symlinked};
 use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
 pub const SIDECAR_SCHEMA: &str = "arc-custody-bundle/1";
@@ -144,21 +147,25 @@ fn stream(
     Ok(Verdict::Verified)
 }
 
-fn inspect(path: &Path, content: &Content) -> Availability {
-    if !is_digest(&content.sha256) {
-        return Availability::Corrupt("the recorded digest is not a sha256".into());
-    }
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
+/// Read the state of the entry named for `content` in `directory`.
+fn inspect(directory: &Dir, content: &Content) -> Availability {
+    let file = match directory.open_entry(&content.sha256) {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Availability::Unavailable
         }
+        Err(error) if Dir::refused_link(&error) => {
+            return Availability::Corrupt("not a regular file".into())
+        }
         Err(error) => return Availability::Corrupt(format!("unreadable: {error}")),
     };
-    if !metadata.file_type().is_file() {
-        return Availability::Corrupt("not a regular file".into());
+    match file.metadata() {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Availability::Corrupt("not a regular file".into()),
+        Err(error) => return Availability::Corrupt(format!("unreadable: {error}")),
     }
-    match File::open(path).and_then(|mut file| stream(&mut file, content, None)) {
+    let mut file = file;
+    match stream(&mut file, content, None) {
         Ok(Verdict::Verified) => Availability::Available,
         Ok(Verdict::Mismatch(reason)) => Availability::Corrupt(reason),
         Err(error) => Availability::Corrupt(format!("unreadable: {error}")),
@@ -173,6 +180,24 @@ enum Visibility {
     Shared,
 }
 
+impl Visibility {
+    fn file_mode(self) -> u32 {
+        match self {
+            Visibility::Private => 0o600,
+            Visibility::Shared => 0o666,
+        }
+    }
+
+    fn directory_mode(self) -> u32 {
+        match self {
+            Visibility::Private => 0o700,
+            Visibility::Shared => 0o777,
+        }
+    }
+}
+
+/// Create `path` and any missing ancestors. The caller has chosen the path and
+/// is trusted to have chosen a real location.
 fn create_dirs(path: &Path, visibility: Visibility) -> Result<()> {
     match visibility {
         Visibility::Private => fs::DirBuilder::new()
@@ -184,82 +209,65 @@ fn create_dirs(path: &Path, visibility: Visibility) -> Result<()> {
     .with_context(|| format!("cannot create {}", path.display()))
 }
 
-/// Write `bytes` beside `destination` and rename them into place, so a reader
-/// sees the whole file or none of it.
-fn write_atomic(destination: &Path, bytes: &[u8], visibility: Visibility) -> Result<()> {
-    let directory = destination
-        .parent()
-        .context("destination has no parent directory")?;
-    create_dirs(directory, visibility)?;
-    let name = destination
-        .file_name()
-        .context("destination has no file name")?
-        .to_string_lossy();
-    let temporary = directory.join(format!(".{name}.{}.tmp", crate::ids::new_identifier()));
+fn open_new(directory: &Dir, name: &str, visibility: Visibility) -> Result<File> {
+    directory
+        .create_file(name, visibility.file_mode())
+        .with_context(|| format!("cannot create {}", directory.path().join(name).display()))
+}
+
+/// Move the finished `temporary` entry over `name` and make the rename
+/// durable.
+fn publish_entry(directory: &Dir, temporary: &str, name: &str) -> Result<()> {
+    directory
+        .rename(temporary, name)
+        .with_context(|| format!("cannot publish {}", directory.path().join(name).display()))?;
+    directory.sync()?;
+    Ok(())
+}
+
+/// Write `bytes` beside `name` and rename them into place, so a reader sees
+/// the whole file or none of it.
+fn write_atomic(directory: &Dir, name: &str, bytes: &[u8], visibility: Visibility) -> Result<()> {
+    let temporary = format!(".{name}.{}.tmp", crate::ids::new_identifier());
     let result = (|| -> Result<()> {
-        let mut file = open_new(&temporary, visibility)?;
+        let mut file = open_new(directory, &temporary, visibility)?;
         file.write_all(bytes)?;
         file.sync_all()?;
-        fs::rename(&temporary, destination)
-            .with_context(|| format!("cannot publish {}", destination.display()))?;
-        File::open(directory)?.sync_all()?;
-        Ok(())
+        publish_entry(directory, &temporary, name)
     })();
     if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+        let _ = directory.remove_file(&temporary);
     }
     result
 }
 
-fn open_new(path: &Path, visibility: Visibility) -> Result<File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    if matches!(visibility, Visibility::Private) {
-        options.mode(0o600);
-    }
-    options
-        .open(path)
-        .with_context(|| format!("cannot create {}", path.display()))
-}
-
-/// Copy a regular file to `destination` through a temporary sibling, verifying
-/// the bytes actually copied against `content`. Nothing is published unless
-/// they match.
+/// Copy a regular file to `name` of `directory` through a temporary sibling,
+/// verifying the bytes actually copied against `content`. Nothing is
+/// published unless they match.
 fn publish_verified(
-    source: &Path,
-    destination: &Path,
+    mut input: File,
+    origin: &Path,
+    directory: &Dir,
+    name: &str,
     content: &Content,
     visibility: Visibility,
 ) -> Result<()> {
-    let mut input =
-        File::open(source).with_context(|| format!("cannot read {}", source.display()))?;
     ensure!(
         input.metadata()?.is_file(),
         "{} is not a regular file",
-        source.display()
+        origin.display()
     );
-    let directory = destination
-        .parent()
-        .context("destination has no parent directory")?;
-    create_dirs(directory, visibility)?;
-    let temporary = directory.join(format!(
-        ".{}.{}.tmp",
-        content.sha256,
-        crate::ids::new_identifier()
-    ));
+    let temporary = format!(".{}.{}.tmp", content.sha256, crate::ids::new_identifier());
     let result = (|| -> Result<()> {
-        let mut output = open_new(&temporary, visibility)?;
+        let mut output = open_new(directory, &temporary, visibility)?;
         if let Verdict::Mismatch(reason) = stream(&mut input, content, Some(&mut output))? {
             bail!("content {} {reason}", short(&content.sha256));
         }
         output.sync_all()?;
-        fs::rename(&temporary, destination)
-            .with_context(|| format!("cannot publish {}", destination.display()))?;
-        File::open(directory)?.sync_all()?;
-        Ok(())
+        publish_entry(directory, &temporary, name)
     })();
     if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+        let _ = directory.remove_file(&temporary);
     }
     result
 }
@@ -284,8 +292,13 @@ pub fn safe_relative(path: &str) -> Result<()> {
 }
 
 /// What a ledger holds for the references it records.
+///
+/// Custody lives in `custody/sha256` under the ledger root. Neither directory
+/// is ever followed through a symlink: a link there would carry reads and
+/// writes outside the ledger, so every access resolves the two directories
+/// afresh without following links and then works inside the handle.
 pub struct Custody {
-    objects: PathBuf,
+    root: PathBuf,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -297,12 +310,45 @@ pub enum Installed {
 impl Custody {
     pub fn at(ledger_root: &Path) -> Custody {
         Custody {
-            objects: ledger_root.join("custody").join(LAYOUT),
+            root: ledger_root.to_path_buf(),
         }
     }
 
     pub fn path(&self, sha256: &str) -> PathBuf {
-        self.objects.join(sha256)
+        self.root.join("custody").join(LAYOUT).join(sha256)
+    }
+
+    /// The directory that holds the bytes. An absent one is `None` unless it
+    /// is being `create`d; a symlink anywhere below the ledger root is
+    /// refused.
+    fn objects(&self, create: bool) -> Result<Option<Dir>> {
+        if create {
+            create_dirs(&self.root, Visibility::Private)?;
+        }
+        let root = match Dir::open_root(&self.root) {
+            Ok(root) => root,
+            Err(error) if !create && error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None)
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("cannot open ledger {}", self.root.display()))
+            }
+        };
+        let mode = create.then(|| Visibility::Private.directory_mode());
+        let Some(custody) = root.descend("custody", mode)? else {
+            return Ok(None);
+        };
+        custody.descend(LAYOUT, mode)
+    }
+
+    /// Refuse a custody directory that is a symlink, before anything is
+    /// written. Absent or unusable directories are left to the write itself.
+    pub fn verify_destination(&self) -> Result<()> {
+        match self.objects(false) {
+            Err(error) if error.is::<Symlinked>() => Err(error),
+            _ => Ok(()),
+        }
     }
 
     /// Read the bytes' state, verifying length and digest.
@@ -310,18 +356,27 @@ impl Custody {
         if !is_digest(&content.sha256) {
             return Availability::Corrupt("the recorded digest is not a sha256".into());
         }
-        inspect(&self.path(&content.sha256), content)
+        match self.objects(false) {
+            Ok(Some(directory)) => inspect(&directory, content),
+            Ok(None) => Availability::Unavailable,
+            Err(error) => Availability::Corrupt(format!("unreadable: {error:#}")),
+        }
+    }
+
+    /// The held entry for `content`, opened without following a link.
+    fn open_held(&self, content: &Content) -> Result<File> {
+        let directory = self
+            .objects(false)?
+            .with_context(|| format!("no custody for {}", short(&content.sha256)))?;
+        directory
+            .open_entry(&content.sha256)
+            .with_context(|| format!("cannot read {}", self.path(&content.sha256).display()))
     }
 
     /// Read exact bytes from one regular descriptor, checking its length and digest.
     pub fn read_bytes(&self, content: &Content) -> Result<Vec<u8>> {
         ensure!(is_digest(&content.sha256), "invalid custody digest");
-        const O_NOFOLLOW: i32 = 0x20000;
-        const O_NONBLOCK: i32 = 0x800;
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(O_NOFOLLOW | O_NONBLOCK)
-            .open(self.path(&content.sha256))?;
+        let file = self.open_held(content)?;
         ensure!(
             file.metadata()?.is_file(),
             "custody source is not a regular file"
@@ -347,9 +402,14 @@ impl Custody {
         if self.availability(content).is_available() {
             return Ok(Installed::AlreadyHeld);
         }
+        let input =
+            File::open(source).with_context(|| format!("cannot read {}", source.display()))?;
+        let directory = self.objects(true)?.context("custody directory is absent")?;
         publish_verified(
+            input,
             source,
-            &self.path(&content.sha256),
+            &directory,
+            &content.sha256,
             content,
             Visibility::Private,
         )?;
@@ -581,7 +641,11 @@ pub fn export_sidecar(
         staging: Some(staging.clone()),
         destination: dir.to_path_buf(),
     };
-    create_dirs(&staging.join(LAYOUT), Visibility::Shared)?;
+    let staging_dir =
+        Dir::open_root(&staging).with_context(|| format!("cannot open {}", staging.display()))?;
+    let layout = staging_dir
+        .descend(LAYOUT, Some(Visibility::Shared.directory_mode()))?
+        .context("the staged sidecar has no layout directory")?;
     let mut entries = Vec::new();
     for content in wanted {
         let state = custody.availability(content);
@@ -596,8 +660,10 @@ pub fn export_sidecar(
             Availability::Available => {
                 let path = format!("{LAYOUT}/{}", content.sha256);
                 publish_verified(
+                    custody.open_held(content)?,
                     &custody.path(&content.sha256),
-                    &staging.join(&path),
+                    &layout,
+                    &content.sha256,
                     content,
                     Visibility::Shared,
                 )?;
@@ -621,7 +687,7 @@ pub fn export_sidecar(
     };
     let mut bytes = serde_json::to_vec_pretty(&manifest)?;
     bytes.push(b'\n');
-    write_atomic(&staging.join(MANIFEST_FILE), &bytes, Visibility::Shared)?;
+    write_atomic(&staging_dir, MANIFEST_FILE, &bytes, Visibility::Shared)?;
     Ok((
         Exported {
             binding: Binding {
@@ -877,39 +943,41 @@ pub enum Damage {
 /// temporary file is an orphan once it is old enough that no write can still
 /// be filling it. Mismatches come first.
 pub fn audit(ledger_root: &Path, now: std::time::SystemTime) -> Result<Vec<Damage>> {
-    let objects = ledger_root.join("custody").join(LAYOUT);
-    let entries = match fs::read_dir(&objects) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => {
-            return Err(error).with_context(|| format!("cannot read {}", objects.display()))
-        }
+    let custody = Custody::at(ledger_root);
+    let Some(directory) = custody.objects(false)? else {
+        return Ok(Vec::new());
     };
-    let mut names = entries
-        .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
-        .collect::<std::io::Result<Vec<_>>>()?;
+    let objects = directory.path().to_path_buf();
+    let mut names = directory
+        .names()
+        .with_context(|| format!("cannot read {}", objects.display()))?;
     names.sort();
     let mut mismatched = Vec::new();
     let mut orphaned = Vec::new();
     for name in names {
         let path = objects.join(&name);
-        let metadata = fs::symlink_metadata(&path)?;
+        let opened = directory.open_entry(&name);
         if is_digest(&name) {
-            let reason = if !metadata.file_type().is_file() {
-                Some("not a regular file".to_string())
-            } else {
-                match hash_file(&path) {
-                    Ok(actual) if actual == name => None,
-                    Ok(actual) => Some(format!("its bytes hash to {actual}")),
+            let reason = match opened {
+                Ok(mut file) => match file.metadata() {
+                    Ok(metadata) if metadata.is_file() => match hash_file(&mut file) {
+                        Ok(actual) if actual == name => None,
+                        Ok(actual) => Some(format!("its bytes hash to {actual}")),
+                        Err(error) => Some(format!("unreadable: {error}")),
+                    },
+                    Ok(_) => Some("not a regular file".to_string()),
                     Err(error) => Some(format!("unreadable: {error}")),
-                }
+                },
+                Err(error) if Dir::refused_link(&error) => Some("not a regular file".to_string()),
+                Err(error) => Some(format!("unreadable: {error}")),
             };
             if let Some(reason) = reason {
                 mismatched.push(Damage::Mismatch { path, reason });
             }
         } else if name.starts_with('.') && name.ends_with(".tmp") {
-            let age = metadata
-                .modified()
+            let age = opened
+                .and_then(|file| file.metadata())
+                .and_then(|metadata| metadata.modified())
                 .ok()
                 .and_then(|modified| now.duration_since(modified).ok())
                 .unwrap_or_default();
@@ -922,8 +990,7 @@ pub fn audit(ledger_root: &Path, now: std::time::SystemTime) -> Result<Vec<Damag
     Ok(mismatched)
 }
 
-fn hash_file(path: &Path) -> std::io::Result<String> {
-    let mut file = File::open(path)?;
+fn hash_file(file: &mut File) -> std::io::Result<String> {
     let mut hash = Sha256::new();
     let mut buffer = vec![0u8; CHUNK];
     loop {
@@ -1060,6 +1127,84 @@ mod tests {
         staged.publish().unwrap();
         assert!(destination.join(MANIFEST_FILE).is_file());
         assert_eq!(siblings(&dir.path().join("out")), 1);
+    }
+
+    #[test]
+    fn a_symlinked_custody_directory_is_refused_for_every_access() {
+        for link in ["custody", "custody/sha256"] {
+            let dir = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            let custody = Custody::at(dir.path());
+            let body = content("body");
+            let source = dir.path().join("source");
+            fs::write(&source, "body").unwrap();
+            // Bytes held at the link's target do not make a reference available.
+            fs::write(outside.path().join(&body.sha256), "body").unwrap();
+            let link_path = dir.path().join(link);
+            fs::create_dir_all(link_path.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(outside.path(), &link_path).unwrap();
+
+            assert!(
+                matches!(custody.availability(&body), Availability::Corrupt(_)),
+                "{link}"
+            );
+            assert!(custody.read_bytes(&body).is_err(), "{link}");
+            assert!(custody.verify_destination().is_err(), "{link}");
+            assert!(audit(dir.path(), std::time::SystemTime::now()).is_err());
+            let error = custody.install(&body, &source).unwrap_err();
+            assert!(error.is::<Symlinked>(), "{link}: {error:#}");
+            let others: Vec<_> = fs::read_dir(outside.path())
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            assert_eq!(others.len(), 1, "{link}: {others:?}");
+            assert_eq!(
+                fs::read(outside.path().join(&body.sha256)).unwrap(),
+                b"body"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dangling_symlink_where_custody_belongs_is_refused_not_created_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("absent");
+        std::os::unix::fs::symlink(&target, dir.path().join("custody")).unwrap();
+        let source = dir.path().join("source");
+        fs::write(&source, "body").unwrap();
+        let error = Custody::at(dir.path())
+            .install(&content("body"), &source)
+            .unwrap_err();
+        assert!(error.is::<Symlinked>(), "{error:#}");
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn a_custody_entry_is_never_read_through_a_link_or_a_pipe() {
+        let dir = tempfile::tempdir().unwrap();
+        let custody = Custody::at(dir.path());
+        let body = content("body");
+        let objects = dir.path().join("custody/sha256");
+        fs::create_dir_all(&objects).unwrap();
+        let outside = dir.path().join("outside");
+        fs::write(&outside, "body").unwrap();
+        std::os::unix::fs::symlink(&outside, objects.join(&body.sha256)).unwrap();
+        assert!(matches!(
+            custody.availability(&body),
+            Availability::Corrupt(_)
+        ));
+        assert!(custody.read_bytes(&body).is_err());
+
+        // A pipe in the entry's place reads as damage instead of blocking.
+        fs::remove_file(objects.join(&body.sha256)).unwrap();
+        let pipe = std::ffi::CString::new(objects.join(&body.sha256).to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(pipe.as_ptr(), 0o600) }, 0);
+        assert!(matches!(
+            custody.availability(&body),
+            Availability::Corrupt(_)
+        ));
+        assert!(custody.read_bytes(&body).is_err());
     }
 
     #[test]

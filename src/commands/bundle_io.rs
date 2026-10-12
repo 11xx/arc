@@ -359,6 +359,11 @@ fn import_events(
         }
     }
     let root = Store::resolve_root(&ctx.cwd)?;
+    if sidecar.is_some() {
+        crate::custody::Custody::at(&root)
+            .verify_destination()
+            .context("cannot install custody; nothing was imported")?;
+    }
     let local_repository_id = Store::repository_id_at(&root)?;
     let local_store = local_repository_id.as_ref().map(|repository_id| Store {
         operator_policy_path: crate::policy::operator_path(&ctx.cwd).ok(),

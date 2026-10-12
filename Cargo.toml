@@ -23,6 +23,7 @@ clap = { version = "4", features = ["derive", "env", "string"] }
 clap_complete = "4"
 clap_mangen = "0.2"
 hostname = "0.4"
+libc = "0.2"
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }

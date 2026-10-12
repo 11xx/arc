@@ -1231,3 +1231,136 @@ fn forge_bundle_in_the_earlier_object_roles_still_imports() {
         .failure()
         .stderr(predicates::str::contains("missing bundled Git objects"));
 }
+
+/// A directory outside any ledger that a custody ancestor is made to point at.
+fn redirected(repo: &Repo, ancestor: &str) -> PathBuf {
+    let outside = repo.home.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let link = repo.root.join(".git/arc").join(ancestor);
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    outside
+}
+
+fn observed_with(repo: &Repo, id: &str, supplied: &Path) -> std::process::Output {
+    fs::write(
+        repo.root.join("frontier.json"),
+        document("read-1", "g1", "first", None).to_string(),
+    )
+    .unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "forge",
+            "observe",
+            id,
+            "--file",
+            "frontier.json",
+            "--custody-dir",
+            supplied.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn a_symlinked_custody_ancestor_never_redirects_observe_writes() {
+    for ancestor in ["custody", "custody/sha256"] {
+        let (repo, id) = setup();
+        let supplied = repo.home.join("supplied");
+        materialize(&supplied, &["first", PAGE]);
+        let outside = if ancestor == "custody" {
+            redirected(&repo, "custody")
+        } else {
+            fs::create_dir_all(repo.root.join(".git/arc/custody")).unwrap();
+            redirected(&repo, "custody/sha256")
+        };
+        // A file already named for a requested digest is not replaced.
+        let held = outside.join(digest("first"));
+        fs::write(&held, "not the bytes").unwrap();
+        let before = files_in(&outside);
+        let output = observed_with(&repo, &id, &supplied);
+        assert!(
+            !output.status.success(),
+            "{ancestor}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert!(err.contains("symlink"), "{ancestor}: {err}");
+        assert_eq!(files_in(&outside), before, "{ancestor}");
+        assert_eq!(fs::read(&held).unwrap(), b"not the bytes", "{ancestor}");
+        // Nothing was recorded either: the refusal precedes the event.
+        let state = stdout(repo.arc(&repo.root).args(["forge", "show", &id, "--json"]));
+        assert!(!state.contains("read-1"), "{ancestor}: {state}");
+    }
+}
+
+#[test]
+fn a_symlinked_custody_file_is_replaced_not_followed() {
+    let (repo, id) = setup();
+    let supplied = repo.home.join("supplied");
+    materialize(&supplied, &["first", PAGE]);
+    let objects = repo.root.join(".git/arc/custody/sha256");
+    fs::create_dir_all(&objects).unwrap();
+    let outside = repo.home.join("outside-file");
+    fs::write(&outside, "not the bytes").unwrap();
+    std::os::unix::fs::symlink(&outside, objects.join(digest("first"))).unwrap();
+    let output = observed_with(&repo, &id, &supplied);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(fs::read(&outside).unwrap(), b"not the bytes");
+    let held = custody_file(&repo, "first");
+    assert!(fs::symlink_metadata(&held).unwrap().file_type().is_file());
+    assert_eq!(fs::read(&held).unwrap(), b"first");
+}
+
+#[test]
+fn a_symlinked_custody_ancestor_is_refused_before_import_publishes() {
+    let (source, _id, bundle, sidecar) = exported_with_custody();
+    let replica = Repo::new();
+    deliver_git_objects(&source, &replica);
+    let outside = redirected(&replica, "custody");
+    let output = admitted_change_command(&replica, &bundle)
+        .args(["--custody-dir", sidecar.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(err.contains("symlink"), "{err}");
+    assert!(
+        !err.contains("events are published"),
+        "refused only after publishing: {err}"
+    );
+    assert_eq!(published_batches(&replica), 0);
+    assert!(files_in(&outside).is_empty(), "{:?}", files_in(&outside));
+}
+
+#[test]
+fn doctor_and_reads_do_not_follow_a_symlinked_custody_ancestor() {
+    let (repo, id) = setup();
+    let supplied = repo.home.join("supplied");
+    materialize(&supplied, &["first", PAGE]);
+    observe_in(
+        &repo,
+        &id,
+        &document("read-1", "g1", "first", None),
+        Some(&supplied),
+    );
+    // Valid bytes held elsewhere do not make the reference available here.
+    let real = repo.root.join(".git/arc/custody");
+    let moved = repo.home.join("moved-custody");
+    fs::rename(&real, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &real).unwrap();
+    let found = doctor_custody(&repo);
+    assert!(
+        found
+            .iter()
+            .any(|(code, detail)| code == "custody-unreadable" && detail.contains("symlink")),
+        "{found:?}"
+    );
+    let mut show = repo.arc(&repo.root);
+    show.args(["forge", "observe", &id, "--file", "frontier.json"]);
+    let receipt = stdout(&mut show);
+    assert!(
+        receipt.contains("0 available"),
+        "followed the link: {receipt}"
+    );
+}
