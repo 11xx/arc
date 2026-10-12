@@ -1783,7 +1783,9 @@ FORGE
   null), recipient_access_basis, omissions, outgoing RetainedContentRef and exact
   readback source generation. A selected source names a forge generation,
   a ledger event (change_id/event), or Git support (change_id/commit); Git
-  support uses a full held commit ID and travels with the object closure.
+  support uses a full lowercase held commit ID, never a tag or blob, is pinned
+  under refs/arc/retained/ before the declaration is recorded, and travels with
+  the object closure where this repository holds the commit.
   Repository-scoped ledger sources name change_id=repository and travel with
   repository events rather than a related change.
   Outgoing and readback digests and lengths must

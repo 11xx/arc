@@ -616,14 +616,26 @@ pub fn declare(ctx: &Ctx, args: DeclareArgs) -> Result<()> {
             );
         }
     }
-    subject.append(&store, &mut event)?;
-    for commit in crate::forge_round_trip::disclosure_commits(&event.payload) {
+    // Pinned before it is recorded: the event's own ID is issued by the
+    // append, so each commit is held under a pending name until the ref the
+    // event names exists. A failed pin appends nothing.
+    let commits: Vec<String> = crate::forge_round_trip::disclosure_commits(&event.payload)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let pending = pin_pending(ctx, subject.ledger_scope(), &commits)?;
+    if let Err(error) = subject.append(&store, &mut event) {
+        release_pending(ctx, &pending);
+        return Err(error);
+    }
+    for commit in &commits {
         gitio::update_ref(
             &ctx.cwd,
             &gitio::retained_ref(subject.ledger_scope(), &event.event_id, commit),
             commit,
         )?;
     }
+    release_pending(ctx, &pending);
     if let Some(comment) = disclosure.as_ref().and_then(|d| d.comment.as_ref()) {
         println!("{}", comment.compact_line());
     }
@@ -637,6 +649,30 @@ pub fn declare(ctx: &Ctx, args: DeclareArgs) -> Result<()> {
     }
     println!("  event: {}", event.event_id);
     Ok(())
+}
+
+/// Hold each commit under a name no event owns yet, so that nothing recorded
+/// afterwards cites a commit Git may collect. A failure releases what it held.
+fn pin_pending(ctx: &Ctx, scope: &str, commits: &[String]) -> Result<Vec<String>> {
+    let token = format!("pending-{}", ulid::Ulid::new());
+    let mut held = Vec::new();
+    for commit in commits {
+        let name = gitio::retained_ref(scope, &token, commit);
+        if let Err(error) = gitio::update_ref(&ctx.cwd, &name, commit) {
+            release_pending(ctx, &held);
+            return Err(error);
+        }
+        held.push(name);
+    }
+    Ok(held)
+}
+
+/// A pending name that cannot be removed only holds a commit longer; the
+/// declaration it belonged to has either failed or holds its own ref.
+fn release_pending(ctx: &Ctx, names: &[String]) {
+    for name in names {
+        let _ = gitio::delete_ref(&ctx.cwd, name);
+    }
 }
 
 pub fn capture(

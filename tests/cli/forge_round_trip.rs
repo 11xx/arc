@@ -616,6 +616,21 @@ fn recorded_git_support_that_is_a_held_tag_is_unavailable_unexported_and_unpinne
 }
 
 #[test]
+fn disclosure_git_support_pins_before_it_records() {
+    let (repo, id) = setup();
+    let head = repo.head(&repo.root);
+    let observation = observe(&repo, &id, "read-1", "g1", "public bytes", None);
+    // A ref named for the namespace's parent blocks every retention ref
+    // beneath it, so the pin fails after the declaration is otherwise valid.
+    git(&repo.root, &["update-ref", "refs/arc/retained", &head]);
+    let before = event_count(&repo, &id);
+    git_support(&repo, &id, &observation, &head)
+        .assert()
+        .failure();
+    assert_eq!(event_count(&repo, &id), before);
+}
+
+#[test]
 fn disclosure_repository_ledger_source_exports_without_a_fake_related_change() {
     let (repo, id) = setup();
     let observation = observe(&repo, &id, "read-1", "g1", "public bytes", None);

@@ -3971,6 +3971,10 @@ enum ContextCmd {
     ///
     /// --disclosure-file verifies outgoing/readback byte identity against custody;
     /// accessible Git/forge support and withheld private assertions stay labelled.
+    /// Git support names a held commit by its full lowercase object ID: an
+    /// abbreviation, uppercase spelling, held tag or blob, or absent object is
+    /// refused, and each commit is pinned under `refs/arc/retained/` before the
+    /// declaration is recorded.
     /// It records locally and never renders or publishes externally.
     /// A declaration is attributed to its declarant, never checked against
     /// what was read, and never becomes a read. `--citation` points it at a
