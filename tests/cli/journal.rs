@@ -16869,6 +16869,90 @@ fn transition_retry_verifies_prepared_custom_body_and_preserves_prefix_evidence(
     );
 }
 
+/// `--json` help names the report each command emits.
+#[test]
+fn doctor_and_open_json_help_describe_their_own_reports() {
+    let repo = Repo::new();
+    let doctor = stdout(repo.arc(&repo.root).args(["journal", "doctor", "--help"]));
+    assert!(!doctor.contains("arc-journal-open"), "{doctor}");
+    assert!(!doctor.contains("pending recovery bucket"), "{doctor}");
+    let report = json_stdout(repo.arc(&repo.root).args(["journal", "doctor", "--json"]));
+    assert!(report.get("schema").is_none(), "{report}");
+    assert!(report["problems"].is_array() && report["advice"].is_array());
+    let open = stdout(repo.arc(&repo.root).args(["journal", "open", "--help"]));
+    assert!(open.contains("arc-journal-open/1"), "{open}");
+    assert!(open.contains("pending recovery bucket"), "{open}");
+}
+
+/// A successor whose publication evidence is incomplete is a pending
+/// transition; no writer may treat it as a live source.
+#[test]
+fn pending_successor_is_refused_as_a_transition_source_and_claim_target() {
+    let repo = Repo::new();
+    let source = filed_artifact(&repo, "todo", "pending-source", "source work\n");
+    stdout(
+        repo.arc(&repo.root)
+            .env("ARC_SESSION", "pending-writer")
+            .args([
+                "journal",
+                "transition",
+                &source,
+                "--to",
+                "handoff",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("The full successor body.\n"),
+    );
+    let dir = journal_dir(&repo);
+    let mut events = journal_events(&dir);
+    let relation = events
+        .iter()
+        .find(|event| event["event"] == "transition")
+        .unwrap()
+        .clone();
+    let successor = relation["file"].as_str().unwrap().to_string();
+    let path = dir.join(&successor);
+    let complete = fs::read(&path).unwrap();
+    events.retain(|event| !(event["event"] == "consumed" && event["file"] == source));
+    let log = events
+        .iter()
+        .map(|event| format!("{event}\n"))
+        .collect::<String>();
+    fs::write(dir.join("events.jsonl"), &log).unwrap();
+    fs::create_dir_all(dir.join(".transitions")).unwrap();
+    fs::write(dir.join(".transitions").join(&successor), &complete).unwrap();
+    let prefix = format!("supersedes: {source}\n\n# Pending\nThe full ");
+    fs::write(&path, &prefix).unwrap();
+    for target in ["plan", "later"] {
+        repo.arc(&repo.root)
+            .args(["journal", "transition", &successor, "--to", target])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("pending transition"));
+    }
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "transition",
+            &successor,
+            "--to",
+            "plan",
+            "--dry-run",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("pending transition"));
+    repo.arc(&repo.root)
+        .env("ARC_SESSION", "pending-claimer")
+        .args(["claim", &successor])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("pending transition"));
+    assert_eq!(fs::read(&path).unwrap(), prefix.as_bytes());
+    assert_eq!(fs::read_to_string(dir.join("events.jsonl")).unwrap(), log);
+}
+
 #[test]
 fn committed_promotion_cleanup_refuses_changed_bodies_and_relation_identity() {
     use std::os::unix::fs::PermissionsExt;

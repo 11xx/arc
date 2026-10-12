@@ -564,7 +564,7 @@ pub enum JournalCmd {
     /// evidence, question, and answer markers terminate an open fence.
     /// Records no events; ledger reads do not require a parseable append policy.
     Doctor {
-        /// Emit arc-journal-open/1 JSON, including the pending recovery bucket
+        /// Emit JSON with the journal dir, the problems, and the advice
         #[arg(long)]
         json: bool,
     },
@@ -1132,7 +1132,7 @@ pub enum JournalCmd {
         /// Restrict to one actionable kind; lower-priority tiers stay separate
         #[arg(long, value_parser = parse_journal_kind_filter)]
         kind: Option<String>,
-        /// Emit structured JSON instead of text
+        /// Emit arc-journal-open/1 JSON, including the pending recovery bucket
         #[arg(long)]
         json: bool,
     },
@@ -1292,7 +1292,9 @@ pub enum JournalCmd {
     /// and directory before recording the relation. Retry uses those staged bytes.
     /// Plan targets require valid inherited planner metadata or --no-planner.
     /// A legacy successor requires verification against the original body and title;
-    /// a mismatch preserves the artifact and refuses retirement.
+    /// a mismatch preserves the artifact and refuses retirement. A successor
+    /// whose publication evidence is incomplete is a pending transition and
+    /// is refused as a source; retry the transition that created it.
     Transition {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
@@ -9924,6 +9926,16 @@ fn pending_transition(dir: &Path, events: &[JournalEvent], file: &str) -> bool {
     })
 }
 
+/// A successor whose publication evidence is incomplete is not live work:
+/// promoting, converting, or claiming it would carry partial bytes forward.
+/// Its source transition is what completes it.
+fn refuse_pending_successor(dir: &Path, events: &[JournalEvent], file: &str) -> Result<()> {
+    if pending_transition(dir, events, file) {
+        bail!("{file} is a pending transition without complete publication evidence; retry its source transition before promotion");
+    }
+    Ok(())
+}
+
 /// Whether an artifact can be picked up, and what is known about who has.
 fn artifact_availability(
     events: &[JournalEvent],
@@ -10273,6 +10285,7 @@ fn claim_context(ctx: &Ctx, file: &str) -> Result<ClaimContext> {
     }
     let events = read_events(&dir)?;
     ensure_storage_settled(&dir, &events, file)?;
+    refuse_pending_successor(&dir, &events, file)?;
     Ok(ClaimContext {
         dir,
         anchor: resolution.anchor,
@@ -15797,9 +15810,7 @@ pub fn require_open_actionable(ctx: &Ctx, reference: &str) -> Result<String> {
         return Err(missing_artifact(&location, &dir.display().to_string()));
     }
     let events = read_events(dir)?;
-    if pending_transition(dir, &events, filename) {
-        bail!("{filename} is a pending transition without complete publication evidence; retry its source transition before promotion");
-    }
+    refuse_pending_successor(dir, &events, filename)?;
     if is_consumed(&events, filename) {
         bail!("{filename} is already consumed (see the journal)");
     }
@@ -15975,6 +15986,7 @@ fn transition(
         return Err(missing_write_target(&dir, filename));
     }
     let events = read_events(&dir)?;
+    refuse_pending_successor(&dir, &events, filename)?;
     if is_consumed(&events, filename) {
         bail!("{filename} is already consumed (see the journal)");
     }
@@ -16076,6 +16088,7 @@ fn transition(
     }
     let events = read_events(&dir)?;
     ensure_storage_settled(&dir, &events, filename)?;
+    refuse_pending_successor(&dir, &events, filename)?;
     if is_consumed(&events, filename) {
         bail!("{filename} is already consumed (see the journal)");
     }

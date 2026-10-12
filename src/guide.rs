@@ -290,7 +290,8 @@ ORIENT INSIDE A PROJECT (start here, in this order)
   arc journal open       The actionable backlog — work waiting for a session.
                          Incomplete successors appear under `pending`, with
                          availability `pending-transition`, outside actionable
-                         counts. Retry the source transition before promotion.
+                         counts. Retry the source transition before promotion;
+                         transition and claim refuse a pending successor too.
                          Inventory and workspace backlog retain that status.
                          A row occupied by somebody reads `[claimed by <actor>
                          via <harness>: active|expired]`; `--json` carries the
