@@ -2447,7 +2447,9 @@ enum Cmd {
     /// authors answer to the model of every `Implemented-by` line in the
     /// audited range. An assessment that omits one is recorded with binding
     /// `authors-uncovered`, names the omitted models, and leaves the debt
-    /// open.
+    /// open. When the range's `Implemented-by` lines cannot be established
+    /// (the production record kept none and the range does not read) the
+    /// binding is `authors-unread` and the debt stays open too.
     ///
     /// An approving audit recorded under the model of an `Implemented-by`
     /// line in the audited range, at any effort, warns that it shows a review

@@ -373,14 +373,20 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
             let mut binding = assessed.bind(ctx.resolve_model().model.as_deref());
             let mut uncovered_authors = Vec::new();
             if binding == AuditorBinding::Bound {
-                uncovered_authors = assessed.uncovered(
-                    implementers
-                        .iter()
-                        .flatten()
-                        .filter_map(|value| crate::trailers::coordinate_model(value)),
-                );
-                if !uncovered_authors.is_empty() {
-                    binding = AuditorBinding::AuthorsUncovered;
+                // A list nobody could read is not an empty list: with no
+                // authors established, nothing was covered.
+                match implementers.as_deref() {
+                    None => binding = AuditorBinding::AuthorsUnread,
+                    Some(values) => {
+                        uncovered_authors = assessed.uncovered(
+                            values
+                                .iter()
+                                .filter_map(|value| crate::trailers::coordinate_model(value)),
+                        );
+                        if !uncovered_authors.is_empty() {
+                            binding = AuditorBinding::AuthorsUncovered;
+                        }
+                    }
                 }
             }
             AuditAssessment {

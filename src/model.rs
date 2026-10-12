@@ -722,6 +722,10 @@ pub enum AuditorBinding {
     /// `Implemented-by` line in the audited range; the audit lists the ones
     /// it leaves out.
     AuthorsUncovered,
+    /// The audited range's `Implemented-by` lines could not be established:
+    /// the production record kept no list and the range did not read. Never
+    /// treated as an empty list.
+    AuthorsUnread,
 }
 
 impl AuditorBinding {
@@ -742,6 +746,9 @@ impl AuditorBinding {
             Self::AuthorsUncovered => {
                 Some("the assessment's authors omit a model the range's Implemented-by lines name")
             }
+            Self::AuthorsUnread => Some(
+                "the range's Implemented-by lines could not be read, so its authors are unknown",
+            ),
         }
     }
 
@@ -757,7 +764,9 @@ impl AuditorBinding {
                     uncovered.join(", ")
                 )
             }
-            Self::AuthorsUncovered => format!("not bound to the audited work: {reason}"),
+            Self::AuthorsUncovered | Self::AuthorsUnread => {
+                format!("not bound to the audited work: {reason}")
+            }
             _ => format!("not bound to this auditor: {reason}"),
         })
     }

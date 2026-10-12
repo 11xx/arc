@@ -2000,10 +2000,12 @@ REVIEW COVERAGE AND DEBT
   the approval as it rejects a contributor match, and `arc audit` refuses to
   record it; `--verdict changes-requested` is open to anyone. Models compare
   as strings once the effort is dropped: arc holds no alias table, so a model
-  the trailers spell another way is not matched. A reviewer arc cannot place
-  that way is reported as unknown attribution rather than counted as
-  independent or as self-review, whether it cast a verdict or only filed
-  findings.
+  the trailers spell another way is not matched. A range that cannot be read
+  names nobody for this comparison: arc says it could not read the trailers,
+  and neither the gate nor `arc audit` refuses on what it could not see. A
+  reviewer arc cannot place that way is reported as unknown attribution
+  rather than counted as independent or as self-review, whether it cast a
+  verdict or only filed findings.
 
   Which changes need one is declared in `[danger] paths` in
   `.arc/policy.toml` or the operator policy at
@@ -2135,8 +2137,12 @@ REVIEW COVERAGE AND DEBT
   to the model of every `Implemented-by` line in the integrated range. An
   assessment that omits one is recorded with binding `authors-uncovered` and
   the omitted models in `uncovered_authors`, and leaves the debt open;
-  readers list them beside the obligation. A range with no `Implemented-by`
-  line asks nothing of the authors, and no other kind has this rule. The
+  readers list them beside the obligation. A range read and found to have no
+  `Implemented-by` line asks nothing of the authors; a range whose lines
+  cannot be established (no list kept with the production record, and the
+  range does not read) is not an empty one, and its audit is recorded with
+  binding `authors-unread` and leaves the debt open. No other kind has this
+  rule. The
   assessment describes the auditor when the model its audit event recorded is
   among the reviewer's `identities` (every model string routing accepts for
   it) and, where both name an effort, the effort equals the reviewer's
@@ -2144,7 +2150,8 @@ REVIEW COVERAGE AND DEBT
   `model-mismatch`, `effort-mismatch`, `model-unrecorded` (an audit by a
   person records no model), `identities-unstated` (the file lists none) or
   `authors-uncovered` (the authors it lists omit a model of the range, named
-  beside it). An audit without an assessment, with an `ineligible` one, or
+  beside it) or `authors-unread` (the range's authors could not be read). An
+  audit without an assessment, with an `ineligible` one, or
   whose binding is not `bound` is recorded, says why, and is listed beside the
   obligation, which stays open; a verdict recorded since carries no
   assessment and does not clear it.
@@ -2160,7 +2167,9 @@ REVIEW COVERAGE AND DEBT
   executor's commits is the recorded implementer, and the trailers say who
   did the work. A range whose commits carry none records an empty list,
   which readers show as "no Implemented-by trailers"; a record kept before
-  the range was read has no list and says nothing of it. `arc catchup`, the
+  the range was read, or whose range could not be read then, has no list and
+  says nothing of it: the two read alike, and an audit reads the range again.
+  `arc catchup`, the
   workspace backlog, `arc explain` and `arc show` show the list wherever it
   is empty or names a harness and model other than the recorder's.
 

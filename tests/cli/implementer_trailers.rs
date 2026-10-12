@@ -388,3 +388,47 @@ fn an_audit_whose_assessment_covers_its_range_keeps_its_older_shape() {
     assert_eq!(assessment["binding"], "bound", "{status}");
     assert!(assessment.get("uncovered_authors").is_none(), "{status}");
 }
+
+/// An `ineligible-review` debt whose production kept no list and whose range
+/// no longer resolves in the repository.
+fn owed_change_with_unreadable_range(repo: &Repo, slug: &str) {
+    owed_change(repo, slug, &[&[SOL]]);
+    let change = opened_change_id_of(repo, slug);
+    rewrite_event(repo, &change, "debt-declared", |event| {
+        event["production"]
+            .as_object_mut()
+            .unwrap()
+            .remove("trailer_implementers");
+    });
+    rewrite_event(repo, &change, "patchset-added", |event| {
+        event["base"] = serde_json::json!("0".repeat(40));
+    });
+}
+
+fn opened_change_id_of(repo: &Repo, slug: &str) -> String {
+    json_stdout(repo.arc(&repo.root).args(["status", slug, "--json"]))["change_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn an_unreadable_range_never_binds_an_assessment_to_its_authors() {
+    let repo = repo_forbidding_self_approval();
+    owed_change_with_unreadable_range(&repo, "unread");
+
+    let covering = eligible_assessment(&repo, "unread.json", &[&["gpt-6.1-sol"]]);
+    let output = audit_assessed(&repo, "unread", &covering);
+    assert!(output.contains("still owes"), "{output}");
+    assert!(output.contains("could not be read"), "{output}");
+    let debt = debt_of(&repo, "unread");
+    assert!(debt["discharged_by"].is_null(), "{debt}");
+    assert_eq!(
+        debt["ineligible"]["later_reads"][0]["binding"], "authors-unread",
+        "{debt}"
+    );
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "unread", "--json"]));
+    assert_eq!(status["debt_outstanding"], true, "{status}");
+    let show = stdout(repo.arc(&repo.root).args(["show", "unread"]));
+    assert!(show.contains("could not be read"), "{show}");
+}
