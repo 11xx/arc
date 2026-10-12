@@ -997,18 +997,28 @@ fn integrate_provisionally_inner(
             );
             return Ok(13);
         }
-        if fork::fork_slug_for_branch(&ctx.cwd, &state.branch)?.is_none() {
-            if let Some(debt) = args.debt {
-                let operation = || {
-                    super::audit::declare_debt_locked(
-                        ctx,
-                        &store,
-                        &state,
-                        &debt.reason,
-                        debt.kind,
-                        &debt.read,
-                    )
-                };
+    }
+    let mut planned_debt = None;
+    if fork::fork_slug_for_branch(&ctx.cwd, &state.branch)?.is_none() {
+        if let Some(debt) = args.debt {
+            let declaration =
+                super::audit::plan_debt(ctx, &store, &state, &debt.reason, debt.kind, &debt.read)?;
+            if args.dry_run {
+                // Judged as the execution would, and shown as a plan: the
+                // change reads as it would with the declaration, and nothing
+                // is written.
+                let planned = declaration.planned();
+                if !args.json {
+                    for line in planned.describe() {
+                        println!("dry-run: {line}");
+                    }
+                }
+                planned_debt = Some(planned);
+                let target = state.target_branch.clone();
+                state = declaration.projected(&store, &state)?;
+                state.target_branch = target;
+            } else {
+                let operation = || declaration.declare(&store);
                 let (result, details) = if args.json {
                     crate::operation_output::capture(operation)
                 } else {
@@ -1049,13 +1059,14 @@ fn integrate_provisionally_inner(
     };
     if args.dry_run {
         if args.json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&IntegrationPlan::of_provisional(
-                    &state.change_id,
-                    &plan
-                ))?
-            );
+            let mut document = IntegrationPlan::of_provisional(&state.change_id, &plan);
+            if let Some(debt) = planned_debt {
+                if debt.disposition == integration::DebtDisposition::WouldDeclare {
+                    document.authorization.audit_debt_event_id = None;
+                }
+                document.debt = Some(debt);
+            }
+            println!("{}", serde_json::to_string_pretty(&document)?);
         } else if let Some(reuse) = &plan.reuse {
             println!(
                 "would reuse provisional obligation {}; merge {}; staging refs remain at {}",

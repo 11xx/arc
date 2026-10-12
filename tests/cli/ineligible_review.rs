@@ -2,7 +2,7 @@ use super::common::*;
 
 const SAME_FAMILY_REVIEWER: &str = "fixture-opus#medium";
 
-fn repo_forbidding_self_approval() -> Repo {
+pub(super) fn repo_forbidding_self_approval() -> Repo {
     let repo = Repo::new();
     fs::create_dir_all(repo.root.join(".arc")).unwrap();
     fs::write(
@@ -16,7 +16,7 @@ fn repo_forbidding_self_approval() -> Repo {
 }
 
 /// A snapshotted change at its own file, so two changes never collide.
-fn snapshotted(repo: &Repo, slug: &str) {
+pub(super) fn snapshotted(repo: &Repo, slug: &str) {
     stdout(repo.arc(&repo.root).args(["begin", slug]));
     let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
     repo.commit(
@@ -38,7 +38,7 @@ fn event_of(output: &str) -> String {
 }
 
 /// One approving read of the change by a named reviewer at a model string.
-fn read_by(repo: &Repo, slug: &str, reviewer: &str, model: &str) -> String {
+pub(super) fn read_by(repo: &Repo, slug: &str, reviewer: &str, model: &str) -> String {
     event_of(&stdout(
         repo.arc(&repo.root).env("ARC_ACTOR", reviewer).args([
             "--model",
@@ -52,12 +52,17 @@ fn read_by(repo: &Repo, slug: &str, reviewer: &str, model: &str) -> String {
 }
 
 /// A change read once, by a reviewer routing would not count independent.
-fn read_change(repo: &Repo, slug: &str) -> String {
+pub(super) fn read_change(repo: &Repo, slug: &str) -> String {
     snapshotted(repo, slug);
     read_by(repo, slug, "Reviewer", SAME_FAMILY_REVIEWER)
 }
 
-fn assessment(repo: &Repo, name: &str, independence: &str, qualifiers: &[&str]) -> PathBuf {
+pub(super) fn assessment(
+    repo: &Repo,
+    name: &str,
+    independence: &str,
+    qualifiers: &[&str],
+) -> PathBuf {
     assessment_for(repo, name, independence, qualifiers, None, None)
 }
 
@@ -127,7 +132,7 @@ fn integrate_ineligible(repo: &Repo, slug: &str, extra: &[&str]) -> assert_cmd::
         .assert()
 }
 
-fn debt_of(repo: &Repo, slug: &str) -> serde_json::Value {
+pub(super) fn debt_of(repo: &Repo, slug: &str) -> serde_json::Value {
     json_stdout(repo.arc(&repo.root).args(["status", slug, "--json"]))["debt"].clone()
 }
 

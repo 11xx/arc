@@ -2856,6 +2856,116 @@ fn execution_text_names_the_debt_a_later_refusal_leaves_in_the_ledger() {
     );
 }
 
+fn event_files(repo: &Repo) -> usize {
+    fn count(dir: &Path) -> usize {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .map(|path| {
+                if path.is_dir() {
+                    count(&path)
+                } else {
+                    usize::from(
+                        path.parent().and_then(|parent| parent.file_name())
+                            == Some("events".as_ref()),
+                    )
+                }
+            })
+            .sum()
+    }
+    count(&repo.root.join(".git/arc"))
+}
+
+#[test]
+fn a_provisional_dry_run_shows_the_debt_it_would_declare_and_writes_nothing() {
+    let (_authority, worker) = worker();
+    let (change, _, _) = change_with_patchset(&worker, "unread");
+    worker
+        .arc(&worker.root)
+        .args(["integrate", &change, "--provisional", "--dry-run"])
+        .assert()
+        .failure();
+    let before = event_files(&worker);
+    let text = stdout(worker.arc(&worker.root).args([
+        "integrate",
+        &change,
+        "--provisional",
+        "--dry-run",
+        "--debt",
+        "review owed",
+    ]));
+    assert!(
+        text.contains("would declare debt for ps-01 (nothing-read): review owed"),
+        "{text}"
+    );
+    let plan_text = stdout(worker.arc(&worker.root).args([
+        "integrate",
+        &change,
+        "--provisional",
+        "--dry-run",
+        "--json",
+        "--debt",
+        "review owed",
+    ]));
+    let plan: serde_json::Value = serde_json::from_str(&plan_text).unwrap();
+    assert_eq!(plan["debt"]["disposition"], "would-declare", "{plan}");
+    assert_eq!(plan["debt"]["kind"], "nothing-read", "{plan}");
+    assert!(plan["debt"]["event_id"].is_null(), "{plan}");
+    assert!(
+        plan["authorization"].get("audit_debt_event_id").is_none(),
+        "{plan}"
+    );
+    assert_eq!(event_files(&worker), before);
+
+    let path = worker.home.join("provisional-plan.json");
+    fs::write(&path, plan_text).unwrap();
+    let executed = worker
+        .arc(&worker.root)
+        .args([
+            "integrate",
+            &change,
+            "--provisional",
+            "--debt",
+            "review owed",
+            "--expect-basis",
+            path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&executed.get_output().stderr);
+    assert!(!stderr.contains("moved"), "{stderr}");
+}
+
+#[test]
+fn a_provisional_dry_run_meets_the_refusal_the_real_run_gives() {
+    let (_authority, worker) = worker();
+    let (change, _, _) = change_with_patchset(&worker, "unread");
+    let before = event_files(&worker);
+    let args = [
+        "integrate",
+        &change,
+        "--provisional",
+        "--debt",
+        "review owed",
+        "--kind",
+        "ineligible-review",
+        "--qualifier",
+        "same-model",
+    ];
+    let planned = worker
+        .arc(&worker.root)
+        .args(args)
+        .arg("--dry-run")
+        .output()
+        .unwrap();
+    let real = worker.arc(&worker.root).args(args).output().unwrap();
+    assert!(!planned.status.success());
+    assert_eq!(planned.status.code(), real.status.code());
+    assert_eq!(planned.stderr, real.stderr);
+    assert!(String::from_utf8_lossy(&planned.stderr).contains("no verdict"));
+    assert_eq!(event_files(&worker), before);
+}
+
 #[test]
 fn execution_json_reports_a_debt_that_was_never_published() {
     use std::os::unix::fs::PermissionsExt;

@@ -14,6 +14,7 @@ mod context;
 mod contribution;
 mod cost;
 mod cross_links;
+mod debt_plan;
 mod debt_standing;
 mod diff;
 mod doctor;

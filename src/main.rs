@@ -2280,7 +2280,10 @@ enum Cmd {
         #[arg(long, conflicts_with = "cleanup")]
         no_cleanup: bool,
         /// Report what would happen without merging, closing, or writing.
-        /// Queues stop at known blockers before projection; future gates,
+        /// With `--debt`, the plan reads the change as it would once that debt
+        /// is declared and says which debt it would declare; a declaration
+        /// the real run would refuse is refused with the same message. Queues
+        /// stop at known blockers before projection; future gates,
         /// replay and checkout guards are conditional. Style, history, approval,
         /// danger and provenance resolve against each member's projected destination.
         /// Exact-patchset review vetoes stop even an unresolved projection.
@@ -2296,7 +2299,11 @@ enum Cmd {
         /// target revision it was decided at, the approved head, and the tree
         /// the integration would ship, and its shape. The same decision governs
         /// the dry run and execution; a refusal prints the blocker on stderr
-        /// and nothing on stdout. Provisional retries identify a completed
+        /// and nothing on stdout. With `--debt`, the plan's `debt` object names
+        /// the kind, reason, bound patchset and, for `ineligible-review`, the read,
+        /// qualifiers and assessment basis, with `disposition` `would-declare`
+        /// or `already-declared`; a debt not yet declared has no event in
+        /// `authorization`. Provisional retries identify a completed
         /// preparation through reuse_event_id and reuse_commit, with merge_commit
         /// false. With provisional execution, emit `arc-provisional-transition/2`
         /// with observed refs, event publication, retained intent and recovery command.
@@ -2340,7 +2347,8 @@ enum Cmd {
         /// held in an import batch. Reuse confirms its backing publication. Divergence
         /// observed under the target and change locks refuses before declaration.
         /// External Git moving the target after that observation can retain debt.
-        /// A provisional execution that refuses after the declaration ends its
+        /// With `--dry-run` nothing is declared: the plan shows the debt. A
+        /// provisional execution that refuses after the declaration ends its
         /// text output with `debt event <id> <written|reused> publication=<state>`;
         /// `--json` carries the same receipt
         #[arg(long = "debt", value_name = "REASON")]

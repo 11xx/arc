@@ -2088,6 +2088,21 @@ REVIEW COVERAGE AND DEBT
   the same reason, kind, and declarer against the same patchset and coverage
   records nothing and prints the debt already in force.
 
+  `arc integrate --debt ... --dry-run` plans the integration as it reads once
+  the debt is declared, and writes no event. The plan says `would declare
+  debt` with its kind, reason, bound patchset and, for `ineligible-review`, the
+  named read, qualifiers and assessment basis; a debt the change already
+  carries reads `debt already declared` with its event. A declaration the
+  execution would refuse is refused by the plan with the same message and
+  exit code: an unknown qualifier, no verdict to name, an eligible assessment,
+  a read flag on another kind. The plan never invents an approval, and a
+  changes-requested verdict on the exact head still refuses it. `--json`
+  carries the debt as `debt` in `arc-integration-plan/1`, with
+  `disposition` `would-declare` or `already-declared`; a plan that would
+  declare names no debt event in `authorization`, and handing it to
+  `--expect-basis` does not count the execution's own declaration as a move.
+  `--provisional --dry-run` plans the same way.
+
   A debt is a record, not a count. It carries what kind of deficit it is,
   what review the work did have and at what coordinates, and who planned and
   who implemented it:

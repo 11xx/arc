@@ -309,6 +309,76 @@ pub struct IntegrationPlan {
     pub shape: Option<crate::model::IntegrationShape>,
     pub evaluated_tree: Option<String>,
     pub authorization: AuthorizationBasis,
+    /// The debt the execution declares before it decides, when the plan was
+    /// asked for with `--debt`. Its event is the debt already in the ledger,
+    /// or none until the execution writes one, so `authorization` names no
+    /// debt event for a declaration still to come.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debt: Option<PlannedDebt>,
+}
+
+/// Whether a planned debt is already in the ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DebtDisposition {
+    /// The execution would append a new debt event.
+    WouldDeclare,
+    /// The change already carries this exact obligation; the execution
+    /// answers with it.
+    AlreadyDeclared,
+}
+
+/// The review obligation an integration would declare in place of a verdict
+/// nobody recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedDebt {
+    pub disposition: DebtDisposition,
+    pub kind: crate::model::DebtMissing,
+    pub reason: String,
+    pub patchset_id: Option<String>,
+    /// The event already holding the obligation, for `already-declared`.
+    pub event_id: Option<String>,
+    /// The read an `ineligible-review` debt names, and why routing did not
+    /// count it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ineligible: Option<crate::model::IneligibleRead>,
+}
+
+impl PlannedDebt {
+    /// Lines describing the debt, for a plan printed as text.
+    pub fn describe(&self) -> Vec<String> {
+        let kind = self.kind.as_str();
+        let subject = self
+            .patchset_id
+            .as_deref()
+            .map(|id| format!(" for {id}"))
+            .unwrap_or_default();
+        let mut lines = vec![match (self.disposition, &self.event_id) {
+            (DebtDisposition::AlreadyDeclared, Some(event)) => format!(
+                "debt already declared{subject} ({kind}): {}; event {event}",
+                self.reason
+            ),
+            _ => format!("would declare debt{subject} ({kind}): {}", self.reason),
+        }];
+        if let Some(read) = &self.ineligible {
+            let qualifiers = read
+                .qualifiers
+                .iter()
+                .map(|qualifier| qualifier.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut line = format!(
+                "  names read {}: {qualifiers}; {}",
+                read.read,
+                read.assessment.as_str()
+            );
+            if let Some(version) = &read.route_version {
+                line.push_str(&format!("; route {version}"));
+            }
+            lines.push(line);
+        }
+        lines
+    }
 }
 
 impl IntegrationPlan {
@@ -332,6 +402,7 @@ impl IntegrationPlan {
             shape: Some(plan.shape),
             evaluated_tree: plan.evaluated_tree.clone(),
             authorization: plan.authorization.clone(),
+            debt: None,
         }
     }
 
@@ -355,6 +426,7 @@ impl IntegrationPlan {
             shape: None,
             evaluated_tree: None,
             authorization: plan.authorization.clone(),
+            debt: None,
         }
     }
 }
@@ -618,10 +690,20 @@ fn moved(prior: &IntegrationPlan, facts: &IntegrationFacts) -> Vec<Moved> {
         prior.authorization.external_verdict.as_ref(),
         prior.authorization.audit_debt_event_id.as_deref(),
     );
+    // A plan that would declare its debt names no event for it, and the
+    // execution's own declaration is the one the plan said it would write.
+    let planned_declaration = prior
+        .debt
+        .as_ref()
+        .is_some_and(|debt| debt.disposition == DebtDisposition::WouldDeclare);
     let fresh_approval = approval_label(
         facts.approval.verdict_event_id.as_deref(),
         facts.approval.external_verdict.as_ref(),
-        facts.approval.audit_debt_event_id.as_deref(),
+        facts
+            .approval
+            .audit_debt_event_id
+            .as_deref()
+            .filter(|_| !planned_declaration),
     );
     if prior_approval != fresh_approval {
         moved.push(Moved::Approval {
@@ -704,6 +786,7 @@ impl IntegrationPlan {
             }),
             evaluated_tree: Some(plan.evaluated_tree.clone()),
             authorization: plan.authorization.clone(),
+            debt: None,
         }
     }
 }
@@ -1083,6 +1166,65 @@ mod tests {
                 },
                 Moved::Policy,
             ]
+        );
+    }
+
+    fn debt_plan(disposition: DebtDisposition, event_id: Option<&str>) -> PlannedDebt {
+        PlannedDebt {
+            disposition,
+            kind: crate::model::DebtMissing::NothingRead,
+            reason: "review owed".to_string(),
+            patchset_id: Some("ps-1".to_string()),
+            event_id: event_id.map(str::to_string),
+            ineligible: None,
+        }
+    }
+
+    fn facts_declaring(debt: &str) -> IntegrationFacts {
+        let mut facts = ready();
+        facts.approval = Approval {
+            verdict_event_id: None,
+            verdict_provisional: None,
+            external_verdict: None,
+            audit_debt_event_id: Some(debt.to_string()),
+        };
+        facts
+    }
+
+    #[test]
+    fn a_planned_declaration_is_not_a_moved_approval_once_it_is_written() {
+        let mut planned = prior();
+        planned.authorization.verdict_event_id = None;
+        planned.debt = Some(debt_plan(DebtDisposition::WouldDeclare, None));
+        let outcome = decide(facts_declaring("DEBT-EVENT"), Some(&planned));
+        assert!(outcome.moved.is_empty(), "{:?}", outcome.moved);
+    }
+
+    #[test]
+    fn a_debt_already_in_the_ledger_moving_is_a_moved_approval() {
+        let mut planned = prior();
+        planned.authorization.verdict_event_id = None;
+        planned.authorization.audit_debt_event_id = Some("OLD-DEBT".to_string());
+        planned.debt = Some(debt_plan(
+            DebtDisposition::AlreadyDeclared,
+            Some("OLD-DEBT"),
+        ));
+        let outcome = decide(facts_declaring("DEBT-EVENT"), Some(&planned));
+        assert!(matches!(outcome.moved.as_slice(), [Moved::Approval { .. }]));
+    }
+
+    #[test]
+    fn a_planned_debt_reads_as_what_the_execution_would_write() {
+        let mut debt = debt_plan(DebtDisposition::WouldDeclare, None);
+        assert_eq!(
+            debt.describe(),
+            vec!["would declare debt for ps-1 (nothing-read): review owed"]
+        );
+        debt.disposition = DebtDisposition::AlreadyDeclared;
+        debt.event_id = Some("EV".to_string());
+        assert_eq!(
+            debt.describe(),
+            vec!["debt already declared for ps-1 (nothing-read): review owed; event EV"]
         );
     }
 

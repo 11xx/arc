@@ -2460,7 +2460,7 @@ pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Resul
                     json,
                     expect_basis,
                     cleanup_checkout: None,
-                    debt: debt.filter(|_| !dry_run),
+                    debt,
                 },
             )
         }
@@ -3173,7 +3173,7 @@ fn integrate_one(
         }
     }
     let initial = store.state(&change_id)?;
-    if initial.iterating && (dry_run || debt.is_none()) {
+    if initial.iterating && debt.is_none() {
         eprintln!(
             "change declares it is iterating; clear it with arc iterating {} --off",
             initial.change_id
@@ -3191,7 +3191,14 @@ fn integrate_one(
         // A dry run promises to write nothing, so there is no record for the
         // policy to be about.
         if json {
-            return integrate_dry_run_json(ctx, &store, &initial, &target, &selection);
+            return integrate_dry_run_json(
+                ctx,
+                &store,
+                &initial,
+                &target,
+                &selection,
+                debt.as_ref(),
+            );
         }
         return integrate_dry_run(
             ctx,
@@ -3200,6 +3207,7 @@ fn integrate_one(
             &target,
             message.as_deref(),
             &selection,
+            debt.as_ref(),
         );
     }
     // The same store the merge's closure event will be appended to, so the
@@ -4402,6 +4410,37 @@ fn advise_role_trailers(report: &StatusReport) {
     }
 }
 
+/// The change as an integration reads it once its `--debt` is declared,
+/// with that declaration judged but not written. A dry run decides from this,
+/// so it meets the refusals the real run meets and shows the debt it would
+/// declare. A fork never declares one.
+fn project_debt(
+    ctx: &Ctx,
+    store: &Store,
+    st: &ChangeState,
+    debt: Option<&DebtDeclaration>,
+) -> Result<(ChangeState, Option<integration::PlannedDebt>)> {
+    let Some(debt) = debt else {
+        return Ok((st.clone(), None));
+    };
+    if super::fork::fork_slug_for_branch(&ctx.cwd, &st.branch)?.is_some() {
+        return Ok((st.clone(), None));
+    }
+    let plan = super::audit::plan_debt(ctx, store, st, &debt.reason, debt.kind, &debt.read)?;
+    let mut projected = plan.projected(store, st)?;
+    projected.target_branch = st.target_branch.clone();
+    Ok((projected, Some(plan.planned())))
+}
+
+/// A plan names no event for a debt still to be declared.
+fn forget_planned_debt_event(plan: &mut IntegrationPlan, debt: Option<integration::PlannedDebt>) {
+    let Some(debt) = debt else { return };
+    if debt.disposition == integration::DebtDisposition::WouldDeclare {
+        plan.authorization.audit_debt_event_id = None;
+    }
+    plan.debt = Some(debt);
+}
+
 /// The plan `integrate` would carry out, decided from the same facts and by
 /// the same function as the merge, printed as JSON. Nothing is locked or
 /// written.
@@ -4411,6 +4450,7 @@ fn integrate_dry_run_json(
     st: &ChangeState,
     target: &str,
     selection: &IntegrationStyle,
+    debt: Option<&DebtDeclaration>,
 ) -> Result<i32> {
     let recorded_target = st.target_branch.clone();
     let mut selected = st.clone();
@@ -4422,6 +4462,8 @@ fn integrate_dry_run_json(
     if shape == integration::Shape::FfOnly && ff_diverged(ctx, st, target)? {
         return Ok(refuse_divergence(st, target, &recorded_target));
     }
+    let (projected, planned_debt) = project_debt(ctx, store, st, debt)?;
+    let st = &projected;
     let report = ctx.report_for_integration(store, st, target, shape)?;
     advise_role_trailers(&report);
     let facts = integration_facts(ctx, store, st, &report, target, selection);
@@ -4459,8 +4501,16 @@ fn integrate_dry_run_json(
             IntegrationPlan::of_merge(&st.change_id, &plan)
         }
     };
+    let mut plan = plan;
+    forget_planned_debt_event(&mut plan, planned_debt);
     println!("{}", serde_json::to_string_pretty(&plan)?);
     Ok(0)
+}
+
+fn print_planned_debt(debt: Option<&integration::PlannedDebt>) {
+    for line in debt.map(|debt| debt.describe()).unwrap_or_default() {
+        println!("dry-run: {line}");
+    }
 }
 
 fn integrate_dry_run(
@@ -4470,6 +4520,7 @@ fn integrate_dry_run(
     target: &str,
     message: Option<&str>,
     selection: &IntegrationStyle,
+    debt: Option<&DebtDeclaration>,
 ) -> Result<i32> {
     let recorded_target = st.target_branch.clone();
     let mut selected = st.clone();
@@ -4482,6 +4533,9 @@ fn integrate_dry_run(
     ctx.ensure_declared_actor(store)?;
     ctx.ensure_target_declares_actor(st)?;
     if let Some(contribution) = contribution_policy(ctx, st)? {
+        let (projected, planned_debt) = project_debt(ctx, store, st, debt)?;
+        let st = &projected;
+        print_planned_debt(planned_debt.as_ref());
         let report = ctx.report_for_integration(store, st, target, shape)?;
         advise_role_trailers(&report);
         if !report.integrate_ready() {
@@ -4509,6 +4563,9 @@ fn integrate_dry_run(
     if shape == integration::Shape::FfOnly && ff_diverged(ctx, st, target)? {
         return Ok(refuse_divergence(st, target, &recorded_target));
     }
+    let (projected, planned_debt) = project_debt(ctx, store, st, debt)?;
+    let st = &projected;
+    print_planned_debt(planned_debt.as_ref());
     let checkout = target_checkout(ctx, st, target)?;
     checkout_tracked_dirt(&checkout.path)?;
     let report = ctx.report_for_integration(store, st, target, shape)?;
