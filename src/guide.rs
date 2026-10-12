@@ -2380,7 +2380,10 @@ REVIEW ASSURANCE
     counting read was assessed, since one routing never saw may stand at the
     frontier.
   - Routing is asked once per distinct author and set of reads, not once per
-    change.
+    change. Arc reads its answer as `agent-routing-frontier/1`, and a refusal
+    as `agent-routing-refusal/1`; a refused reviewer coordinate costs only
+    the read it names, a refused author costs the change its standing. Its
+    own error text and paths never reach the view.
 
   With `--stale` each row shows four components, in this order, each
   displayed and none stored:
