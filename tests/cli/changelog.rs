@@ -1671,3 +1671,76 @@ fn command_renderer_request_never_carries_the_recording_session() {
         assert_eq!(recorded["effective_author"], "test:[session]", "{text}");
     }
 }
+
+#[test]
+fn an_unreadable_changelog_declaration_never_stops_readiness_checks() {
+    for (name, unreadable) in [("directory", true), ("invalid", false)] {
+        let repo = Repo::new();
+        begin(&repo, "advisory-read");
+        repo.arc(&repo.root)
+            .args(["metadata", "advisory-read", "--tag", "advisory-tag"])
+            .assert()
+            .success();
+        let baseline = repo
+            .arc(&repo.root)
+            .args(["check", "advisory-read", "--json"])
+            .output()
+            .unwrap();
+        let baseline_json: serde_json::Value = serde_json::from_slice(&baseline.stdout).unwrap();
+
+        fs::create_dir_all(repo.root.join(".arc")).unwrap();
+        let config = repo.root.join(".arc/changelog.toml");
+        if unreadable {
+            fs::create_dir(&config).unwrap();
+        } else {
+            fs::write(&config, "none = [\n").unwrap();
+        }
+
+        let out = repo
+            .arc(&repo.root)
+            .args(["check", "advisory-read", "--json"])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), baseline.status.code(), "{name}");
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|error| panic!("{name}: {error}: {:?}", out.stderr));
+        assert_eq!(value["ready"], baseline_json["ready"], "{name}");
+        assert_eq!(value["exit_code"], baseline_json["exit_code"], "{name}");
+        assert!(
+            value.get("changelog_none").is_none_or(|v| v.is_null()),
+            "{name}"
+        );
+        assert!(
+            has_code(
+                value["advisories"].as_array().unwrap(),
+                "no-changelog-entry"
+            ),
+            "{name}"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            stderr
+                .matches("could not read repository changelog declaration")
+                .count(),
+            1,
+            "{name}: {stderr}"
+        );
+
+        let tagged = repo
+            .arc(&repo.root)
+            .args(["check", "--tag", "advisory-tag"])
+            .output()
+            .unwrap();
+        let tagged_stdout = String::from_utf8_lossy(&tagged.stdout);
+        assert!(
+            tagged_stdout.contains("advisory-read"),
+            "{name}: {tagged_stdout} {:?}",
+            tagged.stderr
+        );
+        assert!(
+            String::from_utf8_lossy(&tagged.stderr)
+                .contains("could not read repository changelog declaration"),
+            "{name}"
+        );
+    }
+}

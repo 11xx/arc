@@ -4886,7 +4886,7 @@ fn check(
     json: bool,
     shape: Option<integration::Shape>,
 ) -> Result<i32> {
-    let changelog_none = super::repository_changelog_none(&ctx.cwd)?;
+    let changelog_none = super::advisory_changelog_none(&ctx.cwd);
     let store = ctx.store()?;
     let (change_id, st) = ctx.load_state(&store, reference)?;
     let shape =
@@ -4979,7 +4979,7 @@ fn check(
 }
 
 fn check_tagged(ctx: &Ctx, tags: Vec<String>, shape: Option<integration::Shape>) -> Result<i32> {
-    let changelog_none = super::repository_changelog_none(&ctx.cwd)?;
+    let changelog_none = super::advisory_changelog_none(&ctx.cwd);
     let store = ctx.store()?;
     let states = store.readable_states()?;
     let selected = states

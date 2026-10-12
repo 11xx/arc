@@ -1247,7 +1247,9 @@ RUN A CHANGE
   `renderer_command`, or `renderer_timeout` key. The declaration silences
   `no-changelog-entry`, including integration advice. Like debt advisory
   thresholds, it is read from the invoking checkout, not the change's target
-  branch. `arc check` prints the declaration and its reason; `--json` includes
+  branch. An unreadable declaration warns on stderr and declares nothing for
+  `arc status`, `arc check` and integration advice; readiness is unchanged.
+  `arc check` prints the declaration and its reason; `--json` includes
   the optional `changelog_none` reason in `arc-check/4`. `arc changelog`
   refuses entry recording and `--write` under the declaration. Per-change
   `--none --reason` remains valid and is unnecessary; reads remain available.

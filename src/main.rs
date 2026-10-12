@@ -1387,7 +1387,8 @@ enum Cmd {
     /// .arc/changelog.toml silences no-changelog-entry and prints its reason;
     /// JSON includes the optional changelog_none reason. This declaration
     /// uses the invoking checkout, like debt advisory thresholds, rather than
-    /// the change's target branch.
+    /// the change's target branch. An unreadable declaration warns on stderr
+    /// and declares nothing; readiness and the exit code are unchanged.
     /// Contribution-trailer advice never changes readiness or the exit code:
     /// a commit lacking an asserted line names arc rewrite trailers --from
     /// <rev> --append <line>, and a role line carrying a placeholder or a

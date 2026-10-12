@@ -1013,8 +1013,23 @@ fn read_changelog_config(cwd: &Path) -> Result<ChangelogConfig> {
 }
 
 /// The invoking checkout's declaration that the repository keeps no changelog.
-pub(crate) fn repository_changelog_none(cwd: &Path) -> Result<Option<String>> {
+fn repository_changelog_none(cwd: &Path) -> Result<Option<String>> {
     Ok(read_changelog_config(cwd)?.none)
+}
+
+/// The declaration as advice reads it: an unreadable `.arc/changelog.toml`
+/// warns once per process and declares nothing, because advice never blocks.
+pub(crate) fn advisory_changelog_none(cwd: &Path) -> Option<String> {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    match repository_changelog_none(cwd) {
+        Ok(declared) => declared,
+        Err(error) => {
+            WARNED.call_once(|| {
+                eprintln!("warning: could not read repository changelog declaration: {error:#}");
+            });
+            None
+        }
+    }
 }
 
 fn refuse_declared_none_write(cwd: &Path) -> Result<()> {

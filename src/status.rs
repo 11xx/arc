@@ -2250,14 +2250,8 @@ pub fn missing_changelog_advisory(state: &ChangeState, cwd: Option<&Path>) -> Op
     if state.changelog.is_some() {
         return None;
     }
-    if let Some(cwd) = cwd {
-        match crate::commands::repository_changelog_none(cwd) {
-            Ok(Some(_)) => return None,
-            Ok(None) => {}
-            Err(error) => {
-                eprintln!("warning: could not read repository changelog declaration: {error:#}")
-            }
-        }
+    if cwd.is_some_and(|cwd| crate::commands::advisory_changelog_none(cwd).is_some()) {
+        return None;
     }
     Some(Advisory {
         code: "no-changelog-entry",
