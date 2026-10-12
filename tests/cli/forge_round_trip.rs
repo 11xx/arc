@@ -244,11 +244,28 @@ fn compact_provenance_absent_frontier_cost_and_model_degrade_independently() {
     doc["previous_disclosure"] = json!("disclosure-1");
     doc["editor"] = json!("cost-annotator");
     doc["comment"]["cost"]["scope"] = json!("review-exchange");
-    assert!(stdout(&mut declare(&repo, &id, &doc)).contains("Review cost: unmeasured."));
+    let line = stdout(&mut declare(&repo, &id, &doc));
+    assert!(
+        line.contains("Review cost: list-estimate as of cost-observation-1."),
+        "{line}"
+    );
+    assert!(!line.contains("unmeasured"), "{line}");
     assert_eq!(
         state(&repo, &id)["round_trip"]["disclosures"][1]["comment"]["cost"]["reference"],
         "opaque-cost"
     );
+    let shown = state(&repo, &id)["round_trip"]["disclosure_availability"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["disclosure_id"] == "scoped-cost")
+        .unwrap()["compact_provenance"]
+        .to_string();
+    assert!(
+        shown.contains("list-estimate as of cost-observation-1"),
+        "{shown}"
+    );
+    assert!(!shown.contains("unmeasured"), "{shown}");
 }
 fn admitted_round_trip(repo: &Repo, path: &Path) -> AssertCommand {
     let bytes = fs::read(path).unwrap();

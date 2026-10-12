@@ -387,8 +387,12 @@ impl CommentProvenance {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
+        let cost = match &self.cost {
+            Some(cost) => format!("{} as of {}", cost.basis, cost.as_of),
+            None => "unmeasured".into(),
+        };
         format!(
-            "{}: {authors} · Review cost: unmeasured.",
+            "{}: {authors} · Review cost: {cost}.",
             if self.authors.len() > 1 {
                 "Authors"
             } else {

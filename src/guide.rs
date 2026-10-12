@@ -1807,7 +1807,8 @@ FORGE
   outgoing/readback generation independently of the original judgment. A comment
   identity has one original disclosure; later annotations link its lineage.
   Local readers can project one compact line: Author: harness:model#effort ·
-  Review cost: unmeasured. Multiple material authors use Authors. Missing model
+  Review cost: unmeasured. A recorded cost reference reads Review cost: <basis>
+  as of <as_of> instead; arc invents no amount. Multiple material authors use Authors. Missing model
   evidence reads model not recorded. A cost reference carries reference, as_of,
   scope=review-exchange, basis, coverage and source_frontier; it is separately
   owned evidence, not a number or a whole-session/implementation allocation.
