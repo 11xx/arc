@@ -2555,7 +2555,7 @@ fn append_policy_has_a_single_authority() {
         "gatekeeping.rs::queue_step::ifst.is_closed(){",
         "gatekeeping.rs::rebase::ifst.is_closed(){",
         "hooks.rs::change_for_branch::ifstate.is_closed(){",
-        "audit.rs::declare_debt_locked::letpatchset_id=ifst.is_closed(){",
+        "audit.rs::plan_debt::letpatchset_id=ifst.is_closed(){",
         "hooks.rs::post_commit::ifstate.is_closed(){",
         "hooks.rs::prepare_commit_msg::ifstate.is_closed(){",
         "lifecycle.rs::begin::ifst.is_closed(){",
