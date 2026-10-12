@@ -3566,7 +3566,8 @@ enum RewriteCmd {
         drop: Vec<String>,
         /// Add this `Key: value` line to the trailer block where it is not
         /// already there; repeat for more than one. A Planned-by,
-        /// Implemented-by, Reviewed-by or Orchestrated-by value that is no
+        /// Implemented-by, Reviewed-by or Orchestrated-by value, or an
+        /// Assisted-by value without its trailing `(role)`, that is no
         /// fresh coordinate (malformed, carrying a placeholder or a session
         /// id, or a person without an email) refuses before any commit is
         /// recreated, --dry-run included.

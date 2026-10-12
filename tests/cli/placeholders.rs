@@ -605,6 +605,11 @@ fn appended_role_trailers_refuse_placeholders_before_any_commit_moves() {
         "Implemented-by: opencode:session-a#high",
         "Implemented-by: codex:#high<fixture>",
         "Implemented-by: :model<fixture>",
+        "Assisted-by: pi:unknown",
+        "Assisted-by: opencode:session-a (planner)",
+        "Assisted-by: opencode:session-a",
+        "Assisted-by: codex: (planner)",
+        "Assisted-by: fixture",
     ] {
         for dry_run in [true, false] {
             let mut command = repo.arc(&worktree);
@@ -636,7 +641,11 @@ fn appended_role_trailers_refuse_placeholders_before_any_commit_moves() {
             "--from",
             "HEAD",
             "--append",
-            "Assisted-by: pi:unknown",
+            "Assisted-by: pi:gpt-6.1-sol#xhigh (planner)",
+            "--append",
+            "Reviewed-by: Ada Lovelace <ada@example.test>",
+            "--append",
+            "Signed-off-by: x",
             "--no-sign",
             "--dry-run",
         ])

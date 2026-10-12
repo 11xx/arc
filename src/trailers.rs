@@ -102,17 +102,16 @@ pub fn check_contribution(message: &[u8]) -> Vec<ContributionIssue> {
         .collect()
 }
 
-/// The first of `lines` whose role key carries a value that is no fresh
-/// coordinate: a line [`check_contribution`] reports as `malformed` or
-/// `placeholder`, and so a line no write records.
+/// The first of `lines` whose value is no fresh coordinate: a role key's
+/// value, or an `Assisted-by` value read without its trailing `(role)`, so a
+/// line no write records.
 pub(crate) fn first_unrecordable_role(
     lines: &[String],
     session: Option<&str>,
 ) -> Option<ContributionIssue> {
     lines
         .iter()
-        .filter_map(|line| line_issue(line.as_bytes(), session))
-        .find(|issue| issue.kind != "unsupported")
+        .find_map(|line| unrecordable_line(line, session))
 }
 
 /// What the convention says about one trailer line, if anything.
@@ -363,7 +362,7 @@ pub fn parse_edits(
                     anyhow::bail!(
                         "{origin}: the new line {new:?} is no fresh coordinate: {}; write a \
                          fresh coordinate or drop the line",
-                        issue
+                        issue.detail
                     );
                 }
             }
@@ -382,11 +381,12 @@ pub fn parse_edits(
 
 /// Why a trailer line a write would record is no fresh coordinate, when its
 /// key says it holds one: a role key's value, or an `Assisted-by` value read
-/// without its trailing `(role)`.
-fn unrecordable_line(line: &str, session: Option<&str>) -> Option<&'static str> {
+/// without its trailing `(role)`. The issue carries the whole value as
+/// written.
+fn unrecordable_line(line: &str, session: Option<&str>) -> Option<ContributionIssue> {
     let key = String::from_utf8_lossy(&trailer_key(line.as_bytes())?).into_owned();
     let value = line[key.len() + 1..].trim();
-    let value = if key.eq_ignore_ascii_case(LEGACY_DISCLOSURE) {
+    let coordinate = if key.eq_ignore_ascii_case(LEGACY_DISCLOSURE) {
         match value.rsplit_once(" (") {
             Some((coordinate, role)) if role.ends_with(')') => coordinate.trim(),
             _ => value,
@@ -399,7 +399,16 @@ fn unrecordable_line(line: &str, session: Option<&str>) -> Option<&'static str> 
     } else {
         return None;
     };
-    crate::coordinate::coordinate_defect(value, session).map(crate::coordinate::Defect::reason)
+    let defect = crate::coordinate::coordinate_defect(coordinate, session)?;
+    Some(ContributionIssue {
+        kind: match defect {
+            crate::coordinate::Defect::Unreadable => "malformed",
+            _ => "placeholder",
+        },
+        key,
+        value: value.to_owned(),
+        detail: defect.reason(),
+    })
 }
 
 /// Apply the edits that name one commit to its message, or say which edit

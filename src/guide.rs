@@ -2512,7 +2512,8 @@ HISTORY REWRITES
                        repeats, and at least one of the three is required.
                        Edits apply first, reading each commit's block as the
                        commit carries it, then --drop, then --append.
-                       A role line whose value is no fresh
+                       A role line, or an Assisted-by line read without its
+                       trailing `(role)`, whose value is no fresh
                        coordinate (malformed, carrying a placeholder or a
                        session id, or a person without an email) refuses
                        before any commit is recreated, including in
