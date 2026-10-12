@@ -857,7 +857,12 @@ impl Ctx {
     /// validity reflects what the actor saw at that point rather than the
     /// current worktree. Cross-change dependency state is still evaluated
     /// against the present ledger.
-    pub(crate) fn report_as_of(&self, store: &Store, state: &ChangeState) -> Result<StatusReport> {
+    pub(crate) fn report_as_of(
+        &self,
+        store: &Store,
+        state: &ChangeState,
+        at: Option<&str>,
+    ) -> Result<StatusReport> {
         let toplevel = gitio::toplevel(&self.cwd)?;
         let declarations = crate::declarations::for_change(&self.cwd, state)?;
         let states = store.readable_states()?;
@@ -885,7 +890,14 @@ impl Ctx {
         );
         provisional::attach_pending_transition(&mut report, &self.cwd, store, &state.change_id)?;
         if report.forge.is_some() || crate::forge_round_trip::has_records(state) {
-            report.forge_view = Some(crate::forge_view::build(store, state, &Default::default())
+            report.forge_view = Some(crate::forge_view::build(
+                store,
+                state,
+                &crate::forge_view::Options {
+                    change_at: at.map(str::to_string),
+                    ..Default::default()
+                },
+            )
                 .unwrap_or_else(|error| serde_json::json!({"schema":"arc-forge-view/1","availability":"unavailable","diagnostic":error.to_string()})));
         }
         Ok(report)

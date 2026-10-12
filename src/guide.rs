@@ -1731,10 +1731,13 @@ FORGE
   its acquisition-history frontier. Links, lifecycle facts and the checks
   rollup are those bound to observations in that history;
   local_resolution.checks is the last such rollup, null only when none was
-  recorded there. Local rewrite resolution and current byte
-  availability are separate reads. Change and repository event frontiers and
-  reader options are included; explain --at bounds change knowledge, while
-  repository history, rewrite resolution and retained bytes are current reads.
+  recorded there, and a review binding's later_observations counts only the
+  reads inside it. Local rewrite resolution and current byte availability are
+  separate reads. Change and repository event frontiers and reader options
+  are included. With --at, show, status and explain stop the change events,
+  run references, local records and their source and byte references at that
+  event; repository history, rewrite resolution and retained bytes are
+  current reads.
   Freshness names the last successful read, latest attempt, age and clock
   anomalies. A failed acquisition does not erase a successful retained read;
   recording time never establishes present provider agreement.

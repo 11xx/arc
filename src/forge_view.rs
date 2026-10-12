@@ -6,7 +6,7 @@ use crate::{
     state::{ChangeState, VerdictEntry},
     store::Store,
 };
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -280,7 +280,14 @@ pub fn build(store: &Store, state: &ChangeState, options: &Options) -> Result<Va
         .map(|s| s.change_id.clone())
         .collect();
     let repo_events = store.load_repository_events()?;
-    let events = store.load_events(&state.change_id)?;
+    let mut events = store.load_events(&state.change_id)?;
+    if let Some(at) = options.change_at.as_deref() {
+        let position = events
+            .iter()
+            .position(|event| event.event_id == at)
+            .with_context(|| format!("unknown event {at:?} in {}", state.change_id))?;
+        events.truncate(position + 1);
+    }
     let mut workflow = workflow_facts(state, &events, &repo_events)?;
     let mut round_trip = state.round_trip.clone();
     round_trip.join(state, &repo_events, &custody);
@@ -397,7 +404,7 @@ pub fn build(store: &Store, state: &ChangeState, options: &Options) -> Result<Va
     workflow["source_read_errors"] = json!(source_read_errors);
     workflow["byte_references"] = json!(byte_references);
     workflow["local_record_scope"] =
-        json!("held local workflow records; source and byte availability are current reads");
+        json!("held local workflow records, bounded by the change frontier when one is named; source and byte availability are current reads");
     let seeds: std::collections::BTreeSet<_> = related.into_iter().collect();
     let related = related_closure(&states, seeds);
     let related_workflows: Vec<_> = related.iter().filter(|id| *id != &state.change_id).filter_map(|id| states.get(id)).map(|other| {
@@ -446,7 +453,8 @@ pub fn build(store: &Store, state: &ChangeState, options: &Options) -> Result<Va
         workflow["round_trip"]["observed_merge_sha"] =
             json!(lifecycle.and_then(|l| l.observed_merge_sha.as_ref()));
     }
-    let verdicts: Vec<_> = state.verdicts.iter().map(|v| json!({"event_id":v.event_id,"sources":v.forge_sources,"frontier":v.forge_frontier,"later_observations":drift(state,v),"verdict":v.verdict})).collect();
+    let in_history = |id: &String| selected.is_none() || history.iter().any(|r| &r.event_id == id);
+    let verdicts: Vec<_> = state.verdicts.iter().map(|v| json!({"event_id":v.event_id,"sources":v.forge_sources,"frontier":v.forge_frontier,"later_observations":drift(state,v).map(|later| later.into_iter().filter(in_history).collect::<Vec<_>>()),"verdict":v.verdict})).collect();
     let mut view = json!({"schema":"arc-forge-view/1","change_id":state.change_id,
         "identity":identities,"observations":content,"generation_links":content.iter().flat_map(|r| &r.document.generations).collect::<Vec<_>>(),
         "related_changes":related,"patchsets":state.patchsets,

@@ -1199,7 +1199,7 @@ fn open_evaluation(
             "no patchset recorded, so no tree to evaluate",
         )));
     };
-    let report = ctx.report_as_of(store, state)?;
+    let report = ctx.report_as_of(store, state, at)?;
     let rows = report
         .gates
         .iter()

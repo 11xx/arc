@@ -1363,21 +1363,14 @@ pub fn status_cmd(
     let output = match at {
         Some(at) => {
             let st = super::reduce_at(&store, &change_id, at)?;
-            status_output_as_of(ctx, &store, &st)?
+            status_output_as_of(ctx, &store, &st, at)?
         }
         None => {
             let st = store.state(&change_id)?;
             status_output(ctx, &store, &st)?
         }
     };
-    let mut value = serde_json::to_value(output)?;
-    if let Some(at) = at {
-        if let Some(view) = value.get_mut("forge_view") {
-            view["reader_options"]["change_at"] = serde_json::json!(at);
-            view["frontiers"]["change_knowledge_at"] = serde_json::json!(at);
-            view["freshness_scope"] = serde_json::json!("change knowledge at event");
-        }
-    }
+    let value = serde_json::to_value(output)?;
     print_projected(value, get, fields)?;
     Ok(())
 }
@@ -1413,8 +1406,13 @@ pub(crate) fn status_output(ctx: &Ctx, store: &Store, state: &ChangeState) -> Re
     status_output_with(store, state, ctx.report(store, state)?)
 }
 
-fn status_output_as_of(ctx: &Ctx, store: &Store, state: &ChangeState) -> Result<StatusOutput> {
-    status_output_with(store, state, ctx.report_as_of(store, state)?)
+fn status_output_as_of(
+    ctx: &Ctx,
+    store: &Store,
+    state: &ChangeState,
+    at: &str,
+) -> Result<StatusOutput> {
+    status_output_with(store, state, ctx.report_as_of(store, state, Some(at))?)
 }
 
 fn status_output_with(
@@ -1586,7 +1584,7 @@ fn show(
     } else {
         let states = store.readable_states()?;
         let report = match at {
-            Some(_) => ctx.report_as_of(&store, &st)?,
+            Some(_) => ctx.report_as_of(&store, &st, at)?,
             None => ctx.report(&store, &st)?,
         };
         let alternatives = if report.blocker_status.blocked {

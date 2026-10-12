@@ -576,7 +576,11 @@ fn checks_document(
     predecessor: Option<&str>,
 ) -> Value {
     let mut v = document(read, generation, body, predecessor);
-    facts(&mut v, "checks", json!({"kind":"checks","state":state,"count":1}));
+    facts(
+        &mut v,
+        "checks",
+        json!({"kind":"checks","state":state,"count":1}),
+    );
     v
 }
 fn record_checks(
@@ -616,8 +620,24 @@ fn forge_observation_frontier_reports_the_checks_recorded_there() {
         repo.arc(&repo.root)
             .args(["forge", "link", &id, "--observation", "read-1"]),
     );
-    record_checks(&repo, &id, "checks-pass", "gp", "checks passed", "passed", None);
-    record_checks(&repo, &id, "checks-fail", "gf", "checks failed", "failed", Some("gp"));
+    record_checks(
+        &repo,
+        &id,
+        "checks-pass",
+        "gp",
+        "checks passed",
+        "passed",
+        None,
+    );
+    record_checks(
+        &repo,
+        &id,
+        "checks-fail",
+        "gf",
+        "checks failed",
+        "failed",
+        Some("gp"),
+    );
     assert_eq!(
         view(&repo, &id, &[])["local_resolution"]["checks"]["state"],
         "failed"
@@ -632,4 +652,95 @@ fn forge_observation_frontier_reports_the_checks_recorded_there() {
     assert!(before_any["local_resolution"]["checks"].is_null());
     let failed = view(&repo, &id, &["--observation", "checks-fail"]);
     assert_eq!(failed["local_resolution"]["checks"]["state"], "failed");
+}
+
+fn deliver_citing(repo: &Repo, id: &str, observation: &str) {
+    let source = json!({"change_id":id,"observation":observation,"generation":"g1"});
+    let outcome = |standing: &str| json!({"standing":standing,"detail":"adapter observation","evidence":[],"sources":[]});
+    let mut delivery = json!({"schema":"arc-forge-delivery/1","message_id":"message-1","attempt_id":"attempt-1","evidence_id":"outcome-1","run":"run-1","transport_request":"request-1","sources":[source],"delivery":outcome("uncertain"),"acknowledgement":outcome("uncertain"),"acted_on":outcome("not-observed")});
+    delivery["delivery"]["evidence"] = json!([{"provider":"fixture","handle":"receipt","sha256":"0".repeat(64),"byte_length":4,"media_type":"text/plain","capture":"pinned"}]);
+    fs::write(repo.root.join("delivery.json"), delivery.to_string()).unwrap();
+    stdout(repo.arc(&repo.root).args([
+        "message",
+        id,
+        "--type",
+        "note",
+        "--summary",
+        "Rework",
+        "--delivery-file",
+        "delivery.json",
+    ]));
+}
+
+#[test]
+fn forge_change_bound_excludes_events_and_local_records_recorded_later() {
+    let (repo, id) = setup();
+    retained_pair(&repo, &id);
+    let observed = view(&repo, &id, &["--observation", "read-1"])["observations"][0]["event_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    deliver_citing(&repo, &id, &observed);
+    let current = view(&repo, &id, &[]);
+    assert!(!current["source_availability"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(!current["byte_references"].as_array().unwrap().is_empty());
+    let mut ids = event_ids(&current);
+    let position = ids.iter().position(|e| *e == observed).unwrap();
+    ids.truncate(position + 1);
+    for surface in [
+        stdout(
+            repo.arc(&repo.root)
+                .args(["show", &id, "--at", &observed, "--json"]),
+        ),
+        stdout(
+            repo.arc(&repo.root)
+                .args(["explain", &id, "--at", &observed, "--json"]),
+        ),
+        stdout(
+            repo.arc(&repo.root)
+                .args(["status", &id, "--at", &observed]),
+        ),
+    ] {
+        let value: Value = serde_json::from_str(&surface).unwrap();
+        let bounded = &value["forge_view"];
+        assert_eq!(event_ids(bounded), ids, "{surface}");
+        assert_eq!(bounded["frontiers"]["change_knowledge_at"], observed);
+        assert_eq!(bounded["source_availability"], json!([]));
+        assert_eq!(bounded["byte_references"], json!([]));
+        assert_eq!(bounded["deliveries"], json!([]));
+    }
+}
+
+#[test]
+fn forge_observation_frontier_counts_only_the_drift_recorded_within_it() {
+    let (repo, id) = setup();
+    materialize(&repo.home.join("materialized"), &["first", "second", "{}"]);
+    observe(&repo, &id, &document("read-1", "g1", "first", None));
+    let wt = snapshot(&repo, &id);
+    stdout(repo.arc(&wt).args([
+        "review",
+        &id,
+        "--verdict",
+        "comment-only",
+        "--forge-source",
+        "read-1:g1",
+    ]));
+    observe(&repo, &id, &document("read-2", "g2", "second", Some("g1")));
+    failed(&repo, &id);
+    let drift = |view: &Value| view["review_bindings"][0]["later_observations"].clone();
+    assert_eq!(drift(&view(&repo, &id, &[])).as_array().unwrap().len(), 2);
+    assert_eq!(
+        drift(&view(&repo, &id, &["--observation", "read-2"]))
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        drift(&view(&repo, &id, &["--observation", "read-1"])),
+        json!([])
+    );
 }
