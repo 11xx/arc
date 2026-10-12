@@ -66,16 +66,15 @@ pub fn events(ctx: &Ctx, args: EventsArgs<'_>) -> Result<()> {
         Some(resolve_tagged(ctx, &tags)?.into_iter().collect())
     };
     loop {
-        let (raw_events, reservation) = {
-            let _cursor = store.lock_event_cursor()?;
+        let (raw_events, reservation) = store.read_event_cursor(|| {
             let reservation = store.oldest_event_reservation()?;
             let raw = match (&change_id, repository_scope) {
                 (Some(id), _) => store.raw_events_unseen(id, &seen)?,
                 (None, true) => store.raw_repository_events_unseen(&seen)?,
                 (None, false) => store.raw_events_all_unseen(&seen)?,
             };
-            (raw, reservation)
-        };
+            Ok((raw, reservation))
+        })?;
         if replay
             && since
                 .as_ref()

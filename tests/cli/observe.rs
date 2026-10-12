@@ -1834,3 +1834,91 @@ fn aggregate_views_report_a_malformed_event_and_keep_other_rows() {
         .assert()
         .failure();
 }
+
+/// Set every entry under `root` to read-only (directories stay traversable),
+/// or back to writable, so a test can hold a ledger the way a read-only
+/// mount presents it.
+fn set_tree_writable(root: &Path, writable: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = fs::symlink_metadata(root).unwrap();
+    if metadata.file_type().is_symlink() {
+        return;
+    }
+    let is_dir = metadata.is_dir();
+    let mode = match (is_dir, writable) {
+        (true, true) => 0o700,
+        (true, false) => 0o500,
+        (false, true) => 0o600,
+        (false, false) => 0o400,
+    };
+    if is_dir && writable {
+        fs::set_permissions(root, fs::Permissions::from_mode(mode)).unwrap();
+    }
+    if is_dir {
+        for entry in fs::read_dir(root).unwrap() {
+            set_tree_writable(&entry.unwrap().path(), writable);
+        }
+    }
+    if !(is_dir && writable) {
+        fs::set_permissions(root, fs::Permissions::from_mode(mode)).unwrap();
+    }
+}
+
+fn assert_a_frozen_ledger_reads(keep_lock: bool) {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "frozen-ledger", "--no-worktree"]),
+    );
+    let ledger = repo.root.join(".git/arc");
+    let before = stdout(repo.arc(&repo.root).args(["events"]));
+    let exported = repo.home.join("frozen-before.json");
+    stdout(repo.arc(&repo.root).args([
+        "export",
+        "frozen-ledger",
+        "--output",
+        exported.to_str().unwrap(),
+    ]));
+    // A ledger last written by an arc that took no event lock has none on
+    // disk, and a reader has no right to create one.
+    if !keep_lock {
+        fs::remove_file(ledger.join("locks/event-ids.lock")).unwrap();
+    }
+    let locks_before = fs::read_dir(ledger.join("locks")).map(|d| d.count()).ok();
+    set_tree_writable(&ledger, false);
+    let replay = repo.arc(&repo.root).args(["events"]).assert().try_success();
+    let frozen_export = repo.home.join("frozen-after.json");
+    let export = repo
+        .arc(&repo.root)
+        .args([
+            "export",
+            "frozen-ledger",
+            "--output",
+            frozen_export.to_str().unwrap(),
+        ])
+        .assert()
+        .try_success();
+    set_tree_writable(&ledger, true);
+    let replay = replay.unwrap_or_else(|error| panic!("events on a read-only ledger: {error}"));
+    export.unwrap_or_else(|error| panic!("export on a read-only ledger: {error}"));
+    assert_eq!(String::from_utf8_lossy(&replay.get_output().stdout), before);
+    assert_eq!(
+        fs::read(&frozen_export).unwrap(),
+        fs::read(&exported).unwrap()
+    );
+    assert_eq!(
+        fs::read_dir(ledger.join("locks")).map(|d| d.count()).ok(),
+        locks_before,
+        "a reader created lock metadata"
+    );
+}
+
+#[test]
+fn events_and_export_read_a_ledger_whose_event_lock_exists_but_is_unwritable() {
+    assert_a_frozen_ledger_reads(true);
+}
+
+#[test]
+fn events_and_export_read_a_ledger_that_has_no_event_lock() {
+    assert_a_frozen_ledger_reads(false);
+}

@@ -52,6 +52,8 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(1);
 // The target lock is legitimately held across a real merge, so waiters get a
 // budget sized to an integration rather than to a state append.
 const TARGET_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+/// The lock a writer holds to issue and publish an event ID.
+const EVENT_IDS_LOCK: &str = "event-ids.lock";
 const LOCK_RETRY: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -708,13 +710,58 @@ impl Store {
     /// Only filesystem work belongs inside this guard.
     pub(crate) fn lock_event_ids(&self) -> Result<TransitionLock> {
         self.refuse_read_only()?;
-        self.lock_event_cursor()
+        self.lock_file(EVENT_IDS_LOCK, "ledger event IDs", LOCK_TIMEOUT)
     }
 
-    /// A consistent read of reservations and visible events. Release this
-    /// guard before running Git, hooks, or any consumer of the event stream.
-    pub(crate) fn lock_event_cursor(&self) -> Result<TransitionLock> {
-        self.lock_file("event-ids.lock", "ledger event IDs", LOCK_TIMEOUT)
+    /// Run `read` against a consistent view of reservations and visible
+    /// events. Readers share the event-ID lock with each other and exclude
+    /// writers, and they never create it: the lock is opened read-only, so a
+    /// ledger that cannot be written can still be read. A ledger with no lock
+    /// file has had no writer, and a writer creates the file before it
+    /// publishes anything, so a read that finishes with the file still absent
+    /// saw no concurrent write. `read` must not run Git, hooks, or any
+    /// consumer of the event stream, and may run more than once.
+    pub(crate) fn read_event_cursor<T>(&self, read: impl Fn() -> Result<T>) -> Result<T> {
+        let path = self.root.join("locks").join(EVENT_IDS_LOCK);
+        loop {
+            let file = match File::open(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    let value = read()?;
+                    if path.exists() {
+                        continue;
+                    }
+                    return Ok(value);
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("cannot open ledger event IDs lock {}", path.display())
+                    });
+                }
+            };
+            let deadline = Instant::now() + LOCK_TIMEOUT;
+            loop {
+                match file.try_lock_shared() {
+                    Ok(()) => break,
+                    Err(std::fs::TryLockError::WouldBlock) => {
+                        if Instant::now() >= deadline {
+                            bail!(
+                                "ledger event IDs lock {} is busy; retry the command",
+                                path.display()
+                            );
+                        }
+                        thread::sleep(LOCK_RETRY);
+                    }
+                    Err(std::fs::TryLockError::Error(error)) => {
+                        return Err(error).with_context(|| {
+                            format!("cannot lock ledger event IDs {}", path.display())
+                        });
+                    }
+                }
+            }
+            let _held = TransitionLock(file);
+            return read();
+        }
     }
 
     fn read_id_marker(&self, name: &str) -> Result<Option<String>> {
@@ -2465,6 +2512,31 @@ mod tests {
         assert!(later.event_id > reserved);
         assert_eq!(other.oldest_event_reservation().unwrap(), None);
         store.clear_provisional_intent("reserved").unwrap();
+    }
+
+    #[test]
+    fn event_cursor_readers_share_the_lock_and_exclude_a_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut event = ordering_draft("seed");
+        store.append_local_event(&mut event).unwrap();
+        let nested = store
+            .read_event_cursor(|| store.read_event_cursor(|| Ok(7)))
+            .unwrap();
+        assert_eq!(nested, 7);
+        let held = store.lock_event_ids().unwrap();
+        let error = store.read_event_cursor(|| Ok(())).unwrap_err();
+        assert!(error.to_string().contains("is busy"), "{error:#}");
+        drop(held);
+        store.read_event_cursor(|| Ok(())).unwrap();
+    }
+
+    #[test]
+    fn an_event_cursor_read_never_creates_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        store.read_event_cursor(|| Ok(())).unwrap();
+        assert!(!dir.path().join("locks").exists());
     }
 
     #[test]

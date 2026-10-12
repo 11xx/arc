@@ -204,8 +204,7 @@ impl Bundle {
 
     fn export_one(store: &Store, cwd: &Path, change_id: &str, since: Option<&str>) -> Result<Self> {
         ids::validate_id_component(change_id)?;
-        let (raw, repository_events) = {
-            let _cursor = store.lock_event_cursor()?;
+        let (raw, repository_events) = store.read_event_cursor(|| {
             let reservation = store.oldest_event_reservation()?;
             let mut raw = store.raw_events(change_id)?;
             let mut repository =
@@ -219,14 +218,14 @@ impl Bundle {
                     );
                 }
             }
-            (
+            Ok((
                 raw,
                 repository
                     .into_iter()
                     .map(|(_, value)| value)
                     .collect::<Vec<_>>(),
-            )
-        };
+            ))
+        })?;
         if raw.is_empty() {
             bail!("change {change_id:?} has no events");
         }

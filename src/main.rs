@@ -1103,7 +1103,8 @@ enum Cmd {
         change: Option<String>,
     },
     /// Replay raw ledger events as NDJSON, optionally following new events
-    /// Records no events; ledger reads do not require a parseable append policy.
+    /// Records no events and writes nothing to the ledger, so a read-only ledger
+    /// replays; ledger reads do not require a parseable append policy.
     /// Local IDs are totally ordered by issuance across processes. ID cursors
     /// wait below unresolved provisional reservations. Imported
     /// events keep their origin IDs; follow emits unseen imports in each poll.
@@ -1239,7 +1240,8 @@ enum Cmd {
     /// Nonportable cost facts or bindings refuse transport; recording
     /// locators and unclassified cost reasons are never emitted. Recorded
     /// events are preserved.
-    /// Records no events and initializes no replica; ledger reads do not
+    /// Records no events, initializes no replica and writes nothing to the
+    /// ledger, so a read-only ledger exports; ledger reads do not
     /// require a parseable append policy.
     Export {
         /// Change to export as a versioned bundle
