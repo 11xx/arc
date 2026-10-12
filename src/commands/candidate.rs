@@ -264,7 +264,7 @@ fn read_evidence(cwd: &std::path::Path, path: &str) -> Result<ReceivedEvidence> 
         )
     })?;
     evidence
-        .validate()
+        .validate_admission()
         .map_err(|error| anyhow::anyhow!("malformed-evidence: {error}"))?;
     evidence.validate_held_heads(cwd)?;
     Ok(evidence)

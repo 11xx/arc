@@ -1758,8 +1758,9 @@ FORGE
   arc-disclosure/1 privately. It records disclosure_id, optional
   previous_disclosure, selected source generations/fields with access_basis
   (accessible-git, accessible-forge, withheld-private-assertion), allowlist_version,
-  validator_version, author, optional reviewer/editor, discloser,
-  recipient_access_basis, omissions, outgoing RetainedContentRef and exact
+  validator_version, author, optional reviewer/editor, discloser (each a
+  participant: a placeholder or a session id is refused, and absence is
+  null), recipient_access_basis, omissions, outgoing RetainedContentRef and exact
   readback source generation. A selected source names a forge generation,
   a ledger event (change_id/event), or Git support (change_id/commit); Git
   support uses a full held commit ID and travels with the object closure.
@@ -1780,7 +1781,8 @@ FORGE
   shared coordinate rules: placeholders and malformed separators refuse; missing
   model/harness evidence degrades the projection without inventing a coordinate. Material synthesis names each author
   and its source statements; quoted, transported and implementation participants
-  remain roles and never become authors automatically. Corrections name an
+  remain roles and never become authors automatically; a role's participant
+  follows the same participant rule. Corrections name an
   editor and previous_disclosure, preserve original authors, and bind the
   outgoing/readback generation independently of the original judgment. A comment
   identity has one original disclosure; later annotations link its lineage.
@@ -2750,7 +2752,11 @@ CANDIDATES
   review sender, the Git author and the Git committer. They are separate
   facts and none implies another: one forge account behind three roles is
   three entries, and account equality establishes no equality of roles,
-  models or Git identities. A candidate's `producers`, a promoted patchset's
+  models or Git identities. A coordinate or an identity is a value or is left
+  out: registration, and an import for each evidence event the bundle adds,
+  refuse a placeholder (unknown, none, n/a, ...) anywhere in a provenance
+  entry or the environment identity, and a session id as a model, effort or
+  source coordinate. A candidate's `producers`, a promoted patchset's
   contributors and `--on-behalf-of` keep their own roles and are never
   derived from, or merged with, a provenance entry. `registered_by` and the
   evidence's `recorded_by` are the declarant of the write.

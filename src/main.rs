@@ -3624,7 +3624,10 @@ enum CandidateCmd {
     /// reviewer) with the native producer and the model, each with its source
     /// coordinates, and the forge account, review sender, Git author and Git
     /// committer as fields of their own; none stands in for another, and two
-    /// roles behind one account are two entries. A receipt is a
+    /// roles behind one account are two entries. A coordinate or identity is a
+    /// value or is left out: a placeholder is refused anywhere in a provenance
+    /// entry or the environment identity, and a session id as a model, effort
+    /// or source coordinate. A receipt is a
     /// RetainedContentRef (provider, handle, sha256, byte_length, media_type,
     /// capture); it is a claim about bytes until custody holds them.
     /// `omissions` is required: provenance, receipts, commands and
@@ -3981,7 +3984,7 @@ enum ContextCmd {
         /// A tool record id recorded as a read on the same subject
         #[arg(long)]
         citation: Option<String>,
-        /// arc-disclosure/1 selection, omissions, act provenance and exact outgoing/readback bytes. Records locally; never publishes
+        /// arc-disclosure/1 selection, omissions, act provenance and exact outgoing/readback bytes. Records locally; never publishes. Author, reviewer, editor, discloser and role participants refuse a placeholder or a session id; absence is null
         #[arg(long)]
         disclosure_file: Option<PathBuf>,
         /// Materialized sha256 files for disclosure outgoing bytes; hashes are checked before append

@@ -5,6 +5,29 @@ use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+/// A single-line value naming a participant: no placeholder, no session id,
+/// and no `harness:model` form carrying either. Absence is `None`, never a
+/// placeholder.
+fn participant(value: &str) -> Result<()> {
+    named(value)?;
+    ensure!(
+        !crate::coordinate::is_session_id(value, None)
+            && crate::coordinate::actor_defect(value).is_none(),
+        "a placeholder or session id names no participant"
+    );
+    Ok(())
+}
+
+/// A single-line coordinate that is no placeholder.
+fn established(value: &str) -> Result<()> {
+    named(value)?;
+    ensure!(
+        !crate::coordinate::is_placeholder(value),
+        "a placeholder is not a coordinate"
+    );
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceGeneration {
@@ -180,7 +203,7 @@ pub struct CommentAuthor {
 }
 impl CommentAuthor {
     fn validate(&self) -> Result<()> {
-        named(&self.act)?;
+        established(&self.act)?;
         ensure!(
             self.name.is_none()
                 || (self.harness.is_none() && self.model.is_none() && self.effort.is_none()),
@@ -207,7 +230,11 @@ impl CommentAuthor {
                 "invalid authorship effort"
             );
         }
+        if let Some(observation) = &self.model_observation {
+            established(observation)?;
+        }
         if let Some(name) = &self.name {
+            participant(name)?;
             ensure!(
                 !name.contains(['/', '\\', ':', '@']),
                 "human author needs a name, not a trace or URL"
@@ -333,7 +360,7 @@ impl CommentProvenance {
         }
         for role in &self.roles {
             named(&role.role)?;
-            named(&role.participant)?;
+            participant(&role.participant)?;
         }
         if let Some(cost) = &self.cost {
             ensure!(cost.scope == "review-exchange", "comment cost must be scoped to review-exchange, never implementation or whole-session");
@@ -475,17 +502,18 @@ impl Disclosure {
             &self.disclosure_id,
             &self.allowlist_version,
             &self.validator_version,
-            &self.author,
-            &self.discloser,
             &self.recipient_access_basis,
         ] {
             named(value)?;
         }
-        for value in [&self.previous_disclosure, &self.reviewer, &self.editor]
-            .into_iter()
-            .flatten()
-        {
-            named(value)?;
+        for value in [&self.author, &self.discloser] {
+            participant(value)?;
+        }
+        for value in [&self.reviewer, &self.editor].into_iter().flatten() {
+            participant(value)?;
+        }
+        if let Some(previous) = &self.previous_disclosure {
+            named(previous)?;
         }
         for selection in &self.selected {
             selection.source.validate()?;

@@ -1126,6 +1126,63 @@ fn a_novel_contradicting_claim_is_refused_naming_its_event() {
     assert!(stderr.contains(&event), "{stderr}");
 }
 
+/// A model observation names its coordinates or is absent; a placeholder or a
+/// session id is refused wherever evidence is admitted.
+#[test]
+fn placeholder_coordinates_are_refused_at_registration_and_import() {
+    let f = Fixture::new();
+    let mut evidence = f.evidence();
+    evidence["provenance"] = json!([{
+        "role": "producer",
+        "model": {"name": "model-a", "effort": "high",
+                  "source": {"kind": "session-file", "reference": "run-1"}},
+    }]);
+    evidence["omissions"] = json!([]);
+    let before = event_types(&f.repo, &f.change);
+    for (pointer, value) in [
+        ("/provenance/0/model/name", "unknown"),
+        ("/provenance/0/model/effort", "n/a"),
+        ("/provenance/0/model/source/kind", "none"),
+        ("/provenance/0/model/source/reference", "?"),
+    ] {
+        let mut bad = evidence.clone();
+        *bad.pointer_mut(pointer).unwrap() = json!(value);
+        let out = f.register("c1", &f.report.commit, &bad).output().unwrap();
+        assert!(!out.status.success(), "{pointer}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("placeholder"));
+        assert_eq!(event_types(&f.repo, &f.change), before);
+    }
+    f.registered("c1", &f.report.commit, &evidence);
+
+    let bundle = f.repo.home.join("bundle.json");
+    stdout(f.repo.arc(&f.repo.root).args([
+        "export",
+        &f.change,
+        "--output",
+        bundle.to_str().unwrap(),
+    ]));
+    let mut foreign: Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    for event in foreign["repository_events"].as_array_mut().unwrap() {
+        if event["event_type"] == "candidate-registered" {
+            event
+                .as_object_mut()
+                .unwrap()
+                .remove("requested_evidence_sha256");
+        }
+        if event["event_type"] == "candidate-evidence-received" {
+            event["evidence"]["provenance"][0]["model"]["name"] = json!("unknown");
+        }
+    }
+    fs::write(&bundle, serde_json::to_vec_pretty(&foreign).unwrap()).unwrap();
+    let receiver = Repo::new();
+    deliver_git_objects(&f.repo, &receiver);
+    let out = import_command(&receiver, &bundle).output().unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("placeholder"), "{stderr}");
+    assert!(!receiver.root.join(".git/arc/imports").exists());
+}
+
 #[test]
 #[cfg(debug_assertions)]
 fn interrupted_registration_retries_preserve_unavailable_claims_and_event_identity() {

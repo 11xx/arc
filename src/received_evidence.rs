@@ -45,6 +45,22 @@ pub struct ReceivedEvidence {
 }
 
 impl ReceivedEvidence {
+    /// [`Self::validate`] and the rules a document must also meet to be
+    /// admitted: a coordinate or an identity is a value, never a placeholder,
+    /// and a model, effort or source coordinate is no session id. Absence is
+    /// a field left out. A recorded document reduces under `validate` alone,
+    /// so a record written earlier stays readable.
+    pub fn validate_admission(&self) -> Result<()> {
+        self.validate()?;
+        for (index, entry) in self.provenance.iter().enumerate() {
+            entry.validate_admission(index)?;
+        }
+        if let Some(environment) = &self.environment {
+            established("environment identity", &environment.identity)?;
+        }
+        Ok(())
+    }
+
     /// SHA256 of the typed document serialized with sorted object keys.
     pub fn sha256(&self) -> Result<String> {
         use sha2::{Digest, Sha256};
@@ -345,6 +361,25 @@ fn object_id(label: &str, text: &str) -> Result<()> {
     Ok(())
 }
 
+/// A value that names something: no placeholder spelling.
+fn established(label: &str, text: &str) -> Result<()> {
+    ensure!(
+        !crate::coordinate::is_placeholder(text),
+        "{label} {text:?} is a placeholder; leave the field out when it is not established"
+    );
+    Ok(())
+}
+
+/// A model, effort or source coordinate: established and no session id.
+fn coordinate(label: &str, text: &str) -> Result<()> {
+    established(label, text)?;
+    ensure!(
+        !crate::coordinate::is_session_id(text, None),
+        "{label} {text:?} is a session id, not a coordinate"
+    );
+    Ok(())
+}
+
 impl SourceCoordinate {
     fn validate(&self, label: &str) -> Result<()> {
         nonblank(&format!("{label} source kind"), &self.kind)?;
@@ -402,6 +437,53 @@ impl Provenance {
         }
         if let Some(identity) = &self.git_committer {
             identity.validate(&format!("{label} git committer"))?;
+        }
+        Ok(())
+    }
+}
+
+impl SourceCoordinate {
+    fn validate_admission(&self, label: &str) -> Result<()> {
+        coordinate(&format!("{label} source kind"), &self.kind)?;
+        coordinate(&format!("{label} source reference"), &self.reference)
+    }
+}
+
+impl Provenance {
+    fn validate_admission(&self, index: usize) -> Result<()> {
+        let label = format!("provenance {index} ({})", self.role.as_str());
+        if let Some(native) = &self.native {
+            established(&format!("{label} native provider"), &native.provider)?;
+            established(&format!("{label} native identity"), &native.identity)?;
+            native
+                .source
+                .validate_admission(&format!("{label} native"))?;
+        }
+        if let Some(model) = &self.model {
+            coordinate(&format!("{label} model"), &model.name)?;
+            if let Some(effort) = &model.effort {
+                coordinate(&format!("{label} model effort"), effort)?;
+            }
+            model.source.validate_admission(&format!("{label} model"))?;
+        }
+        for (what, account) in [
+            ("forge account", &self.forge_account),
+            ("review sender", &self.review_sender),
+        ] {
+            if let Some(account) = account {
+                established(&format!("{label} {what} provider"), &account.provider)?;
+                established(&format!("{label} {what} host"), &account.host)?;
+                established(&format!("{label} {what} account"), &account.account)?;
+            }
+        }
+        for (what, identity) in [
+            ("git author", &self.git_author),
+            ("git committer", &self.git_committer),
+        ] {
+            if let Some(identity) = identity {
+                established(&format!("{label} {what} name"), &identity.name)?;
+                established(&format!("{label} {what} email"), &identity.email)?;
+            }
         }
         Ok(())
     }
@@ -605,6 +687,93 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("pass with exit code 2"));
+    }
+
+    fn with_provenance(entry: Provenance) -> ReceivedEvidence {
+        let mut document = evidence();
+        document
+            .omissions
+            .retain(|omission| omission.what != "provenance");
+        document.provenance.push(entry);
+        document
+    }
+
+    fn observed_model(name: &str, effort: Option<&str>, kind: &str, reference: &str) -> Provenance {
+        Provenance {
+            role: AgentRole::Producer,
+            native: None,
+            model: Some(ModelObservation {
+                name: name.into(),
+                effort: effort.map(Into::into),
+                source: SourceCoordinate {
+                    kind: kind.into(),
+                    reference: reference.into(),
+                },
+            }),
+            forge_account: None,
+            review_sender: None,
+            git_author: None,
+            git_committer: None,
+        }
+    }
+
+    #[test]
+    fn admission_refuses_placeholder_and_session_coordinates() {
+        let session = "019f0000-0000-7000-8000-00000000000a";
+        let good = observed_model("model-a", Some("high"), "session-file", "run-1");
+        with_provenance(good).validate_admission().unwrap();
+        for entry in [
+            observed_model("unknown", Some("high"), "session-file", "run-1"),
+            observed_model(session, Some("high"), "session-file", "run-1"),
+            observed_model("model-a", Some("n/a"), "session-file", "run-1"),
+            observed_model("model-a", Some(session), "session-file", "run-1"),
+            observed_model("model-a", Some("high"), "none", "run-1"),
+            observed_model("model-a", Some("high"), "session-file", "?"),
+            observed_model("model-a", Some("high"), "session-file", session),
+        ] {
+            let document = with_provenance(entry);
+            document.validate().unwrap();
+            assert!(document.validate_admission().is_err());
+        }
+        let mut native = observed_model("model-a", None, "session-file", "run-1");
+        native.native = Some(NativeProducer {
+            provider: "unknown".into(),
+            identity: session.into(),
+            source: SourceCoordinate {
+                kind: "session-file".into(),
+                reference: "run-1".into(),
+            },
+        });
+        assert!(with_provenance(native.clone())
+            .validate_admission()
+            .is_err());
+        native.native.as_mut().unwrap().provider = "codex".into();
+        with_provenance(native).validate_admission().unwrap();
+    }
+
+    #[test]
+    fn admission_refuses_placeholder_attribution() {
+        let mut entry = observed_model("model-a", None, "session-file", "run-1");
+        entry.model = None;
+        entry.git_author = Some(GitIdentity {
+            name: "Unknown".into(),
+            email: "a@example.invalid".into(),
+        });
+        assert!(with_provenance(entry.clone()).validate_admission().is_err());
+        entry.git_author = None;
+        entry.forge_account = Some(ForgeAccount {
+            provider: "forge".into(),
+            host: "example.invalid".into(),
+            account: "none".into(),
+        });
+        assert!(with_provenance(entry).validate_admission().is_err());
+        let mut document = evidence();
+        document.omissions.retain(|o| o.what != "environment");
+        document.environment = Some(Environment {
+            identity: "n/a".into(),
+            detail: None,
+        });
+        assert!(document.validate_admission().is_err());
     }
 
     #[test]

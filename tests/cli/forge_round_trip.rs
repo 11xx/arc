@@ -629,6 +629,50 @@ fn compact_provenance_rejects_placeholder_and_malformed_coordinates_before_publi
 }
 
 #[test]
+fn disclosure_attribution_refuses_placeholders_and_session_ids_at_admission() {
+    let (repo, id) = setup();
+    let observation = observe(&repo, &id, "read-1", "g1", "public bytes", None);
+    let session = "019f0000-0000-7000-8000-00000000000a";
+    let mut doc = disclosure(
+        &id,
+        &observation,
+        "g1",
+        "public bytes",
+        Some(comment(vec![author(
+            Some("review-model"),
+            Some("high"),
+            "act-1",
+        )])),
+    );
+    doc["editor"] = json!("local-editor");
+    let before = event_count(&repo, &id);
+    for pointer in [
+        "/author",
+        "/reviewer",
+        "/editor",
+        "/discloser",
+        "/comment/roles/0/participant",
+        "/comment/authors/0/name",
+    ] {
+        for value in ["unknown", "N/A", " none ", "codex:unknown", session] {
+            let mut bad = doc.clone();
+            bad["comment"]["authors"][0] = json!({"name": "Writer", "harness": null,
+                "model": null, "effort": null, "act": "act-1", "model_observation": null});
+            *bad.pointer_mut(pointer).unwrap() = json!(value);
+            if pointer == "/comment/authors/0/name" && value == "codex:unknown" {
+                continue;
+            }
+            declare(&repo, &id, &bad).assert().failure();
+            assert_eq!(event_count(&repo, &id), before, "{pointer} {value:?}");
+        }
+    }
+    let mut absent = doc.clone();
+    absent["reviewer"] = Value::Null;
+    absent["editor"] = Value::Null;
+    stdout(&mut declare(&repo, &id, &absent));
+}
+
+#[test]
 fn forge_delivery_predecessor_change_closure_survives_offline_import() {
     let (repo, origin) = setup();
     let observation = observe(&repo, &origin, "read-1", "g1", "first", None);

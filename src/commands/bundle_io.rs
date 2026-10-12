@@ -1134,6 +1134,12 @@ fn plan_repository_events(
     // of it is a read-time diagnostic, never a reason to refuse an import.
     for event in &novel {
         if let Payload::CandidateEvidenceReceived { evidence, .. } = &event.payload {
+            evidence.validate_admission().with_context(|| {
+                format!(
+                    "the bundle's received evidence event {} is refused; nothing was imported",
+                    event.event_id
+                )
+            })?;
             evidence.validate_held_heads(cwd).with_context(|| {
                 format!(
                     "the bundle's received evidence event {} is refused; nothing was imported",
