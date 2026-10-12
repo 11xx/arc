@@ -1163,6 +1163,12 @@ pub struct ChangeState {
     pub schema: &'static str,
     #[serde(skip)]
     pub provisional_signature_successors: BTreeMap<String, String>,
+    /// The revisions falsification references named as recorded, where
+    /// identity recovery replaced them with the failure's own. Projection
+    /// shows the recovered identity; a checker that asks what the ledger
+    /// cites still needs the recorded one.
+    #[serde(skip)]
+    pub(crate) recovered_falsification_revisions: BTreeSet<String>,
     pub provisional_integrations: Vec<Event>,
     pub provisional_resolutions: Vec<Event>,
     /// Write-time model evidence, keyed by the ledger event that carries it.
@@ -1304,6 +1310,9 @@ impl ChangeState {
             if let Some(inferred) = &verification.falsification_inferred {
                 note(&inferred.revision, "inferred falsification".to_string());
             }
+        }
+        for revision in &self.recovered_falsification_revisions {
+            note(revision, "falsification".to_string());
         }
         for run in &self.verification_runs {
             note(&run.revision, "verification run".to_string());
@@ -1817,6 +1826,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
             } => (
                 ChangeState {
                     provisional_signature_successors: BTreeMap::new(),
+                    recovered_falsification_revisions: BTreeSet::new(),
                     provisional_integrations: Vec::new(),
                     provisional_resolutions: Vec::new(),
                     privilege_scope: None,
@@ -2842,6 +2852,9 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                         if falsification.revision != failure.revision
                             && rewrites.rewrites_to(&failure.revision, &falsification.revision)?
                         {
+                            state
+                                .recovered_falsification_revisions
+                                .insert(falsification.revision.clone());
                             falsification.revision = failure.revision.clone();
                         }
                     }

@@ -390,3 +390,71 @@ fn projected_falsification_peer_claim_contest_uses_admitted_proof() {
     );
     assert_eq!(state["claim"]["owner"]["actor"], "peer-executor");
 }
+
+/// Rewrite the latest repository event of `event_type` in place.
+fn rewrite_repository_event(
+    repo: &Repo,
+    event_type: &str,
+    update: impl FnOnce(&mut serde_json::Value),
+) {
+    let dir = repo.root.join(".git/arc/repository/events");
+    let mut paths = fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    paths.sort();
+    let (path, mut value) = paths
+        .into_iter()
+        .rev()
+        .map(|path| {
+            let value: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            (path, value)
+        })
+        .find(|(_, value)| value["event_type"] == event_type)
+        .expect("repository event type should exist");
+    update(&mut value);
+    fs::write(path, json_file_bytes(&value)).unwrap();
+}
+
+#[test]
+fn doctor_reports_a_falsification_revision_that_identity_recovery_replaces() {
+    let f = fixture();
+    let missing = "5555555555555555555555555555555555555555";
+    // The recorded map moves the failure's revision to a commit this
+    // repository does not hold, and the falsification names that successor.
+    // Identity recovery reads the falsification as the failure's own revision,
+    // so only the recorded reference still names the missing commit.
+    rewrite_repository_event(&f.source, "history-rewritten", |event| {
+        event["mapping"] = serde_json::json!({ f.old.clone(): missing });
+    });
+    rewrite_event(&f.source, &f.change, "verification-recorded", |event| {
+        if event["result"] == "pass" {
+            event["falsification"]["revision"] = missing.into();
+        }
+    });
+    let report = json_stdout_any_status(f.source.arc(&f.source.root).args(["doctor", "--json"]));
+    let dangling: Vec<_> = report["advice"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|finding| finding["code"] == "dangling-revision")
+        .collect();
+    assert!(
+        dangling.iter().any(|finding| {
+            let detail = finding["detail"].as_str().unwrap();
+            detail.starts_with("55555555") && detail.contains("falsification")
+        }),
+        "{report}"
+    );
+    let text = String::from_utf8_lossy(
+        &f.source
+            .arc(&f.source.root)
+            .arg("doctor")
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .into_owned();
+    assert!(text.contains("55555555"), "{text}");
+}

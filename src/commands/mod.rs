@@ -1377,6 +1377,7 @@ mod tests {
     fn change(id: &str, blocked_by: &[&str], closure: Option<Closure>) -> ChangeState {
         ChangeState {
             provisional_signature_successors: BTreeMap::new(),
+            recovered_falsification_revisions: BTreeSet::new(),
             provisional_integrations: Vec::new(),
             provisional_resolutions: Vec::new(),
             privilege_scope: None,
