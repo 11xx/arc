@@ -1567,10 +1567,7 @@ fn show(
     };
     if json {
         let mut value = serde_json::to_value(&st)?;
-        if st.profile == "forge"
-            || !st.forge.is_empty()
-            || crate::forge_round_trip::has_records(&st)
-        {
+        if crate::forge_round_trip::applies(&st) {
             value["forge_view"] = crate::forge_view::build(
                 &store,
                 &st,

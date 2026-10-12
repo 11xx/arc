@@ -939,6 +939,13 @@ pub fn disclosure_commits(payload: &Payload) -> Vec<&str> {
 }
 
 /// Whether a local workflow carries forge-related records without a provider declaration.
+/// Whether a change takes part in a forge round trip: it has the forge
+/// profile, recorded forge facts, or typed local round-trip records. Only
+/// such a change carries a forge view or a round-trip section.
+pub fn applies(state: &crate::state::ChangeState) -> bool {
+    state.profile == "forge" || !state.forge.is_empty() || has_records(state)
+}
+
 pub fn has_records(state: &crate::state::ChangeState) -> bool {
     !state.round_trip.disclosures.is_empty()
         || !state.round_trip.origins.is_empty()

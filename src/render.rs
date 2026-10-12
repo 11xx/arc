@@ -935,10 +935,7 @@ pub fn markdown(
         }
     }
 
-    if !state.round_trip.disclosures.is_empty()
-        || !state.round_trip.origins.is_empty()
-        || state.round_trip.local_integration_revision.is_some()
-    {
+    if crate::forge_round_trip::applies(state) {
         let _ = writeln!(w, "\n## Forge round trip\n");
         let _ = writeln!(
             w,

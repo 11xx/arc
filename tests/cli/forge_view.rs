@@ -762,6 +762,31 @@ fn forge_identity_view_applies_the_observation_to_the_changes_that_hold_it() {
 }
 
 #[test]
+fn forge_round_trip_section_belongs_to_changes_with_forge_facts() {
+    let repo = Repo::new();
+    change_with_patchset(&repo, "plain");
+    repo.arc(&repo.root)
+        .args(["review", "plain", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", "plain"])
+        .assert()
+        .success();
+    let text = stdout(repo.arc(&repo.root).args(["show", "plain"]));
+    assert!(text.contains("# "), "{text}");
+    assert!(!text.contains("Forge round trip"), "{text}");
+    let (repo, id) = setup();
+    let worktree = snapshot(&repo, &id);
+    git(&repo.root, &["merge", "--ff-only", &repo.head(&worktree)]);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["close", &id, "--assert-integrated", &repo.head(&worktree)]),
+    );
+    assert!(stdout(repo.arc(&repo.root).args(["show", &id])).contains("Forge round trip"));
+}
+
+#[test]
 fn forge_observation_frontier_counts_only_the_drift_recorded_within_it() {
     let (repo, id) = setup();
     materialize(&repo.home.join("materialized"), &["first", "second", "{}"]);

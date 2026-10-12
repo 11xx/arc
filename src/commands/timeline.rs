@@ -20,10 +20,7 @@ pub fn log(ctx: &Ctx, reference: &str, reverse: bool) -> Result<()> {
         }
     }
     let state = store.state(&change_id)?;
-    if state.profile == "forge"
-        || !state.forge.is_empty()
-        || crate::forge_round_trip::has_records(&state)
-    {
+    if crate::forge_round_trip::applies(&state) {
         print!(
             "{}",
             crate::forge_view::render(&crate::forge_view::build(

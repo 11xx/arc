@@ -1756,7 +1756,10 @@ FORGE
   independent: closed is closed-unmerged; merged names the observed merge SHA.
   A local cherry-pick, accepted candidate or public closure proves no forge
   merge or independent approval. Manual preparation declares its origin with
-  `context declare --forge-origin CHANGE:OBSERVATION:GENERATION`.
+  `context declare --forge-origin CHANGE:OBSERVATION:GENERATION`. Only a
+  change with the forge profile, recorded forge facts or such records carries
+  forge_view and a Forge round trip section in its text; any other change,
+  integrated or not, carries neither.
 
   `message CHANGE --type note --summary TEXT --delivery-file FILE` admits
   arc-forge-delivery/1: message_id, attempt_id, evidence_id, optional

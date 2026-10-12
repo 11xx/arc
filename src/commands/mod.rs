@@ -843,7 +843,7 @@ impl Ctx {
             &self.store()?,
             &state.change_id,
         )?;
-        if report.forge.is_some() || crate::forge_round_trip::has_records(state) {
+        if crate::forge_round_trip::applies(state) {
             report.forge_view = Some(crate::forge_view::build(
                 &self.store()?, state, &Default::default(),
             ).unwrap_or_else(|error| serde_json::json!({"schema":"arc-forge-view/1","availability":"unavailable","diagnostic":error.to_string()})));
@@ -889,7 +889,7 @@ impl Ctx {
             crate::replica::integration_refusal(store)?,
         );
         provisional::attach_pending_transition(&mut report, &self.cwd, store, &state.change_id)?;
-        if report.forge.is_some() || crate::forge_round_trip::has_records(state) {
+        if crate::forge_round_trip::applies(state) {
             report.forge_view = Some(crate::forge_view::build(
                 store,
                 state,
