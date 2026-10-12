@@ -16,7 +16,7 @@ name = "arc"
 path = "src/main.rs"
 
 [dependencies]
-agent-tapes-core = { git = "https://github.com/11xx/tapes", rev = "3b168bf16c12445b8b385761aa87d853678b5ed3", version = "2026.9.29" }
+agent-tapes-core = { git = "https://github.com/11xx/tapes", rev = "d4f5b75f36f95e82c47b291973c92c072093d453", version = "2026.9.29" }
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env", "string"] }

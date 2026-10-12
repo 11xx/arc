@@ -52,7 +52,8 @@ fn unresolved(harness: &str, reason: &str) -> String {
 }
 
 /// The reason tapes gives for an OpenCode row whose transcript it cannot read.
-const OPENCODE_UNREADABLE: &str = "cannot read the recording: opencode record has no message_id";
+const OPENCODE_UNREADABLE: &str =
+    "cannot read the recording: opencode database command exited with exit status: 1";
 
 #[test]
 fn no_arg_snapshot_stage_and_show_work_inside_change_worktree() {
@@ -808,6 +809,7 @@ fn env_does_not_use_an_opencode_listing_model_when_the_read_fails() {
         &sqlite,
         concat!(
             "#!/bin/sh\n",
+            "case \"$*\" in *'FROM message'*) echo 'message table unreadable' >&2; exit 1;; esac\n",
             "printf '%s\\n' 'row'\n",
             "printf '%s\\n' '{\"id\":\"ses_test123\",\"model\":\"{\\\"id\\\":\\\"kimi-k3\\\",",
             "\\\"providerID\\\":\\\"opencode-go\\\",\\\"variant\\\":\\\"max\\\"}\"}'\n",
@@ -1638,6 +1640,7 @@ fn env_marks_an_unreadable_opencode_recording_unresolved() {
         &sqlite,
         concat!(
             "#!/bin/sh\n",
+            "case \"$*\" in *'FROM message'*) echo 'message table unreadable' >&2; exit 1;; esac\n",
             "printf '%s\\n' 'row'\n",
             "printf '%s\\n' '{\"id\":\"ses_test123\",\"model\":null}'\n",
         ),
