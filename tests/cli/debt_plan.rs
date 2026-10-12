@@ -392,3 +392,51 @@ fn a_dry_run_of_an_iterating_change_meets_the_refusal_after_the_debt() {
     );
     assert!(text(&planned.stdout).contains("would not integrate"));
 }
+
+/// What an execution against a saved `would-declare` plan prints on stderr
+/// when a debt was declared between the plan and the execution, by `declarer`
+/// or by the executing actor itself when none is named.
+fn executed_after_another_declaration(slug: &str, declarer: Option<&str>, reason: &str) -> String {
+    let repo = repo_forbidding_self_approval();
+    snapshotted(&repo, slug);
+    let plan_path = repo.home.join("plan.json");
+    let plan = stdout(repo.arc(&repo.root).args([
+        "integrate",
+        slug,
+        "--debt",
+        REASON,
+        "--dry-run",
+        "--json",
+    ]));
+    fs::write(&plan_path, plan).unwrap();
+    let mut declaration = repo.arc(&repo.root);
+    if let Some(declarer) = declarer {
+        declaration.env("ARC_ACTOR", declarer);
+    }
+    stdout(declaration.args(["debt", slug, "--reason", reason]));
+    let real = integrate(
+        &repo,
+        slug,
+        false,
+        &["--expect-basis", plan_path.to_str().unwrap()],
+    );
+    text(&real.stderr)
+}
+
+#[test]
+fn a_debt_another_actor_declared_after_the_plan_is_a_moved_approval() {
+    let outcome = executed_after_another_declaration("moved", Some("Other"), "someone else's debt");
+    assert!(
+        outcome.contains("the approval you checked moved from nothing to debt"),
+        "{outcome}"
+    );
+}
+
+#[test]
+fn a_declaration_the_execution_reuses_is_a_moved_approval() {
+    let outcome = executed_after_another_declaration("reused", None, REASON);
+    assert!(
+        outcome.contains("the approval you checked moved from nothing to debt"),
+        "{outcome}"
+    );
+}

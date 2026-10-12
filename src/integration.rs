@@ -382,6 +382,22 @@ impl PlannedDebt {
 }
 
 impl IntegrationPlan {
+    /// The plan as the execution that wrote the debt it said it would declare
+    /// compares against: that one event is the debt the plan named by
+    /// intent. Any other debt event at execution, or none written because an
+    /// existing declaration was reused, still reads as a moved approval.
+    pub fn after_declaring(&self, written: Option<&str>) -> IntegrationPlan {
+        let mut basis = self.clone();
+        let would_declare = basis
+            .debt
+            .as_ref()
+            .is_some_and(|debt| debt.disposition == DebtDisposition::WouldDeclare);
+        if would_declare && basis.authorization.audit_debt_event_id.is_none() {
+            basis.authorization.audit_debt_event_id = written.map(str::to_string);
+        }
+        basis
+    }
+
     pub fn of_merge(change_id: &str, plan: &MergePlan) -> Self {
         IntegrationPlan {
             provisional_prerequisites: Vec::new(),
@@ -690,20 +706,10 @@ fn moved(prior: &IntegrationPlan, facts: &IntegrationFacts) -> Vec<Moved> {
         prior.authorization.external_verdict.as_ref(),
         prior.authorization.audit_debt_event_id.as_deref(),
     );
-    // A plan that would declare its debt names no event for it, and the
-    // execution's own declaration is the one the plan said it would write.
-    let planned_declaration = prior
-        .debt
-        .as_ref()
-        .is_some_and(|debt| debt.disposition == DebtDisposition::WouldDeclare);
     let fresh_approval = approval_label(
         facts.approval.verdict_event_id.as_deref(),
         facts.approval.external_verdict.as_ref(),
-        facts
-            .approval
-            .audit_debt_event_id
-            .as_deref()
-            .filter(|_| !planned_declaration),
+        facts.approval.audit_debt_event_id.as_deref(),
     );
     if prior_approval != fresh_approval {
         moved.push(Moved::Approval {
@@ -1196,8 +1202,29 @@ mod tests {
         let mut planned = prior();
         planned.authorization.verdict_event_id = None;
         planned.debt = Some(debt_plan(DebtDisposition::WouldDeclare, None));
-        let outcome = decide(facts_declaring("DEBT-EVENT"), Some(&planned));
+        let basis = planned.after_declaring(Some("DEBT-EVENT"));
+        let outcome = decide(facts_declaring("DEBT-EVENT"), Some(&basis));
         assert!(outcome.moved.is_empty(), "{:?}", outcome.moved);
+    }
+
+    #[test]
+    fn a_debt_other_than_the_one_written_is_a_moved_approval() {
+        let mut planned = prior();
+        planned.authorization.verdict_event_id = None;
+        planned.debt = Some(debt_plan(DebtDisposition::WouldDeclare, None));
+        let basis = planned.after_declaring(Some("OWN"));
+        let outcome = decide(facts_declaring("OTHER"), Some(&basis));
+        assert!(matches!(outcome.moved.as_slice(), [Moved::Approval { .. }]));
+    }
+
+    #[test]
+    fn a_declaration_reused_instead_of_written_is_a_moved_approval() {
+        let mut planned = prior();
+        planned.authorization.verdict_event_id = None;
+        planned.debt = Some(debt_plan(DebtDisposition::WouldDeclare, None));
+        let basis = planned.after_declaring(None);
+        let outcome = decide(facts_declaring("EXISTING"), Some(&basis));
+        assert!(matches!(outcome.moved.as_slice(), [Moved::Approval { .. }]));
     }
 
     #[test]

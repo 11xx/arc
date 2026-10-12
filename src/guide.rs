@@ -2099,8 +2099,9 @@ REVIEW COVERAGE AND DEBT
   changes-requested verdict on the exact head still refuses it. `--json`
   carries the debt as `debt` in `arc-integration-plan/1`, with
   `disposition` `would-declare` or `already-declared`; a plan that would
-  declare names no debt event in `authorization`, and handing it to
-  `--expect-basis` does not count the execution's own declaration as a move.
+  declare names no debt event in `authorization`. Handed to `--expect-basis`,
+  the event the execution itself writes is not a move; a debt another actor
+  declared meanwhile, or an existing declaration the execution reuses, is.
   `--provisional --dry-run` plans the same way.
 
   A debt is a record, not a count. It carries what kind of deficit it is,

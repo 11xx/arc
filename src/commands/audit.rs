@@ -221,6 +221,20 @@ impl std::fmt::Display for DebtPublicationFailure {
 
 impl std::error::Error for DebtPublicationFailure {}
 
+impl DebtReceipt {
+    /// The event this declaration wrote, when the change held no debt for the
+    /// same patchset beforehand. A plan that said it would declare a debt
+    /// answers for exactly this event; another declaration it never saw, or a
+    /// reused one, is not what it described.
+    pub(super) fn event_written_over(&self, before: &ChangeState) -> Option<&str> {
+        let held = before
+            .debt
+            .as_ref()
+            .is_some_and(|debt| debt.patchset_id == self.patchset_id);
+        (self.disposition == "written" && !held).then_some(self.event_id.as_str())
+    }
+}
+
 /// A debt declaration judged against the change as it stands, with every
 /// refusal already made and nothing written. `declare` writes it; `projected`
 /// shows the change as it would read once it was.

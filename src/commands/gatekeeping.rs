@@ -3160,7 +3160,7 @@ fn integrate_one(
         style_flags,
         dry_run,
         json,
-        expect_basis,
+        mut expect_basis,
     } = options;
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
@@ -3253,7 +3253,7 @@ fn integrate_one(
     }
     if super::fork::fork_slug_for_branch(&ctx.cwd, &st.branch)?.is_none() {
         if let Some(debt) = debt {
-            super::audit::declare_debt_locked(
+            let receipt = super::audit::declare_debt_locked(
                 ctx,
                 &store,
                 &st,
@@ -3261,6 +3261,8 @@ fn integrate_one(
                 debt.kind,
                 &debt.read,
             )?;
+            expect_basis =
+                expect_basis.map(|prior| prior.after_declaring(receipt.event_written_over(&st)));
             st = store.state(&change_id)?;
             st.target_branch = target.clone();
         }

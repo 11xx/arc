@@ -999,6 +999,7 @@ fn integrate_provisionally_inner(
         }
     }
     let mut planned_debt = None;
+    let mut written_debt = None;
     if fork::fork_slug_for_branch(&ctx.cwd, &state.branch)?.is_none() {
         if let Some(debt) = args.debt {
             let declaration =
@@ -1035,6 +1036,7 @@ fn integrate_provisionally_inner(
                         return Err(error);
                     }
                 };
+                written_debt = receipt.event_written_over(&state).map(str::to_string);
                 *debt_effect = Some((receipt, details));
                 state = store.state(&state.change_id)?;
             }
@@ -1050,7 +1052,7 @@ fn integrate_provisionally_inner(
             {
                 bail!("expected basis is not this change's provisional plan");
             }
-            Ok(plan)
+            Ok(plan.after_declaring(written_debt.as_deref()))
         })
         .transpose()?;
     let plan = match plan(ctx, &store, &state, &selection, expected.as_ref())? {
