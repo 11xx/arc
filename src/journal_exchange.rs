@@ -77,38 +77,39 @@ pub(crate) struct ImportReceipt {
 
 /// Formatting whitespace is excluded from bundle checksums; event tokens,
 /// including object key order and string escapes, retain their bytes.
+pub(crate) fn compact_event(raw: &str) -> Result<Box<RawValue>> {
+    let mut in_string = false;
+    let mut escaped = false;
+    let compact: String = raw
+        .chars()
+        .filter(|&character| {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if character == '\\' {
+                    escaped = true;
+                } else if character == '"' {
+                    in_string = false;
+                }
+                true
+            } else if character == '"' {
+                in_string = true;
+                true
+            } else {
+                !matches!(character, ' ' | '\t' | '\r' | '\n')
+            }
+        })
+        .collect();
+    Ok(RawValue::from_string(compact)?)
+}
+
 fn deserialize_events<'de, D>(deserializer: D) -> std::result::Result<Vec<Box<RawValue>>, D::Error>
 where
     D: Deserializer<'de>,
 {
     Vec::<Box<RawValue>>::deserialize(deserializer)?
         .into_iter()
-        .map(|raw| {
-            let mut in_string = false;
-            let mut escaped = false;
-            let compact: String = raw
-                .get()
-                .chars()
-                .filter(|&character| {
-                    if in_string {
-                        if escaped {
-                            escaped = false;
-                        } else if character == '\\' {
-                            escaped = true;
-                        } else if character == '"' {
-                            in_string = false;
-                        }
-                        true
-                    } else if character == '"' {
-                        in_string = true;
-                        true
-                    } else {
-                        !matches!(character, ' ' | '\t' | '\r' | '\n')
-                    }
-                })
-                .collect();
-            RawValue::from_string(compact).map_err(serde::de::Error::custom)
-        })
+        .map(|raw| compact_event(raw.get()).map_err(serde::de::Error::custom))
         .collect()
 }
 

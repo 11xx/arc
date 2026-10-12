@@ -582,6 +582,121 @@ fn partial_retries_deduplicate_a_delivery_rejected_after_a_local_answer() {
     }
 }
 
+/// Export carries every physical record about an artifact, so a receiver
+/// that cannot read one holds the artifact back instead of admitting a copy
+/// that lacks it.
+#[test]
+fn export_carries_unsupported_physical_records_so_the_receiver_holds_the_artifact_back() {
+    use std::io::Write as _;
+    let source = Repo::new();
+    let recipient = Repo::new();
+    pair(&source, &recipient, "origin", "peer");
+    let file = write_artifact(&source, "future-record", "todo", "# Future record\n");
+    let dir = journal_dir(&source);
+    let future = serde_json::json!({
+        "schema": "journal-events/99",
+        "event": "future-observation",
+        "file": file,
+        "topic": "future-record",
+        "ts": "2026-01-01T00:00:00Z",
+    });
+    let mut log = fs::OpenOptions::new()
+        .append(true)
+        .open(dir.join("events.jsonl"))
+        .unwrap();
+    writeln!(log, "{future}").unwrap();
+    let path = bundle_file(&source, "future-record");
+    export(&source, &[&file], &path);
+    let bundle: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let carried = bundle["artifacts"][0]["events"].as_array().unwrap();
+    assert!(
+        carried
+            .iter()
+            .any(|event| event["event"] == "future-observation"),
+        "{bundle}"
+    );
+    let imported = import(&recipient, &path, false);
+    let output = String::from_utf8_lossy(&imported.stdout);
+    assert!(output.contains(&format!("held back: {file}")), "{output}");
+    assert!(!journal_dir(&recipient).join(&file).exists());
+}
+
+/// A record state replay rejects is still a record about the artifact.
+#[test]
+fn export_carries_understood_records_that_question_replay_rejects() {
+    let source = Repo::new();
+    let recipient = Repo::new();
+    pair(&source, &recipient, "origin", "peer");
+    let file = write_artifact(&source, "late-delivery", "discussion", "# Late delivery\n");
+    source
+        .arc(&source.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "closing",
+            "--option",
+            "yes",
+            "--option",
+            "no",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Proceed?\n")
+        .assert()
+        .success();
+    let dir = journal_dir(&source);
+    let question = events_for(&dir, &file)
+        .into_iter()
+        .find(|event| event["event"] == "question")
+        .unwrap();
+    let id = question["question_id"].as_str().unwrap().to_string();
+    source
+        .arc(&source.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &id,
+            "--option",
+            "yes",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Proceed.\n")
+        .assert()
+        .success();
+    let mut late = question.clone();
+    late["event"] = "question-delivered".into();
+    late["delivered_to"] = "person".into();
+    late["ts"] = "2999-01-01T00:00:00Z".into();
+    for key in ["options", "placement", "digest"] {
+        late.as_object_mut().unwrap().remove(key);
+    }
+    let mut log = fs::read_to_string(dir.join("events.jsonl")).unwrap();
+    log.push_str(&format!("{late}\n"));
+    fs::write(dir.join("events.jsonl"), log).unwrap();
+    let replayed = stdout(source.arc(&source.root).args(["journal", "events"]));
+    assert!(!replayed.contains("question-delivered"), "{replayed}");
+    let path = bundle_file(&source, "late-delivery");
+    export(&source, &[&file], &path);
+    let bundle: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(
+        bundle["artifacts"][0]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["event"] == "question-delivered"),
+        "{bundle}"
+    );
+    assert!(import(&recipient, &path, false).status.success());
+    assert!(events_for(&journal_dir(&recipient), &file)
+        .iter()
+        .any(|event| event["event"] == "question-delivered"));
+}
+
 #[test]
 fn journal_bundle_guide_and_help_describe_artifact_admission() {
     let repo = Repo::new();

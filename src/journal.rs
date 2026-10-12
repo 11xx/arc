@@ -1387,9 +1387,11 @@ pub enum JournalCmd {
     },
     /// Export selected journal artifacts as a versioned bundle for another
     /// replica. --global exports the operator journal without Git pairing.
-    /// The bundle carries each artifact body, the events recorded
-    /// about it, its body digest, the exporting replica, and every artifact
-    /// the selection references by filename. Exports arc-journal-bundle/2.
+    /// The bundle carries each artifact body, every log record written
+    /// about it as written, including records this build cannot read and
+    /// records state replay sets aside, its body digest, the exporting
+    /// replica, and every artifact the selection references by filename.
+    /// Exports arc-journal-bundle/2.
     /// Checksums retain event field order and opaque payload tokens, excluding
     /// formatting whitespace.
     /// Records no events; ledger reads do not require a parseable append policy.
@@ -1877,7 +1879,8 @@ fn export_artifacts(ctx: &Ctx, files: &[String], output: &str) -> Result<()> {
         (project_id, local)
     };
     let events = read_events(&hot)?;
-    let artifacts = collect_exchange_artifacts(&hot, &events, files)?;
+    let records = read_physical_records(&hot)?;
+    let artifacts = collect_exchange_artifacts(&hot, &events, &records, files)?;
     let bundle = crate::journal_exchange::JournalBundle::new(project_id, local, artifacts)?;
     let digest = bundle.digest()?;
     let bytes = bundle.to_bytes()?;
@@ -1900,11 +1903,48 @@ fn export_artifacts(ctx: &Ctx, files: &[String], output: &str) -> Result<()> {
     Ok(())
 }
 
+/// One record of the event log as written: kept verbatim so an exchange can
+/// carry what this build cannot read, and what state replay sets aside.
+struct PhysicalRecord {
+    raw: String,
+    file: Option<String>,
+    event: Option<JournalEvent>,
+}
+
+/// Every JSON record in the log, in append order. A line that is not JSON is
+/// no record and names no artifact; `journal doctor` reports it.
+fn read_physical_records(dir: &Path) -> Result<Vec<PhysicalRecord>> {
+    let jsonl = dir.join("events.jsonl");
+    if !jsonl.is_file() {
+        return Ok(Vec::new());
+    }
+    let bytes =
+        std::fs::read(&jsonl).with_context(|| format!("cannot read {}", jsonl.display()))?;
+    check_event_tail(dir, &bytes)?;
+    let text =
+        String::from_utf8(bytes).with_context(|| format!("cannot read {}", jsonl.display()))?;
+    Ok(text
+        .lines()
+        .filter_map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line).ok()?;
+            Some(PhysicalRecord {
+                raw: line.to_string(),
+                file: value["file"].as_str().map(str::to_string),
+                event: serde_json::from_value::<JournalEvent>(value)
+                    .ok()
+                    .filter(JournalEvent::known),
+            })
+        })
+        .collect())
+}
+
 /// The selected artifacts and everything their recorded events reference by
-/// filename, read from the hot journal or its cold archive.
+/// filename, read from the hot journal or its cold archive. Each artifact
+/// carries every physical record written about it.
 fn collect_exchange_artifacts(
     hot: &Path,
     events: &[JournalEvent],
+    records: &[PhysicalRecord],
     requested: &[String],
 ) -> Result<Vec<crate::journal_exchange::BundledArtifact>> {
     let mut selected: BTreeMap<String, &'static str> = BTreeMap::new();
@@ -1926,9 +1966,10 @@ fn collect_exchange_artifacts(
             },
         };
         ensure_storage_settled(hot, events, &file)?;
-        for event in events
+        for event in records
             .iter()
-            .filter(|event| event.file.as_deref() == Some(file.as_str()))
+            .filter(|record| record.file.as_deref() == Some(file.as_str()))
+            .filter_map(|record| record.event.as_ref())
         {
             for reference in artifact_references(event)? {
                 match reference {
@@ -1962,11 +2003,11 @@ fn collect_exchange_artifacts(
             format!("{file} is not UTF-8 text; journal bundles carry Markdown artifacts")
         })?;
         let digest = crate::journal_exchange::body_digest(&body);
-        let recorded = events
+        let recorded = records
             .iter()
-            .filter(|event| event.file.as_deref() == Some(file.as_str()))
-            .map(serde_json::value::to_raw_value)
-            .collect::<Result<Vec<_>, _>>()?;
+            .filter(|record| record.file.as_deref() == Some(file.as_str()))
+            .map(|record| crate::journal_exchange::compact_event(&record.raw))
+            .collect::<Result<Vec<_>>>()?;
         artifacts.push(crate::journal_exchange::BundledArtifact {
             file,
             storage: storage.to_string(),
