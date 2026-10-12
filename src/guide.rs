@@ -636,7 +636,11 @@ SETTLE A QUESTION (before it is work)
   what changed and leave the original where it was filed, so the artifact
   still reads as the argument that happened while the tally, the branches,
   the question queue, and the open queue read the value in force. A retracted
-  position leaves the tally; a retracted answer reopens its question. Both are
+  position leaves the tally; a retracted answer reopens its question, and a
+  question answered again is settled by its latest answer: an amendment of
+  `answer:<question id>` names the answer it was made against
+  (`settlement`), and one recorded without it binds to the answer standing at
+  its place in the log. Both are
   open on a consumed artifact, which is closed to new work but not to being
   wrong. A row for a filed claim carries `[amended ×N]` for the positions
   standing on it, so a claim amended three times is not read as one filed

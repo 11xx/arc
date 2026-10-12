@@ -1003,7 +1003,9 @@ pub enum JournalCmd {
         /// question or evidence block. A corrected actor, model or planner is held to what a
         /// write records: a placeholder or a session id model refuses. A
         /// model is checked against the target entry's session and the invoking
-        /// session; an answer target uses its latest settlement. Headers and
+        /// session; an answer target uses its latest settlement, and a
+        /// correction of it applies to the settlement it was made against,
+        /// not to one that replaced it. Headers and
         /// recorded planner coordinates undergo the same semantic validation
         /// before credit is granted. A planner correction that fails the same
         /// checks when read reads as
@@ -1019,7 +1021,9 @@ pub enum JournalCmd {
     },
     /// Withdraw a recorded entry while leaving it visible. A retracted position
     /// leaves the stance tally and the branches argued under a question; a
-    /// retracted answer reopens the question it settled. Retracted evidence is
+    /// retracted answer reopens the question it settled, and answering it again
+    /// settles it with the new answer, which a later retraction can withdraw in
+    /// turn. Retracted evidence is
     /// marked withdrawn in `show --json`. The block stays in the
     /// artifact, because an argument withdrawn is a different record from an
     /// argument never made. A consumed artifact accepts retractions
@@ -2069,6 +2073,14 @@ pub(crate) fn artifact_references(event: &JournalEvent) -> Result<Vec<ArtifactRe
 }
 
 impl JournalEvent {
+    /// The identity of one answer event, which is what a settlement of its
+    /// question is. Two answers to a reopened question differ in it even when
+    /// they say the same thing.
+    fn settlement_id(&self) -> Option<String> {
+        let bytes = serde_json::to_vec(self).ok()?;
+        Some(hex::encode(Sha256::digest(bytes)))
+    }
+
     /// The section identity and ordering key carried by an append event.
     pub(crate) fn exchange_block(&self) -> Option<(String, String, &str, Option<&str>)> {
         let (heading, id) = match self.event.as_str() {
@@ -2088,10 +2100,9 @@ impl JournalEvent {
             } else {
                 ""
             };
-            let bytes = serde_json::to_vec(self).ok()?;
             (
                 format!("### Answer {id} = {menu}{option} ("),
-                format!("answer:{id}:{}", hex::encode(Sha256::digest(bytes))),
+                format!("answer:{id}:{}", self.settlement_id()?),
             )
         } else {
             (format!("### {heading} {id} "), id.to_string())
@@ -3905,10 +3916,17 @@ fn inspect_fork_marker_paths(
 /// current value through here, so the artifact keeps reading as the argument
 /// that happened while the views read as what is true. The latest correction
 /// of a given target and field wins, in event order.
+///
+/// A question can be settled again after its answer is retracted, so
+/// `answer:<question id>` names a succession of settlements. An amendment of
+/// it belongs to one of them; the settlement a question has is its latest, and
+/// only amendments bound to that one apply to it.
 #[derive(Default)]
 struct Amendments {
     corrections: Vec<Correction>,
     retracted: Vec<Retracted>,
+    /// Every settlement each question has taken, oldest first.
+    settlements: HashMap<String, Vec<Settlement>>,
 }
 
 struct Correction {
@@ -3918,6 +3936,8 @@ struct Correction {
     target: String,
     field: String,
     value: String,
+    /// The settlement an answer correction was made against.
+    settlement: Option<String>,
 }
 
 /// One withdrawn entry and the reason it no longer holds.
@@ -3925,13 +3945,26 @@ struct Correction {
 struct Retracted {
     target: String,
     note: String,
+    #[serde(skip)]
+    settlement: Option<String>,
+}
+
+/// One answer event, as the settlement of its question.
+struct Settlement {
+    id: String,
+    option: Option<String>,
+    actor: Option<String>,
+    on_behalf_of: Option<String>,
 }
 
 impl Amendments {
     fn collect(events: &[JournalEvent], filename: &str) -> Self {
         let mut amendments = Self::default();
-        for event in amendment_events(events, filename) {
-            amendments.absorb(event);
+        for event in events
+            .iter()
+            .filter(|event| event.file.as_deref() == Some(filename))
+        {
+            amendments.observe(event);
         }
         amendments
     }
@@ -3940,14 +3973,50 @@ impl Amendments {
     /// view spanning the journal resolves each artifact against its own.
     fn collect_by_file(events: &[JournalEvent]) -> HashMap<String, Self> {
         let mut by_file: HashMap<String, Self> = HashMap::new();
-        for event in events.iter().filter(|event| {
-            event.known() && matches!(event.event.as_str(), "correction" | "retraction")
-        }) {
+        for event in events {
             if let Some(file) = event.file.clone() {
-                by_file.entry(file).or_default().absorb(event);
+                by_file.entry(file).or_default().observe(event);
             }
         }
         by_file
+    }
+
+    /// Take one event of the artifact, in log order.
+    fn observe(&mut self, event: &JournalEvent) {
+        if !event.known() {
+            return;
+        }
+        match event.event.as_str() {
+            "answer" => {
+                if let (Some(question), Some(id)) =
+                    (event.question_id.clone(), event.settlement_id())
+                {
+                    self.settlements
+                        .entry(question)
+                        .or_default()
+                        .push(Settlement {
+                            id,
+                            option: event.option.clone(),
+                            actor: event.actor.clone(),
+                            on_behalf_of: event.on_behalf_of.clone(),
+                        });
+                }
+            }
+            "correction" | "retraction" => self.absorb(event),
+            _ => {}
+        }
+    }
+
+    /// The settlement an amendment of this target is bound to: the one it
+    /// names, else the one standing at this point in the log.
+    fn bound_settlement(&self, target: &str, named: Option<&String>) -> Option<String> {
+        let question = target.strip_prefix("answer:")?;
+        named.cloned().or_else(|| {
+            self.settlements
+                .get(question)
+                .and_then(|all| all.last())
+                .map(|settlement| settlement.id.clone())
+        })
     }
 
     fn absorb(&mut self, event: &JournalEvent) {
@@ -3955,6 +4024,7 @@ impl Amendments {
             .target
             .clone()
             .expect("a known amendment names a target");
+        let settlement = self.bound_settlement(&target, event.settlement.as_ref());
         if event.event == "correction" {
             self.corrections.push(Correction {
                 id: event.amendment_id.clone(),
@@ -3967,24 +4037,47 @@ impl Amendments {
                     .value
                     .clone()
                     .expect("a known correction carries a value"),
+                settlement,
             });
-        } else if !self.is_retracted(&target) {
+        } else if !self
+            .retracted
+            .iter()
+            .any(|entry| entry.target == target && entry.settlement == settlement)
+        {
             self.retracted.push(Retracted {
                 note: event
                     .note
                     .clone()
                     .expect("a known retraction carries a note"),
                 target,
+                settlement,
             });
         }
     }
 
+    /// The settlement a target's amendments must be bound to for them to
+    /// apply: the question's latest for an answer, none for any other entry.
+    fn current_settlement(&self, target: &str) -> Option<&str> {
+        let question = target.strip_prefix("answer:")?;
+        self.settlements
+            .get(question)
+            .and_then(|all| all.last())
+            .map(|settlement| settlement.id.as_str())
+    }
+
+    /// Whether an amendment bound to `settlement` applies to `target` as it
+    /// stands now.
+    fn applies(&self, target: &str, settlement: Option<&str>) -> bool {
+        !target.starts_with("answer:") || settlement == self.current_settlement(target)
+    }
+
     /// The correction in force on one field of one target.
     fn latest(&self, target: &str, field: &str) -> Option<&Correction> {
-        self.corrections
-            .iter()
-            .rev()
-            .find(|correction| correction.target == target && correction.field == field)
+        self.corrections.iter().rev().find(|correction| {
+            correction.target == target
+                && correction.field == field
+                && self.applies(target, correction.settlement.as_deref())
+        })
     }
 
     /// A field's value after corrections: the latest correction of it, or what
@@ -4001,7 +4094,9 @@ impl Amendments {
     }
 
     fn is_retracted(&self, target: &str) -> bool {
-        self.retracted.iter().any(|entry| entry.target == target)
+        self.retracted.iter().any(|entry| {
+            entry.target == target && self.applies(target, entry.settlement.as_deref())
+        })
     }
 
     /// The artifact's own title, when a correction replaced it.
@@ -4009,14 +4104,26 @@ impl Amendments {
         self.field("artifact", "title", None)
     }
 
-    /// Whether the settlement of the named question still stands. A retracted
-    /// answer leaves the question open, which is the state it was in before
-    /// anyone answered it.
-    fn answer_stands(&self, question: &str) -> bool {
-        !self.is_retracted(&format!("answer:{question}"))
+    /// The question's latest settlement, withdrawn or not.
+    fn settlement(&self, question: &str) -> Option<&Settlement> {
+        self.settlements.get(question).and_then(|all| all.last())
     }
 
-    /// A field of that question's answer, after corrections.
+    /// The identity of the settlement a new amendment of the question's answer
+    /// binds to.
+    fn settlement_id(&self, question: &str) -> Option<&str> {
+        self.settlement(question)
+            .map(|settlement| settlement.id.as_str())
+    }
+
+    /// Whether the question stands settled: it has been answered and its
+    /// latest answer was not withdrawn. A retracted answer leaves the question
+    /// open, which is the state it was in before anyone answered it.
+    fn answer_stands(&self, question: &str) -> bool {
+        self.settlement(question).is_some() && !self.is_retracted(&format!("answer:{question}"))
+    }
+
+    /// A field of that question's latest answer, after corrections.
     fn answer_field<'a>(
         &'a self,
         question: &str,
@@ -6829,14 +6936,7 @@ fn answer(
         (None, Some(other)) => Chosen::OffMenu(other.trim()),
         _ => bail!("pass exactly one of --option or --other"),
     };
-    if Amendments::collect(&events, filename).answer_stands(question_id)
-        && events.iter().any(|event| {
-            event.known()
-                && event.event == "answer"
-                && event.file.as_deref() == Some(filename)
-                && event.question_id.as_deref() == Some(question_id)
-        })
-    {
+    if Amendments::collect(&events, filename).answer_stands(question_id) {
         bail!("{question_id} is already answered; open a successor question to revisit it");
     }
     let mut unargued: Vec<String> = Vec::new();
@@ -6973,14 +7073,7 @@ fn suggest(
         );
     }
     let amendments = Amendments::collect(&events, filename);
-    let answered = amendments.answer_stands(question_id)
-        && events.iter().any(|event| {
-            event.known()
-                && event.event == "answer"
-                && event.file.as_deref() == Some(filename)
-                && event.question_id.as_deref() == Some(question_id)
-        });
-    if answered {
+    if amendments.answer_stands(question_id) {
         bail!(
             "{question_id} is already answered; a suggestion is input to a decision, \
              not a way to reopen one"
@@ -7206,14 +7299,7 @@ fn delivered(
     }) else {
         bail!("no question {question_id} on {filename}");
     };
-    if Amendments::collect(&events, filename).answer_stands(question_id)
-        && events.iter().any(|event| {
-            event.known()
-                && event.event == "answer"
-                && event.file.as_deref() == Some(filename)
-                && event.question_id.as_deref() == Some(question_id)
-        })
-    {
+    if Amendments::collect(&events, filename).answer_stands(question_id) {
         bail!("{question_id} is already answered; there is nothing left to ask for");
     }
     // A question waiting on one named delegate is not asked by prompting
@@ -7407,6 +7493,7 @@ fn correct(
     if field == "option" {
         check_branch_correction(&events, filename, &parsed, value)?;
     }
+    let settlement = settlement_of(&events, filename, &parsed);
 
     let now = Utc::now();
     let ts = now.to_rfc3339_opts(SecondsFormat::Secs, true);
@@ -7426,12 +7513,24 @@ fn correct(
     event.file = Some(filename.to_string());
     event.amendment_id = Some(amendment_id);
     event.target = Some(target.to_string());
+    event.settlement = settlement;
     event.field = Some(field.to_string());
     event.value = Some(value.to_string());
     event.note = note.map(str::to_string);
     append_event(ctx, &dir, &event)?;
     println!("{}", path.display());
     Ok(0)
+}
+
+/// The settlement an amendment of an answer is made against: the question's
+/// latest answer. Every other target has none.
+fn settlement_of(events: &[JournalEvent], filename: &str, target: &AmendTarget) -> Option<String> {
+    let AmendTarget::Answer(question) = target else {
+        return None;
+    };
+    Amendments::collect(events, filename)
+        .settlement_id(question)
+        .map(str::to_string)
 }
 
 /// Withdraw a recorded entry while leaving it visible.
@@ -7464,14 +7563,15 @@ fn retract(ctx: &Ctx, filename: &str, target: &str, body_file: &str) -> Result<i
     if !amend_target_exists(&events, filename, &parsed, Some(&artifact)) {
         bail!("no {target} on {filename}");
     }
-    if events.iter().any(|event| {
-        event.known()
-            && event.event == "retraction"
-            && event.file.as_deref() == Some(filename)
-            && event.target.as_deref() == Some(target)
-    }) {
+    let amendments = Amendments::collect(&events, filename);
+    let already = match &parsed {
+        AmendTarget::Answer(question) => !amendments.answer_stands(question),
+        _ => amendments.is_retracted(target),
+    };
+    if already {
         bail!("{target} is already retracted");
     }
+    let settlement = settlement_of(&events, filename, &parsed);
 
     let now = Utc::now();
     let ts = now.to_rfc3339_opts(SecondsFormat::Secs, true);
@@ -7487,6 +7587,7 @@ fn retract(ctx: &Ctx, filename: &str, target: &str, body_file: &str) -> Result<i
     event.file = Some(filename.to_string());
     event.amendment_id = Some(amendment_id);
     event.target = Some(target.to_string());
+    event.settlement = settlement;
     event.note = Some(body.trim().to_string());
     append_event(ctx, &dir, &event)?;
     println!("{}", path.display());
@@ -8231,6 +8332,13 @@ pub(crate) struct JournalEvent {
     /// identifier a hand-written event may omit.
     #[serde(skip_serializing_if = "Option::is_none")]
     amendment_id: Option<String>,
+    /// The settlement an amendment of `answer:<question id>` was made against:
+    /// the identity of that answer event. A question settled again after a
+    /// retraction has several; an amendment binds to the one it named, and an
+    /// amendment recorded without the key binds to the answer standing at its
+    /// position in the log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    settlement: Option<String>,
     /// The recorded session this entry was distilled out of, when it was
     /// distilled rather than authored. Absent means the entry was authored
     /// here, which is what every event written without the field means.
@@ -8560,6 +8668,7 @@ impl JournalEvent {
             field: None,
             value: None,
             amendment_id: None,
+            settlement: None,
             source: None,
             item_key: None,
             promoted_by: None,
@@ -9015,6 +9124,8 @@ struct QuestionProgress {
     /// not count twice.
     argued: HashSet<String>,
     answered: bool,
+    /// The identity of the answer that settled the question, while it stands.
+    settlement: Option<String>,
 }
 
 #[derive(Default)]
@@ -9046,6 +9157,7 @@ impl QuestionMachine {
                         options: event.options.clone().expect("known question has options"),
                         argued: HashSet::new(),
                         answered: false,
+                        settlement: None,
                     },
                 );
                 true
@@ -9106,6 +9218,7 @@ impl QuestionMachine {
                     return false;
                 }
                 progress.answered = true;
+                progress.settlement = event.settlement_id();
                 true
             }
             // A delivery is a fact about a question that exists and is still
@@ -9137,7 +9250,16 @@ impl QuestionMachine {
                 let Some(progress) = self.questions.get_mut(&key) else {
                     return false;
                 };
-                progress.answered = false;
+                // A retraction bound to an earlier settlement withdraws what
+                // is no longer the answer, and leaves the standing one alone.
+                if event
+                    .settlement
+                    .as_ref()
+                    .is_none_or(|bound| progress.settlement.as_ref() == Some(bound))
+                {
+                    progress.answered = false;
+                    progress.settlement = None;
+                }
                 true
             }
             _ => true,
@@ -13058,9 +13180,9 @@ fn project_inventory(
         }
         let promotion_state = promotion_state_of(&file_kind, promotions.as_deref());
         let question_history = all_questions.iter().filter(|q| q.file == name).map(|question| {
-            let answer = events.iter().rev().find(|e| e.file.as_deref() == Some(name.as_str()) && e.event == "answer" && e.question_id.as_deref() == Some(question.question.as_str()));
+            let answer = amendments.settlement(&question.question);
             let state = if answer.is_none() { "unanswered" } else if amendments.answer_stands(&question.question) { "answered" } else { "retracted" };
-            serde_json::json!({"question": question, "state": state, "answer": answer.and_then(|e| amendments.answer_field(&question.question, "option", e.option.as_deref()))})
+            serde_json::json!({"question": question, "state": state, "answer": answer.and_then(|settlement| amendments.answer_field(&question.question, "option", settlement.option.as_deref()))})
         }).collect();
         items.push(ArtifactEntry {
             file: name.clone(),
@@ -15094,24 +15216,18 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         .filter_map(|(posed_at, posed)| {
             let id = posed.question_id.clone()?;
             let options = posed.options.clone().unwrap_or_default();
-            let answered = events
-                .iter()
-                .find(|event| {
-                    event.known()
-                        && event.event == "answer"
-                        && event.file.as_deref() == Some(filename)
-                        && event.question_id.as_deref() == Some(id.as_str())
-                })
+            let answered = amendments
+                .settlement(&id)
                 .filter(|_| amendments.answer_stands(&id))
-                .and_then(|event| {
+                .and_then(|settlement| {
                     Some(DiscussionAnswer {
                         option: amendments
-                            .answer_field(&id, "option", event.option.as_deref())?
+                            .answer_field(&id, "option", settlement.option.as_deref())?
                             .to_string(),
                         actor: amendments
-                            .answer_field(&id, "actor", event.actor.as_deref())
+                            .answer_field(&id, "actor", settlement.actor.as_deref())
                             .map(str::to_string),
-                        on_behalf_of: event.on_behalf_of.clone(),
+                        on_behalf_of: settlement.on_behalf_of.clone(),
                     })
                 });
             let branches = options
@@ -17479,6 +17595,80 @@ mod ownership_regressions {
             );
             assert!(wrong_file.questions.is_empty() && wrong_file.answers.is_empty());
         }
+    }
+
+    /// Replay and readers agree on which settlement an amendment withdrew,
+    /// however the amendments reached the log.
+    #[test]
+    fn an_amendment_bound_to_an_earlier_settlement_leaves_the_standing_answer() {
+        let file = "20260101T000000Z-work-discussion.md";
+        let event = |value: serde_json::Value| -> JournalEvent {
+            let mut base = serde_json::json!({
+                "schema": "journal-events/2", "topic": "work", "file": file,
+                "ts": "2026-01-01T00:00:00Z"
+            });
+            base.as_object_mut()
+                .unwrap()
+                .extend(value.as_object().unwrap().clone());
+            serde_json::from_value(base).unwrap()
+        };
+        let question = event(serde_json::json!({
+            "event": "question", "question_id": "q-a", "placement": "opening",
+            "options": ["a", "b"]
+        }));
+        let first = event(serde_json::json!({
+            "event": "answer", "question_id": "q-a", "option": "a", "ts": "2026-01-01T00:01:00Z"
+        }));
+        let second = event(serde_json::json!({
+            "event": "answer", "question_id": "q-a", "option": "b", "ts": "2026-01-01T00:03:00Z"
+        }));
+        let first_id = first.settlement_id().unwrap();
+        let second_id = second.settlement_id().unwrap();
+        assert_ne!(first_id, second_id);
+        let retraction = |settlement: &str| {
+            event(serde_json::json!({
+                "event": "retraction", "target": "answer:q-a", "amendment_id": "ret-a",
+                "note": "withdrawn", "settlement": settlement, "ts": "2026-01-01T00:02:00Z"
+            }))
+        };
+        let correction = |settlement: &str, value: &str| {
+            event(serde_json::json!({
+                "event": "correction", "target": "answer:q-a", "amendment_id": "cor-a",
+                "field": "option", "value": value, "settlement": settlement
+            }))
+        };
+        // Withdrawn, answered again, then a late record of the first
+        // withdrawal and of a correction to the first answer.
+        let log = [
+            question,
+            first.clone(),
+            correction(&first_id, "b"),
+            retraction(&first_id),
+            second.clone(),
+            retraction(&first_id),
+            correction(&first_id, "a"),
+        ];
+        let mut machine = QuestionMachine::default();
+        assert!(log.iter().all(|event| machine.accept(event)));
+        assert!(machine.questions.values().all(|progress| progress.answered));
+        let amendments = Amendments::collect(&log, file);
+        assert!(amendments.answer_stands("q-a"));
+        assert_eq!(
+            amendments.answer_field("q-a", "option", Some("b")),
+            Some("b")
+        );
+        let settlement = amendments.settlement("q-a").unwrap();
+        assert_eq!(settlement.id, second_id);
+        // Withdrawing the standing answer reopens the question.
+        let mut reopened = log.to_vec();
+        reopened.push(retraction(&second_id));
+        let mut machine = QuestionMachine::default();
+        assert!(reopened.iter().all(|event| machine.accept(event)));
+        assert!(machine
+            .questions
+            .values()
+            .all(|progress| !progress.answered));
+        assert!(!Amendments::collect(&reopened, file).answer_stands("q-a"));
     }
 
     #[test]

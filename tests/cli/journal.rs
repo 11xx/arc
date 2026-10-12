@@ -10338,6 +10338,162 @@ fn journal_correct_moves_an_answer_to_the_branch_it_chose() {
     assert!(open["questions"].as_array().unwrap().is_empty(), "{open}");
 }
 
+fn answer_with(repo: &Repo, file: &str, question: &str, option: &str) {
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            file,
+            "--question",
+            question,
+            "--option",
+            option,
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Settled.\n")
+        .assert()
+        .success();
+}
+
+fn open_question_ids(repo: &Repo) -> Vec<String> {
+    let open = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "questions", "--json"]),
+    );
+    open["questions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|question| question["question"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// An amendment belongs to the settlement it was made against: a question
+/// answered again after a retraction is settled by its new answer.
+#[test]
+fn a_reanswered_question_is_settled_by_its_latest_answer_alone() {
+    let repo = Repo::new();
+    let (file, question) = branched_discussion(&repo, "reanswered");
+    let target = format!("answer:{question}");
+    answer_with(&repo, &file, &question, "one-go");
+    repo.arc(&repo.root)
+        .args([
+            "journal", "correct", &file, "--target", &target, "--field", "option", "--value",
+            "staged",
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        discussion_summary_json(&repo, &file)["questions"][0]["answered"]["option"],
+        "staged"
+    );
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "retract",
+            &file,
+            "--target",
+            &target,
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Wrong call.\n")
+        .assert()
+        .success();
+    assert_eq!(open_question_ids(&repo), vec![question.clone()]);
+
+    answer_with(&repo, &file, &question, "one-go");
+    assert!(open_question_ids(&repo).is_empty());
+    let summary = discussion_summary_json(&repo, &file);
+    assert_eq!(
+        summary["questions"][0]["answered"]["option"], "one-go",
+        "the earlier correction does not carry over: {summary}"
+    );
+    let listed = stdout(repo.arc(&repo.root).args(["journal", "discussion", &file]));
+    assert!(!listed.contains("open question"), "{listed}");
+
+    // The new settlement can itself be retracted, and reopens the question.
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "retract",
+            &file,
+            "--target",
+            &target,
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Wrong again.\n")
+        .assert()
+        .success();
+    assert_eq!(open_question_ids(&repo), vec![question.clone()]);
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "retract",
+            &file,
+            "--target",
+            &target,
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Nothing left to withdraw.\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("already retracted"));
+    answer_with(&repo, &file, &question, "staged");
+    assert!(open_question_ids(&repo).is_empty());
+    assert_eq!(
+        discussion_summary_json(&repo, &file)["questions"][0]["answered"]["option"],
+        "staged"
+    );
+    repo.arc(&repo.root)
+        .args(["journal", "doctor"])
+        .assert()
+        .success();
+}
+
+/// A retraction recorded without a settlement binding applies to the answer
+/// standing when it was appended.
+#[test]
+fn an_unbound_retraction_applies_to_the_answer_standing_when_it_was_recorded() {
+    let repo = Repo::new();
+    let (file, question) = branched_discussion(&repo, "unbound-retraction");
+    let target = format!("answer:{question}");
+    answer_with(&repo, &file, &question, "one-go");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "retract",
+            &file,
+            "--target",
+            &target,
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Wrong call.\n")
+        .assert()
+        .success();
+    answer_with(&repo, &file, &question, "staged");
+    let dir = journal_dir(&repo);
+    let log = fs::read_to_string(dir.join("events.jsonl")).unwrap();
+    let stripped: String = log
+        .lines()
+        .map(|line| {
+            let mut event: serde_json::Value = serde_json::from_str(line).unwrap();
+            event.as_object_mut().unwrap().remove("settlement");
+            format!("{event}\n")
+        })
+        .collect();
+    fs::write(dir.join("events.jsonl"), stripped).unwrap();
+    assert!(open_question_ids(&repo).is_empty());
+    assert_eq!(
+        discussion_summary_json(&repo, &file)["questions"][0]["answered"]["option"],
+        "staged"
+    );
+}
+
 #[test]
 fn journal_retract_removes_a_position_from_the_tally_and_its_branch() {
     let repo = Repo::new();
