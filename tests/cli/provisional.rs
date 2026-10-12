@@ -2832,6 +2832,31 @@ fn execution_json_reports_written_and_reused_debt_before_a_refusal() {
 }
 
 #[test]
+fn execution_text_names_the_debt_a_later_refusal_leaves_in_the_ledger() {
+    let (_authority, worker) = worker();
+    let change = prepared(&worker);
+    worker.declare_gates_locally("[gates.required]\ncommand='false'\n");
+    let refused = worker
+        .arc(&worker.root)
+        .args([
+            "integrate",
+            &change,
+            "--provisional",
+            "--debt",
+            "review obligation retained",
+        ])
+        .assert()
+        .code(5);
+    let recorded = json_stdout(worker.arc(&worker.root).args(["show", &change, "--json"]));
+    let event = recorded["debt"]["event_id"].as_str().unwrap();
+    let stderr = String::from_utf8_lossy(&refused.get_output().stderr);
+    assert!(
+        stderr.contains(&format!("debt event {event} written publication=durable")),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn execution_json_reports_a_debt_that_was_never_published() {
     use std::os::unix::fs::PermissionsExt;
     let (_authority, worker) = worker();
@@ -2984,11 +3009,10 @@ fn an_inflight_remedy_keeps_the_selected_conflicting_staging_destination() {
     assert_eq!(git_out(&worker.root, &["show-ref", "--heads"]), heads);
 }
 
-#[test]
+/// The preload library that fails every read of a change's events once its
+/// debt event is durable, and the directory it watches.
 #[cfg(target_os = "linux")]
-fn execution_json_preserves_durable_debt_after_a_ledger_read_failure() {
-    let (_authority, worker) = worker();
-    let change = prepared(&worker);
+fn post_debt_read_failure(worker: &Repo, change: &str) -> (PathBuf, PathBuf) {
     let source = worker.home.join("read-failure.c");
     let library = worker.home.join("read-failure.so");
     fs::write(
@@ -3012,8 +3036,17 @@ fn execution_json_preserves_durable_debt_after_a_ledger_read_failure() {
     let directory = worker
         .root
         .join(".git/arc/changes")
-        .join(&change)
+        .join(change)
         .join("events");
+    (library, directory)
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn execution_json_preserves_durable_debt_after_a_ledger_read_failure() {
+    let (_authority, worker) = worker();
+    let change = prepared(&worker);
+    let (library, directory) = post_debt_read_failure(&worker, &change);
     let failed = worker
         .arc(&worker.root)
         .env("LD_PRELOAD", &library)
@@ -3049,6 +3082,112 @@ fn execution_json_preserves_durable_debt_after_a_ledger_read_failure() {
         .as_str()
         .unwrap()
         .contains("debt declared"));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn execution_text_names_a_durable_debt_after_a_ledger_read_failure() {
+    let (_authority, worker) = worker();
+    let change = prepared(&worker);
+    let (library, directory) = post_debt_read_failure(&worker, &change);
+    let failed = worker
+        .arc(&worker.root)
+        .env("LD_PRELOAD", &library)
+        .env("ARC_TEST_DEBT_EVENTS", &directory)
+        .args([
+            "integrate",
+            &change,
+            "--provisional",
+            "--debt",
+            "review obligation retained",
+        ])
+        .assert()
+        .code(1);
+    let state = json_stdout(worker.arc(&worker.root).args(["show", &change, "--json"]));
+    let event = state["debt"]["event_id"].as_str().unwrap();
+    let report = format!(
+        "{}{}",
+        String::from_utf8_lossy(&failed.get_output().stdout),
+        String::from_utf8_lossy(&failed.get_output().stderr)
+    );
+    assert!(
+        report.contains(&format!("debt event {event} written publication=durable")),
+        "{report}"
+    );
+}
+
+/// A debt event whose directory sync fails after the file was written is
+/// readable in the ledger but not confirmed durable.
+#[test]
+#[cfg(target_os = "linux")]
+fn execution_json_reports_a_debt_visible_after_a_directory_sync_failure() {
+    let (_authority, worker) = worker();
+    let change = prepared(&worker);
+    let (library, directory) = post_debt_read_failure(&worker, &change);
+    let failed = worker
+        .arc(&worker.root)
+        .env("LD_PRELOAD", &library)
+        .env("ARC_TEST_DEBT_EVENTS", &directory)
+        .env("ARC_TEST_FAIL_DEBT_DIRECTORY_SYNC", "1")
+        .args([
+            "integrate",
+            &change,
+            "--provisional",
+            "--json",
+            "--debt",
+            "review obligation retained",
+        ])
+        .assert()
+        .code(1);
+    let output: serde_json::Value = serde_json::from_slice(&failed.get_output().stdout).unwrap();
+    let state = json_stdout(worker.arc(&worker.root).args(["show", &change, "--json"]));
+    assert!(state["debt"]["event_id"].is_string(), "{state}");
+    assert!(output["transition"].is_null(), "{output}");
+    assert_eq!(
+        output["debt"]["event_id"], state["debt"]["event_id"],
+        "{output}"
+    );
+    assert_eq!(
+        output["debt"]["publication"], "visible-unconfirmed",
+        "{output}"
+    );
+    assert_eq!(output["debt"]["disposition"], "attempted", "{output}");
+    assert!(output["debt"]["publication_error"].is_string(), "{output}");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn execution_text_names_a_debt_visible_after_a_directory_sync_failure() {
+    let (_authority, worker) = worker();
+    let change = prepared(&worker);
+    let (library, directory) = post_debt_read_failure(&worker, &change);
+    let failed = worker
+        .arc(&worker.root)
+        .env("LD_PRELOAD", &library)
+        .env("ARC_TEST_DEBT_EVENTS", &directory)
+        .env("ARC_TEST_FAIL_DEBT_DIRECTORY_SYNC", "1")
+        .args([
+            "integrate",
+            &change,
+            "--provisional",
+            "--debt",
+            "review obligation retained",
+        ])
+        .assert()
+        .code(1);
+    let state = json_stdout(worker.arc(&worker.root).args(["show", &change, "--json"]));
+    let event = state["debt"]["event_id"].as_str().unwrap();
+    let report = format!(
+        "{}{}",
+        String::from_utf8_lossy(&failed.get_output().stdout),
+        String::from_utf8_lossy(&failed.get_output().stderr)
+    );
+    assert!(
+        report.contains(&format!(
+            "debt event {event} publication=visible-unconfirmed"
+        )),
+        "{report}"
+    );
 }
 
 #[test]

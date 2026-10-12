@@ -1472,6 +1472,9 @@ PAIR REPLICA STORES
   when the ledger could not be read. A declaration that fails after the
   attempt still reports the debt, with disposition `attempted`, beside
   `transition: null` and the error, and `publication_error` naming the failure.
+  Text output ends a refusal after a declaration with `debt event <id>
+  <written|reused> publication=<state>`; a declaration that failed to publish
+  names the same event and state in its error.
   Doctor, status and workspace report expose unfinished intents separately
   from published obligations and review debt.
   Recovery of an applied transition precedes new-preparation eligibility checks,

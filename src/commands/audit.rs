@@ -189,6 +189,16 @@ pub(super) struct DebtReceipt {
     pub declared_by: String,
 }
 
+impl DebtReceipt {
+    /// One line naming the event and what is known of its publication.
+    pub fn summary(&self) -> String {
+        format!(
+            "debt event {} {} publication={}",
+            self.event_id, self.disposition, self.publication
+        )
+    }
+}
+
 /// A declaration whose publication did not complete, carrying what was
 /// observed of the event so a caller can report it.
 #[derive(Debug)]

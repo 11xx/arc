@@ -777,8 +777,24 @@ pub fn integrate_provisionally(
     args: IntegrateArgs,
 ) -> Result<i32> {
     let mut debt_effect = None;
-    if !args.json || args.dry_run {
+    if args.dry_run {
         return integrate_provisionally_inner(ctx, references, args, &mut debt_effect);
+    }
+    if !args.json {
+        let result = integrate_provisionally_inner(ctx, references, args, &mut debt_effect);
+        // A publication failure's own message already names the event and its
+        // state; any other later refusal leaves a debt the caller must be told
+        // is in the ledger.
+        let refused = match &result {
+            Ok(code) => *code != 0,
+            Err(error) => error
+                .downcast_ref::<super::audit::DebtPublicationFailure>()
+                .is_none(),
+        };
+        if let Some((receipt, _)) = debt_effect.filter(|_| refused) {
+            eprintln!("{}", receipt.summary());
+        }
+        return result;
     }
     let (result, output) = crate::operation_output::capture(|| {
         integrate_provisionally_inner(ctx, references, args, &mut debt_effect)

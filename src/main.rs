@@ -2339,7 +2339,10 @@ enum Cmd {
         /// declared, and a retry with the same reason reuses it, including a debt
         /// held in an import batch. Reuse confirms its backing publication. Divergence
         /// observed under the target and change locks refuses before declaration.
-        /// External Git moving the target after that observation can retain debt
+        /// External Git moving the target after that observation can retain debt.
+        /// A provisional execution that refuses after the declaration ends its
+        /// text output with `debt event <id> <written|reused> publication=<state>`;
+        /// `--json` carries the same receipt
         #[arg(long = "debt", value_name = "REASON")]
         debt: Option<String>,
         /// What kind of deficit the debt records. Omitted, arc derives it from

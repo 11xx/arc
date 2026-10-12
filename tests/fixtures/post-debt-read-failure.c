@@ -55,7 +55,13 @@ int fsync(int fd) {
     if (result || !directory || length < 0) return result;
     path[length] = '\0';
     if (!strcmp(path, directory)) {
-        if (debt_synced) fail_reads = 1;
+        if (debt_synced) {
+            if (getenv("ARC_TEST_FAIL_DEBT_DIRECTORY_SYNC")) {
+                errno = EIO;
+                return -1;
+            }
+            fail_reads = 1;
+        }
     } else if (!strncmp(path, directory, strlen(directory))) {
         int (*real_open)(const char *, int, ...) = dlsym(RTLD_NEXT, "open64");
         int event = real_open(path, O_RDONLY);
