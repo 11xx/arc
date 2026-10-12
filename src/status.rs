@@ -679,6 +679,12 @@ pub struct StatusReport {
     /// A declared review obligation with no audit answering it. Additive in
     /// arc-status/6.
     pub debt_outstanding: bool,
+    /// Where the declared review obligation stands: `declared` before the
+    /// change integrates, `owed` after it until a review answers it,
+    /// `discharged` once one has. Absent when no debt was declared.
+    /// `debt_outstanding` is true only for `owed`. Additive in `arc-status/27`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debt_standing: Option<crate::state::DebtStanding>,
     /// The change's gating approval was recorded as owed corroboration, and
     /// no audit has supplied it. Reported beside `debt_outstanding`
     /// because it is the same obligation seen one step earlier: debt says a
@@ -1919,6 +1925,7 @@ fn build_report(
         closure: state.closure.clone(),
         ready_to_send: state.ready_to_send.clone(),
         debt_outstanding: state.debt_outstanding(),
+        debt_standing: state.debt_standing(),
         provisional_approval_outstanding: state.provisional_approval_outstanding(),
         debt: state.debt.clone(),
         dirty_tree_waiver: dirty_tree_waiver_in_force,

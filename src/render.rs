@@ -1,6 +1,6 @@
 use crate::commands::ArcAlternative;
 use crate::model::{DebtCoverage, DebtIdentity, DebtMissing, DebtProduction, Event, Payload};
-use crate::state::ChangeState;
+use crate::state::{ChangeState, DebtStanding};
 use crate::status::{Blocker, BriefBaseDrift, GateStatus, StatusReport};
 use std::collections::BTreeMap;
 use std::fmt::Write;
@@ -1148,19 +1148,23 @@ pub fn markdown(
     }
 
     if report.debt.is_some() || !report.audit_verdicts.is_empty() {
-        let _ = writeln!(w, "\n## Post-integration audit\n");
+        let standing = report.debt.as_ref().map(|debt| debt.standing);
+        let _ = writeln!(
+            w,
+            "\n## {}\n",
+            if standing == Some(DebtStanding::Declared) && report.audit_verdicts.is_empty() {
+                "Review debt"
+            } else {
+                "Post-integration audit"
+            }
+        );
         if let Some(debt) = &report.debt {
-            let _ = writeln!(
-                w,
-                "- Owed{}: {} (declared by {})",
-                if report.debt_outstanding {
-                    ""
-                } else {
-                    " (discharged)"
-                },
-                debt.reason,
-                debt.actor
-            );
+            let lead = match debt.standing {
+                DebtStanding::Declared => "Declared, not yet integrated",
+                DebtStanding::Owed => "Owed",
+                DebtStanding::Discharged => "Owed (discharged)",
+            };
+            let _ = writeln!(w, "- {lead}: {} (declared by {})", debt.reason, debt.actor);
             if let Some(missing) = debt.missing {
                 let _ = writeln!(w, "  - Missing: {}", missing.as_str());
             } else {
@@ -1185,7 +1189,11 @@ pub fn markdown(
                     let _ = writeln!(w, "    - Later read: {}", later_read_label(later));
                 }
             }
-            if let Some(discharged_by) = &debt.discharged_by {
+            if let Some(discharged_by) = debt
+                .discharged_by
+                .as_ref()
+                .filter(|_| debt.standing == DebtStanding::Discharged)
+            {
                 let _ = writeln!(
                     w,
                     "  - Discharged by: {}",

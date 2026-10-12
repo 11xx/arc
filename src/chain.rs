@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-pub const CHAIN_SCHEMA: &str = "arc-chain/4";
+pub const CHAIN_SCHEMA: &str = "arc-chain/5";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ChainMember {
@@ -45,6 +45,12 @@ pub struct ChainReview {
     pub stale_reviewers: usize,
     /// A review obligation recorded at integration and not yet discharged.
     pub debt_outstanding: bool,
+    /// Where the declared obligation stands: `declared` before the change
+    /// integrates, `owed` after it until a review answers it, `discharged`
+    /// once one has. Absent when no debt was declared. `debt_outstanding` is
+    /// true only for `owed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debt_standing: Option<crate::state::DebtStanding>,
 }
 
 #[derive(Debug, Clone, Serialize)]

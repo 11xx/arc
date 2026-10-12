@@ -1,5 +1,6 @@
 use super::*;
 use crate::chain::{Chain, ChainMember, ChainPlan, ChainReview, ChainReviewWindow, CHAIN_SCHEMA};
+use crate::state::DebtStanding;
 
 pub fn chain(ctx: &Ctx, tag: String, json: bool, review: bool) -> Result<()> {
     let tags = normalize_tags(vec![tag])?;
@@ -43,6 +44,7 @@ pub fn chain(ctx: &Ctx, tag: String, json: bool, review: bool) -> Result<()> {
                         coverage: Vec::new(),
                         stale_reviewers: 0,
                         debt_outstanding: state.debt_outstanding(),
+                        debt_standing: state.debt_standing(),
                     };
                 };
                 let subject = patchset
@@ -127,6 +129,7 @@ pub fn chain(ctx: &Ctx, tag: String, json: bool, review: bool) -> Result<()> {
                     lifetime,
                     stale_reviewers: coverage.iter().filter(|row| !row.covers_final).count(),
                     debt_outstanding: state.debt_outstanding(),
+                    debt_standing: state.debt_standing(),
                     coverage,
                 }
             });
@@ -228,8 +231,12 @@ pub fn chain(ctx: &Ctx, tag: String, json: bool, review: bool) -> Result<()> {
                             );
                         }
                     }
-                    if review.debt_outstanding {
-                        println!("  audit: owed, not yet discharged");
+                    match review.debt_standing {
+                        Some(DebtStanding::Declared) => {
+                            println!("  audit: declared, not yet integrated");
+                        }
+                        Some(DebtStanding::Owed) => println!("  audit: owed, not yet discharged"),
+                        Some(DebtStanding::Discharged) | None => {}
                     }
                 }
             }

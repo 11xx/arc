@@ -495,6 +495,9 @@ enum Cmd {
     /// recorded, otherwise with the newest snapshot
     /// Aggregate reads name unreadable changes with their errors on stderr
     /// and retain readable changes; a selected unreadable change fails
+    /// A declared review debt reads `Declared, not yet integrated` until the
+    /// change integrates, then `Owed`, then `Owed (discharged)` with its
+    /// discharger; JSON carries the same as `debt.standing`
     /// Recorded producer models that are missing, placeholders or session ids
     /// print as model not recorded. JSON production identities and review coverage retain raw values
     /// with model_recorded: false; valid models omit the flag.
@@ -555,6 +558,11 @@ enum Cmd {
     /// predicted reason) and the failure arc inferred it follows (standing
     /// `inferred`, with the failing event, its revision, and the rule that
     /// derived it) as separate entries, or `none` when neither was recorded.
+    ///
+    /// A debt declared on a change that has not integrated appears as a
+    /// `debt` row with `debt_standing` `declared`; after integration its
+    /// standing is `owed` or `discharged`, and a discharge after the
+    /// integration also names `discharged_later_by`.
     ///
     /// A discharge of a debt by a later review that is not an approval reads
     /// `fulfilled, not approved`. Coverage at acceptance never takes later
@@ -943,7 +951,10 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Show a tagged program in dependency order (arc-chain/4 schema)
+    /// Show a tagged program in dependency order (arc-chain/5 schema)
+    /// With --review, each member's `debt_standing` is `declared` before it
+    /// integrates, `owed` after, and `discharged` once a review answers it;
+    /// `debt_outstanding` is true only for `owed`
     /// Aggregate reads name unreadable changes with their errors on stderr
     /// and retain readable changes; a selected unreadable change fails
     /// Records no events; ledger reads do not require a parseable append policy.
@@ -1004,6 +1015,9 @@ enum Cmd {
         off: bool,
     },
     /// Machine-readable status report (the versioned arc-status/27 schema).
+    /// `debt_standing` is `declared` before the change integrates, `owed`
+    /// after, and `discharged` once a review answers the debt;
+    /// `debt_outstanding` is true only for `owed`.
     /// Forge observed and resolved head matches are separate; hosted checks apply
     /// only to their recorded PR identity and the patchset's approval anchor.
     /// Content and trailer rewrite successors require a fresh snapshot.
@@ -2999,7 +3013,9 @@ enum WorkspaceCmd {
     },
     /// Ledger and journal backlog across every project, ranked by what is
     /// blocked on a decision rather than on work. Debt rows carry their
-    /// verbatim `reason` and optional `patchset_id`. A partial collection keeps
+    /// verbatim `reason` and optional `patchset_id`, and list only debt that
+    /// is owed: one declared on a change that has not integrated, or already
+    /// discharged, is not backlog. A partial collection keeps
     /// the projects it did read, names each failure, and exits 16
     /// Change observations name unreadable changes with their errors on
     /// stderr and retain readable changes

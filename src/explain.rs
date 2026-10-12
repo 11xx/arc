@@ -14,7 +14,9 @@ use crate::model::{
     PlannerIdentity, ReadCoverage, RelationSubject,
 };
 use crate::relations::Relations;
-use crate::state::{ChangeState, Patchset, VerificationEntry, VerificationRunTerminal};
+use crate::state::{
+    ChangeState, DebtStanding, Patchset, VerificationEntry, VerificationRunTerminal,
+};
 use crate::store::Store;
 use anyhow::{bail, Result};
 use serde::Serialize;
@@ -337,6 +339,12 @@ pub enum Detail {
         /// integration. The acceptance values above are unchanged by it.
         #[serde(skip_serializing_if = "Option::is_none")]
         discharged_later_by: Option<String>,
+        /// Where the debt stands at the explained boundary: `declared` on a
+        /// change that has not integrated; on one that has, `owed`, or
+        /// `discharged` by a review in force at the integration or recorded
+        /// since (`discharged_later_by`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        debt_standing: Option<DebtStanding>,
     },
     AuditVerdict {
         event_id: String,
@@ -579,7 +587,7 @@ fn build(ctx: &Ctx, reference: &str, at: Option<&str>) -> Result<Explanation> {
                 state.clone(),
                 contract_slot(&state, state.latest_patchset()),
                 open_evaluation(ctx, &store, &state, at)?,
-                Slot::empty(Standing::absent(not_accepted.clone())),
+                unintegrated_debt_slot(&state, &not_accepted),
                 Slot::empty(Standing::absent(format!(
                     "{not_accepted}; nothing is later than an acceptance"
                 ))),
@@ -1370,6 +1378,11 @@ fn coverage_slot(
             let discharged_later_by = later
                 .filter(|discharge| discharge.debt_event_id == debt.event_id)
                 .map(|discharge| discharge.by_event_id.clone());
+            let debt_standing = if discharged_later_by.is_some() {
+                Some(DebtStanding::Discharged)
+            } else {
+                at_integration.debt_standing()
+            };
             rows.push(row(
                 Standing::recorded(),
                 Detail::Debt {
@@ -1381,6 +1394,7 @@ fn coverage_slot(
                     production: debt.production.clone().map(Box::new),
                     ineligible: debt.ineligible.clone().map(Box::new),
                     discharged_later_by,
+                    debt_standing,
                 },
             ));
             if let Some(discharge) =
@@ -1402,6 +1416,7 @@ fn coverage_slot(
                 production: None,
                 ineligible: None,
                 discharged_later_by: None,
+                debt_standing: None,
             },
         )),
         None => rows.push(row(
@@ -1415,11 +1430,38 @@ fn coverage_slot(
                 production: None,
                 ineligible: None,
                 discharged_later_by: None,
+                debt_standing: None,
             },
         )),
     }
     Slot::of(rows, Standing::absent("the authorization names nothing"))
         .with_basis(format!("as of the integration event {integration_id}"))
+}
+
+/// What a change that has not integrated holds of an obligation: the debt as
+/// declared, standing on its own, with nothing accepted beside it.
+fn unintegrated_debt_slot(state: &ChangeState, not_accepted: &str) -> Slot {
+    let Some(debt) = &state.debt else {
+        return Slot::empty(Standing::absent(not_accepted));
+    };
+    Slot::of(
+        vec![row(
+            Standing::recorded(),
+            Detail::Debt {
+                event_id: Some(debt.event_id.clone()),
+                used: None,
+                debt_reason: Some(debt.reason.clone()),
+                missing: debt.missing,
+                coverage: debt.coverage.clone(),
+                production: debt.production.clone().map(Box::new),
+                ineligible: debt.ineligible.clone().map(Box::new),
+                discharged_later_by: None,
+                debt_standing: state.debt_standing(),
+            },
+        )],
+        Standing::absent(not_accepted),
+    )
+    .with_basis("declared on a change that has not integrated")
 }
 
 fn later_knowledge(events: &[Event], discharge: Option<&Discharge>, at: Option<&str>) -> Slot {
@@ -1854,6 +1896,7 @@ fn describe(detail: &Detail) -> String {
             production,
             ineligible,
             discharged_later_by,
+            debt_standing,
         } => {
             let Some(event_id) = event_id else {
                 return "debt".to_string();
@@ -1891,6 +1934,9 @@ fn describe(detail: &Detail) -> String {
             ));
             if let Some(read) = ineligible {
                 text.push_str(&format!("; {}", read.label()));
+            }
+            if let Some(standing) = debt_standing {
+                text.push_str(&format!("; standing: {}", standing.label()));
             }
             if let Some(later) = discharged_later_by {
                 text.push_str(&format!(

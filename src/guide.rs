@@ -2184,6 +2184,18 @@ REVIEW COVERAGE AND DEBT
     arc audit <change> --verdict <v>          record a post-integration review
     arc findings <change> --audit             what an audit raised
 
+  A debt stands in one of three states, and every view that shows it reads
+  the same one. `declared`: the change has not integrated, so nothing is owed
+  yet and no review has answered it. `owed`: the change integrated and no
+  eligible review has answered it. `discharged`: one has, and the debt names
+  it. `arc show` and `arc explain` print the state in words (`Declared, not
+  yet integrated`, `Owed`, `Owed (discharged)`); `arc status --json` and
+  `arc chain --review --json` carry it as `debt_standing`, and every JSON
+  view of the debt itself as `debt.standing`. `debt_outstanding`, the
+  debt queues and the waiver keep their meaning: true, listed and binding
+  only for `owed`, which is why a declared debt is absent from `arc inbox`,
+  `arc query --debt` and the workspace backlog.
+
   Any independent verdict on the revision that shipped, recorded after the
   debt was declared, discharges it — whether it came from `arc review` before
   the merge or `arc audit` after. The debt records that no verdict existed,
@@ -3525,7 +3537,7 @@ SCHEMAS
     `arc-findings/3`                 arc findings --format json
     `arc-blocker-status/1`           arc blocker-status --json
     `arc-metadata/1`                 arc metadata --json
-    `arc-chain/4`                    arc chain --json
+    `arc-chain/5`                    arc chain --json
     `arc-candidate/1`                arc candidate show|list --json
     `arc-stats/1`                    arc stats --json
     `arc-stats-by-model/1`           arc stats --by-model --json
