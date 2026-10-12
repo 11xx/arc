@@ -3359,6 +3359,47 @@ RULES THAT CHANGE WHAT YOU DO
     The source bytes stay in the harness store. Identical facts record
     nothing; retained facts are observations at their frontier and are never
     added to one another.
+  - `arc cost show --commit <rev> [--json]` answers for a commit, which has
+    no cost of its own. Git resolves the revision, and the commit maps to the
+    change that records it: a patchset head or the integrated commit decides
+    first, and otherwise a commit inside a change's current patchset range
+    belongs to that change. A commit that several changes record is refused,
+    naming them. The view embeds the change's `arc-cost/1` document
+    unchanged, adds the commit, its position ("2 of 3 commits") and its
+    sibling commits, and states that the change's figures are shared by
+    those commits and that none is per commit. Each role trailer on the
+    commit lists the sessions recorded for that role. `Implemented-by` lists
+    the sessions bound to the change's runs whose route model, effort
+    dropped, equals the trailer's model. `Reviewed-by` lists the
+    participants that acted as reviewer, and `Planned-by` and
+    `Orchestrated-by` those that acted as orchestrator, whose declared model
+    equals the trailer's. A matching session's figure is its whole figure,
+    shared exactly as the change view shares it. A trailer no recorded
+    session answers, such as a person's or another model's, reads `no
+    session recorded`, never zero. A commit no change records answers `no
+    change records this commit`, shows no figure and succeeds. `--json`
+    emits `arc-cost-commit/1`, wrapping the embedded `arc-cost/1`. A price
+    never enters a commit message: a figure is incomplete while a session
+    runs, and no session's spend has a per-commit split.
+  - `arc cost note <change|commit> [--all]` writes that commit view as a Git
+    note on each commit of the change, under `refs/notes/arc-cost`, so
+    `git log --notes=arc-cost` shows cost beside history. A note is a cache
+    of one read, never a source: the ledger and its retained facts stay the
+    truth. It opens with the time it was read and the reader revision, keeps
+    every figure with its quantity kind, accounting basis, status and
+    reasons, labels a dollar figure a harness-calculated estimate on the
+    basis shown beside it, and says the figures are shared by the change's
+    commits. It carries no commit subject or change title. Its text passes
+    the portability check retained cost facts pass: a line with a path
+    separator or a control character is refused, so no path, session link or
+    raw error text reaches a note. Rerunning replaces each note with a newer
+    read, so a figure written while a session was still running completes on
+    refresh. `--all` refreshes every commit that already holds an arc-cost
+    note, wherever a newer read changes its text beyond the opening time,
+    and leaves the others as they are; a noted commit no change records
+    keeps its note. The notes ref is local: arc never configures it for
+    push, never adds it to a refspec and never pushes it. The command
+    records no ledger event.
   - A bounded round records what it deliberately left, so the next round
     inherits a list instead of a memory: `arc run end <dispatch> --outcome
     <o> --reviewed-head <sha> --raised-json <path|-> --deferred-json <path|->`.
@@ -3669,6 +3710,7 @@ SCHEMAS
     `arc-stats-by-model/1`           arc stats --by-model --json
     `arc-stats-provenance/1`         arc stats --provenance --json
     `arc-cost/1`                     arc cost show --json
+    `arc-cost-commit/1`              arc cost show --commit --json
     `arc-changelog/1`                arc changelog --json
     `arc-changelog-render-request/1` stdin of a command changelog renderer
     `arc-forks/3`                    arc fork list --json

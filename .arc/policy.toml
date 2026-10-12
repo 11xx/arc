@@ -215,8 +215,10 @@ acknowledged_safe = [
   "src/forge.rs",
   "src/commands/forge_cmd.rs",
   # Cost views read recorded usage. `cost retain` writes an observation event
-  # that no authorization reads, so a defect renders a wrong figure.
+  # and `cost note` a local Git note, a cache of one read. Nothing reads either
+  # to authorize work, so a defect renders a wrong figure.
   "src/commands/cost.rs",
+  "src/commands/cost_commit.rs",
   "src/commands/cost_read.rs",
   # A pass records what a caller says it opened and nothing reads it to decide
   # whether work ships.

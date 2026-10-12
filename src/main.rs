@@ -4310,10 +4310,36 @@ enum CostCmd {
     /// Transitions and `begin --from-journal` add no consumption. Nonportable binding metadata qualifies the affected
     /// assignment with a fixed diagnostic. `--json` emits `arc-cost/1`
     /// Records no events; ledger reads do not require a parseable append policy.
+    ///
+    /// With `--commit <rev>` the target is a commit. Git resolves the
+    /// revision, and the commit maps to the change that records it: a
+    /// patchset head or the integrated commit decides first, and otherwise a
+    /// commit inside a change's current patchset range belongs to that
+    /// change. The view embeds the change's `arc-cost/1` document unchanged
+    /// and adds the commit, its position ("2 of 3 commits") and its sibling
+    /// commits, and states that the change's figures are shared by those
+    /// commits and that none is per commit. Each role trailer on the commit
+    /// lists the sessions recorded for that role. `Implemented-by` lists the
+    /// sessions bound to the change's runs whose route model, effort
+    /// dropped, equals the trailer's model. `Reviewed-by` lists the
+    /// participants that acted as reviewer, and `Planned-by` and
+    /// `Orchestrated-by` those that acted as orchestrator, whose declared
+    /// model equals the trailer's. A matching session's figure is its whole
+    /// figure, shared exactly as the change view shares it. A trailer no
+    /// recorded session answers reads `no session recorded`, never zero. A
+    /// commit no change records answers `no change records this commit`,
+    /// shows no figure, and succeeds. A commit that several changes record
+    /// is refused, naming them. With `--commit`, `--json` emits
+    /// `arc-cost-commit/1`, which wraps the embedded `arc-cost/1`.
     Show {
         /// Change ID or unique prefix, or a journal artifact: a filename in
         /// this project's journal or <journal-dir>::<file>
-        target: String,
+        #[arg(required_unless_present = "commit", conflicts_with = "commit")]
+        target: Option<String>,
+        /// A commit, resolved with Git and then to the change that records it,
+        /// in place of a target
+        #[arg(long, value_name = "REV")]
+        commit: Option<String>,
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
@@ -4342,6 +4368,35 @@ enum CostCmd {
         /// Change ID or unique prefix, or a journal artifact, as `cost show`
         /// takes it
         target: String,
+    },
+    /// Write the commit view of `cost show --commit` as a Git note on each
+    /// commit of a change, under `refs/notes/arc-cost`, replacing the note
+    /// each holds
+    ///
+    /// The target is a change, or a commit, which stands for the change that
+    /// records it. A note is a cache of one read, never a source: the ledger
+    /// and its retained facts stay the truth. It opens with the time it was
+    /// read and the reader revision, and it keeps every figure with its
+    /// quantity kind, accounting basis, status and reasons. A dollar figure
+    /// is a harness-calculated estimate on the basis shown beside it, never
+    /// a charge. It says the figures are shared by the change's commits, and
+    /// it carries no commit subject or change title. Its text must pass the
+    /// check retained cost facts pass for transport: a line with a path
+    /// separator or a control character is refused, so no path, session link
+    /// or raw error text reaches a note. Rerunning replaces each note with a
+    /// newer read. `--all` refreshes every commit that already holds an
+    /// arc-cost note, wherever a newer read changes its text beyond its
+    /// opening time, and leaves the others as they are; a noted commit no
+    /// change records keeps its note. The notes ref is local: arc never
+    /// configures it for push, never adds it to a refspec and never pushes
+    /// it. Records no ledger events
+    Note {
+        /// Change ID or unique prefix, or a commit that a change records
+        #[arg(required_unless_present = "all")]
+        target: Option<String>,
+        /// Refresh every commit that already holds an arc-cost note
+        #[arg(long)]
+        all: bool,
     },
 }
 
@@ -6442,7 +6497,18 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             }
         },
         Cmd::Cost { cmd } => match cmd {
-            CostCmd::Show { target, json } => commands::show_cost(&ctx, &target, json).map(|_| 0),
+            CostCmd::Show {
+                target,
+                commit,
+                json,
+            } => match (target, commit) {
+                (_, Some(commit)) => commands::show_commit_cost(&ctx, &commit, json).map(|_| 0),
+                (Some(target), None) => commands::show_cost(&ctx, &target, json).map(|_| 0),
+                (None, None) => unreachable!("clap requires a target or --commit"),
+            },
+            CostCmd::Note { target, all } => {
+                commands::note_cost(&ctx, target.as_deref(), all).map(|_| 0)
+            }
             CostCmd::Retain { target } => commands::retain_cost(&ctx, &target).map(|_| 0),
         },
         Cmd::Policy { cmd } => match cmd {

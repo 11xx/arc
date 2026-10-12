@@ -573,19 +573,38 @@ pub(crate) fn contains(message: &[u8], wanted: &str) -> bool {
     block_of(&lines).is_some_and(|block| lines[block].contains(&wanted.as_bytes()))
 }
 
-/// The values of the final trailer block's `Implemented-by` lines, in the
-/// order they appear, each without the whitespace around it.
-pub(crate) fn implemented_by(message: &[u8]) -> Vec<String> {
+/// The values of the final trailer block's lines keyed `key`, in the order
+/// they appear, each without the whitespace around it.
+fn block_values(message: &[u8], key: &str) -> Vec<String> {
     let lines: Vec<&[u8]> = message.split(|byte| *byte == b'\n').collect();
     let Some(block) = block_of(&lines) else {
         return Vec::new();
     };
     lines[block]
         .iter()
-        .filter(|line| trailer_key(line).is_some_and(|key| same_key(&key, "Implemented-by")))
+        .filter(|line| trailer_key(line).is_some_and(|found| same_key(&found, key)))
         .map(|line| {
             let value = &line[line.iter().position(|byte| *byte == b':').unwrap_or(0) + 1..];
             String::from_utf8_lossy(trimmed(value)).into_owned()
+        })
+        .collect()
+}
+
+/// The values of the final trailer block's `Implemented-by` lines, in the
+/// order they appear, each without the whitespace around it.
+pub(crate) fn implemented_by(message: &[u8]) -> Vec<String> {
+    block_values(message, "Implemented-by")
+}
+
+/// The role trailers of the final trailer block, as `(key, value)` in the
+/// convention's canonical key order and each key's lines in message order.
+pub(crate) fn contribution_trailers(message: &[u8]) -> Vec<(&'static str, String)> {
+    CONTRIBUTION_ROLES
+        .iter()
+        .flat_map(|role| {
+            block_values(message, role)
+                .into_iter()
+                .map(move |value| (*role, value))
         })
         .collect()
 }

@@ -2939,3 +2939,321 @@ fn an_unreadable_ledger_record_keeps_a_participant_from_counting_as_the_works_al
         "{view}"
     );
 }
+
+const LEAD_MODEL: &str = "claude-opus-5-5#xhigh";
+const EXECUTOR: &str = "exec-run";
+
+/// `arc` acting as the lead session with its declared model.
+fn lead(repo: &Repo, cwd: &Path) -> AssertCommand {
+    let mut command = acting(repo, cwd, LEAD);
+    command.env("ARC_MODEL", LEAD_MODEL);
+    command
+}
+
+/// A two-commit change the lead opened, dispatched to an executor, approved
+/// and integrated. Its commits carry role trailers naming the executor's
+/// route model, the lead's model, and a reviewer no session recorded.
+struct Shipped {
+    change: String,
+    first: String,
+    second: String,
+}
+
+fn shipped_change(repo: &Repo, slug: &str) -> Shipped {
+    let begin = stdout(lead(repo, &repo.root).args(["begin", slug]));
+    let change = opened_change_id(&begin);
+    let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+    repo.commit(
+        &worktree,
+        "one.txt",
+        "one\n",
+        &format!(
+            "feat: first\n\nPlanned-by: pi:{LEAD_MODEL}\nImplemented-by: pi:claude-sonnet-5-5#high\nReviewed-by: pi:{LEAD_MODEL}\nOrchestrated-by: pi:{LEAD_MODEL}"
+        ),
+    );
+    repo.commit(
+        &worktree,
+        "two.txt",
+        "two\n",
+        "feat: second\n\nImplemented-by: pi:claude-sonnet-5-5#high\nReviewed-by: pi:gpt-9-unrecorded#high",
+    );
+    let dispatched = event_id(&stdout(lead(repo, &repo.root).args([
+        "run",
+        "dispatch",
+        "--route",
+        "claude-sonnet-5-5#high",
+        "--worktree",
+        "/work/run",
+        "--change",
+        &change,
+    ])));
+    dispatch_time(repo, &dispatched, "2026-01-01T09:59:00Z");
+    bind(repo, &dispatched, "pi", EXECUTOR);
+    stdout(lead(repo, &worktree).args(["snapshot", slug]));
+    lead(repo, &worktree)
+        .args(["review", slug, "--verdict", "approved"])
+        .assert()
+        .success();
+    lead(repo, &repo.root)
+        .args(["integrate", slug])
+        .assert()
+        .success();
+    Shipped {
+        change,
+        first: git_out(&worktree, &["rev-parse", "HEAD~1"]),
+        second: git_out(&worktree, &["rev-parse", "HEAD"]),
+    }
+}
+
+fn commit_view(repo: &Repo, commit: &str) -> Value {
+    let view = json_stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "show", "--commit", commit, "--json"]),
+    );
+    assert_eq!(view["schema"], "arc-cost-commit/1", "{view}");
+    view
+}
+
+fn trailer_row<'a>(view: &'a Value, trailer: &str) -> &'a Value {
+    view["roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["trailer"] == trailer)
+        .unwrap_or_else(|| panic!("no {trailer} row: {view}"))
+}
+
+fn note_of(repo: &Repo, commit: &str) -> String {
+    git_out(&repo.root, &["notes", "--ref=arc-cost", "show", commit])
+}
+
+#[test]
+fn a_commit_of_a_two_commit_change_shows_the_changes_figures_and_its_executor_run() {
+    let repo = Repo::new();
+    pi_recording(&repo, LEAD, &[0.2], false);
+    pi_recording(&repo, EXECUTOR, &[0.05], false);
+    let shipped = shipped_change(&repo, "two");
+
+    let view = commit_view(&repo, &shipped.first);
+    assert_eq!(view["commit"], shipped.first, "{view}");
+    assert_eq!(view["change"]["id"], shipped.change, "{view}");
+    assert_eq!(view["position"], json!({"index": 1, "of": 2}), "{view}");
+    assert_eq!(view["commits"].as_array().unwrap().len(), 2, "{view}");
+    assert_eq!(view["commits"][1]["sha"], shipped.second, "{view}");
+    // The embedded document is the change's own view, unchanged.
+    assert_eq!(view["cost"], report(&repo, &shipped.change), "{view}");
+    let implemented = trailer_row(&view, "Implemented-by");
+    assert_eq!(implemented["status"], "recorded", "{view}");
+    assert_eq!(implemented["sessions"][0]["key"], "pi:exec-run", "{view}");
+    assert_eq!(implemented["sessions"][0]["kind"], "executor", "{view}");
+    assert_eq!(usd(&implemented["sessions"][0]["totals"]), Some(0.05));
+
+    let second = commit_view(&repo, &shipped.second);
+    assert_eq!(second["position"], json!({"index": 2, "of": 2}), "{second}");
+
+    let text = stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "show", "--commit", &shipped.first]),
+    );
+    assert!(text.contains("commit 1 of 2"), "{text}");
+    assert!(
+        text.contains("shared by the change's 2 commits; no figure is per commit"),
+        "{text}"
+    );
+    assert!(text.contains("Implemented-by"), "{text}");
+    assert!(text.contains("pi:exec-run"), "{text}");
+}
+
+#[test]
+fn a_commit_outside_every_change_answers_that_none_records_it() {
+    let repo = Repo::new();
+    pi_recording(&repo, LEAD, &[0.2], false);
+    pi_recording(&repo, EXECUTOR, &[0.05], false);
+    shipped_change(&repo, "two");
+    let init = git_out(&repo.root, &["rev-list", "--max-parents=0", "HEAD"]);
+
+    let text = stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "show", "--commit", &init]),
+    );
+    assert!(text.contains("no change records this commit"), "{text}");
+    assert!(!text.contains("harness-calculated"), "{text}");
+    let view = commit_view(&repo, &init);
+    assert_eq!(view["change"], Value::Null, "{view}");
+    assert!(view.get("cost").is_none(), "{view}");
+}
+
+#[test]
+fn a_reviewed_by_trailer_maps_to_the_participant_that_approved_and_an_unrecorded_one_says_so() {
+    let repo = Repo::new();
+    pi_recording(&repo, LEAD, &[0.2], false);
+    pi_recording(&repo, EXECUTOR, &[0.05], false);
+    let shipped = shipped_change(&repo, "two");
+
+    let first = commit_view(&repo, &shipped.first);
+    let reviewed = trailer_row(&first, "Reviewed-by");
+    assert_eq!(reviewed["status"], "recorded", "{first}");
+    assert_eq!(reviewed["sessions"][0]["key"], "pi:lead-session", "{first}");
+    assert_eq!(reviewed["sessions"][0]["kind"], "participant", "{first}");
+    // The whole figure, shared exactly as the change view shares it.
+    assert_eq!(
+        usd(&reviewed["sessions"][0]["totals"]),
+        Some(0.2),
+        "{first}"
+    );
+    for trailer in ["Planned-by", "Orchestrated-by"] {
+        let row = trailer_row(&first, trailer);
+        assert_eq!(row["sessions"][0]["key"], "pi:lead-session", "{first}");
+    }
+
+    let second = commit_view(&repo, &shipped.second);
+    let unrecorded = trailer_row(&second, "Reviewed-by");
+    assert_eq!(unrecorded["status"], "no-session-recorded", "{second}");
+    assert_eq!(unrecorded["sessions"], json!([]), "{second}");
+    let text = stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "show", "--commit", &shipped.second]),
+    );
+    assert!(text.contains("no session recorded"), "{text}");
+}
+
+#[test]
+fn a_note_is_the_commit_view_as_text_and_reads_incomplete_until_a_refresh() {
+    let repo = Repo::new();
+    pi_recording(&repo, LEAD, &[0.2], false);
+    let recording = pi_recording(&repo, EXECUTOR, &[0.05], false);
+    let mut body = fs::read_to_string(&recording).unwrap();
+    body.push_str("{ this record is not json\n");
+    fs::write(&recording, body).unwrap();
+    let shipped = shipped_change(&repo, "two");
+
+    stdout(repo.arc(&repo.root).args(["cost", "note", &shipped.change]));
+    for commit in [&shipped.first, &shipped.second] {
+        let note = note_of(&repo, commit);
+        let opening = note.lines().next().unwrap();
+        assert!(opening.starts_with("arc cost as of 20"), "{note}");
+        assert!(opening.contains(" reader "), "{note}");
+        assert!(note.contains("pi:exec-run  fresh incomplete"), "{note}");
+        assert!(
+            note.contains("shared by the change's 2 commits; no figure is per commit"),
+            "{note}"
+        );
+        assert!(note.contains("harness-calculated estimate"), "{note}");
+        assert!(note.contains("accounting basis"), "{note}");
+    }
+
+    // The run finishes: its recording is whole.
+    pi_recording(&repo, EXECUTOR, &[0.05], false);
+    let before = git_out(
+        &repo.root,
+        &["notes", "--ref=arc-cost", "list", &shipped.first],
+    );
+    let output = stdout(repo.arc(&repo.root).args(["cost", "note", "--all"]));
+    assert!(output.contains(&shipped.first[..12]), "{output}");
+    for commit in [&shipped.first, &shipped.second] {
+        let note = note_of(&repo, commit);
+        assert!(note.contains("pi:exec-run  fresh complete"), "{note}");
+        assert!(!note.contains("pi:exec-run  fresh incomplete"), "{note}");
+    }
+    let after = git_out(
+        &repo.root,
+        &["notes", "--ref=arc-cost", "list", &shipped.first],
+    );
+    assert_ne!(before, after);
+
+    // A refresh with nothing to change leaves every note as it is.
+    let settled = stdout(repo.arc(&repo.root).args(["cost", "note", "--all"]));
+    assert!(settled.contains("unchanged"), "{settled}");
+    let again = git_out(
+        &repo.root,
+        &["notes", "--ref=arc-cost", "list", &shipped.first],
+    );
+    assert_eq!(after, again);
+}
+
+#[test]
+fn a_note_for_a_commit_resolves_to_its_change_and_never_reaches_a_push_refspec() {
+    let repo = Repo::new();
+    pi_recording(&repo, LEAD, &[0.2], false);
+    pi_recording(&repo, EXECUTOR, &[0.05], false);
+    let remote = repo.home.join("remote.git");
+    git(&repo.home, &["init", "--bare", remote.to_str().unwrap()]);
+    git(
+        &repo.root,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(
+        &repo.root,
+        &[
+            "config",
+            "--add",
+            "remote.origin.push",
+            "refs/heads/*:refs/heads/*",
+        ],
+    );
+    let shipped = shipped_change(&repo, "two");
+
+    stdout(repo.arc(&repo.root).args(["cost", "note", &shipped.second]));
+    assert!(note_of(&repo, &shipped.first).starts_with("arc cost as of"));
+    assert!(note_of(&repo, &shipped.second).starts_with("arc cost as of"));
+    let config = fs::read_to_string(repo.root.join(".git/config")).unwrap();
+    assert!(!config.contains("refs/notes/arc-cost"), "{config}");
+    let pushes = git_out(
+        &repo.root,
+        &["config", "--get-regexp", r"^remote\..*\.push$"],
+    );
+    assert!(!pushes.contains("notes"), "{pushes}");
+    assert!(!remote.join("refs/notes").exists());
+}
+
+#[test]
+fn a_note_carries_no_path_link_or_raw_error_text_even_from_a_tampered_retained_fact() {
+    let repo = Repo::new();
+    pi_recording(&repo, LEAD, &[0.2], false);
+    let recording = pi_recording(&repo, EXECUTOR, &[0.05], false);
+    let shipped = shipped_change(&repo, "two");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "retain", &shipped.change]),
+    );
+    let values = stdout(repo.arc(&repo.root).args(["events", "--repository"]));
+    for mut held in values
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|e| e["event_type"] == "cost-facts-retained")
+    {
+        let private = recording.display().to_string();
+        held["facts"]["lineage"]["parent"] = json!(private);
+        held["facts"]["lineage"]["unknown"] = json!([format!("cannot read {private}")]);
+        held["facts"]["digest"] = json!(private);
+        held["facts"]["incomplete"] = json!([format!("cannot read {private}")]);
+        let path = repo
+            .root
+            .join(".git/arc/repository/events")
+            .join(format!("{}.json", held["event_id"].as_str().unwrap()));
+        fs::write(path, serde_json::to_vec(&held).unwrap()).unwrap();
+    }
+    fs::remove_file(&recording).unwrap();
+    fs::remove_file(
+        repo.home
+            .join(".pi/agent/sessions/--fixture-project--")
+            .join(format!("2026-01-01T10-00-00-000Z_{LEAD}.jsonl")),
+    )
+    .unwrap();
+
+    stdout(repo.arc(&repo.root).args(["cost", "note", &shipped.change]));
+    let home = repo.home.display().to_string();
+    for commit in [&shipped.first, &shipped.second] {
+        let note = note_of(&repo, commit);
+        assert!(note.contains("pi:exec-run  retained"), "{note}");
+        assert!(!note.contains(&home), "{note}");
+        assert!(!note.contains("cannot read"), "{note}");
+        for line in note.lines() {
+            assert!(
+                !line.contains(['/', '\\', '~']) && !line.chars().any(char::is_control),
+                "{line}"
+            );
+        }
+        assert!(!note.contains("claude.ai"), "{note}");
+    }
+}

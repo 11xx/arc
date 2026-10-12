@@ -11,6 +11,7 @@ mod changelog;
 mod claims;
 mod config_cmd;
 mod cost;
+mod cost_commit;
 mod cost_read;
 mod diff;
 mod doctor;
@@ -67,6 +68,7 @@ pub use claims::{claim, release_claim, stage, take};
 use clap::ValueEnum;
 pub use config_cmd::check_writable;
 pub use cost::{retain_cost, show_cost};
+pub use cost_commit::{note_cost, show_commit_cost};
 pub use diff::{diff, DiffArgs};
 pub use doctor::run as run_doctor;
 pub use external::{record_verdict as record_external_verdict, ExternalVerdictArgs};
@@ -160,6 +162,7 @@ pub(crate) const READ_ONLY_COMMANDS: &[&str] = &[
     "pass list",
     "run list",
     "cost show",
+    "cost note",
     "policy show",
     "policy path",
     "config",

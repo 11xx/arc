@@ -1121,6 +1121,40 @@ fn git_piped(cwd: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
     piped_output_with(command, "git", &owned, input)
 }
 
+/// Replace the note `commit` holds under `refs/notes/<name>` with `text`.
+pub fn set_note(cwd: &Path, name: &str, commit: &str, text: &str) -> Result<()> {
+    let notes = format!("--ref={name}");
+    git_piped(
+        cwd,
+        &["notes", &notes, "add", "-f", "-F", "-", commit],
+        text.as_bytes(),
+    )?;
+    Ok(())
+}
+
+/// The note `commit` holds under `refs/notes/<name>`, if any.
+pub fn read_note(cwd: &Path, name: &str, commit: &str) -> Result<Option<String>> {
+    let notes = format!("--ref={name}");
+    let output = git_command()
+        .args(["notes", &notes, "show", commit])
+        .current_dir(cwd)
+        .output()
+        .with_context(|| format!("failed to run git in {}", cwd.display()))?;
+    Ok(output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned()))
+}
+
+/// Every commit that holds a note under `refs/notes/<name>`.
+pub fn noted_commits(cwd: &Path, name: &str) -> Result<Vec<String>> {
+    let notes = format!("--ref={name}");
+    Ok(git(cwd, &["notes", &notes, "list"])?
+        .lines()
+        .filter_map(|line| line.split_once(' ').map(|(_, commit)| commit.to_string()))
+        .collect())
+}
+
 /// An armored detached signature over `payload`, made by the OpenPGP program
 /// and key Git itself would use.
 ///
