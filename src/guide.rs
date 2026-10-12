@@ -1835,8 +1835,10 @@ FORGE
   history, each against the state it was recorded in: a read against the reads
   before it; a projection against the read it names and, for checks and
   lifecycle, the link it was bound to, and for a link, any earlier declaration
-  that admits its tuple. A link or declaration that merged history makes
-  current later never refuses what was recorded without it.
+  that admits its tuple; a delivery or disclosure source against the original
+  read event it names. A link, declaration or conflict that merged history
+  makes current later never refuses what was recorded without it. A local
+  write is still judged against the reads usable now.
   Independent replicas can supply different events for the same read.
   Replay coalesces identical documents and retains their event IDs as aliases.
   Conflicting documents mark every member of that read_id as conflict; invalid

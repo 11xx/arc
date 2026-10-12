@@ -542,7 +542,11 @@ pub fn message(
     ) {
         let mut history = crate::forge_round_trip::held_events(&store)?;
         history.push((*event).clone());
-        crate::forge_round_trip::validate_history(&history, &BTreeSet::from([&event.event_id]))?;
+        crate::forge_round_trip::validate_history(
+            &history,
+            &BTreeSet::from([&event.event_id]),
+            crate::forge_round_trip::Standing::Current,
+        )?;
     }
     store.append_local_event(&mut event)?;
     println!("message: {} [{}]", message_type.as_str(), severity.as_str());

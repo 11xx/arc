@@ -551,7 +551,7 @@ pub fn declare(ctx: &Ctx, args: DeclareArgs) -> Result<()> {
         source.resolve(&held)?;
     }
     if let Some(disclosure) = &disclosure {
-        disclosure.validate_readback(&held)?;
+        disclosure.validate_readback(&held, crate::forge_round_trip::Standing::Current)?;
         for selection in &disclosure.selected {
             if let crate::forge_round_trip::DisclosureSource::Git(source) = &selection.source {
                 match gitio::object_type(&ctx.cwd, &source.commit)?.as_deref() {
@@ -598,6 +598,7 @@ pub fn declare(ctx: &Ctx, args: DeclareArgs) -> Result<()> {
         crate::forge_round_trip::validate_history(
             &history,
             &std::collections::BTreeSet::from([&event.event_id]),
+            crate::forge_round_trip::Standing::Current,
         )?;
     }
     ledger.record(&event)?;

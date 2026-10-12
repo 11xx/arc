@@ -985,3 +985,121 @@ fn forge_delivery_disclosure_aliases_and_conflicts_use_the_shared_source_selecto
         "uncertain"
     );
 }
+
+/// Admit a bundle whose events were recorded by several replicas.
+fn admitted_from_every_origin(repo: &Repo, path: &Path) -> AssertCommand {
+    let bytes = fs::read(path).unwrap();
+    let bundle: Value = serde_json::from_slice(&bytes).unwrap();
+    let source = bundle["source_replica_id"].as_str().unwrap();
+    let origins: std::collections::BTreeSet<&str> = bundle["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|event| event["repository_id"].as_str())
+        .chain([source])
+        .collect();
+    let mut config = format!(
+        "[[replica.publishers]]\nprincipal='fixture-round-trip'\nsource_replica_id='{source}'\n"
+    );
+    for origin in origins {
+        config.push_str(&format!(
+            "[[replica.publishers.origins]]\nreplica_id='{origin}'\nroles=['facts','rewrite','integration']\nactors=['tester']\n"
+        ));
+    }
+    repo.declare_gates_locally(&config);
+    let mut command = repo.arc(&repo.root);
+    command.args([
+        "import",
+        path.to_str().unwrap(),
+        "--publisher",
+        "fixture-round-trip",
+        "--received-sha256",
+        &format!("{:x}", Sha256::digest(&bytes)),
+    ]);
+    command
+}
+
+#[test]
+fn forge_delivery_and_disclosure_recorded_before_a_conflict_import_into_a_fresh_receiver() {
+    let (repo, id) = setup();
+    let seed = repo.home.join("seed.json");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["export", &id, "--output", seed.to_str().unwrap()]),
+    );
+    let rival = Repo::new();
+    deliver_git_objects(&repo, &rival);
+    stdout(
+        rival
+            .arc(&rival.root)
+            .args(["import", seed.to_str().unwrap()]),
+    );
+    let observation = observe(&repo, &id, "shared-read", "g1", "first", None);
+    let mut sent = delivery();
+    sent["sources"] = json!([source(&id, &observation, "g1")]);
+    stdout(&mut send(&repo, &id, &sent));
+    stdout(&mut declare(
+        &repo,
+        &id,
+        &disclosure(&id, &observation, "g1", "first", None),
+    ));
+    observe(&rival, &id, "shared-read", "g1", "other", None);
+    let conflict = rival.home.join("conflict.json");
+    stdout(
+        rival
+            .arc(&rival.root)
+            .args(["export", &id, "--output", conflict.to_str().unwrap()]),
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["import", conflict.to_str().unwrap()]),
+    );
+    let mut previous = repo;
+    for round in 0..2 {
+        let bundle = previous.home.join(format!("fresh-{round}.json"));
+        stdout(previous.arc(&previous.root).args([
+            "export",
+            &id,
+            "--output",
+            bundle.to_str().unwrap(),
+        ]));
+        let fresh = Repo::new();
+        deliver_git_objects(&previous, &fresh);
+        admitted_from_every_origin(&fresh, &bundle)
+            .assert()
+            .success();
+        let shown = state(&fresh, &id);
+        assert_eq!(shown["messages"].as_array().unwrap().len(), 1);
+        previous = fresh;
+    }
+}
+
+#[test]
+fn forge_import_refuses_a_delivery_source_no_recorded_read_supports() {
+    let (repo, id) = setup();
+    let observation = observe(&repo, &id, "read-1", "g1", "first", None);
+    let mut sent = delivery();
+    sent["sources"] = json!([source(&id, &observation, "g1")]);
+    stdout(&mut send(&repo, &id, &sent));
+    let bundle = repo.home.join("tampered-delivery.json");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["export", &id, "--output", bundle.to_str().unwrap()]),
+    );
+    let mut value: Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    for event in value["events"].as_array_mut().unwrap() {
+        if event["delivery"]["sources"][0].is_object() {
+            event["delivery"]["sources"][0]["generation"] = json!("absent-generation");
+        }
+    }
+    refresh_bundle_checksum(&mut value);
+    fs::write(&bundle, value.to_string()).unwrap();
+    let receiver = Repo::new();
+    deliver_git_objects(&repo, &receiver);
+    admitted_round_trip(&receiver, &bundle)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "source generation is not present in the exact observation",
+        ));
+}

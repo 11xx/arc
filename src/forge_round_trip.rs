@@ -1,5 +1,5 @@
 //! Non-authorizing delivery, disclosure and comment-act evidence.
-use crate::forge_observation::RetainedContentRef;
+use crate::forge_observation::{ForgeObservation, RetainedContentRef};
 use crate::model::{Event, Payload};
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -28,6 +28,16 @@ fn established(value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Which state a source is judged against. A local write is judged against
+/// the reads that are usable now. A received fact is judged against the
+/// original event it names, so a read that a replica contradicted later
+/// still supports what was recorded while it stood alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing {
+    Current,
+    Recorded,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceGeneration {
@@ -40,6 +50,51 @@ impl SourceGeneration {
         crate::ids::validate_id_component(&self.change_id)?;
         named(&self.observation)?;
         named(&self.generation)
+    }
+    fn resolve_as<'a>(
+        &self,
+        events: &'a [Event],
+        standing: Standing,
+    ) -> Result<&'a RetainedContentRef> {
+        match standing {
+            Standing::Current => self.resolve(events),
+            Standing::Recorded => self.resolve_recorded(events),
+        }
+    }
+    /// The content of the generation on the original observation event the
+    /// source names, or on the one read the name identifies when every event
+    /// carrying it holds the same document.
+    fn resolve_recorded<'a>(&self, events: &'a [Event]) -> Result<&'a RetainedContentRef> {
+        self.validate()?;
+        let reads =
+            |matches: &dyn Fn(&Event, &ForgeObservation) -> bool| -> Vec<&'a ForgeObservation> {
+                events
+                    .iter()
+                    .filter(|e| e.change_id == self.change_id)
+                    .filter_map(|e| match &e.payload {
+                        Payload::ForgeObservationRecorded { observation }
+                            if matches(e, observation) =>
+                        {
+                            Some(observation)
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            };
+        let mut named = reads(&|e, _| e.event_id == self.observation);
+        if named.is_empty() {
+            named = reads(&|_, document| document.read_id == self.observation);
+        }
+        let document = named
+            .first()
+            .filter(|first| named.iter().all(|other| other == *first))
+            .context("source observation is not one recorded read on the named change")?;
+        document
+            .items
+            .iter()
+            .find(|item| item.generation_id == self.generation)
+            .map(|item| &item.content)
+            .context("source generation is not present in the exact observation")
     }
     pub fn resolve<'a>(&self, events: &'a [Event]) -> Result<&'a RetainedContentRef> {
         self.validate()?;
@@ -449,11 +504,11 @@ impl DisclosureSource {
             }
         }
     }
-    fn resolve(&self, events: &[Event]) -> Result<()> {
+    fn resolve(&self, events: &[Event], standing: Standing) -> Result<()> {
         self.validate()?;
         match self {
             Self::Forge(s) => {
-                s.resolve(events)?;
+                s.resolve_as(events, standing)?;
             }
             Self::Ledger(s) => {
                 ensure!(
@@ -550,12 +605,12 @@ impl Disclosure {
             })
             .chain(std::iter::once(&self.readback))
     }
-    pub fn validate_readback(&self, events: &[Event]) -> Result<()> {
+    pub fn validate_readback(&self, events: &[Event], standing: Standing) -> Result<()> {
         self.validate()?;
         for selection in &self.selected {
-            selection.source.resolve(events)?;
+            selection.source.resolve(events, standing)?;
         }
-        let readback = self.readback.resolve(events)?;
+        let readback = self.readback.resolve_as(events, standing)?;
         ensure!(
             self.outgoing.sha256 == readback.sha256
                 && self.outgoing.byte_length == readback.byte_length,
@@ -566,7 +621,11 @@ impl Disclosure {
 }
 
 /// Validate foreign delivery/disclosure shapes and their immutable lineage before publication.
-pub fn validate_history(events: &[Event], introduced: &BTreeSet<&String>) -> Result<()> {
+pub fn validate_history(
+    events: &[Event],
+    introduced: &BTreeSet<&String>,
+    standing: Standing,
+) -> Result<()> {
     let deliveries: Vec<_> = events
         .iter()
         .filter_map(|event| match &event.payload {
@@ -596,7 +655,7 @@ pub fn validate_history(events: &[Event], introduced: &BTreeSet<&String>) -> Res
             ..
         } = &event.payload
         {
-            origin.resolve(events)?;
+            origin.resolve_as(events, standing)?;
         }
         match &event.payload {
             Payload::Message {
@@ -605,7 +664,7 @@ pub fn validate_history(events: &[Event], introduced: &BTreeSet<&String>) -> Res
             } => {
                 delivery.validate()?;
                 for source in delivery.sources() {
-                    source.resolve(events)?;
+                    source.resolve_as(events, standing)?;
                 }
                 for old in &deliveries {
                     if old.attempt_id == delivery.attempt_id {
@@ -659,7 +718,7 @@ pub fn validate_history(events: &[Event], introduced: &BTreeSet<&String>) -> Res
                 disclosure: Some(disclosure),
                 ..
             } => {
-                disclosure.validate_readback(events)?;
+                disclosure.validate_readback(events, standing)?;
                 if let Some(comment) = &disclosure.comment {
                     for old in &disclosures {
                         if let Some(original) = &old.comment {
@@ -725,7 +784,7 @@ pub fn validate_history(events: &[Event], introduced: &BTreeSet<&String>) -> Res
                 origin: Some(source),
                 ..
             } => {
-                source.resolve(events)?;
+                source.resolve_as(events, standing)?;
             }
             _ => {}
         }
