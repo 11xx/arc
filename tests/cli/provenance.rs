@@ -1928,3 +1928,182 @@ fn attribution_amendment_is_repairable_only_before_a_verdict() {
     // The subject is unchanged: a dispatch proves an invocation, not
     // authorship, so recording one after the snapshot rewrites nothing.
 }
+
+#[test]
+fn snapshot_explicit_subject_changes_preserve_history_and_idempotence() {
+    for contributors in [false, true] {
+        let repo = repo_with_self_approval_policy();
+        let slug = "represented-snapshot";
+        let (change, wt, head) = change_with_patchset(&repo, slug);
+        if contributors {
+            stdout(repo.arc(&wt).args([
+                "snapshot",
+                slug,
+                "--amend",
+                "ps-01",
+                "--contributors",
+                "Producer",
+            ]));
+        }
+        let original =
+            json_stdout(repo.arc(&wt).args(["show", slug, "--json"]))["patchsets"][0].clone();
+        repo.arc(&wt)
+            .env("ARC_ACTOR", "Independent")
+            .args(["review", slug, "--verdict", "approved"])
+            .assert()
+            .success();
+        let before = event_count(&repo, &change);
+        let mut command = repo.arc(&wt);
+        command
+            .env("ARC_ON_BEHALF_OF", "Producer")
+            .args(["snapshot", slug]);
+        if contributors {
+            command.args(["--contributors", "Producer"]);
+        }
+        command
+            .assert()
+            .success()
+            .stdout(predicates::str::contains("patchset: ps-02"))
+            .stdout(predicates::str::contains("subject: Producer"));
+        assert_eq!(event_count(&repo, &change), before + 1);
+        let state = json_stdout(repo.arc(&wt).args(["show", slug, "--json"]));
+        assert_eq!(state["patchsets"][0], original);
+        assert_eq!(state["patchsets"][1]["actor"], "tester");
+        assert_eq!(state["patchsets"][1]["on_behalf_of"], "Producer");
+        assert_eq!(state["patchsets"][1]["head"], head);
+        assert_eq!(state["patchsets"][1]["base"], original["base"]);
+        let status = json_stdout(repo.arc(&wt).args(["status", slug]));
+        assert_eq!(status["review_subject"]["effective_author"], "Producer");
+        assert_eq!(status["review_subject"]["invoker"], "tester");
+        assert_eq!(status["has_valid_approval"], false);
+        for subject in [None, Some("Producer")] {
+            let mut command = repo.arc(&wt);
+            command
+                .env("ARC_ACTOR", "AnotherCollector")
+                .args(["snapshot", slug]);
+            if let Some(subject) = subject {
+                command.args(["--on-behalf-of", subject]);
+            }
+            if contributors {
+                command.args(["--contributors", "Producer"]);
+            }
+            command.assert().success().stdout(predicates::str::contains(
+                "patchset: ps-02 (unchanged) subject: Producer",
+            ));
+            assert_eq!(event_count(&repo, &change), before + 1);
+        }
+        let mut command = repo.arc(&wt);
+        command.args(["snapshot", slug, "--on-behalf-of", "OtherProducer"]);
+        if contributors {
+            command.args(["--contributors", "Producer"]);
+        }
+        command
+            .assert()
+            .success()
+            .stdout(predicates::str::contains("patchset: ps-03"));
+        let status = json_stdout(repo.arc(&wt).args(["status", slug]));
+        assert_eq!(
+            status["review_subject"]["effective_author"],
+            "OtherProducer"
+        );
+        assert_eq!(
+            status["review_subject"]["contributors"],
+            if contributors {
+                serde_json::json!(["Producer"])
+            } else {
+                serde_json::json!(["OtherProducer"])
+            }
+        );
+        repo.arc(&wt)
+            .env("ARC_ACTOR", "Producer")
+            .args(["review", slug, "--verdict", "approved"])
+            .assert()
+            .success();
+        let status = json_stdout(repo.arc(&wt).args(["status", slug]));
+        assert_eq!(status["has_valid_approval"], !contributors);
+    }
+}
+
+#[test]
+fn snapshot_explicit_effective_invoker_is_unchanged() {
+    let repo = Repo::new();
+    let (change, wt, _) = change_with_patchset(&repo, "same-subject");
+    let before = event_count(&repo, &change);
+    repo.arc(&wt)
+        .args(["snapshot", "same-subject", "--on-behalf-of", "tester"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "patchset: ps-01 (unchanged) subject: tester",
+        ));
+    assert_eq!(event_count(&repo, &change), before);
+    let status = json_stdout(repo.arc(&wt).args(["status", "same-subject"]));
+    assert!(status["latest_patchset"]["on_behalf_of"].is_null());
+}
+
+#[test]
+fn snapshot_subject_history_survives_rewrite_and_exchange() {
+    let repo = Repo::new();
+    let slug = "subject-exchange";
+    let (change, wt, head) = change_with_patchset(&repo, slug);
+    repo.arc(&wt)
+        .args(["snapshot", slug, "--on-behalf-of", "Producer"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args([
+            "rewrite",
+            "trailers",
+            "--from",
+            &head,
+            "--append",
+            "Implemented-by: test:model-a",
+            "--no-sign",
+        ])
+        .assert()
+        .success();
+    let successor = repo.head(&wt);
+    assert_ne!(head, successor);
+    let before = json_stdout(repo.arc(&wt).args(["show", slug, "--json"]));
+    assert_eq!(before["patchsets"][0]["actor"], "tester");
+    assert!(before["patchsets"][0]["on_behalf_of"].is_null());
+    assert_eq!(before["patchsets"][1]["actor"], "tester");
+    assert_eq!(before["patchsets"][1]["on_behalf_of"], "Producer");
+    for patchset in before["patchsets"].as_array().unwrap() {
+        assert_eq!(patchset["head"], successor);
+    }
+    let bundle = repo.home.join("subjects.json");
+    stdout(
+        repo.arc(&wt)
+            .args(["export", &change, "--output", bundle.to_str().unwrap()]),
+    );
+    let receiver = Repo::new();
+    deliver_git_objects(&repo, &receiver);
+    let bytes = fs::read(&bundle).unwrap();
+    let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let source = parsed["source_replica_id"].as_str().unwrap();
+    receiver.declare_gates_locally(&format!(
+        "[[replica.publishers]]\nprincipal='fixture'\nsource_replica_id='{source}'\n\
+         [[replica.publishers.origins]]\nreplica_id='{source}'\nroles=['facts','rewrite']\nactors=[]\n"));
+    receiver
+        .arc(&receiver.root)
+        .args([
+            "import",
+            bundle.to_str().unwrap(),
+            "--publisher",
+            "fixture",
+            "--received-sha256",
+            &format!("{:x}", Sha256::digest(&bytes)),
+        ])
+        .assert()
+        .success();
+    let after = json_stdout(
+        receiver
+            .arc(&receiver.root)
+            .args(["show", &change, "--json"]),
+    );
+    assert_eq!(after["patchsets"], before["patchsets"]);
+    let status = json_stdout(receiver.arc(&receiver.root).args(["status", &change]));
+    assert_eq!(status["review_subject"]["effective_author"], "Producer");
+    assert_eq!(status["review_subject"]["invoker"], "tester");
+}

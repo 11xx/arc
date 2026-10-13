@@ -732,3 +732,136 @@ fn the_losing_sibling_keeps_its_ref_and_retire_refuses_while_selected() {
         .assert()
         .success();
 }
+
+#[test]
+fn reused_evaluation_supplier_retirement_preserves_basis_bytes_and_later_reuse() {
+    for interrupted in [false, true] {
+        let f = fixture(Some("matching-coordinates"), &[], false);
+        let repo = &f.repo;
+        let evaluation = evaluated(repo, "alice");
+        let registrations = repository_events(repo, "candidate-registered");
+        let evaluations = repository_events(repo, "candidate-verified");
+        if interrupted {
+            hook_on_branch(repo, "prepared", "exit 1");
+            select(repo, &f.change, "bob", &target(repo), &[&evaluation])
+                .assert()
+                .failure()
+                .stderr(predicates::str::contains("promotion stopped"));
+            fs::remove_file(repo.root.join(".git/hooks/reference-transaction")).unwrap();
+            assert!(repository_events(repo, "candidate-promoted").is_empty());
+        } else {
+            stdout(&mut select(
+                repo,
+                &f.change,
+                "bob",
+                &target(repo),
+                &[&evaluation],
+            ));
+            assert_eq!(repository_events(repo, "candidate-promoted").len(), 1);
+        }
+        let selections = repository_events(repo, "candidate-selected");
+        assert_eq!(selections[0]["evaluations"][0]["candidate_id"], "alice");
+        repo.arc(&repo.root)
+            .args(["candidate", "retire", "alice"])
+            .assert()
+            .success();
+        let pin = Command::new("git")
+            .current_dir(&repo.root)
+            .args(["show-ref", "--verify", "refs/arc/candidate/alice"])
+            .output()
+            .unwrap();
+        assert!(!pin.status.success());
+        assert_eq!(
+            git_out(&repo.root, &["rev-parse", "refs/arc/candidate/bob"]),
+            f.shared
+        );
+        git(&repo.root, &["gc", "--prune=now"]);
+        assert_eq!(
+            git_out(&repo.root, &["show", &format!("{}:answer.txt", f.shared)]),
+            "the shared answer"
+        );
+        assert_eq!(
+            repository_events(repo, "candidate-registered"),
+            registrations
+        );
+        assert_eq!(repository_events(repo, "candidate-verified"), evaluations);
+        assert_eq!(repository_events(repo, "candidate-selected"), selections);
+        let shown =
+            json_stdout(
+                repo.arc(&repo.root)
+                    .args(["candidate", "show", "alice", "--json"]),
+            );
+        assert!(!shown["candidates"][0]["retired"].is_null(), "{shown}");
+        let doctor = repo.arc(&repo.root).args(["doctor"]).output().unwrap();
+        let report = String::from_utf8_lossy(&doctor.stdout);
+        assert!(!report.contains("rooted-candidate-unpinned"), "{report}");
+        stdout(&mut select(
+            repo,
+            &f.change,
+            "bob",
+            &target(repo),
+            &[&evaluation],
+        ));
+        let latest = repository_events(repo, "candidate-selected").pop().unwrap();
+        assert_eq!(latest["evaluations"][0]["candidate_id"], "alice");
+        assert_eq!(latest["evaluations"][0]["event_id"], evaluation);
+        repo.arc(&repo.root)
+            .args(["candidate", "retire", "bob"])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("rooted-candidate"));
+        repo.arc(&repo.root)
+            .args([
+                "candidate",
+                "select",
+                "--chosen",
+                "alice",
+                "--into",
+                &f.change,
+                "--target",
+                &target(repo),
+                "--evaluation",
+                &evaluation,
+                "--rationale",
+                "retired choice",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("candidate-retired"));
+    }
+}
+
+#[test]
+fn reused_supplier_retirement_refuses_when_content_ancestry_roots_it() {
+    for edge in ["--parent", "--adopts"] {
+        let f = fixture(Some("matching-coordinates"), &[], false);
+        let repo = &f.repo;
+        register(
+            repo,
+            &f.change,
+            "child",
+            &f.shared,
+            "alice",
+            &[edge, "alice"],
+        );
+        let evaluation = evaluated(repo, "alice");
+        stdout(&mut select(
+            repo,
+            &f.change,
+            "child",
+            &target(repo),
+            &[&evaluation],
+        ));
+        let before = repository_events(repo, "candidate-retired");
+        repo.arc(&repo.root)
+            .args(["candidate", "retire", "alice"])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("rooted-candidate"));
+        assert_eq!(repository_events(repo, "candidate-retired"), before);
+        assert_eq!(
+            git_out(&repo.root, &["rev-parse", "refs/arc/candidate/alice"]),
+            f.shared
+        );
+    }
+}

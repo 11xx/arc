@@ -1559,6 +1559,11 @@ enum Cmd {
     /// A head whose rewrite invalidated approval requires a fresh patchset,
     /// even when the latest patchset's mapped head already matches the branch.
     /// Re-approval requires a verdict on that fresh patchset.
+    /// At unchanged content, an explicit --on-behalf-of (also supplied by
+    /// ARC_ON_BEHALF_OF) differing from the latest effective author records a
+    /// fresh patchset. An equal or omitted subject preserves that patchset
+    /// and its attribution; the unchanged output names the effective subject.
+    /// Earlier verdicts remain bound to their original patchsets.
     Snapshot {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -3816,6 +3821,10 @@ enum CandidateCmd {
     /// adoptions carry; when one does, exit 1 naming it, writing nothing.
     /// The registration stands. Retiring a retired candidate says so and
     /// exits 0. arc never retires a candidate on its own
+    /// Reusing its evaluation supplies no pin root: an otherwise-unrooted
+    /// supplier may retire while its registration, evaluation and basis
+    /// remain evidence. Its evaluation can still answer later selections
+    /// under the reuse policy; the chosen registration pins the evaluated tree.
     Retire {
         /// Candidate id
         id: String,
@@ -3863,7 +3872,11 @@ enum CandidateCmd {
     /// evaluation, `unrecorded`, `other-registration` (under `never`),
     /// `other-tree`, `other-declaration`, `environment-unrecorded`,
     /// `environment-other`, or `failed`, and `no-evaluation` for a gate none
-    /// is named for. Received evidence satisfies no ground: whatever an
+    /// is named for. A retired supplier's evaluation may still be reused:
+    /// reuse roots neither the supplier nor its ancestry, and the chosen
+    /// registration's pin holds the evaluated tree. Registration, evaluation
+    /// and basis records survive supplier retirement. A retired chosen
+    /// registration remains refused. Received evidence satisfies no ground: whatever an
     /// external execution reports of any tree, a required gate needs an
     /// evaluation at the shipped tree. Each `--must-read` of the registration's brief version
     /// needs a tool read (`arc context read`) on the registration or one

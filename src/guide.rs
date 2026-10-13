@@ -2815,7 +2815,10 @@ THE HISTORY MODEL
   and what that candidate's parents and adoptions carry. arc never collects
   on its own: `arc candidate retire` deletes a pin only when no root reaches
   it, on the operator's command, and retirement deletes a pin, never an
-  event.
+  event. Reusing an evaluation supplies no pin root for its registration or
+  ancestry. An otherwise-unrooted supplier may retire; its registration,
+  evaluation and the basis's original references remain evidence, and the
+  chosen registration pins the evaluated tree.
 
   A debt is a record of review that did not happen, carried with the
   coverage the work did have, its coordinates, and who produced it. A later
@@ -2958,7 +2961,12 @@ CANDIDATES
   shipped tree, the chosen registration's, under the declaration in force and
   in the environment observed now at that tree; under `never` only the chosen
   registration's evaluations count, under `matching-coordinates` any
-  registration's whose tree, declaration, and environment match. Each
+  registration's whose tree, declaration, and environment match, even after
+  that supplier retires. Reuse roots neither the supplier nor its ancestry;
+  its registration and evaluation remain evidence and the chosen pin holds
+  the evaluated tree. A supplier reached independently by a selection,
+  promotion, parent or adoption still cannot retire. A retired chosen
+  registration remains refused. Each
   `--must-read` of the registration's brief version needs a tool read on the
   registration or one along its parent chain, by an episode one of them cites,
   at the required version and covering the required extent. A declaration,
@@ -3167,6 +3175,13 @@ RULES THAT CHANGE WHAT YOU DO
     ships, a change behind its target still lists `merged-tree-unevaluated`
     beside `needs-rebase` in `check --json`, and `check` exits 11 for the
     rebase before it would exit 14.
+  - At unchanged content, an explicit snapshot subject (`--on-behalf-of`,
+    including `ARC_ON_BEHALF_OF`) that differs from the latest patchset's
+    effective author records a fresh patchset. An equal or omitted subject
+    preserves the existing patchset and its attribution; omission never
+    reverts a represented subject to the invoker. The output names the
+    effective subject. Earlier verdicts stay bound to their own patchsets;
+    gate evidence at an unchanged tree follows its ordinary reuse rules.
   - A snapshot records the context that framed the work. Each journal link
     names an artifact by filename with the body digest read at record time,
     and a `via` saying where it came from. With no `--journal-ref`, a

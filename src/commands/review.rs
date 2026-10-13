@@ -600,6 +600,10 @@ pub(super) fn snapshot_holding(
                 && p.approved_head == head
                 && p.base == base_rev
                 && p.brief_ref == brief_ref
+                && ctx
+                    .on_behalf_of
+                    .as_deref()
+                    .is_none_or(|subject| subject == p.effective_author())
                 // Links supplied now are part of what the patchset records: a
                 // rerun that adds or changes them is a new patchset. A rerun
                 // that supplies none leaves an existing patchset's links in
@@ -649,7 +653,8 @@ pub(super) fn snapshot_holding(
     };
     ensure_append_allowed(&st, &payload)?;
     if let Some(patchset_id) = unchanged_patchset {
-        println!("patchset: {patchset_id} (unchanged)");
+        let subject = st.latest_patchset().unwrap().effective_author();
+        println!("patchset: {patchset_id} (unchanged) subject: {subject}");
         return Ok(patchset_id);
     }
     for skipped in &skipped_defaults {
@@ -666,6 +671,10 @@ pub(super) fn snapshot_holding(
     )?;
     println!("patchset: {patchset_id}");
     println!("head: {head}");
+    println!(
+        "subject: {}",
+        ev.on_behalf_of.as_deref().unwrap_or(&ev.actor)
+    );
     if !payload_contributors(&ev.payload).is_empty() {
         println!(
             "contributors: {}",
