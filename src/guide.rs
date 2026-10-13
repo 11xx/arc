@@ -20,6 +20,8 @@ integration. Review verdicts bind to exact patchsets; integration checks
 findings, holds, and required verification gates before merging.
 Run `arc catchup` for live project state and `arc journal open` for work
 waiting for a session.
+Run `arc guide` for indexed topics, `arc guide <topic>` for depth, or
+`arc guide --search <text>` to find a topic or command-help route.
 
 SAY WHO YOU ARE (before the first write)
   eval "$(arc env)"                    Detect harness, session, model, and session link.
@@ -3961,4 +3963,277 @@ fn read_only_commands() -> String {
         }
     }
     lines.join("\n")
+}
+
+const TOPIC_LIMIT: usize = 16_384;
+const PAGE_LIMIT: usize = 16_000;
+
+const TOPICS: &[(&str, &str)] = &[
+    ("identity", "SAY WHO YOU ARE (before the first write)"),
+    ("workspace", "FROM A WORKSPACE ROOT (outside a project)"),
+    (
+        "orient",
+        "ORIENT INSIDE A PROJECT (start here, in this order)",
+    ),
+    ("sandbox", "SANDBOX (rehearse something destructive)"),
+    ("questions", "SETTLE A QUESTION (before it is work)"),
+    ("change", "RUN A CHANGE"),
+    ("delivery", "PREPARE A DELIVERED CHANGE"),
+    ("replicas", "PAIR REPLICA STORES"),
+    (
+        "journal",
+        "KEEP WHAT THE WORK DISCOVERS (mid-change, before it is lost)",
+    ),
+    ("ending", "END A SESSION (what the next one reads)"),
+    ("profiles", "PROFILES (--profile, default local)"),
+    ("forge", "FORGE"),
+    ("debt", "REVIEW COVERAGE AND DEBT"),
+    ("assurance", "REVIEW ASSURANCE"),
+    ("repair", "REVIEW AND REPAIR"),
+    ("contributions", "CONTRIBUTION TRAILERS"),
+    ("rewrites", "HISTORY REWRITES"),
+    ("history", "THE HISTORY MODEL"),
+    ("candidates", "CANDIDATES"),
+    ("context", "CONTEXT"),
+    ("rules", "RULES THAT CHANGE WHAT YOU DO"),
+    ("exit-codes", "EXIT CODES"),
+    ("files", "FILES"),
+    ("schemas", "SCHEMAS"),
+    ("boundaries", "WHAT ARC WILL NOT DO"),
+];
+
+struct Topic<'a> {
+    name: &'static str,
+    title: &'static str,
+    text: &'a str,
+}
+
+fn topics(text: &str) -> Vec<Topic<'_>> {
+    let offsets: Vec<_> = TOPICS
+        .iter()
+        .map(|(_, heading)| {
+            text.find(&format!("\n{heading}\n"))
+                .expect("compiled topic heading exists")
+                + 1
+        })
+        .collect();
+    let mut topics = vec![Topic {
+        name: "overview",
+        title: "Arc and Git ownership",
+        text: &text[..offsets[0]],
+    }];
+    for (i, (name, title)) in TOPICS.iter().enumerate() {
+        topics.push(Topic {
+            name,
+            title,
+            text: &text[offsets[i]..*offsets.get(i + 1).unwrap_or(&text.len())],
+        });
+    }
+    for (name, title, start, end) in [
+        (
+            "probes",
+            "Acceptance probes",
+            "  Each acceptance probe declared",
+            "\n  `arc rebase",
+        ),
+        (
+            "cleanup",
+            "Integration cleanup",
+            "  `integration.cleanup` governs",
+            "\n  Integration prints",
+        ),
+        (
+            "cost",
+            "Work cost accounting",
+            "  - `arc cost show <change|journal-file>",
+            "\nEXIT CODES",
+        ),
+    ] {
+        let start = text.find(start).expect("compiled topic start exists");
+        let end = text[start..].find(end).expect("compiled topic end exists") + start;
+        topics.push(Topic {
+            name,
+            title,
+            text: &text[start..end],
+        });
+    }
+    topics
+}
+
+/// Page boundaries preserve every byte and never divide a UTF-8 code point.
+fn pages(mut text: &str) -> Vec<&str> {
+    let mut result = Vec::new();
+    while text.len() > PAGE_LIMIT {
+        let mut boundary = PAGE_LIMIT;
+        while !text.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        let prefix = &text[..boundary];
+        if let Some(paragraph) = prefix.rfind("\n\n").filter(|at| *at > 0) {
+            boundary = paragraph + 2;
+        } else if let Some(line) = prefix.rfind('\n').filter(|at| *at > 0) {
+            boundary = line + 1;
+        }
+        result.push(&text[..boundary]);
+        text = &text[boundary..];
+    }
+    if !text.is_empty() {
+        result.push(text);
+    }
+    result
+}
+
+fn topic_routes(topics: &[Topic<'_>]) -> Vec<(String, String)> {
+    let mut routes = Vec::new();
+    for topic in topics {
+        if topic.text.len() <= TOPIC_LIMIT {
+            routes.push((format!("arc guide {}", topic.name), topic.text.to_string()));
+        } else {
+            for (i, page) in pages(topic.text).iter().enumerate() {
+                routes.push((
+                    format!("arc guide {}-{}", topic.name, i + 1),
+                    page.to_string(),
+                ));
+            }
+        }
+    }
+    routes
+}
+
+fn instruction_commands(mut command: clap::Command, path: &str, out: &mut Vec<(String, String)>) {
+    command = command.mut_args(|arg| arg.hide_env_values(true));
+    command.build();
+    for child in command.get_subcommands_mut() {
+        *child = child.clone().mut_args(|arg| arg.hide_env_values(true));
+    }
+    out.push((
+        format!("{path} --help"),
+        command.clone().render_long_help().to_string(),
+    ));
+    for child in command.get_subcommands() {
+        instruction_commands(child.clone(), &format!("{path} {}", child.get_name()), out);
+    }
+}
+
+fn context(text: &str, needle: &str) -> Option<String> {
+    let folded = text.to_lowercase();
+    let offset = folded.find(needle)?;
+    let line = folded[..offset]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count();
+    let compact = text
+        .lines()
+        .skip(line)
+        .take(3)
+        .flat_map(str::split_whitespace)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut chars = compact.chars();
+    let mut snippet: String = chars.by_ref().take(140).collect();
+    if chars.next().is_some() {
+        snippet.push('…');
+    }
+    Some(snippet)
+}
+
+pub fn show(
+    topic: Option<&str>,
+    all: bool,
+    search: Option<&str>,
+    command: clap::Command,
+) -> anyhow::Result<()> {
+    let text = GUIDE.replace("{READ_ONLY_COMMANDS}", &read_only_commands());
+    if all {
+        print!("{text}");
+        return Ok(());
+    }
+    let topics = topics(&text);
+    if let Some(search) = search {
+        anyhow::ensure!(
+            !search.is_empty(),
+            "search text must not be empty; use `arc guide` for the index"
+        );
+        let needle = search.to_lowercase();
+        let mut routes = topic_routes(&topics);
+        instruction_commands(command, "arc", &mut routes);
+        let mut found = false;
+        for (route, body) in routes {
+            if let Some(context) = context(&body, &needle) {
+                println!("{route}: {context}");
+                found = true;
+            }
+        }
+        if !found {
+            println!("No instruction matches; use `arc guide` for the index.");
+        }
+        return Ok(());
+    }
+    if let Some(name) = topic {
+        for topic in &topics {
+            if name == topic.name {
+                if topic.text.len() <= TOPIC_LIMIT {
+                    print!("{}", topic.text);
+                } else {
+                    println!("{}\nRead each section in order:", topic.title);
+                    for (i, _) in pages(topic.text).iter().enumerate() {
+                        println!("  arc guide {}-{}", topic.name, i + 1);
+                    }
+                }
+                return Ok(());
+            }
+            if topic.text.len() > TOPIC_LIMIT {
+                for (i, page) in pages(topic.text).iter().enumerate() {
+                    if name == format!("{}-{}", topic.name, i + 1) {
+                        print!("{page}");
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        anyhow::bail!("unknown guide topic {name:?}; use `arc guide` for the index");
+    }
+    println!("Workflow topics (read with the exact route):");
+    for topic in &topics {
+        println!("  arc guide {} — {}", topic.name, topic.title);
+        if topic.text.len() > TOPIC_LIMIT {
+            for (i, _) in pages(topic.text).iter().enumerate() {
+                println!("    arc guide {}-{}", topic.name, i + 1);
+            }
+        }
+    }
+    println!("\nCanonical contribution rules: arc instructions git");
+    println!("Full depth: arc guide --all\nLiteral search: arc guide --search TEXT");
+    println!("\nCommand contracts:");
+    let mut routes = Vec::new();
+    instruction_commands(command, "arc", &mut routes);
+    for (route, _) in routes {
+        println!("  {route}");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod topic_tests {
+    use super::*;
+
+    #[test]
+    fn topic_pages_preserve_all_bytes_within_the_ceiling() {
+        let text = GUIDE.replace("{READ_ONLY_COMMANDS}", &read_only_commands());
+        let topics = topics(&text);
+        assert_eq!(
+            topics[..=TOPICS.len()]
+                .iter()
+                .map(|topic| topic.text)
+                .collect::<String>(),
+            text
+        );
+        for topic in topics {
+            let pages = pages(topic.text);
+            assert_eq!(pages.concat(), topic.text);
+            assert!(pages.iter().all(|page| page.len() <= TOPIC_LIMIT));
+        }
+        let unicode = "界".repeat(PAGE_LIMIT);
+        assert_eq!(pages(&unicode).concat(), unicode);
+    }
 }

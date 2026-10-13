@@ -125,6 +125,7 @@ pub use workspace::{
 /// checkout's append policy and refuses every append, and the guide prints its
 /// list from here.
 pub(crate) const READ_ONLY_COMMANDS: &[&str] = &[
+    "guide",
     "forge show",
     "status",
     "trailers",

@@ -270,6 +270,25 @@ impl From<KeptKindArg> for model::KeptKind {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Read indexed workflow topics or search instruction text without project state
+    ///
+    /// With no topic, list topic and command-help routes. A topic exceeding
+    /// 16,384 bytes lists its exact child routes; --all prints the complete
+    /// guide. --search performs literal, case-insensitive search over topics
+    /// and command help, showing each matching route once with compact context.
+    /// Unknown topics refuse naming `arc guide`. Reads work outside a repository,
+    /// under every role and with broken configuration, recording nothing.
+    Guide {
+        /// Topic from `arc guide`, including a listed child route
+        #[arg(conflicts_with_all = ["all", "search"])]
+        topic: Option<String>,
+        /// Print the complete workflow guide
+        #[arg(long, conflicts_with = "search")]
+        all: bool,
+        /// Search topics and command help literally, ignoring case
+        #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
+        search: Option<String>,
+    },
     /// Open a change: create (or adopt) its branch and record its checkout
     ///
     /// The opening event records session-store resolution. An unreadable
@@ -4818,6 +4837,10 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
         return Ok(9);
     }
 
+    if let Cmd::Guide { topic, all, search } = &cmd {
+        guide::show(topic.as_deref(), *all, search.as_deref(), cli_command())?;
+        return Ok(0);
+    }
     let cwd = std::env::current_dir()?;
     // The environment is read here rather than through clap's `env`, so that
     // the flag and the variable stay distinguishable even when they carry the
@@ -5902,6 +5925,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             )
         }
         Cmd::Env => Ok(context::print_env()),
+        Cmd::Guide { .. } => unreachable!("guide reads precede identity resolution"),
         Cmd::Completions { shell } => {
             let mut command = Cli::command();
             clap_complete::generate(shell, &mut command, "arc", &mut std::io::stdout());

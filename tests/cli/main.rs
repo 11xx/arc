@@ -31,6 +31,7 @@ mod forge_view;
 mod fork;
 mod gate_declarations;
 mod gate_environment;
+mod guide_topics;
 mod hooks;
 mod implementer_trailers;
 mod import_authorization;
