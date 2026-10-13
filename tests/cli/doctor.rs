@@ -1003,3 +1003,39 @@ fn doctor_reports_a_change_whose_events_cannot_be_replayed() {
         .code(1)
         .stdout(predicates::str::contains("unreplayable-change"));
 }
+
+#[test]
+fn doctor_reports_unparseable_project_and_operator_policies() {
+    for operator in [false, true] {
+        let repo = Repo::new();
+        let path = repo.root.join(if operator {
+            ".git/arc/operator-policy.toml"
+        } else {
+            ".arc/policy.toml"
+        });
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "[danger]\npaths = [\n").unwrap();
+        let subdir = repo.root.join("nested");
+        fs::create_dir(&subdir).unwrap();
+        for cwd in [&repo.root, &subdir] {
+            let output = repo.arc(cwd).args(["doctor", "--json"]).output().unwrap();
+            assert_eq!(output.status.code(), Some(1), "{output:?}");
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+                .unwrap_or_else(|error| panic!("{error}: {output:?}"));
+            let finding = report["problems"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|finding| finding["code"] == "policy-unreadable")
+                .expect("policy parse failure must be a problem");
+            let detail = finding["detail"].as_str().unwrap();
+            assert!(detail.contains(path.to_str().unwrap()), "{detail}");
+            assert!(detail.contains("TOML parse error"), "{detail}");
+        }
+        repo.arc(&repo.root)
+            .args(["doctor"])
+            .assert()
+            .code(1)
+            .stdout(predicates::str::contains("policy-unreadable"));
+    }
+}

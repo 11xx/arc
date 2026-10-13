@@ -3652,6 +3652,8 @@ FILES
   the operator policy at `<git-common-dir>/arc/operator-policy.toml`, outside
   every tree (`arc policy path|show|write`). Both apply, the stricter reading
   winning.
+  `arc doctor` reports an unreadable or malformed policy as the problem
+  `policy-unreadable`, naming its file and error, and exits 1.
 
     [policy] forbid_self_approval = true
     [policy] require_declared_actor = true

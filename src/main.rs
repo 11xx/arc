@@ -2686,6 +2686,8 @@ enum Cmd {
     /// Check the append-only ledger for malformed or stale state (read-only)
     /// Reports the build commit and tracked-tree clean/dirty state in text
     /// and arc-doctor/6 JSON; builds outside Git report unknown.
+    /// An unreadable or malformed project or operator policy is the problem
+    /// `policy-unreadable`, naming the file and error.
     /// Unfinished provisional transitions report their merge, refs, event state,
     /// retained intent and exact recovery command as problems.
     /// A `refs/arc/retained` ref whose object is gone is the problem

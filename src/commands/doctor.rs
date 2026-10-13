@@ -112,33 +112,40 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     let mut states = BTreeMap::new();
     let mut known_patchsets = BTreeMap::<String, Vec<String>>::new();
     let store = ctx.store()?;
-    let scope = store.privilege_scope()?;
-    // Repository diagnostics report unreadable maps independently of changes.
-    let rewrites = store
-        .load_repository_events()
-        .and_then(|events| {
-            crate::rewrite::RewriteMap::from_permitted_events(events.iter(), |event| {
-                scope.permits(
-                    &event.event_id,
-                    &event.repository_id,
-                    crate::import_authorization::Role::Rewrite,
-                )
-            })
-        })
-        .unwrap_or_default();
-    inspect_changes(
-        ChangeInspection {
-            cwd: &ctx.cwd,
-            local_repository_id: &local_repository_id,
-            rewrites,
-            scope,
-        },
-        &root,
-        &mut problems,
-        &mut advice,
-        &mut states,
-        &mut known_patchsets,
-    )?;
+    match store.privilege_scope() {
+        Ok(scope) => {
+            // Repository diagnostics report unreadable maps independently of changes.
+            let rewrites = store
+                .load_repository_events()
+                .and_then(|events| {
+                    crate::rewrite::RewriteMap::from_permitted_events(events.iter(), |event| {
+                        scope.permits(
+                            &event.event_id,
+                            &event.repository_id,
+                            crate::import_authorization::Role::Rewrite,
+                        )
+                    })
+                })
+                .unwrap_or_default();
+            inspect_changes(
+                ChangeInspection {
+                    cwd: &ctx.cwd,
+                    local_repository_id: &local_repository_id,
+                    rewrites,
+                    scope,
+                },
+                &root,
+                &mut problems,
+                &mut advice,
+                &mut states,
+                &mut known_patchsets,
+            )?;
+        }
+        Err(error) => problems.push(Finding {
+            code: "authorization-policy-unreadable",
+            detail: format!("cannot inspect change authorization: {error:#}"),
+        }),
+    }
     // Before anything that reads them: a malformed repository event must be
     // reported as the problem it is, not surface as a fatal error inside
     // whatever happened to read it first — which is what doctor exists to
@@ -172,8 +179,17 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     // declarations and tracked files. A change's target would hide local
     // mistakes until they reached that branch.
     inspect_gate_conflicts(&ctx.cwd, &mut problems);
-    inspect_danger_paths(&ctx.cwd, &mut problems);
-    inspect_danger_classification(&ctx.cwd, &mut problems);
+    let toplevel = gitio::toplevel(&ctx.cwd)?;
+    match crate::policy::load(&toplevel) {
+        Ok(policy) => {
+            inspect_danger_paths(&toplevel, &policy, &mut problems);
+            inspect_danger_classification(&toplevel, &policy, &mut problems);
+        }
+        Err(error) => problems.push(Finding {
+            code: "policy-unreadable",
+            detail: format!("{error:#}"),
+        }),
+    }
     inspect_closed_worktrees(&ctx.cwd, &states, &mut advice)?;
     inspect_debt(ctx, &states, &mut advice)?;
     inspect_hold_releases(&store, &states, &mut advice);
@@ -824,13 +840,11 @@ fn inspect_candidates(
 /// surface it was meant to protect stays on a self-recorded verdict. A rename
 /// is enough to cause it, and nothing else would ever say so. Only literals
 /// are checked — a wildcard legitimately matches nothing today.
-fn inspect_danger_paths(cwd: &Path, problems: &mut Vec<Finding>) {
-    let Ok(toplevel) = crate::gitio::toplevel(cwd) else {
-        return;
-    };
-    let Ok(policy) = crate::policy::load(&toplevel) else {
-        return;
-    };
+fn inspect_danger_paths(
+    toplevel: &Path,
+    policy: &crate::policy::PolicyFile,
+    problems: &mut Vec<Finding>,
+) {
     for pattern in &policy.danger.paths {
         if pattern.contains('*') || pattern.ends_with('/') {
             continue;
@@ -871,13 +885,11 @@ fn inspect_danger_paths(cwd: &Path, problems: &mut Vec<Finding>) {
 /// pattern, looks healthy, and lands on a self-verdict. Closing the world over
 /// declared roots turns adding or renaming a file into a loud failure, which is
 /// the direction both observed misses failed in.
-fn inspect_danger_classification(cwd: &Path, problems: &mut Vec<Finding>) {
-    let Ok(toplevel) = crate::gitio::toplevel(cwd) else {
-        return;
-    };
-    let Ok(policy) = crate::policy::load(&toplevel) else {
-        return;
-    };
+fn inspect_danger_classification(
+    toplevel: &Path,
+    policy: &crate::policy::PolicyFile,
+    problems: &mut Vec<Finding>,
+) {
     if policy.danger.source_roots.is_empty() {
         return;
     }
@@ -885,7 +897,7 @@ fn inspect_danger_classification(cwd: &Path, problems: &mut Vec<Finding>) {
     // from and names paths relative to it. Run from a subdirectory it returns
     // a subset under names no declared root matches, so the whole closed world
     // silently stops being checked and `doctor` reports nothing wrong.
-    let Ok(tracked) = crate::gitio::git(&toplevel, &["ls-files"]) else {
+    let Ok(tracked) = crate::gitio::git(toplevel, &["ls-files"]) else {
         return;
     };
     for path in tracked
