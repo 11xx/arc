@@ -282,7 +282,7 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          are omitted; journal doctor reports pending transitions.
                          --session matches the writing or source session id.
                          Fates are open, taken (with change ids), done, superseded,
-                         discarded, or stale. Staleness
+                         discarded, relocated, or stale. Staleness
                          measures recorded inactivity on open actionable items;
                          active claims and evidence suppress it. Plain reads
                          record no activity.
@@ -360,6 +360,24 @@ ORIENT INSIDE A PROJECT (start here, in this order)
   FILE to restore storage. Terminal resolution remains terminal. Pending
   storage moves appear in journal doctor and must be retried before other
   writes; the retry validates the operation's paths and body digest.
+  Archiving keeps every byte readable. To take content out of reach:
+    arc journal relocate FILE... --to DIR --reason TEXT [--dry-run]
+                         Move whole artifacts to a directory outside arc. The
+                         body leaves the hot directory, the cold archive, and
+                         any prepared transition copy; a `relocated`
+                         tombstone keeps the file, destination, reason, and
+                         digest, and readers report that fate. Open claims,
+                         unfinished transitions or storage moves, and
+                         unanswered questions refuse until acknowledged.
+                         Exchange neither carries nor restores the artifact.
+    arc journal redact FILE (--replace OLD --with NEW)... | --body-file F
+        --reason TEXT [--dry-run]
+                         Rewrite passages of a hot or archived body in place,
+                         keeping its entries. The `redacted` event records
+                         digests and the reason, never the removed text, and
+                         exchange keeps the redacted revision on both sides.
+  The event log keeps what events recorded, such as topics and titles; both
+  commands change bodies, not the log.
   arc journal dir        The authoritative journal location for the project
                          you are standing in, honoring ARC_JOURNAL_DIR and
                          [journals.dirs]; the default path is only a default.
@@ -3935,7 +3953,8 @@ SCHEMAS
   A journal event omits the harness or session key nobody established.
   Owned claim and lane lifecycle events require their complete identities;
   an event lacking one is unsupported and cannot change ownership state.
-  `journal-events/2` covers that and the `evidence` kind; `journal-events/1`
+  `journal-events/2` covers that and the `evidence`, `relocated`, and
+  `redacted` kinds; `journal-events/1`
   events, which carry both keys, are read alongside it, and a value of
   `unknown` in either reads as absent. A journal bundle and a journal spool
   (`arc-journal-spool/1` or current) carry events of either version. A reader

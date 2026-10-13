@@ -1490,7 +1490,8 @@ pub enum JournalCmd {
     /// about it as written, including records this build cannot read and
     /// records state replay sets aside, its body digest, the exporting
     /// replica, and every artifact the selection references by filename.
-    /// Exports arc-journal-bundle/2.
+    /// A relocated artifact cannot travel, so naming or referencing one
+    /// refuses the export. Exports arc-journal-bundle/2.
     /// Checksums retain event field order and opaque payload tokens, excluding
     /// formatting whitespace.
     /// Records no events; ledger reads do not require a parseable append policy.
@@ -1509,7 +1510,10 @@ pub enum JournalCmd {
     /// merge by event identity, ordered by timestamp then ID. Answers to a
     /// reopened question retain distinct append identities.
     /// Edits to the base or a shared block refuse the entire bundle, naming
-    /// both digests and the first differing block. Storage tiers must agree.
+    /// both digests and the first differing block, unless a recorded
+    /// redaction relates the two revisions: the redacted one is kept on
+    /// either side. Storage tiers must agree. A bundled copy of an artifact
+    /// this journal relocated is held back with what references it.
     /// Checksums retain event field order and opaque payload tokens, excluding
     /// formatting whitespace.
     /// Artifacts carrying unsupported events are held back as a unit, reported
@@ -3979,14 +3983,19 @@ fn inspect_transition_integrity(
         *relation_counts.entry(key.clone()).or_insert(0usize) += 1;
         relations.insert(key.clone());
 
+        // A relocated end of the relation is accounted for by its tombstone.
         let mut issues = Vec::new();
-        if !dir.join(source).is_file() && !cold.join(source).is_file() {
+        if !dir.join(source).is_file()
+            && !cold.join(source).is_file()
+            && relocation(events, source).is_none()
+        {
             issues.push("the source artifact is missing");
         }
         let successor_path = [dir.join(successor), cold.join(successor)]
             .into_iter()
             .find(|path| path.is_file());
         match successor_path {
+            None if relocation(events, successor).is_some() => {}
             None => issues.push("the successor artifact is missing"),
             Some(path) if artifact_supersedes(&path).as_deref() != Some(source) => {
                 issues.push("the successor does not carry the supersedes link")
@@ -4657,6 +4666,7 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
                 if parse_artifact_name(file).is_some()
                     && !dir.join(file).is_file()
                     && !cold.join(file).is_file()
+                    && relocation(&events, file).is_none()
                 {
                     problems.push(DoctorFinding {
                         code: "dangling-artifact-reference",

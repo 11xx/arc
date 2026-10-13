@@ -61,6 +61,7 @@ mod received_evidence;
 mod registration_retirement;
 mod relations;
 mod release;
+mod relocate_redact;
 mod replicas;
 mod rescue;
 mod retention;

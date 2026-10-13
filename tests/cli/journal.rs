@@ -15097,7 +15097,7 @@ fn filed_groups_origins_and_tracks_fates_and_recorded_inactivity() {
     assert_eq!(report["stale_count"], 1);
     assert_eq!(
         report["counts"],
-        serde_json::json!({"open":1,"taken":1,"done":1,"superseded":1,"discarded":1,"stale":1})
+        serde_json::json!({"open":1,"taken":1,"done":1,"superseded":1,"discarded":1,"relocated":0,"stale":1})
     );
     let groups = report["sessions"].as_array().unwrap();
     assert_eq!(groups.len(), 2, "{report}");
