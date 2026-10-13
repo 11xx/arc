@@ -1,6 +1,6 @@
 //! Gate verification keeps observed process evidence distinct from attestation.
-//! Executed gates run in a process group, capture a bounded combined output
-//! tail, and honor an optional declared timeout; attested gates carry only the
+//! Executed gates run in a process group, retain private combined diagnostics
+//! and a bounded output tail, and honor an optional timeout; attested gates carry only the
 //! externally supplied result. Declared gates may run concurrently, but their
 //! evidence is appended afterward in deterministic gate-name order.
 
@@ -11,11 +11,9 @@ use crate::integration::{
 use crate::operation_println as println;
 use crate::process_group::{join_before_deadline, kill_process_group};
 use std::collections::BTreeMap;
-use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::{ExitStatus, Stdio};
-
-const OUTPUT_TAIL_BYTES: usize = 4096;
+use std::sync::mpsc::{self, TryRecvError};
 pub fn check_selection(
     ctx: &Ctx,
     reference: Option<&str>,
@@ -113,6 +111,7 @@ struct CompletedVerification {
     exit_code: Option<i32>,
     duration_ms: Option<u64>,
     output_tail: Option<String>,
+    output_artifact: Option<crate::verification_output::OutputArtifact>,
     timed_out: bool,
     hostname: String,
     attested: bool,
@@ -1578,7 +1577,18 @@ fn verify_all_parallel(
             let cwd = cwd.clone();
             let revision = revision.to_owned();
             let hostname = hostname.clone();
-            thread::spawn(move || execute_verification(input, &cwd, revision, hostname))
+            let output_root = store.root.clone();
+            let producing_store = store.repository_id.clone();
+            thread::spawn(move || {
+                execute_verification(
+                    input,
+                    &cwd,
+                    revision,
+                    hostname,
+                    &output_root,
+                    &producing_store,
+                )
+            })
         })
         .collect::<Vec<_>>();
     let mut completed = Vec::with_capacity(handles.len());
@@ -1871,7 +1881,14 @@ fn record_verification_at(
     } else {
         None
     };
-    let mut completed = execute_verification(input, command_cwd, revision.clone(), hostname)?;
+    let mut completed = execute_verification(
+        input,
+        command_cwd,
+        revision.clone(),
+        hostname,
+        &store.root,
+        &store.repository_id,
+    )?;
     if !completed.attested {
         let post = gitio::head(command_cwd)?;
         if post != revision {
@@ -1910,6 +1927,8 @@ fn execute_verification(
     cwd: &Path,
     revision: String,
     hostname: String,
+    output_root: &Path,
+    producing_store: &str,
 ) -> Result<CompletedVerification> {
     let VerificationInput {
         run_id,
@@ -1927,29 +1946,32 @@ fn execute_verification(
         against_target,
     } = input;
     let attested = attested_result.is_some();
-    let (result, exit_code, duration_ms, output_tail, timed_out) = match attested_result {
-        // Attested evidence has only the caller's result because arc did not
-        // execute a process or observe an exit code or duration.
-        Some(result) => (result, None, None, None, false),
-        None => {
-            let started = std::time::Instant::now();
-            let observed = run_gate(&command, cwd, timeout_seconds)?;
-            let duration_ms = started.elapsed().as_millis() as u64;
-            let exit_code = observed.status.code().unwrap_or(-1);
-            let result = if observed.status.success() && !observed.timed_out {
-                VerifyResult::Pass
-            } else {
-                VerifyResult::Fail
-            };
-            (
-                result,
-                Some(exit_code),
-                Some(duration_ms),
-                observed.output_tail,
-                observed.timed_out,
-            )
-        }
-    };
+    let (result, exit_code, duration_ms, output_tail, output_artifact, timed_out) =
+        match attested_result {
+            // Attested evidence has only the caller's result because arc did not
+            // execute a process or observe an exit code or duration.
+            Some(result) => (result, None, None, None, None, false),
+            None => {
+                let started = std::time::Instant::now();
+                let observed =
+                    run_gate(&command, cwd, timeout_seconds, output_root, producing_store)?;
+                let duration_ms = started.elapsed().as_millis() as u64;
+                let exit_code = observed.status.code().unwrap_or(-1);
+                let result = if observed.status.success() && !observed.timed_out {
+                    VerifyResult::Pass
+                } else {
+                    VerifyResult::Fail
+                };
+                (
+                    result,
+                    Some(exit_code),
+                    Some(duration_ms),
+                    observed.output_tail,
+                observed.output_artifact,
+                    observed.timed_out,
+                )
+            }
+        };
     Ok(CompletedVerification {
         run_id,
         probe,
@@ -1961,6 +1983,7 @@ fn execute_verification(
         exit_code,
         duration_ms,
         output_tail,
+        output_artifact,
         timed_out,
         hostname,
         attested,
@@ -2015,6 +2038,7 @@ fn append_verifications(
             exit_code: item.exit_code,
             duration_ms: item.duration_ms,
             output_tail: item.output_tail,
+            output_artifact: item.output_artifact,
             timed_out: item.timed_out,
             hostname: item.hostname,
             attested: item.attested,
@@ -2140,10 +2164,17 @@ fn nonempty_attestation_value(value: Option<String>, flag: &str) -> Result<Strin
 pub(super) struct GateRun {
     pub(super) status: ExitStatus,
     pub(super) output_tail: Option<String>,
+    pub(super) output_artifact: Option<crate::verification_output::OutputArtifact>,
     pub(super) timed_out: bool,
 }
 
-pub(super) fn run_gate(cmd: &str, cwd: &Path, timeout_seconds: Option<u64>) -> Result<GateRun> {
+pub(super) fn run_gate(
+    cmd: &str,
+    cwd: &Path,
+    timeout_seconds: Option<u64>,
+    output_root: &Path,
+    producing_store: &str,
+) -> Result<GateRun> {
     let started = Instant::now();
     let deadline = timeout_seconds
         .map(|seconds| {
@@ -2165,16 +2196,29 @@ pub(super) fn run_gate(cmd: &str, cwd: &Path, timeout_seconds: Option<u64>) -> R
         .stdout
         .take()
         .context("gate output pipe unavailable")?;
-    let reader = thread::spawn(move || read_output_tail(stdout));
+    let (reader_done_tx, reader_done_rx) = mpsc::sync_channel(1);
+    let capture = crate::verification_output::Capture::new(output_root, producing_store);
+    let reader = thread::spawn(move || {
+        capture.read_with_notify(stdout, || {
+            let _ = reader_done_tx.send(());
+        })
+    });
 
     let mut status = None;
+    let mut reader_done = false;
     let timed_out = loop {
         if status.is_none() {
             status = child
                 .try_wait()
                 .context("failed to wait for gate command")?;
         }
-        if status.is_some() && reader.is_finished() {
+        if !reader_done {
+            reader_done = match reader_done_rx.try_recv() {
+                Ok(()) | Err(TryRecvError::Disconnected) => true,
+                Err(TryRecvError::Empty) => false,
+            };
+        }
+        if status.is_some() && reader_done {
             break false;
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
@@ -2192,41 +2236,19 @@ pub(super) fn run_gate(cmd: &str, cwd: &Path, timeout_seconds: Option<u64>) -> R
         thread::sleep(Duration::from_millis(10));
     };
 
-    let output = join_before_deadline(reader, deadline, "gate output reader")?
+    let (output, output_artifact) = join_before_deadline(reader, deadline, "gate output reader")?
         .transpose()
         .context("failed to read gate output")?
+        .map(|(output, artifact)| (output, Some(artifact)))
         .unwrap_or_default();
     let status = status.context("gate leader exited without an observed status")?;
     let output_tail = (!output.is_empty()).then(|| String::from_utf8_lossy(&output).into_owned());
     Ok(GateRun {
         status,
         output_tail,
+        output_artifact,
         timed_out,
     })
-}
-
-fn read_output_tail(mut output: impl Read) -> io::Result<Vec<u8>> {
-    let mut tail = Vec::with_capacity(OUTPUT_TAIL_BYTES);
-    let mut chunk = [0_u8; 8192];
-    loop {
-        let read = output.read(&mut chunk)?;
-        if read == 0 {
-            return Ok(tail);
-        }
-        if read >= OUTPUT_TAIL_BYTES {
-            tail.clear();
-            tail.extend_from_slice(&chunk[read - OUTPUT_TAIL_BYTES..read]);
-            continue;
-        }
-        let overflow = tail
-            .len()
-            .saturating_add(read)
-            .saturating_sub(OUTPUT_TAIL_BYTES);
-        if overflow > 0 {
-            tail.drain(..overflow);
-        }
-        tail.extend_from_slice(&chunk[..read]);
-    }
 }
 
 pub fn hold(ctx: &Ctx, reference: &str, reason: String) -> Result<()> {
@@ -5065,6 +5087,8 @@ mod pipe_deadline_tests {
             "setsid sh -c 'echo $$ > descendant.pid; sleep 5' & exit 0",
             cwd.path(),
             Some(1),
+            cwd.path(),
+            "fixture",
         )
         .unwrap();
         let elapsed = started.elapsed();
@@ -5075,5 +5099,6 @@ mod pipe_deadline_tests {
         assert!(elapsed < Duration::from_secs(3));
         assert!(run.status.success());
         assert!(run.timed_out);
+        assert!(run.output_artifact.is_none());
     }
 }

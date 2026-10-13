@@ -759,6 +759,23 @@ pub fn markdown(
                     g.hostname.as_deref().unwrap_or("unknown host")
                 );
             }
+            if let Some(output) = &g.output_artifact {
+                let completeness = if output.capture_error.is_some() {
+                    "capture failed"
+                } else if output.truncated {
+                    "truncated"
+                } else {
+                    "complete"
+                };
+                let _ = writeln!(
+                    w,
+                    "  - diagnostics: {completeness}, {} of {} bytes; {} (store {})",
+                    output.byte_length,
+                    output.observed_bytes,
+                    output.path.as_deref().unwrap_or("no artifact"),
+                    output.producing_store
+                );
+            }
             if let Some(output_tail) = &g.output_tail {
                 let marker = if output_tail.len() >= 4096 {
                     "[output truncated to final 4096 bytes]"

@@ -3264,6 +3264,24 @@ RULES THAT CHANGE WHAT YOU DO
     identity with `--environment <IDENTITY>`.
   - A hostname arc could not read is recorded as `unknown`, a host fact
     on verification and candidate-evaluation events.
+  - Executed verification and candidate gates retain combined stdout and
+    stderr under the producing ledger's private `gate-output/` directory.
+    Files have mode 0600 and the directory 0700. Each capture keeps its first
+    16 MiB; publication retains 16 completed files, expiring the oldest
+    captures, while active captures are separate. Events carry
+    `output_artifact`: the producing store, relative path, retained SHA-256
+    and byte length, full observed stream SHA-256 and byte length, and
+    explicit truncation or capture errors. Capturing a truncated prefix does
+    not prove the absence of diagnostics in the omitted bytes. A capture
+    error does not change the command's observed result or prevent its tail
+    from being recorded. Status carries the metadata even for a passing gate;
+    ordinary output retains only a short tail. Attestations carry no capture.
+    An output reader unfinished at its deadline supplies no artifact: its
+    diagnostics have unknown capture coverage, never an invented empty stream.
+    These files are local diagnostics: exports contain their metadata alone,
+    and a path naming an expired or another store's file is unavailable. The
+    verification event binds the capture to its command, revision, tree,
+    environment and result; retention never changes those evidence facts.
   - A gate that passed is not evidence that it could have failed. Watch it
     fail first, then record the pass with `--falsified-by <failing-event>
     --predicted "<why it should fail>"`; the gate line then reads

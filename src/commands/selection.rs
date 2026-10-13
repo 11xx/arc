@@ -237,7 +237,13 @@ pub fn verify(ctx: &Ctx, candidate_id: &str, only: Option<&str>) -> Result<i32> 
     for (name, gate) in selected {
         eprintln!("running: {}", gate.command);
         let started = std::time::Instant::now();
-        let run = run_gate(&gate.command, &scratch.path, gate.timeout)?;
+        let run = run_gate(
+            &gate.command,
+            &scratch.path,
+            gate.timeout,
+            &store.root,
+            &store.repository_id,
+        )?;
         let duration_ms = started.elapsed().as_millis() as u64;
         let result = if run.status.success() && !run.timed_out {
             VerifyResult::Pass
@@ -261,6 +267,7 @@ pub fn verify(ctx: &Ctx, candidate_id: &str, only: Option<&str>) -> Result<i32> 
             exit_code: Some(run.status.code().unwrap_or(-1)),
             duration_ms: Some(duration_ms),
             output_tail: run.output_tail,
+            output_artifact: run.output_artifact,
             timed_out: run.timed_out,
             hostname: hostname.clone(),
         };

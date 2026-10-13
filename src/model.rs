@@ -1479,6 +1479,8 @@ pub enum Payload {
         /// Final bytes of combined stdout and stderr observed by arc.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output_tail: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_artifact: Option<crate::verification_output::OutputArtifact>,
         /// Arc terminated the gate after its declared timeout elapsed.
         #[serde(default, skip_serializing_if = "is_false")]
         timed_out: bool,
@@ -1959,6 +1961,8 @@ pub enum Payload {
         duration_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output_tail: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_artifact: Option<crate::verification_output::OutputArtifact>,
         #[serde(default, skip_serializing_if = "is_false")]
         timed_out: bool,
         hostname: String,

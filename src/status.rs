@@ -119,6 +119,8 @@ pub struct GateStatus {
     pub environment: Option<GateEnvironmentStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_tail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_artifact: Option<crate::verification_output::OutputArtifact>,
     #[serde(skip_serializing_if = "is_false")]
     pub timed_out: bool,
     /// Whether this gate was ever shown capable of failing at this revision.
@@ -1551,6 +1553,7 @@ fn build_report(
             output_tail: evidence
                 .filter(|e| e.result == crate::model::VerifyResult::Fail)
                 .and_then(|e| e.output_tail.clone()),
+            output_artifact: evidence.and_then(|e| e.output_artifact.clone()),
             timed_out: evidence
                 .is_some_and(|e| e.result == crate::model::VerifyResult::Fail && e.timed_out),
             discrimination: counted_pass.map(|_| match discriminating {

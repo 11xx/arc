@@ -310,7 +310,7 @@ fn verify_all_parallel_stays_not_green_when_a_transient_change_is_restored() {
 }
 
 #[test]
-fn failing_gate_exposes_only_the_final_4096_output_bytes_in_status() {
+fn failing_gate_keeps_complete_private_diagnostics_beside_its_short_tail() {
     let repo = Repo::new();
     repo.redeclare_gates("[gates.failure]\ncommand = \"printf discard; head -c 4096 /dev/zero | tr '\\\\000' x; printf err >&2; exit 1\"\n");
     stdout(
@@ -330,6 +330,22 @@ fn failing_gate_exposes_only_the_final_4096_output_bytes_in_status() {
     let tail = status["gates"][0]["output_tail"].as_str().unwrap();
     assert_eq!(tail.len(), 4096);
     assert_eq!(tail, format!("{}err", "x".repeat(4093)));
+    let artifact = &status["gates"][0]["output_artifact"];
+    assert_eq!(artifact["truncated"], false);
+    assert!(artifact.get("capture_error").is_none());
+    let path = repo
+        .root
+        .join(".git/arc")
+        .join(artifact["path"].as_str().unwrap());
+    let bytes = fs::read(path).unwrap();
+    assert_eq!(bytes, format!("discard{}err", "x".repeat(4096)).as_bytes());
+    use sha2::Digest;
+    assert_eq!(
+        artifact["sha256"],
+        hex::encode(sha2::Sha256::digest(&bytes))
+    );
+    assert_eq!(artifact["observed_sha256"], artifact["sha256"]);
+    assert_eq!(artifact["observed_bytes"], bytes.len() as u64);
 }
 
 #[test]

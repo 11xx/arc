@@ -8,7 +8,7 @@
 //! resolves a provider handle: bytes arrive as files an adapter materialized
 //! or inside a sidecar an export wrote, and are verified before they are
 //! published.
-mod anchored;
+pub(crate) mod anchored;
 
 use crate::model::Payload;
 use anchored::{Dir, Symlinked};

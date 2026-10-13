@@ -80,6 +80,8 @@ paths = [
   # Kills an overrunning declared command with its whole process group. A
   # defect leaves the command running past its bound.
   "src/process_group.rs",
+  # Captures private gate diagnostics and expires its own completed files.
+  "src/verification_output.rs",
   # Bundle import writes foreign events into the append-only store.
   "src/commands/bundle_io.rs",
   # The candidate ledger: the rules a local or imported registration must pass.
