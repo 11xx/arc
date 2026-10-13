@@ -10,6 +10,7 @@ use crate::model::{ModelObservation, ModelTurnRelation};
 use agent_tapes_core::backend::{self, Backend};
 use agent_tapes_core::model::{Role, SourceBound, TurnKind};
 use agent_tapes_core::ResolveError;
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -737,23 +738,20 @@ fn read_model_checkpoint(path: &std::path::Path) -> Option<ModelCheckpoint> {
     serde_json::from_slice(&bytes).ok()
 }
 
-fn save_model_checkpoint(path: &std::path::Path, checkpoint: &ModelCheckpoint) {
+fn save_model_checkpoint(
+    path: &std::path::Path,
+    checkpoint: &ModelCheckpoint,
+) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-    let Some(parent) = path.parent() else {
-        return;
-    };
-    let Ok(bytes) = serde_json::to_vec(checkpoint) else {
-        return;
-    };
-    if std::fs::DirBuilder::new()
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("model checkpoint has no directory"))?;
+    let bytes = serde_json::to_vec(checkpoint).map_err(std::io::Error::other)?;
+    std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
-        .create(parent)
-        .is_err()
-    {
-        return;
-    }
+        .create(parent)?;
     let staged = path.with_extension(format!("{}.tmp", crate::ids::new_identifier()));
     let result = (|| -> std::io::Result<()> {
         let mut file = std::fs::OpenOptions::new()
@@ -768,6 +766,7 @@ fn save_model_checkpoint(path: &std::path::Path, checkpoint: &ModelCheckpoint) {
     if result.is_err() {
         let _ = std::fs::remove_file(staged);
     }
+    result
 }
 
 fn codex_model_identity(
@@ -874,7 +873,7 @@ fn codex_model_identity_at(
                     }),
                 };
                 if let Some(path) = path {
-                    save_model_checkpoint(path, held);
+                    let _ = save_model_checkpoint(path, held);
                 }
                 return Ok(identity);
             }
@@ -889,7 +888,12 @@ fn codex_model_identity_at(
             }
         }
         if let (Some(path), Some(checkpoint)) = (path, &checkpoint) {
-            save_model_checkpoint(path, checkpoint);
+            save_model_checkpoint(path, checkpoint)
+                .context("cannot retain the bounded model lookup checkpoint")?;
+        } else {
+            anyhow::bail!(
+                "bounded model lookup cannot checkpoint without a private cache location"
+            );
         }
         Ok(SessionIdentity::Unnamed(ModelUnavailable::ModelScanLimit))
     })();
@@ -1014,7 +1018,7 @@ mod tests {
         let checkpoint = root.path().join("checkpoint.json");
         let mut found = None;
         let mut previous_cursor = None;
-        for _ in 0..128 {
+        for _ in 0..512 {
             let identity = codex_model_identity_at(
                 &backend,
                 &session,
