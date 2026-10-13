@@ -86,7 +86,7 @@ pub struct Store {
     pub read_only: bool,
 }
 
-/// One read of the ledger. The import batches, the recorded rewrites and the
+/// One read of the ledger. Import batches, repository events, rewrites and the
 /// privilege scope are each loaded or derived at most once, the first time the
 /// read needs them, and shared by every change it reads. A read of N changes
 /// then costs N changes' events, not N times the ledger.
@@ -98,6 +98,7 @@ pub struct LedgerRead<'a> {
     batches: Vec<ImportBatch>,
     scope: std::cell::OnceCell<Arc<PrivilegeScope>>,
     rewrites: std::cell::OnceCell<crate::rewrite::RewriteMap>,
+    repository_events: std::cell::OnceCell<Vec<Event>>,
 }
 
 impl LedgerRead<'_> {
@@ -113,8 +114,17 @@ impl LedgerRead<'_> {
         if let Some(held) = self.rewrites.get() {
             return Ok(held);
         }
-        let loaded = self.store.rewrites_in(&self.batches)?;
+        let loaded = crate::rewrite::RewriteMap::from_events(self.repository_events()?.iter())
+            .context("cannot read the recorded history rewrites; `arc doctor` reports which")?;
         Ok(self.rewrites.get_or_init(|| loaded))
+    }
+
+    fn repository_events(&self) -> Result<&[Event]> {
+        if let Some(held) = self.repository_events.get() {
+            return Ok(held);
+        }
+        let loaded = typed_repository_events(self.store.raw_repository_events_in(&self.batches)?)?;
+        Ok(self.repository_events.get_or_init(|| loaded))
     }
 
     /// The scope, derived when first asked for. A read that never asks, as one
@@ -130,8 +140,12 @@ impl LedgerRead<'_> {
 
     /// A change's events reduced under this read's rewrites and scope.
     pub fn project(&self, events: &[Event]) -> Result<crate::state::ChangeState> {
-        self.store
-            .project_state_in(self.scope()?, events, self.rewrites()?)
+        self.store.project_state_with_repository(
+            self.scope()?,
+            events,
+            self.rewrites()?,
+            self.repository_events()?,
+        )
     }
 
     pub fn state(&self, change_id: &str) -> Result<crate::state::ChangeState> {
@@ -1722,13 +1736,23 @@ impl Store {
         events: &[Event],
         rewrites: &crate::rewrite::RewriteMap,
     ) -> Result<crate::state::ChangeState> {
+        self.project_state_with_repository(scope, events, rewrites, &self.load_repository_events()?)
+    }
+
+    fn project_state_with_repository(
+        &self,
+        scope: &Arc<PrivilegeScope>,
+        events: &[Event],
+        rewrites: &crate::rewrite::RewriteMap,
+        repository_events: &[Event],
+    ) -> Result<crate::state::ChangeState> {
         let mut state = crate::state::reduce_following(events, rewrites)?;
         state.apply_privilege_scope(Arc::clone(scope), events);
         crate::replica::localize_change(&self.repository_id, events, &mut state);
         let mut round_trip = std::mem::take(&mut state.round_trip);
         round_trip.join(
             &state,
-            &self.load_repository_events()?,
+            repository_events,
             &crate::custody::Custody::at(&self.root),
         );
         state.round_trip = round_trip;
@@ -1769,6 +1793,7 @@ impl Store {
             batches: import_batches(&self.root)?,
             scope: Default::default(),
             rewrites: Default::default(),
+            repository_events: Default::default(),
         })
     }
 
@@ -1782,21 +1807,8 @@ impl Store {
         let read = self.read()?;
         read.rewrites()?;
         let mut states = BTreeMap::new();
-        let repository_events = self.load_repository_events()?;
         for change_id in read.change_ids()? {
-            let result = read.events(&change_id).and_then(|events| {
-                let mut state = crate::state::reduce_following(&events, read.rewrites()?)?;
-                state.apply_privilege_scope(Arc::clone(read.scope()?), &events);
-                crate::replica::localize_change(&self.repository_id, &events, &mut state);
-                let mut round_trip = std::mem::take(&mut state.round_trip);
-                round_trip.join(
-                    &state,
-                    &repository_events,
-                    &crate::custody::Custody::at(&self.root),
-                );
-                state.round_trip = round_trip;
-                Ok(state)
-            });
+            let result = read.state(&change_id);
             match result {
                 Ok(state) => {
                     states.insert(change_id, state);
@@ -1812,13 +1824,6 @@ impl Store {
     /// need the repository's own terms.
     pub fn rewrites(&self) -> Result<crate::rewrite::RewriteMap> {
         crate::rewrite::RewriteMap::load(self)
-            .context("cannot read the recorded history rewrites; `arc doctor` reports which")
-    }
-
-    /// `rewrites` over import batches the caller already holds.
-    fn rewrites_in(&self, batches: &[ImportBatch]) -> Result<crate::rewrite::RewriteMap> {
-        typed_repository_events(self.raw_repository_events_in(batches)?)
-            .and_then(|events| crate::rewrite::RewriteMap::from_events(events.iter()))
             .context("cannot read the recorded history rewrites; `arc doctor` reports which")
     }
 
@@ -2938,6 +2943,22 @@ mod tests {
         let before = crate::import_authorization::scope_derivations();
         assert!(store.readable_states().unwrap().is_empty());
         assert_eq!(crate::import_authorization::scope_derivations(), before);
+    }
+
+    #[test]
+    fn one_read_reuses_repository_events_and_a_fresh_read_reports_damage() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        open_change(&store, "one");
+        open_change(&store, "two");
+        let read = store.read().unwrap();
+        read.state("one").unwrap();
+
+        fs::create_dir_all(store.repository_events_dir()).unwrap();
+        fs::write(store.repository_events_dir().join("broken.json"), b"{").unwrap();
+        read.state("two").unwrap();
+        assert!(store.read().unwrap().state("two").is_err());
+        assert!(store.readable_states().is_err());
     }
 
     #[test]
