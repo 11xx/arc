@@ -744,6 +744,31 @@ pub struct Sidecar {
     unavailable: Vec<Content>,
 }
 
+/// Custody installed by an import, planned by a preview, or held without
+/// the bound sidecar. Counts describe content references in the delivery.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TransferSummary {
+    pub phase: &'static str,
+    pub installed: usize,
+    pub held: usize,
+    pub unavailable: usize,
+    pub complete: bool,
+    pub manifest_sha256: String,
+}
+
+impl TransferSummary {
+    pub fn from_outcome(phase: &'static str, outcome: &Outcome, binding: &Binding) -> Self {
+        Self {
+            phase,
+            installed: outcome.installed,
+            held: outcome.held,
+            unavailable: outcome.unavailable,
+            complete: outcome.complete(),
+            manifest_sha256: binding.manifest_sha256.clone(),
+        }
+    }
+}
+
 /// What publishing a sidecar did, or would do.
 pub struct Outcome {
     pub installed: usize,

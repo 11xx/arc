@@ -1560,3 +1560,81 @@ fn an_export_to_standard_output_still_publishes_its_sidecar() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("arc-bundle/"));
     assert!(sidecar.join("manifest.json").is_file());
 }
+
+#[test]
+fn custody_transfer_summaries_are_structured_json() {
+    let (source, id, bundle, sidecar) = exported_with_custody();
+    let second_bundle = source.home.join("json-export.json");
+    let second_sidecar = source.home.join("json-export.custody");
+    let exported = json_stdout(source.arc(&source.root).args([
+        "export",
+        &id,
+        "--output",
+        second_bundle.to_str().unwrap(),
+        "--custody-dir",
+        second_sidecar.to_str().unwrap(),
+        "--json",
+    ]));
+    assert_eq!(exported["schema"], "arc-export/1");
+    assert_eq!(exported["custody"]["entries"], 2);
+    assert_eq!(exported["custody"]["available"], 2);
+    assert_eq!(exported["custody"]["complete"], true);
+    let receiver = Repo::new();
+    deliver_git_objects(&source, &receiver);
+    let preview = json_stdout(admitted_change_command(&receiver, &bundle).args([
+        "--custody-dir",
+        sidecar.to_str().unwrap(),
+        "--dry-run",
+        "--json",
+    ]));
+    assert_eq!(preview["schema"], "arc-import/1");
+    assert_eq!(preview["published"], false);
+    assert_eq!(preview["custody"]["phase"], "planned");
+    assert_eq!(preview["custody"]["installed"], 2);
+    assert!(!receiver.root.join(".git/arc/custody").exists());
+    let installed = json_stdout(admitted_change_command(&receiver, &bundle).args([
+        "--custody-dir",
+        sidecar.to_str().unwrap(),
+        "--json",
+    ]));
+    assert_eq!(installed["custody"]["phase"], "installed");
+    assert_eq!(installed["custody"]["installed"], 2);
+    assert_eq!(installed["custody"]["complete"], true);
+    let again = json_stdout(admitted_change_command(&receiver, &bundle).args([
+        "--custody-dir",
+        sidecar.to_str().unwrap(),
+        "--json",
+    ]));
+    assert_eq!(again["custody"]["installed"], 0);
+    assert_eq!(again["custody"]["held"], 2);
+    assert_eq!(
+        again["custody"]["manifest_sha256"],
+        exported["custody"]["manifest_sha256"]
+    );
+    let without = Repo::new();
+    deliver_git_objects(&source, &without);
+    let missing = json_stdout(admitted_change_command(&without, &bundle).arg("--json"));
+    assert_eq!(missing["custody"]["phase"], "not-supplied");
+    assert_eq!(missing["custody"]["unavailable"], 2);
+    assert_eq!(missing["custody"]["complete"], false);
+}
+
+#[test]
+fn export_json_summary_requires_a_file_before_writing_artifacts() {
+    let (repo, id) = setup();
+    let objects = repo.home.join("objects.json");
+    repo.arc(&repo.root)
+        .args([
+            "export",
+            &id,
+            "--output",
+            "-",
+            "--objects-json",
+            objects.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicates::str::is_empty());
+    assert!(!objects.exists());
+}

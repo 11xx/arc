@@ -1855,6 +1855,8 @@ fn accept_delivery_installs_a_supplied_custody_sidecar() {
     let dir = sidecar.to_str().unwrap();
 
     let preview = d.run(&["--dry-run", "--custody-dir", dir], 0);
+    assert_eq!(preview["custody"]["phase"], "planned");
+    assert_eq!(preview["custody"]["installed"], 2);
     assert!(
         step_outcome(&preview, "import-preview")
             .contains("custody: 2 would install, 0 held, 0 unavailable"),
@@ -1894,6 +1896,8 @@ fn accept_delivery_installs_a_supplied_custody_sidecar() {
     assert!(!d.receiver.root.join(".git/arc/custody").exists());
 
     let result = d.run(&["--custody-dir", dir], 3);
+    assert_eq!(result["custody"]["phase"], "installed");
+    assert_eq!(result["custody"]["installed"], 2);
     let imported = step_outcome(&result, "import");
     assert!(
         imported.contains("custody: 2 installed, 0 held, 0 unavailable (complete)"),

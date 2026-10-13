@@ -51,6 +51,7 @@ pub struct AcceptanceResult {
     local_verdict_owed: bool,
     verdict_tips: Vec<serde_json::Value>,
     next_steps: Vec<String>,
+    custody: Option<crate::custody::TransferSummary>,
 }
 
 #[derive(Debug)]
@@ -225,48 +226,53 @@ fn plan_acceptance(
     if let Some(dir) = &args.custody_dir {
         preview_argv.extend(["--custody-dir".into(), dir.clone()]);
     }
-    let (bytes, bundle, sidecar) = step(result, ctx, "import-preview", preview_argv, || {
-        let bytes = if args.input == "-" {
-            let mut bytes = Vec::new();
-            std::io::stdin().read_to_end(&mut bytes)?;
-            bytes
-        } else {
-            std::fs::read(&args.input)
-                .with_context(|| format!("cannot read delivery {}", args.input))?
-        };
-        crate::import_authorization::verify_received_digest(&bytes, Some(&args.received_sha256))?;
-        let validated = Bundle::parse(&bytes)?;
-        for object in validated.bundle.objects.as_deref().unwrap_or_default() {
-            if gitio::git(&ctx.cwd, &["cat-file", "-e", &object.oid]).is_err() {
-                return refuse(
-                    6,
-                    format!(
+    let (bytes, bundle, sidecar, custody) =
+        step(result, ctx, "import-preview", preview_argv, || {
+            let bytes = if args.input == "-" {
+                let mut bytes = Vec::new();
+                std::io::stdin().read_to_end(&mut bytes)?;
+                bytes
+            } else {
+                std::fs::read(&args.input)
+                    .with_context(|| format!("cannot read delivery {}", args.input))?
+            };
+            crate::import_authorization::verify_received_digest(
+                &bytes,
+                Some(&args.received_sha256),
+            )?;
+            let validated = Bundle::parse(&bytes)?;
+            for object in validated.bundle.objects.as_deref().unwrap_or_default() {
+                if gitio::git(&ctx.cwd, &["cat-file", "-e", &object.oid]).is_err() {
+                    return refuse(
+                        6,
+                        format!(
                         "missing {} object {}; fetch the delivery's Git objects before accepting",
                         object.role, object.oid
                     ),
+                    );
+                }
+            }
+            let sidecar = bundle_io::load_custody_sidecar(&validated, args.custody_dir.as_deref())?;
+            let preview = bundle_io::import_validated_guarded(
+                ctx,
+                &bytes,
+                &validated,
+                true,
+                false,
+                Some(&args.publisher),
+                Some(&args.received_sha256),
+                None,
+                sidecar.as_ref(),
+            )?;
+            if preview.exit_code != 0 {
+                return refuse(
+                    preview.exit_code,
+                    "import preview refused; nothing was imported",
                 );
             }
-        }
-        let sidecar = bundle_io::load_custody_sidecar(&validated, args.custody_dir.as_deref())?;
-        let preview = bundle_io::import_validated_guarded(
-            ctx,
-            &bytes,
-            &validated,
-            true,
-            false,
-            Some(&args.publisher),
-            Some(&args.received_sha256),
-            None,
-            sidecar.as_ref(),
-        )?;
-        if preview.exit_code != 0 {
-            return refuse(
-                preview.exit_code,
-                "import preview refused; nothing was imported",
-            );
-        }
-        Ok((bytes, validated, sidecar))
-    })?;
+            Ok((bytes, validated, sidecar, preview.output.custody))
+        })?;
+    result.custody = custody;
     if let (Some(binding), None) = (&bundle.bundle.custody, &sidecar) {
         result.next_steps.push(format!(
             "custody unavailable: the delivery binds custody manifest {}; accept again with \
@@ -982,7 +988,7 @@ fn execute_acceptance(
         result.next_steps.push("Run the same acceptance command without --dry-run; signing and verification remain conditional.".into());
         return Ok(0);
     }
-    step(result, ctx, "import", operations[0].1.clone(), || {
+    result.custody = step(result, ctx, "import", operations[0].1.clone(), || {
         revalidate(ctx, plan, &plan.head)?;
         let imported = bundle_io::import_validated_guarded(
             ctx,
@@ -1001,7 +1007,7 @@ fn execute_acceptance(
                 "import refused; publication result retained in transcript",
             );
         }
-        Ok(())
+        Ok(imported.output.custody)
     })?;
     if plan.create_checkout {
         step(result, ctx, "checkout-allocation", checkout_argv, || {
@@ -1561,6 +1567,7 @@ pub fn accept_role_refusal(
         readiness: None,
         local_verdict_owed: true,
         verdict_tips: Vec::new(),
+        custody: None,
         next_steps: vec![format!(
             "role refusal: {role} may not accept (requires lead)"
         )],
@@ -1585,6 +1592,7 @@ pub fn accept(ctx: &Ctx, args: AcceptArgs) -> Result<i32> {
         readiness: None,
         local_verdict_owed: true,
         verdict_tips: Vec::new(),
+        custody: None,
         next_steps: Vec::new(),
     };
     let operation = plan_acceptance(ctx, &args, &mut result)

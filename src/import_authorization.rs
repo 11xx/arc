@@ -741,6 +741,8 @@ pub fn required_replica_roles(payload: &crate::replica::ReplicaPayload) -> Vec<V
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ImportSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custody: Option<crate::custody::TransferSummary>,
     pub introduced_event_ids: Vec<String>,
     pub authorization: Option<ImportAuthorization>,
 }

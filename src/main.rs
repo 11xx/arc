@@ -1282,6 +1282,10 @@ enum Cmd {
         /// Write the custody sidecar into this new or empty directory
         #[arg(long, value_name = "DIR")]
         custody_dir: Option<String>,
+        /// Print an arc-export/1 summary with structured custody counts.
+        /// Requires --output <FILE>; the summary goes to stdout
+        #[arg(long)]
+        json: bool,
     },
     /// Import arc-bundle/6 or /5 into this repository's local store.
     /// Imported events retain their origin IDs, including IDs below a
@@ -1362,6 +1366,11 @@ enum Cmd {
         /// Install this arc-custody-bundle/1 sidecar directory after judging it
         #[arg(long, value_name = "DIR")]
         custody_dir: Option<String>,
+        /// Print an arc-import/1 summary with diagnostics and custody counts.
+        /// Custody phase is planned, installed or not-supplied. Installed
+        /// counts in a planned summary describe the prospective effect
+        #[arg(long)]
+        json: bool,
     },
     /// Prepare a delivered change on the paired integration authority (lead only).
     /// Admission precedes local checkout binding, exclusive scoped signing,
@@ -1370,6 +1379,8 @@ enum Cmd {
     /// from failed gates and probe discrimination. Preparation records evidence
     /// and returns readiness;
     /// it records no judgment. A local review still owed normally exits 3.
+    /// JSON includes structured custody counts from the latest import step,
+    /// with phase planned, installed or not-supplied.
     /// Moved authoritative history requires explicit rebase, snapshot, and review.
     /// Stops at the first failure and reports refs, objects, events and pending
     /// rewrite recovery state, including effects preceding event publication.
@@ -5430,6 +5441,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             since,
             objects_json,
             custody_dir,
+            json,
         } => {
             commands::export_bundle(
                 &ctx,
@@ -5438,6 +5450,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 since.as_deref(),
                 objects_json.as_deref(),
                 custody_dir.as_deref(),
+                json,
             )?;
             Ok(0)
         }
@@ -5476,6 +5489,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             publisher,
             received_sha256,
             custody_dir,
+            json,
         } => commands::import_bundle(
             &ctx,
             &input,
@@ -5484,6 +5498,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             publisher.as_deref(),
             received_sha256.as_deref(),
             custody_dir.as_deref(),
+            json,
         )
         .map(|result| result.exit_code),
         Cmd::Replica { cmd } => match cmd {

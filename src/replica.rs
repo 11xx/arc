@@ -614,6 +614,7 @@ pub fn import(
             exit_code: 0,
             published: false,
             output: crate::import_authorization::ImportSummary {
+                custody: None,
                 introduced_event_ids: if receipt_exists {
                     Vec::new()
                 } else {
@@ -632,6 +633,7 @@ pub fn import(
             exit_code: 0,
             published: false,
             output: crate::import_authorization::ImportSummary {
+                custody: None,
                 introduced_event_ids: if receipt_exists {
                     Vec::new()
                 } else {
@@ -682,6 +684,7 @@ pub fn import(
         exit_code: 0,
         published: true,
         output: crate::import_authorization::ImportSummary {
+            custody: None,
             introduced_event_ids: added.iter().map(|event| event.event_id.clone()).collect(),
             authorization,
         },

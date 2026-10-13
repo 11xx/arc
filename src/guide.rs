@@ -817,6 +817,8 @@ RUN A CHANGE
                                      Export a versioned event bundle and its
                                      Git objects, with a count by role.
     --objects-json <file>            Write an arc-bundle-objects/1 transport file.
+    --json                          Print arc-export/1 summary JSON, including
+                                     custody counts; requires --output <file>.
     --custody-dir <dir>              Also write an arc-custody-bundle/1 sidecar
                                      of the retained forge content.
   arc import <file|-> [--dry-run]     Require every listed object locally before
@@ -825,6 +827,13 @@ RUN A CHANGE
     --provenance-only                Import events despite missing objects,
                                      reporting the unavailable evidence.
     --custody-dir <dir>              Install a sidecar the bundle binds.
+    --json                          Print arc-import/1 summary JSON, including
+                                     diagnostics and structured custody counts.
+                                     Custody phase is planned, installed or
+                                     not-supplied; installed counts in a planned
+                                     summary describe the prospective effect.
+                                     arc accept --json carries the same custody
+                                     summary from its latest import step.
 
   Change history checksums hash compact JSON with recursively sorted object
   keys and a newline after each event. The checksum names the same prefix
@@ -3811,6 +3820,8 @@ SCHEMAS
     `arc-watch/1`                    arc watch --json, stdin of arc watch --exec
     `arc-config/1`                   arc config
     `arc-accept/1`                   arc accept --json
+    `arc-export/1`                   arc export --json
+    `arc-import/1`                   arc import --json
     `arc-integration-plan/1`         arc integrate --dry-run --json
     `arc-provisional-transition/2`   arc integrate --provisional --json
     `arc-brief/2`                    arc brief --json

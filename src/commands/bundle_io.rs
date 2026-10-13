@@ -1,6 +1,7 @@
 use super::*;
 use crate::operation_println as println;
 
+#[allow(clippy::too_many_arguments)]
 pub fn export_bundle(
     ctx: &Ctx,
     reference: &str,
@@ -8,7 +9,12 @@ pub fn export_bundle(
     since: Option<&str>,
     objects_json: Option<&str>,
     custody_dir: Option<&str>,
+    json: bool,
 ) -> Result<()> {
+    anyhow::ensure!(
+        !json || output != "-",
+        "--json requires --output <FILE>; stdout cannot carry both the bundle and its summary"
+    );
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
     let mut files = Vec::new();
@@ -115,7 +121,31 @@ pub fn export_bundle(
         ));
     }
     publication.commit()?;
-    if output == "-" {
+    if json {
+        let custody = sidecar.as_ref().map(|exported| {
+            serde_json::json!({
+                "entries": exported.entries,
+                "available": exported.available,
+                "unavailable": exported.unavailable,
+                "complete": exported.complete(),
+                "manifest_sha256": exported.binding.manifest_sha256,
+                "directory": custody_dir,
+            })
+        });
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema": "arc-export/1",
+                "change_id": change_id,
+                "events": bundle.event_count,
+                "prefix": bundle.since,
+                "sha256": bundle.events_sha256,
+                "objects": { "total": objects.len(), "by_role": counts },
+                "custody": custody,
+                "output": output,
+            })
+        );
+    } else if output == "-" {
         eprintln!("{reported}\noutput: -");
     } else {
         println!("{reported}\noutput: {output}");
@@ -168,7 +198,51 @@ fn referenced_content(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn import_bundle(
+    ctx: &Ctx,
+    input: &str,
+    dry_run: bool,
+    provenance_only: bool,
+    publisher: Option<&str>,
+    received_sha256: Option<&str>,
+    custody_dir: Option<&str>,
+    json: bool,
+) -> Result<crate::import_authorization::ImportResult> {
+    let operation = || {
+        import_bundle_inner(
+            ctx,
+            input,
+            dry_run,
+            provenance_only,
+            publisher,
+            received_sha256,
+            custody_dir,
+        )
+    };
+    if !json {
+        return operation();
+    }
+    let (result, diagnostics) = crate::operation_output::capture(operation);
+    let result = result?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "schema": "arc-import/1",
+            "dry_run": dry_run,
+            "published": result.published,
+            "exit_code": result.exit_code,
+            "introduced_event_ids": result.output.introduced_event_ids,
+            "authorization": result.output.authorization,
+            "custody": result.output.custody,
+            "diagnostics": diagnostics,
+        })
+    );
+    Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn import_bundle_inner(
     ctx: &Ctx,
     input: &str,
     dry_run: bool,
@@ -319,13 +393,21 @@ pub(super) fn import_validated_guarded(
     result.output.introduced_event_ids = introduced.into_iter().collect();
     if let (0, None, Some(binding)) = (result.exit_code, sidecar, &validated.bundle.custody) {
         let custody = crate::custody::Custody::at(&Store::resolve_root(&ctx.cwd)?);
+        let referenced = referenced_content(validated);
+        let unavailable = crate::custody::unavailable_among(&custody, &referenced);
         println!(
             "custody: sidecar not supplied; {}",
-            crate::custody::unsupplied_note(
-                binding,
-                crate::custody::unavailable_among(&custody, &referenced_content(validated))
-            )
+            crate::custody::unsupplied_note(binding, unavailable)
         );
+        result.output.custody = Some(crate::custody::TransferSummary::from_outcome(
+            "not-supplied",
+            &crate::custody::Outcome {
+                installed: 0,
+                held: referenced.len() - unavailable,
+                unavailable,
+            },
+            binding,
+        ));
     }
     Ok(result)
 }
@@ -630,14 +712,24 @@ fn import_events(
             println!("aborted: no events or refs written");
             return Ok(crate::model::OperationResult::unpublished(1));
         }
-        if let Some(sidecar) = sidecar {
+        let custody = sidecar.map(|sidecar| {
             let outcome = sidecar.plan(&crate::custody::Custody::at(&root));
             print_custody_outcome(&outcome, "would install");
-        }
+            crate::custody::TransferSummary::from_outcome(
+                "planned",
+                &outcome,
+                validated
+                    .bundle
+                    .custody
+                    .as_ref()
+                    .expect("validated sidecar binding"),
+            )
+        });
         return Ok(crate::model::OperationResult {
             exit_code: 0,
             published: false,
             output: crate::import_authorization::ImportSummary {
+                custody,
                 introduced_event_ids: plan
                     .new_events
                     .iter()
@@ -821,7 +913,7 @@ fn import_events(
     // Custody is reported installed only once the events are published. Its
     // bytes are verified and content-addressed, so a failure here costs
     // nothing but the installation, which repeating the import completes.
-    if let Some(sidecar) = sidecar {
+    let custody = if let Some(sidecar) = sidecar {
         let outcome = sidecar
             .install(&crate::custody::Custody::at(&root))
             .map_err(|error| crate::model::OperationFailure {
@@ -837,11 +929,23 @@ fn import_events(
                 ),
             })?;
         print_custody_outcome(&outcome, "installed");
-    }
+        Some(crate::custody::TransferSummary::from_outcome(
+            "installed",
+            &outcome,
+            validated
+                .bundle
+                .custody
+                .as_ref()
+                .expect("validated sidecar binding"),
+        ))
+    } else {
+        None
+    };
     Ok(crate::model::OperationResult {
         exit_code: 0,
         published,
         output: crate::import_authorization::ImportSummary {
+            custody,
             introduced_event_ids: plan
                 .new_events
                 .iter()
