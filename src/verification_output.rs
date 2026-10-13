@@ -41,7 +41,8 @@ impl Storage {
             .descend("gate-output", Some(0o700))?
             .context("gate output directory unavailable")?;
         directory.set_mode(0o700)?;
-        let name = format!("{}.log", crate::ids::new_identifier());
+        // Retention prunes by name order, so names must sort in creation order.
+        let name = format!("{}.log", crate::ids::new_event_id()?);
         let temporary = format!("{name}.{}.partial", std::process::id());
         let file = directory.create_file(&temporary, 0o600)?;
         Ok(Self {
