@@ -1967,7 +1967,7 @@ fn execute_verification(
                     Some(exit_code),
                     Some(duration_ms),
                     observed.output_tail,
-                observed.output_artifact,
+                    observed.output_artifact,
                     observed.timed_out,
                 )
             }

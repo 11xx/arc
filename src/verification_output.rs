@@ -40,6 +40,7 @@ impl Storage {
         let directory = Dir::open_root(root)?
             .descend("gate-output", Some(0o700))?
             .context("gate output directory unavailable")?;
+        directory.set_mode(0o700)?;
         let name = format!("{}.log", crate::ids::new_identifier());
         let temporary = format!("{name}.{}.partial", std::process::id());
         let file = directory.create_file(&temporary, 0o600)?;
@@ -85,10 +86,9 @@ impl Storage {
             // SAFETY: signal zero only tests whether the named positive process exists.
             if unsafe { libc::kill(pid, 0) } == -1
                 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+                && self.directory.open_entry(&name)?.metadata()?.is_file()
             {
-                if self.directory.open_entry(&name)?.metadata()?.is_file() {
-                    self.directory.remove_file(&name)?;
-                }
+                self.directory.remove_file(&name)?;
             }
         }
         let mut names: Vec<_> = self

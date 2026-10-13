@@ -10,6 +10,7 @@ use std::fs::File;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 /// A directory a handle was asked to descend into is a symlink.
@@ -75,6 +76,10 @@ impl Dir {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn set_mode(&self, mode: u32) -> io::Result<()> {
+        File::from(self.fd.try_clone()?).set_permissions(std::fs::Permissions::from_mode(mode))
     }
 
     fn open_at(&self, name: &CStr, flags: libc::c_int, mode: u32) -> io::Result<OwnedFd> {
