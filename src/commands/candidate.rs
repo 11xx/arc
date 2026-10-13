@@ -479,6 +479,7 @@ struct CandidateView {
 #[derive(Serialize)]
 struct ReceivedView {
     origin: &'static str,
+    request_binding: &'static str,
     event_id: String,
     recorded_by: String,
     recorded_at: DateTime<Utc>,
@@ -903,6 +904,11 @@ fn received_view(
     };
     Ok(ReceivedView {
         origin: "external",
+        request_binding: if registration.requested_evidence_sha256.is_some() {
+            "request-bound"
+        } else {
+            "unbound"
+        },
         event_id: received.event_id.clone(),
         recorded_by: received.declarant.clone(),
         recorded_at: received.recorded_at,
@@ -1119,6 +1125,7 @@ fn render_received(received: &ReceivedView) {
         received.recorded_by,
         received.event_id
     );
+    println!("    request binding: {}", received.request_binding);
     println!(
         "    run handle (private): {}; packet: {}",
         received.run_handle, received.packet

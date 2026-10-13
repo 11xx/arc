@@ -2936,8 +2936,12 @@ CANDIDATES
   exactly. Each fact is recorded once; conflicting retries refuse. Registration
   without evidence establishes no request: --evidence-file cannot attach one
   later (`evidence-not-requested`). Older records without this optional intent
-  remain readable and importable, including their received evidence, but grant
-  no registration retry. An evidence publication failure names the durable
+  remain readable but grant no registration retry. Already-held evidence
+  without an intent reads as `request_binding: unbound`, never producer
+  consent. A newly admitted attachment requires an original request digest
+  and matching declarant; an unrequested attachment refuses before any import
+  publication, naming its event. Registrations without attachments remain
+  importable. An evidence publication failure names the durable
   registration event. Without a custody directory, absent receipt bytes remain
   unavailable and do not block registration.
 
@@ -3050,10 +3054,11 @@ CONTEXT
   by file name in this project's journal, as `<journal-dir>::<file>` in
   another project's.
 
-  `--from-tapes` takes the reads from a `tapes-events/9` document or the
-  `tapes-session/14` `.json` of a `tapes export` bundle, one per tool call
+  `--from-tapes` takes the reads from a `tapes-events/14` document or the
+  `tapes-session/19` `.json` of a `tapes export` bundle, one per tool call
   with a `read` member, skipping each call with no stable id, path, or digest,
   each that failed, and each record already held, with one printed line.
+  Legacy `tapes-events/9` and `tapes-session/14` documents are also accepted.
   arc reads only that file; it opens no harness store and runs no program.
   tapes digests the text a tool returned, which arc records unnormalized, so
   a tool that decorates what it returns, like a line-numbered `Read`, never

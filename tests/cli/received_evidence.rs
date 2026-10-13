@@ -1390,9 +1390,13 @@ fn received_originals_survive_rewrite_and_import_garbage_collection() {
 }
 
 #[test]
-fn legacy_received_records_import_but_conflicting_original_intents_refuse() {
+fn novel_attachments_require_matching_request_and_declarant() {
     let f = Fixture::new();
     f.registered("intent", &f.report.commit, &f.evidence());
+    assert_eq!(
+        f.view("intent")["received_evidence"]["request_binding"],
+        "request-bound"
+    );
     let bundle = f.repo.home.join("intent.json");
     stdout(f.repo.arc(&f.repo.root).args([
         "export",
@@ -1401,17 +1405,26 @@ fn legacy_received_records_import_but_conflicting_original_intents_refuse() {
         bundle.to_str().unwrap(),
     ]));
     let original: Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
-    for corrupt in [false, true] {
+    for variant in ["absent", "digest", "declarant"] {
         let mut parsed = original.clone();
+        let mut evidence_id = String::new();
         for event in parsed["repository_events"].as_array_mut().unwrap() {
             if event["event_type"] == "candidate-registered" {
-                if corrupt {
-                    event["requested_evidence_sha256"] = json!("0".repeat(64));
-                } else {
-                    event
-                        .as_object_mut()
-                        .unwrap()
-                        .remove("requested_evidence_sha256");
+                match variant {
+                    "digest" => event["requested_evidence_sha256"] = json!("0".repeat(64)),
+                    "absent" => {
+                        event
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("requested_evidence_sha256");
+                    }
+                    _ => {}
+                }
+            }
+            if event["event_type"] == "candidate-evidence-received" {
+                evidence_id = event["event_id"].as_str().unwrap().to_string();
+                if variant == "declarant" {
+                    event["actor"] = json!("foreign-claimant");
                 }
             }
         }
@@ -1419,48 +1432,60 @@ fn legacy_received_records_import_but_conflicting_original_intents_refuse() {
         let receiver = Repo::new();
         deliver_git_objects(&f.repo, &receiver);
         let out = import_command(&receiver, &bundle).output().unwrap();
-        if corrupt {
-            assert!(!out.status.success());
-            assert!(String::from_utf8_lossy(&out.stderr)
-                .contains("disagrees with its original request or declarant"));
-            assert!(!receiver.root.join(".git/arc/imports").exists());
-        } else {
-            assert!(
-                out.status.success(),
-                "{}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            let view = json_stdout(receiver.arc(&receiver.root).args([
-                "candidate",
-                "show",
-                "intent",
-                "--json",
-            ]));
-            assert_eq!(
-                view["candidates"][0]["received_evidence"]["origin"],
-                "external"
-            );
-            let path = f.repo.home.join("intent.evidence.json");
-            let out = receiver
-                .arc(&receiver.root)
-                .args([
-                    "candidate",
-                    "register",
-                    "--id",
-                    "intent",
-                    "--tree",
-                    &f.report.commit,
-                    "--brief",
-                    &f.change,
-                    "--producer",
-                    "lead-a",
-                    "--evidence-file",
-                    path.to_str().unwrap(),
-                ])
-                .output()
-                .unwrap();
-            assert!(!out.status.success());
-            assert!(String::from_utf8_lossy(&out.stderr).contains("evidence-not-requested"));
+        assert!(!out.status.success());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(&evidence_id), "{stderr}");
+        assert!(
+            stderr.contains(if variant == "absent" {
+                "evidence-not-requested"
+            } else {
+                "disagrees with its original request or declarant"
+            }),
+            "{stderr}"
+        );
+        assert!(!receiver.root.join(".git/arc/imports").exists());
+        assert!(!receiver.root.join(".git/arc/repository/events").exists());
+    }
+}
+
+#[test]
+fn held_unbound_attachments_remain_readable_and_do_not_block_imports() {
+    let f = Fixture::new();
+    f.registered("legacy", &f.report.commit, &f.evidence());
+    for entry in fs::read_dir(f.repo.root.join(".git/arc/repository/events")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
+        let mut event: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        if event["event_type"] == "candidate-registered" {
+            event
+                .as_object_mut()
+                .unwrap()
+                .remove("requested_evidence_sha256");
+            fs::write(path, json_file_bytes(&event)).unwrap();
         }
     }
+    assert_eq!(
+        f.view("legacy")["received_evidence"]["request_binding"],
+        "unbound"
+    );
+    let shown = stdout(
+        f.repo
+            .arc(&f.repo.root)
+            .args(["candidate", "show", "legacy"]),
+    );
+    assert!(shown.contains("request binding: unbound"), "{shown}");
+    let bundle = f.repo.home.join("held.json");
+    stdout(f.repo.arc(&f.repo.root).args([
+        "export",
+        &f.change,
+        "--output",
+        bundle.to_str().unwrap(),
+    ]));
+    import_command(&f.repo, &bundle).assert().success();
+    assert_eq!(
+        f.view("legacy")["received_evidence"]["request_binding"],
+        "unbound"
+    );
 }

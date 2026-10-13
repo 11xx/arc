@@ -1179,11 +1179,25 @@ fn plan_repository_events(
     // that needs no local object: a parent or an adoption may arrive in the
     // same bundle or already be here, and a tree this object store lacks is
     // not a refusal.
-    super::candidate::Ledger::replay(&combined).map_err(|refusal| {
+    let candidates = super::candidate::Ledger::replay(&combined).map_err(|refusal| {
         anyhow::anyhow!(
             "the bundle's candidate events are refused: {refusal}; nothing was imported"
         )
     })?;
+    for event in &novel {
+        if let Payload::CandidateEvidenceReceived { candidate_id, .. } = &event.payload {
+            let registration = candidates
+                .registration(candidate_id)
+                .expect("replayed evidence has a registration");
+            if registration.requested_evidence_sha256.is_none() {
+                bail!(
+                    "received evidence event {} for {candidate_id} has no original \
+                     requested-evidence intent (evidence-not-requested); nothing was imported",
+                    event.event_id
+                );
+            }
+        }
+    }
     crate::relations::Relations::replay(&combined).map_err(|refusal| {
         anyhow::anyhow!(
             "the bundle's candidate relations are refused: {refusal}; nothing was imported"

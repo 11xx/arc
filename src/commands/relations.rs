@@ -22,7 +22,12 @@ use super::Ctx;
 
 /// The tool record documents `--from-tapes` reads: `tapes events --json`, and
 /// the `.json` file of a `tapes export` bundle, which carries the same events.
-pub const TAPES_SCHEMAS: [&str; 2] = ["tapes-events/9", "tapes-session/14"];
+pub const TAPES_SCHEMAS: [&str; 4] = [
+    agent_tapes_core::event::EVENTS_SCHEMA,
+    agent_tapes_core::model::SESSION_SCHEMA,
+    "tapes-events/9",
+    "tapes-session/14",
+];
 
 /// A subject resolved to where its relations live and which change's claims
 /// its episodes are.

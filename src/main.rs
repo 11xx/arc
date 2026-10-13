@@ -1319,7 +1319,11 @@ enum Cmd {
     /// post-integration disposition on a finding that was resolved,
     /// accepted-risk, or obsolete when the change shipped. Nonportable cost
     /// facts or bindings refuse transport: recording locators and
-    /// unclassified cost reasons are not admitted
+    /// unclassified cost reasons are not admitted.
+    /// A newly admitted candidate evidence attachment requires its registration's
+    /// original requested-evidence digest and matching declarant. Already-held
+    /// attachments without an intent stay readable as unbound claims; their
+    /// presence never implies producer consent
     Import {
         /// Input file ('-' for stdin)
         input: String,
@@ -3961,9 +3965,10 @@ enum ContextCmd {
     /// the qualified `<journal-dir>::<file>` in another project's.
     ///
     /// `--from-tapes <file>` reads a tool record document instead:
-    /// `tapes-events/9` (`tapes events <session> --json`) or
-    /// `tapes-session/14` (the `.json` of a `tapes export` bundle, which
-    /// carries the same events). Every tool call with a `read` member becomes
+    /// `tapes-events/14` (`tapes events <session> --json`) or
+    /// `tapes-session/19` (the `.json` of a `tapes export` bundle, which
+    /// carries the same events). Legacy `tapes-events/9` and `tapes-session/14`
+    /// documents are also accepted. Every tool call with a `read` member becomes
     /// a read record: its `event_id` is the record id, `read.path` the path,
     /// `read.lines` a line range or `read.whole` whole coverage (neither is
     /// `unknown`), and `read.sha256` the digest. A call with no stable event
@@ -4012,7 +4017,7 @@ enum ContextCmd {
         /// Compare the returned bytes with the path's blob at this revision
         #[arg(long)]
         at: Option<String>,
-        /// A `tapes-events/9` or `tapes-session/14` document to take the
+        /// A `tapes-events/14` or `tapes-session/19` document to take the
         /// reads from
         #[arg(long = "from-tapes", value_name = "FILE")]
         from_tapes: Option<std::path::PathBuf>,

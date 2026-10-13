@@ -142,16 +142,27 @@ fn a_declaration_may_cite_a_recorded_read() {
 
 #[test]
 fn tapes_events_become_read_records_with_skips() {
+    for schema in [
+        agent_tapes_core::event::EVENTS_SCHEMA,
+        agent_tapes_core::model::SESSION_SCHEMA,
+        "tapes-events/9",
+        "tapes-session/14",
+    ] {
+        assert_tapes_read_document(schema);
+    }
+}
+
+fn assert_tapes_read_document(schema: &str) {
     let repo = Repo::new();
     let (change, claim) = claimed_change(&repo, "tapes");
     let path = repo.root.join("README.md");
     let path = path.to_str().unwrap();
     let event_id = |n: u8| format!("sha256:{}", format!("{n:02x}").repeat(32));
     let document = serde_json::json!({
-        "schema": "tapes-events/9",
+        "schema": schema,
         "session": { "id": "session-x" },
         "events": [
-            { "ordinal": 1, "event_id": event_id(1), "kind": "tool-call", "name": "Read",
+            { "ordinal": 1, "turn_ordinal": 1, "text_chars": 80, "event_id": event_id(1), "kind": "tool-call", "name": "Read",
               "read": { "path": path, "lines": { "start": 1, "end": 1 },
                         "sha256": digest(b"1\thello") },
               "pair": { "ordinal": 2 } },
@@ -226,7 +237,7 @@ fn tapes_events_become_read_records_with_skips() {
     );
     // Line-numbered output digests text no file holds: nothing is inferred.
     assert!(ranged.get("blob").is_none(), "{ranged}");
-    assert_eq!(ranged["source"], "tapes-events/9 session session-x");
+    assert_eq!(ranged["source"], format!("{schema} session session-x"));
     let whole = by_record(event_id(3));
     assert_eq!(whole["coverage"], serde_json::json!({ "kind": "whole" }));
     assert_eq!(whole["blob"]["path"], "README.md", "{whole}");
