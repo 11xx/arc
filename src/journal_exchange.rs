@@ -193,12 +193,24 @@ impl JournalBundle {
     }
 
     /// Admission preserves each artifact and the closure of its references.
+    #[cfg(test)]
     pub(crate) fn held_back(&self) -> Result<BTreeMap<String, Vec<String>>> {
+        self.held_back_with(BTreeMap::new())
+    }
+
+    /// `held_back`, starting from artifacts the receiving journal itself
+    /// refuses, such as those it relocated: what references them is held
+    /// back with them.
+    pub(crate) fn held_back_with(
+        &self,
+        refused: BTreeMap<String, Vec<String>>,
+    ) -> Result<BTreeMap<String, Vec<String>>> {
         let mut held: BTreeMap<String, Vec<String>> = self
             .artifacts
             .iter()
             .filter_map(|artifact| {
-                let reasons = artifact.unsupported_events();
+                let mut reasons = artifact.unsupported_events();
+                reasons.extend(refused.get(&artifact.file).cloned().unwrap_or_default());
                 (!reasons.is_empty()).then(|| (artifact.file.clone(), reasons))
             })
             .collect();
@@ -351,9 +363,112 @@ fn artifacts_digest(artifacts: &[BundledArtifact]) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
+/// A recorded rewrite of an artifact body: its whole-body digests before and
+/// after, and each section that changed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Redaction {
+    pub(crate) before: String,
+    pub(crate) after: String,
+    pub(crate) sections: Vec<RedactedSection>,
+}
+
+/// One section a redaction rewrote: [`BASE_SECTION`] for the text before the
+/// first appended entry, or the exchange identity of an appended entry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RedactedSection {
+    pub(crate) id: String,
+    pub(crate) before: String,
+    pub(crate) after: String,
+}
+
+impl Redaction {
+    pub(crate) fn well_formed(&self) -> bool {
+        let digest = |value: &str| {
+            value
+                .strip_prefix("sha256:")
+                .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+        };
+        digest(&self.before)
+            && digest(&self.after)
+            && self.before != self.after
+            && !self.sections.is_empty()
+            && self.sections.iter().all(|section| {
+                !section.id.is_empty()
+                    && digest(&section.before)
+                    && digest(&section.after)
+                    && section.before != section.after
+            })
+    }
+}
+
+/// The section identity of an artifact's text before its first appended entry.
+pub(crate) const BASE_SECTION: &str = "base";
+
+/// Every recorded rewrite of each section, as before/after digest edges.
+#[derive(Default)]
+struct Rewrites(BTreeMap<String, Vec<(String, String)>>);
+
+impl Rewrites {
+    fn of<'a>(events: impl IntoIterator<Item = &'a JournalEvent>) -> Self {
+        let mut rewrites = Self::default();
+        for redaction in events.into_iter().filter_map(JournalEvent::redaction) {
+            for section in &redaction.sections {
+                let edges = rewrites.0.entry(section.id.clone()).or_default();
+                let edge = (section.before.clone(), section.after.clone());
+                if !edges.contains(&edge) {
+                    edges.push(edge);
+                }
+            }
+        }
+        rewrites
+    }
+
+    /// Whether a redaction recorded `digest` as a revision of section `id`.
+    fn records(&self, id: &str, digest: &str) -> bool {
+        self.0
+            .get(id)
+            .is_some_and(|edges| edges.iter().any(|(b, a)| b == digest || a == digest))
+    }
+
+    /// Whether recorded redactions lead from `from` to `to` for section `id`.
+    fn leads(&self, id: &str, from: &str, to: &str) -> bool {
+        let Some(edges) = self.0.get(id) else {
+            return false;
+        };
+        let mut reached = vec![from.to_string()];
+        let mut index = 0;
+        while index < reached.len() {
+            for (before, after) in edges {
+                if *before == reached[index] && !reached.contains(after) {
+                    reached.push(after.clone());
+                }
+            }
+            index += 1;
+        }
+        reached[1..].iter().any(|digest| digest == to)
+    }
+
+    /// The later of two revisions of one section: equal text, or the one a
+    /// recorded redaction leads to. Text no redaction relates differs.
+    fn later<'a>(&self, id: &str, held: &'a str, incoming: &'a str) -> Option<&'a str> {
+        if held == incoming {
+            return Some(held);
+        }
+        let (held_digest, incoming_digest) = (body_digest(held), body_digest(incoming));
+        if self.leads(id, &held_digest, &incoming_digest) {
+            Some(incoming)
+        } else if self.leads(id, &incoming_digest, &held_digest) {
+            Some(held)
+        } else {
+            None
+        }
+    }
+}
+
 struct RevisionBlock<'a> {
     id: String,
     timestamp: DateTime<Utc>,
+    start: usize,
     body: &'a str,
     event: Vec<u8>,
 }
@@ -363,9 +478,40 @@ struct Revision<'a> {
     blocks: Vec<RevisionBlock<'a>>,
 }
 
+/// One section of an artifact body: its identity and byte range.
+pub(crate) struct Section {
+    pub(crate) id: String,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+}
+
+/// The sections of `body`: the base, then each appended entry its recorded
+/// event identifies, in body order.
+pub(crate) fn sections(body: &str, events: &[JournalEvent]) -> Result<Vec<Section>> {
+    let revision = revision(body, events, &Rewrites::of(events))?;
+    let mut sections = vec![Section {
+        id: BASE_SECTION.to_string(),
+        start: 0,
+        end: revision.base.len(),
+    }];
+    for block in &revision.blocks {
+        sections.push(Section {
+            id: block.id.clone(),
+            start: block.start,
+            end: block.start + block.body.len(),
+        });
+    }
+    Ok(sections)
+}
+
 /// Only sections identified by recorded append events participate in a merge.
-/// The base and every shared section must retain their exact bytes.
-fn revision<'a>(body: &'a str, events: &[JournalEvent]) -> Result<Revision<'a>> {
+/// The base and every shared section must retain their exact bytes, or be
+/// related by a recorded redaction.
+fn revision<'a>(
+    body: &'a str,
+    events: &[JournalEvent],
+    rewrites: &Rewrites,
+) -> Result<Revision<'a>> {
     let descriptors: Vec<_> = events
         .iter()
         .filter_map(|event| event.exchange_block().map(|block| (event, block)))
@@ -423,7 +569,7 @@ fn revision<'a>(body: &'a str, events: &[JournalEvent]) -> Result<Revision<'a>> 
                     return false;
                 }
                 if let Some(recorded) = recorded {
-                    return digest == *recorded;
+                    return digest == *recorded || rewrites.records(id, &digest);
                 }
                 // Answers without a digest bind by choice and second-resolution timestamp.
                 !id.starts_with("answer:")
@@ -449,6 +595,7 @@ fn revision<'a>(body: &'a str, events: &[JournalEvent]) -> Result<Revision<'a>> 
         }
         seen.insert(id.as_str());
         blocks.push(RevisionBlock {
+            start: *start,
             id: id.clone(),
             timestamp: ts
                 .parse()
@@ -465,29 +612,53 @@ fn revision<'a>(body: &'a str, events: &[JournalEvent]) -> Result<Revision<'a>> 
     Ok(Revision { base, blocks })
 }
 
+/// The body both revisions grow into. A section the two sides hold
+/// differently is taken from the side a recorded redaction leads to, so a
+/// revision written before a redaction never restores what it removed.
 pub(crate) fn merge_revision(
     held_body: &str,
     held_events: &[JournalEvent],
     incoming: &BundledArtifact,
 ) -> Result<String> {
-    let held = revision(held_body, held_events)?;
-    let incoming_revision = revision(&incoming.body, &incoming.understood_events()?)?;
-    if held.base != incoming_revision.base {
+    let incoming_events = incoming.understood_events()?;
+    let rewrites = Rewrites::of(held_events.iter().chain(&incoming_events));
+    let held = revision(held_body, held_events, &rewrites)?;
+    let incoming_revision = revision(&incoming.body, &incoming_events, &rewrites)?;
+    let Some(base) = rewrites.later(BASE_SECTION, held.base, incoming_revision.base) else {
         bail!("base");
-    }
+    };
+    let mut chosen: BTreeMap<&str, &str> = BTreeMap::new();
     let mut union = std::collections::BTreeMap::new();
     for block in &held.blocks {
         union.insert(block.id.as_str(), block);
     }
     for block in &incoming_revision.blocks {
         if let Some(local) = union.get(block.id.as_str()) {
-            if local.body != block.body || local.event != block.event {
+            if local.event != block.event {
                 bail!("{}", block.id);
             }
+            let Some(text) = rewrites.later(&block.id, local.body, block.body) else {
+                bail!("{}", block.id);
+            };
+            chosen.insert(block.id.as_str(), text);
         } else {
             union.insert(block.id.as_str(), block);
         }
     }
+    let text = |block: &RevisionBlock<'_>| -> String {
+        chosen
+            .get(block.id.as_str())
+            .copied()
+            .unwrap_or(block.body)
+            .to_string()
+    };
+    let assemble = |blocks: &[RevisionBlock<'_>]| -> String {
+        let mut body = base.to_string();
+        for block in blocks {
+            body.push_str(&text(block));
+        }
+        body
+    };
     let prefix = |left: &Revision<'_>, right: &Revision<'_>| {
         left.blocks.len() <= right.blocks.len()
             && left
@@ -497,16 +668,16 @@ pub(crate) fn merge_revision(
                 .all(|(left, right)| left.id == right.id)
     };
     if prefix(&held, &incoming_revision) {
-        return Ok(incoming.body.clone());
+        return Ok(assemble(&incoming_revision.blocks));
     }
     if prefix(&incoming_revision, &held) {
-        return Ok(held_body.to_string());
+        return Ok(assemble(&held.blocks));
     }
     let mut blocks: Vec<_> = union.into_values().collect();
     blocks.sort_by(|left, right| (left.timestamp, &left.id).cmp(&(right.timestamp, &right.id)));
-    let mut merged = held.base.to_string();
+    let mut merged = base.to_string();
     for block in blocks {
-        merged.push_str(block.body);
+        merged.push_str(&text(block));
     }
     Ok(merged)
 }

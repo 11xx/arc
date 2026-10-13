@@ -1367,7 +1367,12 @@ fn workspace_inventory(
                 artifact.file
             );
             if let Some(successor) = &artifact.superseded_by {
-                println!("    superseded by {successor}");
+                let relocated = if artifact.superseded_by_relocated {
+                    " (relocated)"
+                } else {
+                    ""
+                };
+                println!("    superseded by {successor}{relocated}");
             }
         }
     }
@@ -1428,6 +1433,9 @@ struct ReconciledArtifact {
     /// transition named one.
     #[serde(skip_serializing_if = "Option::is_none")]
     superseded_by: Option<String>,
+    /// Whether that successor was relocated out of the journal.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    superseded_by_relocated: bool,
     /// Why the artifact is where it is: `present`, `terminal`, `archived`, or
     /// `superseded`. Nothing is classified from one store's absence alone.
     explanation: &'static str,
@@ -1458,6 +1466,9 @@ fn reconcile_artifact(
         storage: entry.storage.clone(),
         resolution: entry.resolution.clone(),
         resolution_basis: entry.resolution_basis.clone(),
+        superseded_by_relocated: superseded_by
+            .as_ref()
+            .is_some_and(|successor| facts.relocated.contains_key(successor)),
         superseded_by,
         explanation,
         promotions: entry.promotions.clone(),
@@ -2364,6 +2375,18 @@ fn workspace_report(
                 }
             };
             for (project, file) in files {
+                if facts.relocated.contains_key(&file) {
+                    fates.insert(
+                        (project, file),
+                        report::Fate {
+                            explanation: "relocated".to_string(),
+                            storage: "relocated".to_string(),
+                            resolution: None,
+                            superseded_by: None,
+                        },
+                    );
+                    continue;
+                }
                 if let Some(entry) = entries.iter().find(|entry| entry.file == file) {
                     let reconciled = reconcile_artifact(entry, &facts);
                     fates.insert(
@@ -3073,7 +3096,8 @@ mod report {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub(crate) struct Fate {
         /// `present`, `terminal`, `archived`, or `superseded`, as
-        /// `workspace inventory` explains it.
+        /// `workspace inventory` explains it, or `relocated` for an artifact
+        /// moved out of its journal.
         pub explanation: String,
         /// `hot` or `archived`.
         pub storage: String,
@@ -3201,7 +3225,7 @@ mod report {
         file: String,
         kind: String,
         title: String,
-        /// `consumed`, `archived`, `superseded`, `unobserved`,
+        /// `consumed`, `archived`, `superseded`, `relocated`, `unobserved`,
         /// or `unknown`. Never inferred from absence alone.
         reason: &'static str,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -3847,6 +3871,7 @@ mod report {
                     Some(fate) if fate.explanation == "terminal" => {
                         ("consumed", fate.resolution.clone(), None)
                     }
+                    Some(fate) if fate.explanation == "relocated" => ("relocated", None, None),
                     Some(fate) if fate.explanation == "archived" => {
                         ("archived", fate.resolution.clone(), None)
                     }

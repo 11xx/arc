@@ -7009,6 +7009,8 @@ mod tests {
             "journal promote",
             "journal archive",
             "journal unarchive",
+            "journal relocate",
+            "journal redact",
             "journal import",
         ];
         fn leaves(command: &clap::Command, prefix: &str, out: &mut Vec<String>) {

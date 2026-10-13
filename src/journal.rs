@@ -1389,6 +1389,101 @@ pub enum JournalCmd {
         /// Archived artifact filename inside the journal dir (a name, not a path)
         filename: String,
     },
+    /// Move artifacts out of this journal into a directory arc does not read,
+    /// leaving a tombstone.
+    ///
+    /// Each body is copied into the destination under its own filename,
+    /// verified against its digest, and then removed from the hot directory,
+    /// the cold archive, and any prepared transition copy, so `show`, `list
+    /// --archived`, catchup, and every workspace view stop reaching it. A
+    /// `relocated` event records the file, the destination path, the reason,
+    /// and the body digest. The event log keeps what earlier events recorded
+    /// about the artifact, such as its topic and title.
+    ///
+    /// Readers treat the tombstone as the artifact's fate. `show` and writes
+    /// name the destination, `filed` reports the fate `relocated`, and
+    /// supersedes and successor links to the artifact are marked relocated.
+    /// Its open claims end, its storage moves and transitions read as
+    /// settled, and `journal doctor` reports a tombstone whose body is still
+    /// present. Exports refuse to carry a relocated artifact, and imports
+    /// hold back a bundled copy of one, with what references it, so a peer
+    /// replica cannot restore it. A peer's own copy is relocated there.
+    ///
+    /// The destination must lie outside arc's home and every known journal;
+    /// it is created with mode 0700 when missing, and copies are written with
+    /// mode 0600. Every named file is checked before anything moves. Refuses
+    /// a destination that already holds the filename with a different body,
+    /// and an artifact with an open claim, an unfinished transition or
+    /// storage move, or unanswered questions, unless `--acknowledge-claim`,
+    /// `--acknowledge-transition`, or `--drop-questions` accepts it. Rerunning
+    /// an interrupted relocation finishes it.
+    Relocate {
+        /// Artifact filenames inside the journal dir (names, not paths)
+        #[arg(required = true)]
+        files: Vec<String>,
+        /// Destination directory outside arc
+        #[arg(long, value_name = "DIR")]
+        to: String,
+        /// Why the artifacts leave the journal, recorded on each tombstone
+        #[arg(long)]
+        reason: String,
+        /// End this open claim with the relocation; repeat for each
+        #[arg(long = "acknowledge-claim", value_name = "ID")]
+        acknowledge_claim: Vec<String>,
+        /// Relocate an artifact whose transition or storage move is
+        /// unfinished, leaving it unfinished
+        #[arg(long)]
+        acknowledge_transition: bool,
+        /// Relocate an artifact with unanswered questions, leaving them
+        /// undecided
+        #[arg(long)]
+        drop_questions: bool,
+        /// Check every artifact and print what would move; write nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Replace passages in one artifact's body in place, hot or archived.
+    ///
+    /// `--replace OLD --with NEW` pairs apply in order, each to every
+    /// occurrence, and each must match; `--body-file` supplies the whole new
+    /// body instead. The rewrite keeps every appended entry's heading line, in
+    /// order, and a `supersedes:` first line unchanged. A `redacted` event
+    /// records the reason, the body digests before and after, and the before
+    /// and after digests of each changed section (the base text, or an
+    /// appended entry by its identity). It never records the removed text,
+    /// and refusals do not repeat it.
+    ///
+    /// `journal export` carries the redacted body with its event, and
+    /// `journal import` takes a recorded redaction's result as the section's
+    /// current revision on both sides of a merge, so a bundle written before
+    /// the redaction never restores what it removed. Refuses a relocated
+    /// artifact, an unfinished storage move, and an unfinished transition
+    /// whose prepared copy would keep the old text. Rerunning an interrupted
+    /// redaction finishes it.
+    Redact {
+        /// Artifact filename inside the journal dir (a name, not a path)
+        filename: String,
+        /// Text to replace; pair each with --with
+        #[arg(
+            long = "replace",
+            value_name = "OLD",
+            requires = "with",
+            conflicts_with = "body_file"
+        )]
+        replace: Vec<String>,
+        /// Replacement for the --replace at the same position
+        #[arg(long = "with", value_name = "NEW", requires = "replace")]
+        with: Vec<String>,
+        /// The whole new body: a file path, or '-' for stdin
+        #[arg(long, required_unless_present = "replace")]
+        body_file: Option<String>,
+        /// Why the text is removed, recorded on the redaction
+        #[arg(long)]
+        reason: String,
+        /// Check the rewrite and print what would change; write nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Export selected journal artifacts as a versioned bundle for another
     /// replica. --global exports the operator journal without Git pairing.
     /// The bundle carries each artifact body, every log record written
@@ -1470,7 +1565,9 @@ impl JournalCmd {
                 command,
                 LaneCmd::Open { .. } | LaneCmd::Renew { .. } | LaneCmd::Close { .. }
             ),
-            JournalCmd::Transition { dry_run, .. } => !dry_run,
+            JournalCmd::Transition { dry_run, .. }
+            | JournalCmd::Relocate { dry_run, .. }
+            | JournalCmd::Redact { dry_run, .. } => !dry_run,
             _ => true,
         }
     }
@@ -1806,6 +1903,43 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd, global: bool) -> Result<i32> {
             &acknowledge_claim,
         ),
         JournalCmd::Unarchive { filename } => unarchive(ctx, &filename),
+        JournalCmd::Relocate {
+            files,
+            to,
+            reason,
+            acknowledge_claim,
+            acknowledge_transition,
+            drop_questions,
+            dry_run,
+        } => relocate(
+            ctx,
+            &files,
+            &to,
+            &reason,
+            RelocationAcknowledgements {
+                claims: &acknowledge_claim,
+                transition: acknowledge_transition,
+                questions: drop_questions,
+            },
+            dry_run,
+        ),
+        JournalCmd::Redact {
+            filename,
+            replace,
+            with,
+            body_file,
+            reason,
+            dry_run,
+        } => {
+            if replace.len() != with.len() {
+                bail!("each --replace needs one --with");
+            }
+            let rewrite = match body_file {
+                Some(body_file) => Rewrite::Body(read_body_verbatim(&body_file)?),
+                None => Rewrite::Replace(replace.into_iter().zip(with).collect()),
+            };
+            redact(ctx, &filename, rewrite, &reason, dry_run)
+        }
         JournalCmd::Export { files, output } => export_artifacts(ctx, &files, &output).map(|()| 0),
         JournalCmd::Import { input, dry_run } => import_artifacts(ctx, &input, dry_run),
     }
@@ -1965,6 +2099,14 @@ fn collect_exchange_artifacts(
         if selected.contains_key(&file) {
             continue;
         }
+        if relocation(events, &file).is_some() {
+            let carrier = referrer
+                .map(|referrer| format!("{referrer} references {file}, which"))
+                .unwrap_or_else(|| file.clone());
+            bail!(
+                "{carrier} was relocated out of this journal, and a bundle cannot carry it; export nothing"
+            );
+        }
         let storage = match locate_exchange_artifact(hot, &file) {
             Ok(storage) => storage,
             Err(error) => match referrer {
@@ -2088,6 +2230,13 @@ impl JournalEvent {
         Some(hex::encode(Sha256::digest(bytes)))
     }
 
+    /// The rewrite a `redacted` event records.
+    pub(crate) fn redaction(&self) -> Option<&crate::journal_exchange::Redaction> {
+        (self.event == "redacted")
+            .then_some(self.redaction.as_ref())
+            .flatten()
+    }
+
     /// The section identity and ordering key carried by an append event.
     pub(crate) fn exchange_block(&self) -> Option<(String, String, &str, Option<&str>)> {
         let (heading, id) = match self.event.as_str() {
@@ -2138,7 +2287,6 @@ fn import_artifacts(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
     };
     let bundle = crate::journal_exchange::JournalBundle::parse(&bytes)?;
     let digest = bundle.digest()?;
-    let held_back = bundle.held_back()?;
     let hot = resolve_dir(&ctx.cwd)?;
     let cold = archive_dir(&hot);
     let global = is_global_dir(&hot)?;
@@ -2204,6 +2352,20 @@ fn import_artifacts(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
         held.insert(serde_json::to_vec(event)?);
     }
     let local_events = replay_events(local_records);
+    // A body this journal relocated stays out of it: a peer's copy is not
+    // restored, and neither is what references it.
+    let relocated: BTreeMap<String, Vec<String>> = bundle
+        .artifacts
+        .iter()
+        .filter(|artifact| relocation(&local_events, &artifact.file).is_some())
+        .map(|artifact| {
+            (
+                artifact.file.clone(),
+                vec!["relocated out of this journal; a bundled copy is not restored".to_string()],
+            )
+        })
+        .collect();
+    let held_back = bundle.held_back_with(relocated)?;
     let now = Utc::now();
     let mut plan = Vec::with_capacity(bundle.artifacts.len());
     for artifact in &bundle.artifacts {
@@ -4443,6 +4605,7 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
     inspect_fork_marker_paths(&dir, &hot_files, &mut problems)?;
     inspect_amendments(&dir, &events, &mut problems);
     inspect_entry_blocks(&dir, &cold, &events, &mut problems)?;
+    inspect_relocations_and_redactions(&dir, &cold, &events, &mut problems)?;
 
     // A journal is addressed by the slugged path of its project. When that
     // path stops existing the journal becomes unreachable from anywhere, and
@@ -5989,6 +6152,10 @@ pub(crate) struct FiledItem {
     filed_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     supersedes: Option<String>,
+    /// Whether the artifact `supersedes` names was relocated out of the
+    /// journal.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    supersedes_relocated: bool,
     last_activity: String,
     pub(crate) fate: String,
     untouched_days: Option<i64>,
@@ -6129,7 +6296,9 @@ pub(crate) fn filed_report_in(
                             .any(|change| note == format!("change {change}"))
                     }))
         });
-        let fate = if promoted_consumption || (consumed.is_none() && !promotions.is_empty()) {
+        let fate = if relocation(&events, file).is_some() {
+            "relocated".to_string()
+        } else if promoted_consumption || (consumed.is_none() && !promotions.is_empty()) {
             "taken".to_string()
         } else if let Some(outcome) = consumption(&events, file) {
             outcome
@@ -6172,6 +6341,10 @@ pub(crate) fn filed_report_in(
             title: event.title.clone(),
             filed_at: event.ts.clone(),
             supersedes: event.supersedes.clone(),
+            supersedes_relocated: event
+                .supersedes
+                .as_deref()
+                .is_some_and(|origin| relocation(&events, origin).is_some()),
             last_activity: activity.to_rfc3339(),
             fate,
             untouched_days,
@@ -6181,11 +6354,18 @@ pub(crate) fn filed_report_in(
         });
     }
     let sessions: Vec<_> = groups.into_values().collect();
-    let mut counts: std::collections::BTreeMap<String, usize> =
-        ["open", "taken", "done", "superseded", "discarded", "stale"]
-            .into_iter()
-            .map(|fate| (fate.to_string(), 0))
-            .collect();
+    let mut counts: std::collections::BTreeMap<String, usize> = [
+        "open",
+        "taken",
+        "done",
+        "superseded",
+        "discarded",
+        "relocated",
+        "stale",
+    ]
+    .into_iter()
+    .map(|fate| (fate.to_string(), 0))
+    .collect();
     for item in sessions.iter().flat_map(|group| &group.items) {
         *counts.entry(item.fate.clone()).or_default() += 1;
     }
@@ -6231,7 +6411,12 @@ fn filed(ctx: &Ctx, session: Option<&str>, stale_days: u64, json: bool) -> Resul
                 };
                 println!("  {} [{}{age}{changes}{evidence}]", item.file, item.fate);
                 if let Some(origin) = &item.supersedes {
-                    println!("    supersedes: {origin}");
+                    let relocated = if item.supersedes_relocated {
+                        " (relocated)"
+                    } else {
+                        ""
+                    };
+                    println!("    supersedes: {origin}{relocated}");
                 }
                 for source in &item.sources {
                     println!(
@@ -8188,6 +8373,9 @@ pub(crate) struct JournalEvent {
     storage_destination: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     storage_digest: Option<String>,
+    /// The body digests a `redacted` event moved an artifact between.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    redaction: Option<crate::journal_exchange::Redaction>,
     topic: String,
     pub(crate) event: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -8652,6 +8840,7 @@ impl JournalEvent {
             storage_source: None,
             storage_destination: None,
             storage_digest: None,
+            redaction: None,
             topic: topic.to_string(),
             event: event.to_string(),
             message: None,
@@ -8709,6 +8898,14 @@ impl JournalEvent {
     fn creates_artifact(&self, dir: &Path, events: &[JournalEvent]) -> bool {
         match self.event.as_str() {
             "note" => true,
+            "transition"
+                if self
+                    .file
+                    .as_deref()
+                    .is_some_and(|file| relocation(events, file).is_some()) =>
+            {
+                true
+            }
             "transition" => self.file.as_deref().is_some_and(|file| {
                 self.supersedes.as_deref().is_some_and(|source| {
                     let Some(path) = artifact_body_path(dir, file) else {
@@ -8858,6 +9055,26 @@ impl JournalEvent {
             }
             "archived" => self.file.is_some(),
             "unarchived" => self.artifact_file(),
+            "relocated" => {
+                self.artifact_file()
+                    && self
+                        .note
+                        .as_deref()
+                        .is_some_and(|note| !note.trim().is_empty())
+                    && self.storage_destination.is_some()
+                    && self.storage_digest.as_deref().is_some_and(valid_digest)
+            }
+            "redacted" => {
+                self.artifact_file()
+                    && self
+                        .note
+                        .as_deref()
+                        .is_some_and(|note| !note.trim().is_empty())
+                    && self
+                        .redaction
+                        .as_ref()
+                        .is_some_and(crate::journal_exchange::Redaction::well_formed)
+            }
             "promoted" => self.artifact_file() && self.promotion.is_some(),
             "storage-intent" | "storage-completed" => {
                 self.artifact_file()
@@ -9913,6 +10130,17 @@ fn event_message(event: &JournalEvent) -> String {
             event.file.as_deref().unwrap_or_default()
         ),
         "unarchived" => format!("unarchived {}", event.file.as_deref().unwrap_or_default()),
+        "relocated" => format!(
+            "relocated {} to {}: {}",
+            event.file.as_deref().unwrap_or_default(),
+            event.storage_destination.as_deref().unwrap_or_default(),
+            event.note.as_deref().unwrap_or_default()
+        ),
+        "redacted" => format!(
+            "redacted {}: {}",
+            event.file.as_deref().unwrap_or_default(),
+            event.note.as_deref().unwrap_or_default()
+        ),
         "promoted" => {
             let promotion = event.promotion.as_ref();
             format!(
@@ -10223,6 +10451,7 @@ fn terminal_kind(event: &JournalEvent) -> Option<&'static str> {
             },
         ),
         "transition" => Some("transition"),
+        "relocated" => Some("relocated"),
         "archived" | "storage-completed"
             if event.outcome.as_deref() == Some("unresolved")
                 && event
@@ -10382,6 +10611,9 @@ fn open_artifact_claims(events: &[JournalEvent], file: &str) -> Vec<ArtifactClai
 }
 
 fn pending_transition(dir: &Path, events: &[JournalEvent], file: &str) -> bool {
+    if relocation(events, file).is_some() {
+        return false;
+    }
     events.iter().any(|event| {
         event.event == "transition"
             && event.file.as_deref() == Some(file)
@@ -13524,6 +13756,8 @@ pub(crate) struct ReconciliationFacts {
     pub consumed: HashMap<String, String>,
     /// Successor filename per superseded artifact filename.
     pub successors: HashMap<String, String>,
+    /// Destination per artifact relocated out of the journal.
+    pub relocated: HashMap<String, String>,
 }
 
 pub(crate) fn reconciliation_facts(dir: &Path) -> Result<ReconciliationFacts> {
@@ -13555,6 +13789,12 @@ pub(crate) fn reconciliation_facts(dir: &Path) -> Result<ReconciliationFacts> {
                         .entry(source.to_string())
                         .or_insert_with(|| file.to_string());
                 }
+            }
+            "relocated" => {
+                facts.relocated.insert(
+                    file.to_string(),
+                    event.storage_destination.clone().unwrap_or_default(),
+                );
             }
             _ => {}
         }
@@ -14009,6 +14249,60 @@ fn entry_id(event: &JournalEvent) -> Option<&str> {
 }
 
 /// Match both halves of each entry across all artifact kinds and storage tiers.
+/// A tombstone whose body is still in the journal is an interrupted
+/// relocation, and a redaction whose result the body does not hold is an
+/// interrupted redaction; rerunning either command finishes it.
+fn inspect_relocations_and_redactions(
+    hot: &Path,
+    cold: &Path,
+    events: &[JournalEvent],
+    problems: &mut Vec<DoctorFinding>,
+) -> Result<()> {
+    let mut files: Vec<&str> = events
+        .iter()
+        .filter(|event| event.known() && matches!(event.event.as_str(), "relocated" | "redacted"))
+        .filter_map(|event| event.file.as_deref())
+        .collect();
+    files.sort();
+    files.dedup();
+    for file in files {
+        if relocation(events, file).is_some() {
+            if [
+                hot.join(file),
+                cold.join(file),
+                transition_body_path(hot, file),
+            ]
+            .iter()
+            .any(|path| path.exists())
+            {
+                problems.push(DoctorFinding {
+                    code: "relocated-body-present",
+                    detail: format!("{file}: rerun `arc journal relocate` to finish removing it"),
+                });
+            }
+            continue;
+        }
+        let Some(last) = events
+            .iter()
+            .rev()
+            .filter(|event| event.known() && event.file.as_deref() == Some(file))
+            .find_map(JournalEvent::redaction)
+        else {
+            continue;
+        };
+        let Some(path) = artifact_body_path(hot, file) else {
+            continue;
+        };
+        if body_digest(&path)? == last.before {
+            problems.push(DoctorFinding {
+                code: "unapplied-redaction",
+                detail: format!("{file}: rerun `arc journal redact` to finish rewriting it"),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn inspect_entry_blocks(
     hot: &Path,
     cold: &Path,
@@ -14036,6 +14330,8 @@ fn inspect_entry_blocks(
             files.insert(file.clone());
         }
     }
+    // A relocated artifact's entries left with its body.
+    files.retain(|file| relocation(events, file).is_none());
     for file in files {
         let body = artifact_body_path(hot, &file)
             .map(std::fs::read_to_string)
@@ -14491,6 +14787,9 @@ fn path_refusal(path: &str, spelled: Option<&str>) -> anyhow::Error {
 /// `<journal-dir>::<file>` form of each other known journal that holds it, or,
 /// when none does, the qualified form is named.
 pub(crate) fn missing_artifact(location: &ArtifactLocation, searched: &str) -> anyhow::Error {
+    if let Some(refusal) = relocated_refusal(&location.hot, &location.file) {
+        return refusal;
+    }
     if location.foreign {
         return anyhow::anyhow!("no such artifact {} in {searched}", location.file);
     }
@@ -14527,7 +14826,23 @@ fn artifact_refusal(file: &str, searched: &str, holders: Result<Vec<PathBuf>>) -
 /// journal holds, so each other known journal holding the filename is named
 /// with its project, as the place the write runs from.
 fn missing_write_target(own: &Path, file: &str) -> anyhow::Error {
+    if let Some(refusal) = relocated_refusal(own, file) {
+        return refusal;
+    }
     write_target_refusal(own, file, journals_holding(own, file))
+}
+
+/// The refusal for an artifact this journal relocated: where it went, when,
+/// and why.
+fn relocated_refusal(hot: &Path, file: &str) -> Option<anyhow::Error> {
+    let events = read_events(hot).ok()?;
+    let tombstone = relocation(&events, file)?;
+    Some(anyhow::anyhow!(
+        "{file} was relocated out of this journal to {} at {}: {}",
+        tombstone.storage_destination.as_deref().unwrap_or_default(),
+        tombstone.ts,
+        tombstone.note.as_deref().unwrap_or_default()
+    ))
 }
 
 fn write_target_refusal(own: &Path, file: &str, holders: Result<Vec<PathBuf>>) -> anyhow::Error {
@@ -15996,6 +16311,497 @@ fn unarchive(ctx: &Ctx, filename: &str) -> Result<i32> {
     Ok(0)
 }
 
+/// What a relocation was told to accept instead of refusing.
+struct RelocationAcknowledgements<'a> {
+    claims: &'a [String],
+    transition: bool,
+    questions: bool,
+}
+
+/// One artifact a relocation moves, checked before anything moves.
+struct RelocationPlan {
+    file: String,
+    topic: String,
+    /// Copies of the body inside the journal: hot, cold, and a prepared
+    /// transition copy, whichever exist.
+    copies: Vec<PathBuf>,
+    digest: String,
+    destination: PathBuf,
+    /// Whether the destination already holds this body.
+    copied: bool,
+    /// Whether the tombstone is already recorded: an interrupted relocation.
+    recorded: bool,
+    claims: Vec<String>,
+}
+
+fn relocate(
+    ctx: &Ctx,
+    files: &[String],
+    to: &str,
+    reason: &str,
+    accept: RelocationAcknowledgements<'_>,
+    dry_run: bool,
+) -> Result<i32> {
+    if reason.trim().is_empty() {
+        bail!("--reason must not be empty");
+    }
+    let hot = resolve_dir(&ctx.cwd)?;
+    let destination = relocation_destination(ctx, &hot, to)?;
+    let _transition = (!dry_run)
+        .then(|| lock_journal_transition(&hot))
+        .transpose()?;
+    let events = read_events(&hot)?;
+    let mut plans: Vec<RelocationPlan> = Vec::new();
+    for file in files {
+        if plans.iter().any(|plan| &plan.file == file) {
+            continue;
+        }
+        plans.push(plan_relocation(
+            ctx,
+            &hot,
+            &events,
+            file,
+            &destination,
+            &accept,
+        )?);
+    }
+    for plan in &plans {
+        if dry_run {
+            println!(
+                "would relocate: {} -> {} ({})",
+                plan.file,
+                plan.destination.display(),
+                plan.digest
+            );
+            continue;
+        }
+        execute_relocation(ctx, &hot, plan, reason.trim())?;
+        println!(
+            "relocated: {} -> {} ({})",
+            plan.file,
+            plan.destination.display(),
+            plan.digest
+        );
+    }
+    if dry_run {
+        println!("dry run: nothing written");
+    }
+    Ok(0)
+}
+
+/// The absolute destination directory, refused when arc reads anything
+/// beneath it.
+fn relocation_destination(ctx: &Ctx, hot: &Path, to: &str) -> Result<PathBuf> {
+    let requested = config::expand_tilde(to)?;
+    let requested = if requested.is_absolute() {
+        requested
+    } else {
+        ctx.cwd.join(requested)
+    };
+    let resolved = resolve_existing_prefix(&requested)?;
+    let cfg = config::load()?;
+    let mut protected = vec![cfg.ai_home.clone(), hot.to_path_buf(), archive_dir(hot)];
+    if let Some(data_root) = &cfg.data_root {
+        protected.push(data_root.clone());
+    }
+    for (_, journal) in crate::registry::known_journals(&cfg)? {
+        protected.push(archive_dir(&journal));
+        protected.push(journal);
+    }
+    for root in protected {
+        let root = resolve_existing_prefix(&root)?;
+        if resolved.starts_with(&root) {
+            bail!(
+                "{} is inside {}, which arc reads; relocate to a directory outside arc",
+                resolved.display(),
+                root.display()
+            );
+        }
+    }
+    Ok(resolved)
+}
+
+/// `path` with its longest existing prefix canonicalized and the rest kept,
+/// so a destination not created yet compares like one that exists.
+fn resolve_existing_prefix(path: &Path) -> Result<PathBuf> {
+    let mut existing = path.to_path_buf();
+    let mut rest = Vec::new();
+    while !existing.exists() {
+        let Some(name) = existing.file_name() else {
+            break;
+        };
+        rest.push(name.to_os_string());
+        if !existing.pop() {
+            break;
+        }
+    }
+    let mut resolved = std::fs::canonicalize(&existing)
+        .with_context(|| format!("cannot resolve {}", existing.display()))?;
+    for name in rest.into_iter().rev() {
+        if name == ".." || name == "." {
+            bail!("{} must not climb out with `..`", path.display());
+        }
+        resolved.push(name);
+    }
+    Ok(resolved)
+}
+
+fn plan_relocation(
+    ctx: &Ctx,
+    hot: &Path,
+    events: &[JournalEvent],
+    file: &str,
+    destination: &Path,
+    accept: &RelocationAcknowledgements<'_>,
+) -> Result<RelocationPlan> {
+    let (topic, _) = check_artifact_name(ctx, file)?;
+    let copies: Vec<PathBuf> = [
+        hot.join(file),
+        archive_dir(hot).join(file),
+        transition_body_path(hot, file),
+    ]
+    .into_iter()
+    .filter(|path| path.is_file())
+    .collect();
+    let target = destination.join(file);
+    if let Some(tombstone) = relocation(events, file) {
+        let digest = tombstone.storage_digest.clone().unwrap_or_default();
+        let recorded = tombstone.storage_destination.as_deref().map(PathBuf::from);
+        if copies.is_empty() {
+            bail!(
+                "{file} was already relocated to {}",
+                recorded.as_deref().unwrap_or(&target).display()
+            );
+        }
+        // An interrupted relocation: the tombstone is written and the copy
+        // verified, so only the journal's copies remain to remove.
+        let recorded = recorded.context("the tombstone names no destination")?;
+        if !recorded.is_file() || body_digest(&recorded)? != digest {
+            bail!(
+                "{file} has a tombstone naming {}, which does not hold its body; restore that copy before finishing the relocation",
+                recorded.display()
+            );
+        }
+        return Ok(RelocationPlan {
+            file: file.to_string(),
+            topic,
+            copies,
+            digest,
+            destination: recorded,
+            copied: true,
+            recorded: true,
+            claims: Vec::new(),
+        });
+    }
+    let Some(body) = artifact_body_path(hot, file) else {
+        return Err(missing_write_target(hot, file));
+    };
+    let digest = body_digest(&body)?;
+    for copy in &copies {
+        if copy != &transition_body_path(hot, file) && body_digest(copy)? != digest {
+            bail!("conflicting hot and cold bodies for {file}");
+        }
+    }
+    let unfinished = pending_storage(events, file).is_some()
+        || pending_transition(hot, events, file)
+        || events.iter().any(|event| {
+            event.event == "transition"
+                && event.supersedes.as_deref() == Some(file)
+                && !event.creates_artifact(hot, events)
+        });
+    if unfinished && !accept.transition {
+        bail!(
+            "{file} has an unfinished transition or storage move; finish it first (journal doctor names it), or pass --acknowledge-transition to leave it unfinished"
+        );
+    }
+    ensure_claims_acknowledged(events, file, accept.claims, "relocate")?;
+    let questions = unanswered_questions(events, file);
+    if !questions.is_empty() && !accept.questions {
+        bail!(
+            "{file} holds {} unanswered question{} ({}); pass --drop-questions to leave {} undecided",
+            questions.len(),
+            if questions.len() == 1 { "" } else { "s" },
+            questions.join(", "),
+            if questions.len() == 1 { "it" } else { "them" }
+        );
+    }
+    let copied = match std::fs::symlink_metadata(&target) {
+        Ok(_) if body_digest(&target).ok().as_deref() == Some(digest.as_str()) => true,
+        Ok(_) => bail!(
+            "{} already exists with a different body; nothing was relocated",
+            target.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(error).with_context(|| format!("cannot inspect {}", target.display()))
+        }
+    };
+    Ok(RelocationPlan {
+        file: file.to_string(),
+        topic,
+        copies,
+        digest,
+        destination: target,
+        copied,
+        recorded: false,
+        claims: open_artifact_claims(events, file)
+            .into_iter()
+            .map(|claim| claim.state.claim_id)
+            .collect(),
+    })
+}
+
+/// Copy, verify, record, then remove: an interruption at any step leaves
+/// the body in the journal or a tombstone naming a verified copy, and a
+/// rerun finishes from there.
+fn execute_relocation(ctx: &Ctx, hot: &Path, plan: &RelocationPlan, reason: &str) -> Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    if !plan.copied {
+        let directory = plan
+            .destination
+            .parent()
+            .context("destination has no parent")?;
+        if !directory.is_dir() {
+            std::fs::create_dir_all(directory)
+                .with_context(|| format!("cannot create {}", directory.display()))?;
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let source = plan.copies.first().context("no copy to relocate")?;
+        let body = std::fs::read(source)?;
+        let staged = directory.join(format!(".{}.relocating", plan.file));
+        let _ = std::fs::remove_file(&staged);
+        let mut out = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&staged)
+            .with_context(|| format!("cannot write {}", staged.display()))?;
+        out.write_all(&body)?;
+        out.sync_all()?;
+        drop(out);
+        let linked = std::fs::hard_link(&staged, &plan.destination);
+        std::fs::remove_file(&staged)?;
+        linked.with_context(|| format!("cannot create {}", plan.destination.display()))?;
+        File::open(directory)?.sync_all()?;
+    }
+    if body_digest(&plan.destination)? != plan.digest {
+        bail!(
+            "{} does not match {}'s digest; nothing was removed",
+            plan.destination.display(),
+            plan.file
+        );
+    }
+    if !plan.recorded {
+        let mut event = JournalEvent::base(ctx, Utc::now(), &plan.topic, "relocated");
+        event.file = Some(plan.file.clone());
+        event.note = Some(reason.to_string());
+        event.storage_source = plan.copies.first().map(|path| path.display().to_string());
+        event.storage_destination = Some(plan.destination.display().to_string());
+        event.storage_digest = Some(plan.digest.clone());
+        event.storage_claims = plan.claims.clone();
+        append_event(ctx, hot, &event)?;
+    }
+    for copy in &plan.copies {
+        std::fs::remove_file(copy).with_context(|| format!("cannot remove {}", copy.display()))?;
+        File::open(copy.parent().context("copy has no parent")?)?.sync_all()?;
+    }
+    Ok(())
+}
+
+/// What a redaction writes: replacement pairs, or a whole new body.
+enum Rewrite {
+    Replace(Vec<(String, String)>),
+    Body(String),
+}
+
+fn redact(ctx: &Ctx, file: &str, rewrite: Rewrite, reason: &str, dry_run: bool) -> Result<i32> {
+    if reason.trim().is_empty() {
+        bail!("--reason must not be empty");
+    }
+    let (topic, _) = check_artifact_name(ctx, file)?;
+    let hot = resolve_dir(&ctx.cwd)?;
+    let _transition = (!dry_run)
+        .then(|| lock_journal_transition(&hot))
+        .transpose()?;
+    let events = read_events(&hot)?;
+    if let Some(tombstone) = relocation(&events, file) {
+        bail!(
+            "{file} was relocated to {}; nothing in this journal holds its body",
+            tombstone.storage_destination.as_deref().unwrap_or_default()
+        );
+    }
+    ensure_storage_settled(&hot, &events, file)?;
+    if transition_body_path(&hot, file).exists() {
+        bail!(
+            "{file} has an unfinished transition whose prepared copy would keep the old text; finish the transition first"
+        );
+    }
+    let Some(path) = artifact_body_path(&hot, file) else {
+        return Err(missing_write_target(&hot, file));
+    };
+    let old = std::fs::read_to_string(&path)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    let own: Vec<JournalEvent> = events
+        .iter()
+        .filter(|event| event.file.as_deref() == Some(file))
+        .cloned()
+        .collect();
+    let new = match rewrite {
+        Rewrite::Body(body) => body,
+        Rewrite::Replace(pairs) => {
+            let mut body = old.clone();
+            for (index, (from, to)) in pairs.iter().enumerate() {
+                if from.is_empty() || !body.contains(from.as_str()) {
+                    bail!("replacement {} matches nothing in {file}", index + 1);
+                }
+                body = body.replace(from.as_str(), to);
+            }
+            body
+        }
+    };
+    if new == old {
+        bail!("the rewrite leaves {file} unchanged");
+    }
+    let redaction = redaction_of(file, &old, &new, &own)?;
+    let mut event = JournalEvent::base(ctx, Utc::now(), &topic, "redacted");
+    event.file = Some(file.to_string());
+    event.note = Some(reason.trim().to_string());
+    event.redaction = Some(redaction.clone());
+    let mut after_events = own.clone();
+    after_events.push(event.clone());
+    let before_ids: Vec<String> = crate::journal_exchange::sections(&old, &own)?
+        .into_iter()
+        .map(|section| section.id)
+        .collect();
+    let after_ids: Vec<String> = crate::journal_exchange::sections(&new, &after_events)
+        .with_context(|| format!("the rewrite breaks an appended entry of {file}"))?
+        .into_iter()
+        .map(|section| section.id)
+        .collect();
+    if before_ids != after_ids {
+        bail!("the rewrite changes which entries {file} holds");
+    }
+    let changed: Vec<&str> = redaction
+        .sections
+        .iter()
+        .map(|section| section.id.as_str())
+        .collect();
+    if dry_run {
+        println!(
+            "would redact: {file} ({} -> {}); sections: {}",
+            redaction.before,
+            redaction.after,
+            changed.join(", ")
+        );
+        println!("dry run: nothing written");
+        return Ok(0);
+    }
+    // A rerun of an interrupted redaction finds its event already recorded.
+    let recorded = own
+        .iter()
+        .rev()
+        .find_map(JournalEvent::redaction)
+        .is_some_and(|last| last.before == redaction.before && last.after == redaction.after);
+    if !recorded {
+        append_event(ctx, &hot, &event)?;
+    }
+    replace_body(&path, &new)?;
+    println!(
+        "redacted: {file} ({} -> {}); sections: {}",
+        redaction.before,
+        redaction.after,
+        changed.join(", ")
+    );
+    Ok(0)
+}
+
+/// The before and after digests of `old` and `new` and of each section the
+/// rewrite changed. Sections are found in `new` by the heading lines of the
+/// appended entries `old` holds, in order; a rewrite that loses or reorders
+/// one refuses.
+fn redaction_of(
+    file: &str,
+    old: &str,
+    new: &str,
+    events: &[JournalEvent],
+) -> Result<crate::journal_exchange::Redaction> {
+    use crate::journal_exchange::body_digest as digest;
+    let first_line = |text: &str| text.lines().next().map(str::to_string);
+    if first_line(old).is_some_and(|line| line.starts_with("supersedes: "))
+        && first_line(old) != first_line(new)
+    {
+        bail!("the rewrite changes the `supersedes:` line of {file}");
+    }
+    let sections = crate::journal_exchange::sections(old, events)?;
+    let mut bounds = vec![0usize];
+    let mut cursor = 0usize;
+    for section in sections.iter().skip(1) {
+        let heading = old[section.start..section.end]
+            .trim_start_matches('\n')
+            .lines()
+            .next()
+            .unwrap_or_default();
+        let needle = format!("\n{heading}\n");
+        let found = new[cursor..]
+            .find(&needle)
+            .or_else(|| {
+                let tail = format!("\n{heading}");
+                new[cursor..]
+                    .ends_with(&tail)
+                    .then(|| new.len() - cursor - tail.len())
+            })
+            .with_context(|| {
+                format!(
+                    "the rewrite changes, removes, or reorders the heading of entry {} in {file}",
+                    section.id
+                )
+            })?;
+        let start = cursor + found;
+        bounds.push(start);
+        cursor = start + 1;
+    }
+    let mut changed = Vec::new();
+    for (index, section) in sections.iter().enumerate() {
+        let new_start = bounds[index];
+        let new_end = bounds.get(index + 1).copied().unwrap_or(new.len());
+        let before = &old[section.start..section.end];
+        let after = &new[new_start..new_end];
+        if before != after {
+            changed.push(crate::journal_exchange::RedactedSection {
+                id: section.id.clone(),
+                before: digest(before),
+                after: digest(after),
+            });
+        }
+    }
+    Ok(crate::journal_exchange::Redaction {
+        before: digest(old),
+        after: digest(new),
+        sections: changed,
+    })
+}
+
+/// Replace a body file atomically, keeping its permissions.
+fn replace_body(path: &Path, body: &str) -> Result<()> {
+    use std::io::Write as _;
+    let directory = path.parent().context("artifact has no parent")?;
+    let staged = directory.join(format!(
+        ".{}.redacting",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    let permissions = std::fs::metadata(path)?.permissions();
+    let mut out =
+        File::create(&staged).with_context(|| format!("cannot write {}", staged.display()))?;
+    out.write_all(body.as_bytes())?;
+    out.sync_all()?;
+    drop(out);
+    std::fs::set_permissions(&staged, permissions)?;
+    std::fs::rename(&staged, path).with_context(|| format!("cannot replace {}", path.display()))?;
+    File::open(directory)?.sync_all()?;
+    Ok(())
+}
+
 fn timestamp_older_than(timestamp: &str, days: u64) -> bool {
     let Some(parsed) = parse_artifact_timestamp(timestamp) else {
         return false;
@@ -16059,11 +16865,22 @@ fn storage_is_complete(events: &[JournalEvent], intent: &JournalEvent) -> bool {
 }
 
 fn pending_storage<'a>(events: &'a [JournalEvent], filename: &str) -> Option<&'a JournalEvent> {
+    if relocation(events, filename).is_some() {
+        return None;
+    }
     events.iter().rev().find(|e| {
         e.event == "storage-intent"
             && e.file.as_deref() == Some(filename)
             && !storage_is_complete(events, e)
     })
+}
+
+/// The tombstone of an artifact relocated out of this journal.
+pub(crate) fn relocation<'a>(events: &'a [JournalEvent], file: &str) -> Option<&'a JournalEvent> {
+    events
+        .iter()
+        .rev()
+        .find(|event| event.event == "relocated" && event.file.as_deref() == Some(file))
 }
 
 fn ensure_storage_settled(hot: &Path, events: &[JournalEvent], file: &str) -> Result<()> {
