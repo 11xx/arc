@@ -1188,6 +1188,7 @@ fn every_read_only_command_reads_past_a_broken_policy() {
     let manual_dir = manual_dir.to_str().unwrap();
     // Missing subjects exercise read errors without claiming a successful lookup.
     let extra_forms = vec![
+        vec!["guide", "identity"],
         vec!["forge", "show", "read-only", "--json"],
         vec!["stats", "--json"],
         vec!["stats", "--by-model", "--json"],
