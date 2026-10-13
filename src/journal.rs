@@ -12839,8 +12839,7 @@ fn all_changes_in(
     for id in read.change_ids()? {
         let events = read.events(&id)?;
         changes.push(
-            read.scope()
-                .and_then(|scope| store.project_state_in(scope, &events, rewrites))
+            read.project_with_rewrites(&events, rewrites)
                 .with_context(|| format!("cannot read change {id}"))?,
         );
     }

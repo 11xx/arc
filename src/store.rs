@@ -140,10 +140,19 @@ impl LedgerRead<'_> {
 
     /// A change's events reduced under this read's rewrites and scope.
     pub fn project(&self, events: &[Event]) -> Result<crate::state::ChangeState> {
+        self.project_with_rewrites(events, self.rewrites()?)
+    }
+
+    /// Reduce held events under a supplied map, sharing this read's repository facts.
+    pub fn project_with_rewrites(
+        &self,
+        events: &[Event],
+        rewrites: &crate::rewrite::RewriteMap,
+    ) -> Result<crate::state::ChangeState> {
         self.store.project_state_with_repository(
             self.scope()?,
             events,
-            self.rewrites()?,
+            rewrites,
             self.repository_events()?,
         )
     }
