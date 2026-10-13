@@ -175,6 +175,97 @@ fn an_audit_by_the_implementers_model_at_another_effort_warns() {
         .success()
         .stderr(predicates::str::contains("Implemented-by"))
         .stderr(predicates::str::contains("gpt-6.1-sol"));
+    let debt = debt_of(&repo, "warned");
+    assert_eq!(debt["standing"], "owed", "{debt}");
+    assert!(debt["discharged_by"].is_null(), "{debt}");
+    assert!(
+        stdout(repo.arc(&repo.root).args(["query", "--debt"])).contains("warned"),
+        "same-model audit removed the change from the debt queue"
+    );
+
+    audit_as(&repo, "warned", "fixture-opus#medium", "approved").success();
+    assert_eq!(debt_of(&repo, "warned")["standing"], "discharged");
+}
+
+#[test]
+fn a_same_model_read_never_discharges_debt_regardless_of_policy_effort_or_verdict() {
+    for policy in ["", "[policy]\nforbid_self_approval = false\n"] {
+        for model in ["gpt-6.1-sol#low", "gpt-6.1-sol#xhigh"] {
+            for verdict in ["approved", "changes-requested"] {
+                let repo = repo_with_policy(policy);
+                trailed_change(&repo, "read", &[&[SONNET, SOL]]);
+                integrate_with_debt(&repo, "read");
+                audit_as(&repo, "read", model, verdict).success();
+                let debt = debt_of(&repo, "read");
+                assert_eq!(
+                    debt["standing"], "owed",
+                    "{policy:?} {model} {verdict}: {debt}"
+                );
+                assert!(debt["discharged_by"].is_null(), "{debt}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_same_model_verdict_may_authorize_integration_but_leaves_review_debt_owed() {
+    let repo = repo_with_policy("[policy]\nforbid_self_approval = false\n");
+    trailed_change(&repo, "verdict", &[&[SOL]]);
+    repo.arc(&repo.root)
+        .args([
+            "debt",
+            "verdict",
+            "--kind",
+            "independent-review",
+            "--reason",
+            "independent read owed",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Reviewer")
+        .args([
+            "--model",
+            "gpt-6.1-sol#xhigh",
+            "review",
+            "verdict",
+            "--verdict",
+            "approved",
+        ])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("Implemented-by"));
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "verdict", "--json"]));
+    assert_eq!(status["has_valid_approval"], true, "{status}");
+    assert_ne!(status["approval_waived_by_debt"], true, "{status}");
+    repo.arc(&repo.root)
+        .args(["integrate", "verdict"])
+        .assert()
+        .success();
+    let debt = debt_of(&repo, "verdict");
+    assert_eq!(debt["standing"], "owed", "{debt}");
+    assert!(debt["discharged_by"].is_null(), "{debt}");
+}
+
+#[test]
+fn guide_and_review_help_distinguish_approval_authority_from_independent_coverage() {
+    let repo = Repo::new();
+    let guide = stdout(&mut repo.arc(&repo.root));
+    assert!(
+        guide.contains("policy governs approval authority, not independent coverage"),
+        "{guide}"
+    );
+    for command in ["audit", "review"] {
+        let help = stdout(repo.arc(&repo.root).args([command, "--help"]));
+        assert!(
+            help.contains("never discharges review debt"),
+            "{command}: {help}"
+        );
+        assert!(
+            help.contains("regardless of self-approval policy"),
+            "{command}: {help}"
+        );
+    }
 }
 
 #[test]

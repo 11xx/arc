@@ -3959,11 +3959,20 @@ impl ChangeState {
                     .iter()
                     .find(|patchset| patchset.id == shipped)
             });
+        let implementers = debt
+            .production
+            .as_ref()
+            .and_then(|production| production.trailer_implementers.as_deref())
+            .unwrap_or_default();
+        let independent_model = |model: Option<&str>| {
+            model.is_none_or(|model| crate::trailers::naming_model(implementers, model).is_none())
+        };
         if let Some(audit) = self.audit_verdicts.iter().find(|audit| {
             self.review_eligible(&audit.event_id, &audit.origin_replica_id)
                 && audit.created_at >= debt.declared_at
                 && (!ineligible_review || audit.clears_ineligible_review())
                 && !audit.author_assumed()
+                && independent_model(audit.model.as_deref())
                 && shipped_patchset.is_none_or(|patchset| {
                     patchset
                         .contributor_match(audit.effective_author())
@@ -3998,6 +4007,7 @@ impl ChangeState {
                     && verdict.created_at >= debt.declared_at
                     && verdict.patchset_id == shipped
                     && !verdict.author_assumed()
+                    && independent_model(verdict.model.as_deref())
                     && patchset
                         .contributor_match(verdict.effective_author())
                         .is_none()

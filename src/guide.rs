@@ -2396,7 +2396,10 @@ REVIEW COVERAGE AND DEBT
   identity wrote, and whether arc assumed the identity rather than anyone
   declaring it. Such a
   verdict is a review that happened, not an independent one, and it leaves an
-  independent-review debt owed.
+  independent-review debt owed. A read under a model named by an
+  `Implemented-by` trailer in the debt's production record, at any effort,
+  also leaves the debt owed, regardless of `forbid_self_approval`. That
+  policy governs approval authority, not independent coverage.
 
 REVIEW ASSURANCE
   Every integrated change carries a dated assurance record: the reads it

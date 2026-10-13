@@ -1787,7 +1787,9 @@ enum Cmd {
     /// and not that it was independent of whoever wrote the work. Where
     /// `forbid_self_approval` applies, the gate rejects it as a self-approval,
     /// exactly as it rejects a reviewer matching a contributor, and says so
-    /// when the verdict is recorded.
+    /// when the verdict is recorded. Such a read never discharges review debt,
+    /// regardless of self-approval policy: permission to approve does not
+    /// establish independent coverage.
     #[command(group(clap::ArgGroup::new("snapshot_attribution").args(["contributors", "solo"]).requires("snapshot")))]
     /// Verdicts retain observed publication authority. A verified authority refusal
     /// on a provisional delivery remains applicable across authority transfer.
@@ -2572,7 +2574,8 @@ enum Cmd {
     /// records the audit: the audit's recorded model, and its effort where
     /// both name one, must match the reviewer's `identities` and `effort`.
     /// Otherwise the audit is recorded, says why, and is listed beside the
-    /// obligation, which stays open. Every other kind discharges as before.
+    /// obligation, which stays open. Every other kind needs an independent
+    /// read without a routing assessment.
     ///
     /// An `ineligible-review` debt is also cleared only when the assessment's
     /// authors answer to the model of every `Implemented-by` line in the
@@ -2586,7 +2589,10 @@ enum Cmd {
     /// line in the audited range, at any effort, warns that it shows a review
     /// happened and not that it was independent of whoever wrote the work.
     /// Where `forbid_self_approval` is on it is refused, with the remedy a
-    /// contributor match gets. `--verdict changes-requested` is open to anyone.
+    /// contributor match gets. Such a read never discharges review debt,
+    /// regardless of self-approval policy: permission to approve does not
+    /// establish independent coverage. `--verdict changes-requested` is
+    /// open to anyone.
     Audit {
         /// Change whose integrated revision was reviewed
         change: String,
