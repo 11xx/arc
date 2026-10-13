@@ -1394,8 +1394,9 @@ pub enum JournalCmd {
     ///
     /// Each body is copied into the destination under its own filename,
     /// verified against its digest, and then removed from the hot directory,
-    /// the cold archive, and any prepared transition copy, so `show`, `list
-    /// --archived`, catchup, and every workspace view stop reaching it. A
+    /// the cold archive, and any prepared transition copy, so `show`,
+    /// `inventory --archived`, catchup, and every workspace view stop reaching
+    /// it. A
     /// `relocated` event records the file, the destination path, the reason,
     /// and the body digest. The event log keeps what earlier events recorded
     /// about the artifact, such as its topic and title.
