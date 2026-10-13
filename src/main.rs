@@ -1597,7 +1597,8 @@ enum Cmd {
         /// Brief version this patchset implements (defaults to latest)
         #[arg(long)]
         brief_version: Option<usize>,
-        /// Run verification after recording the patchset
+        /// Run verification after recording the patchset. Without --gate,
+        /// reuse the newest green evidence at the same tree and rerun the rest
         #[arg(long)]
         verify: bool,
         /// Gate name from .arc/gates.toml (repeatable with --verify). Names must
@@ -1853,6 +1854,9 @@ enum Cmd {
     /// `--attest` records evidence arc did not run. Acceptance executes local
     /// head gates even when imported evidence passed, and selects probes from
     /// the delivered patchset's bound brief. Baselines run in scratch checkouts.
+    /// Declared timeouts also bound output-pipe cleanup after the shell exits.
+    /// Arc kills the process group and does not wait for escaped descendants;
+    /// unfinished readers supply no output tail or environment identity.
     Verify {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in

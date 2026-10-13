@@ -138,28 +138,13 @@ fn wait_for_output(mut child: std::process::Child, deadline: Instant) -> Result<
     output
 }
 
-/// Workers own their pipes and buffers; dropping an unfinished handle detaches
-/// it without borrowing caller state or extending the probe deadline.
 fn join_before_deadline<T>(
     worker: thread::JoinHandle<T>,
     deadline: Option<Instant>,
     name: &str,
 ) -> Result<T> {
-    if let Some(deadline) = deadline {
-        while !worker.is_finished() {
-            if Instant::now() >= deadline {
-                bail!("git probe timed out waiting for {name}");
-            }
-            thread::sleep(
-                deadline
-                    .saturating_duration_since(Instant::now())
-                    .min(Duration::from_millis(1)),
-            );
-        }
-    }
-    worker
-        .join()
-        .map_err(|_| anyhow::anyhow!("{name} panicked"))
+    crate::process_group::join_before_deadline(worker, deadline, name)?
+        .with_context(|| format!("git probe timed out waiting for {name}"))
 }
 
 /// The common Git directory shared by every worktree of one repository.

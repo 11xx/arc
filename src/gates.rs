@@ -5,7 +5,9 @@
 //! retained for diagnostics and refused by gate-dependent operations.
 
 use crate::commands::parse_duration;
-use crate::process_group::{kill_process_group, read_tail, STDERR_TAIL_BYTES};
+use crate::process_group::{
+    join_before_deadline, kill_process_group, read_tail, STDERR_TAIL_BYTES,
+};
 use anyhow::{bail, Context, Result};
 use serde::{de::Error as _, Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
@@ -237,30 +239,40 @@ pub fn environment_probe(cwd: &Path, probe: &str, timeout: Option<u64>) -> Resul
                 .try_wait()
                 .context("failed to wait for environment probe")?;
         }
-        if status.is_some() {
+        if status.is_some() && stdout_reader.is_finished() && stderr_reader.is_finished() {
             break;
         }
         if Instant::now() >= deadline {
             kill_process_group(child.id())
                 .context("failed to kill overrunning environment probe")?;
-            status = Some(
-                child
-                    .wait()
-                    .context("failed to reap overrunning environment probe")?,
-            );
+            if status.is_none() {
+                status = Some(
+                    child
+                        .wait()
+                        .context("failed to reap overrunning environment probe")?,
+                );
+            }
             timed_out = true;
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    let (stdout_digest, printed) = stdout_reader
-        .join()
-        .map_err(|_| anyhow::anyhow!("environment probe stdout reader panicked"))?
-        .context("failed to read environment probe stdout")?;
-    let stderr_tail = stderr_reader
-        .join()
-        .map_err(|_| anyhow::anyhow!("environment probe stderr reader panicked"))?
-        .context("failed to read environment probe stderr")?;
+    let (stdout_digest, printed) = join_before_deadline(
+        stdout_reader,
+        Some(deadline),
+        "environment probe stdout reader",
+    )?
+    .transpose()
+    .context("failed to read environment probe stdout")?
+    .unwrap_or_default();
+    let stderr_tail = join_before_deadline(
+        stderr_reader,
+        Some(deadline),
+        "environment probe stderr reader",
+    )?
+    .transpose()
+    .context("failed to read environment probe stderr")?
+    .unwrap_or_default();
     let exit_code = status.and_then(|status| status.code());
     let succeeded = status.is_some_and(|status| status.success());
     Ok(if timed_out || !succeeded || !printed {
@@ -497,5 +509,25 @@ mod tests {
         let unbounded = declared("[gates.unit]\ncommand = \"t\"\n");
         assert!(target.owe_also(unbounded, "master", "change").is_empty());
         assert_eq!(target.gates["unit"].timeout, Some(60));
+    }
+}
+
+#[cfg(test)]
+mod pipe_deadline_tests {
+    use super::*;
+
+    #[test]
+    fn inherited_environment_probe_pipes_obey_the_deadline() {
+        let cwd = tempfile::tempdir().unwrap();
+        for probe in [
+            "printf identity; sleep 5 & exit 0",
+            "printf identity; sleep 5 >&2 & exit 0",
+        ] {
+            let started = Instant::now();
+            let run = environment_probe(cwd.path(), probe, Some(1)).unwrap();
+            assert!(started.elapsed() < Duration::from_secs(3));
+            assert!(run.identity.is_none());
+            assert!(run.failure.unwrap().timed_out);
+        }
     }
 }

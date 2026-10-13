@@ -4306,3 +4306,48 @@ exit 1
         1
     );
 }
+
+#[test]
+fn snapshot_verify_reuses_green_tree_evidence_and_reruns_failed_gates() {
+    let repo = Repo::new();
+    let runs = repo.home.join("runs");
+    let failure = repo.home.join("fail-gate");
+    repo.redeclare_gates(&format!(
+        "[gates.unit]\ncommand = \"test ! -f '{}' && echo run >> '{}'\"\n",
+        failure.display(),
+        runs.display(),
+    ));
+    let id = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "snapshot-reuse",
+        "--no-worktree",
+    ])));
+    stdout(
+        repo.arc(&repo.root)
+            .args(["snapshot", &id, "--verify", "--solo"]),
+    );
+    assert_eq!(fs::read_to_string(&runs).unwrap().lines().count(), 1);
+    let reused = stdout(
+        repo.arc(&repo.root)
+            .args(["snapshot", &id, "--verify", "--solo"]),
+    );
+    assert!(reused.contains("skipped"), "{reused}");
+    assert_eq!(fs::read_to_string(&runs).unwrap().lines().count(), 1);
+    // An explicit gate requests execution even when its evidence is green.
+    stdout(
+        repo.arc(&repo.root)
+            .args(["snapshot", &id, "--verify", "--gate", "unit", "--solo"]),
+    );
+    assert_eq!(fs::read_to_string(&runs).unwrap().lines().count(), 2);
+    fs::write(&failure, "fail").unwrap();
+    repo.arc(&repo.root)
+        .args(["verify", &id, "--gate", "unit"])
+        .assert()
+        .code(1);
+    fs::remove_file(&failure).unwrap();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["snapshot", &id, "--verify", "--solo"]),
+    );
+    assert_eq!(fs::read_to_string(&runs).unwrap().lines().count(), 3);
+}

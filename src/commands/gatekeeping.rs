@@ -9,19 +9,13 @@ use crate::integration::{
     self, Decision, IntegrationFacts, IntegrationPlan, Refusal, TargetCheckout,
 };
 use crate::operation_println as println;
+use crate::process_group::{join_before_deadline, kill_process_group};
 use std::collections::BTreeMap;
 use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::{ExitStatus, Stdio};
-use std::sync::mpsc::{self, TryRecvError};
 
 const OUTPUT_TAIL_BYTES: usize = 4096;
-const SIGKILL: i32 = 9;
-
-extern "C" {
-    fn kill(pid: i32, signal: i32) -> i32;
-}
-
 pub fn check_selection(
     ctx: &Ctx,
     reference: Option<&str>,
@@ -1163,7 +1157,7 @@ fn verify_recorded(
             VerifyArgs {
                 all: true,
                 parallel: false,
-                skip_green: false,
+                skip_green: true,
                 gate: None,
                 command: None,
                 probe: None,
@@ -2171,39 +2165,21 @@ pub(super) fn run_gate(cmd: &str, cwd: &Path, timeout_seconds: Option<u64>) -> R
         .stdout
         .take()
         .context("gate output pipe unavailable")?;
-    let (reader_done_tx, reader_done_rx) = mpsc::sync_channel(1);
-    let reader = thread::spawn(move || {
-        let output = read_output_tail(stdout);
-        let _ = reader_done_tx.send(());
-        output
-    });
+    let reader = thread::spawn(move || read_output_tail(stdout));
 
     let mut status = None;
-    let mut reader_done = false;
     let timed_out = loop {
         if status.is_none() {
             status = child
                 .try_wait()
                 .context("failed to wait for gate command")?;
         }
-        if !reader_done {
-            reader_done = match reader_done_rx.try_recv() {
-                Ok(()) | Err(TryRecvError::Disconnected) => true,
-                Err(TryRecvError::Empty) => false,
-            };
-        }
-        if status.is_some() && reader_done {
+        if status.is_some() && reader.is_finished() {
             break false;
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            if let Err(error) = kill_process_group(child.id()) {
-                // The final group member may exit between the completion poll
-                // and kill(2). Preserve its verification evidence instead of
-                // turning that normal race into a command error.
-                if error.raw_os_error() != Some(3) {
-                    return Err(error).context("failed to kill timed-out gate process group");
-                }
-            }
+            kill_process_group(child.id())
+                .context("failed to kill timed-out gate process group")?;
             if status.is_none() {
                 status = Some(
                     child
@@ -2216,10 +2192,10 @@ pub(super) fn run_gate(cmd: &str, cwd: &Path, timeout_seconds: Option<u64>) -> R
         thread::sleep(Duration::from_millis(10));
     };
 
-    let output = reader
-        .join()
-        .map_err(|_| anyhow::anyhow!("gate output reader panicked"))?
-        .context("failed to read gate output")?;
+    let output = join_before_deadline(reader, deadline, "gate output reader")?
+        .transpose()
+        .context("failed to read gate output")?
+        .unwrap_or_default();
     let status = status.context("gate leader exited without an observed status")?;
     let output_tail = (!output.is_empty()).then(|| String::from_utf8_lossy(&output).into_owned());
     Ok(GateRun {
@@ -2251,17 +2227,6 @@ fn read_output_tail(mut output: impl Read) -> io::Result<Vec<u8>> {
         }
         tail.extend_from_slice(&chunk[..read]);
     }
-}
-
-fn kill_process_group(pid: u32) -> io::Result<()> {
-    let pid = i32::try_from(pid)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "gate pid exceeds i32"))?;
-    // SAFETY: `kill` is called with a negated child PID created as the leader
-    // of its own process group; SIGKILL requires no borrowed memory contract.
-    if unsafe { kill(-pid, SIGKILL) } == -1 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
 }
 
 pub fn hold(ctx: &Ctx, reference: &str, reason: String) -> Result<()> {
@@ -5085,4 +5050,30 @@ fn release_retention_refs(ctx: &Ctx, change_id: &str, integrated: Option<&str>) 
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod pipe_deadline_tests {
+    use super::*;
+
+    #[test]
+    fn escaped_gate_descendant_cannot_extend_pipe_cleanup() {
+        let cwd = tempfile::tempdir().unwrap();
+        let pid_file = cwd.path().join("descendant.pid");
+        let started = Instant::now();
+        let run = run_gate(
+            "setsid sh -c 'echo $$ > descendant.pid; sleep 5' & exit 0",
+            cwd.path(),
+            Some(1),
+        )
+        .unwrap();
+        let elapsed = started.elapsed();
+        // Terminate the fixture-owned escaped group before asserting the bound.
+        if let Ok(pid) = std::fs::read_to_string(&pid_file) {
+            crate::process_group::kill_process_group(pid.trim().parse().unwrap()).unwrap();
+        }
+        assert!(elapsed < Duration::from_secs(3));
+        assert!(run.status.success());
+        assert!(run.timed_out);
+    }
 }

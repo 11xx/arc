@@ -56,3 +56,29 @@ pub fn read_tail(mut reader: impl Read, limit: usize) -> std::io::Result<String>
         tail.extend_from_slice(&chunk[..read]);
     }
 }
+
+/// Join a pipe worker within the process deadline. An unfinished worker owns
+/// its buffers and pipe; dropping its handle detaches it without extending
+/// the deadline or borrowing caller state.
+pub(crate) fn join_before_deadline<T>(
+    worker: std::thread::JoinHandle<T>,
+    deadline: Option<std::time::Instant>,
+    name: &str,
+) -> anyhow::Result<Option<T>> {
+    if let Some(deadline) = deadline {
+        while !worker.is_finished() {
+            if std::time::Instant::now() >= deadline {
+                return Ok(None);
+            }
+            std::thread::sleep(
+                deadline
+                    .saturating_duration_since(std::time::Instant::now())
+                    .min(std::time::Duration::from_millis(1)),
+            );
+        }
+    }
+    worker
+        .join()
+        .map(Some)
+        .map_err(|_| anyhow::anyhow!("{name} panicked"))
+}

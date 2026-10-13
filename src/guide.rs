@@ -742,8 +742,9 @@ RUN A CHANGE
                                      requires a fresh patchset even when the
                                      mapped head already matches the branch.
                                      A snapshot grants no approval.
-    --verify [--gate <name>...]      Run required gates, or selected gates.
-                                     Selected names must be unique and declared;
+    --verify [--gate <name>...]      Run required gates, reusing the newest
+                                     green evidence at the same tree. Selected
+                                     --gate names rerun explicitly and must be unique and declared;
                                      invalid names refuse before any write.
     --contributors <a,b> | --solo    Declare who wrote it; required while
                                      another actor holds a live claim.
@@ -774,7 +775,8 @@ RUN A CHANGE
     --falsified-by <id> --predicted <why>
                                      Name the failure this pass answers,
                                      storing its original event revision.
-  arc done                           Snapshot, run every gate, print check state.
+  arc done                           Snapshot, verify every gate with green-tree
+                                     reuse, print check state.
     --contributors <a,b> | --solo    As on `arc snapshot`.
   arc rebase [--verify]              Replay the branch onto its target, snapshot
                                      the new head, name the gates it owes.
@@ -3759,6 +3761,11 @@ FILES
     timeout = "10m"                     s, m, or h; omitted: unbounded
     environment = "<probe command>"     evidence counts only where the probe
                                         prints the same output
+
+  A timeout bounds the process and its output-pipe cleanup. A descendant
+  holding a pipe after the leader exits still times out; arc kills the
+  process group and returns without waiting on an escaped descendant. An
+  unfinished output reader supplies no tail or environment identity.
 
   Every patchset's resolved head is pinned by `refs/arc/keep/<change>/<patchset>`
   so Git's garbage collection cannot take it. Pins follow recorded rewrites
