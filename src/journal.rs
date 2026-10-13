@@ -1497,6 +1497,13 @@ fn read_scope(ctx: &Ctx, cmd: &JournalCmd) -> Result<Option<PathBuf>> {
         );
     }
     if !anchor.is_dir() {
+        if let Some(retirement) = registration_retirement(&ctx.cwd)? {
+            bail!(
+                "this journal's registration was retired at {}; read it with ARC_JOURNAL_DIR={}",
+                retirement.retired_at,
+                ctx.cwd.display()
+            );
+        }
         bail!(
             "this journal records the project at {}, which is not there; run from where the project lives now, or set ARC_JOURNAL_DIR",
             anchor.display()
@@ -3653,6 +3660,7 @@ fn rebind(ctx: &Ctx, from: &str) -> Result<i32> {
             previous_anchor: Some(previous.clone()),
             harness,
             session,
+            reason: None,
         },
     )?;
 
@@ -4456,8 +4464,10 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
             });
         }
     }
+    // A retired registration's missing anchor is the reason it was retired.
+    let retired = registration_retirement(&dir)?.is_some();
     match recorded_anchor(&dir)?.as_deref() {
-        Some(anchor) if !Path::new(anchor).is_dir() => problems.push(DoctorFinding {
+        Some(anchor) if !retired && !Path::new(anchor).is_dir() => problems.push(DoctorFinding {
             code: "orphaned-journal",
             detail: format!("bound to {anchor}, which no longer exists"),
         }),
@@ -8544,6 +8554,9 @@ struct JournalBinding {
     harness: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     session: Option<String>,
+    /// Why the registration was retired or restored, on those events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
 }
 
 const BINDING_SCHEMA: &str = "journal-binding/1";
@@ -8591,13 +8604,19 @@ pub(crate) fn record_binding(
             previous_anchor: Some(previous.display().to_string()),
             harness,
             session,
+            reason: None,
         },
     )
 }
 
 fn append_binding(dir: &Path, binding: &JournalBinding) -> Result<()> {
-    use std::io::Write;
     let _events = lock_journal_events(dir)?;
+    write_binding(dir, binding)
+}
+
+/// Append one binding; the caller holds the journal's events lock.
+fn write_binding(dir: &Path, binding: &JournalBinding) -> Result<()> {
+    use std::io::Write;
     let path = bindings_path(dir);
     let mut line = serde_json::to_string(binding)?;
     line.push('\n');
@@ -9331,6 +9350,223 @@ pub(crate) fn recorded_anchor(dir: &Path) -> Result<Option<String>> {
     Ok(read_bindings(dir)?.pop().map(|binding| binding.anchor))
 }
 
+/// A registration taken out of the workspace registry, as its `retired`
+/// binding records it.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct Retirement {
+    pub retired_at: String,
+    pub anchor: String,
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+}
+
+/// The retirement in force for this journal's registration. It is in force
+/// while the newest binding is the `retired` one: a `restored` binding, a
+/// rebind, or a write from a checkout that resolves here ends it.
+pub(crate) fn registration_retirement(dir: &Path) -> Result<Option<Retirement>> {
+    Ok(read_bindings(dir)?
+        .pop()
+        .filter(|binding| binding.event == "retired")
+        .map(|binding| Retirement {
+            retired_at: binding.ts,
+            anchor: binding.anchor,
+            reason: binding.reason,
+            harness: binding.harness,
+            session: binding.session,
+        }))
+}
+
+/// One artifact retiring a registration would strand.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct HeldArtifact {
+    pub file: String,
+    pub kind: String,
+    /// Questions on it nobody has answered.
+    pub open_questions: usize,
+}
+
+/// A claim nothing has ended. An active one is live ownership.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct HeldClaim {
+    pub file: String,
+    pub claim_id: String,
+    pub actor: String,
+    pub harness: String,
+    pub active: bool,
+}
+
+/// What a journal still holds that retiring its registration would strand.
+#[derive(Debug, Clone, Default, Serialize)]
+pub(crate) struct JournalHoldings {
+    /// Unconsumed actionable artifacts in hot storage.
+    pub unresolved: Vec<HeldArtifact>,
+    /// Transitions and storage moves that have not finished.
+    pub pending: Vec<String>,
+    /// Open claims on hot artifacts.
+    pub claims: Vec<HeldClaim>,
+}
+
+impl JournalHoldings {
+    pub(crate) fn active_claims(&self) -> impl Iterator<Item = &HeldClaim> {
+        self.claims.iter().filter(|claim| claim.active)
+    }
+
+    /// Anything that blocks retirement even when unresolved items are archived
+    /// with it: unfinished storage work and live ownership.
+    pub(crate) fn blocks_archiving(&self) -> bool {
+        !self.pending.is_empty() || self.active_claims().next().is_some()
+    }
+}
+
+/// Read what a journal holds. Takes no lock, so the retirement can repeat it
+/// under the events lock.
+pub(crate) fn journal_holdings(dir: &Path) -> Result<JournalHoldings> {
+    let events = read_events(dir)?;
+    let now = Utc::now();
+    let mut holdings = JournalHoldings::default();
+    let mut names = sorted_artifact_names(dir)?;
+    for event in events.iter().filter(|e| e.event == "storage-intent") {
+        if let Some(file) = &event.file {
+            if pending_storage(&events, file).is_some() && !names.contains(file) {
+                names.push(file.clone());
+            }
+        }
+    }
+    for name in names {
+        let Some((_, _, kind)) = parse_artifact_name(&name) else {
+            continue;
+        };
+        if pending_storage(&events, &name).is_some() || pending_transition(dir, &events, &name) {
+            holdings.pending.push(name);
+            continue;
+        }
+        for claim in open_artifact_claims(&events, &name) {
+            holdings.claims.push(HeldClaim {
+                file: name.clone(),
+                claim_id: claim.state.claim_id.clone(),
+                actor: claim.state.owner.actor.clone(),
+                harness: claim.state.owner.harness.clone(),
+                active: state::claim_timing_at(&claim.state, now).active,
+            });
+        }
+        if is_actionable_kind(&kind) && !is_consumed(&events, &name) {
+            holdings.unresolved.push(HeldArtifact {
+                open_questions: unanswered_questions(&events, &name).len(),
+                file: name,
+                kind,
+            });
+        }
+    }
+    Ok(holdings)
+}
+
+/// Retire this journal's registration, recording `reason`.
+///
+/// Unresolved artifacts refuse it unless `archive_unresolved` moves each to the
+/// cold archive first, shelved as unresolved with the reason as its note.
+/// Unfinished storage work and active claims refuse it either way. The final
+/// check and the `retired` binding share the events lock, so an artifact filed
+/// while the retirement runs refuses it rather than being stranded. Returns
+/// the artifacts archived.
+pub(crate) fn retire_registration(
+    ctx: &Ctx,
+    dir: &Path,
+    anchor: &str,
+    reason: &str,
+    archive_unresolved: bool,
+) -> Result<Vec<String>> {
+    let _transition = lock_journal_transition(dir)?;
+    let holdings = journal_holdings(dir)?;
+    refuse_retirement(&holdings, archive_unresolved)?;
+    let mut archived = Vec::new();
+    if archive_unresolved {
+        let events = read_events(dir)?;
+        for held in &holdings.unresolved {
+            let acknowledged: Vec<String> = open_artifact_claims(&events, &held.file)
+                .into_iter()
+                .map(|claim| claim.state.claim_id)
+                .collect();
+            archive_stored(ctx, dir, &held.file, Some(reason), &acknowledged, true)
+                .with_context(|| format!("cannot archive {}", held.file))?;
+            archived.push(held.file.clone());
+        }
+    }
+    let _events = lock_journal_events(dir)?;
+    let holdings = journal_holdings(dir)?;
+    refuse_retirement(&holdings, false)
+        .context("the journal changed while it was being retired")?;
+    let (harness, session) = identity(ctx);
+    write_binding(
+        dir,
+        &JournalBinding {
+            schema: BINDING_SCHEMA.to_string(),
+            ts: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            event: "retired".to_string(),
+            anchor: anchor.to_string(),
+            previous_anchor: None,
+            harness,
+            session,
+            reason: Some(reason.to_string()),
+        },
+    )?;
+    Ok(archived)
+}
+
+fn refuse_retirement(holdings: &JournalHoldings, archive_unresolved: bool) -> Result<()> {
+    if !holdings.pending.is_empty() {
+        bail!(
+            "unfinished transitions or storage moves: {}; finish them first (arc journal doctor names each)",
+            holdings.pending.join(", ")
+        );
+    }
+    let active: Vec<String> = holdings
+        .active_claims()
+        .map(|claim| format!("{} on {} ({})", claim.claim_id, claim.file, claim.actor))
+        .collect();
+    if !active.is_empty() {
+        bail!("active claims: {}", active.join(", "));
+    }
+    if !archive_unresolved && !holdings.unresolved.is_empty() {
+        let files: Vec<&str> = holdings
+            .unresolved
+            .iter()
+            .map(|held| held.file.as_str())
+            .collect();
+        bail!(
+            "unresolved artifacts: {}; resolve them, or pass --archive-unresolved to shelve them with the retirement",
+            files.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// End a retirement, recording `reason`. Archived artifacts stay archived;
+/// `journal unarchive` brings each back from the project's checkout.
+pub(crate) fn restore_registration(ctx: &Ctx, dir: &Path, reason: &str) -> Result<String> {
+    let _events = lock_journal_events(dir)?;
+    let Some(retirement) = registration_retirement(dir)? else {
+        bail!("{} is not retired", dir.display());
+    };
+    let (harness, session) = identity(ctx);
+    write_binding(
+        dir,
+        &JournalBinding {
+            schema: BINDING_SCHEMA.to_string(),
+            ts: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            event: "restored".to_string(),
+            anchor: retirement.anchor.clone(),
+            previous_anchor: None,
+            harness,
+            session,
+            reason: Some(reason.to_string()),
+        },
+    )?;
+    Ok(retirement.anchor)
+}
+
 /// Record which project this journal belongs to, once, the first time anything
 /// is written to it. A journal is addressed by the slugged path of its Git
 /// anchor, so moving the project silently starts a fresh one and strands the
@@ -9346,9 +9582,20 @@ fn ensure_bound(ctx: &Ctx, dir: &Path) -> Result<()> {
     // exists: an empty or unreadable bindings file would otherwise suppress
     // the record forever.
     let recorded = recorded_anchor(dir)?;
-    let Some(anchor) = resolve(&ctx.cwd)?.anchor else {
+    // Only a checkout whose journal this is can state that it owns it. A
+    // write naming another journal, as a registration's retirement does from
+    // wherever it runs, says nothing about where that journal belongs.
+    let Ok(resolution) = resolve(&ctx.cwd) else {
         return Ok(());
     };
+    if resolution.directory != dir {
+        return Ok(());
+    }
+    let Some(anchor) = resolution.anchor else {
+        return Ok(());
+    };
+    // A write from the project re-registers a retired journal.
+    let retired = registration_retirement(dir)?.is_some();
     if let Some(recorded) = recorded.as_deref() {
         // Two different paths can slug to one journal directory, because the
         // slug maps `/` and `.` alike. A dead anchor there names a project that
@@ -9362,7 +9609,7 @@ fn ensure_bound(ctx: &Ctx, dir: &Path) -> Result<()> {
         // journal holding history keeps its dead anchor and is reported as an
         // orphan; adopting it stays `rebind`'s explicit job.
         let stale = !Path::new(recorded).is_dir();
-        if !stale || recorded == anchor.to_string_lossy() || holds_history(dir)? {
+        if !retired && (!stale || recorded == anchor.to_string_lossy() || holds_history(dir)?) {
             return Ok(());
         }
     }
@@ -9377,6 +9624,7 @@ fn ensure_bound(ctx: &Ctx, dir: &Path) -> Result<()> {
             previous_anchor: recorded,
             harness,
             session,
+            reason: None,
         },
     )
 }
@@ -15969,14 +16217,29 @@ fn archive_one(
     acknowledge_claim: &[String],
     unresolved: bool,
 ) -> Result<()> {
+    let (_, kind) = check_artifact_name(ctx, filename)?;
+    if unresolved && kind != "discussion" {
+        bail!("--unresolved is valid only for discussion artifacts");
+    }
+    archive_stored(ctx, hot, filename, note, acknowledge_claim, unresolved)
+}
+
+/// Move one artifact to the cold archive. `unresolved` shelves an unconsumed
+/// artifact of any actionable kind; `archive_one` narrows that to discussions,
+/// and a registration's retirement uses it for every kind it shelves.
+fn archive_stored(
+    ctx: &Ctx,
+    hot: &Path,
+    filename: &str,
+    note: Option<&str>,
+    acknowledge_claim: &[String],
+    unresolved: bool,
+) -> Result<()> {
     let (topic, kind) = check_artifact_name(ctx, filename)?;
     let events = read_events(hot)?;
     require_stored(hot, &events, filename)?;
     let consumed = is_consumed(&events, filename);
     if unresolved {
-        if kind != "discussion" {
-            bail!("--unresolved is valid only for discussion artifacts");
-        }
         if note.is_none_or(|v| v.trim().is_empty()) {
             bail!("archive --unresolved requires a nonempty --note");
         }

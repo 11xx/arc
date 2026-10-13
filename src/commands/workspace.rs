@@ -50,17 +50,30 @@ pub enum WorkspaceView {
     Inventory {
         scope: WorkspaceScope,
         storage: StorageSelection,
+        show_retired: bool,
     },
     Backlog {
         since: Option<String>,
         items: bool,
         scope: WorkspaceScope,
         show_unreachable: bool,
+        show_retired: bool,
         rank_by: RankBasis,
     },
     Report {
         scope: WorkspaceScope,
         previous: Option<PathBuf>,
+        show_retired: bool,
+    },
+    Retire {
+        project: String,
+        reason: String,
+        archive_unresolved: bool,
+        dry_run: bool,
+    },
+    Restore {
+        project: String,
+        reason: String,
     },
 }
 
@@ -226,7 +239,8 @@ fn registry_stores(cfg: &crate::config::Config) -> Result<Vec<(String, Store)>> 
             // nothing an operator can act on.
             eprintln!(
                 "warning: skipping {}: its project is not at {}; \
-                 `arc workspace backlog` reports it, `arc journal rebind` adopts it",
+                 `arc workspace backlog` reports it, `arc journal rebind` adopts it, \
+                 `arc workspace retire` retires it",
                 project.journal_dir.display(),
                 project
                     .anchor
@@ -292,6 +306,7 @@ struct BacklogSelection {
     /// The parsed cutoff in replayable RFC 3339 form, when one was supplied.
     since: Option<String>,
     show_unreachable: bool,
+    show_retired: bool,
     /// The ranking basis the report used. The replay names it when it is not
     /// the default, so repeating the footer cannot silently reorder rows.
     rank_by: &'static str,
@@ -329,6 +344,9 @@ impl BacklogSelection {
         if self.show_unreachable {
             parts.push("--unreachable".to_string());
         }
+        if self.show_retired {
+            parts.push("--retired".to_string());
+        }
         if self.rank_by != RankBasis::Blocking.as_str() {
             parts.push(format!("--rank-by {}", self.rank_by));
         }
@@ -341,26 +359,43 @@ pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<i32> {
     match view {
         WorkspaceView::List => workspace_list(&workspace_stores()?, json).map(|()| 0),
         WorkspaceView::Inbox { scope } => workspace_inbox(ctx, scope, json).map(|()| 0),
-        WorkspaceView::Inventory { scope, storage } => {
-            workspace_inventory(ctx, scope, storage, json)
-        }
+        WorkspaceView::Inventory {
+            scope,
+            storage,
+            show_retired,
+        } => workspace_inventory(ctx, scope, storage, show_retired, json),
         WorkspaceView::Backlog {
             since,
             items,
             scope,
             show_unreachable,
+            show_retired,
             rank_by,
         } => workspace_backlog(
             ctx,
             since.as_deref(),
             items,
             scope,
-            show_unreachable,
+            Listed {
+                unreachable: show_unreachable,
+                retired: show_retired,
+            },
             rank_by,
             json,
         ),
-        WorkspaceView::Report { scope, previous } => {
-            workspace_report(ctx, scope, previous.as_deref(), json)
+        WorkspaceView::Report {
+            scope,
+            previous,
+            show_retired,
+        } => workspace_report(ctx, scope, previous.as_deref(), show_retired, json),
+        WorkspaceView::Retire {
+            project,
+            reason,
+            archive_unresolved,
+            dry_run,
+        } => workspace_retire(ctx, &project, &reason, archive_unresolved, dry_run, json),
+        WorkspaceView::Restore { project, reason } => {
+            workspace_restore(ctx, &project, &reason, json)
         }
     }
 }
@@ -458,7 +493,10 @@ fn workspace_inbox(ctx: &Ctx, scope: WorkspaceScope, json: bool) -> Result<()> {
     let scope = ResolvedWorkspaceScope::resolve(scope)?;
     let mut repos = Vec::new();
     for project in crate::registry::projects(&cfg)? {
-        if !scope.includes(project.anchor.as_deref()) || !project.reachable {
+        if !scope.includes(project.anchor.as_deref())
+            || !project.reachable
+            || project.retired.is_some()
+        {
             continue;
         }
         let anchor = project
@@ -556,6 +594,9 @@ struct Backlog {
     summary: BacklogSummary,
     projects: Vec<ProjectBacklog>,
     unreachable: Vec<UnreachableProject>,
+    /// Retired registrations in scope, present only under `--retired`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    retired: Vec<RetiredProject>,
 }
 
 #[derive(Serialize)]
@@ -585,6 +626,9 @@ struct CollectionManifest {
     /// Selected projects with at least one failed component, orphaned
     /// anchors included.
     failed: usize,
+    /// Retired registrations within the scope. They stand outside
+    /// `discovered`: nothing is observed for them, and `--retired` lists them.
+    retired: usize,
     /// One entry per failed component; a project may name several.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     failures: Vec<CollectionFailure>,
@@ -601,6 +645,12 @@ fn render_collection(collection: &CollectionManifest) {
         collection.empty,
         collection.failed
     );
+    if collection.retired > 0 {
+        println!(
+            "retired: {} registrations (--retired lists them)",
+            collection.retired
+        );
+    }
     for failure in &collection.failures {
         println!(
             "  failed {} [{}]: {}",
@@ -1048,6 +1098,39 @@ impl ProjectBacklog {
     }
 }
 
+/// A registration retired with `arc workspace retire`, listed on request.
+#[derive(Serialize)]
+struct RetiredProject {
+    slug: String,
+    journal_dir: String,
+    /// When, why, by whom, and the anchor it was retired from.
+    #[serde(flatten)]
+    retirement: crate::journal::Retirement,
+}
+
+impl RetiredProject {
+    fn of(project: &crate::registry::Project, retirement: &crate::journal::Retirement) -> Self {
+        Self {
+            slug: project.slug.clone(),
+            journal_dir: project.journal_dir.display().to_string(),
+            retirement: retirement.clone(),
+        }
+    }
+
+    fn render(&self) {
+        println!(
+            "  {}  retired {}: {}",
+            self.slug,
+            self.retirement.retired_at,
+            self.retirement
+                .reason
+                .as_deref()
+                .unwrap_or("no reason recorded")
+        );
+        println!("    journal: {}", self.journal_dir);
+    }
+}
+
 #[derive(Serialize)]
 struct UnreachableProject {
     slug: String,
@@ -1078,6 +1161,10 @@ impl UnreachableProject {
         println!("  {}  {}", self.slug, self.reason);
         println!("    journal: {}", self.journal_dir);
         println!("    adopt from the project's new location: arc journal rebind <dir>");
+        println!(
+            "    or, if the project is gone: arc workspace retire {} --reason <text>",
+            self.journal_dir
+        );
     }
 }
 
@@ -1116,6 +1203,7 @@ fn workspace_inventory(
     ctx: &Ctx,
     scope: WorkspaceScope,
     storage: StorageSelection,
+    show_retired: bool,
     json: bool,
 ) -> Result<i32> {
     let cfg = crate::config::load()?;
@@ -1123,6 +1211,8 @@ fn workspace_inventory(
     let observed_at = chrono::Utc::now();
     let mut projects = Vec::new();
     let mut unreachable = Vec::new();
+    let mut retired = Vec::new();
+    let mut retired_count = 0usize;
     let mut failures: Vec<CollectionFailure> = Vec::new();
     let mut discovered = 0usize;
     let mut selected = 0usize;
@@ -1132,6 +1222,15 @@ fn workspace_inventory(
     let mut failed = 0usize;
 
     for project in crate::registry::projects(&cfg)? {
+        if let Some(retirement) = &project.retired {
+            if scope.includes(project.anchor.as_deref()) {
+                retired_count += 1;
+                if show_retired {
+                    retired.push(RetiredProject::of(&project, retirement));
+                }
+            }
+            continue;
+        }
         discovered += 1;
         if !scope.includes(project.anchor.as_deref()) {
             skipped += 1;
@@ -1227,6 +1326,7 @@ fn workspace_inventory(
         empty,
         non_empty,
         failed,
+        retired: retired_count,
         failures,
     };
     let partial = collection.failed > 0;
@@ -1246,6 +1346,7 @@ fn workspace_inventory(
                 collection,
                 projects,
                 unreachable,
+                retired,
             })?
         );
         return Ok(if partial { 16 } else { 0 });
@@ -1273,7 +1374,18 @@ fn workspace_inventory(
     for project in &unreachable {
         project.render();
     }
+    render_retired(&retired);
     Ok(if partial { 16 } else { 0 })
+}
+
+fn render_retired(retired: &[RetiredProject]) {
+    if retired.is_empty() {
+        return;
+    }
+    println!("retired:");
+    for project in retired {
+        project.render();
+    }
 }
 
 #[derive(Serialize)]
@@ -1285,6 +1397,9 @@ struct WorkspaceInventory {
     collection: CollectionManifest,
     projects: Vec<ReconciledProject>,
     unreachable: Vec<UnreachableProject>,
+    /// Retired registrations in scope, present only under `--retired`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    retired: Vec<RetiredProject>,
 }
 
 #[derive(Serialize)]
@@ -1545,15 +1660,28 @@ struct CollectedBacklog {
     partial: bool,
 }
 
+/// Which registrations a backlog names beyond its observed projects.
+#[derive(Clone, Copy)]
+struct Listed {
+    /// Every unreachable journal, temporary and scratch anchors included.
+    unreachable: bool,
+    /// Retired registrations, which are otherwise only counted.
+    retired: bool,
+}
+
 fn collect_backlog(
     ctx: &Ctx,
     since: Option<&str>,
     show_items: bool,
     scope: WorkspaceScope,
-    show_unreachable: bool,
+    listed: Listed,
     rank_by: RankBasis,
     include_empty: bool,
 ) -> Result<CollectedBacklog> {
+    let Listed {
+        unreachable: show_unreachable,
+        retired: show_retired,
+    } = listed;
     let cfg = crate::config::load()?;
     let scope = ResolvedWorkspaceScope::resolve(scope)?;
     let cutoff = match since {
@@ -1574,10 +1702,13 @@ fn collect_backlog(
         },
         since: cutoff.map(normalized_cutoff),
         show_unreachable,
+        show_retired,
         rank_by: rank_by.as_str(),
     };
     let mut projects = Vec::new();
     let mut unreachable = Vec::new();
+    let mut retired = Vec::new();
+    let mut retired_count = 0usize;
     let mut failures: Vec<CollectionFailure> = Vec::new();
     let mut discovered = 0usize;
     let mut selected = 0usize;
@@ -1588,6 +1719,15 @@ fn collect_backlog(
     let observed_at = chrono::Utc::now();
 
     for project in crate::registry::projects(&cfg)? {
+        if let Some(retirement) = &project.retired {
+            if scope.includes(project.anchor.as_deref()) {
+                retired_count += 1;
+                if show_retired {
+                    retired.push(RetiredProject::of(&project, retirement));
+                }
+            }
+            continue;
+        }
         discovered += 1;
         if !scope.includes(project.anchor.as_deref()) {
             skipped += 1;
@@ -1667,6 +1807,7 @@ fn collect_backlog(
         empty,
         non_empty,
         failed,
+        retired: retired_count,
         failures,
     };
     let partial = collection.failed > 0;
@@ -1696,6 +1837,7 @@ fn collect_backlog(
         summary,
         projects,
         unreachable,
+        retired,
     };
     Ok(CollectedBacklog {
         backlog,
@@ -1710,24 +1852,17 @@ fn workspace_backlog(
     since: Option<&str>,
     show_items: bool,
     scope: WorkspaceScope,
-    show_unreachable: bool,
+    listed: Listed,
     rank_by: RankBasis,
     json: bool,
 ) -> Result<i32> {
+    let show_unreachable = listed.unreachable;
     let CollectedBacklog {
         backlog,
         scope,
         selection,
         partial,
-    } = collect_backlog(
-        ctx,
-        since,
-        show_items,
-        scope,
-        show_unreachable,
-        rank_by,
-        false,
-    )?;
+    } = collect_backlog(ctx, since, show_items, scope, listed, rank_by, false)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&backlog)?);
         return Ok(if partial { 16 } else { 0 });
@@ -1737,6 +1872,7 @@ fn workspace_backlog(
         summary,
         projects,
         unreachable,
+        retired,
         ..
     } = backlog;
 
@@ -1753,6 +1889,7 @@ fn workspace_backlog(
         }
     }
     summary.render();
+    render_retired(&retired);
     if projects.is_empty() && unreachable.is_empty() {
         println!("nothing outstanding in this workspace scope");
         // Over an empty scope too: this is when a reader is likeliest to
@@ -2140,9 +2277,14 @@ fn workspace_report(
     ctx: &Ctx,
     scope: WorkspaceScope,
     previous: Option<&Path>,
+    show_retired: bool,
     json: bool,
 ) -> Result<i32> {
-    let mut collected = collect_backlog(ctx, None, true, scope, false, RankBasis::Blocking, true)?;
+    let listed = Listed {
+        unreachable: false,
+        retired: show_retired,
+    };
+    let mut collected = collect_backlog(ctx, None, true, scope, listed, RankBasis::Blocking, true)?;
     let (ledgers, mut failures) = report_ledger_facts(&collected.backlog)?;
     let backlog = serde_json::to_value(&collected.backlog)?;
     let previous = match previous {
@@ -2272,6 +2414,322 @@ fn workspace_report(
         report.render();
     }
     Ok(if collected.partial { 16 } else { 0 })
+}
+
+/// The registration a command names: its journal directory, its slug, or
+/// the anchor the registry reports for it.
+fn find_registration(cfg: &crate::config::Config, named: &str) -> Result<crate::registry::Project> {
+    let path = crate::config::expand_tilde(named)?;
+    let mut matches: Vec<crate::registry::Project> = crate::registry::projects(cfg)?
+        .into_iter()
+        .filter(|project| {
+            project.slug == named
+                || project.journal_dir == path
+                || project.anchor.as_deref() == Some(path.as_path())
+        })
+        .collect();
+    match matches.len() {
+        0 => anyhow::bail!(
+            "no registration is named {named}; name its journal directory, slug, or anchor \
+             as `arc workspace backlog --unreachable` or `--retired` prints them"
+        ),
+        1 => Ok(matches.remove(0)),
+        _ => anyhow::bail!(
+            "{named} names {} registrations; name one by its journal directory: {}",
+            matches.len(),
+            matches
+                .iter()
+                .map(|project| project.journal_dir.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// What a retired registration's ledger still owes.
+#[derive(Serialize, Default)]
+struct LedgerHoldings {
+    /// The ledger read, or null when none was found.
+    root: Option<String>,
+    open_changes: Vec<String>,
+    owed_debts: Vec<String>,
+}
+
+/// The ledger a registration whose anchor is gone can still have: one kept
+/// under `data_root`. A ledger inside the project's Git directory went with
+/// the anchor.
+fn registration_ledger(cfg: &crate::config::Config, anchor: &Path) -> Result<LedgerHoldings> {
+    let Some(data_root) = &cfg.data_root else {
+        return Ok(LedgerHoldings::default());
+    };
+    let root = data_root.join(crate::config::path_slug(anchor));
+    let Some(store) = Store::open_at(&root)? else {
+        return Ok(LedgerHoldings::default());
+    };
+    let mut holdings = LedgerHoldings {
+        root: Some(root.display().to_string()),
+        ..LedgerHoldings::default()
+    };
+    for state in store.readable_states()?.values() {
+        if !state.is_closed() {
+            holdings.open_changes.push(state.change_id.clone());
+        }
+        if state.debt_outstanding() {
+            holdings.owed_debts.push(state.change_id.clone());
+        }
+    }
+    Ok(holdings)
+}
+
+/// The outcome of `workspace retire` or `workspace restore`.
+#[derive(Serialize)]
+struct RetirementReport {
+    schema: &'static str,
+    /// `retire` or `restore`.
+    operation: &'static str,
+    dry_run: bool,
+    slug: String,
+    journal_dir: String,
+    anchor: Option<String>,
+    anchor_exists: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    holdings: Option<crate::journal::JournalHoldings>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ledger: Option<LedgerHoldings>,
+    /// Artifacts moved to the cold archive, shelved as unresolved.
+    archived: Vec<String>,
+    /// The retirement in force once the command finished, or null.
+    retirement: Option<crate::journal::Retirement>,
+    /// Why nothing was written, when the command refused.
+    refused: Option<String>,
+}
+
+const RETIREMENT_SCHEMA: &str = "arc-workspace-retirement/1";
+
+impl RetirementReport {
+    fn render(&self) {
+        println!("registration: {}", self.slug);
+        println!("  journal: {}", self.journal_dir);
+        match &self.anchor {
+            Some(anchor) => println!(
+                "  anchor: {anchor} ({})",
+                if self.anchor_exists {
+                    "exists"
+                } else {
+                    "missing"
+                }
+            ),
+            None => println!("  anchor: none recorded"),
+        }
+        if let Some(holdings) = &self.holdings {
+            println!("unresolved artifacts: {}", holdings.unresolved.len());
+            for held in &holdings.unresolved {
+                let questions = match held.open_questions {
+                    0 => String::new(),
+                    count => format!("  ({count} open questions)"),
+                };
+                println!("  {}  {}{questions}", held.kind, held.file);
+            }
+            for claim in &holdings.claims {
+                println!(
+                    "  claim {} on {} by {} via {} ({})",
+                    claim.claim_id,
+                    claim.file,
+                    claim.actor,
+                    claim.harness,
+                    if claim.active { "active" } else { "expired" }
+                );
+            }
+            for file in &holdings.pending {
+                println!("  unfinished transition or storage move: {file}");
+            }
+        }
+        if let Some(ledger) = &self.ledger {
+            match &ledger.root {
+                Some(root) => {
+                    println!("ledger: {root}");
+                    for change in &ledger.open_changes {
+                        println!("  open change {change}");
+                    }
+                    for change in &ledger.owed_debts {
+                        println!("  owed debt on {change}");
+                    }
+                }
+                None => println!("ledger: none found"),
+            }
+        }
+        if let Some(refused) = &self.refused {
+            println!("refused: {refused}");
+            return;
+        }
+        if self.dry_run {
+            let archive = self
+                .holdings
+                .as_ref()
+                .map_or(0, |holdings| holdings.unresolved.len());
+            if archive > 0 {
+                println!("dry run: would archive {archive} unresolved artifacts and retire the registration; nothing written");
+            } else {
+                println!("dry run: would retire the registration; nothing written");
+            }
+            return;
+        }
+        for file in &self.archived {
+            println!("archived: {file}");
+        }
+        match &self.retirement {
+            Some(retirement) => {
+                println!(
+                    "retired: {}: {}",
+                    retirement.anchor,
+                    retirement.reason.as_deref().unwrap_or("")
+                );
+                println!(
+                    "history: ARC_JOURNAL_DIR={} arc journal show <file> reads hot, then archived artifacts",
+                    self.journal_dir
+                );
+                println!(
+                    "restore: arc workspace restore {} --reason <text>",
+                    self.journal_dir
+                );
+            }
+            None => {
+                println!("restored: {}", self.anchor.as_deref().unwrap_or(&self.slug));
+                println!("archived artifacts stay archived; `arc journal unarchive <file>` in the project's checkout brings each back");
+            }
+        }
+    }
+
+    fn emit(&self, json: bool) -> Result<i32> {
+        if json {
+            println!("{}", serde_json::to_string_pretty(self)?);
+        } else {
+            self.render();
+        }
+        Ok(if self.refused.is_some() { 1 } else { 0 })
+    }
+}
+
+fn require_reason(reason: &str) -> Result<()> {
+    ensure!(!reason.trim().is_empty(), "--reason must not be empty");
+    Ok(())
+}
+
+/// Retire a registration whose project is gone, after showing what it holds.
+fn workspace_retire(
+    ctx: &Ctx,
+    named: &str,
+    reason: &str,
+    archive_unresolved: bool,
+    dry_run: bool,
+    json: bool,
+) -> Result<i32> {
+    require_reason(reason)?;
+    let cfg = crate::config::load()?;
+    let project = find_registration(&cfg, named)?;
+    let holdings = crate::journal::journal_holdings(&project.journal_dir)?;
+    let ledger = match project.anchor.as_deref() {
+        Some(anchor) => registration_ledger(&cfg, anchor)?,
+        None => LedgerHoldings::default(),
+    };
+    let anchor = project.anchor.as_ref().map(|p| p.display().to_string());
+    let refused = if let Some(retirement) = &project.retired {
+        Some(format!(
+            "already retired at {}; `arc workspace restore` ends a retirement",
+            retirement.retired_at
+        ))
+    } else if anchor.is_none() {
+        Some(
+            "the journal records no anchor and its name resolves to no single path; \
+             adopt it from its project's checkout with `arc journal rebind <dir>`"
+                .to_string(),
+        )
+    } else if project.reachable {
+        Some(
+            "the anchor exists; retirement is for a registration whose project is gone. \
+             A project that moved is adopted from its new checkout with `arc journal rebind <dir>`"
+                .to_string(),
+        )
+    } else if !ledger.open_changes.is_empty() || !ledger.owed_debts.is_empty() {
+        Some(format!(
+            "its ledger holds {} open changes and {} owed debts; close or abandon the changes \
+             and discharge or waive the debts first",
+            ledger.open_changes.len(),
+            ledger.owed_debts.len()
+        ))
+    } else if holdings.blocks_archiving() {
+        Some(
+            "unfinished transitions or storage moves, or active claims, hold the journal; \
+             finish them or let the claims end first"
+                .to_string(),
+        )
+    } else if !holdings.unresolved.is_empty() && !archive_unresolved {
+        Some(format!(
+            "{} unresolved artifacts; resolve them, or pass --archive-unresolved to shelve them \
+             in the cold archive with the retirement",
+            holdings.unresolved.len()
+        ))
+    } else {
+        None
+    };
+    let mut report = RetirementReport {
+        schema: RETIREMENT_SCHEMA,
+        operation: "retire",
+        dry_run,
+        slug: project.slug.clone(),
+        journal_dir: project.journal_dir.display().to_string(),
+        anchor_exists: project.reachable,
+        anchor,
+        holdings: Some(holdings),
+        ledger: Some(ledger),
+        archived: Vec::new(),
+        retirement: project.retired.clone(),
+        refused,
+    };
+    if report.refused.is_some() || dry_run {
+        return report.emit(json);
+    }
+    let anchor = report
+        .anchor
+        .clone()
+        .expect("a refused retirement has no anchor");
+    report.archived = crate::journal::retire_registration(
+        ctx,
+        &project.journal_dir,
+        &anchor,
+        reason.trim(),
+        archive_unresolved,
+    )?;
+    report.retirement = crate::journal::registration_retirement(&project.journal_dir)?;
+    report.emit(json)
+}
+
+/// End a registration's retirement.
+fn workspace_restore(ctx: &Ctx, named: &str, reason: &str, json: bool) -> Result<i32> {
+    require_reason(reason)?;
+    let cfg = crate::config::load()?;
+    let project = find_registration(&cfg, named)?;
+    let mut report = RetirementReport {
+        schema: RETIREMENT_SCHEMA,
+        operation: "restore",
+        dry_run: false,
+        slug: project.slug.clone(),
+        journal_dir: project.journal_dir.display().to_string(),
+        anchor: project.anchor.as_ref().map(|p| p.display().to_string()),
+        anchor_exists: project.reachable,
+        holdings: None,
+        ledger: None,
+        archived: Vec::new(),
+        retirement: project.retired.clone(),
+        refused: None,
+    };
+    if project.retired.is_none() {
+        report.refused = Some("the registration is not retired".to_string());
+        return report.emit(json);
+    }
+    crate::journal::restore_registration(ctx, &project.journal_dir, reason.trim())?;
+    report.retirement = None;
+    report.emit(json)
 }
 
 /// The two ledger buckets a lead reads across projects: what awaits a verdict,
@@ -2522,10 +2980,11 @@ mod report {
         DebtGrew,
         /// A component read failed; the collection is partial
         CollectionFailed,
-        /// A registered project whose anchor is gone
+        /// A registered project whose anchor is gone and whose registration
+        /// is not retired
         UnreachableAnchor,
         /// Registered journals whose temporary or scratch anchors are gone,
-        /// folded into one fact
+        /// folded into one fact; `arc workspace retire` retires each
         UnreachableScratch,
         /// A promoted candidate whose sibling registrations, answering the
         /// same brief version, nobody has judged
@@ -2634,6 +3093,9 @@ mod report {
         sections: Sections,
         attention: Vec<Attention>,
         projects: Vec<ProjectSummary>,
+        /// Retired registrations in scope, present only under `--retired`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        retired: Option<Value>,
     }
 
     #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
@@ -3483,6 +3945,7 @@ mod report {
             sections,
             attention,
             projects,
+            retired: backlog.get("retired").cloned(),
         }
     }
 
@@ -3550,6 +4013,20 @@ mod report {
                 tally("delivered"),
                 tally("projects")
             );
+            let retired = self.collection["retired"].as_u64().unwrap_or(0);
+            if retired > 0 {
+                println!("retired registrations {retired} (--retired lists them)");
+            }
+            for project in self.retired.as_ref().map_or(&[][..], |list| {
+                list.as_array().map_or(&[][..], Vec::as_slice)
+            }) {
+                println!(
+                    "  {}  retired {}: {}",
+                    text(project, "slug"),
+                    text(project, "retired_at"),
+                    text(project, "reason")
+                );
+            }
             if let Some(previous) = &self.previous {
                 println!(
                     "since {previous}: {} new, {} departed",

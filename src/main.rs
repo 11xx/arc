@@ -2755,7 +2755,8 @@ enum Cmd {
         #[command(subcommand)]
         cmd: InstructionsCmd,
     },
-    /// Aggregate changes, inboxes, or backlog across every known project
+    /// Aggregate changes, inboxes, or backlog across every known project,
+    /// and retire or restore a project's registration
     Workspace {
         #[command(subcommand)]
         cmd: WorkspaceCmd,
@@ -3128,12 +3129,17 @@ enum WorkspaceCmd {
     /// it is: present, terminal, archived, or superseded. It accepts the same
     /// `--under`/`--here`/`--global` scope, reports the same collection
     /// manifest, exits 16 on a partial collection, and is versioned
-    /// `arc-workspace-inventory/2`.
+    /// `arc-workspace-inventory/2`. A retired registration is counted as
+    /// `collection.retired`, never observed or failed.
     /// Records no events; ledger reads do not require a parseable append policy.
     Inventory {
         /// Read the hot journal directory, the cold archive, or both
         #[arg(long, value_enum, default_value_t = commands::StorageSelection::Hot)]
         storage: commands::StorageSelection,
+        /// List retired registrations in scope. Without it they are only
+        /// counted, as `collection.retired`
+        #[arg(long)]
+        retired: bool,
         /// Report only projects whose canonical anchor is beneath this path
         #[arg(long, value_name = "PATH", conflicts_with_all = ["here", "global"])]
         under: Option<PathBuf>,
@@ -3152,7 +3158,9 @@ enum WorkspaceCmd {
     /// verbatim `reason` and optional `patchset_id`, and list only debt that
     /// is owed: one declared on a change that has not integrated, or already
     /// discharged, is not backlog. A partial collection keeps
-    /// the projects it did read, names each failure, and exits 16
+    /// the projects it did read, names each failure, and exits 16.
+    /// A retired registration is counted as `collection.retired`, never
+    /// observed, failed, or unreachable
     /// Change observations name unreadable changes with their errors on
     /// stderr and retain readable changes
     /// Records no events; ledger reads do not require a parseable append policy.
@@ -3183,6 +3191,10 @@ enum WorkspaceCmd {
         /// Name every unreachable journal, including temporary and scratch anchors
         #[arg(long)]
         unreachable: bool,
+        /// List retired registrations in scope. Without it they are only
+        /// counted, as `collection.retired`
+        #[arg(long)]
+        retired: bool,
         /// Rank projects by this fact, highest first. Every row carries all
         /// three facts unchanged, so the choice only sets the order
         #[arg(long, value_enum, default_value_t = commands::RankBasis::Blocking)]
@@ -3202,8 +3214,11 @@ enum WorkspaceCmd {
     /// the backlog is listed with its recorded reason. The baseline must have
     /// the same schema and scope. Every failed component read, including the
     /// report's ledger read, enters the collection manifest and makes the
-    /// command exit 16. Attention facts, listed below by rule, never change
-    /// the exit code. The report writes nothing.
+    /// command exit 16. A retired registration is counted as
+    /// `collection.retired`, never observed or failed, so its missing anchor
+    /// neither fails the collection nor raises attention. Attention facts,
+    /// listed below by rule, never change the exit code. The report writes
+    /// nothing.
     #[command(after_help = commands::report_rules_help())]
     /// Change observations name unreadable changes with their errors on
     /// stderr and retain readable changes
@@ -3226,6 +3241,78 @@ enum WorkspaceCmd {
         /// An earlier `arc workspace report --json` to compare against
         #[arg(long, value_name = "FILE")]
         previous: Option<PathBuf>,
+        /// List retired registrations in scope. Without it they are only
+        /// counted, as `collection.retired`
+        #[arg(long)]
+        retired: bool,
+        /// Emit the machine-readable JSON view instead of text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Retire a registration whose project is gone, recording why, so the
+    /// workspace views stop observing it.
+    ///
+    /// The registry is derived from journal directories, so a probe
+    /// repository, deleted worktree, or scratch directory leaves a
+    /// registration whose anchor no longer exists, and every workspace view
+    /// counts it as a failed collection. Retiring it appends a `retired`
+    /// binding with the reason to the journal's `bindings.jsonl`; the
+    /// directory, its events, its cold archive, and any ledger stay where
+    /// they are. `backlog`, `report`, and `inventory` then count it as
+    /// `collection.retired` instead of a failure and list it under
+    /// `--retired`; `list` and `inbox` skip it.
+    ///
+    /// It first shows what the project still holds: unconsumed actionable
+    /// artifacts (with their open questions), open claims, unfinished
+    /// transitions or storage moves, and the open changes and owed debts of a
+    /// ledger kept under `data_root` (a ledger inside the project's Git
+    /// directory went with the anchor). It refuses while the anchor exists, a
+    /// ledger holds open changes or owed debts, a transition or storage move
+    /// is unfinished, or a claim is active. Unresolved artifacts refuse it
+    /// unless `--archive-unresolved` moves each to the cold archive, shelved
+    /// as `unresolved` with the reason as its note and its expired claims
+    /// ended. The final check and the binding share the journal's events
+    /// lock, so an artifact filed meanwhile refuses the retirement. A refusal
+    /// writes nothing and exits 1.
+    ///
+    /// History stays readable: with `ARC_JOURNAL_DIR` naming the journal
+    /// directory, `arc journal show <file>` reads hot, then archived
+    /// artifacts, and `arc journal events` streams the log, from any
+    /// directory. `arc workspace restore` ends the retirement, and so
+    /// does any journal write from a checkout that resolves to this journal,
+    /// which re-registers it; archived artifacts stay archived until
+    /// `arc journal unarchive`. Versioned `arc-workspace-retirement/1`.
+    Retire {
+        /// The registration: its journal directory, slug, or anchor
+        project: String,
+        /// Why it is retired, recorded with the retirement and as the note on
+        /// every artifact it archives
+        #[arg(long)]
+        reason: String,
+        /// Shelve unresolved artifacts in the cold archive with the retirement
+        /// instead of refusing
+        #[arg(long)]
+        archive_unresolved: bool,
+        /// Show what the registration holds and what would happen; write
+        /// nothing. Exits 1 when the retirement would refuse
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit the machine-readable JSON view instead of text
+        #[arg(long)]
+        json: bool,
+    },
+    /// End a registration's retirement, recording why. The registration is
+    /// observed again, and counts as unreachable while its anchor is missing.
+    /// Artifacts archived with the retirement stay archived;
+    /// `arc journal unarchive <file>` in the project's checkout brings each
+    /// back. A registration that is not retired refuses and exits 1.
+    /// Versioned `arc-workspace-retirement/1`.
+    Restore {
+        /// The registration: its journal directory, slug, or anchor
+        project: String,
+        /// Why it is restored
+        #[arg(long)]
+        reason: String,
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
@@ -6715,6 +6802,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 ),
                 WorkspaceCmd::Inventory {
                     storage,
+                    retired,
                     under,
                     here,
                     global: _,
@@ -6723,6 +6811,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     commands::WorkspaceView::Inventory {
                         scope: workspace_scope(under, here)?,
                         storage,
+                        show_retired: retired,
                     },
                     json,
                 ),
@@ -6731,14 +6820,36 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     here,
                     global: _,
                     previous,
+                    retired,
                     json,
                 } => (
                     commands::WorkspaceView::Report {
                         scope: workspace_scope(under, here)?,
                         previous,
+                        show_retired: retired,
                     },
                     json,
                 ),
+                WorkspaceCmd::Retire {
+                    project,
+                    reason,
+                    archive_unresolved,
+                    dry_run,
+                    json,
+                } => (
+                    commands::WorkspaceView::Retire {
+                        project,
+                        reason,
+                        archive_unresolved,
+                        dry_run,
+                    },
+                    json,
+                ),
+                WorkspaceCmd::Restore {
+                    project,
+                    reason,
+                    json,
+                } => (commands::WorkspaceView::Restore { project, reason }, json),
                 WorkspaceCmd::Backlog {
                     since,
                     items,
@@ -6746,6 +6857,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     here,
                     global: _,
                     unreachable,
+                    retired,
                     rank_by,
                     json,
                 } => (
@@ -6754,6 +6866,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                         items,
                         scope: workspace_scope(under, here)?,
                         show_unreachable: unreachable,
+                        show_retired: retired,
                         rank_by,
                     },
                     json,
@@ -6856,6 +6969,8 @@ mod tests {
             "forge pr-state",
             "sandbox clone",
             "sandbox discard",
+            "workspace retire",
+            "workspace restore",
             "hooks install",
             "hooks uninstall",
             "hook-run",

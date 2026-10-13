@@ -233,6 +233,28 @@ FROM A WORKSPACE ROOT (outside a project)
                        `--help` lists every attention rule. Versioned
                        `arc-workspace-report/3`.
   cd <anchor>          Enter one project named by the report, then orient there.
+  arc workspace retire <journal-dir|slug|anchor> --reason TEXT [--dry-run]
+                       Take a registration whose project is gone (a probe,
+                       deleted worktree, or scratch directory) out of what the
+                       workspace views observe, so its missing anchor stops
+                       failing the collection. It shows what the project still
+                       holds, refuses while the anchor exists, a `data_root`
+                       ledger holds open changes or owed debts, a transition
+                       is unfinished, or a claim is active, and refuses
+                       unresolved artifacts unless --archive-unresolved
+                       shelves each in the cold archive with the reason. The
+                       `retired` binding with its reason lands in the
+                       journal's own bindings.jsonl; nothing is deleted.
+                       Views count it as `collection.retired` and list it
+                       under --retired. Read its history with
+                       `ARC_JOURNAL_DIR=<journal-dir> arc journal show <file>`.
+                       A moved project is not retired: `arc journal rebind`
+                       adopts it from the new checkout.
+  arc workspace restore <journal-dir|slug|anchor> --reason TEXT
+                       End a retirement. A journal write from a checkout at
+                       the anchor ends it too, re-registering the project.
+                       Archived artifacts stay archived until
+                       `arc journal unarchive`.
 
 ORIENT INSIDE A PROJECT (start here, in this order)
   arc catchup --sessions 5
@@ -3876,6 +3898,7 @@ SCHEMAS
     `arc-workspace-backlog/19`       arc workspace backlog --json
     `arc-workspace-report/3`         arc workspace report --json
     `arc-workspace-inventory/2`      arc workspace inventory --json
+    `arc-workspace-retirement/1`     arc workspace retire|restore --json
     `arc-writability/1`              arc config --check-writable --json
     `arc-sandbox-clone/1`            arc sandbox clone --json
     `arc-sandbox-diff/1`             arc sandbox diff --json

@@ -9,7 +9,9 @@
 //!
 //! Everything here is derived and read-only. A registry entry records where a
 //! project was last seen; a stale one is a fact to report, never a thing to
-//! quietly correct.
+//! quietly correct. Retiring one is an explicit, recorded operation
+//! (`arc workspace retire`), and its record lives in the journal's own
+//! `bindings.jsonl`, so it travels with the directory.
 
 use crate::config::Config;
 use crate::store::Store;
@@ -47,6 +49,10 @@ pub struct Project {
     pub reachable: bool,
     /// The project's ledger, when it has one.
     pub ledger: Option<PathBuf>,
+    /// The retirement in force, when the registration was retired. A retired
+    /// registration stays in the registry so it can be listed and restored,
+    /// and workspace views leave it out of what they observe.
+    pub retired: Option<crate::journal::Retirement>,
 }
 
 impl Project {
@@ -68,9 +74,10 @@ impl Project {
     /// with a binding and nothing else, so a repository moved before anything
     /// was written to its journal leaves a directory that holds no artifacts
     /// and still names a project with open changes. A recorded anchor that no
-    /// longer resolves is the signal; content only adds to it.
+    /// longer resolves is the signal; content only adds to it. A retired
+    /// registration is not one: its missing anchor is the recorded reason.
     pub fn is_orphan(&self) -> bool {
-        if self.reachable {
+        if self.reachable || self.retired.is_some() {
             return false;
         }
         matches!(
@@ -161,7 +168,8 @@ pub fn projects(cfg: &Config) -> Result<Vec<Project>> {
             },
         };
         let reachable = anchor.as_deref().is_some_and(Path::is_dir);
-        let ledger = match anchor.as_deref().filter(|_| reachable) {
+        let retired = crate::journal::registration_retirement(&journal_dir)?;
+        let ledger = match anchor.as_deref().filter(|_| reachable && retired.is_none()) {
             Some(path) => match ledger_at(cfg, path) {
                 Ok(found) => found,
                 // An unreadable store is not an absent one, and this whole
@@ -180,6 +188,7 @@ pub fn projects(cfg: &Config) -> Result<Vec<Project>> {
             anchor_source,
             reachable,
             ledger,
+            retired,
         });
     }
     Ok(projects)
