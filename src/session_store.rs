@@ -10,7 +10,7 @@ use crate::model::{ModelObservation, ModelTurnRelation};
 use agent_tapes_core::backend::{self, Backend};
 use agent_tapes_core::model::{Role, SourceBound, TurnKind};
 use agent_tapes_core::ResolveError;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -469,6 +469,7 @@ pub enum ModelUnavailable {
     /// subagent a shell belongs to, so the parent's model need not be the
     /// acting one.
     SubagentActivity(Vec<UnfinishedChild>),
+    ModelScanLimit,
     OutsideRead,
 }
 
@@ -513,6 +514,7 @@ impl ModelUnavailable {
     /// What an operator reads: why no model is named.
     pub fn line(&self) -> String {
         match self {
+            ModelUnavailable::ModelScanLimit => "no model selection in this bounded read; rerun arc env to continue the checkpointed lookup while the recording is unchanged".to_string(),
             ModelUnavailable::OutsideRead => "recording head not read; an earlier model selection may be outside the read".to_string(),
             ModelUnavailable::NotRecorded => "the recording names no model for this session".to_string(),
             ModelUnavailable::NotRecordedAfterWait => "the recording names no model for this session after waiting up to 1 second for a model-bearing record".to_string(),
@@ -678,6 +680,9 @@ fn recording_identity(
         .as_ref()
         .is_some_and(|status| !status.head_read)
     {
+        if harness == "codex" {
+            return codex_model_identity(backend, session, &transcript, 16, 1024 * 1024);
+        }
         return SessionIdentity::Unnamed(ModelUnavailable::OutsideRead);
     }
     match transcript.session.model.as_ref() {
@@ -686,6 +691,213 @@ fn recording_identity(
             observation: None,
         },
         None => SessionIdentity::Unnamed(ModelUnavailable::NotRecorded),
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct ModelCheckpoint {
+    format: u32,
+    session: String,
+    source_revision: String,
+    cursor: Option<String>,
+    selection: Option<CheckpointSelection>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CheckpointSelection {
+    model: String,
+    timestamp: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+fn model_checkpoint_path(session: &agent_tapes_core::model::Session) -> Option<PathBuf> {
+    use sha2::{Digest, Sha256};
+    let key = serde_json::to_vec(&(session.id.as_str(), &session.source)).ok()?;
+    Some(
+        crate::config::ai_home()
+            .ok()?
+            .join("arc/cache/model-lookups")
+            .join(format!("{}.json", hex::encode(Sha256::digest(key)))),
+    )
+}
+
+fn read_model_checkpoint(path: &std::path::Path) -> Option<ModelCheckpoint> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() > 32768 {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(32769).read_to_end(&mut bytes).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn save_model_checkpoint(path: &std::path::Path, checkpoint: &ModelCheckpoint) {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let Ok(bytes) = serde_json::to_vec(checkpoint) else {
+        return;
+    };
+    if std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(parent)
+        .is_err()
+    {
+        return;
+    }
+    let staged = path.with_extension(format!("{}.tmp", crate::ids::new_identifier()));
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&staged)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&staged, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(staged);
+    }
+}
+
+fn codex_model_identity(
+    backend: &dyn Backend,
+    session: &agent_tapes_core::model::Session,
+    transcript: &agent_tapes_core::model::Transcript,
+    pages: usize,
+    bytes: usize,
+) -> SessionIdentity {
+    let path = model_checkpoint_path(session);
+    codex_model_identity_at(backend, session, transcript, pages, bytes, path.as_deref())
+}
+
+fn codex_model_identity_at(
+    backend: &dyn Backend,
+    session: &agent_tapes_core::model::Session,
+    transcript: &agent_tapes_core::model::Transcript,
+    pages: usize,
+    bytes: usize,
+    path: Option<&std::path::Path>,
+) -> SessionIdentity {
+    let result = (|| -> anyhow::Result<SessionIdentity> {
+        let mut checkpoint: Option<ModelCheckpoint> = None;
+        let mut cursor = None;
+        for index in 0..pages {
+            let page = backend.metadata_page(session, cursor.as_deref(), bytes)?;
+            let revision = page
+                .read
+                .source_revision
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("model metadata read has no source revision"))?;
+            if index == 0
+                && transcript
+                    .read
+                    .as_ref()
+                    .and_then(|read| read.source_revision.as_ref())
+                    != Some(&revision)
+            {
+                anyhow::bail!(
+                    "recording changed between transcript and model metadata reads; retry"
+                );
+            }
+            if page.skipped_records != 0
+                || page.skipped_fragment_bytes != 0
+                || page
+                    .read
+                    .gaps
+                    .iter()
+                    .any(|gap| gap.reason != "discarded-partial-record")
+            {
+                anyhow::bail!("model metadata read skipped records; selection remains unresolved");
+            }
+            let selected = page.models.last().map(|observed| CheckpointSelection {
+                model: model_name(&observed.model),
+                timestamp: observed.timestamp,
+            });
+            if index == 0 {
+                checkpoint = path.and_then(read_model_checkpoint).filter(|held| {
+                    held.format == 1
+                        && held.session == session.id
+                        && held.source_revision == revision
+                });
+            }
+            let held = checkpoint.get_or_insert_with(|| ModelCheckpoint {
+                format: 1,
+                session: session.id.clone(),
+                source_revision: revision.clone(),
+                cursor: None,
+                selection: None,
+            });
+            if held.source_revision != revision {
+                anyhow::bail!("recording changed during model lookup; retry");
+            }
+            if let Some(selected) = selected {
+                held.selection = Some(selected);
+            }
+            if let Some(selection) = &held.selection {
+                if let Some(defect) =
+                    crate::coordinate::model_defect(&selection.model, Some(&session.id))
+                {
+                    anyhow::bail!("recorded model {}", defect.reason());
+                }
+                let operator = transcript
+                    .turns
+                    .iter()
+                    .rev()
+                    .find(|turn| turn.kind == TurnKind::Operator);
+                let turn_start = operator.and_then(|turn| turn.ts);
+                let relation = match (selection.timestamp, turn_start) {
+                    (Some(record), Some(start)) if record >= start => ModelTurnRelation::Inside,
+                    (Some(_), Some(_)) => ModelTurnRelation::Before,
+                    _ => ModelTurnRelation::Unknown,
+                };
+                let identity = SessionIdentity::Named {
+                    model: selection.model.clone(),
+                    observation: Some(ModelObservation {
+                        observed: selection.model.clone(),
+                        timestamp: selection.timestamp.map(|at| at.to_rfc3339()),
+                        native_id: None,
+                        head_read: false,
+                        turn_start: turn_start.map(|at| at.to_rfc3339()),
+                        turn_native_id: operator.and_then(|turn| turn.native_id.clone()),
+                        turn_relation: relation,
+                    }),
+                };
+                if let Some(path) = path {
+                    save_model_checkpoint(path, held);
+                }
+                return Ok(identity);
+            }
+            cursor = if index == 0 {
+                held.cursor.take().or(page.next_cursor)
+            } else {
+                page.next_cursor
+            };
+            held.cursor = cursor.clone();
+            if cursor.is_none() {
+                return Ok(SessionIdentity::Unnamed(ModelUnavailable::NotRecorded));
+            }
+        }
+        if let (Some(path), Some(checkpoint)) = (path, &checkpoint) {
+            save_model_checkpoint(path, checkpoint);
+        }
+        Ok(SessionIdentity::Unnamed(ModelUnavailable::ModelScanLimit))
+    })();
+    match result {
+        Ok(identity) => identity,
+        Err(error) => SessionIdentity::Unresolved(bounded_reason(&format!(
+            "cannot establish the Codex model selection: {error:#}"
+        ))),
     }
 }
 
@@ -780,6 +992,79 @@ mod tests {
     }
 
     const SESSION: &str = "11111111-2222-3333-4444-555555555555";
+
+    #[test]
+    fn codex_model_pages_resume_and_invalidate_on_subsequent_selections() {
+        use agent_tapes_core::backend::codex::CodexBackend;
+        let root = tempfile::tempdir().unwrap();
+        let path = root
+            .path()
+            .join(format!("rollout-2026-01-01T00-00-00-{SESSION}.jsonl"));
+        let mut file = std::fs::File::create(&path).unwrap();
+        writeln!(file, "{}", json!({"type":"session_meta", "timestamp":"2026-01-01T00:00:00Z", "payload":{"id":SESSION, "cwd":"/fixture"}})).unwrap();
+        writeln!(file, "{}", json!({"type":"turn_context", "timestamp":"2026-01-01T00:00:01Z", "payload":{"model":"fixture-model", "effort":"high"}})).unwrap();
+        for _ in 0..1024 {
+            writeln!(file, "{}", json!({"type":"event_msg", "timestamp":"2026-01-01T00:00:02Z", "payload":{"type":"agent_message", "message":"padding".repeat(8)}})).unwrap();
+        }
+        drop(file);
+        let backend = CodexBackend::new(root.path()).with_read_bytes(1024);
+        let session = backend.locate(SESSION).unwrap().unwrap();
+        let transcript = backend.transcript(&session, usize::MAX).unwrap();
+        assert!(transcript.session.newest_model_selection().is_none());
+        let checkpoint = root.path().join("checkpoint.json");
+        let mut found = None;
+        let mut previous_cursor = None;
+        for _ in 0..128 {
+            let identity = codex_model_identity_at(
+                &backend,
+                &session,
+                &transcript,
+                2,
+                1024,
+                Some(&checkpoint),
+            );
+            match identity {
+                SessionIdentity::Named { model, .. } => {
+                    found = Some(model);
+                    break;
+                }
+                SessionIdentity::Unnamed(ModelUnavailable::ModelScanLimit) => {
+                    let held = read_model_checkpoint(&checkpoint).unwrap();
+                    assert_ne!(held.cursor, previous_cursor);
+                    previous_cursor = held.cursor;
+                }
+                SessionIdentity::Unresolved(reason) => panic!("{reason}"),
+                _ => panic!("lookup must be explicitly bounded or named"),
+            }
+        }
+        assert_eq!(found.as_deref(), Some("fixture-model#high"));
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file, "{}", json!({"type":"turn_context", "timestamp":"2026-01-01T00:00:03Z", "payload":{"model":"other-model", "effort":"low"}})).unwrap();
+        for _ in 0..16 {
+            writeln!(file, "{}", json!({"type":"event_msg", "payload":{"type":"agent_message", "message":"padding".repeat(8)}})).unwrap();
+        }
+        drop(file);
+        let session = backend.locate(SESSION).unwrap().unwrap();
+        let transcript = backend.transcript(&session, usize::MAX).unwrap();
+        let identity =
+            codex_model_identity_at(&backend, &session, &transcript, 16, 1024, Some(&checkpoint));
+        assert!(
+            matches!(identity, SessionIdentity::Named { model, .. } if model == "other-model#low")
+        );
+        fs::write(&checkpoint, b"{broken").unwrap();
+        let identity =
+            codex_model_identity_at(&backend, &session, &transcript, 16, 1024, Some(&checkpoint));
+        assert!(
+            matches!(identity, SessionIdentity::Named { model, .. } if model == "other-model#low")
+        );
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file, "{{malformed").unwrap();
+        drop(file);
+        let transcript = backend.transcript(&session, usize::MAX).unwrap();
+        let identity =
+            codex_model_identity_at(&backend, &session, &transcript, 16, 1024, Some(&checkpoint));
+        assert!(matches!(identity, SessionIdentity::Unresolved(_)));
+    }
 
     fn claude_fixture() -> (tempfile::TempDir, PathBuf, Vec<Box<dyn Backend>>) {
         let root = tempfile::tempdir().unwrap();

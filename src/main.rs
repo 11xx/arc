@@ -2133,6 +2133,11 @@ enum Cmd {
     /// with ARC_MODEL or --model only when it is known, since a write refuses
     /// a placeholder or a session id. Missing boundaries and incomplete head
     /// coverage are reported.
+    /// A Codex selection outside the transcript tail is sought through at most
+    /// sixteen 1 MiB metadata pages per invocation. A private checkpoint under
+    /// the AI home's arc/cache/model-lookups resumes an unchanged recording;
+    /// rerun env after a bounded lookup to continue. Changed recordings restart
+    /// the search, and skipped records or source changes remain unresolved.
     /// Records no events; ledger reads do not require a parseable append policy.
     /// Prints the build commit and tracked-tree clean/dirty state as a comment;
     /// builds outside Git report unknown.

@@ -39,6 +39,15 @@ SAY WHO YOU ARE (before the first write)
   recorded with any observed disagreement. `arc show --json` and `arc log`
   show the model evidence.
 
+  A Codex model selection outside the transcript tail is sought through at
+  most sixteen 1 MiB metadata pages per invocation, in addition to the normal
+  store and transcript reads. Private checkpoints under
+  `<ai-home>/arc/cache/model-lookups` retain the selection or backward cursor
+  bound to the recording's session, source and stat revision. An unchanged
+  recording resumes; changed recordings restart. Rerun `arc env` after a
+  bounded lookup to continue. Missing selections, skipped records and source
+  changes remain explicit rather than attributing an older cached model.
+
   Omit a value nobody established; never declare a placeholder. A write
   refuses a harness, session, actor or on-behalf-of subject that is one
   (unknown, unset, none, null, n/a, na, tbd, undefined, ?, -, <synthetic>,
@@ -3924,6 +3933,7 @@ SCHEMAS
     `arc-journal-exchange-import/1`  receipt of an imported journal bundle
     `arc-sandbox/2`                  .arc-sandbox.json
     assurance blame cache            <ledger>/cache/assurance/<change>.json
+    Codex model checkpoint format 1   <ai-home>/arc/cache/model-lookups/<key>.json
     `journal-binding/1`              bindings.jsonl
 
 WHAT ARC WILL NOT DO

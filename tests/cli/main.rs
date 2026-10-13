@@ -10,6 +10,7 @@ mod chain;
 mod changelog;
 mod checkout_defaults;
 mod claims;
+mod codex_model_checkpoint;
 mod common;
 mod context;
 mod contribution;
