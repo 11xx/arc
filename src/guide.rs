@@ -3933,7 +3933,7 @@ SCHEMAS
     `arc-journal-exchange-import/1`  receipt of an imported journal bundle
     `arc-sandbox/2`                  .arc-sandbox.json
     assurance blame cache            <ledger>/cache/assurance/<change>.json
-    Codex model checkpoint format 1   <ai-home>/arc/cache/model-lookups/<key>.json
+    Codex model checkpoint format 1  <ai-home>/arc/cache/model-lookups/<key>.json
     `journal-binding/1`              bindings.jsonl
 
 WHAT ARC WILL NOT DO
