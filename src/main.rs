@@ -3886,11 +3886,11 @@ enum CandidateCmd {
     /// when it ran, the environment identity the probe yielded, and the
     /// result; `evaluation: <event>` names it for `select --evaluation`.
     /// A hostname that cannot be read is recorded as `unknown`. These are the
+    /// only evaluations: evidence received from an external execution is
+    /// recorded by `register --evidence-file` and is no evaluation.
     /// Diagnostic capture follows verify: private combined stdout and stderr,
     /// 16 MiB per file and 16 completed files, with digests, sizes and explicit
     /// truncation or capture errors in the event. Exports carry metadata only.
-    /// only evaluations: evidence received from an external execution is
-    /// recorded by `register --evidence-file` and is no evaluation.
     /// Exits 0 when every gate run passes and 1 otherwise. Refused:
     /// `unknown-candidate`; `unknown-gate` for a --gate the change is not
     /// required to pass; `target-unreadable` when the target cannot be read

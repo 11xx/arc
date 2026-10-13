@@ -119,6 +119,8 @@ pub struct GateStatus {
     pub environment: Option<GateEnvironmentStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_tail: Option<String>,
+    /// Private diagnostic capture of an executed gate, passing or failing.
+    /// Additive in `arc-status/27`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_artifact: Option<crate::verification_output::OutputArtifact>,
     #[serde(skip_serializing_if = "is_false")]
