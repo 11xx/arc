@@ -4510,7 +4510,8 @@ enum CostCmd {
     /// identified groups no overlap; a bound child whose recording is gone
     /// is unmeasured (`child recording missing`). Each parent row carries
     /// `family`: its bound child rows, every child its recording names with
-    /// its recording present or missing and an unbound child's figure, the
+    /// its recording present or missing, `bound` when any dispatch binds it,
+    /// and an unbound child's figure, the
     /// `unassigned` figure outside every total, and for Claude the
     /// `reconciliation`: whether its own requests and each child's add up to
     /// the family's identified union (`conserved`, `not-conserved` with
@@ -4622,8 +4623,9 @@ enum CostCmd {
     /// `--allocate even` the allocated total beside it; `unattributed shared`
     /// holds each session's part outside it, with a line naming each session's
     /// reasons; one line counts the qualifications `--detail` explains; a
-    /// `children` line per parent of native children names its bound rows
-    /// and the unassigned figure outside the total, and a `family` line its
+    /// `children` line per parent of native children names its bound rows,
+    /// the children bound to unselected work, and the unassigned figure
+    /// outside the total, and a `family` line its
     /// reconciliation and each residual counter that does not reconcile.
     /// `--detail` prints the per-category report instead. `--by` groups counted
     /// rows with one subtotal per group, never adding incompatible accounting

@@ -520,7 +520,12 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
         bail!("cost target has no readable metadata");
     }
     let ledger = read_ledger(&mut read, &selection, &events, &assigned);
-    let Assigned { runs, sessions, .. } = assigned;
+    let Assigned {
+        runs,
+        sessions,
+        bound,
+        ..
+    } = assigned;
     let plans = span_plans(&sessions, &ledger);
     let mut fresh = read_all(
         sessions
@@ -632,7 +637,7 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
     }
     let outside = outside_sessions(&ledger, &sessions, &unmeasured);
     selection.ledger_gaps = read.gaps;
-    let mut children = read_all(unbound_spawned(&sessions), &BTreeMap::new());
+    let mut children = read_all(unbound_spawned(&sessions, &bound), &BTreeMap::new());
     for facts in children.values_mut().flatten() {
         price(facts, prices.table());
     }
@@ -641,6 +646,7 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
         prices: &prices,
         allocate_even: query.allocate_even,
         children: &children,
+        bound: &bound,
     };
     let mut report = render_report(&selection, &runs, &sessions, &outside, &ledger, &view);
     if let Some(footprint) = &query.footprint {
@@ -684,16 +690,18 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
 }
 
 /// The spawned children each row's recording names under their own session
-/// ids that no row holds: they are listed under their parent, outside every
-/// total, and read for that listing alone.
-fn unbound_spawned(sessions: &[SessionRow]) -> BTreeSet<(String, String)> {
-    let rows: BTreeSet<String> = sessions.iter().map(SessionRow::key).collect();
+/// ids that no dispatch binds: they are listed under their parent, outside
+/// every total, and read for that listing alone.
+fn unbound_spawned(
+    sessions: &[SessionRow],
+    bound: &BTreeSet<(String, String)>,
+) -> BTreeSet<(String, String)> {
     sessions
         .iter()
         .filter_map(|row| row.measured.facts.as_ref()?.lineage.as_ref())
         .flat_map(|lineage| &lineage.children)
-        .filter(|child| !rows.contains(&format!("{}:{}", child.harness, child.session)))
         .map(|child| (child.harness.clone(), child.session.clone()))
+        .filter(|key| !bound.contains(key))
         .collect()
 }
 
@@ -709,7 +717,7 @@ fn counted_facts(
     facts.spans = None;
     facts.residual = None;
     facts.events = None;
-    facts.lineage = None;
+    facts.lineage = Some(CostLineage::default());
     facts.list_price = None;
     facts.by_model = Vec::new();
     facts.served_model = None;
@@ -751,6 +759,23 @@ fn counted_facts(
     facts
 }
 
+/// A child listed under `parent` with `facts` as its figure, under its own
+/// identity so no total reads it as the parent counted again.
+fn child_row(parent: &SessionRow, harness: &str, session: &str, facts: CostFacts) -> SessionRow {
+    let mut child = parent.with_facts(facts);
+    child.harness = harness.to_string();
+    child.session = session.to_string();
+    child.spans = Vec::new();
+    child.membership = BTreeSet::new();
+    child.split = Split::Whole;
+    child.overlap = BTreeSet::new();
+    child.participation = None;
+    child.liveness = None;
+    child.agent = None;
+    child.parent = Some(parent.session.clone());
+    child
+}
+
 /// Why a child recording's figure in its family is a known subtotal: tapes
 /// read a record it could not count, or a request that failed.
 const CHILD_SOURCE_INCOMPLETE: &str = "the child recording holds records its requests do not count";
@@ -770,11 +795,11 @@ fn family_json(row: &SessionRow, sessions: &[SessionRow], view: &View<'_>) -> Op
             child.harness == row.harness && child.parent.as_deref() == Some(&row.session)
         })
         .collect();
-    let bound_key = |key: &str| {
-        bound
-            .iter()
-            .find(|child| child.key() == key)
-            .map(|child| child.key())
+    // A child any dispatch binds is assigned, to this view's work or to
+    // work it does not select; only a child no binding names is unassigned.
+    let assigned = |harness: &str, session: &str| {
+        view.bound
+            .contains(&(harness.to_string(), session.to_string()))
     };
     let natives: Vec<&CostNativeChild> = lineage
         .map(|lineage| {
@@ -807,19 +832,23 @@ fn family_json(row: &SessionRow, sessions: &[SessionRow], view: &View<'_>) -> Op
     let mut unassigned: Vec<SessionRow> = Vec::new();
     let mut unmeasured = 0usize;
     for child in &natives {
-        let key = format!("{}:{}::{}", row.harness, row.session, child.agent);
-        let held = bound_key(&key);
+        let session = format!("{}::{}", row.session, child.agent);
+        let key = format!("{}:{session}", row.harness);
+        let held = assigned(&row.harness, &session);
         let figure = facts
             .zip(source_of(&child.agent))
             .and_then(|(facts, source)| {
                 let counters = source.identified.as_ref()?;
                 let mut figure = counted_facts(facts, &row.harness, counters, source.complete);
                 price(&mut figure, table);
-                Some((row.with_facts(figure), source.requests))
+                Some((
+                    child_row(row, &row.harness, &session, figure),
+                    source.requests,
+                ))
             });
         let recording = if child.resolved { "present" } else { "missing" };
         let mut entry = json!({"agent": child.agent, "key": key, "role": child.role,
-            "recording": recording, "bound": held.is_some()});
+            "recording": recording, "bound": held, "row": bound.iter().any(|row| row.key() == key)});
         match &figure {
             Some((figure, requests)) => {
                 entry["requests"] = json!(requests);
@@ -833,7 +862,7 @@ fn family_json(row: &SessionRow, sessions: &[SessionRow], view: &View<'_>) -> Op
                 });
             }
         }
-        if held.is_none() {
+        if !held {
             match figure {
                 Some((figure, _)) => unassigned.push(figure),
                 None => unmeasured += 1,
@@ -843,15 +872,16 @@ fn family_json(row: &SessionRow, sessions: &[SessionRow], view: &View<'_>) -> Op
     }
     for child in &spawned {
         let key = format!("{}:{}", child.harness, child.session);
-        let held = bound_key(&key);
-        let mut entry = json!({"session": child.session, "key": key, "bound": held.is_some()});
-        if held.is_none() {
+        let held = assigned(&child.harness, &child.session);
+        let mut entry = json!({"session": child.session, "key": key, "bound": held,
+            "row": bound.iter().any(|row| row.key() == key)});
+        if !held {
             match view
                 .children
                 .get(&(child.harness.clone(), child.session.clone()))
             {
                 Some(Ok(facts)) => {
-                    let figure = row.with_facts(facts.clone());
+                    let figure = child_row(row, &child.harness, &child.session, facts.clone());
                     entry["totals"] =
                         totals(&[&figure], &[], &scope(&format!("child {}", child.session)));
                     unassigned.push(figure);
@@ -3839,6 +3869,8 @@ struct View<'a> {
     allocate_even: bool,
     /// The fresh reads of spawned children no row holds, by harness and id.
     children: &'a Children,
+    /// Every session any dispatch binds, selected or not.
+    bound: &'a BTreeSet<(String, String)>,
 }
 
 type Children = BTreeMap<(String, String), std::result::Result<CostFacts, String>>;
@@ -4745,6 +4777,8 @@ fn cost_table(
                 "bound": family["bound"].as_array().into_iter().flatten()
                     .filter_map(|key| short_of(key.as_str()?)).collect::<Vec<_>>(),
                 "unassigned": unassigned,
+                "elsewhere": family["children"].as_array().into_iter().flatten()
+                    .filter(|child| child["bound"] == true && child["row"] != true).count(),
                 "missing": family["children"].as_array().into_iter().flatten()
                     .filter(|child| child["recording"] == "missing").count(),
                 "reconciliation": family["reconciliation"]["status"],

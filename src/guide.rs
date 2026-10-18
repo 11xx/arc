@@ -3636,8 +3636,10 @@ RULES THAT CHANGE WHAT YOU DO
     and a child with recordings of their own, so it groups no overlap. A
     bound child whose recording is gone is unmeasured (`child recording
     missing`). Each parent row carries `family`: `bound`, its bound child
-    rows; `children`, every child its recording names, with the recording
-    `present` or `missing` and, for one no binding names, its figure, from
+    rows; `children`, every child its recording names, `bound` when any
+    dispatch binds it, to this view's work or to work it does not select,
+    with the recording `present` or `missing` and, for one no binding names,
+    its figure, from
     tapes' family reconciliation for a Claude subagent and a fresh read for
     a child with its own session; and `unassigned`, those children's figure,
     listed and never in a total. A mirror row is never listed. A Claude
@@ -3678,7 +3680,8 @@ RULES THAT CHANGE WHAT YOU DO
     shared` row with each session's part outside the total and one line per
     session naming its reasons; and a line counting the qualifications
     `--detail` explains, then per parent of native children a `children`
-    line naming its bound rows and the unassigned figure outside the total,
+    line naming its bound rows, the children bound to unselected work, and
+    the unassigned figure outside the total,
     and a `family` line with the reconciliation status and each residual
     counter that does not reconcile. An amount not established is shown as its known subtotal, or
     as `≥` the least an overlapping figure is known to be, with its status

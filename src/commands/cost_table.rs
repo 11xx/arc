@@ -374,6 +374,10 @@ fn family_line(family: &Value) -> String {
     } else {
         format!("{} bound ({})", bound.len(), bound.join(", "))
     }];
+    let elsewhere = family["elsewhere"].as_u64().unwrap_or(0);
+    if elsewhere > 0 {
+        parts.push(format!("{elsewhere} bound to unselected work"));
+    }
     let unassigned = &family["unassigned"];
     let count = unassigned["children"].as_u64().unwrap_or(0);
     if count > 0 {

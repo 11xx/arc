@@ -359,6 +359,13 @@ fn two_bound_native_children_have_separate_figures_and_conserve_the_family() {
         !has_session(&scout, &child_key(REVIEWER)),
         "a child bound to another change is not this one's"
     );
+    let alone = &session(&scout, &format!("claude:{PARENT}"))["family"];
+    assert_eq!(
+        alone["unassigned"]["children"], 2,
+        "a child bound to unselected work is assigned, not unassigned: {alone:#}"
+    );
+    let text = stdout(repo.arc(&repo.root).args(["cost", "show", &scouting]));
+    assert!(text.contains("1 bound to unselected work"), "{text}");
 
     let both = report(&repo, &[&scouting, &reviewing]);
     let reviewer = session(&both, &child_key(REVIEWER));
