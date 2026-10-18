@@ -3461,9 +3461,10 @@ RULES THAT CHANGE WHAT YOU DO
     the pinned tapes reader, or from retained facts when its source no longer
     answers, and the report says which; a fresh read that disagrees with
     facts retained at the same frontier shows the conflict. Direct totals hold
-    sessions whose every span is the item's whole, and the item's share of
+    each undivided session whose work the item holds, and the item's share of
     each divided session with a span on it; inclusive totals add the artifact
-    a change was begun from, and the union counts each session once. A run's
+    a change was begun from, and the union counts each session once, a
+    divided one by the selected items' shares. A run's
     figure is the segments that run alone covers. A harness-written dollar
     figure is a harness-calculated estimate with an unknown pricing basis;
     token counts are resource quantities by tapes' categories. A list-price
@@ -3530,9 +3531,12 @@ RULES THAT CHANGE WHAT YOU DO
     first item`, `between items`, `after last item` and `request time
     unrecorded`. Conservation holds per counter within the segments'
     accounting basis: the item shares and the unattributed part add up to the
-    session's whole figure in that basis. Where tapes' segment figures do not,
-    as a Codex counter reset can leave them, the split names each counter that
-    does not conserve under `conservation`. A recorded total no span divides,
+    session's whole figure in that basis. `conservation` reads `conserved`
+    only when every counter and disjoint category compares: one the parts
+    and the whole do not add up in is named under `differs` (`not-conserved`),
+    and one either side leaves unknown is named under `uncompared`
+    (`unestablished`), never read as agreeing. A Codex session's segments
+    are read in the summed-requests basis. A recorded total no span divides,
     such as a Claude cost-state or an OpenCode session row, stays whole in its
     own basis on the session row while the shares take the request basis tapes
     reads spans in, and the unattributed part then names `recorded total not
@@ -3542,9 +3546,14 @@ RULES THAT CHANGE WHAT YOU DO
     participant whose ledger records are not all readable (`ledger records are
     unreadable`), and retained facts whose segments are not the ones the
     ledger gives now (`retained spans do not match the ledger`) stay
-    undivided, outside every share with that reason. A divided session's
-    consumption before its first span is unattributed, so it withholds no
-    share; a session counted whole still withholds as above. `--allocate even`
+    undivided, outside every share with that reason. An undivided session
+    that also acted on work the figure does not hold has an unknown share in
+    it, so every figure it would join is withheld, naming the session. A
+    divided session joins every figure by its items' shares, even when the
+    figure holds all of its work, so its unattributed part is never charged
+    to a selection; its consumption before its first span is unattributed and
+    withholds no share, and an undivided session counted whole still
+    withholds as above. `--allocate even`
     divides each segment several items cover evenly among them, tokens kept
     whole with the first items in order taking one token each of the
     remainder. Every allocated figure is labelled `allocated` beside the
@@ -3574,12 +3583,11 @@ RULES THAT CHANGE WHAT YOU DO
     prose and trailers name none. A participant is measured through the same
     reader as an executor, or from retained facts when its source no longer
     answers, and divided by its span on each work item. Its membership is
-    every change in this ledger whose events carry it, read in one pass. It
-    counts whole where the item holds every member; otherwise its share joins
-    the item's total and it is listed in `participants` with its whole figure,
-    roles, span count, the number of members, and `share`. A union counts it
-    whole once when the selection covers its whole membership, and takes the
-    selected items' shares otherwise. A recording cannot show
+    every change in this ledger whose events carry it, read in one pass.
+    Undivided, it counts whole where the item holds every member. Divided,
+    its share joins each item's total, and a union takes the selected items'
+    shares. It is listed in `participants` with its whole figure, roles,
+    span count, the number of members, `counted` and `share`. A recording cannot show
     whether its session is still running, so the view asks `agent-status`
     once, bounded to two seconds (`ARC_AGENT_STATUS` names another program).
     A session it lists, in any state, is live: its figure is as of its read
@@ -3677,8 +3685,9 @@ RULES THAT CHANGE WHAT YOU DO
     install a table. Footer rows hold the total, which is the union figure
     with its status and a row per accounting partition when it spans several;
     with `--allocate even`, the allocated total beside it; the `unattributed
-    shared` row with each session's part outside the total and one line per
-    session naming its reasons; and a line counting the qualifications
+    shared` row with everything of each session outside the total, its
+    unattributed part and its shares of items the view does not select
+    (`unselected item`), and one line per session naming its reasons; and a line counting the qualifications
     `--detail` explains, then per parent of native children a `children`
     line naming its bound rows, the children bound to unselected work, and
     the unassigned figure outside the total,

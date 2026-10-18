@@ -4027,6 +4027,51 @@ impl SessionRow {
         parts
     }
 
+    /// The figure outside the selection's total, with why: a divided
+    /// session's unattributed part and its shares of the items `selected`
+    /// does not hold, or an undivided one's whole figure.
+    fn outside_figure(
+        &self,
+        table: Option<&agent_tapes_core::pricing::PriceTable>,
+        selected: &BTreeSet<String>,
+    ) -> Option<(SessionRow, Vec<&'static str>)> {
+        let Some(spans) = self.segments() else {
+            return self.unattributed_figure(table);
+        };
+        let facts = self.measured.facts.as_ref()?;
+        fn alone(segment: &CostSegment) -> Option<&String> {
+            match &segment.work[..] {
+                [one] => Some(one),
+                _ => None,
+            }
+        }
+        let outside =
+            |segment: &CostSegment| alone(segment).is_none_or(|one| !selected.contains(one));
+        let mut reasons: Vec<&'static str> = self
+            .unattributed(table)
+            .iter()
+            .filter(|(_, requests, _)| *requests > 0)
+            .map(|(reason, _, _)| *reason)
+            .collect();
+        if spans.segments.iter().any(|segment| {
+            segment.requests > 0 && alone(segment).is_some_and(|one| !selected.contains(one))
+        }) {
+            reasons.push(span::UNSELECTED);
+        }
+        if spans
+            .whole
+            .as_ref()
+            .is_some_and(|whole| whole.basis != facts.basis)
+        {
+            reasons.push(span::NOT_SPLITTABLE);
+        }
+        if reasons.is_empty() {
+            return None;
+        }
+        let row = self.part(table, |_, segment| outside(segment), |_| Vec::new(), true)?;
+        Some((row, reasons))
+    }
+
     /// The figure outside every work item's share, with why: a divided
     /// session's unattributed part, or an undivided one's whole figure.
     fn unattributed_figure(
@@ -4098,12 +4143,16 @@ fn render_report(
     view: &View<'_>,
 ) -> Value {
     let table = view.prices.table();
-    // A session counts for these items alone when they hold every work item
-    // it acted on, and for a participant when that membership is complete.
+    // An undivided session counts whole for these items when they hold
+    // every work item it acted on, and for a participant when that
+    // membership is complete. A divided session always joins by its items'
+    // shares: its consumption no item holds is unattributed, never charged.
     let counted = |row: &SessionRow, keys: &[&WorkKey]| -> bool {
-        row.participation
-            .as_ref()
-            .is_none_or(|participation| participation.membership_complete)
+        row.split != Split::Divided
+            && row
+                .participation
+                .as_ref()
+                .is_none_or(|participation| participation.membership_complete)
             && row.membership.iter().all(|work| keys.contains(&work))
     };
     let unbound_in = |key: &WorkKey| -> Vec<String> {
@@ -4192,14 +4241,37 @@ fn render_report(
         }
         members
     };
+    // A session these items share with other work and cannot divide has an
+    // unknown share in them, so every figure it would join is withheld.
+    let shared_withheld = |members: &Members<'_>| -> Vec<String> {
+        members
+            .shared
+            .iter()
+            .map(|key| {
+                let reason = sessions
+                    .iter()
+                    .find(|row| &row.key() == key)
+                    .and_then(|row| match row.split {
+                        Split::Unsplit(reason) => Some(reason),
+                        _ => None,
+                    })
+                    .unwrap_or(span::INCOMPLETE_MEMBERSHIP);
+                format!("session {key} also acted on other work and is not divided ({reason}), so its share here is unknown")
+            })
+            .collect()
+    };
     // A figure and, when the view allocates, the allocated figure beside it.
     let figure = |keys: &[&WorkKey], scope: &str| -> (Value, Option<Value>) {
         let members = within(keys, false);
-        let mut conserving = totals(&members.rows(), &withheld_for(keys, scope), scope);
+        let mut withheld = withheld_for(keys, scope);
+        withheld.extend(shared_withheld(&members));
+        let mut conserving = totals(&members.rows(), &withheld, scope);
         conserving["shares"] = json!(members.share_keys());
         let allocated = view.allocate_even.then(|| {
             let members = within(keys, true);
-            let mut allocated = totals(&members.rows(), &withheld_for(keys, scope), scope);
+            let mut withheld = withheld_for(keys, scope);
+            withheld.extend(shared_withheld(&members));
+            let mut allocated = totals(&members.rows(), &withheld, scope);
             for quantity in allocated["quantities"].as_array_mut().into_iter().flatten() {
                 quantity["allocated"] = json!(true);
             }
@@ -4378,7 +4450,8 @@ fn render_report(
     let identity_complete = identities
         .iter()
         .all(|figure| figure["identity"]["status"] == "complete");
-    let union_withheld = withheld_for(&all, "union");
+    let mut union_withheld = withheld_for(&all, "union");
+    union_withheld.extend(shared_withheld(&union_members));
     let mut report = json!({
         "schema": COST_SCHEMA,
         "target": selection.target,
@@ -4678,12 +4751,18 @@ fn cost_table(
                 "tokens": figure["tokens"], "list": figure["list"], "usd": figure["usd"]})
         })
         .collect();
+    let selected: BTreeSet<String> = report["union"]["members"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|label| label.as_str().map(str::to_string))
+        .collect();
     let unattributed: Vec<(SessionRow, Vec<&'static str>, &String)> = sessions
         .iter()
         .zip(&short)
         .filter(|(row, _)| !whole(row))
         .filter_map(|(row, short)| {
-            let (figure, reasons) = row.unattributed_figure(table)?;
+            let (figure, reasons) = row.outside_figure(table, &selected)?;
             Some((figure, reasons, short))
         })
         .collect();
@@ -4916,13 +4995,21 @@ fn split_json(row: &SessionRow, table: Option<&agent_tapes_core::pricing::PriceT
 /// Whether the segment figures add up to the whole, and the counters where
 /// they do not.
 fn conservation(row: &SessionRow, spans: &CostSpans) -> Value {
-    let differs = row
-        .measured
-        .facts
-        .as_ref()
-        .map(|facts| span::unconserved(facts, spans))
-        .unwrap_or_default();
-    json!({"status": if differs.is_empty() { "conserved" } else { "not-conserved" }, "differs": differs})
+    let held = match row.measured.facts.as_ref() {
+        Some(facts) => span::conservation(facts, spans),
+        None => span::Conservation {
+            uncompared: vec!["whole".to_string()],
+            ..Default::default()
+        },
+    };
+    let status = if !held.differs.is_empty() {
+        "not-conserved"
+    } else if !held.uncompared.is_empty() {
+        "unestablished"
+    } else {
+        "conserved"
+    };
+    json!({"status": status, "differs": held.differs, "uncompared": held.uncompared})
 }
 
 fn session_json(row: &SessionRow, table: Option<&agent_tapes_core::pricing::PriceTable>) -> Value {

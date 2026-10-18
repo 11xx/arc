@@ -378,11 +378,23 @@ fn two_bound_native_children_have_separate_figures_and_conserve_the_family() {
         Some(of(OWN)),
         "the parent's figure is its own requests"
     );
+    // The parent's one request precedes its spans on both changes, so the
+    // union takes each bound child once and the parent's request stays in
+    // the unattributed footer.
     assert_eq!(
         tokens(&both["union"]),
-        Some(of(OWN) + of(SCOUTED) + of(REVIEWED)),
-        "the union counts the parent's own requests and each bound child once: {:#}",
+        Some(of(SCOUTED) + of(REVIEWED)),
+        "the union counts each bound child once: {:#}",
         both["union"]
+    );
+    let footer = &both["table"]["unattributed"]["tokens"];
+    assert_eq!(
+        footer["amount"]
+            .as_u64()
+            .or(footer["known_subtotal"].as_u64()),
+        Some(of(OWN)),
+        "{:#}",
+        both["table"]
     );
 
     let family = &parent["family"];

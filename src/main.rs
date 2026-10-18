@@ -4456,11 +4456,11 @@ enum CostCmd {
     /// measured through the pinned tapes reader over its whole recording, or,
     /// when the source is unavailable, from the facts `cost retain` kept, and
     /// the report says which. A fresh read that disagrees with facts retained at the same
-    /// frontier shows the conflict. Direct totals count sessions whose every
-    /// span is the item's whole, and the item's share of each divided session
-    /// with a span on it; inclusive totals for a change add the journal
-    /// artifact it was begun from; the union counts each session once over the
-    /// selection. A run's figure is the segments that run alone covers. Every
+    /// frontier shows the conflict. Direct totals count each undivided
+    /// session whose work the item holds, and the item's share of each divided
+    /// session with a span on it; inclusive totals for a change add the
+    /// journal artifact it was begun from; the union counts each session once
+    /// over the selection, a divided one by the selected items' shares. A run's figure is the segments that run alone covers. Every
     /// total names its quantity kind: the dollar figure a harness wrote is a
     /// harness-calculated estimate with an unknown pricing basis, a list-price
     /// estimate prices the disjoint categories by a `tapes-price-table/1` table
@@ -4533,16 +4533,21 @@ enum CostCmd {
     /// and a request with no recorded time are unattributed, with the reasons
     /// `overlap`, `before first item`, `between items`, `after last item` and
     /// `request time unrecorded`. The shares and the unattributed part add up
-    /// to the whole in the segments' accounting basis, per counter, and the
-    /// split names under `conservation` any counter whose segment figures do
-    /// not, as a Codex counter reset can leave them. A recorded
+    /// to the whole in the segments' accounting basis, per counter;
+    /// `conservation` is `conserved` only when every counter compares, names a
+    /// counter that does not add up under `differs` (`not-conserved`) and one
+    /// either side leaves unknown under `uncompared` (`unestablished`). A
+    /// Codex session's segments are in the summed-requests basis. A recorded
     /// total no span divides stays whole in its own basis on the session row,
     /// and the unattributed part names `recorded total not splittable`. A
     /// session that cannot be divided (`span reading unsupported`,
     /// `unmeasured`, `ledger records are unreadable`, `retained spans do not
-    /// match the ledger`) stays outside every share. A divided session's
-    /// consumption before its first span is unattributed and withholds no
-    /// share. `--allocate even` divides each segment several items cover evenly
+    /// match the ledger`) stays outside every share; when it also acted on
+    /// work a figure does not hold, its share there is unknown and the figure
+    /// is withheld, naming it. A divided session joins every figure by its
+    /// items' shares, even one holding all of its work, so its unattributed
+    /// part is never charged to a selection. A divided session's consumption
+    /// before its first span is unattributed and withholds no share. `--allocate even` divides each segment several items cover evenly
     /// among them, labelled `allocated` beside the conserving figure;
     /// allocation is never the default.
     /// Lineage relatives are plain session ids. Unresolved locators and
@@ -4558,11 +4563,11 @@ enum CostCmd {
     /// a snapshot or a verdict is a reviewer's, an integration, a debt or a
     /// closure an integrator's, a dispatch an orchestrator's. It is divided by
     /// its span on each work item. Its membership is every change in this
-    /// ledger whose events carry it; it counts whole where the item holds every
-    /// member, and otherwise its share joins the item's total and it is listed
-    /// in `participants` with its whole figure, roles, span count (its members)
-    /// and `share`. A union counts it whole once when the selection covers its
-    /// whole membership, and takes the selected items' shares otherwise. A recording cannot show whether its session is still
+    /// ledger whose events carry it. Undivided, it counts whole where the item
+    /// holds every member; divided, its share joins each item's total and a
+    /// union takes the selected items' shares. It is listed in `participants`
+    /// with its whole figure, roles, span count (its members), `counted` and
+    /// `share`. A recording cannot show whether its session is still
     /// running, so the view asks `agent-status` once (`ARC_AGENT_STATUS`
     /// names another program), bounded to two seconds. A session it lists, in
     /// any state, is live: its figure is as of its read frontier and is
@@ -4621,8 +4626,9 @@ enum CostCmd {
     /// install a table. The `total` row is the union figure with its status,
     /// with a row per accounting partition when it spans several, and with
     /// `--allocate even` the allocated total beside it; `unattributed shared`
-    /// holds each session's part outside it, with a line naming each session's
-    /// reasons; one line counts the qualifications `--detail` explains; a
+    /// holds everything of each session outside it, its unattributed part and
+    /// its shares of unselected items (`unselected item`), with a line naming
+    /// each session's reasons; one line counts the qualifications `--detail` explains; a
     /// `children` line per parent of native children names its bound rows,
     /// the children bound to unselected work, and the unassigned figure
     /// outside the total, and a `family` line its

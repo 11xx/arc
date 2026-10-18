@@ -318,20 +318,29 @@ fn a_lead_across_two_sequential_changes_splits_exactly() {
         assert_eq!(direct["shares"], json!([key]), "{view}");
         assert_eq!(work(&view, change)["shared"], json!([]), "{view}");
     }
-    // The union covers the lead's whole membership, so it counts it whole.
-    assert_eq!(uncached(&view["union"]), Some(11111), "{view}");
-
-    // A view of one change takes its share; the rest is unattributed.
-    let alone = report(&repo, &[&first]);
-    assert_eq!(uncached(&alone["union"]), Some(10), "{alone}");
-    let footer = &alone["table"]["unattributed"];
-    assert_eq!(footer["sessions"][0]["key"], key, "{alone}");
-    // Three requests of `input + 600` disjoint tokens each.
+    // The union takes the lead's two shares; what no item holds stays in
+    // the unattributed footer, outside the total.
+    assert_eq!(uncached(&view["union"]), Some(1010), "{view}");
+    let footer = &view["table"]["unattributed"];
+    assert_eq!(footer["sessions"][0]["key"], key, "{view}");
     let tokens = &footer["tokens"];
     let shown = tokens["amount"]
         .as_u64()
         .or(tokens["known_subtotal"].as_u64());
-    assert_eq!(shown, Some(10101 + 3 * 600), "{alone}");
+    assert_eq!(shown, Some(10101 + 3 * 600), "{view}");
+
+    // A view of one change takes its share; the footer holds the rest,
+    // the unselected change's share included.
+    let alone = report(&repo, &[&first]);
+    assert_eq!(uncached(&alone["union"]), Some(10), "{alone}");
+    let footer = &alone["table"]["unattributed"];
+    assert_eq!(footer["sessions"][0]["key"], key, "{alone}");
+    // Four requests of `input + 600` disjoint tokens each.
+    let tokens = &footer["tokens"];
+    let shown = tokens["amount"]
+        .as_u64()
+        .or(tokens["known_subtotal"].as_u64());
+    assert_eq!(shown, Some(11101 + 4 * 600), "{alone}");
     let text = stdout(repo.arc(&repo.root).args(["cost", "show", &first]));
     assert!(text.contains("split ×2"), "{text}");
     assert!(text.contains("unattributed shared (1 session)"), "{text}");
@@ -459,7 +468,8 @@ fn a_warm_executor_across_three_sequential_runs_splits_per_run() {
         json!(["after last item"]),
         "{row}"
     );
-    assert_eq!(uncached(&view["union"]), Some(1117), "{view}");
+    // The union takes the three runs' shares, without the request after them.
+    assert_eq!(uncached(&view["union"]), Some(1110), "{view}");
 }
 
 // Claim: a split read is retained with its segments, so a session divided

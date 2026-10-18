@@ -2741,16 +2741,25 @@ fn a_union_over_both_changes_counts_the_lead_once() {
     let second = integrated_by(&repo, "second", LEAD, &["--from-journal", &plan]);
 
     let view = report(&repo, &plan);
-    assert_eq!(usd(&view["union"]), Some(0.2), "{view}");
+    // The lead's one request precedes both of its spans: the union takes
+    // the shares, which hold none of it, and the footer holds it.
+    assert_eq!(usd(&view["union"]), Some(0.0), "{view}");
     assert_eq!(
         view["union"]["sessions"],
         json!(["pi:lead-session"]),
         "{view}"
     );
     assert_eq!(view["union"]["shared"], json!([]), "{view}");
+    let lead = participant(&view["union"], "pi:lead-session");
+    assert_eq!(lead["counted"], false, "{view}");
+    assert_eq!(lead["share"], true, "{view}");
+    let footer = &view["table"]["unattributed"]["usd"];
     assert_eq!(
-        participant(&view["union"], "pi:lead-session")["counted"],
-        true
+        footer["amount"]
+            .as_f64()
+            .or(footer["known_subtotal"].as_f64()),
+        Some(0.2),
+        "{view}"
     );
     // Each change takes its share, which holds none of the one request.
     for change in [&first, &second] {

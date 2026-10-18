@@ -21,6 +21,8 @@ pub(super) const BETWEEN: &str = "between items";
 pub(super) const AFTER: &str = "after last item";
 pub(super) const UNTIMED: &str = "request time unrecorded";
 pub(super) const NOT_SPLITTABLE: &str = "recorded total not splittable";
+/// Why a share is outside a view's total: the item it belongs to is not selected.
+pub(super) const UNSELECTED: &str = "unselected item";
 pub(super) const UNSUPPORTED: &str = "span reading unsupported";
 pub(super) const RETAINED_MISMATCH: &str = "retained spans do not match the ledger";
 pub(super) const UNMEASURED: &str = "unmeasured";
@@ -192,13 +194,22 @@ pub(super) fn sum_facts(session: &CostFacts, basis: &CostFacts, parts: &[Part<'_
         Some(convention) => models
             .into_iter()
             .map(|model| {
-                // A part with no share of the model consumed none of it.
+                // A part with no share of the model consumed none of it; a
+                // part that served it at several efforts holds a share for
+                // each, and every one of them adds.
                 let held: Vec<(Option<&CostDisjoint>, u64)> = parts
                     .iter()
-                    .map(|(part, requests)| {
-                        match part.by_model.iter().find(|share| &share.model == model) {
-                            Some(share) => (Some(&share.disjoint), *requests),
-                            None => (None, 0),
+                    .flat_map(|(part, requests)| {
+                        let shares: Vec<(Option<&CostDisjoint>, u64)> = part
+                            .by_model
+                            .iter()
+                            .filter(|share| &share.model == model)
+                            .map(|share| (Some(&share.disjoint), *requests))
+                            .collect();
+                        if shares.is_empty() {
+                            vec![(None, 0)]
+                        } else {
+                            shares
                         }
                     })
                     .collect();
@@ -271,7 +282,8 @@ pub(super) fn sum_facts(session: &CostFacts, basis: &CostFacts, parts: &[Part<'_
             _ => None,
         };
     }
-    for (part, _) in parts {
+    // A part that holds no request measured nothing to qualify.
+    for (part, _) in parts.iter().filter(|(_, requests)| *requests > 0) {
         for reason in &part.incomplete {
             if !facts.incomplete.contains(reason) {
                 facts.incomplete.push(reason.clone());
@@ -368,13 +380,21 @@ fn counter_mut<'a>(
     }
 }
 
-/// The counters and disjoint categories the segments and the remainder do
-/// not add up to the whole in, where both are measured. tapes' span figures
-/// conserve; a figure that restarts its counters inside the recording, as a
-/// Codex counter reset does, can leave them apart.
-pub(super) fn unconserved(session: &CostFacts, spans: &crate::model::CostSpans) -> Vec<String> {
+/// How the segments and the remainder stand against the whole: the counters
+/// and disjoint categories they do not add up to, and those one side leaves
+/// unknown, which cannot be compared. A category neither side records is
+/// neither.
+#[derive(Default)]
+pub(super) struct Conservation {
+    pub differs: Vec<String>,
+    pub uncompared: Vec<String>,
+}
+
+pub(super) fn conservation(session: &CostFacts, spans: &crate::model::CostSpans) -> Conservation {
+    let mut held = Conservation::default();
     let Some(whole) = spans.whole.as_deref() else {
-        return Vec::new();
+        held.uncompared.push("whole".to_string());
+        return held;
     };
     let parts: Vec<Part<'_>> = spans
         .segments
@@ -388,29 +408,33 @@ pub(super) fn unconserved(session: &CostFacts, spans: &crate::model::CostSpans) 
         )
         .collect();
     let sum = sum_facts(session, whole, &parts);
-    let mut differs: Vec<String> = CATEGORIES
-        .into_iter()
-        .filter(|category| {
-            let pair = (
+    let mut compare = |name: String, pair: (Option<u64>, Option<u64>)| match pair {
+        (Some(parts), Some(total)) if parts != total => held.differs.push(name),
+        (Some(_), None) | (None, Some(_)) => held.uncompared.push(name),
+        _ => {}
+    };
+    for category in CATEGORIES {
+        compare(
+            category.to_string(),
+            (
                 super::counter(&sum.counters, category),
                 super::counter(&whole.counters, category),
-            );
-            matches!(pair, (Some(held), Some(total)) if held != total)
-        })
-        .map(str::to_string)
-        .collect();
-    if let (Some(held), Some(total)) = (&sum.disjoint, &whole.disjoint) {
-        for category in ["uncached_input", "cache_read", "cache_write", "output"] {
-            let pair = (
-                super::disjoint_amount(held, category),
-                super::disjoint_amount(total, category),
-            );
-            if matches!(pair, (Some(held), Some(total)) if held != total) {
-                differs.push(format!("disjoint {category}"));
-            }
-        }
+            ),
+        );
     }
-    differs
+    let categories = ["uncached_input", "cache_read", "cache_write", "output"];
+    for category in categories {
+        let amount = |disjoint: &Option<CostDisjoint>| {
+            disjoint
+                .as_ref()
+                .and_then(|disjoint| super::disjoint_amount(disjoint, category))
+        };
+        compare(
+            format!("disjoint {category}"),
+            (amount(&sum.disjoint), amount(&whole.disjoint)),
+        );
+    }
+    held
 }
 
 /// The `index`th of `shares` even shares of a figure. Tokens stay whole: each
@@ -524,8 +548,11 @@ mod tests {
             remainder_requests: 0,
             whole: Some(Box::new(facts(whole))),
         };
-        assert_eq!(unconserved(&facts(7), &spans(7)), Vec::<String>::new());
-        assert_eq!(unconserved(&facts(5), &spans(5)), vec!["input".to_string()]);
+        assert!(conservation(&facts(7), &spans(7)).differs.is_empty());
+        assert_eq!(
+            conservation(&facts(5), &spans(5)).differs,
+            vec!["input".to_string()]
+        );
     }
 
     #[test]
