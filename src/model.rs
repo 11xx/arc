@@ -3171,6 +3171,8 @@ pub(crate) fn portable_quantity_reason(reason: &str) -> bool {
             | "some records carrying usage were not read"
             | "recorded total is below its identified requests"
             | "recorded cost kind is unsupported"
+            | "the price table has no row for the model that served the usage"
+            | "some cache writes recorded no TTL"
     )
 }
 

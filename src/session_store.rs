@@ -211,10 +211,13 @@ fn resolve_exact(
         Err(error @ ResolveError::Ambiguous { .. }) => {
             return Err(LookupIssue::Ambiguous(error.to_string()));
         }
-        Err(ResolveError::BackendFailed { query, failures }) => {
+        Err(ResolveError::BackendFailed {
+            query, failures, ..
+        }) => {
             let error = ResolveError::BackendFailed {
                 query,
                 failures: without_coverage(failures),
+                coverage: Vec::new(),
             };
             return Err(LookupIssue::Unreadable(error.to_string()));
         }

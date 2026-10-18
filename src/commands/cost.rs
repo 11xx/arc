@@ -63,6 +63,8 @@ const DISJOINT: [&str; 9] = [
     "total",
 ];
 const ZERO_PRICE: &str = "recorded zero price accompanies nonzero or unknown usage";
+const UNLISTED_MODEL: &str = "the price table has no row for the model that served the usage";
+const TTL_UNRECORDED: &str = "some cache writes recorded no TTL";
 const RESIDUAL_CONFLICT: &str = "recorded total is below its identified requests";
 
 /// Work a dispatched run is assigned to, through the subject it names.
@@ -1705,6 +1707,8 @@ fn arc_reason(reason: MeasurementReason) -> &'static str {
         }
         MeasurementReason::Undetermined => "the recorded counters do not determine this category",
         MeasurementReason::UnrecognizedUsage => "some records carrying usage were not read",
+        MeasurementReason::UnlistedModel => UNLISTED_MODEL,
+        MeasurementReason::TtlUnrecorded => TTL_UNRECORDED,
     }
 }
 
@@ -2586,7 +2590,7 @@ fn figure_gaps(facts: &CostFacts, figure: Figure) -> Vec<String> {
                     .cache_write
                     .is_some_and(|writes| writes.ttl_unrecorded > 0)
             {
-                reasons.insert("some cache writes recorded no TTL".to_string());
+                reasons.insert(TTL_UNRECORDED.to_string());
             }
             reasons.into_iter().collect()
         }
