@@ -1025,6 +1025,8 @@ impl Store {
             .truncate(false)
             .open(&path)
             .with_context(|| format!("cannot open {description} lock {}", path.display()))?;
+        // Only the debug-build test pause moves the deadline.
+        #[cfg_attr(not(debug_assertions), allow(unused_mut))]
         let mut deadline = Instant::now() + timeout;
         #[cfg(debug_assertions)]
         let mut contended = false;
