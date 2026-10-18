@@ -584,3 +584,76 @@ fn list_prices_follow_hand_arithmetic_and_absent_tables_leave_the_harness_figure
     assert!(text.contains("tapes-price-table/1"), "{text}");
     assert!(text.contains("tapes/prices.toml"), "{text}");
 }
+
+fn retained_events(repo: &Repo) -> Vec<PathBuf> {
+    fs::read_dir(repo.root.join(".git/arc/repository/events"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            fs::read_to_string(path)
+                .unwrap()
+                .contains("cost-facts-retained")
+        })
+        .collect()
+}
+
+// Claim: a fresh read whose segment figures disagree with the ones retained
+// at the same frontier shows the conflict, as a whole figure's disagreement
+// does. Rejects comparing only the whole figure, which agrees here.
+#[test]
+fn a_fresh_read_disagreeing_with_retained_segments_shows_the_conflict() {
+    let repo = Repo::new();
+    pi_session(&repo, EXECUTOR, &[("10:05:00", 10), ("10:25:00", 100)]);
+    run(&repo, "held-one", "08:59:00", "10:10:00");
+    run(&repo, "held-two", "10:20:00", "10:30:00");
+    stdout(repo.arc(&repo.root).args(["cost", "retain", "held-one"]));
+    let [path] = &retained_events(&repo)[..] else {
+        panic!("one retention");
+    };
+    let mut event: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    let segments = event["facts"]["spans"]["segments"]
+        .as_array_mut()
+        .unwrap_or_else(|| panic!("no retained segments"));
+    let held = segments
+        .iter_mut()
+        .find(|segment| segment["requests"] == 1)
+        .unwrap();
+    held["facts"]["counters"]["input"] = json!(11);
+    fs::write(path, serde_json::to_vec(&event).unwrap()).unwrap();
+
+    let view = report(&repo, &["held-one"]);
+    let row = session(&view, &format!("pi:{EXECUTOR}"));
+    assert_eq!(row["measurement"]["source"], "fresh", "{row}");
+    assert!(row["measurement"]["conflict"].is_object(), "{row}");
+}
+
+// Claim: retained segments are used only while they are the ones the ledger
+// gives the session; once a later run moves its spans, a view from those
+// facts leaves the session undivided with that reason. Rejects dividing a
+// session along spans the ledger no longer gives it.
+#[test]
+fn retained_segments_the_ledger_no_longer_gives_leave_the_session_whole() {
+    let repo = Repo::new();
+    pi_session(&repo, EXECUTOR, &[("10:05:00", 10), ("10:25:00", 100)]);
+    run(&repo, "moved-one", "08:59:00", "10:10:00");
+    run(&repo, "moved-two", "10:20:00", "10:30:00");
+    stdout(repo.arc(&repo.root).args(["cost", "retain", "moved-one"]));
+    fs::remove_file(
+        repo.home
+            .join(".pi/agent/sessions/--fixture-project--")
+            .join(format!("2026-01-01T09-00-00-000Z_{EXECUTOR}.jsonl")),
+    )
+    .unwrap();
+    run(&repo, "moved-three", "10:40:00", "10:50:00");
+
+    let view = report(&repo, &["moved-one"]);
+    let row = session(&view, &format!("pi:{EXECUTOR}"));
+    assert_eq!(row["measurement"]["source"], "retained", "{row}");
+    assert_eq!(row["split"]["status"], "unsplit", "{row}");
+    assert_eq!(
+        row["split"]["reason"], "retained spans do not match the ledger",
+        "{row}"
+    );
+    let item = work(&view, "moved-one");
+    assert_eq!(item["shared"], json!([format!("pi:{EXECUTOR}")]), "{view}");
+}
