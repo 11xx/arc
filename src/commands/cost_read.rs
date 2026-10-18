@@ -11,6 +11,7 @@ pub(super) struct CostRead<'a> {
     store: &'a Store,
     batches: Vec<ImportBatch>,
     pub gaps: Vec<Value>,
+    read: BTreeMap<String, Vec<Event>>,
 }
 
 fn record_id(scope: &str, path: &Path) -> String {
@@ -75,6 +76,7 @@ impl<'a> CostRead<'a> {
             store,
             batches,
             gaps,
+            read: BTreeMap::new(),
         }
     }
 
@@ -116,7 +118,18 @@ impl<'a> CostRead<'a> {
         ids.into_iter().collect()
     }
 
+    /// One scope's readable events. Each scope is read once per view, so a
+    /// gap is reported once however many selectors consult the scope.
     pub fn events(&mut self, change: &str) -> Vec<Event> {
+        if let Some(events) = self.read.get(change) {
+            return events.clone();
+        }
+        let events = self.read_events(change);
+        self.read.insert(change.to_string(), events.clone());
+        events
+    }
+
+    fn read_events(&mut self, change: &str) -> Vec<Event> {
         let directory = if change == Store::REPOSITORY_SCOPE {
             self.store.root.join("repository/events")
         } else {
