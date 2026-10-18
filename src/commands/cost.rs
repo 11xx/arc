@@ -136,6 +136,8 @@ struct Selection {
 struct Span {
     dispatch_event_id: String,
     dispatched_at: chrono::DateTime<chrono::Utc>,
+    /// When the run's recorded `run end` was written, if one was.
+    ended_at: Option<chrono::DateTime<chrono::Utc>>,
     forked_from: Option<String>,
     round: Option<usize>,
     work: WorkKey,
@@ -155,6 +157,8 @@ struct Measured {
     /// The liveness retained with facts at the measured frontier: those the
     /// view uses, or for a fresh read, any retained at the same frontier.
     retained_liveness: Option<String>,
+    /// When the facts the view uses were retained, for a retained source.
+    retained_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// What a participant's events show it did. The variants are the fixed role
@@ -205,17 +209,29 @@ const PARTICIPANT_LIVE: &str = "participant session is live: measured as of its 
 const RETAINED_BEFORE_END: &str =
     "participant facts were retained before its session was known to end: measured as of their retained frontier";
 
-/// What liveness a participant's figure is read under, and why it is not
-/// final when it is not. A fresh read of an ended session is final; facts
-/// retained after the session ended are final unless it is listed again.
-struct ParticipantLiveness {
+/// Why an executor's figure is incomplete while agent-status lists it.
+const EXECUTOR_LIVE: &str = "executor session is live: measured as of its read frontier";
+/// Why an executor's figure from facts retained before its last run ended is
+/// incomplete.
+const RETAINED_BEFORE_RUN_END: &str =
+    "executor facts were retained before its last run ended: measured as of their retained frontier";
+
+/// What liveness a session's figure is read under, and why it is not final
+/// when it is not.
+struct SessionLiveness {
     fresh: Liveness,
     retained: Option<String>,
+    /// For an executor, how many of its bound dispatches have a recorded
+    /// run end, of how many.
+    runs: Option<(usize, usize)>,
     incomplete: Option<String>,
 }
 
-impl ParticipantLiveness {
-    fn of(measured: &Measured, fresh: Liveness) -> Self {
+impl SessionLiveness {
+    /// A participant has no run to end, so agent-status alone answers. A
+    /// fresh read of an ended session is final; facts retained after the
+    /// session ended are final unless it is listed again.
+    fn participant(measured: &Measured, fresh: Liveness) -> Self {
         let retained_ended = measured.retained_liveness.as_deref() == Some("ended");
         let incomplete = match (fresh, &measured.source) {
             (Liveness::Live, _) => Some(PARTICIPANT_LIVE.to_string()),
@@ -229,14 +245,55 @@ impl ParticipantLiveness {
         Self {
             fresh,
             retained: measured.retained_liveness.clone(),
+            runs: None,
+            incomplete,
+        }
+    }
+
+    /// The ledger is the stronger evidence for an executor: a session whose
+    /// every bound dispatch has a recorded run end has ended, and one whose
+    /// dispatch has none is still running. An agent-status listing makes it
+    /// live either way. When unreadable ledger records could hold the
+    /// missing end, only a listing qualifies the figure.
+    fn executor(measured: &Measured, fresh: Liveness, spans: &[Span], ledger: bool) -> Self {
+        let open: Vec<&str> = spans
+            .iter()
+            .filter(|span| span.ended_at.is_none())
+            .map(|span| span.dispatch_event_id.as_str())
+            .collect();
+        let last_end = spans.iter().filter_map(|span| span.ended_at).max();
+        let retained_after_end = measured.retained_liveness.as_deref() == Some("ended")
+            || measured
+                .retained_at
+                .zip(last_end)
+                .is_some_and(|(at, end)| at >= end);
+        let incomplete = match (fresh, &measured.source) {
+            (Liveness::Live, _) => Some(EXECUTOR_LIVE.to_string()),
+            _ if !open.is_empty() && ledger => Some(format!(
+                "executor dispatch {} has no recorded run end: measured as of its read frontier",
+                open.join(", ")
+            )),
+            _ if !open.is_empty() => None,
+            (_, Source::Fresh) => None,
+            _ if retained_after_end => None,
+            _ => Some(RETAINED_BEFORE_RUN_END.to_string()),
+        };
+        Self {
+            fresh,
+            retained: measured.retained_liveness.clone(),
+            runs: Some((spans.len() - open.len(), spans.len())),
             incomplete,
         }
     }
 
     fn json(&self) -> Value {
-        json!({"answer": self.fresh.answer(), "reason": self.fresh.reason(),
+        let mut value = json!({"answer": self.fresh.answer(), "reason": self.fresh.reason(),
             "source": "agent-status", "retained": self.retained,
-            "final": self.incomplete.is_none()})
+            "final": self.incomplete.is_none()});
+        if let Some((ended, dispatches)) = self.runs {
+            value["runs"] = json!({"ended": ended, "dispatches": dispatches});
+        }
+        value
     }
 }
 
@@ -244,7 +301,6 @@ impl ParticipantLiveness {
 /// the selected work.
 struct Participation {
     roles: BTreeSet<Role>,
-    liveness: ParticipantLiveness,
     /// The ledger read had no gap, so the membership names every change the
     /// session acted on. Otherwise a record that could name another one is
     /// unreadable and the session is never counted as the work's alone.
@@ -259,6 +315,7 @@ struct SessionRow {
     measured: Measured,
     overlap: BTreeSet<String>,
     participation: Option<Participation>,
+    liveness: Option<SessionLiveness>,
 }
 
 impl SessionRow {
@@ -315,10 +372,20 @@ pub(super) fn read_cost(ctx: &Ctx, target: &str) -> Result<CostView> {
     }
     let ledger = read_ledger(&mut read, &selection, &events, &assigned);
     let Assigned { runs, sessions, .. } = assigned;
+    let snapshot = std::cell::OnceCell::new();
     let mut sessions: Vec<SessionRow> = sessions
         .into_iter()
         .map(|((harness, session), (spans, membership))| {
-            let measured = measure(&events, &harness, &session);
+            let mut measured = measure(&events, &harness, &session);
+            let liveness = SessionLiveness::executor(
+                &measured,
+                snapshot.get_or_init(Snapshot::read).of(&harness, &session),
+                &spans,
+                ledger.complete,
+            );
+            if let Some(facts) = measured.facts.as_mut() {
+                facts.incomplete.extend(liveness.incomplete.clone());
+            }
             SessionRow {
                 harness,
                 session,
@@ -327,16 +394,16 @@ pub(super) fn read_cost(ctx: &Ctx, target: &str) -> Result<CostView> {
                 measured,
                 overlap: BTreeSet::new(),
                 participation: None,
+                liveness: Some(liveness),
             }
         })
         .collect();
     // A participant whose recording cannot be read is still a row: its
     // missing figure qualifies every total it would have joined.
     let mut unmeasured = BTreeMap::new();
-    let snapshot = std::cell::OnceCell::new();
     for ((harness, session), person) in ledger.participants() {
         let mut measured = measure(&events, harness, session);
-        let liveness = ParticipantLiveness::of(
+        let liveness = SessionLiveness::participant(
             &measured,
             snapshot.get_or_init(Snapshot::read).of(harness, session),
         );
@@ -361,9 +428,9 @@ pub(super) fn read_cost(ctx: &Ctx, target: &str) -> Result<CostView> {
             overlap: BTreeSet::new(),
             participation: Some(Participation {
                 roles: person.roles.clone(),
-                liveness,
                 membership_complete: ledger.complete,
             }),
+            liveness: Some(liveness),
         });
     }
     let groups = lineage_groups(&sessions);
@@ -874,6 +941,7 @@ fn assign(ctx: &Ctx, selection: &mut Selection, events: &[Event]) -> Assigned {
             spans.push(Span {
                 dispatch_event_id: round.dispatch.event_id.clone(),
                 dispatched_at: round.dispatch.created_at,
+                ended_at: round.ending.as_ref().map(|ending| ending.event.created_at),
                 forked_from: binding
                     .forked_from
                     .as_ref()
@@ -949,12 +1017,14 @@ fn measure(events: &[Event], harness: &str, session: &str) -> Measured {
                 facts: Some(fresh),
                 conflict,
                 retained_liveness,
+                retained_at: None,
             }
         }
         Err(reason) => match retained {
             Some((event, held)) => Measured {
                 source: Source::Retained(event.event_id.clone(), reason),
                 retained_liveness: held.liveness.clone(),
+                retained_at: Some(event.created_at),
                 facts: Some(held),
                 conflict: None,
             },
@@ -963,6 +1033,7 @@ fn measure(events: &[Event], harness: &str, session: &str) -> Measured {
                 facts: None,
                 conflict: None,
                 retained_liveness: None,
+                retained_at: None,
             },
         },
     }
@@ -2812,7 +2883,9 @@ fn session_json(row: &SessionRow) -> Value {
             "roles": participation.roles.iter().map(|role| role.name()).collect::<Vec<_>>(),
             "spans": row.membership.len(),
         });
-        value["measurement"]["liveness"] = participation.liveness.json();
+    }
+    if let Some(liveness) = &row.liveness {
+        value["measurement"]["liveness"] = liveness.json();
     }
     value
 }

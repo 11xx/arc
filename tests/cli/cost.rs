@@ -137,6 +137,7 @@ fn recording_lines(path: &Path) -> Vec<Value> {
         .collect()
 }
 
+/// Bind a finished run: its recorded end makes the executor's figure final.
 fn bind(repo: &Repo, dispatch_id: &str, harness: &str, session: &str) {
     stdout(repo.arc(&repo.root).args([
         "run",
@@ -146,6 +147,19 @@ fn bind(repo: &Repo, dispatch_id: &str, harness: &str, session: &str) {
         harness,
         "--executor-session",
         session,
+    ]));
+    end_run(repo, dispatch_id);
+}
+
+/// Record the run's end once; a second binding of the same dispatch finds it
+/// already ended.
+fn end_run(repo: &Repo, dispatch_id: &str) {
+    stdout_any_status(repo.arc(&repo.root).args([
+        "run",
+        "end",
+        dispatch_id,
+        "--outcome",
+        "completed",
     ]));
 }
 
@@ -1221,6 +1235,7 @@ fn bind_fork(repo: &Repo, dispatch_id: &str, harness: &str, session: &str, origi
         "--forked-from",
         origin,
     ]));
+    end_run(repo, dispatch_id);
 }
 
 #[test]
@@ -1587,7 +1602,15 @@ fn corrupt_retained_facts_do_not_spoil_healthy_fresh_figures() {
         }
     }
     let after = report(&repo, "fresh-healthy");
-    assert_eq!(after["sessions"], before["sessions"]);
+    // Only the echo of the corrupted record's liveness may differ.
+    let figures = |view: &Value| {
+        let mut sessions = view["sessions"].clone();
+        for row in sessions.as_array_mut().unwrap() {
+            row["measurement"]["liveness"]["retained"] = Value::Null;
+        }
+        sessions
+    };
+    assert_eq!(figures(&after), figures(&before));
     assert_eq!(after["union"], before["union"]);
     assert_eq!(after["coverage"]["ledger"]["status"], "incomplete");
     let retained = stdout(

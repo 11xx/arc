@@ -4496,7 +4496,14 @@ enum CostCmd {
     /// Facts retained after the session ended stay complete unless it is
     /// listed again; facts retained while it was live or unknown stay
     /// incomplete, since it may have gone on past their frontier. Each
-    /// participant row shows its answer under `liveness`. A session may also act in other
+    /// participant row shows its answer under `liveness`. An executor whose
+    /// every bound dispatch has a recorded `run end` has ended; one with a
+    /// dispatch that has none is running and incomplete as of its frontier,
+    /// naming the dispatch; an agent-status listing makes it live either
+    /// way, and when unreadable ledger records could hold the missing end,
+    /// only a listing qualifies it. Its facts retained before its last run
+    /// ended stay incomplete. Executor rows show `liveness` with their run
+    /// ends. A session may also act in other
     /// repositories' ledgers, which this ledger cannot see, and an unreadable
     /// ledger record leaves the membership incomplete, so the participant is
     /// never counted as the work's alone. Acting events without a usable

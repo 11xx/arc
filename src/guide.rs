@@ -3522,8 +3522,15 @@ RULES THAT CHANGE WHAT YOU DO
     session ended stay complete unless it is listed again; facts retained
     while it was live or unknown stay incomplete even once it has ended,
     since it may have gone on past their frontier. Each participant row
-    shows the answer under `liveness`. arc works fully without
-    agent-status. A session may
+    shows the answer under `liveness`. An executor's run ends are the
+    stronger evidence: one whose every bound dispatch has a recorded `run
+    end` has ended, and one with a dispatch that has none is still running
+    and incomplete as of its frontier, naming the open dispatch. An
+    agent-status listing makes an executor live either way. When unreadable
+    ledger records could hold the missing end, only a listing qualifies it.
+    An executor's facts retained before its last run ended stay incomplete;
+    facts retained after it, or while agent-status answered ended, are
+    final. arc works fully without agent-status. A session may
     also act in other repositories' ledgers, which this ledger cannot see.
     An unreadable ledger record leaves a participant's membership incomplete,
     so it is never counted as the work's alone. Acting events with no
