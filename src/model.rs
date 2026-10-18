@@ -2958,6 +2958,111 @@ pub struct CostFacts {
     /// several.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub served_model: Option<String>,
+    /// The disjoint categories of each model the recording says served the
+    /// figure, where it names several.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub by_model: Vec<CostModelShare>,
+    /// The session read per span, when the ledger gives it more than one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spans: Option<CostSpans>,
+    /// The list-price estimate under the price table a view loads. It is
+    /// priced from these facts when they are shown and is never retained.
+    #[serde(skip)]
+    pub list_price: Option<CostListPrice>,
+}
+
+/// One model's part of a figure, by its model id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CostModelShare {
+    pub model: String,
+    pub disjoint: CostDisjoint,
+}
+
+/// A session read once per disjoint segment of its timeline. Segments are
+/// cut at every boundary of the spans the ledger gives the session, so no
+/// request is in two of them; the segments and the remainder add up to
+/// `whole` per counter, within `whole`'s accounting basis.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CostSpans {
+    /// Why the read could not split the session: `span reading unsupported`
+    /// when the reader refuses to divide it. The segments are empty then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsplit: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub segments: Vec<CostSegment>,
+    /// Requests no segment holds: those whose time the recording leaves
+    /// unrecorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remainder: Option<Box<CostFacts>>,
+    #[serde(default)]
+    pub remainder_requests: u64,
+    /// The whole session in the segments' accounting basis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub whole: Option<Box<CostFacts>>,
+}
+
+/// One segment `[from, to)` of a session's timeline, the work items and runs
+/// whose spans cover it, and what the session consumed inside it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CostSegment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<DateTime<Utc>>,
+    /// The covering work items, by their view labels.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub work: Vec<String>,
+    /// The covering runs, by dispatch event id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<String>,
+    /// Counted requests the segment holds.
+    pub requests: u64,
+    pub facts: Box<CostFacts>,
+}
+
+/// What defines a segment: its bounds, covering work items and runs.
+pub(crate) type SegmentDefinition<'a> = (
+    Option<DateTime<Utc>>,
+    Option<DateTime<Utc>>,
+    &'a [String],
+    &'a [String],
+);
+
+impl CostSegment {
+    /// The segment's definition, without what was measured inside it.
+    pub(crate) fn bounds(&self) -> SegmentDefinition<'_> {
+        (self.from, self.to, &self.work, &self.runs)
+    }
+}
+
+impl CostSpans {
+    pub(crate) fn portable(&self) -> bool {
+        self.unsplit
+            .as_deref()
+            .is_none_or(|reason| reason == "span reading unsupported")
+            && self.segments.iter().all(|segment| {
+                segment
+                    .work
+                    .iter()
+                    .chain(&segment.runs)
+                    .all(|label| portable_cost_metadata(label) && !label.is_empty())
+                    && segment.facts.portable()
+            })
+            && self.remainder.as_deref().is_none_or(CostFacts::portable)
+            && self.whole.as_deref().is_none_or(CostFacts::portable)
+    }
+}
+
+/// A list-price estimate of one figure: an amount where every priced token
+/// has one price, else the least it can be, the table rows it used, and why
+/// it is not a complete estimate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CostListPrice {
+    pub currency: String,
+    /// Absent when nothing in the figure could be priced.
+    pub amount: Option<f64>,
+    pub models: Vec<String>,
+    pub gaps: Vec<String>,
 }
 
 /// Token counts in categories no token belongs to twice: uncached input,
@@ -3359,6 +3464,11 @@ impl CostFacts {
             && self.disjoint.as_ref().is_none_or(CostDisjoint::portable)
             && self.events.as_ref().is_none_or(CostEvents::portable)
             && self.residual.as_ref().is_none_or(CostResidual::portable)
+            && self.spans.as_ref().is_none_or(CostSpans::portable)
+            && self
+                .by_model
+                .iter()
+                .all(|share| portable_coordinate(&share.model) && share.disjoint.portable())
     }
 }
 

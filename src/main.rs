@@ -4425,14 +4425,18 @@ enum CostCmd {
     /// when the source is unavailable, from the facts `cost retain` kept, and
     /// the report says which. A fresh read that disagrees with facts retained at the same
     /// frontier shows the conflict. Direct totals count sessions whose every
-    /// span is the item's; inclusive totals for a change add the journal
-    /// artifact it was begun from; the union counts each session once over
-    /// the selection. A session with spans on several items is listed as
-    /// shared beside the totals, and a session with several spans carries no
-    /// per-run figure. Every total names its quantity kind: the dollar figure
-    /// a harness wrote is a harness-calculated estimate with an unknown
-    /// pricing basis, and token counts are resource quantities by tapes'
-    /// categories. A harness's native counters add only within that harness:
+    /// span is the item's whole, and the item's share of each divided session
+    /// with a span on it; inclusive totals for a change add the journal
+    /// artifact it was begun from; the union counts each session once over the
+    /// selection. A run's figure is the segments that run alone covers. Every
+    /// total names its quantity kind: the dollar figure a harness wrote is a
+    /// harness-calculated estimate with an unknown pricing basis, a list-price
+    /// estimate prices the disjoint categories by a `tapes-price-table/1` table
+    /// (`--prices`, else `TAPES_PRICES`, else
+    /// `$XDG_CONFIG_HOME/tapes/prices.toml`) and the row of the model that
+    /// served them, never retained and absent with a reason when no table,
+    /// model or row prices it, and token counts are resource quantities by
+    /// tapes' categories. A harness's native counters add only within that harness:
     /// a raw input sum across harnesses is refused and other native sums are
     /// withheld. Tapes' disjoint categories (uncached input, cache read,
     /// cache write by TTL, output, reasoning as a subset of output, and their
@@ -4466,7 +4470,28 @@ enum CostCmd {
     /// A recording that starts before its session's first dispatch has
     /// pre-dispatch consumption: assignment is incomplete and work totals
     /// are withheld. An unknown opening boundary likewise withholds them;
-    /// session measurements remain available and are never split by time.
+    /// session measurements remain available. A session the ledger gives one
+    /// span is measured whole. Spans come only from the session's own ledger
+    /// records, never from proximity: an executor's span is each bound run,
+    /// from its dispatch to its recorded `run end`, open to the read frontier
+    /// while it has none; a participant's span on a work item runs from its
+    /// first to its last ledger event there, both inclusive. A session with
+    /// several spans is cut at every span boundary into disjoint segments, read
+    /// in one pass, so no request counts twice. A segment one item alone covers
+    /// is that item's share; a segment several items cover, one none covers,
+    /// and a request with no recorded time are unattributed, with the reasons
+    /// `overlap`, `before first item`, `between items`, `after last item` and
+    /// `request time unrecorded`. The shares and the unattributed part add up
+    /// to the whole in the segments' accounting basis, per counter. A recorded
+    /// total no span divides stays whole in its own basis on the session row,
+    /// and the unattributed part names `recorded total not splittable`. A
+    /// session that cannot be divided (`span reading unsupported`,
+    /// `unmeasured`, `ledger records are unreadable`, `retained spans do not
+    /// match the ledger`) stays outside every share. A divided session's
+    /// consumption before its first span is unattributed and withholds no
+    /// share. `--allocate even` divides each segment several items cover evenly
+    /// among them, labelled `allocated` beside the conserving figure;
+    /// allocation is never the default.
     /// Lineage relatives are plain session ids. Unresolved locators and
     /// lineage notes make identity unknown; reasons are fixed categories.
     /// Recorded lineage and binding fork origins group potentially
@@ -4478,13 +4503,13 @@ enum CostCmd {
     /// on the selected work; a session a dispatch binds is an executor and
     /// never a participant. Its roles come only from the kinds of its events:
     /// a snapshot or a verdict is a reviewer's, an integration, a debt or a
-    /// closure an integrator's, a dispatch an orchestrator's. It is measured
-    /// whole and never split. Its membership is every change in this ledger
-    /// whose events carry it; it counts as direct only where the item holds
-    /// every member, and is otherwise listed under `shared` and in
-    /// `participants` with its whole figure, roles and span count (its
-    /// members). A union counts it once when the selection covers its whole
-    /// membership. A recording cannot show whether its session is still
+    /// closure an integrator's, a dispatch an orchestrator's. It is divided by
+    /// its span on each work item. Its membership is every change in this
+    /// ledger whose events carry it; it counts whole where the item holds every
+    /// member, and otherwise its share joins the item's total and it is listed
+    /// in `participants` with its whole figure, roles, span count (its members)
+    /// and `share`. A union counts it whole once when the selection covers its
+    /// whole membership, and takes the selected items' shares otherwise. A recording cannot show whether its session is still
     /// running, so the view asks `agent-status` once (`ARC_AGENT_STATUS`
     /// names another program), bounded to two seconds. A session it lists, in
     /// any state, is live: its figure is as of its read frontier and is
@@ -4526,7 +4551,8 @@ enum CostCmd {
     /// `--footprint` every change and journal item one session was bound to,
     /// dispatched or acted on, beside its whole figure, `--since`/`--until`
     /// every change with a ledger event or run in the window (the window
-    /// selects work items; consumption is not cut at its edges), and `--all`
+    /// selects work items; a session is divided by its spans, never by the
+    /// window's edges), and `--all`
     /// every change. A range that selects nothing refuses.
     ///
     /// Text output is a table with one row per session: agent
@@ -4534,16 +4560,24 @@ enum CostCmd {
     /// session's own event models, else the model its recording says served
     /// it; the harness alone when none establishes one), roles (impl, review,
     /// orch, integ), the shortest unique session id prefix of at least eight
-    /// characters, runs, spans, the disjoint token total, the harness-written dollar
-    /// estimate, and a status (`complete`, `subtotal`, `shared ×N`, `live`,
-    /// `unmeasured` or `withheld`). The `total` row is the union figure with
-    /// its status, with a row per accounting partition when it spans several;
-    /// `shared` holds the sessions outside it with their whole figures; one
-    /// line counts the qualifications `--detail` explains. `--detail` prints
-    /// the per-category report instead. `--by` groups counted rows with one
-    /// subtotal per group, never adding incompatible accounting domains.
-    /// `--json` adds the table's rows, total, shared figure, qualification
-    /// count and groups under `table`, and the footprint under `footprint`.
+    /// characters, runs, spans, the disjoint token total, the money columns,
+    /// and a status (`complete`, `subtotal`, `split ×N`, `shared ×N`, `live`,
+    /// `unmeasured` or `withheld`). With a price table the money columns are
+    /// the list-price estimate, then the harness-written estimate; without one
+    /// the harness-written estimate alone, and a footer line says how to
+    /// install a table. The `total` row is the union figure with its status,
+    /// with a row per accounting partition when it spans several, and with
+    /// `--allocate even` the allocated total beside it; `unattributed shared`
+    /// holds each session's part outside it, with a line naming each session's
+    /// reasons; one line counts the qualifications `--detail` explains.
+    /// `--detail` prints the per-category report instead. `--by` groups counted
+    /// rows with one subtotal per group, never adding incompatible accounting
+    /// domains. `--json` adds the table's rows, total, allocated total,
+    /// unattributed figure, qualification count, groups and price table under
+    /// `table`, each session's segments, shares, run figures and unattributed
+    /// parts under `sessions[].split`, allocated figures under
+    /// `work[].allocated`, the price table under `prices`, and the footprint
+    /// under `footprint`.
     ///
     /// With `--commit <rev>` the target is a commit. Git resolves the
     /// revision, and the commit maps to the change that records it: a
@@ -4559,7 +4593,8 @@ enum CostCmd {
     /// participants that acted as reviewer, and `Planned-by` and
     /// `Orchestrated-by` those that acted as orchestrator, whose declared
     /// model equals the trailer's. A matching session's figure is its whole
-    /// figure, shared exactly as the change view shares it. A trailer no
+    /// figure, shared exactly as the change view shares it, with the change's
+    /// share beside it when the view divides the session. A trailer no
     /// recorded session answers reads `no session recorded`, never zero. A
     /// commit no change records answers `no change records this commit`,
     /// shows no figure, and succeeds. A commit that several changes record
@@ -4584,7 +4619,7 @@ enum CostCmd {
         footprint: Option<String>,
         /// Every change with a ledger event at or after this journal stamp
         /// (20260101T000000Z) or RFC 3339 timestamp. The window selects work
-        /// items; consumption is not cut at its edges
+        /// items; a session is divided by its spans, never by its edges
         #[arg(long, conflicts_with = "commit")]
         since: Option<String>,
         /// Every change with a ledger event at or before this instant, as
@@ -4600,6 +4635,16 @@ enum CostCmd {
         #[arg(long, value_delimiter = ',', conflicts_with = "commit",
             value_parser = clap::builder::PossibleValuesParser::new(commands::COST_GROUPINGS))]
         by: Vec<String>,
+        /// Divide requests in overlapping spans evenly among the overlapping
+        /// work items. Each allocated figure is labelled `allocated` beside the
+        /// conserving one, which leaves those requests unattributed
+        #[arg(long, value_name = "METHOD", conflicts_with = "commit",
+            value_parser = clap::builder::PossibleValuesParser::new(["even"]))]
+        allocate: Option<String>,
+        /// A `tapes-price-table/1` file to price every figure with; else the
+        /// file `TAPES_PRICES` names, else `$XDG_CONFIG_HOME/tapes/prices.toml`
+        #[arg(long, value_name = "FILE")]
+        prices: Option<std::path::PathBuf>,
         /// Print every figure by category with its reasons and coverage, in
         /// place of the table
         #[arg(long)]
@@ -4621,7 +4666,11 @@ enum CostCmd {
     /// their own gaps, the consumption events with their coverage, the Claude residual, and
     /// any harness-written dollar figure with its pricing coverage, plus
     /// lineage relations, read failures as fixed categories, the one model the
-    /// recording says served the session when it names one, and the liveness
+    /// recording says served the session when it names one, each model's
+    /// disjoint categories where it names several, the segments a session
+    /// with several spans was read in (bounds, covering work items and runs,
+    /// request count and facts, with the remainder and the whole in the
+    /// segments' basis), and the liveness
     /// `agent-status` answered for the session then (`live`, `ended` or
     /// `unknown`, as `cost show` reads it). Relatives are plain session ids; no
     /// recording locator or raw error text is retained. Binding fork origins
@@ -4630,10 +4679,12 @@ enum CostCmd {
     /// session identities still permit independent retention. A query refuses
     /// only when no target metadata or relevant dispatch or session is readable.
     /// The source
-    /// bytes stay in the harness store. Facts identical to ones already
-    /// retained for a session
+    /// bytes stay in the harness store. A list-price estimate is never
+    /// retained. Facts identical to ones already retained for a session
     /// record nothing and print the held event; a session whose source does
-    /// not answer is reported and skipped
+    /// not answer is reported and skipped. A fresh read whose segments match
+    /// retained ones at the same frontier and disagrees with them shows the
+    /// conflict
     Retain {
         /// Change ID or unique prefix, or a journal artifact, as `cost show`
         /// takes it
@@ -6794,11 +6845,15 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 until,
                 all,
                 by,
+                allocate,
+                prices,
                 detail,
                 commit,
                 json,
             } => match commit {
-                Some(commit) => commands::show_commit_cost(&ctx, &commit, json).map(|_| 0),
+                Some(commit) => {
+                    commands::show_commit_cost(&ctx, &commit, prices.as_deref(), json).map(|_| 0)
+                }
                 None => {
                     let instant = |raw: Option<String>| {
                         raw.map(|raw| crate::journal::parse_since(&raw)).transpose()
@@ -6811,6 +6866,8 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                         until: instant(until)?,
                         all,
                         by,
+                        allocate_even: allocate.is_some(),
+                        prices,
                     };
                     commands::show_cost(&ctx, &query, json, detail).map(|_| 0)
                 }

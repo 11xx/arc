@@ -3437,13 +3437,27 @@ RULES THAT CHANGE WHAT YOU DO
     --from-journal` add no consumption. Each session is measured through
     the pinned tapes reader, or from retained facts when its source no longer
     answers, and the report says which; a fresh read that disagrees with
-    facts retained at the same frontier shows the conflict. Direct totals
-    hold sessions whose every span is the item's, inclusive totals add the
-    artifact a change was begun from, and the union counts each session once.
-    A session spanning several items is shared beside the totals, and one
-    with several spans has no per-run figure. A harness-written dollar
+    facts retained at the same frontier shows the conflict. Direct totals hold
+    sessions whose every span is the item's whole, and the item's share of
+    each divided session with a span on it; inclusive totals add the artifact
+    a change was begun from, and the union counts each session once. A run's
+    figure is the segments that run alone covers. A harness-written dollar
     figure is a harness-calculated estimate with an unknown pricing basis;
-    token counts are resource quantities by tapes' categories. A harness's
+    token counts are resource quantities by tapes' categories. A list-price
+    estimate prices a figure's disjoint categories by a `tapes-price-table/1`
+    table: `--prices <file>`, else the file `TAPES_PRICES` names, else
+    `$XDG_CONFIG_HOME/tapes/prices.toml` (`~/.config/tapes/prices.toml`). It
+    uses the table row of the one model the recording says served the figure,
+    or each model's row where the recording splits it by model; a model the
+    table lacks, a figure no model is known to have served, a category
+    measured incompletely, and a cache write with no recorded TTL, priced at
+    the least it can cost, each leave a known subtotal with a fixed reason.
+    The estimate is priced when the view is shown, from fresh or retained
+    facts alike, and is never retained. With no table it is absent with the
+    reason `no price table is loaded`; an invalid default table is reported
+    and leaves it absent, and a named or environment table that cannot be read
+    refuses. A harness's
+
     native counters add only within that harness: a raw input sum across
     harnesses is refused and other native sums across harnesses are
     withheld. Tapes' disjoint categories (uncached input, cache read, cache
@@ -3478,8 +3492,38 @@ RULES THAT CHANGE WHAT YOU DO
     currency bounds round outwards.
     A recording beginning before its session's first dispatch has
     pre-dispatch consumption: assignment is incomplete and work totals are
-    withheld. An unknown opening boundary also withholds them. Sessions
-    retain their own measurements; consumption is never split by time.
+    withheld. An unknown opening boundary also withholds them. A session the
+    ledger gives one span is measured whole. Spans come only from the
+    session's own ledger records, never from proximity: an executor's span is
+    each bound run, from its dispatch to its recorded `run end`, open to the
+    read frontier while it has none; a participant's span on a work item runs
+    from its first to its last ledger event there, both inclusive. A session
+    with several spans is cut at every span boundary into disjoint segments,
+    read in one pass through tapes' span reader, so no request is counted
+    twice. A segment one work item alone covers is that item's share. A
+    segment several items cover, a segment none covers, and a request whose
+    time the recording leaves unrecorded belong to no item: they are the
+    session's unattributed part, with the fixed reasons `overlap`, `before
+    first item`, `between items`, `after last item` and `request time
+    unrecorded`. Conservation holds per counter within the segments'
+    accounting basis: the item shares and the unattributed part add up to the
+    session's whole figure in that basis. A recorded total no span divides,
+    such as a Claude cost-state or an OpenCode session row, stays whole in its
+    own basis on the session row while the shares take the request basis tapes
+    reads spans in, and the unattributed part then names `recorded total not
+    splittable`; every figure names its basis, and totals mix bases only as
+    the partition rules allow. A session the reader refuses to divide (`span
+    reading unsupported`), one with no measurement (`unmeasured`), a
+    participant whose ledger records are not all readable (`ledger records are
+    unreadable`), and retained facts whose segments are not the ones the
+    ledger gives now (`retained spans do not match the ledger`) stay
+    undivided, outside every share with that reason. A divided session's
+    consumption before its first span is unattributed, so it withholds no
+    share; a session counted whole still withholds as above. `--allocate even`
+    divides each segment several items cover evenly among them, tokens kept
+    whole with the first items in order taking one token each of the
+    remainder. Every allocated figure is labelled `allocated` beside the
+    conserving one and never replaces it, and allocation is never the default.
     Lineage relatives are plain session ids. A non-id reference makes
     identity unknown with a fixed reason; arc does not parse a recording path
     to infer an id. Lineage notes, failed reads and bounded reads also make
@@ -3502,14 +3546,15 @@ RULES THAT CHANGE WHAT YOU DO
     only source of its roles: a snapshot or a verdict makes the session a
     reviewer, an integration, a debt or a closure an integrator, and a
     dispatch an orchestrator; any other kind makes no participant, and
-    prose and trailers name none. A participant is measured whole through
-    the same reader as an executor, or from retained facts when its source no
-    longer answers, and is never split by time or by event. Its membership is
-    every change in this ledger whose events carry it, read in one pass.
-    It counts as direct only where the item holds every member; otherwise it
-    is listed under `shared` and in `participants` with its whole figure,
-    roles and span count, the number of members. A union counts it once when
-    the selection covers its whole membership. A recording cannot show
+    prose and trailers name none. A participant is measured through the same
+    reader as an executor, or from retained facts when its source no longer
+    answers, and divided by its span on each work item. Its membership is
+    every change in this ledger whose events carry it, read in one pass. It
+    counts whole where the item holds every member; otherwise its share joins
+    the item's total and it is listed in `participants` with its whole figure,
+    roles, span count, the number of members, and `share`. A union counts it
+    whole once when the selection covers its whole membership, and takes the
+    selected items' shares otherwise. A recording cannot show
     whether its session is still running, so the view asks `agent-status`
     once, bounded to two seconds (`ARC_AGENT_STATUS` names another program).
     A session it lists, in any state, is live: its figure is as of its read
@@ -3561,8 +3606,8 @@ RULES THAT CHANGE WHAT YOU DO
     journal item that session was bound to, dispatched or acted on, and
     shows its whole figure beside them. `--since` and `--until` select each
     change with a ledger event, or a run dispatched or ended for it, in the
-    window; the window selects work items only, and consumption is not cut
-    at its edges. `--all` selects every change in this ledger. Each selected
+    window; the window selects work items only, and a session is divided by
+    its spans, never by the window's edges. `--all` selects every change in this ledger. Each selected
     target keeps its own selection rules; a change whose state cannot be
     read for a tag is a selection gap, and a range that selects nothing
     refuses.
@@ -3572,21 +3617,28 @@ RULES THAT CHANGE WHAT YOU DO
     model its recording says served it; the harness alone when none
     establishes a single model), roles (impl, review, orch, integ), the
     shortest session id prefix of at least eight characters no other row
-    shares, runs and spans, the disjoint token total, the harness-written
-    dollar estimate, and a
-    status: `complete`, `subtotal`, `shared ×N` (outside the total, acting
-    on N work items), `live`, `unmeasured` or `withheld`. Footer rows hold
-    the total, which is the union figure with its status and a row per
-    accounting partition when it spans several; the shared sessions with
-    their whole figures; and a line counting the qualifications `--detail`
-    explains. An amount not established is shown as its known subtotal, or
+    shares, runs and spans, the disjoint token total, the money columns, and a
+    status: `complete`, `subtotal`, `split ×N` (divided among N work items,
+    its share in the total), `shared ×N` (undivided and outside the total),
+    `live`, `unmeasured` or `withheld`. With a price table the money columns
+    are the list-price estimate, then the harness-written estimate; without
+    one the harness-written estimate alone, and a footer line says how to
+    install a table. Footer rows hold the total, which is the union figure
+    with its status and a row per accounting partition when it spans several;
+    with `--allocate even`, the allocated total beside it; the `unattributed
+    shared` row with each session's part outside the total and one line per
+    session naming its reasons; and a line counting the qualifications
+    `--detail` explains. An amount not established is shown as its known subtotal, or
     as `≥` the least an overlapping figure is known to be, with its status
     beside it. `--detail` prints the per-category report instead. `--by
     agent|role|model|harness|change|session`, repeatable or comma-separated,
     groups the counted rows with one subtotal per group; a subtotal never
     adds incompatible accounting domains and shows their partitions as the
-    total does. `--json` carries the same rows, total, shared figure,
-    qualification count and groups under `table`, and a footprint under
+    total does. `--json` carries the same rows, total, allocated total,
+    unattributed figure, qualification count, groups and price table under
+    `table`, each session's segments, shares, run figures and unattributed
+    parts under `sessions[].split`, each item's allocated figures under
+    `work[].allocated`, the price table under `prices`, and a footprint under
     `footprint`.
   - `arc cost retain <change|journal-file>` keeps, per bound or participating
     session, the facts a fresh read gives: reader and calculation versions, source
@@ -3596,8 +3648,12 @@ RULES THAT CHANGE WHAT YOU DO
     identity, the Claude residual, and any harness-written dollar figure
     with its pricing coverage, plus lineage relations, read failures
     as fixed categories, the one model the recording says served the
-    session when it names one, and the liveness agent-status answered then
-    (`live`, `ended` or `unknown`). Retained facts carry no recording locators or raw
+    session when it names one, each model's disjoint categories where it names
+    several, the segments a session with several spans was read in, each with
+    its bounds, covering work items and runs, request count and facts, the
+    remainder and the whole in the segments' basis, and the liveness
+    agent-status answered then (`live`, `ended` or `unknown`). A list-price
+    estimate is never retained. Retained facts carry no recording locators or raw
     errors. Display sanitizes older facts field by field, so one unreadable
     field leaves the rest of the measurement available; bundle import and export refuse
     nonportable identities, metadata, quantities or reason categories without
@@ -3608,7 +3664,9 @@ RULES THAT CHANGE WHAT YOU DO
     whose source does not answer is reported and skipped independently.
     The source bytes stay in the harness store. Identical facts record
     nothing; retained facts are observations at their frontier and are never
-    added to one another.
+    added to one another. A fresh read and retained facts at one frontier
+    compare their segment figures when both cut the session alike, and a
+    disagreement shows as a conflict.
   - `arc cost show --commit <rev> [--json]` answers for a commit, which has
     no cost of its own. Git resolves the revision, and the commit maps to the
     change that records it: a patchset head or the integrated commit decides
@@ -3624,7 +3682,8 @@ RULES THAT CHANGE WHAT YOU DO
     participants that acted as reviewer, and `Planned-by` and
     `Orchestrated-by` those that acted as orchestrator, whose declared model
     equals the trailer's. A matching session's figure is its whole figure,
-    shared exactly as the change view shares it. A trailer no recorded
+    shared exactly as the change view shares it, with the change's share
+    beside it when the view divides the session. A trailer no recorded
     session answers, such as a person's or another model's, reads `no
     session recorded`, never zero. A commit no change records answers `no
     change records this commit`, shows no figure and succeeds. `--json`

@@ -126,7 +126,9 @@ impl Repo {
             .env_remove("CODEX_HOME")
             .env_remove("CLAUDE_CONFIG_DIR")
             .env_remove("PI_CODING_AGENT_SESSION_DIR")
-            .env_remove("PI_CODING_AGENT_DIR");
+            .env_remove("PI_CODING_AGENT_DIR")
+            // A price table the host names would price the fixture's figures.
+            .env_remove("TAPES_PRICES");
         cmd
     }
 

@@ -615,8 +615,10 @@ fn a_shared_plan_counts_once_in_the_union_and_in_each_inclusive_view() {
     assert!(text.contains("0.1 USD"), "{text}");
 }
 
+/// Both runs stay open across the whole recording, so no request lies in one
+/// run alone.
 #[test]
-fn two_spans_on_one_session_share_it_without_a_per_run_figure() {
+fn two_spans_on_one_session_are_divided_per_run_and_by_work_item() {
     let repo = Repo::new();
     pi_recording(&repo, "resumed-session", &[0.04], false);
     let first = dispatch(&repo, "--change", "span-change");
@@ -627,13 +629,13 @@ fn two_spans_on_one_session_share_it_without_a_per_run_figure() {
     let report = report(&repo, "span-change");
     let row = session(&report, "pi:resumed-session");
     assert_eq!(row["spans"].as_array().unwrap().len(), 2, "{report}");
-    assert_eq!(row["per_run"], "shared-among-spans", "{report}");
+    assert_eq!(row["per_run"], "split", "{report}");
     for run in work(&report, "change:span-change")["runs"]
         .as_array()
         .unwrap()
     {
-        assert_eq!(run["per_run"], "shared-among-spans", "{report}");
-        assert!(run.get("amount").is_none(), "{report}");
+        assert_eq!(run["per_run"], "split", "{report}");
+        assert_eq!(usd(&run["totals"]), Some(0.0), "{report}");
     }
     // Both spans are this work's, so the session is counted once for it.
     assert_eq!(
@@ -641,14 +643,30 @@ fn two_spans_on_one_session_share_it_without_a_per_run_figure() {
         Some(0.04)
     );
 
-    // Spans on two different work items make the session shared between them.
+    // Spans on two different work items divide the session between them;
+    // the request lies in both, so it is unattributed overlap.
     let other = dispatch(&repo, "--change", "other-change");
     bind(&repo, &other, "pi", "resumed-session");
     let report = super::cost::report(&repo, "span-change");
     let item = work(&report, "change:span-change");
-    assert_eq!(item["shared"], json!(["pi:resumed-session"]), "{report}");
-    assert_eq!(quantity(&item["direct"], USD, None)["status"], "absent");
-    assert!(usd(&item["direct"]).is_none(), "{report}");
+    assert_eq!(item["shared"], json!([]), "{report}");
+    assert_eq!(
+        item["direct"]["shares"],
+        json!(["pi:resumed-session"]),
+        "{report}"
+    );
+    assert_eq!(usd(&item["direct"]), Some(0.0), "{report}");
+    let split = &session(&report, "pi:resumed-session")["split"];
+    assert_eq!(
+        split["unattributed"]["reasons"],
+        json!(["overlap"]),
+        "{report}"
+    );
+    assert_eq!(
+        usd(&split["unattributed"]["totals"]),
+        Some(0.04),
+        "{report}"
+    );
     let membership = &session(&report, "pi:resumed-session")["membership"];
     assert_eq!(
         membership,
@@ -2626,8 +2644,10 @@ fn outside_session<'a>(report: &'a Value, key: &str) -> Option<&'a Value> {
         })
 }
 
+/// The lead's one recorded request precedes its events on either change, so
+/// its share of each is empty and the request is unattributed.
 #[test]
-fn a_lead_acting_on_two_changes_is_shared_in_each_view_with_its_whole_figure() {
+fn a_lead_acting_on_two_changes_is_divided_by_span_beside_its_whole_figure() {
     let repo = Repo::new();
     pi_recording(&repo, LEAD, &[0.2], false);
     let first = integrated_by(&repo, "first", LEAD, &[]);
@@ -2649,21 +2669,39 @@ fn a_lead_acting_on_two_changes_is_shared_in_each_view_with_its_whole_figure() {
         let view = report(&repo, change);
         let key = format!("change:{change}");
         let item = work(&view, &key);
-        assert_eq!(item["shared"], json!(["pi:lead-session"]), "{view}");
+        assert_eq!(item["shared"], json!([]), "{view}");
+        assert_eq!(
+            item["direct"]["shares"],
+            json!(["pi:lead-session"]),
+            "{view}"
+        );
         let lead = participant(item, "pi:lead-session");
         assert_eq!(lead["spans"], 2, "{view}");
         assert_eq!(lead["counted"], false, "{view}");
+        assert_eq!(lead["share"], true, "{view}");
         let roles = if change == &first {
             json!(["integrator", "orchestrator", "reviewer"])
         } else {
             json!(["integrator", "reviewer"])
         };
         assert_eq!(lead["roles"], roles, "{view}");
-        // The whole figure is shown, and the direct total takes none of it.
+        // The whole figure is shown, and the direct total takes only the
+        // empty share; the first change's unbound dispatch withholds it.
         assert_eq!(usd(&lead["totals"]), Some(0.2), "{view}");
-        assert!(usd(&item["direct"]).is_none(), "{view}");
-        assert_eq!(item["direct"]["sessions"], json!([]), "{view}");
+        assert_ne!(usd(&item["direct"]), Some(0.2), "{view}");
         let row = session(&view, "pi:lead-session");
+        let share = row["split"]["shares"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|share| share["work"] == key)
+            .unwrap();
+        assert_eq!(usd(&share["totals"]), Some(0.0), "{view}");
+        assert_eq!(
+            row["split"]["unattributed"]["reasons"],
+            json!(["before first item"]),
+            "{view}"
+        );
         assert_eq!(row["kind"], "participant", "{view}");
         assert_eq!(row["participant"]["spans"], 2, "{view}");
         let membership = [format!("change:{change}"), format!("change:{other}")];
@@ -2714,10 +2752,16 @@ fn a_union_over_both_changes_counts_the_lead_once() {
         participant(&view["union"], "pi:lead-session")["counted"],
         true
     );
+    // Each change takes its share, which holds none of the one request.
     for change in [&first, &second] {
         let item = work(&view, &format!("change:{change}"));
-        assert_eq!(item["shared"], json!(["pi:lead-session"]), "{view}");
-        assert!(usd(&item["direct"]).is_none(), "{view}");
+        assert_eq!(item["shared"], json!([]), "{view}");
+        assert_eq!(
+            item["direct"]["shares"],
+            json!(["pi:lead-session"]),
+            "{view}"
+        );
+        assert_eq!(usd(&item["direct"]), Some(0.0), "{view}");
     }
 }
 

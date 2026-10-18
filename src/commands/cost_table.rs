@@ -1,15 +1,36 @@
 //! The compact text form of a cost report: one row per session, the union
-//! total, the sessions outside it, a count of the qualifications `--detail`
-//! explains, and a subtotal per group when the view groups rows. Every value
-//! comes from the `table` the `arc-cost/1` document carries, so the text and
-//! the JSON never disagree.
+//! total, what of each session is outside it and why, a count of the
+//! qualifications `--detail` explains, and a subtotal per group when the
+//! view groups rows. Every value comes from the `table` the `arc-cost/1`
+//! document carries, so the text and the JSON never disagree.
 
 use serde_json::Value;
 use std::fmt::Write as _;
 
-const HEADERS: [&str; 8] = [
-    "agent", "roles", "session", "runs", "spans", "tokens", "money", "status",
-];
+/// The money columns a table shows: the list-price estimate then the
+/// harness-written figure when a price table is loaded, else the harness
+/// figure alone.
+fn money_columns(priced: bool) -> &'static [(&'static str, &'static str)] {
+    if priced {
+        &[("list", "list"), ("usd", "harness")]
+    } else {
+        &[("usd", "money")]
+    }
+}
+
+fn headers(priced: bool) -> Vec<String> {
+    let mut headers: Vec<String> = ["agent", "roles", "session", "runs", "spans", "tokens"]
+        .iter()
+        .map(|header| header.to_string())
+        .collect();
+    headers.extend(
+        money_columns(priced)
+            .iter()
+            .map(|(_, header)| header.to_string()),
+    );
+    headers.push("status".to_string());
+    headers
+}
 
 /// A token count at a glance: whole below a thousand, then thousands,
 /// millions and billions with three significant figures.
@@ -69,17 +90,24 @@ fn status(value: &Value) -> String {
     value.as_str().unwrap_or_default().to_string()
 }
 
-fn figure_row(label: String, figure: &Value) -> Vec<String> {
-    vec![
+fn money_cells(figure: &Value, priced: bool) -> impl Iterator<Item = String> + '_ {
+    money_columns(priced)
+        .iter()
+        .map(move |(field, _)| shown(&figure[*field], money_text))
+}
+
+fn figure_row(label: String, figure: &Value, priced: bool) -> Vec<String> {
+    let mut row = vec![
         label,
         String::new(),
         String::new(),
         String::new(),
         String::new(),
         shown(&figure["tokens"], token_text),
-        shown(&figure["usd"], money_text),
-        status(&figure["status"]),
-    ]
+    ];
+    row.extend(money_cells(figure, priced));
+    row.push(status(&figure["status"]));
+    row
 }
 
 /// A role as the table abbreviates it, so a row fits its line.
@@ -93,7 +121,7 @@ fn role(name: &str) -> &str {
     }
 }
 
-fn session_row(row: &Value) -> Vec<String> {
+fn session_row(row: &Value, priced: bool) -> Vec<String> {
     let roles: Vec<&str> = row["roles"]
         .as_array()
         .into_iter()
@@ -101,25 +129,27 @@ fn session_row(row: &Value) -> Vec<String> {
         .filter_map(Value::as_str)
         .map(role)
         .collect();
-    vec![
+    let mut cells = vec![
         status(&row["agent"]),
         roles.join(","),
         status(&row["session"]),
         row["runs"].to_string(),
         row["spans"].to_string(),
         shown(&row["tokens"], token_text),
-        shown(&row["usd"], money_text),
-        status(&row["status"]),
-    ]
+    ];
+    cells.extend(money_cells(row, priced));
+    cells.push(status(&row["status"]));
+    cells
 }
 
 /// Each accounting partition of a combined figure, as its own row.
-fn partition_rows(label: &str, figure: &Value) -> Vec<Vec<String>> {
+fn partition_rows(label: &str, figure: &Value, priced: bool) -> Vec<Vec<String>> {
+    let width = headers(priced).len();
     figure["partitions"]
         .as_array()
         .into_iter()
         .flatten()
-        .map(|partition| {
+        .filter_map(|partition| {
             let domain = [&partition["harness"], &partition["accounting_basis"]]
                 .into_iter()
                 .filter_map(Value::as_str)
@@ -130,16 +160,19 @@ fn partition_rows(label: &str, figure: &Value) -> Vec<Vec<String>> {
             } else {
                 domain
             };
-            let mut row = vec![String::new(); HEADERS.len()];
+            let mut row = vec![String::new(); width];
             row[0] = format!("  {label} {domain}");
             let cell = &partition["cell"];
-            if partition["column"] == "usd" {
-                row[6] = shown(cell, money_text);
-            } else {
-                row[5] = shown(cell, token_text);
+            match money_columns(priced)
+                .iter()
+                .position(|(field, _)| partition["column"] == *field)
+            {
+                Some(index) => row[6 + index] = shown(cell, money_text),
+                None if partition["column"] == "tokens" => row[5] = shown(cell, token_text),
+                None => return None,
             }
-            row[7] = status(&cell["status"]);
-            row
+            row[width - 1] = status(&cell["status"]);
+            Some(row)
         })
         .collect()
 }
@@ -155,19 +188,20 @@ fn group_label(group: &Value) -> String {
 }
 
 fn render(out: &mut String, rows: &[Vec<String>]) {
+    let columns = rows.first().map_or(0, Vec::len);
     let width = |column: usize| {
         rows.iter()
             .map(|row| row[column].chars().count())
             .max()
             .unwrap_or(0)
     };
-    let widths: Vec<usize> = (0..HEADERS.len()).map(width).collect();
+    let widths: Vec<usize> = (0..columns).map(width).collect();
     for row in rows {
         let mut line = String::new();
         for (column, value) in row.iter().enumerate() {
             let pad = widths[column].saturating_sub(value.chars().count());
             // Counts and amounts align right; names and words align left.
-            if (3..=6).contains(&column) {
+            if (3..columns - 1).contains(&column) {
                 line.push_str(&" ".repeat(pad));
                 line.push_str(value);
             } else {
@@ -205,13 +239,14 @@ fn heading(report: &Value) -> String {
 /// The compact table of a cost report.
 pub(super) fn table_text(report: &Value) -> String {
     let table = &report["table"];
+    let priced = table["prices"]["status"] == "loaded";
     let mut out = String::new();
     let _ = writeln!(out, "{}", heading(report));
-    let mut rows = vec![HEADERS.iter().map(|header| header.to_string()).collect()];
+    let mut rows = vec![headers(priced)];
     let sessions: Vec<&Value> = table["rows"].as_array().into_iter().flatten().collect();
     let groups: Vec<&Value> = table["groups"].as_array().into_iter().flatten().collect();
     if groups.is_empty() {
-        rows.extend(sessions.iter().map(|row| session_row(row)));
+        rows.extend(sessions.iter().map(|row| session_row(row, priced)));
     } else {
         for group in &groups {
             let members: Vec<&Value> = group["sessions"].as_array().into_iter().flatten().collect();
@@ -219,30 +254,72 @@ pub(super) fn table_text(report: &Value) -> String {
                 sessions
                     .iter()
                     .filter(|row| members.contains(&&row["key"]))
-                    .map(|row| session_row(row)),
+                    .map(|row| session_row(row, priced)),
             );
             let label = format!("subtotal {}", group_label(group));
-            rows.push(figure_row(label.clone(), group));
-            rows.extend(partition_rows("subtotal", group));
+            rows.push(figure_row(label.clone(), group, priced));
+            rows.extend(partition_rows("subtotal", group, priced));
         }
         rows.extend(
             sessions
                 .iter()
-                .filter(|row| row["counted"] != true)
-                .map(|row| session_row(row)),
+                .filter(|row| row["counted"] != true && row["share"] != true)
+                .map(|row| session_row(row, priced)),
         );
     }
-    rows.push(figure_row("total".to_string(), &table["total"]));
-    rows.extend(partition_rows("total", &table["total"]));
-    let shared = table["shared"]["sessions"].as_array().map_or(0, Vec::len);
-    if shared > 0 {
+    rows.push(figure_row("total".to_string(), &table["total"], priced));
+    rows.extend(partition_rows("total", &table["total"], priced));
+    if table["allocated"].is_object() {
         rows.push(figure_row(
-            format!("shared ({shared} outside the total)"),
-            &table["shared"],
+            "total allocated even".to_string(),
+            &table["allocated"],
+            priced,
         ));
-        rows.extend(partition_rows("shared", &table["shared"]));
+        rows.extend(partition_rows("allocated", &table["allocated"], priced));
+    }
+    let unattributed: Vec<&Value> = table["unattributed"]["sessions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .collect();
+    if !unattributed.is_empty() {
+        rows.push(figure_row(
+            format!(
+                "unattributed shared ({} session{})",
+                unattributed.len(),
+                if unattributed.len() == 1 { "" } else { "s" }
+            ),
+            &table["unattributed"],
+            priced,
+        ));
+        rows.extend(partition_rows(
+            "unattributed",
+            &table["unattributed"],
+            priced,
+        ));
+        for session in &unattributed {
+            rows.push(figure_row(
+                format!("  {}", status(&session["session"])),
+                session,
+                priced,
+            ));
+        }
     }
     render(&mut out, &rows);
+    for session in &unattributed {
+        let reasons: Vec<&str> = session["reasons"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        let _ = writeln!(
+            out,
+            "unattributed {}: {}",
+            status(&session["session"]),
+            reasons.join(", ")
+        );
+    }
     if let Some(footprint) = report["footprint"]["session"].as_str() {
         let _ = writeln!(
             out,
@@ -252,6 +329,7 @@ pub(super) fn table_text(report: &Value) -> String {
                 .unwrap_or("not measured here")
         );
     }
+    let _ = writeln!(out, "{}", prices_line(&table["prices"]));
     let qualifications = table["coverage"]["qualifications"].as_u64().unwrap_or(0);
     let _ = writeln!(
         out,
@@ -274,6 +352,28 @@ pub(super) fn table_text(report: &Value) -> String {
         }
     );
     out
+}
+
+/// Where the money columns come from, and how to install a price table when
+/// none is loaded.
+fn prices_line(prices: &Value) -> String {
+    let schema = prices["schema"].as_str().unwrap_or("tapes-price-table/1");
+    match prices["status"].as_str() {
+        Some("loaded") => format!(
+            "money: list price by a {schema} table ({}) beside the harness-written estimate",
+            match prices["origin"].as_str() {
+                Some("named") => "--prices",
+                Some("environment") => "TAPES_PRICES",
+                _ => "the default location",
+            }
+        ),
+        Some("invalid") => format!(
+            "money: harness-written estimates; the {schema} table at the default location is invalid, so no list price is shown"
+        ),
+        _ => format!(
+            "money: harness-written estimates; no price table is loaded\n  install a {schema} file at ~/.config/tapes/prices.toml, or name one with --prices or TAPES_PRICES"
+        ),
+    }
 }
 
 #[cfg(test)]

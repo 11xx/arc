@@ -219,12 +219,14 @@ fn session_entry(report: &Value, change_key: &str, key: &str, kind: &str) -> Val
         .into_iter()
         .flatten()
         .find(|item| item["key"] == change_key);
-    let shared = item.is_some_and(|item| {
-        item["shared"]
+    let listed = |field: &Value| {
+        field
             .as_array()
-            .is_some_and(|shared| shared.iter().any(|held| held == key))
-    });
-    json!({
+            .is_some_and(|keys| keys.iter().any(|held| held == key))
+    };
+    let divided = item.is_some_and(|item| listed(&item["direct"]["shares"]));
+    let shared = divided || item.is_some_and(|item| listed(&item["shared"]));
+    let mut entry = json!({
         "key": key,
         "kind": row["kind"],
         "per_run": row["per_run"],
@@ -232,7 +234,18 @@ fn session_entry(report: &Value, change_key: &str, key: &str, kind: &str) -> Val
         "measurement": row["measurement"]["status"],
         "source": row["measurement"]["source"],
         "totals": row["totals"],
-    })
+    });
+    if divided {
+        if let Some(share) = row["split"]["shares"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|share| share["work"] == change_key)
+        {
+            entry["share"] = share["totals"].clone();
+        }
+    }
+    entry
 }
 
 /// The sessions the ledger records behind one role trailer.
@@ -332,12 +345,12 @@ fn view_of(ctx: &Ctx, commit: &str, located: &Located, cost: &CostView) -> Resul
 
 /// The view of any commit: the change's figures, or the answer that no
 /// change records it.
-fn commit_view(ctx: &Ctx, revision: &str) -> Result<Value> {
+fn commit_view(ctx: &Ctx, revision: &str, prices: Option<&std::path::Path>) -> Result<Value> {
     let commit = gitio::rev_parse(&ctx.cwd, revision)
         .with_context(|| format!("{revision} is not a commit"))?;
     match locate(ctx, &Changes::read(ctx)?, &commit)? {
         Some(located) => {
-            let cost = read_cost(ctx, &located.state.change_id)?;
+            let cost = read_cost(ctx, &located.state.change_id, prices)?;
             view_of(ctx, &commit, &located, &cost)
         }
         None => Ok(json!({
@@ -447,6 +460,9 @@ fn view_text(view: &Value, detail: bool) -> String {
             if session["totals"].is_object() {
                 write_totals(&mut out, "      ", "whole", &session["totals"]);
             }
+            if session["share"].is_object() {
+                write_totals(&mut out, "      ", "share of the change", &session["share"]);
+            }
         }
     }
     emit!(out, "cost");
@@ -455,8 +471,13 @@ fn view_text(view: &Value, detail: bool) -> String {
 }
 
 /// Print the cost view of a commit.
-pub fn show_commit_cost(ctx: &Ctx, revision: &str, json: bool) -> Result<()> {
-    let view = commit_view(ctx, revision)?;
+pub fn show_commit_cost(
+    ctx: &Ctx,
+    revision: &str,
+    prices: Option<&std::path::Path>,
+    json: bool,
+) -> Result<()> {
+    let view = commit_view(ctx, revision, prices)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&view)?);
     } else {
@@ -557,7 +578,7 @@ pub fn note_cost(ctx: &Ctx, target: Option<&str>, all: bool) -> Result<()> {
     let mut refused = 0usize;
     for (commit, (change_id, refresh)) in &jobs {
         if !costs.contains_key(change_id) {
-            costs.insert(change_id.clone(), read_cost(ctx, change_id)?);
+            costs.insert(change_id.clone(), read_cost(ctx, change_id, None)?);
         }
         let state = &states[change_id];
         let commits = patchset_commits(ctx, state);

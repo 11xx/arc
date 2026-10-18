@@ -6,11 +6,14 @@
 //! the pinned tapes reader, or by facts retained from an earlier read. An
 //! executor session is assigned to work through the dispatches bound to it. A
 //! participant is a session with no binding whose ledger events act on the
-//! work: it is measured whole and never split, so it counts as direct only
-//! for work that holds every change its events name, and is shared otherwise.
+//! work. A session the ledger gives several spans is read per segment of its
+//! timeline, and each work item takes the segments it alone covers; work that
+//! holds every item a session acted on counts it whole.
 //! A session whose recording cannot be measured qualifies every total it would
 //! join and is never counted as zero. A total names its quantity kind and is
 //! withheld, refused, or absent rather than understated.
+
+mod span;
 
 use super::cost_liveness::{Liveness, Snapshot};
 use super::cost_read::CostRead;
@@ -20,11 +23,13 @@ use crate::model::{
     plain_session_id, portable_coordinate, portable_cost_metadata, portable_cost_reason,
     portable_lineage_reason, portable_liveness, portable_quantity_reason, portable_selection,
     CostCacheWrites, CostConvention, CostCounterResidual, CostCounters, CostDisjoint,
-    CostEventCoverage, CostEventIdentity, CostEvents, CostFacts, CostLineage, CostPricing,
-    CostRelative, CostResidual, CostResidualSource, Event, Payload, DISJOINT_CATEGORIES,
+    CostEventCoverage, CostEventIdentity, CostEvents, CostFacts, CostLineage, CostListPrice,
+    CostPricing, CostRelative, CostResidual, CostResidualSource, CostSegment, CostSpans, Event,
+    Payload, DISJOINT_CATEGORIES,
 };
 use agent_tapes_core::measurement::{MeasurementCompleteness, MeasurementReason};
 use serde_json::{json, Value};
+use span::{ItemSpan, Segment};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Append one formatted line to a text report.
@@ -44,7 +49,7 @@ pub const TAPES_READER: &str = env!("ARC_TAPES_READER");
 
 /// How arc normalizes a reader's usage answer into retained facts. It moves
 /// when that normalization does, so facts from an older one stay identifiable.
-pub const COST_CALCULATION: &str = "usage-normalization 4";
+pub const COST_CALCULATION: &str = "usage-normalization 5";
 
 const USD_KIND: &str = "harness-calculated-estimate";
 const TOKEN_KIND: &str = "resource-quantity";
@@ -66,6 +71,9 @@ const ZERO_PRICE: &str = "recorded zero price accompanies nonzero or unknown usa
 const UNLISTED_MODEL: &str = "the price table has no row for the model that served the usage";
 const TTL_UNRECORDED: &str = "some cache writes recorded no TTL";
 const RESIDUAL_CONFLICT: &str = "recorded total is below its identified requests";
+const LIST_KIND: &str = agent_tapes_core::pricing::ESTIMATE_KIND;
+const NO_TABLE: &str = "no price table is loaded";
+const NO_SERVED_MODEL: &str = "no single model is known to have served the figure";
 
 /// Work a dispatched run is assigned to, through the subject it names.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -135,6 +143,7 @@ struct Selection {
 }
 
 /// One dispatch bound to an executor session.
+#[derive(Clone)]
 struct Span {
     dispatch_event_id: String,
     dispatched_at: chrono::DateTime<chrono::Utc>,
@@ -148,12 +157,14 @@ struct Span {
 }
 
 /// Where a session's measurement came from.
+#[derive(Clone)]
 enum Source {
     Fresh,
     Retained(String, String),
     Unavailable(String),
 }
 
+#[derive(Clone)]
 struct Measured {
     source: Source,
     facts: Option<CostFacts>,
@@ -222,6 +233,7 @@ const RETAINED_BEFORE_RUN_END: &str =
 
 /// What liveness a session's figure is read under, and why it is not final
 /// when it is not.
+#[derive(Clone)]
 struct SessionLiveness {
     fresh: Liveness,
     retained: Option<String>,
@@ -313,6 +325,7 @@ impl SessionLiveness {
 
 /// A session no dispatch binds, measured because its ledger events act on
 /// the selected work.
+#[derive(Clone)]
 struct Participation {
     roles: BTreeSet<Role>,
     /// The ledger read had no gap, so the membership names every change the
@@ -321,12 +334,25 @@ struct Participation {
     membership_complete: bool,
 }
 
+/// Whether a session's figure is divided among the work its spans cover.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Split {
+    /// The ledger gives the session one span, so its figure is not divided.
+    Whole,
+    /// Read per segment of its timeline.
+    Divided,
+    /// Several spans, but no segment figures to divide, for this reason.
+    Unsplit(&'static str),
+}
+
+#[derive(Clone)]
 struct SessionRow {
     harness: String,
     session: String,
     spans: Vec<Span>,
     membership: BTreeSet<WorkKey>,
     measured: Measured,
+    split: Split,
     overlap: BTreeSet<String>,
     participation: Option<Participation>,
     liveness: Option<SessionLiveness>,
@@ -431,12 +457,19 @@ pub fn show_cost(ctx: &Ctx, query: &CostQuery, json: bool, detail: bool) -> Resu
 }
 
 /// Read the cost view of a change or a journal artifact.
-pub(super) fn read_cost(ctx: &Ctx, target: &str) -> Result<CostView> {
-    read_query(ctx, &CostQuery::target(target))
+pub(super) fn read_cost(
+    ctx: &Ctx,
+    target: &str,
+    prices: Option<&std::path::Path>,
+) -> Result<CostView> {
+    let mut query = CostQuery::target(target);
+    query.prices = prices.map(std::path::Path::to_path_buf);
+    read_query(ctx, &query)
 }
 
 /// Read the cost view of the work a query selects.
 fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
+    let prices = agent_tapes_core::pricing::lookup(query.prices.as_deref())?;
     let store = ctx.store()?;
     let mut read = CostRead::new(&store);
     let events = read.events(Store::REPOSITORY_SCOPE);
@@ -448,17 +481,24 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
     }
     let ledger = read_ledger(&mut read, &selection, &events, &assigned);
     let Assigned { runs, sessions, .. } = assigned;
+    let plans = span_plans(&sessions, &ledger);
     let mut fresh = read_all(
         sessions
             .keys()
             .chain(ledger.participants().map(|(key, _)| key))
             .cloned()
             .collect(),
+        &plans,
     );
+    let plan_of = |harness: &str, session: &str| {
+        plans
+            .get(&(harness.to_string(), session.to_string()))
+            .map_or(&[][..], Vec::as_slice)
+    };
     let mut fresh_read = |harness: &str, session: &str| {
         fresh
             .remove(&(harness.to_string(), session.to_string()))
-            .unwrap_or_else(|| read_fresh(harness, session))
+            .unwrap_or_else(|| read_fresh(harness, session, plan_of(harness, session)))
     };
     let snapshot = std::cell::OnceCell::new();
     let mut sessions: Vec<SessionRow> = sessions
@@ -474,12 +514,14 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
             if let Some(facts) = measured.facts.as_mut() {
                 facts.incomplete.extend(liveness.incomplete.clone());
             }
+            let split = split_of(&measured, plan_of(&harness, &session), true);
             SessionRow {
                 harness,
                 session,
                 spans,
                 membership,
                 measured,
+                split,
                 overlap: BTreeSet::new(),
                 participation: None,
                 liveness: Some(liveness),
@@ -508,12 +550,14 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
                 );
             }
         }
+        let split = split_of(&measured, plan_of(harness, session), ledger.complete);
         sessions.push(SessionRow {
             harness: harness.clone(),
             session: session.clone(),
             spans: Vec::new(),
             membership: person.membership.clone(),
             measured,
+            split,
             overlap: BTreeSet::new(),
             participation: Some(Participation {
                 roles: person.roles.clone(),
@@ -522,6 +566,11 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
             liveness: Some(liveness),
             agent: None,
         });
+    }
+    for row in &mut sessions {
+        if let Some(facts) = row.measured.facts.as_mut() {
+            price(facts, prices.table());
+        }
     }
     let groups = lineage_groups(&sessions);
     for row in &mut sessions {
@@ -539,7 +588,12 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
     }
     let outside = outside_sessions(&ledger, &sessions, &unmeasured);
     selection.ledger_gaps = read.gaps;
-    let mut report = render_report(&selection, &runs, &sessions, &outside, &ledger, &query.by);
+    let view = View {
+        by: &query.by,
+        prices: &prices,
+        allocate_even: query.allocate_even,
+    };
+    let mut report = render_report(&selection, &runs, &sessions, &outside, &ledger, &view);
     if let Some(footprint) = &query.footprint {
         report["footprint"] = footprint_figure(&report, footprint);
     }
@@ -594,6 +648,7 @@ pub fn retain_cost(ctx: &Ctx, target: &str) -> Result<()> {
     }
     let ledger = read_ledger(&mut read, &selection, &events, &assigned);
     print_read_gaps(&selection.gaps, &read.gaps);
+    let plans = span_plans(&assigned.sessions, &ledger);
     let mut keys: BTreeSet<(String, String)> = assigned.sessions.into_keys().collect();
     keys.extend(ledger.participants().map(|(key, _)| key.clone()));
     if keys.is_empty() {
@@ -603,16 +658,17 @@ pub fn retain_cost(ctx: &Ctx, target: &str) -> Result<()> {
     // Read every source before taking the ledger lock: a recording can be
     // large, and other writers wait on the lock.
     let snapshot = Snapshot::read();
-    let reads: Vec<(String, String, std::result::Result<CostFacts, String>)> = read_all(keys)
-        .into_iter()
-        .map(|((harness, session), read)| {
-            let read = read.map(|mut facts| {
-                facts.liveness = Some(snapshot.of(&harness, &session).answer().to_string());
-                facts
-            });
-            (harness, session, read)
-        })
-        .collect();
+    let reads: Vec<(String, String, std::result::Result<CostFacts, String>)> =
+        read_all(keys, &plans)
+            .into_iter()
+            .map(|((harness, session), read)| {
+                let read = read.map(|mut facts| {
+                    facts.liveness = Some(snapshot.of(&harness, &session).answer().to_string());
+                    facts
+                });
+                (harness, session, read)
+            })
+            .collect();
     let _repository_events = store.lock_repository_events()?;
     let mut held = CostRead::new(&store);
     let events = held.events(Store::REPOSITORY_SCOPE);
@@ -783,6 +839,11 @@ pub struct CostQuery {
     /// Table groupings, in order: agent, role, model, harness, change or
     /// session.
     pub by: Vec<String>,
+    /// Divide overlapped requests evenly among the overlapping items, beside
+    /// the conserving figures.
+    pub allocate_even: bool,
+    /// The price table `--prices` names.
+    pub prices: Option<std::path::PathBuf>,
 }
 
 impl CostQuery {
@@ -1070,7 +1131,7 @@ struct Assigned {
 
 /// The selected runs per work item, every bound session with at least
 /// one span in the selection, with all of its spans across the repository:
-/// a span on unselected work makes the session shared beyond the view. A run
+/// a span on unselected work divides the session beyond the view. A run
 /// is a change's when its dispatch names that change's exact id, so what a
 /// run is assigned to never moves as other changes are opened.
 fn assign(ctx: &Ctx, selection: &mut Selection, events: &[Event]) -> Assigned {
@@ -1273,6 +1334,7 @@ fn retained_for<'a>(
 /// and a lineage read can scan a whole harness store.
 fn read_all(
     keys: BTreeSet<(String, String)>,
+    plans: &BTreeMap<(String, String), Vec<Segment>>,
 ) -> BTreeMap<(String, String), std::result::Result<CostFacts, String>> {
     let keys: Vec<(String, String)> = keys.into_iter().collect();
     let workers = std::thread::available_parallelism()
@@ -1287,7 +1349,10 @@ fn read_all(
                 let Some((harness, session)) = keys.get(index) else {
                     break;
                 };
-                let read = read_fresh(harness, session);
+                let plan = plans
+                    .get(&(harness.clone(), session.clone()))
+                    .map_or(&[][..], Vec::as_slice);
+                let read = read_fresh(harness, session, plan);
                 if let Ok(mut reads) = reads.lock() {
                     reads.insert((harness.clone(), session.clone()), read);
                 }
@@ -1356,13 +1421,60 @@ fn measure(
     }
 }
 
+/// Whether the measured facts divide the session along `plan`. A fresh read
+/// was made along it; retained facts divide the session only when their
+/// segments are the ones the ledger gives it now. A participant's spans are
+/// known only while every ledger record is readable.
+fn split_of(measured: &Measured, plan: &[Segment], membership_complete: bool) -> Split {
+    if plan.is_empty() {
+        return Split::Whole;
+    }
+    let Some(facts) = measured.facts.as_ref() else {
+        return Split::Unsplit(span::UNMEASURED);
+    };
+    if !membership_complete {
+        return Split::Unsplit(span::INCOMPLETE_MEMBERSHIP);
+    }
+    match facts.spans.as_ref() {
+        Some(spans) if spans.unsplit.is_some() => Split::Unsplit(span::UNSUPPORTED),
+        Some(spans)
+            if spans.segments.len() == plan.len()
+                && plan
+                    .iter()
+                    .zip(&spans.segments)
+                    .all(|(segment, retained)| segment.defines(retained)) =>
+        {
+            Split::Divided
+        }
+        _ => Split::Unsplit(span::RETAINED_MISMATCH),
+    }
+}
+
 /// Two reads measured the same thing, whichever reader made them and
 /// whatever liveness each was taken under.
+/// Segment figures are compared only when both reads cut the session alike.
 fn same_measurement(left: &CostFacts, right: &CostFacts) -> bool {
     let mut left = left.clone();
+    let mut right = right.clone();
     left.reader.clone_from(&right.reader);
     left.liveness.clone_from(&right.liveness);
-    left == *right
+    let definitions = |facts: &CostFacts| {
+        facts.spans.as_ref().map(|spans| {
+            spans
+                .segments
+                .iter()
+                .map(|segment| {
+                    let (from, to, work, runs) = segment.bounds();
+                    (from, to, work.to_vec(), runs.to_vec())
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    if definitions(&left) != definitions(&right) {
+        left.spans = None;
+        right.spans = None;
+    }
+    left == right
 }
 
 /// The facts a conflict compares, without the reader and calculation names
@@ -1378,8 +1490,13 @@ fn measurement_facts(facts: &CostFacts) -> Value {
 }
 
 /// Measure one session through the pinned tapes reader, over its whole
-/// recording.
-fn read_fresh(harness: &str, session: &str) -> std::result::Result<CostFacts, String> {
+/// recording, and per segment of `plan` when the ledger gives it several
+/// spans.
+fn read_fresh(
+    harness: &str,
+    session: &str,
+    plan: &[Segment],
+) -> std::result::Result<CostFacts, String> {
     let backends: Vec<Box<dyn agent_tapes_core::backend::Backend>> =
         agent_tapes_core::backend::backends()
             .into_iter()
@@ -1410,8 +1527,20 @@ fn read_fresh(harness: &str, session: &str) -> std::result::Result<CostFacts, St
     let whole = backend
         .stream_session(&resolved.session, &read)
         .map_err(|_| "usage read failed".to_string())?;
+    let span_tally = (!plan.is_empty()).then(|| tally.clone());
     let view = agent_tapes_core::usage::streamed(&whole, tally, &read);
     let mut facts = normalize(&view, selection_warnings, harness);
+    if let Some(tally) = span_tally {
+        facts.spans = Some(read_spans(
+            backend.as_ref(),
+            &resolved.session,
+            &read,
+            &tally,
+            plan,
+            selection_warnings,
+            harness,
+        ));
+    }
     if harness == "claude" {
         facts.residual = Some(residual(
             backend.as_ref(),
@@ -1500,6 +1629,61 @@ fn read_fresh(harness: &str, session: &str) -> std::result::Result<CostFacts, St
         },
     );
     Ok(facts)
+}
+
+/// The session's figure in each segment of `plan`, read in one pass. The
+/// segments and the remainder add up to the whole in the segments' basis.
+fn read_spans(
+    backend: &dyn agent_tapes_core::backend::Backend,
+    session: &agent_tapes_core::model::Session,
+    read: &agent_tapes_core::backend::StreamedTranscript,
+    tally: &agent_tapes_core::usage::TurnTally,
+    plan: &[Segment],
+    selection_warnings: usize,
+    harness: &str,
+) -> CostSpans {
+    let bounds: Vec<_> = plan.iter().map(Segment::bounds).collect();
+    let Ok(figures) = backend.stream_spans(session, read, &bounds) else {
+        return CostSpans {
+            unsplit: Some(span::UNSUPPORTED.to_string()),
+            segments: Vec::new(),
+            remainder: None,
+            remainder_requests: 0,
+            whole: None,
+        };
+    };
+    let usage = agent_tapes_core::usage::spans(&figures, tally, read);
+    let requests = |view: &agent_tapes_core::usage::UsageView| {
+        view.span
+            .as_ref()
+            .map_or(0, |placement| placement.requests as u64)
+    };
+    CostSpans {
+        unsplit: None,
+        segments: plan
+            .iter()
+            .zip(&usage.spans)
+            .map(|(segment, view)| CostSegment {
+                from: segment.from,
+                to: segment.to,
+                work: segment.work_labels(),
+                runs: segment.runs.iter().cloned().collect(),
+                requests: requests(view),
+                facts: Box::new(normalize(view, selection_warnings, harness)),
+            })
+            .collect(),
+        remainder_requests: requests(&usage.remainder),
+        remainder: Some(Box::new(normalize(
+            &usage.remainder,
+            selection_warnings,
+            harness,
+        ))),
+        whole: Some(Box::new(normalize(
+            &usage.whole,
+            selection_warnings,
+            harness,
+        ))),
+    }
 }
 
 fn safe_relative(id: String, unknown: &mut Vec<String>) -> Option<String> {
@@ -1679,6 +1863,18 @@ fn sanitized_facts(held: &CostFacts) -> CostFacts {
         lineage.unknown.sort();
         lineage.unknown.dedup();
     }
+    if let Some(spans) = facts.spans.as_mut() {
+        for segment in &mut spans.segments {
+            *segment.facts = sanitized_facts(&segment.facts);
+        }
+        for figure in spans.remainder.iter_mut().chain(spans.whole.iter_mut()) {
+            **figure = sanitized_facts(figure);
+        }
+    }
+    // Segments that cannot be classified leave the session whole.
+    if facts.spans.as_ref().is_some_and(|spans| !spans.portable()) {
+        facts.spans = None;
+    }
     facts
 }
 
@@ -1739,13 +1935,47 @@ fn is_absence(reason: MeasurementReason) -> bool {
 /// typed answer for the figure measured; the only prose arc still counts is
 /// the reader's `--latest` selection warnings, which no typed field carries.
 /// The one model the recording says served the session, if it names one.
+/// It names one in its per-model split, or, with no split, in the model
+/// selections it observed, or in the session's model when it observed no
+/// mix of models.
 fn served_model(view: &agent_tapes_core::usage::UsageView) -> Option<String> {
-    let [model] = view.by_model.as_deref()? else {
-        return None;
+    let coordinate = |model: &str, variant: Option<&String>| match variant {
+        Some(variant) => format!("{model}#{variant}"),
+        None => model.to_string(),
     };
-    let coordinate = match &model.variant {
-        Some(variant) => format!("{}#{variant}", model.model),
-        None => model.model.clone(),
+    let session = &view.session;
+    let coordinate = match view.by_model.as_deref().unwrap_or_default() {
+        [model] => coordinate(&model.model, model.variant.as_ref()),
+        // One model selected at several efforts is that model, effort unnamed.
+        [] if !session.model_selections.is_empty() => {
+            let selections = &session.model_selections;
+            let models: Vec<&String> = selections
+                .iter()
+                .map(|span| &span.model.id)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            let [model] = models[..] else {
+                return None;
+            };
+            let variants: BTreeSet<Option<&String>> = selections
+                .iter()
+                .map(|span| span.model.variant.as_ref())
+                .collect();
+            match &variants.into_iter().collect::<Vec<_>>()[..] {
+                [variant] => coordinate(model, *variant),
+                _ => model.clone(),
+            }
+        }
+        [] if session
+            .model_observation
+            .as_ref()
+            .is_none_or(|status| !status.mixed) =>
+        {
+            let model = session.model.as_ref()?;
+            coordinate(&model.id, model.variant.as_ref())
+        }
+        _ => return None,
     };
     portable_coordinate(&coordinate).then_some(coordinate)
 }
@@ -1883,31 +2113,8 @@ fn normalize(
         selection,
         liveness: None,
         served_model: served_model(view),
-        disjoint: disjoint.as_ref().and_then(|disjoint| {
-            Some(CostDisjoint {
-                convention: CostConvention {
-                    input: kebab(disjoint.convention.input)?,
-                    output: kebab(disjoint.convention.output)?,
-                },
-                uncached_input: disjoint.uncached_input,
-                cache_read: disjoint.cache_read,
-                // The split sums to the writes, so an unrecorded bucket is empty.
-                cache_write: disjoint.cache_write.map(|writes| CostCacheWrites {
-                    ephemeral_5m: writes.ephemeral_5m.unwrap_or(0),
-                    ephemeral_1h: writes.ephemeral_1h.unwrap_or(0),
-                    ttl_unrecorded: writes.ttl_unrecorded.unwrap_or(0),
-                }),
-                output: disjoint.output,
-                reasoning: disjoint.reasoning,
-                gaps: Some(
-                    disjoint
-                        .measurement_completeness
-                        .iter()
-                        .map(|(category, reasons)| (category.to_string(), arc_reasons(reasons)))
-                        .collect(),
-                ),
-            })
-        }),
+        disjoint: disjoint.as_ref().and_then(cost_disjoint),
+        by_model: by_model(view, harness),
         cost_coverage: cost_coverage.map(|coverage| CostPricing {
             complete: coverage.complete,
             zero_written_requests: coverage.zero_written_requests as u64,
@@ -1915,6 +2122,8 @@ fn normalize(
         }),
         events,
         residual: None,
+        spans: None,
+        list_price: None,
     };
     let mut gaps: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let typed = |counter: &str, absent: bool| -> Vec<String> {
@@ -1964,6 +2173,61 @@ fn normalize(
     facts.quantity_gaps = Some(gaps);
     qualify_price(&mut facts);
     facts
+}
+
+fn cost_disjoint(disjoint: &agent_tapes_core::model::DisjointTokens) -> Option<CostDisjoint> {
+    Some(CostDisjoint {
+        convention: CostConvention {
+            input: kebab(disjoint.convention.input)?,
+            output: kebab(disjoint.convention.output)?,
+        },
+        uncached_input: disjoint.uncached_input,
+        cache_read: disjoint.cache_read,
+        // The split sums to the writes, so an unrecorded bucket is empty.
+        cache_write: disjoint.cache_write.map(|writes| CostCacheWrites {
+            ephemeral_5m: writes.ephemeral_5m.unwrap_or(0),
+            ephemeral_1h: writes.ephemeral_1h.unwrap_or(0),
+            ttl_unrecorded: writes.ttl_unrecorded.unwrap_or(0),
+        }),
+        output: disjoint.output,
+        reasoning: disjoint.reasoning,
+        gaps: Some(
+            disjoint
+                .measurement_completeness
+                .iter()
+                .map(|(category, reasons)| (category.to_string(), arc_reasons(reasons)))
+                .collect(),
+        ),
+    })
+}
+
+/// Each model's disjoint categories, where the recording names several
+/// models; one model is `served_model`.
+fn by_model(
+    view: &agent_tapes_core::usage::UsageView,
+    harness: &str,
+) -> Vec<crate::model::CostModelShare> {
+    let models = view.by_model.as_deref().unwrap_or_default();
+    let Some(convention) = agent_tapes_core::model::TokenConvention::of(harness) else {
+        return Vec::new();
+    };
+    if models.len() < 2 {
+        return Vec::new();
+    }
+    models
+        .iter()
+        .filter(|model| portable_coordinate(&model.model))
+        .filter_map(|model| {
+            let tokens = model.tokens.as_ref()?;
+            let disjoint =
+                agent_tapes_core::model::DisjointTokens::from_native(tokens, convention, None)
+                    .with_completeness(&model.measurement_completeness);
+            Some(crate::model::CostModelShare {
+                model: model.model.clone(),
+                disjoint: cost_disjoint(&disjoint)?,
+            })
+        })
+        .collect()
 }
 
 fn unavailable_residual(reason: &str) -> CostResidual {
@@ -2131,6 +2395,114 @@ fn qualify_price(facts: &mut CostFacts) {
     }
 }
 
+/// Price a figure under the view's table, or leave it unpriced without one.
+fn price(facts: &mut CostFacts, table: Option<&agent_tapes_core::pricing::PriceTable>) {
+    facts.list_price = table.map(|table| list_price(facts, table));
+}
+
+/// tapes' disjoint categories of a figure, as the pricing reads them.
+fn tapes_disjoint(disjoint: &CostDisjoint) -> Option<agent_tapes_core::model::DisjointTokens> {
+    use agent_tapes_core::model::{CacheWrites, DisjointTokens, TokenConvention};
+    Some(DisjointTokens {
+        convention: serde_json::from_value::<TokenConvention>(json!(disjoint.convention)).ok()?,
+        uncached_input: disjoint.uncached_input,
+        cache_read: disjoint.cache_read,
+        cache_write: disjoint.cache_write.map(|writes| CacheWrites {
+            ephemeral_5m: Some(writes.ephemeral_5m),
+            ephemeral_1h: Some(writes.ephemeral_1h),
+            ttl_unrecorded: Some(writes.ttl_unrecorded),
+        }),
+        output: disjoint.output,
+        reasoning: disjoint.reasoning,
+        total: None,
+        measurement_completeness: MeasurementCompleteness::default(),
+        missing: Vec::new(),
+    })
+}
+
+/// A figure's list price: its disjoint categories priced by the table row of
+/// the one model that served it, or model by model where several did. What
+/// the table cannot price is a fixed reason, a category the figure measured
+/// incompletely qualifies the estimate, and so does any part of a category
+/// the models' shares leave unattributed.
+fn list_price(facts: &CostFacts, table: &agent_tapes_core::pricing::PriceTable) -> CostListPrice {
+    use agent_tapes_core::pricing::{price_share, EstimateSum, PRICED_CATEGORIES};
+    let unpriced = |gaps: Vec<String>| CostListPrice {
+        currency: table.currency.clone(),
+        amount: None,
+        models: Vec::new(),
+        gaps,
+    };
+    let Some(whole) = facts.disjoint.as_ref().and_then(tapes_disjoint) else {
+        return unpriced(vec!["recorded category is absent".to_string()]);
+    };
+    let mut gaps: BTreeSet<String> = figure_gaps(facts, Figure::Disjoint("total"))
+        .into_iter()
+        .collect();
+    let mut sum = EstimateSum::default();
+    let mut unlisted = false;
+    let mut price = |model: &str, disjoint: &agent_tapes_core::model::DisjointTokens| {
+        let row = table.price(model);
+        unlisted |= row.is_none();
+        sum.merge(price_share(disjoint, row, table));
+    };
+    match facts.served_model.as_deref().and_then(model_of) {
+        Some(model) => price(&model, &whole),
+        None if !facts.by_model.is_empty() => {
+            let shares: Vec<_> = facts
+                .by_model
+                .iter()
+                .filter_map(|share| Some((share, tapes_disjoint(&share.disjoint)?)))
+                .collect();
+            for (share, disjoint) in &shares {
+                price(&share.model, disjoint);
+            }
+            let amount =
+                |disjoint: &agent_tapes_core::model::DisjointTokens, category: &str| match category
+                {
+                    "uncached_input" => disjoint.uncached_input,
+                    "cache_read" => disjoint.cache_read,
+                    "cache_write" => disjoint.cache_write.map(|writes| writes.total()),
+                    _ => disjoint.output,
+                };
+            for category in PRICED_CATEGORIES {
+                let covered = shares.iter().try_fold(0u64, |held, (_, disjoint)| {
+                    held.checked_add(amount(disjoint, category)?)
+                });
+                if covered
+                    .zip(amount(&whole, category))
+                    .is_none_or(|(covered, total)| covered < total)
+                {
+                    gaps.insert(arc_reason(MeasurementReason::IncompleteAttribution).to_string());
+                }
+            }
+        }
+        None => return unpriced(vec![NO_SERVED_MODEL.to_string()]),
+    }
+    if unlisted {
+        gaps.insert(UNLISTED_MODEL.to_string());
+    }
+    let Some(estimate) = sum.finish() else {
+        if !unlisted {
+            gaps.insert("recorded category is absent".to_string());
+        }
+        return unpriced(gaps.into_iter().collect());
+    };
+    gaps.extend(arc_reasons(
+        estimate
+            .measurement_completeness
+            .iter()
+            .flat_map(|(_, reasons)| reasons),
+    ));
+    CostListPrice {
+        currency: estimate.currency,
+        // A cache write with no recorded TTL leaves the least it can cost.
+        amount: estimate.amount.or(estimate.at_least),
+        models: estimate.models.into_iter().map(|model| model.id).collect(),
+        gaps: gaps.into_iter().collect(),
+    }
+}
+
 /// The model of a `model[#effort]` coordinate, without its effort.
 /// The model coordinate a free-form route names: the whole route, or what
 /// precedes ` via <harness>`, when that is one coordinate. A route that is a
@@ -2153,6 +2525,8 @@ fn model_of(coordinate: &str) -> Option<String> {
 struct Person {
     /// Every work item in this ledger whose events carry the session.
     membership: BTreeSet<WorkKey>,
+    /// Its first and last event on each of those items.
+    bounds: BTreeMap<WorkKey, (span::Instant, span::Instant)>,
     /// What its events on the selected work show it did.
     roles: BTreeSet<Role>,
     /// The models its events declared in each role on the selected work,
@@ -2216,6 +2590,14 @@ fn read_ledger(
                     .people
                     .entry((harness.clone(), session.clone()))
                     .or_default();
+                person
+                    .bounds
+                    .entry(work.clone())
+                    .and_modify(|(first, last)| {
+                        *first = (*first).min(event.created_at);
+                        *last = (*last).max(event.created_at);
+                    })
+                    .or_insert((event.created_at, event.created_at));
                 person.membership.insert(work);
                 if on_selection {
                     person.selected_events += 1;
@@ -2257,6 +2639,38 @@ fn read_ledger(
     }
     ledger.complete = read.gaps.is_empty();
     ledger
+}
+
+/// The segments each session with several spans is read in: an executor's
+/// runs, and a participant's events on each work item.
+fn span_plans(sessions: &Sessions, ledger: &Ledger) -> BTreeMap<(String, String), Vec<Segment>> {
+    let executors = sessions
+        .iter()
+        .filter(|(_, (spans, _))| spans.len() > 1)
+        .map(|(key, (spans, _))| {
+            let spans: Vec<ItemSpan> = spans
+                .iter()
+                .map(|span| ItemSpan {
+                    work: span.work.clone(),
+                    run: Some(span.dispatch_event_id.clone()),
+                    from: span.dispatched_at,
+                    to: span.ended_at,
+                })
+                .collect();
+            (key.clone(), span::segments(&spans))
+        });
+    let participants = ledger
+        .participants()
+        .filter(|(_, person)| person.bounds.len() > 1)
+        .map(|(key, person)| {
+            let spans: Vec<ItemSpan> = person
+                .bounds
+                .iter()
+                .map(|(work, (first, last))| ItemSpan::events(work.clone(), *first, *last))
+                .collect();
+            (key.clone(), span::segments(&spans))
+        });
+    executors.chain(participants).collect()
 }
 
 /// Sessions that acted on the selected work and are not among the measured
@@ -2368,24 +2782,27 @@ fn lineage_unknown(row: &SessionRow) -> bool {
         .is_none_or(|lineage| !lineage.unknown.is_empty())
 }
 
-/// One reported quantity: the harness-written dollar figure, a native
-/// counter in its harness's own convention, or a disjoint token category.
+/// One reported quantity: the harness-written dollar figure, the list-price
+/// estimate, a native counter in its harness's own convention, or a
+/// disjoint token category.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Figure {
     Usd,
+    ListPrice,
     Native(&'static str),
     Disjoint(&'static str),
 }
 
 fn figures() -> impl Iterator<Item = Figure> {
-    std::iter::once(Figure::Usd)
+    [Figure::Usd, Figure::ListPrice]
+        .into_iter()
         .chain(CATEGORIES.into_iter().map(Figure::Native))
         .chain(DISJOINT.into_iter().map(Figure::Disjoint))
 }
 
 /// The accounting domain a figure adds within. Native counters and dollar
-/// figures add within one harness and basis; disjoint categories add across
-/// harnesses within one basis.
+/// figures add within one harness and basis; disjoint categories and the
+/// list prices of them add across harnesses within one basis.
 fn domain(row: &SessionRow, figure: Figure) -> (Option<&str>, Option<&str>) {
     let basis = row
         .measured
@@ -2393,7 +2810,7 @@ fn domain(row: &SessionRow, figure: Figure) -> (Option<&str>, Option<&str>) {
         .as_ref()
         .and_then(|facts| facts.basis.as_deref());
     match figure {
-        Figure::Disjoint(_) => (None, basis),
+        Figure::Disjoint(_) | Figure::ListPrice => (None, basis),
         _ => (Some(row.harness.as_str()), basis),
     }
 }
@@ -2510,6 +2927,22 @@ fn base(
             json!({"kind": USD_KIND, "unit": "USD", "pricing_basis": "unknown",
                 "source": "harness recording", "precision": "currency sums rounded to ten fractional places; smaller nonzero values preserved", "scope": scope})
         }
+        Figure::ListPrice => {
+            let currency = members.iter().find_map(|row| {
+                Some(
+                    row.measured
+                        .facts
+                        .as_ref()?
+                        .list_price
+                        .as_ref()?
+                        .currency
+                        .clone(),
+                )
+            });
+            json!({"kind": LIST_KIND, "unit": currency, "schema": agent_tapes_core::pricing::PRICE_TABLE_SCHEMA,
+                "pricing_basis": "the price table's list price per million tokens of each disjoint category, by the model that served them",
+                "source": "price table", "precision": "currency sums rounded to ten fractional places; smaller nonzero values preserved", "scope": scope})
+        }
         Figure::Native(category) => json!({"kind": TOKEN_KIND, "unit": "tokens",
             "categories": "native", "category": category,
             "convention": "the harness's own counters; they add only within one harness",
@@ -2566,6 +2999,10 @@ fn figure_gaps(facts: &CostFacts, figure: Figure) -> Vec<String> {
     let of = |category: &str| gaps.get(category).into_iter().flatten().cloned();
     match figure {
         Figure::Usd => of("usd").collect(),
+        Figure::ListPrice => match &facts.list_price {
+            Some(price) => price.gaps.clone(),
+            None => vec![NO_TABLE.to_string()],
+        },
         Figure::Native(category) => of(category).collect(),
         Figure::Disjoint(category) => {
             let Some(disjoint) = &facts.disjoint else {
@@ -2662,6 +3099,11 @@ fn sum_amounts(
 fn recorded_amount(facts: &CostFacts, figure: Figure) -> Option<Amount> {
     match figure {
         Figure::Usd => facts.harness_estimate_usd.map(Amount::Usd),
+        Figure::ListPrice => facts
+            .list_price
+            .as_ref()
+            .and_then(|price| price.amount)
+            .map(Amount::Usd),
         Figure::Native(category) => counter(&facts.counters, category).map(Amount::Tokens),
         Figure::Disjoint(category) => facts
             .disjoint
@@ -2715,7 +3157,7 @@ fn aggregate(members: &[&SessionRow], withheld: &[String], figure: Figure) -> Ag
             })
             .collect::<Vec<_>>();
         return Aggregate::withheld(vec![match figure {
-            Figure::Disjoint(_) => format!("incompatible accounting bases: {}; quantities are partitioned by accounting basis", names.join(", ")),
+            Figure::Disjoint(_) | Figure::ListPrice => format!("incompatible accounting bases: {}; quantities are partitioned by accounting basis", names.join(", ")),
             _ => format!("incompatible accounting domains: {}; quantities are partitioned by harness and accounting basis", names.join(", ")),
         }]);
     }
@@ -2857,14 +3299,244 @@ fn measurement_reasons(facts: &CostFacts) -> Vec<String> {
     reasons.into_iter().collect()
 }
 
+/// What a view shows beside the figures: its groupings, its price table,
+/// and whether it allocates overlapped requests.
+struct View<'a> {
+    by: &'a [String],
+    prices: &'a agent_tapes_core::pricing::PriceLookup,
+    allocate_even: bool,
+}
+
+impl SessionRow {
+    /// The session's segment figures, when its figure is divided.
+    fn segments(&self) -> Option<&CostSpans> {
+        if self.split != Split::Divided {
+            return None;
+        }
+        self.measured.facts.as_ref()?.spans.as_ref()
+    }
+
+    /// This session carrying `facts`, part of its figure, as its measurement.
+    fn with_facts(&self, facts: CostFacts) -> SessionRow {
+        SessionRow {
+            harness: self.harness.clone(),
+            session: self.session.clone(),
+            spans: self.spans.clone(),
+            membership: self.membership.clone(),
+            measured: Measured {
+                source: self.measured.source.clone(),
+                facts: Some(facts),
+                conflict: None,
+                retained_liveness: self.measured.retained_liveness.clone(),
+                retained_at: self.measured.retained_at,
+            },
+            split: self.split,
+            overlap: self.overlap.clone(),
+            participation: self.participation.clone(),
+            liveness: self.liveness.clone(),
+            agent: self.agent.clone(),
+        }
+    }
+
+    /// The figure of the segments `keep` holds, by index, in the segments'
+    /// basis, with each even share `allocate` names of a segment several
+    /// items cover, and with `remainder`, the requests no segment holds.
+    fn part(
+        &self,
+        table: Option<&agent_tapes_core::pricing::PriceTable>,
+        keep: impl Fn(usize, &CostSegment) -> bool,
+        allocate: impl Fn(&CostSegment) -> Vec<usize>,
+        remainder: bool,
+    ) -> Option<SessionRow> {
+        let facts = self.measured.facts.as_ref()?;
+        let spans = self.segments()?;
+        let allocated: Vec<(CostFacts, u64)> = spans
+            .segments
+            .iter()
+            .flat_map(|segment| {
+                allocate(segment).into_iter().map(|index| {
+                    (
+                        span::even_share(&segment.facts, segment.work.len(), index),
+                        segment.requests,
+                    )
+                })
+            })
+            .collect();
+        let parts: Vec<span::Part<'_>> = spans
+            .segments
+            .iter()
+            .enumerate()
+            .filter(|(index, segment)| keep(*index, segment))
+            .map(|(_, segment)| (&*segment.facts, segment.requests))
+            .chain(allocated.iter().map(|(facts, requests)| (facts, *requests)))
+            .chain(
+                spans
+                    .remainder
+                    .as_deref()
+                    .filter(|_| remainder)
+                    .map(|facts| (facts, spans.remainder_requests)),
+            )
+            .collect();
+        let mut share = span::sum_facts(facts, spans.whole.as_deref()?, &parts);
+        price(&mut share, table);
+        Some(self.with_facts(share))
+    }
+
+    /// The share of the work items `keys` hold: the segments one of them
+    /// alone covers, and with `allocate`, an even share of each segment
+    /// several items cover for every one of them among `keys`.
+    fn share(
+        &self,
+        keys: &[&WorkKey],
+        allocate: bool,
+        table: Option<&agent_tapes_core::pricing::PriceTable>,
+    ) -> Option<SessionRow> {
+        let labels: BTreeSet<String> = keys.iter().map(|key| key.label()).collect();
+        self.part(
+            table,
+            |_, segment| matches!(&segment.work[..], [one] if labels.contains(one)),
+            |segment| {
+                if !allocate || segment.work.len() < 2 {
+                    return Vec::new();
+                }
+                (0..segment.work.len())
+                    .filter(|index| labels.contains(&segment.work[*index]))
+                    .collect()
+            },
+            false,
+        )
+    }
+
+    /// One run's figure: the segments that run alone covers.
+    fn run_share(
+        &self,
+        dispatch: &str,
+        table: Option<&agent_tapes_core::pricing::PriceTable>,
+    ) -> Option<SessionRow> {
+        self.part(
+            table,
+            |_, segment| matches!(&segment.runs[..], [one] if one == dispatch),
+            |_| Vec::new(),
+            false,
+        )
+    }
+
+    /// What no single work item holds, by fixed reason, with the requests
+    /// each part holds: segments several items cover, segments none covers,
+    /// and requests whose time the recording leaves unrecorded.
+    fn unattributed(
+        &self,
+        table: Option<&agent_tapes_core::pricing::PriceTable>,
+    ) -> Vec<(&'static str, u64, SessionRow)> {
+        let Some(spans) = self.segments() else {
+            return Vec::new();
+        };
+        let reason = |index: usize| span::unattributed_reason(&spans.segments, index);
+        let mut held: BTreeMap<&'static str, u64> = BTreeMap::new();
+        for (index, segment) in spans.segments.iter().enumerate() {
+            if let Some(reason) = reason(index) {
+                *held.entry(reason).or_default() += segment.requests;
+            }
+        }
+        let mut parts: Vec<(&'static str, u64, SessionRow)> = held
+            .into_iter()
+            .filter_map(|(named, requests)| {
+                let row = self.part(
+                    table,
+                    |index, _| reason(index) == Some(named),
+                    |_| Vec::new(),
+                    false,
+                )?;
+                Some((named, requests, row))
+            })
+            .collect();
+        if spans.remainder_requests > 0 {
+            if let Some(row) = self.part(table, |_, _| false, |_| Vec::new(), true) {
+                parts.push((span::UNTIMED, spans.remainder_requests, row));
+            }
+        }
+        parts
+    }
+
+    /// The figure outside every work item's share, with why: a divided
+    /// session's unattributed part, or an undivided one's whole figure.
+    fn unattributed_figure(
+        &self,
+        table: Option<&agent_tapes_core::pricing::PriceTable>,
+    ) -> Option<(SessionRow, Vec<&'static str>)> {
+        let Some(spans) = self.segments() else {
+            let reason = match self.split {
+                Split::Unsplit(reason) => reason,
+                _ => span::INCOMPLETE_MEMBERSHIP,
+            };
+            return Some((self.clone(), vec![reason]));
+        };
+        let facts = self.measured.facts.as_ref()?;
+        let mut reasons: Vec<&'static str> = self
+            .unattributed(table)
+            .iter()
+            .filter(|(_, requests, _)| *requests > 0)
+            .map(|(reason, _, _)| *reason)
+            .collect();
+        if spans
+            .whole
+            .as_ref()
+            .is_some_and(|whole| whole.basis != facts.basis)
+        {
+            reasons.push(span::NOT_SPLITTABLE);
+        }
+        if reasons.is_empty() {
+            return None;
+        }
+        let row = self.part(
+            table,
+            |index, _| span::unattributed_reason(&spans.segments, index).is_some(),
+            |_| Vec::new(),
+            true,
+        )?;
+        Some((row, reasons))
+    }
+}
+
+/// The sessions one figure holds: those it counts whole, the shares of
+/// divided sessions it counts in part, and the sessions it holds neither way.
+struct Members<'a> {
+    whole: Vec<&'a SessionRow>,
+    shares: Vec<SessionRow>,
+    shared: Vec<String>,
+}
+
+impl Members<'_> {
+    fn rows(&self) -> Vec<&SessionRow> {
+        self.whole
+            .iter()
+            .copied()
+            .chain(self.shares.iter())
+            .collect()
+    }
+
+    fn share_keys(&self) -> Vec<String> {
+        self.shares.iter().map(SessionRow::key).collect()
+    }
+}
+
 fn render_report(
     selection: &Selection,
     runs: &Runs,
     sessions: &[SessionRow],
     outside: &[Value],
     ledger: &Ledger,
-    by: &[String],
+    view: &View<'_>,
 ) -> Value {
+    let table = view.prices.table();
+    // A session counts for these items alone when they hold every work item
+    // it acted on, and for a participant when that membership is complete.
+    let counted = |row: &SessionRow, keys: &[&WorkKey]| -> bool {
+        row.participation
+            .as_ref()
+            .is_none_or(|participation| participation.membership_complete)
+            && row.membership.iter().all(|work| keys.contains(&work))
+    };
     let unbound_in = |key: &WorkKey| -> Vec<String> {
         runs.get(key)
             .into_iter()
@@ -2893,9 +3565,12 @@ fn render_report(
             }
         }
         // A participant has no dispatch to start from: its whole recording is
-        // its figure.
+        // its figure. A divided executor's consumption before its first
+        // dispatch is outside every share.
         for row in sessions.iter().filter(|row| {
-            row.participation.is_none() && row.membership.iter().any(|work| keys.contains(&work))
+            row.participation.is_none()
+                && row.membership.iter().any(|work| keys.contains(&work))
+                && !(row.split == Split::Divided && !counted(row, keys))
         }) {
             let first = row.spans.iter().map(|span| span.dispatched_at).min();
             match row.measured.facts.as_ref() {
@@ -2929,25 +3604,41 @@ fn render_report(
         }
         reasons
     };
-    // A session counts for these items alone when they hold every work item
-    // it acted on, and for a participant when that membership is complete.
-    let counted = |row: &SessionRow, keys: &[&WorkKey]| -> bool {
-        row.participation
-            .as_ref()
-            .is_none_or(|participation| participation.membership_complete)
-            && row.membership.iter().all(|work| keys.contains(&work))
-    };
-    let within = |keys: &[&WorkKey]| -> (Vec<&SessionRow>, Vec<String>) {
-        let mut inside = Vec::new();
-        let mut shared = Vec::new();
+    // A divided session the items do not hold whole joins with its share.
+    let within = |keys: &[&WorkKey], allocate: bool| -> Members<'_> {
+        let mut members = Members {
+            whole: Vec::new(),
+            shares: Vec::new(),
+            shared: Vec::new(),
+        };
         for row in sessions {
             if counted(row, keys) {
-                inside.push(row);
+                members.whole.push(row);
             } else if row.membership.iter().any(|work| keys.contains(&work)) {
-                shared.push(row.key());
+                match row.share(keys, allocate, table) {
+                    Some(share) => members.shares.push(share),
+                    None => members.shared.push(row.key()),
+                }
             }
         }
-        (inside, shared)
+        members
+    };
+    // A figure and, when the view allocates, the allocated figure beside it.
+    let figure = |keys: &[&WorkKey], scope: &str| -> (Value, Option<Value>) {
+        let members = within(keys, false);
+        let mut conserving = totals(&members.rows(), &withheld_for(keys, scope), scope);
+        conserving["shares"] = json!(members.share_keys());
+        let allocated = view.allocate_even.then(|| {
+            let members = within(keys, true);
+            let mut allocated = totals(&members.rows(), &withheld_for(keys, scope), scope);
+            for quantity in allocated["quantities"].as_array_mut().into_iter().flatten() {
+                quantity["allocated"] = json!(true);
+            }
+            allocated["allocation"] = json!("even");
+            allocated["shares"] = json!(members.share_keys());
+            allocated
+        });
+        (conserving, allocated)
     };
     // Every participant that acted on these items, with its whole figure. It
     // is `counted` where the items hold every change its events name.
@@ -2964,46 +3655,53 @@ fn render_report(
                     "roles": participation.roles.iter().map(|role| role.name()).collect::<Vec<_>>(),
                     "spans": row.membership.len(),
                     "counted": counted(row, keys),
+                    "share": !counted(row, keys) && row.split == Split::Divided,
                     "totals": totals(&[row], &[], &format!("session {}", row.key())),
                 }))
             })
             .collect()
     };
-    let span_count = |key: &str| {
-        sessions
-            .iter()
-            .find(|row| row.key() == key)
-            .map_or(0, |row| row.spans.len())
-    };
+    let row_of = |key: &str| sessions.iter().find(|row| row.key() == key);
 
     let mut work = Vec::new();
     for item in &selection.items {
-        let (direct, shared) = within(&[&item.key]);
+        let shared = within(&[&item.key], false).shared;
         let item_runs: Vec<Value> = runs
             .get(&item.key)
             .into_iter()
             .flatten()
             .map(|run| {
                 let session = (!run.conflicting).then(|| run.candidates.first()).flatten();
+                let row = session.and_then(|key| row_of(key));
+                let divided = row.filter(|row| row.split == Split::Divided);
                 let per_run = match &session {
                     _ if run.invalid => "invalid-binding",
                     _ if run.conflicting => "conflicting-bindings",
                     None => "unbound",
-                    Some(key) if span_count(key) > 1 => "shared-among-spans",
+                    Some(_) if divided.is_some() => "split",
+                    Some(_) if row.is_some_and(|row| row.spans.len() > 1) => "shared-among-spans",
                     Some(_) => "whole-session",
                 };
-                json!({"dispatch_event_id": run.dispatch_event_id, "round": run.round,
-                    "session": session, "binding_candidates": run.candidates, "per_run": per_run})
+                let mut entry = json!({"dispatch_event_id": run.dispatch_event_id, "round": run.round,
+                    "session": session, "binding_candidates": run.candidates, "per_run": per_run});
+                if let Some(share) = divided.and_then(|row| row.run_share(&run.dispatch_event_id, table)) {
+                    entry["totals"] = totals(&[&share], &[], &format!("run {}", run.dispatch_event_id));
+                }
+                entry
             })
             .collect();
+        let (direct, allocated) = figure(&[&item.key], "direct");
         let mut entry = json!({
             "key": item.key.label(),
             "runs": item_runs,
             "unbound": unbound_in(&item.key),
-            "direct": totals(&direct, &withheld_for(&[&item.key], "direct"), "direct"),
+            "direct": direct,
             "shared": shared,
             "participants": participants_in(&[&item.key]),
         });
+        if let Some(allocated) = allocated {
+            entry["allocated"] = json!({"direct": allocated});
+        }
         match &item.key {
             WorkKey::Change(id) => {
                 entry["kind"] = json!("change");
@@ -3018,24 +3716,32 @@ fn render_report(
         }
         if let Some(source) = &item.source {
             let keys = [&item.key, source];
-            let (inclusive, beyond) = within(&keys);
-            let mut totals = totals(&inclusive, &withheld_for(&keys, "inclusive"), "inclusive");
+            let (mut totals, allocated) = figure(&keys, "inclusive");
             totals["members"] = json!([item.key.label(), source.label()]);
-            totals["shared"] = json!(beyond);
+            totals["shared"] = json!(within(&keys, false).shared);
             totals["participants"] = json!(participants_in(&keys));
             entry["inclusive"] = totals;
+            if let Some(allocated) = allocated {
+                entry["allocated"]["inclusive"] = allocated;
+            }
         }
         work.push(entry);
     }
 
     let all: Vec<&WorkKey> = selection.items.iter().map(|item| &item.key).collect();
-    let (union_members, union_shared) = within(&all);
-    let mut union = totals(&union_members, &withheld_for(&all, "union"), "union");
+    let union_members = within(&all, false);
+    let (mut union, union_allocated) = figure(&all, "union");
     union["members"] = json!(all.iter().map(|key| key.label()).collect::<Vec<_>>());
-    union["shared"] = json!(union_shared);
+    union["shared"] = json!(union_members.shared);
     union["participants"] = json!(participants_in(&all));
+    if let Some(allocated) = &union_allocated {
+        union["allocated"] = allocated.clone();
+    }
 
-    let session_rows: Vec<Value> = sessions.iter().map(session_json).collect();
+    let session_rows: Vec<Value> = sessions
+        .iter()
+        .map(|row| session_json(row, table))
+        .collect();
     let unmeasured: BTreeMap<String, Vec<String>> = sessions
         .iter()
         .filter_map(|row| match (&row.measured.facts, &row.measured.source) {
@@ -3118,7 +3824,7 @@ fn render_report(
                 "unbound": unbound,
                 "reasons": assignment_gaps,
                 "participants": {
-                    "statement": "a participant is a session no dispatch binds whose ledger events act on the selected work; it is measured whole and never split, and it may also act in other repositories' ledgers, which this ledger cannot see",
+                    "statement": "a participant is a session no dispatch binds whose ledger events act on the selected work; its span on each work item runs from its first to its last event there, and it may also act in other repositories' ledgers, which this ledger cannot see",
                     "sessions": sessions
                         .iter()
                         .filter(|row| row.participation.is_some())
@@ -3138,8 +3844,24 @@ fn render_report(
             },
         },
     });
-    report["table"] = table(&report, sessions, &union_members, &union_withheld, by);
+    report["prices"] = prices_json(view.prices);
+    report["table"] = cost_table(&report, sessions, &union_members, &union_withheld, view);
     report
+}
+
+/// Which price table the view priced with, or why it has none.
+fn prices_json(prices: &agent_tapes_core::pricing::PriceLookup) -> Value {
+    use agent_tapes_core::pricing::PriceLookup;
+    let schema = agent_tapes_core::pricing::PRICE_TABLE_SCHEMA;
+    match prices {
+        PriceLookup::Loaded(loaded) => json!({"status": "loaded", "schema": schema,
+            "origin": kebab(loaded.origin), "currency": loaded.table.currency,
+            "models": loaded.table.models.len()}),
+        PriceLookup::Absent => json!({"status": "absent", "schema": schema}),
+        PriceLookup::DefaultInvalid { .. } => {
+            json!({"status": "invalid", "schema": schema, "origin": "default"})
+        }
+    }
 }
 
 /// The footprint session's whole figure beside the work it selects, or why
@@ -3152,9 +3874,15 @@ fn footprint_figure(report: &Value, footprint: &str) -> Value {
         .find(|row| row["key"] == footprint);
     let figure = row.map(|row| {
         let tokens = super::cost_table::cell_text(&row["tokens"], false);
+        let list = super::cost_table::cell_text(&row["list"], true);
         let usd = super::cost_table::cell_text(&row["usd"], true);
         [
             tokens,
+            if list.is_empty() {
+                String::new()
+            } else {
+                format!("list {list}")
+            },
             usd,
             row["status"].as_str().unwrap_or_default().to_string(),
         ]
@@ -3190,19 +3918,41 @@ fn short_ids(sessions: &[SessionRow]) -> Vec<String> {
 /// The groupings `--by` accepts.
 pub const GROUPINGS: [&str; 6] = ["agent", "role", "model", "harness", "change", "session"];
 
-/// The combined figure of one table column: the disjoint token total or the
-/// harness-written dollar estimate.
-fn column(totals: &Value, usd: bool, partition: bool) -> Vec<&Value> {
+/// The table's columns: the disjoint token total, the list-price estimate,
+/// and the harness-written dollar estimate.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Column {
+    Tokens,
+    List,
+    Usd,
+}
+
+impl Column {
+    const ALL: [Column; 3] = [Column::Tokens, Column::List, Column::Usd];
+
+    fn name(self) -> &'static str {
+        match self {
+            Column::Tokens => "tokens",
+            Column::List => "list",
+            Column::Usd => "usd",
+        }
+    }
+}
+
+/// The combined figure of one table column.
+fn column(totals: &Value, column: Column, partition: bool) -> Vec<&Value> {
     totals["quantities"]
         .as_array()
         .into_iter()
         .flatten()
         .filter(|quantity| {
             quantity.get("partition").is_some() == partition
-                && if usd {
-                    quantity["kind"] == USD_KIND
-                } else {
-                    quantity["categories"] == "disjoint" && quantity["category"] == "total"
+                && match column {
+                    Column::Usd => quantity["kind"] == USD_KIND,
+                    Column::List => quantity["kind"] == LIST_KIND,
+                    Column::Tokens => {
+                        quantity["categories"] == "disjoint" && quantity["category"] == "total"
+                    }
                 }
         })
         .collect()
@@ -3223,9 +3973,10 @@ fn cell(quantity: Option<&Value>) -> Value {
     cell
 }
 
-/// The status word of a figure from its cells. A dollar column with nothing
-/// recorded, as for a harness that writes no estimate, qualifies nothing.
-fn figure_status(tokens: &Value, usd: &Value) -> &'static str {
+/// The status word of a figure from its cells. A money column with nothing
+/// recorded, as for a harness that writes no estimate or a figure no table
+/// prices, qualifies nothing.
+fn figure_status(tokens: &Value, usd: &Value, list: &Value) -> &'static str {
     let recorded = |cell: &Value| {
         ["amount", "known_subtotal", "bound", "known_bound"]
             .iter()
@@ -3237,12 +3988,14 @@ fn figure_status(tokens: &Value, usd: &Value) -> &'static str {
         _ if recorded(cell) => 1,
         _ => 3,
     };
-    let usd = if usd["status"] == "absent" && !recorded(usd) {
-        0
-    } else {
-        word(usd)
+    let money = |cell: &Value| {
+        if cell["status"] == "absent" && !recorded(cell) {
+            0
+        } else {
+            word(cell)
+        }
     };
-    match word(tokens).max(usd) {
+    match word(tokens).max(money(usd)).max(money(list)) {
         0 => "complete",
         1 => "subtotal",
         2 => "withheld",
@@ -3250,21 +4003,25 @@ fn figure_status(tokens: &Value, usd: &Value) -> &'static str {
     }
 }
 
-/// The table's view of a figure: both columns, their status word, and each
+/// The table's view of a figure: its columns, their status word, and each
 /// accounting partition when the combined figure spans several.
 fn table_figure(totals: &Value) -> Value {
-    let tokens = cell(column(totals, false, false).first().copied());
-    let usd = cell(column(totals, true, false).first().copied());
-    let partitions: Vec<Value> = [false, true]
+    let tokens = cell(column(totals, Column::Tokens, false).first().copied());
+    let list = cell(column(totals, Column::List, false).first().copied());
+    let usd = cell(column(totals, Column::Usd, false).first().copied());
+    let partitions: Vec<Value> = Column::ALL
         .into_iter()
-        .flat_map(|usd| {
-            column(totals, usd, true).into_iter().map(move |quantity| {
-                json!({"column": if usd { "usd" } else { "tokens" }, "harness": quantity["harness"],
+        .flat_map(|named| {
+            column(totals, named, true)
+                .into_iter()
+                .map(move |quantity| {
+                    json!({"column": named.name(), "harness": quantity["harness"],
                     "accounting_basis": quantity["accounting_basis"], "cell": cell(Some(quantity))})
-            })
+                })
         })
         .collect();
-    json!({"status": figure_status(&tokens, &usd), "tokens": tokens, "usd": usd, "partitions": partitions})
+    let status = figure_status(&tokens, &usd, &list);
+    json!({"status": status, "tokens": tokens, "list": list, "usd": usd, "partitions": partitions})
 }
 
 fn group_value(row: &SessionRow, grouping: &str) -> String {
@@ -3287,17 +4044,20 @@ fn group_value(row: &SessionRow, grouping: &str) -> String {
     }
 }
 
-/// The rows the text table shows, the total it ends with, the sessions
-/// outside that total, a count of the qualifications `--detail` explains, and
-/// one subtotal per group. The total is the union figure, with its status.
-fn table(
+/// The rows the text table shows, the total it ends with, what of each
+/// session is outside that total and why, a count of the qualifications
+/// `--detail` explains, and one subtotal per group. The total is the union
+/// figure, with its status.
+fn cost_table(
     report: &Value,
     sessions: &[SessionRow],
-    union_members: &[&SessionRow],
+    union: &Members<'_>,
     union_withheld: &[String],
-    by: &[String],
+    view: &View<'_>,
 ) -> Value {
-    let counted = |row: &SessionRow| union_members.iter().any(|member| member.key() == row.key());
+    let table = view.prices.table();
+    let whole = |row: &SessionRow| union.whole.iter().any(|member| member.key() == row.key());
+    let share = |row: &SessionRow| union.shares.iter().any(|member| member.key() == row.key());
     let short = short_ids(sessions);
     let rows: Vec<Value> = sessions
         .iter()
@@ -3307,7 +4067,9 @@ fn table(
             let running = row.liveness.as_ref().is_some_and(SessionLiveness::running);
             let status = if row.measured.facts.is_none() {
                 "unmeasured".to_string()
-            } else if !counted(row) {
+            } else if share(row) {
+                format!("split ×{}", row.membership.len())
+            } else if !whole(row) {
                 format!("shared ×{}", row.membership.len())
             } else if running {
                 "live".to_string()
@@ -3317,11 +4079,19 @@ fn table(
             json!({"key": row.key(), "agent": row.agent_label(), "roles": row.roles(),
                 "session": short,
                 "runs": row.spans.len(), "spans": row.membership.len(),
-                "counted": counted(row), "status": status,
-                "tokens": figure["tokens"], "usd": figure["usd"]})
+                "counted": whole(row), "share": share(row), "status": status,
+                "tokens": figure["tokens"], "list": figure["list"], "usd": figure["usd"]})
         })
         .collect();
-    let shared: Vec<&SessionRow> = sessions.iter().filter(|row| !counted(row)).collect();
+    let unattributed: Vec<(SessionRow, Vec<&'static str>, &String)> = sessions
+        .iter()
+        .zip(&short)
+        .filter(|(row, _)| !whole(row))
+        .filter_map(|(row, short)| {
+            let (figure, reasons) = row.unattributed_figure(table)?;
+            Some((figure, reasons, short))
+        })
+        .collect();
     let coverage = &report["coverage"];
     let count = |value: &Value| {
         value.as_array().map_or(0, Vec::len) + value.as_object().map_or(0, serde_json::Map::len)
@@ -3340,11 +4110,12 @@ fn table(
         .filter_map(|(_, count)| count.as_u64())
         .sum();
     let mut groups: BTreeMap<Vec<String>, Vec<&SessionRow>> = BTreeMap::new();
-    if !by.is_empty() {
-        for row in union_members {
+    if !view.by.is_empty() {
+        for row in union.rows() {
             groups
                 .entry(
-                    by.iter()
+                    view.by
+                        .iter()
                         .map(|grouping| group_value(row, grouping))
                         .collect(),
                 )
@@ -3356,7 +4127,8 @@ fn table(
         .into_iter()
         .map(|(values, members)| {
             let mut figure = table_figure(&totals(&members, union_withheld, "group"));
-            figure["by"] = json!(by
+            figure["by"] = json!(view
+                .by
                 .iter()
                 .zip(&values)
                 .map(|(grouping, value)| (grouping.clone(), json!(value)))
@@ -3367,16 +4139,33 @@ fn table(
         .collect();
     let mut total = table_figure(&report["union"]);
     total["scope"] = json!("union");
-    let mut outside = table_figure(&totals(&shared, &[], "shared"));
-    outside["sessions"] = json!(shared.iter().map(|row| row.key()).collect::<Vec<_>>());
-    json!({
+    let held: Vec<&SessionRow> = unattributed.iter().map(|(row, _, _)| row).collect();
+    let mut outside = table_figure(&totals(&held, &[], "unattributed shared"));
+    outside["sessions"] = json!(unattributed
+        .iter()
+        .map(|(row, reasons, short)| {
+            let mut figure = table_figure(&totals(&[row], &[], &format!("session {}", row.key())));
+            figure["key"] = json!(row.key());
+            figure["session"] = json!(short);
+            figure["reasons"] = json!(reasons);
+            figure
+        })
+        .collect::<Vec<_>>());
+    let mut value = json!({
         "rows": rows,
         "total": total,
-        "shared": outside,
+        "unattributed": outside,
         "coverage": {"qualifications": total_qualifications, "by_kind": qualifications},
-        "by": by,
+        "by": view.by,
         "groups": groups,
-    })
+        "prices": report["prices"],
+    });
+    if report["union"]["allocated"].is_object() {
+        let mut allocated = table_figure(&report["union"]["allocated"]);
+        allocated["allocation"] = json!("even");
+        value["allocated"] = allocated;
+    }
+    value
 }
 
 /// Where each Claude session's recorded total stands against the requests its
@@ -3416,7 +4205,78 @@ fn residual_coverage(sessions: &[SessionRow]) -> Value {
     })
 }
 
-fn session_json(row: &SessionRow) -> Value {
+/// How a session's figure divides among the work its spans cover: each
+/// segment with its covering items and runs, each item's share and run's
+/// figure, the unattributed part by reason, and the whole in the segments'
+/// basis, which the shares and the unattributed part add up to.
+fn split_json(row: &SessionRow, table: Option<&agent_tapes_core::pricing::PriceTable>) -> Value {
+    match row.split {
+        Split::Whole => return json!({"status": "whole"}),
+        Split::Unsplit(reason) => return json!({"status": "unsplit", "reason": reason}),
+        Split::Divided => {}
+    }
+    let Some(spans) = row.segments() else {
+        return json!({"status": "unsplit", "reason": span::UNMEASURED});
+    };
+    let scope = |what: &str| format!("session {} {what}", row.key());
+    let segments: Vec<Value> = spans
+        .segments
+        .iter()
+        .enumerate()
+        .map(|(index, segment)| {
+            json!({"from": segment.from, "to": segment.to, "work": segment.work,
+                "runs": segment.runs, "requests": segment.requests,
+                "unattributed": span::unattributed_reason(&spans.segments, index)})
+        })
+        .collect();
+    let shares: Vec<Value> = row
+        .membership
+        .iter()
+        .filter_map(|work| {
+            let share = row.share(&[work], false, table)?;
+            Some(json!({"work": work.label(), "totals": totals(&[&share], &[], &scope(&format!("share of {}", work.label())))}))
+        })
+        .collect();
+    let runs: Vec<Value> = row
+        .spans
+        .iter()
+        .filter_map(|run| {
+            let share = row.run_share(&run.dispatch_event_id, table)?;
+            Some(json!({"dispatch_event_id": run.dispatch_event_id,
+                "totals": totals(&[&share], &[], &format!("run {}", run.dispatch_event_id))}))
+        })
+        .collect();
+    let parts: Vec<Value> = row
+        .unattributed(table)
+        .iter()
+        .map(|(reason, requests, part)| {
+            json!({"reason": reason, "requests": requests,
+                "totals": totals(&[part], &[], &scope(&format!("unattributed {reason}")))})
+        })
+        .collect();
+    let unattributed = row.unattributed_figure(table).map(|(figure, reasons)| {
+        json!({"reasons": reasons, "totals": totals(&[&figure], &[], &scope("unattributed"))})
+    });
+    let whole = spans
+        .whole
+        .as_deref()
+        .zip(row.measured.facts.as_ref())
+        .map(|(whole, facts)| {
+            let mut figure = span::sum_facts(facts, whole, &[(whole, 1)]);
+            price(&mut figure, table);
+            totals(
+                &[&row.with_facts(figure)],
+                &[],
+                &scope("in the segments' basis"),
+            )
+        });
+    json!({"status": "divided", "basis": spans.whole.as_ref().and_then(|whole| whole.basis.clone()),
+        "segments": segments, "shares": shares, "runs": runs,
+        "unattributed": unattributed, "unattributed_parts": parts, "whole": whole,
+        "statement": "the shares and the unattributed part add up to the whole in the segments' basis, per counter"})
+}
+
+fn session_json(row: &SessionRow, table: Option<&agent_tapes_core::pricing::PriceTable>) -> Value {
     let measured = &row.measured;
     let mut measurement = json!({});
     match &measured.source {
@@ -3473,14 +4333,16 @@ fn session_json(row: &SessionRow) -> Value {
         "spans": row.spans.iter().map(|span| json!({
             "dispatch_event_id": span.dispatch_event_id,
             "dispatched_at": span.dispatched_at,
+            "ended_at": span.ended_at,
             "forked_from": span.forked_from,
             "round": span.round,
             "work": span.work.label(),
         })).collect::<Vec<_>>(),
         "membership": row.membership.iter().map(WorkKey::label).collect::<Vec<_>>(),
-        "per_run": if row.participation.is_some() { "not-a-run" } else if row.spans.len() > 1 { "shared-among-spans" } else { "whole-session" },
+        "per_run": if row.participation.is_some() { "not-a-run" } else if row.spans.len() > 1 && row.split == Split::Divided { "split" } else if row.spans.len() > 1 { "shared-among-spans" } else { "whole-session" },
         "measurement": measurement,
         "totals": totals(&[row], &[], &scope),
+        "split": split_json(row, table),
     });
     if let Some(participation) = &row.participation {
         value["participant"] = json!({
@@ -3498,6 +4360,7 @@ fn describe_quantity(quantity: &Value) -> String {
     let unit = quantity["unit"].as_str().unwrap_or_default();
     let label = match quantity["kind"].as_str() {
         Some(USD_KIND) => "harness-calculated estimate".to_string(),
+        Some(LIST_KIND) => "list-price estimate".to_string(),
         _ => match quantity["categories"].as_str() {
             Some("disjoint") => format!(
                 "disjoint {}",
@@ -3619,6 +4482,18 @@ fn write_report(out: &mut String, report: &Value) {
             );
         }
         write_totals(out, "  ", "direct", &item["direct"]);
+        let shares: Vec<&str> = item["direct"]["shares"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        if !shares.is_empty() {
+            emit!(out, "  span shares: {}", shares.join(", "));
+        }
+        if item["allocated"]["direct"].is_object() {
+            write_totals(out, "  ", "allocated even", &item["allocated"]["direct"]);
+        }
         let shared: Vec<&str> = item["shared"]
             .as_array()
             .into_iter()
@@ -3635,6 +4510,9 @@ fn write_report(out: &mut String, report: &Value) {
     }
     emit!(out, "union");
     write_totals(out, "  ", "total", &report["union"]);
+    if report["union"]["allocated"].is_object() {
+        write_totals(out, "  ", "allocated even", &report["union"]["allocated"]);
+    }
     write_participants(out, "  ", &report["union"]["participants"]);
     emit!(out, "sessions");
     for session in report["sessions"].as_array().into_iter().flatten() {
@@ -3700,6 +4578,7 @@ fn write_report(out: &mut String, report: &Value) {
             emit!(out, "    {}", reason.as_str().unwrap_or_default());
         }
         write_totals(out, "    ", "measured", &session["totals"]);
+        write_split(out, &session["split"]);
     }
     let coverage = &report["coverage"];
     emit!(out, "coverage");
@@ -3800,6 +4679,47 @@ fn write_report(out: &mut String, report: &Value) {
             .as_str()
             .unwrap_or_default()
     );
+}
+
+/// A divided session's segments, shares and unattributed part, or why a
+/// session with several spans is not divided.
+fn write_split(out: &mut String, split: &Value) {
+    match split["status"].as_str() {
+        Some("unsplit") => emit!(
+            out,
+            "    not divided: {}",
+            split["reason"].as_str().unwrap_or_default()
+        ),
+        Some("divided") => {
+            emit!(
+                out,
+                "    divided into {} segments [{}]",
+                split["segments"].as_array().map_or(0, Vec::len),
+                split["basis"]
+                    .as_str()
+                    .unwrap_or("accounting basis unknown")
+            );
+            for share in split["shares"].as_array().into_iter().flatten() {
+                let label = format!("share of {}", share["work"].as_str().unwrap_or_default());
+                write_totals(out, "      ", &label, &share["totals"]);
+            }
+            for run in split["runs"].as_array().into_iter().flatten() {
+                let label = format!(
+                    "run {}",
+                    run["dispatch_event_id"].as_str().unwrap_or_default()
+                );
+                write_totals(out, "      ", &label, &run["totals"]);
+            }
+            if split["unattributed"].is_object() {
+                let label = format!(
+                    "unattributed ({})",
+                    role_names(&split["unattributed"]["reasons"])
+                );
+                write_totals(out, "      ", &label, &split["unattributed"]["totals"]);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn role_names(roles: &Value) -> String {

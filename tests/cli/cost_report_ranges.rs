@@ -378,9 +378,10 @@ fn text_line<'a>(text: &'a str, label: &str) -> &'a str {
 
 /// Claim: the table's total is the JSON union figure, which for one change
 /// begun from no artifact is its direct figure, with the same status, on a
-/// selection holding an executor, a shared participant and an unmeasured
-/// one; the shared participant stays outside it. Rejects a table total
-/// summed apart from the figures the JSON qualifies.
+/// selection holding an executor, a participant divided between two changes
+/// and an unmeasured one; the divided participant joins with its share and
+/// its unattributed part stays outside. Rejects a table total summed apart
+/// from the figures the JSON qualifies.
 #[test]
 fn the_table_total_is_the_json_union_and_direct_figure() {
     let repo = Repo::new();
@@ -417,11 +418,10 @@ fn the_table_total_is_the_json_union_and_direct_figure() {
             .clone()
     };
     assert_eq!(status("pi:exec-session"), "complete", "{view}");
-    assert_eq!(status("pi:lead-session"), "shared ×2", "{view}");
+    assert_eq!(status("pi:lead-session"), "split ×2", "{view}");
     assert_eq!(status("pi:broken"), "unmeasured", "{view}");
     assert_eq!(
-        table["shared"]["sessions"],
-        json!(["pi:lead-session"]),
+        table["unattributed"]["sessions"][0]["key"], "pi:lead-session",
         "{view}"
     );
 
@@ -436,7 +436,7 @@ fn the_table_total_is_the_json_union_and_direct_figure() {
         "{text}"
     );
     assert!(
-        !text_line(&text, "shared (1 outside the total)").is_empty(),
+        !text_line(&text, "unattributed shared (1 session)").is_empty(),
         "{text}"
     );
     assert!(text.contains("arc cost show --detail"), "{text}");
@@ -530,9 +530,14 @@ fn every_range_selects_exactly_its_changes_and_counts_a_session_once() {
         .filter(|key| *key == "pi:lead-session")
         .collect();
     assert_eq!(lead.len(), 1, "the lead counts once: {tagged}");
-    assert_eq!(
-        tagged["union"]["shared"],
-        json!(["pi:foot-session"]),
+    // The footprint session also acted on an unselected change, so the
+    // union takes its share of the selected ones.
+    assert_eq!(tagged["union"]["shared"], json!([]), "{tagged}");
+    assert!(
+        tagged["union"]["shares"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("pi:foot-session")),
         "{tagged}"
     );
 
