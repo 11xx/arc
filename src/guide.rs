@@ -3510,8 +3510,20 @@ RULES THAT CHANGE WHAT YOU DO
     is listed under `shared` and in `participants` with its whole figure,
     roles and span count, the number of members. A union counts it once when
     the selection covers its whole membership. A recording cannot show
-    whether its session is still running, so a participant's figure is as of
-    its read frontier and says so as incomplete measurement. A session may
+    whether its session is still running, so the view asks `agent-status`
+    once, bounded to two seconds (`ARC_AGENT_STATUS` names another program).
+    A session it lists, in any state, is live: its figure is as of its read
+    frontier and incomplete. A claude, codex or pi session absent from a
+    snapshot its registry owner answered has ended: a fresh read of it is
+    complete as of its final frontier. Every other answer is unknown and
+    incomplete with a fixed reason: no program, a failure, no answer in
+    time, unreadable output, a snapshot no registry owner answered, or a
+    harness agent-status does not report on. Facts retained after the
+    session ended stay complete unless it is listed again; facts retained
+    while it was live or unknown stay incomplete even once it has ended,
+    since it may have gone on past their frontier. Each participant row
+    shows the answer under `liveness`. arc works fully without
+    agent-status. A session may
     also act in other repositories' ledgers, which this ledger cannot see.
     An unreadable ledger record leaves a participant's membership incomplete,
     so it is never counted as the work's alone. Acting events with no
@@ -3540,8 +3552,9 @@ RULES THAT CHANGE WHAT YOU DO
     coverage and category-specific gaps, the disjoint categories with their
     convention and gaps, the consumption events with their per-counter coverage and
     identity, the Claude residual, and any harness-written dollar figure
-    with its pricing coverage, plus lineage relations and read failures
-    as fixed categories. Retained facts carry no recording locators or raw
+    with its pricing coverage, plus lineage relations, read failures
+    as fixed categories, and the liveness agent-status answered then
+    (`live`, `ended` or `unknown`). Retained facts carry no recording locators or raw
     errors. Display sanitizes older facts field by field, so one unreadable
     field leaves the rest of the measurement available; bundle import and export refuse
     nonportable identities, metadata, quantities or reason categories without

@@ -4485,8 +4485,18 @@ enum CostCmd {
     /// `participants` with its whole figure, roles and span count (its
     /// members). A union counts it once when the selection covers its whole
     /// membership. A recording cannot show whether its session is still
-    /// running, so a participant's figure is as of its read frontier and
-    /// reports incomplete measurement. A session may also act in other
+    /// running, so the view asks `agent-status` once (`ARC_AGENT_STATUS`
+    /// names another program), bounded to two seconds. A session it lists, in
+    /// any state, is live: its figure is as of its read frontier and is
+    /// incomplete. A claude, codex or pi session absent from a snapshot its
+    /// registry owner answered has ended: a fresh read of it is complete. Any
+    /// other answer is unknown and incomplete with a fixed reason: no
+    /// program, a failure, no answer in time, unreadable output, a snapshot
+    /// with no registry owner, or a harness agent-status does not report on.
+    /// Facts retained after the session ended stay complete unless it is
+    /// listed again; facts retained while it was live or unknown stay
+    /// incomplete, since it may have gone on past their frontier. Each
+    /// participant row shows its answer under `liveness`. A session may also act in other
     /// repositories' ledgers, which this ledger cannot see, and an unreadable
     /// ledger record leaves the membership incomplete, so the participant is
     /// never counted as the work's alone. Acting events without a usable
@@ -4545,8 +4555,9 @@ enum CostCmd {
     /// that records carrying usage were not read), the disjoint categories with
     /// their own gaps, the consumption events with their coverage, the Claude residual, and
     /// any harness-written dollar figure with its pricing coverage, plus
-    /// lineage relations and read
-    /// failures as fixed categories. Relatives are plain session ids; no
+    /// lineage relations, read failures as fixed categories, and the liveness
+    /// `agent-status` answered for the session then (`live`, `ended` or
+    /// `unknown`, as `cost show` reads it). Relatives are plain session ids; no
     /// recording locator or raw error text is retained. Binding fork origins
     /// remain in the run records. Unavailable journal membership, unreadable
     /// ledger peers and nonportable bindings are coverage gaps; readable

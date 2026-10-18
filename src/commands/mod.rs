@@ -12,6 +12,7 @@ mod claims;
 mod config_cmd;
 mod cost;
 mod cost_commit;
+mod cost_liveness;
 mod cost_read;
 mod diff;
 mod doctor;

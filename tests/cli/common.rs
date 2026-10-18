@@ -95,6 +95,7 @@ impl Repo {
             .env("ARC_ACTOR", "tester")
             .env("ARC_HARNESS", "test")
             .env("ARC_SESSION", "session-a")
+            .env("ARC_AGENT_STATUS", self.home.join(".no-agent-status"))
             .envs(NO_EDITOR)
             .env_remove("ARC_ROLE")
             .env_remove("ARC_MODEL")

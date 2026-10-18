@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use std::os::unix::fs::PermissionsExt;
 
 const USD: &str = "harness-calculated-estimate";
+const LEAD: &str = "lead-session";
 const EXECUTOR: &str = "exec-session";
 
 fn write_lines(path: &Path, lines: &[Value]) {
@@ -96,6 +97,26 @@ fn executed_change(repo: &Repo, slug: &str) -> String {
         "--executor-session",
         EXECUTOR,
     ]));
+    change
+}
+
+/// A change the pi session `lead` opened, snapshotted and approved.
+fn led_change(repo: &Repo, slug: &str, lead: &str) -> String {
+    let change = opened_change_id(&stdout(
+        acting(repo, &repo.root, lead).args(["begin", slug]),
+    ));
+    let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+    repo.commit(
+        &worktree,
+        &format!("{slug}.txt"),
+        &format!("{slug}\n"),
+        &format!("feat: {slug}"),
+    );
+    stdout(acting(repo, &worktree, lead).args(["snapshot", slug]));
+    acting(repo, &worktree, lead)
+        .args(["review", slug, "--verdict", "approved"])
+        .assert()
+        .success();
     change
 }
 
@@ -269,6 +290,193 @@ fn an_unreadable_bound_executor_beside_a_priced_one_never_reads_complete() {
     assert_qualified(usd(&item["direct"]), "pi:missing-exec", &view);
     assert_eq!(
         view["coverage"]["measurement"]["status"], "incomplete",
+        "{view}"
+    );
+}
+
+/// Claim: a participant absent from an owned snapshot, for a harness
+/// agent-status reports on, has ended and prices complete. Rejects a figure
+/// that stays incomplete because a recording cannot show its own end.
+#[test]
+fn an_ended_participant_prices_complete() {
+    let repo = Repo::new();
+    pi_recording(&repo, LEAD, 0.2);
+    let change = led_change(&repo, "ended", LEAD);
+    let status = snapshot(
+        &repo,
+        "other",
+        json!([{"id": "another-session", "harness": "pi", "state": "working"}]),
+    );
+
+    let view = report(&repo, &change, &status);
+    let figure = usd(&work(&view, &format!("change:{change}"))["direct"]);
+    assert_eq!(figure["status"], "complete", "{view}");
+    assert_eq!(figure["amount"].as_f64(), Some(0.2), "{view}");
+    let row = session(&view, "pi:lead-session");
+    assert_eq!(row["measurement"]["liveness"]["answer"], "ended", "{view}");
+    assert_eq!(row["measurement"]["status"], "complete", "{view}");
+    let text = stdout(
+        repo.arc(&repo.root)
+            .env("ARC_AGENT_STATUS", &status)
+            .args(["cost", "show", &change]),
+    );
+    assert!(text.contains("liveness: ended"), "{text}");
+}
+
+/// Claim: a participant agent-status lists, in any state, is live and stays
+/// incomplete as of its frontier. Rejects reading a listed session as ended.
+#[test]
+fn a_live_participant_stays_incomplete() {
+    let repo = Repo::new();
+    pi_recording(&repo, LEAD, 0.2);
+    let change = led_change(&repo, "live", LEAD);
+    for state in ["working", "completed", "idle", "attention"] {
+        let status = snapshot(
+            &repo,
+            state,
+            json!([{"id": LEAD, "harness": "pi", "state": state}]),
+        );
+        let view = report(&repo, &change, &status);
+        let row = session(&view, "pi:lead-session");
+        assert_eq!(
+            row["measurement"]["liveness"]["answer"], "live",
+            "{state}: {view}"
+        );
+        assert_eq!(
+            row["measurement"]["status"], "incomplete",
+            "{state}: {view}"
+        );
+        let figure = usd(&work(&view, &format!("change:{change}"))["direct"]);
+        assert_eq!(figure["status"], "incomplete", "{state}: {view}");
+        assert_eq!(figure["known_subtotal"].as_f64(), Some(0.2), "{view}");
+        assert!(
+            reasons(figure).iter().any(|reason| reason.contains("live")),
+            "{view}"
+        );
+    }
+}
+
+/// Claim: no agent-status, a failing one, a slow one, unreadable output, or
+/// a snapshot no registry owner answered leave a participant incomplete
+/// with a reason, never complete. Rejects treating an empty or missing
+/// answer as ended, and an agent-status that never answers blocks no read.
+#[test]
+fn unavailable_liveness_leaves_a_participant_incomplete_with_a_reason() {
+    let repo = Repo::new();
+    pi_recording(&repo, LEAD, 0.2);
+    let change = led_change(&repo, "unknown", LEAD);
+    let cases = [
+        ("absent", repo.home.join("bin/no-such-agent-status")),
+        ("failing", agent_status(&repo, "failing", "exit 3")),
+        (
+            "unparseable",
+            agent_status(&repo, "unparseable", "echo not-json"),
+        ),
+        (
+            "ownerless",
+            agent_status(&repo, "ownerless", "echo '{\"threads\":[]}'"),
+        ),
+        ("slow", agent_status(&repo, "slow", "sleep 30")),
+    ];
+    for (case, status) in cases {
+        let started = Instant::now();
+        let view = report(&repo, &change, &status);
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "{case} took {:?}",
+            started.elapsed()
+        );
+        let row = session(&view, "pi:lead-session");
+        assert_eq!(
+            row["measurement"]["liveness"]["answer"], "unknown",
+            "{case}: {view}"
+        );
+        assert!(
+            row["measurement"]["liveness"]["reason"].is_string(),
+            "{case}: {view}"
+        );
+        let figure = usd(&work(&view, &format!("change:{change}"))["direct"]);
+        assert_eq!(figure["status"], "incomplete", "{case}: {view}");
+        assert!(
+            reasons(figure)
+                .iter()
+                .any(|reason| reason.contains("liveness is unknown")),
+            "{case}: {view}"
+        );
+    }
+}
+
+/// The liveness each retention of the lead recorded, oldest first.
+fn retained_liveness(repo: &Repo) -> Vec<Value> {
+    stdout(repo.arc(&repo.root).args(["events", "--repository"]))
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|event| {
+            event["event_type"] == "cost-facts-retained" && event["executor_session"] == LEAD
+        })
+        .map(|event| event["facts"]["liveness"].clone())
+        .collect()
+}
+
+/// Claim: retention records the liveness answer it was taken under, and a
+/// figure retained while live stays incomplete after its source is gone,
+/// while one retained after the session ended prices complete. Rejects
+/// retained facts that lose whether their session was still running.
+#[test]
+fn retained_facts_keep_the_liveness_they_were_taken_under() {
+    let repo = Repo::new();
+    let path = pi_recording(&repo, LEAD, 0.2);
+    let change = led_change(&repo, "retained", LEAD);
+    let live = snapshot(
+        &repo,
+        "live",
+        json!([{"id": LEAD, "harness": "pi", "state": "idle"}]),
+    );
+    let ended = snapshot(&repo, "ended", json!([]));
+    let unavailable = repo.home.join("bin/no-such-agent-status");
+    let retain = |status: &Path| {
+        stdout(
+            repo.arc(&repo.root)
+                .env("ARC_AGENT_STATUS", status)
+                .args(["cost", "retain", &change]),
+        )
+    };
+    let direct = |view: &Value| usd(&work(view, &format!("change:{change}"))["direct"]).clone();
+
+    retain(&live);
+    assert_eq!(retained_liveness(&repo), vec![json!("live")]);
+    let source = fs::read(&path).unwrap();
+    fs::remove_file(&path).unwrap();
+    // Retained while live: the session may have gone on past that frontier.
+    let view = report(&repo, &change, &ended);
+    let row = session(&view, "pi:lead-session");
+    assert_eq!(row["measurement"]["source"], "retained", "{view}");
+    assert_eq!(row["measurement"]["liveness"]["retained"], "live", "{view}");
+    assert_eq!(row["measurement"]["status"], "incomplete", "{view}");
+    assert_eq!(direct(&view)["status"], "incomplete", "{view}");
+
+    // Retained after the session ended: its frontier is final.
+    fs::write(&path, source).unwrap();
+    retain(&ended);
+    assert_eq!(
+        retained_liveness(&repo),
+        vec![json!("live"), json!("ended")]
+    );
+    fs::remove_file(&path).unwrap();
+    let view = report(&repo, &change, &unavailable);
+    let row = session(&view, "pi:lead-session");
+    assert_eq!(
+        row["measurement"]["liveness"]["retained"], "ended",
+        "{view}"
+    );
+    assert_eq!(row["measurement"]["status"], "complete", "{view}");
+    assert_eq!(direct(&view)["amount"].as_f64(), Some(0.2), "{view}");
+
+    // A fresh answer that lists the session again outranks the retained end.
+    let view = report(&repo, &change, &live);
+    assert_eq!(
+        session(&view, "pi:lead-session")["measurement"]["status"],
+        "incomplete",
         "{view}"
     );
 }

@@ -12,14 +12,15 @@
 //! join and is never counted as zero. A total names its quantity kind and is
 //! withheld, refused, or absent rather than understated.
 
+use super::cost_liveness::{Liveness, Snapshot};
 use super::cost_read::CostRead;
 use super::run::{rounds, RunSubject};
 use super::*;
 use crate::model::{
     plain_session_id, portable_cost_metadata, portable_cost_reason, portable_lineage_reason,
-    portable_quantity_reason, portable_selection, CostCacheWrites, CostConvention,
-    CostCounterResidual, CostCounters, CostDisjoint, CostEventCoverage, CostEventIdentity,
-    CostEvents, CostFacts, CostLineage, CostPricing, CostRelative, CostResidual,
+    portable_liveness, portable_quantity_reason, portable_selection, CostCacheWrites,
+    CostConvention, CostCounterResidual, CostCounters, CostDisjoint, CostEventCoverage,
+    CostEventIdentity, CostEvents, CostFacts, CostLineage, CostPricing, CostRelative, CostResidual,
     CostResidualSource, Event, Payload, DISJOINT_CATEGORIES,
 };
 use agent_tapes_core::measurement::{MeasurementCompleteness, MeasurementReason};
@@ -151,6 +152,9 @@ struct Measured {
     source: Source,
     facts: Option<CostFacts>,
     conflict: Option<Value>,
+    /// The liveness retained with facts at the measured frontier: those the
+    /// view uses, or for a fresh read, any retained at the same frontier.
+    retained_liveness: Option<String>,
 }
 
 /// What a participant's events show it did. The variants are the fixed role
@@ -194,15 +198,53 @@ fn role_of(payload: &Payload) -> Option<Role> {
     }
 }
 
-/// Why a participant's figure is incomplete: a recording cannot show whether
-/// its session is still running, so the figure is as of the frontier read.
-const PARTICIPANT_FRONTIER: &str =
-    "participant session measured as of its read frontier; a recording cannot show whether it is still running";
+/// Why a participant's figure is incomplete while agent-status lists it.
+const PARTICIPANT_LIVE: &str = "participant session is live: measured as of its read frontier";
+/// Why a figure from facts retained before the session was known to end is
+/// incomplete: the session may have gone on past the retained frontier.
+const RETAINED_BEFORE_END: &str =
+    "participant facts were retained before its session was known to end: measured as of their retained frontier";
+
+/// What liveness a participant's figure is read under, and why it is not
+/// final when it is not. A fresh read of an ended session is final; facts
+/// retained after the session ended are final unless it is listed again.
+struct ParticipantLiveness {
+    fresh: Liveness,
+    retained: Option<String>,
+    incomplete: Option<String>,
+}
+
+impl ParticipantLiveness {
+    fn of(measured: &Measured, fresh: Liveness) -> Self {
+        let retained_ended = measured.retained_liveness.as_deref() == Some("ended");
+        let incomplete = match (fresh, &measured.source) {
+            (Liveness::Live, _) => Some(PARTICIPANT_LIVE.to_string()),
+            (Liveness::Ended, Source::Fresh) => None,
+            _ if retained_ended => None,
+            (Liveness::Ended, _) => Some(RETAINED_BEFORE_END.to_string()),
+            (Liveness::Unknown(reason), _) => Some(format!(
+                "participant session liveness is unknown ({reason}): measured as of its read frontier"
+            )),
+        };
+        Self {
+            fresh,
+            retained: measured.retained_liveness.clone(),
+            incomplete,
+        }
+    }
+
+    fn json(&self) -> Value {
+        json!({"answer": self.fresh.answer(), "reason": self.fresh.reason(),
+            "source": "agent-status", "retained": self.retained,
+            "final": self.incomplete.is_none()})
+    }
+}
 
 /// A session no dispatch binds, measured because its ledger events act on
 /// the selected work.
 struct Participation {
     roles: BTreeSet<Role>,
+    liveness: ParticipantLiveness,
     /// The ledger read had no gap, so the membership names every change the
     /// session acted on. Otherwise a record that could name another one is
     /// unreadable and the session is never counted as the work's alone.
@@ -291,10 +333,15 @@ pub(super) fn read_cost(ctx: &Ctx, target: &str) -> Result<CostView> {
     // A participant whose recording cannot be read is still a row: its
     // missing figure qualifies every total it would have joined.
     let mut unmeasured = BTreeMap::new();
+    let snapshot = std::cell::OnceCell::new();
     for ((harness, session), person) in ledger.participants() {
         let mut measured = measure(&events, harness, session);
+        let liveness = ParticipantLiveness::of(
+            &measured,
+            snapshot.get_or_init(Snapshot::read).of(harness, session),
+        );
         match (measured.facts.as_mut(), &measured.source) {
-            (Some(facts), _) => facts.incomplete.push(PARTICIPANT_FRONTIER.to_string()),
+            (Some(facts), _) => facts.incomplete.extend(liveness.incomplete.clone()),
             (None, Source::Unavailable(reason)) => {
                 unmeasured.insert((harness.clone(), session.clone()), reason.clone());
             }
@@ -314,6 +361,7 @@ pub(super) fn read_cost(ctx: &Ctx, target: &str) -> Result<CostView> {
             overlap: BTreeSet::new(),
             participation: Some(Participation {
                 roles: person.roles.clone(),
+                liveness,
                 membership_complete: ledger.complete,
             }),
         });
@@ -388,10 +436,14 @@ pub fn retain_cost(ctx: &Ctx, target: &str) -> Result<()> {
     }
     // Read every source before taking the ledger lock: a recording can be
     // large, and other writers wait on the lock.
+    let snapshot = Snapshot::read();
     let reads: Vec<(String, String, std::result::Result<CostFacts, String>)> = keys
         .into_iter()
         .map(|(harness, session)| {
-            let read = read_fresh(&harness, &session);
+            let read = read_fresh(&harness, &session).map(|mut facts| {
+                facts.liveness = Some(snapshot.of(&harness, &session).answer().to_string());
+                facts
+            });
             (harness, session, read)
         })
         .collect();
@@ -408,11 +460,15 @@ pub fn retain_cost(ctx: &Ctx, target: &str) -> Result<()> {
                 continue;
             }
         };
+        let liveness = facts.liveness.clone().unwrap_or_default();
         if let Some((event, _)) = retained_for(&events, &harness, &session)
             .into_iter()
             .find(|(_, held)| **held == facts)
         {
-            println!("already retained: {key} frontier={}", facts.frontier);
+            println!(
+                "already retained: {key} frontier={} liveness={liveness}",
+                facts.frontier
+            );
             println!("event: {}", event.event_id);
             continue;
         }
@@ -427,7 +483,7 @@ pub fn retain_cost(ctx: &Ctx, target: &str) -> Result<()> {
             },
         )?;
         store.append_local_repository_event(&mut event)?;
-        println!("retained: {key} frontier={frontier}");
+        println!("retained: {key} frontier={frontier} liveness={liveness}");
         println!("event: {}", event.event_id);
     }
     Ok(())
@@ -869,6 +925,10 @@ fn measure(events: &[Event], harness: &str, session: &str) -> Measured {
         .map(|(event, facts)| (event, sanitized_facts(facts)));
     match read_fresh(harness, session) {
         Ok(fresh) => {
+            let retained_liveness = retained
+                .as_ref()
+                .filter(|(_, held)| held.frontier == fresh.frontier)
+                .and_then(|(_, held)| held.liveness.clone());
             let conflict = retained
                 .as_ref()
                 .filter(|(_, held)| {
@@ -888,11 +948,13 @@ fn measure(events: &[Event], harness: &str, session: &str) -> Measured {
                 source: Source::Fresh,
                 facts: Some(fresh),
                 conflict,
+                retained_liveness,
             }
         }
         Err(reason) => match retained {
             Some((event, held)) => Measured {
                 source: Source::Retained(event.event_id.clone(), reason),
+                retained_liveness: held.liveness.clone(),
                 facts: Some(held),
                 conflict: None,
             },
@@ -900,23 +962,27 @@ fn measure(events: &[Event], harness: &str, session: &str) -> Measured {
                 source: Source::Unavailable(reason),
                 facts: None,
                 conflict: None,
+                retained_liveness: None,
             },
         },
     }
 }
 
-/// Two reads measured the same thing, whichever reader made them.
+/// Two reads measured the same thing, whichever reader made them and
+/// whatever liveness each was taken under.
 fn same_measurement(left: &CostFacts, right: &CostFacts) -> bool {
     let mut left = left.clone();
     left.reader.clone_from(&right.reader);
+    left.liveness.clone_from(&right.liveness);
     left == *right
 }
 
-/// The facts a conflict compares, without the reader and calculation names.
+/// The facts a conflict compares, without the reader and calculation names
+/// or the liveness they were taken under.
 fn measurement_facts(facts: &CostFacts) -> Value {
     let mut value = serde_json::to_value(facts).unwrap_or_default();
     if let Some(object) = value.as_object_mut() {
-        for name in ["reader", "calculation", "frontier"] {
+        for name in ["reader", "calculation", "frontier", "liveness"] {
             object.remove(name);
         }
     }
@@ -1106,6 +1172,14 @@ fn sanitized_facts(held: &CostFacts) -> CostFacts {
         facts
             .incomplete
             .push("retained measurement gap".to_string());
+    }
+    // An unreadable liveness answer reads as unknown; the measurement stands.
+    if facts
+        .liveness
+        .as_deref()
+        .is_some_and(|liveness| !portable_liveness(liveness))
+    {
+        facts.liveness = None;
     }
     if let Some(gaps) = facts
         .disjoint
@@ -1398,6 +1472,7 @@ fn normalize(
             .map(|cost| cost.usd),
         incomplete,
         selection,
+        liveness: None,
         disjoint: disjoint.as_ref().and_then(|disjoint| {
             Some(CostDisjoint {
                 convention: CostConvention {
@@ -2737,6 +2812,7 @@ fn session_json(row: &SessionRow) -> Value {
             "roles": participation.roles.iter().map(|role| role.name()).collect::<Vec<_>>(),
             "spans": row.membership.len(),
         });
+        value["measurement"]["liveness"] = participation.liveness.json();
     }
     value
 }
@@ -2907,6 +2983,19 @@ fn write_report(out: &mut String, report: &Value) {
                 session["per_run"].as_str().unwrap_or_default().to_string()
             },
         );
+        let liveness = &measurement["liveness"];
+        if let Some(answer) = liveness["answer"].as_str() {
+            emit!(
+                out,
+                "    liveness: {answer}{}{}",
+                liveness["reason"]
+                    .as_str()
+                    .map_or(String::new(), |reason| format!(" ({reason})")),
+                liveness["retained"]
+                    .as_str()
+                    .map_or(String::new(), |retained| format!("; retained {retained}"))
+            );
+        }
         if measurement["conflict"].is_object() {
             emit!(
                 out,

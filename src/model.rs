@@ -2948,6 +2948,11 @@ pub struct CostFacts {
     /// recording family identifies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub residual: Option<CostResidual>,
+    /// Whether the session was running when these facts were retained, as
+    /// agent-status answered: `live`, `ended` or `unknown`. A fresh read
+    /// carries none; absence reads as unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liveness: Option<String>,
 }
 
 /// Token counts in categories no token belongs to twice: uncached input,
@@ -3204,6 +3209,10 @@ pub(crate) fn portable_selection(selection: &str) -> bool {
     matches!(selection, "active-branch" | "retained-branches")
 }
 
+pub(crate) fn portable_liveness(liveness: &str) -> bool {
+    matches!(liveness, "live" | "ended" | "unknown")
+}
+
 impl CostDisjoint {
     pub(crate) fn portable(&self) -> bool {
         matches!(
@@ -3325,6 +3334,7 @@ impl CostFacts {
                         .all(|reason| portable_lineage_reason(reason))
             })
             && self.selection.as_deref().is_none_or(portable_selection)
+            && self.liveness.as_deref().is_none_or(portable_liveness)
             && self.disjoint.as_ref().is_none_or(CostDisjoint::portable)
             && self.events.as_ref().is_none_or(CostEvents::portable)
             && self.residual.as_ref().is_none_or(CostResidual::portable)
@@ -3704,6 +3714,7 @@ mod tests {
             !facts.portable()
         };
         assert!(refused(&|f| f.selection = Some("/home/user/branch".into())));
+        assert!(refused(&|f| f.liveness = Some("running".into())));
         assert!(refused(&|f| f
             .disjoint
             .as_mut()
