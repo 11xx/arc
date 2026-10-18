@@ -4491,9 +4491,15 @@ enum CostCmd {
     /// ledger record leaves the membership incomplete, so the participant is
     /// never counted as the work's alone. Acting events without a usable
     /// harness and session are counted as `unattributed_events` and make
-    /// assignment incomplete. A session that acted on the selected work and
-    /// is not measured, such as one the store cannot resolve, is named
-    /// outside assignment coverage with its event count, never zero.
+    /// assignment incomplete. A participant that is not measured, such as
+    /// one the store cannot resolve, is a session row without a figure:
+    /// every total it would join is absent or withheld beside its known
+    /// subtotal, never complete, and it is named outside assignment coverage
+    /// with its event count and reason, making assignment incomplete. A bound
+    /// executor whose read fails with nothing retained likewise leaves its
+    /// totals without an amount. Another session with events on the selected
+    /// work but no acting kind is named outside assignment coverage with its
+    /// event count, never zero.
     /// Transitions and `begin --from-journal` add no consumption. Nonportable binding metadata qualifies the affected
     /// assignment with a fixed diagnostic. `--json` emits `arc-cost/1`
     /// Records no events; ledger reads do not require a parseable append policy.

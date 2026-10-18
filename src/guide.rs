@@ -3516,10 +3516,18 @@ RULES THAT CHANGE WHAT YOU DO
     An unreadable ledger record leaves a participant's membership incomplete,
     so it is never counted as the work's alone. Acting events with no
     harness or session, or one that is not a plain id, are counted under
-    `unattributed_events` and make assignment incomplete. A session that
-    acted on the selected work and is not measured, such as one the store
-    cannot resolve, is named outside assignment coverage with its event
-    count, never zero. A Claude session's recorded total is
+    `unattributed_events` and make assignment incomplete. A participant
+    that is not measured, such as one the store cannot resolve, is still a
+    session row and a participant without a figure: every total it would
+    join is absent or withheld beside its known subtotal, never complete,
+    measurement coverage lists it, and it is named outside assignment
+    coverage with its event count and reason, which makes assignment
+    incomplete. A bound executor whose read fails with nothing retained
+    likewise leaves its totals without an amount. An unmeasured session has
+    no accounting basis, so it qualifies every partition it could belong
+    to. Another session with events on the selected work but no acting
+    kind is named outside assignment coverage with its event count, never
+    zero. A Claude session's recorded total is
     reconciled per counter with the requests its recording family
     identifies. The residual is the signed difference, never clamped, with
     tapes' status (`reconciled`, `conflict`, `discrepancy` or `withheld`) and

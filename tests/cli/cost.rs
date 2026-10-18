@@ -96,8 +96,15 @@ fn claude_recording(repo: &Repo, id: &str, input: u64) -> PathBuf {
     path
 }
 
+/// Dispatch as an orchestrator that names no session: its acting event is
+/// unattributed, so it qualifies assignment and joins no figure, and the
+/// figures stay those of the bound executors.
 fn dispatch(repo: &Repo, subject: &str, value: &str) -> String {
-    let id = event_id(&stdout(repo.arc(&repo.root).args([
+    let mut anonymous = repo.arc(&repo.root);
+    anonymous
+        .env_remove("ARC_HARNESS")
+        .env_remove("ARC_SESSION");
+    let id = event_id(&stdout(anonymous.args([
         "run",
         "dispatch",
         "--route",
@@ -2717,14 +2724,9 @@ fn a_participant_the_store_cannot_resolve_stays_outside_with_its_event_count() {
         .unwrap_or_else(|| panic!("the unresolved session is outside: {view}"));
     assert_eq!(ghost["events"], held, "{view}");
     assert!(ghost.get("amount").is_none(), "{view}");
-    assert!(
-        view["sessions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|row| row["key"] != "pi:ghost-session"),
-        "{view}"
-    );
+    let row = session(&view, "pi:ghost-session");
+    assert_eq!(row["kind"], "participant", "{view}");
+    assert_eq!(row["measurement"]["status"], "unmeasured", "{view}");
     let statement = view["coverage"]["assignment"]["outside"]["statement"]
         .as_str()
         .unwrap();
@@ -2835,12 +2837,10 @@ fn one_unreadable_participant_leaves_the_others_figures_intact() {
     let broken = outside_session(&view, "pi:broken")
         .unwrap_or_else(|| panic!("the unreadable participant is outside: {view}"));
     assert!(broken["events"].as_u64().unwrap() >= 1, "{view}");
-    assert!(
-        item["participants"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|row| row["key"] != "pi:broken"),
+    let unmeasured = participant(item, "pi:broken");
+    assert_eq!(
+        quantity(&unmeasured["totals"], USD, None)["status"],
+        "absent",
         "{view}"
     );
 }

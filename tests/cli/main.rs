@@ -15,6 +15,7 @@ mod common;
 mod context;
 mod contribution;
 mod cost;
+mod cost_completeness;
 mod cross_links;
 mod debt_plan;
 mod debt_standing;

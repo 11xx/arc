@@ -8,8 +8,8 @@
 //! participant is a session with no binding whose ledger events act on the
 //! work: it is measured whole and never split, so it counts as direct only
 //! for work that holds every change its events name, and is shared otherwise.
-//! A session whose recording cannot be measured is outside assignment coverage
-//! and never counted as zero. A total names its quantity kind and is
+//! A session whose recording cannot be measured qualifies every total it would
+//! join and is never counted as zero. A total names its quantity kind and is
 //! withheld, refused, or absent rather than understated.
 
 use super::cost_read::CostRead;
@@ -288,33 +288,35 @@ pub(super) fn read_cost(ctx: &Ctx, target: &str) -> Result<CostView> {
             }
         })
         .collect();
+    // A participant whose recording cannot be read is still a row: its
+    // missing figure qualifies every total it would have joined.
     let mut unmeasured = BTreeMap::new();
     for ((harness, session), person) in ledger.participants() {
         let mut measured = measure(&events, harness, session);
-        match measured.facts.as_mut() {
-            Some(facts) => {
-                facts.incomplete.push(PARTICIPANT_FRONTIER.to_string());
-                sessions.push(SessionRow {
-                    harness: harness.clone(),
-                    session: session.clone(),
-                    spans: Vec::new(),
-                    membership: person.membership.clone(),
-                    measured,
-                    overlap: BTreeSet::new(),
-                    participation: Some(Participation {
-                        roles: person.roles.clone(),
-                        membership_complete: ledger.complete,
-                    }),
-                });
+        match (measured.facts.as_mut(), &measured.source) {
+            (Some(facts), _) => facts.incomplete.push(PARTICIPANT_FRONTIER.to_string()),
+            (None, Source::Unavailable(reason)) => {
+                unmeasured.insert((harness.clone(), session.clone()), reason.clone());
             }
-            None => {
-                let reason = match measured.source {
-                    Source::Unavailable(reason) => reason,
-                    _ => "usage read failed".to_string(),
-                };
-                unmeasured.insert((harness.clone(), session.clone()), reason);
+            (None, _) => {
+                unmeasured.insert(
+                    (harness.clone(), session.clone()),
+                    "usage read failed".to_string(),
+                );
             }
         }
+        sessions.push(SessionRow {
+            harness: harness.clone(),
+            session: session.clone(),
+            spans: Vec::new(),
+            membership: person.membership.clone(),
+            measured,
+            overlap: BTreeSet::new(),
+            participation: Some(Participation {
+                roles: person.roles.clone(),
+                membership_complete: ledger.complete,
+            }),
+        });
     }
     let groups = lineage_groups(&sessions);
     for row in &mut sessions {
@@ -1764,11 +1766,12 @@ fn outside_sessions(
     ledger
         .people
         .iter()
-        .filter(|((harness, session), person)| {
+        .filter(|(key, person)| {
             person.selected_events > 0
-                && !sessions
-                    .iter()
-                    .any(|row| &row.harness == harness && &row.session == session)
+                && (unmeasured.contains_key(key)
+                    || !sessions
+                        .iter()
+                        .any(|row| row.harness == key.0 && row.session == key.1))
         })
         .map(|(key, person)| {
             let ((harness, session), events) = (key, person.selected_events);
@@ -1889,6 +1892,38 @@ fn domain(row: &SessionRow, figure: Figure) -> (Option<&str>, Option<&str>) {
     }
 }
 
+/// The members of each accounting domain of one figure. A session with no
+/// measurement has no basis of its own, so it joins every domain of its
+/// harness, or every domain when the figure adds across harnesses, and
+/// qualifies each one it could belong to.
+type Domain<'a> = (Option<&'a str>, Option<&'a str>);
+
+fn partitions<'a>(
+    members: &[&'a SessionRow],
+    figure: Figure,
+) -> BTreeMap<Domain<'a>, Vec<&'a SessionRow>> {
+    let (measured, unmeasured): (Vec<&SessionRow>, Vec<&SessionRow>) =
+        members.iter().partition(|row| row.measured.facts.is_some());
+    let mut domains: BTreeMap<Domain<'a>, Vec<&'a SessionRow>> = BTreeMap::new();
+    for row in measured {
+        domains.entry(domain(row, figure)).or_default().push(row);
+    }
+    for row in unmeasured {
+        let (harness, _) = domain(row, figure);
+        let mut joined = false;
+        for (key, partition) in &mut domains {
+            if key.0 == harness {
+                partition.push(row);
+                joined = true;
+            }
+        }
+        if !joined {
+            domains.entry(domain(row, figure)).or_default().push(row);
+        }
+    }
+    domains
+}
+
 /// Each harness's native counter convention, as tapes names it.
 fn conventions(members: &[&SessionRow]) -> BTreeMap<String, Value> {
     members
@@ -1906,10 +1941,7 @@ fn totals(members: &[&SessionRow], withheld: &[String], scope: &str) -> Value {
     let mut quantities = Vec::new();
     let harnesses: BTreeSet<&str> = members.iter().map(|row| row.harness.as_str()).collect();
     for figure in figures() {
-        let mut domains: BTreeMap<(Option<&str>, Option<&str>), Vec<&SessionRow>> = BTreeMap::new();
-        for row in members {
-            domains.entry(domain(row, figure)).or_default().push(row);
-        }
+        let domains = partitions(members, figure);
         let bases: BTreeSet<Option<&str>> = domains.keys().map(|(_, basis)| *basis).collect();
         let common_basis = (bases.len() == 1)
             .then(|| bases.first().copied().flatten())
@@ -2167,8 +2199,7 @@ fn aggregate(members: &[&SessionRow], withheld: &[String], figure: Figure) -> Ag
             reasons: vec!["no bound session is assigned here".to_string()],
         };
     }
-    let domains: BTreeSet<(Option<&str>, Option<&str>)> =
-        members.iter().map(|row| domain(row, figure)).collect();
+    let domains: Vec<Domain<'_>> = partitions(members, figure).into_keys().collect();
     if domains.len() > 1 {
         let names = domains
             .iter()
@@ -2514,6 +2545,17 @@ fn render_report(
         assignment_gaps.push(
             "ledger records are unreadable, so a participant's membership may be incomplete and it is never counted as the work's alone".to_string(),
         );
+    }
+    for session in outside
+        .iter()
+        .filter(|session| session["reason"].is_string())
+    {
+        assignment_gaps.push(format!(
+            "participant {}:{} acted on the selected work and is not measured ({}), so its consumption is outside assignment coverage",
+            session["harness"].as_str().unwrap_or_default(),
+            session["session"].as_str().unwrap_or_default(),
+            session["reason"].as_str().unwrap_or_default(),
+        ));
     }
     if ledger.unattributed_events > 0 {
         assignment_gaps.push(format!(
