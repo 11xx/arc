@@ -17,11 +17,11 @@ use super::cost_read::CostRead;
 use super::run::{rounds, RunSubject};
 use super::*;
 use crate::model::{
-    plain_session_id, portable_cost_metadata, portable_cost_reason, portable_lineage_reason,
-    portable_liveness, portable_quantity_reason, portable_selection, CostCacheWrites,
-    CostConvention, CostCounterResidual, CostCounters, CostDisjoint, CostEventCoverage,
-    CostEventIdentity, CostEvents, CostFacts, CostLineage, CostPricing, CostRelative, CostResidual,
-    CostResidualSource, Event, Payload, DISJOINT_CATEGORIES,
+    plain_session_id, portable_coordinate, portable_cost_metadata, portable_cost_reason,
+    portable_lineage_reason, portable_liveness, portable_quantity_reason, portable_selection,
+    CostCacheWrites, CostConvention, CostCounterResidual, CostCounters, CostDisjoint,
+    CostEventCoverage, CostEventIdentity, CostEvents, CostFacts, CostLineage, CostPricing,
+    CostRelative, CostResidual, CostResidualSource, Event, Payload, DISJOINT_CATEGORIES,
 };
 use agent_tapes_core::measurement::{MeasurementCompleteness, MeasurementReason};
 use serde_json::{json, Value};
@@ -44,7 +44,7 @@ pub const TAPES_READER: &str = env!("ARC_TAPES_READER");
 
 /// How arc normalizes a reader's usage answer into retained facts. It moves
 /// when that normalization does, so facts from an older one stay identifiable.
-pub const COST_CALCULATION: &str = "usage-normalization 3";
+pub const COST_CALCULATION: &str = "usage-normalization 4";
 
 const USD_KIND: &str = "harness-calculated-estimate";
 const TOKEN_KIND: &str = "resource-quantity";
@@ -138,6 +138,8 @@ struct Span {
     dispatched_at: chrono::DateTime<chrono::Utc>,
     /// When the run's recorded `run end` was written, if one was.
     ended_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The model coordinate the dispatch's route names, when it names one.
+    route: Option<String>,
     forked_from: Option<String>,
     round: Option<usize>,
     work: WorkKey,
@@ -286,6 +288,16 @@ impl SessionLiveness {
         }
     }
 
+    /// The figure is incomplete because the session is still running: listed
+    /// by agent-status, or an executor with a dispatch that has not ended.
+    fn running(&self) -> bool {
+        self.incomplete.is_some()
+            && (self.fresh == Liveness::Live
+                || self
+                    .runs
+                    .is_some_and(|(ended, dispatches)| ended < dispatches))
+    }
+
     fn json(&self) -> Value {
         let mut value = json!({"answer": self.fresh.answer(), "reason": self.fresh.reason(),
             "source": "agent-status", "retained": self.retained,
@@ -316,6 +328,61 @@ struct SessionRow {
     overlap: BTreeSet<String>,
     participation: Option<Participation>,
     liveness: Option<SessionLiveness>,
+    /// The model coordinate the row is attributed to, and where it came from.
+    agent: Option<(String, &'static str)>,
+}
+
+impl SessionRow {
+    /// The first source that names one coordinate: the bound dispatches'
+    /// routes, the models the session's own events carry, then the model its
+    /// recording says served it. Several distinct coordinates in one source
+    /// establish none there.
+    fn attribute(&mut self, person: Option<&Person>) {
+        let one = |coordinates: BTreeSet<String>| {
+            let mut coordinates = coordinates.into_iter();
+            match (coordinates.next(), coordinates.next()) {
+                (Some(coordinate), None) => Some(coordinate),
+                _ => None,
+            }
+        };
+        let routes = one(self
+            .spans
+            .iter()
+            .filter_map(|span| span.route.clone())
+            .collect())
+        .filter(|_| self.spans.iter().all(|span| span.route.is_some()));
+        self.agent = routes
+            .map(|coordinate| (coordinate, "route"))
+            .or_else(|| {
+                one(person
+                    .map(|person| person.coordinates.clone())
+                    .unwrap_or_default())
+                .map(|coordinate| (coordinate, "events"))
+            })
+            .or_else(|| {
+                self.measured
+                    .facts
+                    .as_ref()
+                    .and_then(|facts| facts.served_model.clone())
+                    .map(|coordinate| (coordinate, "recording"))
+            });
+    }
+
+    /// `harness:model#effort`, or the harness alone when no model is
+    /// established.
+    fn agent_label(&self) -> String {
+        match &self.agent {
+            Some((coordinate, _)) => format!("{}:{coordinate}", self.harness),
+            None => self.harness.clone(),
+        }
+    }
+
+    fn roles(&self) -> Vec<&'static str> {
+        match &self.participation {
+            Some(participation) => participation.roles.iter().map(|role| role.name()).collect(),
+            None => vec!["implementer"],
+        }
+    }
 }
 
 impl SessionRow {
@@ -349,22 +416,29 @@ pub(super) struct CostView {
 }
 
 /// Print the read-only cost view of a change or a journal artifact.
-pub fn show_cost(ctx: &Ctx, target: &str, json: bool) -> Result<()> {
-    let view = read_cost(ctx, target)?;
+pub fn show_cost(ctx: &Ctx, query: &CostQuery, json: bool, detail: bool) -> Result<()> {
+    let view = read_query(ctx, query)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&view.report)?);
-    } else {
+    } else if detail {
         print!("{}", report_text(&view.report));
+    } else {
+        print!("{}", super::cost_table::table_text(&view.report));
     }
     Ok(())
 }
 
 /// Read the cost view of a change or a journal artifact.
 pub(super) fn read_cost(ctx: &Ctx, target: &str) -> Result<CostView> {
+    read_query(ctx, &CostQuery::target(target))
+}
+
+/// Read the cost view of the work a query selects.
+fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
     let store = ctx.store()?;
     let mut read = CostRead::new(&store);
     let events = read.events(Store::REPOSITORY_SCOPE);
-    let mut selection = select(ctx, &mut read, target, &events)?;
+    let mut selection = select_query(ctx, &mut read, query, &events)?;
     qualify_ledger(&mut selection, &read.gaps);
     let assigned = assign(ctx, &mut selection, &events);
     if !selection.readable && assigned.runs.is_empty() && assigned.sessions.is_empty() {
@@ -372,11 +446,23 @@ pub(super) fn read_cost(ctx: &Ctx, target: &str) -> Result<CostView> {
     }
     let ledger = read_ledger(&mut read, &selection, &events, &assigned);
     let Assigned { runs, sessions, .. } = assigned;
+    let mut fresh = read_all(
+        sessions
+            .keys()
+            .chain(ledger.participants().map(|(key, _)| key))
+            .cloned()
+            .collect(),
+    );
+    let mut fresh_read = |harness: &str, session: &str| {
+        fresh
+            .remove(&(harness.to_string(), session.to_string()))
+            .unwrap_or_else(|| read_fresh(harness, session))
+    };
     let snapshot = std::cell::OnceCell::new();
     let mut sessions: Vec<SessionRow> = sessions
         .into_iter()
         .map(|((harness, session), (spans, membership))| {
-            let mut measured = measure(&events, &harness, &session);
+            let mut measured = measure(&events, &harness, &session, fresh_read(&harness, &session));
             let liveness = SessionLiveness::executor(
                 &measured,
                 snapshot.get_or_init(Snapshot::read).of(&harness, &session),
@@ -395,6 +481,7 @@ pub(super) fn read_cost(ctx: &Ctx, target: &str) -> Result<CostView> {
                 overlap: BTreeSet::new(),
                 participation: None,
                 liveness: Some(liveness),
+                agent: None,
             }
         })
         .collect();
@@ -402,7 +489,7 @@ pub(super) fn read_cost(ctx: &Ctx, target: &str) -> Result<CostView> {
     // missing figure qualifies every total it would have joined.
     let mut unmeasured = BTreeMap::new();
     for ((harness, session), person) in ledger.participants() {
-        let mut measured = measure(&events, harness, session);
+        let mut measured = measure(&events, harness, session, fresh_read(harness, session));
         let liveness = SessionLiveness::participant(
             &measured,
             snapshot.get_or_init(Snapshot::read).of(harness, session),
@@ -431,6 +518,7 @@ pub(super) fn read_cost(ctx: &Ctx, target: &str) -> Result<CostView> {
                 membership_complete: ledger.complete,
             }),
             liveness: Some(liveness),
+            agent: None,
         });
     }
     let groups = lineage_groups(&sessions);
@@ -441,9 +529,18 @@ pub(super) fn read_cost(ctx: &Ctx, target: &str) -> Result<CostView> {
             .cloned()
             .unwrap_or_default();
     }
+    for row in &mut sessions {
+        let person = ledger
+            .people
+            .get(&(row.harness.clone(), row.session.clone()));
+        row.attribute(person);
+    }
     let outside = outside_sessions(&ledger, &sessions, &unmeasured);
     selection.ledger_gaps = read.gaps;
-    let report = render_report(&selection, &runs, &sessions, &outside, &ledger);
+    let mut report = render_report(&selection, &runs, &sessions, &outside, &ledger, &query.by);
+    if let Some(footprint) = &query.footprint {
+        report["footprint"] = footprint_figure(&report, footprint);
+    }
     let executor_runs = runs
         .iter()
         .flat_map(|(work, runs)| {
@@ -504,10 +601,10 @@ pub fn retain_cost(ctx: &Ctx, target: &str) -> Result<()> {
     // Read every source before taking the ledger lock: a recording can be
     // large, and other writers wait on the lock.
     let snapshot = Snapshot::read();
-    let reads: Vec<(String, String, std::result::Result<CostFacts, String>)> = keys
+    let reads: Vec<(String, String, std::result::Result<CostFacts, String>)> = read_all(keys)
         .into_iter()
-        .map(|(harness, session)| {
-            let read = read_fresh(&harness, &session).map(|mut facts| {
+        .map(|((harness, session), read)| {
+            let read = read.map(|mut facts| {
                 facts.liveness = Some(snapshot.of(&harness, &session).answer().to_string());
                 facts
             });
@@ -662,6 +759,187 @@ fn possible_journal(item: &WorkItem, reference: &str) -> bool {
             .lineage
             .iter()
             .any(|name| reference_file(name) == reference_file(reference))
+}
+
+/// What a cost view reads: named targets and range selectors, whose union
+/// is the selected work, and how its table groups rows.
+#[derive(Default)]
+pub struct CostQuery {
+    /// Change ids or prefixes and journal artifacts.
+    pub targets: Vec<String>,
+    /// Every change carrying all of these tags.
+    pub tags: Vec<String>,
+    /// Every change and journal item this `harness:id` session was bound to
+    /// or acted on.
+    pub footprint: Option<String>,
+    /// Every change with a ledger event at or after this instant.
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
+    /// Every change with a ledger event at or before this instant.
+    pub until: Option<chrono::DateTime<chrono::Utc>>,
+    /// Every change in this ledger.
+    pub all: bool,
+    /// Table groupings, in order: agent, role, model, harness, change or
+    /// session.
+    pub by: Vec<String>,
+}
+
+impl CostQuery {
+    pub fn target(target: &str) -> Self {
+        Self {
+            targets: vec![target.to_string()],
+            ..Self::default()
+        }
+    }
+
+    fn ranged(&self) -> bool {
+        self.targets.len() != 1
+            || !self.tags.is_empty()
+            || self.footprint.is_some()
+            || self.since.is_some()
+            || self.until.is_some()
+            || self.all
+    }
+
+    fn selectors(&self) -> Value {
+        json!({"targets": self.targets, "tags": self.tags, "footprint": self.footprint,
+            "since": self.since, "until": self.until, "all": self.all})
+    }
+}
+
+/// A `harness:id` footprint selector, split at its first colon.
+fn footprint_key(raw: &str) -> Result<(String, String)> {
+    match raw.split_once(':') {
+        Some((harness, session)) if plain_session_id(harness) && plain_session_id(session) => {
+            Ok((harness.to_string(), session.to_string()))
+        }
+        _ => bail!("--footprint takes harness:session, such as claude:<session id>"),
+    }
+}
+
+/// The targets every range selector names, in a stable order and each once:
+/// explicit targets first, then the changes and journal items the selectors
+/// add. A change whose state cannot be read for a tag is a selection gap.
+fn range_targets(
+    read: &mut CostRead<'_>,
+    query: &CostQuery,
+    events: &[Event],
+    gaps: &mut Vec<Value>,
+) -> Result<Vec<String>> {
+    let mut targets: Vec<String> = query.targets.clone();
+    let ids = read.change_ids();
+    let in_window = |at: &chrono::DateTime<chrono::Utc>| {
+        query.since.is_none_or(|since| *at >= since) && query.until.is_none_or(|until| *at <= until)
+    };
+    let windowed = query.since.is_some() || query.until.is_some();
+    let footprint = query.footprint.as_deref().map(footprint_key).transpose()?;
+    let names = |event: &Event, (harness, session): &(String, String)| {
+        event.harness.as_deref() == Some(harness.as_str())
+            && event.session.as_deref() == Some(session.as_str())
+    };
+    for round in rounds(events) {
+        let subject = match &round.subject {
+            Some(RunSubject::Change { id }) => id.clone(),
+            Some(RunSubject::Journal { file }) => file.clone(),
+            _ => continue,
+        };
+        let windowed_in = windowed
+            && std::iter::once(round.dispatch.created_at)
+                .chain(round.ending.as_ref().map(|ending| ending.event.created_at))
+                .any(|at| in_window(&at))
+            && matches!(round.subject, Some(RunSubject::Change { .. }));
+        let bound = footprint.as_ref().is_some_and(|key| {
+            names(round.dispatch, key)
+                || round.binding.iter().any(|binding| {
+                    std::iter::once(binding)
+                        .chain(&binding.conflicts)
+                        .any(|binding| {
+                            binding.executor_harness == &key.0 && binding.executor_session == &key.1
+                        })
+                })
+        });
+        if windowed_in || bound {
+            targets.push(subject);
+        }
+    }
+    for id in &ids {
+        let change_events = read.events(id);
+        let tagged = !query.tags.is_empty()
+            && match crate::state::reduce(&change_events) {
+                Ok(state) => query.tags.iter().all(|tag| state.tags.contains(tag)),
+                Err(_) => {
+                    gaps.push(json!({"record": id, "reason": "change state unreadable, so its tags are unknown", "work": []}));
+                    false
+                }
+            };
+        let windowed_in = windowed
+            && change_events
+                .iter()
+                .any(|event| in_window(&event.created_at));
+        let acted = footprint.as_ref().is_some_and(|key| {
+            change_events
+                .iter()
+                .any(|event| names(event, key) && role_of(&event.payload).is_some())
+        });
+        if query.all || tagged || windowed_in || acted {
+            targets.push(id.clone());
+        }
+    }
+    let mut seen = BTreeSet::new();
+    targets.retain(|target| seen.insert(target.clone()));
+    Ok(targets)
+}
+
+/// The union of every target's selection: each work item once, every gap,
+/// and the selectors that named them.
+fn select_query(
+    ctx: &Ctx,
+    read: &mut CostRead<'_>,
+    query: &CostQuery,
+    events: &[Event],
+) -> Result<Selection> {
+    if !query.ranged() {
+        return select(ctx, read, &query.targets[0], events);
+    }
+    let mut gaps = Vec::new();
+    let targets = range_targets(read, query, events, &mut gaps)?;
+    if targets.is_empty() {
+        bail!("the cost range selects no work");
+    }
+    let mut items: Vec<WorkItem> = Vec::new();
+    let mut named = Vec::new();
+    let mut readable = false;
+    for target in &targets {
+        let selection = select(ctx, read, target, events)?;
+        readable |= selection.readable;
+        named.push(selection.target);
+        for gap in selection.gaps {
+            if !gaps.contains(&gap) {
+                gaps.push(gap);
+            }
+        }
+        for item in selection.items {
+            match items.iter_mut().find(|held| held.key == item.key) {
+                Some(held) => {
+                    if held.source.is_none() {
+                        held.source = item.source;
+                    }
+                }
+                None => items.push(item),
+            }
+        }
+    }
+    let changes = items
+        .iter()
+        .filter(|item| matches!(item.key, WorkKey::Change(_)))
+        .count();
+    Ok(Selection {
+        target: json!({"kind": "range", "selectors": query.selectors(), "targets": named,
+            "changes": changes, "journals": items.len() - changes}),
+        items,
+        gaps,
+        ledger_gaps: Vec::new(),
+        readable,
+    })
 }
 
 /// A change selects itself and its source artifact; an artifact selects its
@@ -942,6 +1220,10 @@ fn assign(ctx: &Ctx, selection: &mut Selection, events: &[Event]) -> Assigned {
                 dispatch_event_id: round.dispatch.event_id.clone(),
                 dispatched_at: round.dispatch.created_at,
                 ended_at: round.ending.as_ref().map(|ending| ending.event.created_at),
+                route: match &round.dispatch.payload {
+                    Payload::RunDispatched { route, .. } => route_coordinate(route),
+                    _ => None,
+                },
                 forked_from: binding
                     .forked_from
                     .as_ref()
@@ -985,13 +1267,46 @@ fn retained_for<'a>(
 /// A fresh read when the source answers, else the retained facts at the
 /// furthest frontier. A fresh read that disagrees with facts retained at the
 /// same frontier carries the conflict; neither is added to the other.
-fn measure(events: &[Event], harness: &str, session: &str) -> Measured {
+/// Read every session's source, several at once: each read is independent,
+/// and a lineage read can scan a whole harness store.
+fn read_all(
+    keys: BTreeSet<(String, String)>,
+) -> BTreeMap<(String, String), std::result::Result<CostFacts, String>> {
+    let keys: Vec<(String, String)> = keys.into_iter().collect();
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZero::get)
+        .clamp(1, 8);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let reads = std::sync::Mutex::new(BTreeMap::new());
+    std::thread::scope(|scope| {
+        for _ in 0..workers.min(keys.len()) {
+            scope.spawn(|| loop {
+                let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some((harness, session)) = keys.get(index) else {
+                    break;
+                };
+                let read = read_fresh(harness, session);
+                if let Ok(mut reads) = reads.lock() {
+                    reads.insert((harness.clone(), session.clone()), read);
+                }
+            });
+        }
+    });
+    reads.into_inner().unwrap_or_default()
+}
+
+fn measure(
+    events: &[Event],
+    harness: &str,
+    session: &str,
+    fresh: std::result::Result<CostFacts, String>,
+) -> Measured {
     // The furthest frontier, and among equal frontiers the latest retention.
     let retained = retained_for(events, harness, session)
         .into_iter()
         .max_by_key(|(_, facts)| facts.frontier)
         .map(|(event, facts)| (event, sanitized_facts(facts)));
-    match read_fresh(harness, session) {
+    match fresh {
         Ok(fresh) => {
             let retained_liveness = retained
                 .as_ref()
@@ -1244,6 +1559,13 @@ fn sanitized_facts(held: &CostFacts) -> CostFacts {
             .incomplete
             .push("retained measurement gap".to_string());
     }
+    if facts
+        .served_model
+        .as_deref()
+        .is_some_and(|model| !portable_coordinate(model))
+    {
+        facts.served_model = None;
+    }
     // An unreadable liveness answer reads as unknown; the measurement stands.
     if facts
         .liveness
@@ -1412,6 +1734,18 @@ fn is_absence(reason: MeasurementReason) -> bool {
 /// the active branch's. Why a counter is not completely measured is tapes'
 /// typed answer for the figure measured; the only prose arc still counts is
 /// the reader's `--latest` selection warnings, which no typed field carries.
+/// The one model the recording says served the session, if it names one.
+fn served_model(view: &agent_tapes_core::usage::UsageView) -> Option<String> {
+    let [model] = view.by_model.as_deref()? else {
+        return None;
+    };
+    let coordinate = match &model.variant {
+        Some(variant) => format!("{}#{variant}", model.model),
+        None => model.model.clone(),
+    };
+    portable_coordinate(&coordinate).then_some(coordinate)
+}
+
 fn normalize(
     view: &agent_tapes_core::usage::UsageView,
     selection_warnings: usize,
@@ -1544,6 +1878,7 @@ fn normalize(
         incomplete,
         selection,
         liveness: None,
+        served_model: served_model(view),
         disjoint: disjoint.as_ref().and_then(|disjoint| {
             Some(CostDisjoint {
                 convention: CostConvention {
@@ -1793,6 +2128,17 @@ fn qualify_price(facts: &mut CostFacts) {
 }
 
 /// The model of a `model[#effort]` coordinate, without its effort.
+/// The model coordinate a free-form route names: the whole route, or what
+/// precedes ` via <harness>`, when that is one coordinate. A route that is a
+/// profile name or prose names none.
+fn route_coordinate(route: &str) -> Option<String> {
+    let head = route
+        .split_once(" via ")
+        .map_or(route, |(head, _)| head)
+        .trim();
+    portable_coordinate(head).then(|| head.to_string())
+}
+
 fn model_of(coordinate: &str) -> Option<String> {
     let model = coordinate.split('#').next().unwrap_or(coordinate).trim();
     (!model.is_empty()).then(|| model.to_string())
@@ -1808,6 +2154,9 @@ struct Person {
     /// The models its events declared in each role on the selected work,
     /// effort dropped.
     models: BTreeMap<Role, BTreeSet<String>>,
+    /// The model coordinates its events on the selected work declared or
+    /// resolved, effort kept.
+    coordinates: BTreeSet<String>,
     /// Its events on the selected work, of any kind.
     selected_events: usize,
     /// It has an event of a role-bearing kind on the selected work.
@@ -1866,6 +2215,13 @@ fn read_ledger(
                 person.membership.insert(work);
                 if on_selection {
                     person.selected_events += 1;
+                    if let Some(model) = event
+                        .model
+                        .as_deref()
+                        .filter(|model| portable_coordinate(model))
+                    {
+                        person.coordinates.insert(model.to_string());
+                    }
                     if let Some(role) = role {
                         person.acts = true;
                         person.roles.insert(role);
@@ -2503,6 +2859,7 @@ fn render_report(
     sessions: &[SessionRow],
     outside: &[Value],
     ledger: &Ledger,
+    by: &[String],
 ) -> Value {
     let unbound_in = |key: &WorkKey| -> Vec<String> {
         runs.get(key)
@@ -2736,7 +3093,8 @@ fn render_report(
     let identity_complete = identities
         .iter()
         .all(|figure| figure["identity"]["status"] == "complete");
-    json!({
+    let union_withheld = withheld_for(&all, "union");
+    let mut report = json!({
         "schema": COST_SCHEMA,
         "target": selection.target,
         "work": work,
@@ -2775,6 +3133,244 @@ fn render_report(
                 "figures": identities,
             },
         },
+    });
+    report["table"] = table(&report, sessions, &union_members, &union_withheld, by);
+    report
+}
+
+/// The footprint session's whole figure beside the work it selects, or why
+/// there is none.
+fn footprint_figure(report: &Value, footprint: &str) -> Value {
+    let row = report["table"]["rows"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|row| row["key"] == footprint);
+    let figure = row.map(|row| {
+        let tokens = super::cost_table::cell_text(&row["tokens"], false);
+        let usd = super::cost_table::cell_text(&row["usd"], true);
+        [
+            tokens,
+            usd,
+            row["status"].as_str().unwrap_or_default().to_string(),
+        ]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+    });
+    json!({"session": footprint, "row": row, "figure": figure})
+}
+
+/// Each row's session id, cut to the shortest prefix of at least eight
+/// characters no other row's id shares. Time-ordered ids share long
+/// prefixes, so the cut is per view.
+fn short_ids(sessions: &[SessionRow]) -> Vec<String> {
+    sessions
+        .iter()
+        .map(|row| {
+            let id: Vec<char> = row.session.chars().collect();
+            (8..id.len())
+                .map(|length| id[..length].iter().collect::<String>())
+                .find(|prefix| {
+                    sessions.iter().all(|other| {
+                        other.key() == row.key() || !other.session.starts_with(prefix.as_str())
+                    })
+                })
+                .unwrap_or_else(|| row.session.clone())
+        })
+        .collect()
+}
+
+/// The groupings `--by` accepts.
+pub const GROUPINGS: [&str; 6] = ["agent", "role", "model", "harness", "change", "session"];
+
+/// The combined figure of one table column: the disjoint token total or the
+/// harness-written dollar estimate.
+fn column(totals: &Value, usd: bool, partition: bool) -> Vec<&Value> {
+    totals["quantities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|quantity| {
+            quantity.get("partition").is_some() == partition
+                && if usd {
+                    quantity["kind"] == USD_KIND
+                } else {
+                    quantity["categories"] == "disjoint" && quantity["category"] == "total"
+                }
+        })
+        .collect()
+}
+
+/// One table cell: the figure's status and the amount, known subtotal, or
+/// bound it shows.
+fn cell(quantity: Option<&Value>) -> Value {
+    let Some(quantity) = quantity else {
+        return json!({"status": "absent"});
+    };
+    let mut cell = json!({"status": quantity["status"]});
+    for field in ["amount", "known_subtotal", "bound", "known_bound"] {
+        if !quantity[field].is_null() {
+            cell[field] = quantity[field].clone();
+        }
+    }
+    cell
+}
+
+/// The status word of a figure from its cells. A dollar column with nothing
+/// recorded, as for a harness that writes no estimate, qualifies nothing.
+fn figure_status(tokens: &Value, usd: &Value) -> &'static str {
+    let recorded = |cell: &Value| {
+        ["amount", "known_subtotal", "bound", "known_bound"]
+            .iter()
+            .any(|field| !cell[field].is_null())
+    };
+    let word = |cell: &Value| match cell["status"].as_str() {
+        Some("complete") => 0,
+        Some("withheld" | "refused") => 2,
+        _ if recorded(cell) => 1,
+        _ => 3,
+    };
+    let usd = if usd["status"] == "absent" && !recorded(usd) {
+        0
+    } else {
+        word(usd)
+    };
+    match word(tokens).max(usd) {
+        0 => "complete",
+        1 => "subtotal",
+        2 => "withheld",
+        _ => "absent",
+    }
+}
+
+/// The table's view of a figure: both columns, their status word, and each
+/// accounting partition when the combined figure spans several.
+fn table_figure(totals: &Value) -> Value {
+    let tokens = cell(column(totals, false, false).first().copied());
+    let usd = cell(column(totals, true, false).first().copied());
+    let partitions: Vec<Value> = [false, true]
+        .into_iter()
+        .flat_map(|usd| {
+            column(totals, usd, true).into_iter().map(move |quantity| {
+                json!({"column": if usd { "usd" } else { "tokens" }, "harness": quantity["harness"],
+                    "accounting_basis": quantity["accounting_basis"], "cell": cell(Some(quantity))})
+            })
+        })
+        .collect();
+    json!({"status": figure_status(&tokens, &usd), "tokens": tokens, "usd": usd, "partitions": partitions})
+}
+
+fn group_value(row: &SessionRow, grouping: &str) -> String {
+    match grouping {
+        "agent" => row.agent_label(),
+        "role" => row.roles().join(", "),
+        "model" => row
+            .agent
+            .as_ref()
+            .and_then(|(coordinate, _)| model_of(coordinate))
+            .unwrap_or_else(|| "unestablished".to_string()),
+        "harness" => row.harness.clone(),
+        "change" => row
+            .membership
+            .iter()
+            .map(WorkKey::label)
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => row.key(),
+    }
+}
+
+/// The rows the text table shows, the total it ends with, the sessions
+/// outside that total, a count of the qualifications `--detail` explains, and
+/// one subtotal per group. The total is the union figure, with its status.
+fn table(
+    report: &Value,
+    sessions: &[SessionRow],
+    union_members: &[&SessionRow],
+    union_withheld: &[String],
+    by: &[String],
+) -> Value {
+    let counted = |row: &SessionRow| union_members.iter().any(|member| member.key() == row.key());
+    let short = short_ids(sessions);
+    let rows: Vec<Value> = sessions
+        .iter()
+        .zip(&short)
+        .map(|(row, short)| {
+            let figure = table_figure(&totals(&[row], &[], &format!("session {}", row.key())));
+            let running = row.liveness.as_ref().is_some_and(SessionLiveness::running);
+            let status = if row.measured.facts.is_none() {
+                "unmeasured".to_string()
+            } else if !counted(row) {
+                format!("shared ×{}", row.membership.len())
+            } else if running {
+                "live".to_string()
+            } else {
+                figure["status"].as_str().unwrap_or_default().to_string()
+            };
+            json!({"key": row.key(), "agent": row.agent_label(), "roles": row.roles(),
+                "session": short,
+                "runs": row.spans.len(), "spans": row.membership.len(),
+                "counted": counted(row), "status": status,
+                "tokens": figure["tokens"], "usd": figure["usd"]})
+        })
+        .collect();
+    let shared: Vec<&SessionRow> = sessions.iter().filter(|row| !counted(row)).collect();
+    let coverage = &report["coverage"];
+    let count = |value: &Value| {
+        value.as_array().map_or(0, Vec::len) + value.as_object().map_or(0, serde_json::Map::len)
+    };
+    let qualifications = json!({
+        "measurement": count(&coverage["measurement"]["sessions"]),
+        "assignment": count(&coverage["assignment"]["reasons"]),
+        "identity": (coverage["identity"]["status"] != "complete") as usize,
+        "selection": count(&coverage["selection"]["records"]),
+        "ledger": count(&coverage["ledger"]["records"]),
+    });
+    let total_qualifications: u64 = qualifications
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(_, count)| count.as_u64())
+        .sum();
+    let mut groups: BTreeMap<Vec<String>, Vec<&SessionRow>> = BTreeMap::new();
+    if !by.is_empty() {
+        for row in union_members {
+            groups
+                .entry(
+                    by.iter()
+                        .map(|grouping| group_value(row, grouping))
+                        .collect(),
+                )
+                .or_default()
+                .push(row);
+        }
+    }
+    let groups: Vec<Value> = groups
+        .into_iter()
+        .map(|(values, members)| {
+            let mut figure = table_figure(&totals(&members, union_withheld, "group"));
+            figure["by"] = json!(by
+                .iter()
+                .zip(&values)
+                .map(|(grouping, value)| (grouping.clone(), json!(value)))
+                .collect::<serde_json::Map<_, _>>());
+            figure["sessions"] = json!(members.iter().map(|row| row.key()).collect::<Vec<_>>());
+            figure
+        })
+        .collect();
+    let mut total = table_figure(&report["union"]);
+    total["scope"] = json!("union");
+    let mut outside = table_figure(&totals(&shared, &[], "shared"));
+    outside["sessions"] = json!(shared.iter().map(|row| row.key()).collect::<Vec<_>>());
+    json!({
+        "rows": rows,
+        "total": total,
+        "shared": outside,
+        "coverage": {"qualifications": total_qualifications, "by_kind": qualifications},
+        "by": by,
+        "groups": groups,
     })
 }
 
@@ -2866,6 +3462,9 @@ fn session_json(row: &SessionRow) -> Value {
         "harness": row.harness,
         "session": row.session,
         "kind": if row.participation.is_some() { "participant" } else { "executor" },
+        "agent": row.agent_label(),
+        "agent_source": row.agent.as_ref().map(|(_, source)| *source),
+        "roles": row.roles(),
         "spans": row.spans.iter().map(|span| json!({
             "dispatch_event_id": span.dispatch_event_id,
             "dispatched_at": span.dispatched_at,

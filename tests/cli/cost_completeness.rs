@@ -318,7 +318,7 @@ fn an_ended_participant_prices_complete() {
     let text = stdout(
         repo.arc(&repo.root)
             .env("ARC_AGENT_STATUS", &status)
-            .args(["cost", "show", &change]),
+            .args(["cost", "show", "--detail", &change]),
     );
     assert!(text.contains("liveness: ended"), "{text}");
 }

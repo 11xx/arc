@@ -607,7 +607,10 @@ fn a_shared_plan_counts_once_in_the_union_and_in_each_inclusive_view() {
     assert_eq!(usd(&work(&change_report, &a_key)["inclusive"]), Some(0.07));
     assert_eq!(usd(&change_report["union"]), Some(0.07));
 
-    let text = stdout(repo.arc(&repo.root).args(["cost", "show", &plan]));
+    let text = stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "show", "--detail", &plan]),
+    );
     assert!(text.contains("harness-calculated estimate"), "{text}");
     assert!(text.contains("0.1 USD"), "{text}");
 }
@@ -735,7 +738,10 @@ fn a_claude_and_codex_set_refuses_a_raw_input_sum() {
         Some("input"),
     );
     assert_eq!(codex_input["amount"], 700, "{report}");
-    let text = stdout(repo.arc(&repo.root).args(["cost", "show", "mixed"]));
+    let text = stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "show", "--detail", "mixed"]),
+    );
     assert!(text.contains("refused"), "{text}");
 }
 
@@ -818,7 +824,10 @@ fn an_absent_amount_stays_absent_never_zero() {
     assert_eq!(missing["measurement"]["source"], "unavailable", "{report}");
     assert_eq!(missing["measurement"]["status"], "unmeasured", "{report}");
     assert!(usd(&missing["totals"]).is_none(), "{report}");
-    let text = stdout(repo.arc(&repo.root).args(["cost", "show", "absent"]));
+    let text = stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "show", "--detail", "absent"]),
+    );
     assert!(!text.contains(" 0 USD"), "{text}");
 }
 
@@ -946,7 +955,10 @@ fn retained_facts_reproduce_the_report_after_the_source_rotates() {
     );
     assert_eq!(usd(&rotated["union"]), usd(&fresh["union"]));
     assert_eq!(rotated["union"], fresh["union"]);
-    let text = stdout(repo.arc(&repo.root).args(["cost", "show", "rotating"]));
+    let text = stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "show", "--detail", "rotating"]),
+    );
     assert!(text.contains("retained"), "{text}");
 }
 
@@ -975,7 +987,10 @@ fn a_never_dispatched_lead_session_is_outside_assignment_coverage() {
         .as_str()
         .unwrap()
         .contains("outside assignment coverage"));
-    let text = stdout(repo.arc(&repo.root).args(["cost", "show", &change]));
+    let text = stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "show", "--detail", &change]),
+    );
     assert!(text.contains("outside assignment coverage"), "{text}");
     assert!(text.contains("test:session-a"), "{text}");
 }
@@ -1051,7 +1066,10 @@ fn a_bound_fork_withholds_exact_unions_and_retains_identity_after_rotation() {
         session(&rotated, "pi:fork")["measurement"]["lineage"]["parent"],
         "parent"
     );
-    let text = stdout(repo.arc(&repo.root).args(["cost", "show", &change]));
+    let text = stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "show", "--detail", &change]),
+    );
     assert!(
         text.contains("at least 0.06 USD, at most 0.1 USD"),
         "{text}"
@@ -2027,7 +2045,10 @@ fn a_written_zero_cost_beside_usage_stays_unpriced() {
         row["measurement"]["cost_coverage"]["complete"], false,
         "{view}"
     );
-    let text = stdout(repo.arc(&repo.root).args(["cost", "show", "zero-total"]));
+    let text = stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "show", "--detail", "zero-total"]),
+    );
     assert!(!text.contains(" 0 USD"), "{text}");
 }
 
@@ -2662,7 +2683,10 @@ fn a_lead_acting_on_two_changes_is_shared_in_each_view_with_its_whole_figure() {
             "{view}"
         );
     }
-    let text = stdout(repo.arc(&repo.root).args(["cost", "show", &first]));
+    let text = stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "show", "--detail", &first]),
+    );
     assert!(text.contains("pi:lead-session"), "{text}");
     assert!(
         text.contains("integrator, orchestrator, reviewer"),

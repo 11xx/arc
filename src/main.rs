@@ -4521,6 +4521,30 @@ enum CostCmd {
     /// assignment with a fixed diagnostic. `--json` emits `arc-cost/1`
     /// Records no events; ledger reads do not require a parseable append policy.
     ///
+    /// Several targets and the range selectors select their union, and the
+    /// union counts each session once: `--tag` every change carrying the tags,
+    /// `--footprint` every change and journal item one session was bound to,
+    /// dispatched or acted on, beside its whole figure, `--since`/`--until`
+    /// every change with a ledger event or run in the window (the window
+    /// selects work items; consumption is not cut at its edges), and `--all`
+    /// every change. A range that selects nothing refuses.
+    ///
+    /// Text output is a table with one row per session: agent
+    /// (`harness:model#effort`, from the bound dispatches' routes, else the
+    /// session's own event models, else the model its recording says served
+    /// it; the harness alone when none establishes one), roles (impl, review,
+    /// orch, integ), the shortest unique session id prefix of at least eight
+    /// characters, runs, spans, the disjoint token total, the harness-written dollar
+    /// estimate, and a status (`complete`, `subtotal`, `shared ×N`, `live`,
+    /// `unmeasured` or `withheld`). The `total` row is the union figure with
+    /// its status, with a row per accounting partition when it spans several;
+    /// `shared` holds the sessions outside it with their whole figures; one
+    /// line counts the qualifications `--detail` explains. `--detail` prints
+    /// the per-category report instead. `--by` groups counted rows with one
+    /// subtotal per group, never adding incompatible accounting domains.
+    /// `--json` adds the table's rows, total, shared figure, qualification
+    /// count and groups under `table`, and the footprint under `footprint`.
+    ///
     /// With `--commit <rev>` the target is a commit. Git resolves the
     /// revision, and the commit maps to the change that records it: a
     /// patchset head or the integrated commit decides first, and otherwise a
@@ -4542,10 +4566,44 @@ enum CostCmd {
     /// is refused, naming them. With `--commit`, `--json` emits
     /// `arc-cost-commit/1`, which wraps the embedded `arc-cost/1`.
     Show {
-        /// Change ID or unique prefix, or a journal artifact: a filename in
-        /// this project's journal or <journal-dir>::<file>
-        #[arg(required_unless_present = "commit", conflicts_with = "commit")]
-        target: Option<String>,
+        /// Change IDs or unique prefixes, and journal artifacts: a filename in
+        /// this project's journal or <journal-dir>::<file>. Several targets
+        /// and range selectors select their union
+        #[arg(
+            required_unless_present_any = ["commit", "tag", "footprint", "since", "until", "all"],
+            conflicts_with = "commit"
+        )]
+        targets: Vec<String>,
+        /// Every change carrying this tag, as `begin --tag` and `arc meta --tag`
+        /// record it; repeat to require several
+        #[arg(long, conflicts_with = "commit")]
+        tag: Vec<String>,
+        /// Every change and journal item the session `harness:id` was bound
+        /// to or acted on, with that session's whole figure beside them
+        #[arg(long, value_name = "HARNESS:ID", conflicts_with = "commit")]
+        footprint: Option<String>,
+        /// Every change with a ledger event at or after this journal stamp
+        /// (20260101T000000Z) or RFC 3339 timestamp. The window selects work
+        /// items; consumption is not cut at its edges
+        #[arg(long, conflicts_with = "commit")]
+        since: Option<String>,
+        /// Every change with a ledger event at or before this instant, as
+        /// `--since` reads one
+        #[arg(long, conflicts_with = "commit")]
+        until: Option<String>,
+        /// Every change in this ledger
+        #[arg(long, conflicts_with = "commit")]
+        all: bool,
+        /// Group table rows, with one subtotal per group: agent, role,
+        /// model, harness, change or session. Repeat or separate with commas
+        /// to group by several
+        #[arg(long, value_delimiter = ',', conflicts_with = "commit",
+            value_parser = clap::builder::PossibleValuesParser::new(commands::COST_GROUPINGS))]
+        by: Vec<String>,
+        /// Print every figure by category with its reasons and coverage, in
+        /// place of the table
+        #[arg(long)]
+        detail: bool,
         /// A commit, resolved with Git and then to the change that records it,
         /// in place of a target
         #[arg(long, value_name = "REV")]
@@ -4562,7 +4620,8 @@ enum CostCmd {
     /// that records carrying usage were not read), the disjoint categories with
     /// their own gaps, the consumption events with their coverage, the Claude residual, and
     /// any harness-written dollar figure with its pricing coverage, plus
-    /// lineage relations, read failures as fixed categories, and the liveness
+    /// lineage relations, read failures as fixed categories, the one model the
+    /// recording says served the session when it names one, and the liveness
     /// `agent-status` answered for the session then (`live`, `ended` or
     /// `unknown`, as `cost show` reads it). Relatives are plain session ids; no
     /// recording locator or raw error text is retained. Binding fork origins
@@ -6722,13 +6781,33 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
         },
         Cmd::Cost { cmd } => match cmd {
             CostCmd::Show {
-                target,
+                targets,
+                tag,
+                footprint,
+                since,
+                until,
+                all,
+                by,
+                detail,
                 commit,
                 json,
-            } => match (target, commit) {
-                (_, Some(commit)) => commands::show_commit_cost(&ctx, &commit, json).map(|_| 0),
-                (Some(target), None) => commands::show_cost(&ctx, &target, json).map(|_| 0),
-                (None, None) => unreachable!("clap requires a target or --commit"),
+            } => match commit {
+                Some(commit) => commands::show_commit_cost(&ctx, &commit, json).map(|_| 0),
+                None => {
+                    let instant = |raw: Option<String>| {
+                        raw.map(|raw| crate::journal::parse_since(&raw)).transpose()
+                    };
+                    let query = commands::CostQuery {
+                        targets,
+                        tags: tag,
+                        footprint,
+                        since: instant(since)?,
+                        until: instant(until)?,
+                        all,
+                        by,
+                    };
+                    commands::show_cost(&ctx, &query, json, detail).map(|_| 0)
+                }
             },
             CostCmd::Note { target, all } => {
                 commands::note_cost(&ctx, target.as_deref(), all).map(|_| 0)

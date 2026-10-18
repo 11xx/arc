@@ -3418,7 +3418,7 @@ RULES THAT CHANGE WHAT YOU DO
     `--forked-from` names the session in the executor's harness whose
     history it began as a copy of, and follows the validation and retry
     rules of `--executor-session`. Fork origins participate in binding tuples.
-  - `arc cost show <change|journal-file> [--json]` reports what the executor
+  - `arc cost show <change|journal-file>... [--json]` reports what the executor
     sessions bound to the selected runs, and the participants that act on the
     selected work, consumed, and records nothing. A
     change selects itself and the artifact it was begun from; an artifact
@@ -3553,6 +3553,41 @@ RULES THAT CHANGE WHAT YOU DO
     fixed reasons; a conflict, a recorded total below its requests, qualifies
     the counter it understates, a withheld counter has no residual, and a
     family that cannot be read leaves only the residual unavailable.
+  - `arc cost show` selects the union of its positional targets, change ids
+    and journal artifacts mixed, and its range selectors, and the union
+    counts each session once. `--tag <t>`, repeatable with every tag
+    required, selects each change carrying it as `begin --tag` and `arc meta
+    --tag` record it. `--footprint <harness:id>` selects each change and
+    journal item that session was bound to, dispatched or acted on, and
+    shows its whole figure beside them. `--since` and `--until` select each
+    change with a ledger event, or a run dispatched or ended for it, in the
+    window; the window selects work items only, and consumption is not cut
+    at its edges. `--all` selects every change in this ledger. Each selected
+    target keeps its own selection rules; a change whose state cannot be
+    read for a tag is a selection gap, and a range that selects nothing
+    refuses.
+    Text output is a table, one row per session: its agent
+    (`harness:model#effort`, from the bound dispatches' routes when each
+    names one coordinate, else the models its own events carry, else the one
+    model its recording says served it; the harness alone when none
+    establishes a single model), roles (impl, review, orch, integ), the
+    shortest session id prefix of at least eight characters no other row
+    shares, runs and spans, the disjoint token total, the harness-written
+    dollar estimate, and a
+    status: `complete`, `subtotal`, `shared ×N` (outside the total, acting
+    on N work items), `live`, `unmeasured` or `withheld`. Footer rows hold
+    the total, which is the union figure with its status and a row per
+    accounting partition when it spans several; the shared sessions with
+    their whole figures; and a line counting the qualifications `--detail`
+    explains. An amount not established is shown as its known subtotal, or
+    as `≥` the least an overlapping figure is known to be, with its status
+    beside it. `--detail` prints the per-category report instead. `--by
+    agent|role|model|harness|change|session`, repeatable or comma-separated,
+    groups the counted rows with one subtotal per group; a subtotal never
+    adds incompatible accounting domains and shows their partitions as the
+    total does. `--json` carries the same rows, total, shared figure,
+    qualification count and groups under `table`, and a footprint under
+    `footprint`.
   - `arc cost retain <change|journal-file>` keeps, per bound or participating
     session, the facts a fresh read gives: reader and calculation versions, source
     frontier, digest and opening boundary, counters with their basis,
@@ -3560,7 +3595,8 @@ RULES THAT CHANGE WHAT YOU DO
     convention and gaps, the consumption events with their per-counter coverage and
     identity, the Claude residual, and any harness-written dollar figure
     with its pricing coverage, plus lineage relations, read failures
-    as fixed categories, and the liveness agent-status answered then
+    as fixed categories, the one model the recording says served the
+    session when it names one, and the liveness agent-status answered then
     (`live`, `ended` or `unknown`). Retained facts carry no recording locators or raw
     errors. Display sanitizes older facts field by field, so one unreadable
     field leaves the rest of the measurement available; bundle import and export refuse

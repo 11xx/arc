@@ -2953,6 +2953,11 @@ pub struct CostFacts {
     /// carries none; absence reads as unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liveness: Option<String>,
+    /// The one model the recording says served the session, as
+    /// `model#variant` when it names a variant. Absent when it names none or
+    /// several.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub served_model: Option<String>,
 }
 
 /// Token counts in categories no token belongs to twice: uncached input,
@@ -3209,6 +3214,19 @@ pub(crate) fn portable_selection(selection: &str) -> bool {
     matches!(selection, "active-branch" | "retained-branches")
 }
 
+/// A model coordinate, `model` or `model#effort`: one token of lowercase
+/// letters, digits, dots, dashes and underscores, with at most one `#`.
+pub(crate) fn portable_coordinate(coordinate: &str) -> bool {
+    let mut parts = coordinate.split('#');
+    let segment = |part: &str| {
+        !part.is_empty()
+            && part.chars().all(|c| {
+                c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '-' | '_')
+            })
+    };
+    parts.next().is_some_and(segment) && parts.next().is_none_or(segment) && parts.next().is_none()
+}
+
 pub(crate) fn portable_liveness(liveness: &str) -> bool {
     matches!(liveness, "live" | "ended" | "unknown")
 }
@@ -3335,6 +3353,7 @@ impl CostFacts {
             })
             && self.selection.as_deref().is_none_or(portable_selection)
             && self.liveness.as_deref().is_none_or(portable_liveness)
+            && self.served_model.as_deref().is_none_or(portable_coordinate)
             && self.disjoint.as_ref().is_none_or(CostDisjoint::portable)
             && self.events.as_ref().is_none_or(CostEvents::portable)
             && self.residual.as_ref().is_none_or(CostResidual::portable)
@@ -3715,6 +3734,10 @@ mod tests {
         };
         assert!(refused(&|f| f.selection = Some("/home/user/branch".into())));
         assert!(refused(&|f| f.liveness = Some("running".into())));
+        assert!(refused(
+            &|f| f.served_model = Some("/home/user/model".into())
+        ));
+        assert!(refused(&|f| f.served_model = Some("a#b#c".into())));
         assert!(refused(&|f| f
             .disjoint
             .as_mut()
