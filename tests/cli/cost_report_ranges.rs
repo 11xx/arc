@@ -704,3 +704,25 @@ fn group_subtotals_sum_to_the_total_within_one_partition_and_withhold_across() {
         .unwrap();
     assert_eq!(codex["agent"], "codex:gpt-x#high", "{view}");
 }
+
+/// Claim: two sessions whose ids share their first eight characters, as
+/// time-ordered ids do, get distinct short ids. Rejects a table where two
+/// rows read as one session.
+#[test]
+fn short_session_ids_stay_distinct_when_ids_share_a_prefix() {
+    let repo = Repo::new();
+    pi_recording(&repo, "01a12b46-aaaa", 0.01);
+    pi_recording(&repo, "01a12b46-bbbb", 0.02);
+    let change = begin(&repo, "prefixed", &[]);
+    finished(&repo, &change, "model-a#high", "pi", "01a12b46-aaaa");
+    finished(&repo, &change, "model-a#high", "pi", "01a12b46-bbbb");
+    let view = report(&repo, &[&change]);
+    let mut short: Vec<&str> = view["table"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["session"].as_str().unwrap())
+        .collect();
+    short.sort();
+    assert_eq!(short, ["01a12b46-a", "01a12b46-b"], "{view}");
+}

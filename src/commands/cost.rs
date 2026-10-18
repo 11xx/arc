@@ -3163,8 +3163,9 @@ fn footprint_figure(report: &Value, footprint: &str) -> Value {
 }
 
 /// Each row's session id, cut to the shortest prefix of at least eight
-/// characters no other row's id shares. Time-ordered ids share long
-/// prefixes, so the cut is per view.
+/// characters no other row's different id shares; the agent column tells
+/// apart one id under two harnesses. Time-ordered ids share long prefixes,
+/// so the cut is per view.
 fn short_ids(sessions: &[SessionRow]) -> Vec<String> {
     sessions
         .iter()
@@ -3174,7 +3175,7 @@ fn short_ids(sessions: &[SessionRow]) -> Vec<String> {
                 .map(|length| id[..length].iter().collect::<String>())
                 .find(|prefix| {
                     sessions.iter().all(|other| {
-                        other.key() == row.key() || !other.session.starts_with(prefix.as_str())
+                        other.session == row.session || !other.session.starts_with(prefix.as_str())
                     })
                 })
                 .unwrap_or_else(|| row.session.clone())
