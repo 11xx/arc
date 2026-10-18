@@ -6454,11 +6454,23 @@ pub(crate) fn recent_sessions(
     ctx: &Ctx,
     limit: usize,
 ) -> Result<(Vec<crate::session_store::RecentSession>, Vec<String>)> {
+    recent_sessions_from(ctx, limit, || {
+        crate::session_store::project_sessions(&ctx.cwd)
+    })
+}
+
+/// `recent_sessions` with the project's recordings discovered by `discover`,
+/// so a caller can discover them while it reads everything else.
+pub(crate) fn recent_sessions_from(
+    ctx: &Ctx,
+    limit: usize,
+    discover: impl FnOnce() -> Result<(Vec<crate::session_store::RecentSession>, Vec<String>)>,
+) -> Result<(Vec<crate::session_store::RecentSession>, Vec<String>)> {
     use crate::session_store::RecentSession;
     if limit == 0 {
         return Ok((Vec::new(), Vec::new()));
     }
-    let (recordings, mut unavailable) = match crate::session_store::project_sessions(&ctx.cwd) {
+    let (recordings, mut unavailable) = match discover() {
         Ok(result) => result,
         Err(error) => (Vec::new(), vec![format!("recording discovery: {error:#}")]),
     };

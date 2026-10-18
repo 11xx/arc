@@ -1063,6 +1063,13 @@ fn render_waiting_spools(ctx: &Ctx, states: &BTreeMap<String, crate::state::Chan
 /// open; this answers what is waiting, which is the larger question and the
 /// one a session starting cold actually has.
 pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i32> {
+    // Recordings are discovered while the ledger and journal are read: the
+    // scan needs only the checkout. A sandbox points discovery's environment
+    // at its own roots, which is process-wide, so there it runs in turn.
+    let discovery = (sessions > 0 && matches!(crate::config::sandbox(), Ok(None))).then(|| {
+        let cwd = ctx.cwd.clone();
+        std::thread::spawn(move || crate::session_store::project_sessions(&cwd))
+    });
     let store = ctx.store()?;
     let replica = crate::replica::status(&store)?;
     let mut inbox = collect_inbox(ctx, &store, None)?;
@@ -1070,8 +1077,14 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
         inbox.absorb_unowned(unowned);
     }
     let journal = crate::journal::orientation(ctx);
-    let (recent_sessions, session_discovery_errors) =
-        crate::journal::recent_sessions(ctx, sessions)?;
+    let (recent_sessions, session_discovery_errors) = match discovery {
+        Some(discovery) => crate::journal::recent_sessions_from(ctx, sessions, || {
+            discovery
+                .join()
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("recording discovery panicked")))
+        })?,
+        None => crate::journal::recent_sessions(ctx, sessions)?,
+    };
     let filed = crate::journal::filed_report(ctx, None, 14);
     let forks = crate::commands::fork::list_entries(ctx).unwrap_or_default();
     let states = store.readable_states()?;

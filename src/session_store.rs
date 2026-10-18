@@ -395,26 +395,50 @@ pub(crate) fn project_sessions(
     cwd: &std::path::Path,
 ) -> anyhow::Result<(Vec<RecentSession>, Vec<String>)> {
     let _environment = DiscoveryEnvironment::sandboxed()?;
-    let scope = agent_tapes_core::scope::Scope::at(cwd)?;
-    let mut query = backend::Query::unscoped(usize::MAX);
-    query.scope = Some(&scope);
+    // A scope that cannot be read fails discovery as a whole. Each backend
+    // then scans its own store at once with a scope of its own, and their
+    // rows keep the backends' order.
+    agent_tapes_core::scope::Scope::at(cwd)?;
+    let count = backend::backends().len();
+    let listings: Vec<Option<(&'static str, anyhow::Result<backend::Listing>)>> =
+        std::thread::scope(|threads| {
+            let workers: Vec<_> = (0..count)
+                .map(|index| {
+                    threads.spawn(move || {
+                        let backend = backend::backends().into_iter().nth(index)?;
+                        if !backend.available() {
+                            return None;
+                        }
+                        let scope = match agent_tapes_core::scope::Scope::at(cwd) {
+                            Ok(scope) => scope,
+                            Err(error) => return Some((backend.harness(), Err(error))),
+                        };
+                        let mut query = backend::Query::unscoped(usize::MAX);
+                        query.scope = Some(&scope);
+                        let listing = discovery_listing(&mut query, |query| backend.list(query));
+                        Some((backend.harness(), listing))
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap_or(None))
+                .collect()
+        });
     let mut sessions = Vec::new();
     let mut unavailable = Vec::new();
-    for backend in backend::backends()
-        .into_iter()
-        .filter(|backend| backend.available())
-    {
-        match discovery_listing(&mut query, |query| backend.list(query)) {
+    for (harness, listing) in listings.into_iter().flatten() {
+        match listing {
             Ok(listing) => {
                 if listing.scan_truncated {
                     unavailable.push(format!(
                         "{}: incomplete session coverage after {} candidates; ranking may omit sessions outside the backend scan bound",
-                        backend.harness(), listing.scanned
+                        harness, listing.scanned
                     ));
                 }
                 unavailable.extend(listing.unavailable);
                 for session in listing.sessions {
-                    let mut row = RecentSession::new(backend.harness(), &session.id);
+                    let mut row = RecentSession::new(harness, &session.id);
                     row.observe(
                         session.last_activity_at,
                         session.model.as_ref().map(model_name).as_deref(),
@@ -422,7 +446,7 @@ pub(crate) fn project_sessions(
                     sessions.push(row);
                 }
             }
-            Err(error) => unavailable.push(format!("{}: {error:#}", backend.harness())),
+            Err(error) => unavailable.push(format!("{}: {error:#}", harness)),
         }
     }
     Ok((sessions, unavailable))
