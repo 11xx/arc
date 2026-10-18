@@ -2146,6 +2146,69 @@ pub fn commits_among<'a>(
         .collect())
 }
 
+/// The commit graph reachable from some revisions, read in one pass.
+pub struct CommitGraph {
+    /// Each revision that names a commit, with that commit's id.
+    pub tips: std::collections::HashMap<String, String>,
+    /// Each reachable commit's children.
+    children: std::collections::HashMap<String, Vec<String>>,
+}
+
+impl CommitGraph {
+    /// One `cat-file --batch-check` resolves the revisions, and one
+    /// `rev-list --parents` lists every commit reachable from those that name
+    /// a commit. A revision naming no commit is absent from `tips`.
+    pub fn reachable_from<'a>(
+        cwd: &Path,
+        revisions: impl Iterator<Item = &'a str>,
+    ) -> Result<Self> {
+        let mut tips = std::collections::HashMap::new();
+        for (revision, answer) in batch_check(cwd, revisions)? {
+            if let Some((id, "commit")) = answer.split_once(' ') {
+                tips.insert(revision, id.to_string());
+            }
+        }
+        let mut children: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        if !tips.is_empty() {
+            let mut query: Vec<&str> = tips.values().map(String::as_str).collect();
+            query.sort_unstable();
+            query.dedup();
+            let input = query.join("\n") + "\n";
+            let listed = git_piped(cwd, &["rev-list", "--parents", "--stdin"], input.as_bytes())?;
+            for line in String::from_utf8_lossy(&listed).lines() {
+                let mut ids = line.split_whitespace();
+                let Some(commit) = ids.next() else {
+                    continue;
+                };
+                children.entry(commit.to_string()).or_default();
+                for parent in ids {
+                    children
+                        .entry(parent.to_string())
+                        .or_default()
+                        .push(commit.to_string());
+                }
+            }
+        }
+        Ok(Self { tips, children })
+    }
+
+    /// Every commit that has `commit` as an ancestor, `commit` included.
+    pub fn descendants(&self, commit: &str) -> std::collections::HashSet<String> {
+        let mut seen = std::collections::HashSet::new();
+        if !self.children.contains_key(commit) {
+            return seen;
+        }
+        let mut pending = vec![commit.to_string()];
+        while let Some(next) = pending.pop() {
+            if seen.insert(next.clone()) {
+                pending.extend(self.children.get(&next).into_iter().flatten().cloned());
+            }
+        }
+        seen
+    }
+}
+
 /// Each revision with the `cat-file --batch-check` answer for it, in order.
 fn batch_check<'a>(
     cwd: &Path,

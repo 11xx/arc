@@ -44,17 +44,12 @@ struct Located {
 
 /// The commits `base..head` of a change's current patchset, oldest first.
 fn patchset_commits(ctx: &Ctx, state: &ChangeState) -> Vec<String> {
-    let Some(patchset) = state.patchsets.last() else {
+    let Some((base, head)) = patchset_range(state) else {
         return Vec::new();
     };
-    let base = patchset.merge_base.as_ref().unwrap_or(&patchset.base);
     gitio::git(
         &ctx.cwd,
-        &[
-            "rev-list",
-            "--reverse",
-            &format!("{base}..{}", patchset.head),
-        ],
+        &["rev-list", "--reverse", &format!("{base}..{head}")],
     )
     .map(|listed| listed.lines().map(str::to_string).collect())
     .unwrap_or_default()
@@ -87,33 +82,92 @@ fn place_in(state: &ChangeState, commits: &[String], commit: &str) -> Place {
     }
 }
 
+/// The current patchset range of a change: its base and head.
+fn patchset_range(state: &ChangeState) -> Option<(&str, &str)> {
+    let patchset = state.patchsets.last()?;
+    let base = patchset.merge_base.as_ref().unwrap_or(&patchset.base);
+    Some((base.as_str(), patchset.head.as_str()))
+}
+
+/// Every readable change's state and the commit graph its patchset ranges
+/// span, read once for every commit a command locates.
+struct Changes {
+    states: Vec<ChangeState>,
+    /// Absent when the one-pass graph read failed: each range is then walked
+    /// on its own, as `rev-list` answers it.
+    graph: Option<gitio::CommitGraph>,
+}
+
+impl Changes {
+    fn read(ctx: &Ctx) -> Result<Self> {
+        let store = ctx.store()?;
+        let read = store.read()?;
+        let mut states = Vec::new();
+        for change_id in read.change_ids()? {
+            if let Ok(state) = read.state(&change_id) {
+                states.push(state);
+            }
+        }
+        let revisions = states
+            .iter()
+            .filter_map(patchset_range)
+            .flat_map(|(base, head)| [base, head]);
+        let graph = gitio::CommitGraph::reachable_from(&ctx.cwd, revisions).ok();
+        Ok(Self { states, graph })
+    }
+
+    /// The changes whose current patchset range `base..head` holds `commit`.
+    /// A range whose ends name no commit holds none, as `rev-list` lists none
+    /// for it.
+    fn ranges_holding(&self, ctx: &Ctx, commit: &str) -> Vec<&ChangeState> {
+        let Some(graph) = &self.graph else {
+            return self
+                .states
+                .iter()
+                .filter(|state| {
+                    patchset_commits(ctx, state)
+                        .iter()
+                        .any(|held| held == commit)
+                })
+                .collect();
+        };
+        let descendants = graph.descendants(commit);
+        self.states
+            .iter()
+            .filter(|state| {
+                patchset_range(state).is_some_and(|(base, head)| {
+                    match (graph.tips.get(base), graph.tips.get(head)) {
+                        (Some(base), Some(head)) => {
+                            descendants.contains(head) && !descendants.contains(base)
+                        }
+                        _ => false,
+                    }
+                })
+            })
+            .collect()
+    }
+}
+
 /// The change that records `commit`, as `query_commit` finds it: a patchset
 /// head or the integrated commit decides first, and otherwise a commit inside
 /// a change's current patchset range belongs to that change.
-fn locate(ctx: &Ctx, commit: &str) -> Result<Option<Located>> {
-    let store = ctx.store()?;
-    let read = store.read()?;
-    let mut exact = Vec::new();
-    let mut ranged = Vec::new();
-    for change_id in read.change_ids()? {
-        let Ok(state) = read.state(&change_id) else {
-            continue;
-        };
-        let named = state
-            .patchsets
-            .iter()
-            .any(|patchset| patchset.head == commit)
-            || integrated_commit(&state) == Some(commit);
-        if named {
-            exact.push(state);
-        } else if patchset_commits(ctx, &state)
-            .iter()
-            .any(|held| held == commit)
-        {
-            ranged.push(state);
-        }
-    }
-    let mut found = if exact.is_empty() { ranged } else { exact };
+fn locate(ctx: &Ctx, changes: &Changes, commit: &str) -> Result<Option<Located>> {
+    let exact: Vec<&ChangeState> = changes
+        .states
+        .iter()
+        .filter(|state| {
+            state
+                .patchsets
+                .iter()
+                .any(|patchset| patchset.head == commit)
+                || integrated_commit(state) == Some(commit)
+        })
+        .collect();
+    let mut found = if exact.is_empty() {
+        changes.ranges_holding(ctx, commit)
+    } else {
+        exact
+    };
     if found.len() > 1 {
         let ids: Vec<&str> = found.iter().map(|state| state.change_id.as_str()).collect();
         bail!(
@@ -122,10 +176,10 @@ fn locate(ctx: &Ctx, commit: &str) -> Result<Option<Located>> {
         );
     }
     Ok(found.pop().map(|state| {
-        let commits = patchset_commits(ctx, &state);
-        let place = place_in(&state, &commits, commit);
+        let commits = patchset_commits(ctx, state);
+        let place = place_in(state, &commits, commit);
         Located {
-            state,
+            state: state.clone(),
             commits,
             place,
         }
@@ -281,7 +335,7 @@ fn view_of(ctx: &Ctx, commit: &str, located: &Located, cost: &CostView) -> Resul
 fn commit_view(ctx: &Ctx, revision: &str) -> Result<Value> {
     let commit = gitio::rev_parse(&ctx.cwd, revision)
         .with_context(|| format!("{revision} is not a commit"))?;
-    match locate(ctx, &commit)? {
+    match locate(ctx, &Changes::read(ctx)?, &commit)? {
         Some(located) => {
             let cost = read_cost(ctx, &located.state.change_id)?;
             view_of(ctx, &commit, &located, &cost)
@@ -456,13 +510,22 @@ pub fn note_cost(ctx: &Ctx, target: Option<&str>, all: bool) -> Result<()> {
     let mut states: BTreeMap<String, ChangeState> = BTreeMap::new();
     // Each commit to note, and whether a refresh may leave it as it is.
     let mut jobs: BTreeMap<String, (String, bool)> = BTreeMap::new();
+    // Every change is read once however many commits are located.
+    let held = std::cell::OnceCell::new();
+    let changes = || -> Result<&Changes> {
+        if let Some(changes) = held.get() {
+            return Ok(changes);
+        }
+        let read = Changes::read(ctx)?;
+        Ok(held.get_or_init(|| read))
+    };
     if let Some(target) = target {
         let state = match store.resolve_change(target) {
             Ok(change_id) => store.read()?.state(&change_id)?,
             Err(_) => {
                 let commit = gitio::rev_parse(&ctx.cwd, target)
                     .with_context(|| format!("{target} is neither a change nor a commit"))?;
-                locate(ctx, &commit)?
+                locate(ctx, changes()?, &commit)?
                     .context("no change records this commit")?
                     .state
             }
@@ -477,7 +540,7 @@ pub fn note_cost(ctx: &Ctx, target: Option<&str>, all: bool) -> Result<()> {
             if jobs.contains_key(&commit) {
                 continue;
             }
-            match locate(ctx, &commit)? {
+            match locate(ctx, changes()?, &commit)? {
                 Some(located) => {
                     let change_id = located.state.change_id.clone();
                     states.entry(change_id.clone()).or_insert(located.state);
