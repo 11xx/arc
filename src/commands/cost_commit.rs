@@ -254,15 +254,23 @@ fn trailer_row(trailer: &str, value: &str, cost: &CostView, change_key: &str) ->
     let mut keys: BTreeMap<String, &str> = BTreeMap::new();
     let mut unmeasured: BTreeMap<String, String> = BTreeMap::new();
     if let Some(model) = model {
-        if trailer == "Implemented-by" {
-            for run in cost.runs.iter().filter(|run| run.work == change_key) {
-                if run.model.as_deref() == Some(model) {
-                    for session in &run.sessions {
-                        keys.insert(session.clone(), "executor");
-                    }
+        let executor_role = match trailer {
+            "Implemented-by" => Some("implementer"),
+            "Reviewed-by" => Some("reviewer"),
+            _ => None,
+        };
+        for run in cost
+            .runs
+            .iter()
+            .filter(|run| run.work == change_key && Some(run.role) == executor_role)
+        {
+            if run.model.as_deref() == Some(model) {
+                for session in &run.sessions {
+                    keys.insert(session.clone(), "executor");
                 }
             }
-        } else {
+        }
+        if trailer != "Implemented-by" {
             let role = participant_role(trailer);
             for participant in &cost.participants {
                 let named = participant

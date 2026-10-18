@@ -31,6 +31,7 @@ mod pass;
 mod policy_cmd;
 pub(crate) mod provisional;
 pub use provisional::{check_provisional, resolve as resolve_provisional};
+mod native_child;
 pub(crate) mod relations;
 mod replica;
 mod rescue;

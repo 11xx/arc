@@ -320,6 +320,12 @@ pub(super) fn table_text(report: &Value) -> String {
             reasons.join(", ")
         );
     }
+    for family in table["families"].as_array().into_iter().flatten() {
+        let _ = writeln!(out, "{}", family_line(family));
+        if let Some(line) = residual_line(family) {
+            let _ = writeln!(out, "{line}");
+        }
+    }
     if let Some(footprint) = report["footprint"]["session"].as_str() {
         let _ = writeln!(
             out,
@@ -352,6 +358,82 @@ pub(super) fn table_text(report: &Value) -> String {
         }
     );
     out
+}
+
+/// A parent's native children: those bound to rows, and the consumption no
+/// binding assigns, which stays outside the total.
+fn family_line(family: &Value) -> String {
+    let bound: Vec<&str> = family["bound"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let mut parts = vec![if bound.is_empty() {
+        "none bound".to_string()
+    } else {
+        format!("{} bound ({})", bound.len(), bound.join(", "))
+    }];
+    let unassigned = &family["unassigned"];
+    let count = unassigned["children"].as_u64().unwrap_or(0);
+    if count > 0 {
+        let figure = shown(&unassigned["tokens"], token_text);
+        let unmeasured = unassigned["unmeasured"].as_u64().unwrap_or(0);
+        let mut part = format!("{count} unassigned {figure} outside the total");
+        if unmeasured > 0 {
+            part.push_str(&format!(" ({unmeasured} not measured)"));
+        }
+        parts.push(part);
+    }
+    let missing = family["missing"].as_u64().unwrap_or(0);
+    if missing > 0 {
+        parts.push(format!(
+            "{missing} recording{} missing",
+            if missing == 1 { "" } else { "s" }
+        ));
+    }
+    format!(
+        "children {}: {}",
+        status(&family["session"]),
+        parts.join("; ")
+    )
+}
+
+/// The recorded total less the family's identified requests, per counter
+/// that does not reconcile: the parent's, outside every total.
+fn residual_line(family: &Value) -> Option<String> {
+    let reconciliation = family["reconciliation"].as_str()?;
+    if reconciliation == "unavailable" {
+        return Some(format!(
+            "family {}: reconciliation unavailable",
+            status(&family["session"])
+        ));
+    }
+    let counters: Vec<String> = family["residual"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|counter| {
+            let name = status(&counter["counter"]);
+            let state = status(&counter["status"]);
+            match counter["difference"].as_i64() {
+                Some(difference) => {
+                    let sign = if difference < 0 { "-" } else { "+" };
+                    format!("{name} {sign}{} {state}", tokens(difference.unsigned_abs()))
+                }
+                None => format!("{name} {state}"),
+            }
+        })
+        .collect();
+    let residual = if counters.is_empty() {
+        "residual reconciled".to_string()
+    } else {
+        format!("residual {}, outside the total", counters.join(", "))
+    };
+    Some(format!(
+        "family {}: requests {reconciliation}; {residual}",
+        status(&family["session"])
+    ))
 }
 
 /// Where the money columns come from, and how to install a price table when

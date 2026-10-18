@@ -50,6 +50,7 @@ mod lookup_reasons;
 mod messaging;
 mod metadata;
 mod model_resolution;
+mod native_child_binding;
 mod observe;
 mod orchestrate;
 mod pass;

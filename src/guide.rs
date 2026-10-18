@@ -3418,6 +3418,29 @@ RULES THAT CHANGE WHAT YOU DO
     `--forked-from` names the session in the executor's harness whose
     history it began as a copy of, and follows the validation and retry
     rules of `--executor-session`. Fork origins participate in binding tuples.
+  - A lead that spawns a native child, a Claude Agent-tool subagent or a
+    Codex `thread_spawn` thread, records it by hand as a run: `arc run
+    dispatch --change <id> --route <route> --worktree <path>` before it
+    spawns the child, `arc run bind <dispatch> --executor-harness <h>
+    --executor-session <child> --parent-session <parent> [--executor-role
+    reviewer]` once the child's id is known, and `arc run end` when it
+    returns. A Claude subagent is named by the agent id the Agent tool's
+    result names; tapes reads its recording, held under the parent's, as
+    `<parent>::<agent>`. A Codex child is named by its own thread id, and its
+    recording must name the parent as `parent_thread_id`. The pinned reader
+    must find exactly one recording naming both, or the binding refuses with
+    a fixed reason that echoes neither: the parent does not resolve, the
+    parent records no such child, the child's recording is not in the store,
+    or it names another parent or none. A delegated-agents mirror row
+    (`agentType` `delegated-agents:run`) carries no consumption of its own:
+    binding one refuses and names the agent-delegate run it mirrors, with
+    the dispatch that binds that run's handle when one does. A child is
+    never named `<parent>::<agent>` in `--executor-session`.
+    `--executor-role` is `implementer`, the default, or `reviewer`, on any
+    binding. `run list` shows `parent=` and `role=`, and JSON rows carry
+    `binding.parent_session` and `binding.role`. A resumed child is a further
+    dispatch bound to the same child, so its runs are its spans. Binding
+    still attributes by the ledger alone, never by timestamp proximity.
   - `arc cost show <change|journal-file>... [--json]` reports what the executor
     sessions bound to the selected runs, and the participants that act on the
     selected work, consumed, and records nothing. A
@@ -3600,6 +3623,30 @@ RULES THAT CHANGE WHAT YOU DO
     fixed reasons; a conflict, a recorded total below its requests, qualifies
     the counter it understates, a withheld counter has no residual, and a
     family that cannot be read leaves only the residual unavailable.
+    A native child a binding names is an executor row measured from its own
+    recording by its own requests, with `parent` naming the session that
+    spawned it, roles from its bindings' `--executor-role`, and its agent
+    from the model its recording says served it, else its dispatches'
+    routes. A Claude session whose recording names native children with
+    consumption of their own is measured by its own requests, in the
+    summed-requests basis, because its recorded total covers those children
+    too; a session whose only figure is held in the recorded-total basis is
+    unmeasured (`recorded total covers its native children`) rather than
+    counted beside its children. A spawn a binding identified is a parent
+    and a child with recordings of their own, so it groups no overlap. A
+    bound child whose recording is gone is unmeasured (`child recording
+    missing`). Each parent row carries `family`: `bound`, its bound child
+    rows; `children`, every child its recording names, with the recording
+    `present` or `missing` and, for one no binding names, its figure, from
+    tapes' family reconciliation for a Claude subagent and a fresh read for
+    a child with its own session; and `unassigned`, those children's figure,
+    listed and never in a total. A mirror row is never listed. A Claude
+    parent's `family.reconciliation` says whether its own requests and each
+    child's add up to the family's identified union per counter
+    (`conserved`, `not-conserved` naming each counter under `differs`, as a
+    request two recordings both hold leaves it, or `unestablished`), and
+    carries the residual, the recorded total less that union: the parent's,
+    no child's, and in no total.
   - `arc cost show` selects the union of its positional targets, change ids
     and journal artifacts mixed, and its range selectors, and the union
     counts each session once. `--tag <t>`, repeatable with every tag
@@ -3630,15 +3677,18 @@ RULES THAT CHANGE WHAT YOU DO
     with `--allocate even`, the allocated total beside it; the `unattributed
     shared` row with each session's part outside the total and one line per
     session naming its reasons; and a line counting the qualifications
-    `--detail` explains. An amount not established is shown as its known subtotal, or
+    `--detail` explains, then per parent of native children a `children`
+    line naming its bound rows and the unassigned figure outside the total,
+    and a `family` line with the reconciliation status and each residual
+    counter that does not reconcile. An amount not established is shown as its known subtotal, or
     as `≥` the least an overlapping figure is known to be, with its status
     beside it. `--detail` prints the per-category report instead. `--by
     agent|role|model|harness|change|session`, repeatable or comma-separated,
     groups the counted rows with one subtotal per group; a subtotal never
     adds incompatible accounting domains and shows their partitions as the
     total does. `--json` carries the same rows, total, allocated total,
-    unattributed figure, qualification count, groups and price table under
-    `table`, each session's segments, shares, run figures and unattributed
+    unattributed figure, qualification count, groups, families and price
+    table under `table`, each session's segments, shares, run figures and unattributed
     parts under `sessions[].split`, each item's allocated figures under
     `work[].allocated`, the price table under `prices`, and a footprint under
     `footprint`.
@@ -3679,9 +3729,10 @@ RULES THAT CHANGE WHAT YOU DO
     sibling commits, and states that the change's figures are shared by
     those commits and that none is per commit. Each role trailer on the
     commit lists the sessions recorded for that role. `Implemented-by` lists
-    the sessions bound to the change's runs whose route model, effort
-    dropped, equals the trailer's model. `Reviewed-by` lists the
-    participants that acted as reviewer, and `Planned-by` and
+    the sessions bound as implementer to the change's runs whose route
+    model, effort dropped, equals the trailer's model. `Reviewed-by` lists
+    the sessions bound as reviewer on the same terms, and the participants
+    that acted as reviewer, and `Planned-by` and
     `Orchestrated-by` those that acted as orchestrator, whose declared model
     equals the trailer's. A matching session's figure is its whole figure,
     shared exactly as the change view shares it, with the change's share

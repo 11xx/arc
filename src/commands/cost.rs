@@ -24,8 +24,8 @@ use crate::model::{
     portable_lineage_reason, portable_liveness, portable_quantity_reason, portable_selection,
     CostCacheWrites, CostConvention, CostCounterResidual, CostCounters, CostDisjoint,
     CostEventCoverage, CostEventIdentity, CostEvents, CostFacts, CostLineage, CostListPrice,
-    CostPricing, CostRelative, CostResidual, CostResidualSource, CostSegment, CostSpans, Event,
-    Payload, DISJOINT_CATEGORIES,
+    CostNativeChild, CostPricing, CostRelative, CostResidual, CostResidualSource, CostSegment,
+    CostSpans, Event, Payload, DISJOINT_CATEGORIES,
 };
 use agent_tapes_core::measurement::{MeasurementCompleteness, MeasurementReason};
 use serde_json::{json, Value};
@@ -49,7 +49,7 @@ pub const TAPES_READER: &str = env!("ARC_TAPES_READER");
 
 /// How arc normalizes a reader's usage answer into retained facts. It moves
 /// when that normalization does, so facts from an older one stay identifiable.
-pub const COST_CALCULATION: &str = "usage-normalization 5";
+pub const COST_CALCULATION: &str = "usage-normalization 6";
 
 const USD_KIND: &str = "harness-calculated-estimate";
 const TOKEN_KIND: &str = "resource-quantity";
@@ -152,6 +152,10 @@ struct Span {
     /// The model coordinate the dispatch's route names, when it names one.
     route: Option<String>,
     forked_from: Option<String>,
+    /// The session that spawned the executor as its native child.
+    parent: Option<String>,
+    /// The role the binding names; absent reads as implementer.
+    role: Option<String>,
     round: Option<usize>,
     work: WorkKey,
 }
@@ -358,6 +362,9 @@ struct SessionRow {
     liveness: Option<SessionLiveness>,
     /// The model coordinate the row is attributed to, and where it came from.
     agent: Option<(String, &'static str)>,
+    /// The session that spawned this executor as its native child, as its
+    /// bindings name it.
+    parent: Option<String>,
 }
 
 impl SessionRow {
@@ -379,6 +386,19 @@ impl SessionRow {
             .filter_map(|span| span.route.clone())
             .collect())
         .filter(|_| self.spans.iter().all(|span| span.route.is_some()));
+        let recording = self
+            .measured
+            .facts
+            .as_ref()
+            .and_then(|facts| facts.served_model.clone());
+        // A native child is attributed by its own model evidence first: the
+        // lead's route names what it asked for, the recording what served.
+        if self.parent.is_some() {
+            if let Some(coordinate) = recording {
+                self.agent = Some((coordinate, "recording"));
+                return;
+            }
+        }
         self.agent = routes
             .map(|coordinate| (coordinate, "route"))
             .or_else(|| {
@@ -408,7 +428,18 @@ impl SessionRow {
     fn roles(&self) -> Vec<&'static str> {
         match &self.participation {
             Some(participation) => participation.roles.iter().map(|role| role.name()).collect(),
-            None => vec!["implementer"],
+            None => {
+                let roles: BTreeSet<&'static str> = self
+                    .spans
+                    .iter()
+                    .map(|span| executor_role(span.role.as_deref()))
+                    .collect();
+                if roles.is_empty() {
+                    vec!["implementer"]
+                } else {
+                    roles.into_iter().collect()
+                }
+            }
         }
     }
 }
@@ -419,11 +450,20 @@ impl SessionRow {
     }
 }
 
+/// The role a binding names, as the view spells it.
+fn executor_role(role: Option<&str>) -> &'static str {
+    match role {
+        Some("reviewer") => "reviewer",
+        _ => "implementer",
+    }
+}
+
 /// A selected run: the work it is for, the executor model its route names,
-/// and the sessions its binding names.
+/// the role its binding names, and the sessions its binding names.
 pub(super) struct ExecutorRun {
     pub work: String,
     pub model: Option<String>,
+    pub role: &'static str,
     pub sessions: Vec<String>,
 }
 
@@ -515,6 +555,7 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
                 facts.incomplete.extend(liveness.incomplete.clone());
             }
             let split = split_of(&measured, plan_of(&harness, &session), true);
+            let parent = spans.iter().find_map(|span| span.parent.clone());
             SessionRow {
                 harness,
                 session,
@@ -526,6 +567,7 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
                 participation: None,
                 liveness: Some(liveness),
                 agent: None,
+                parent,
             }
         })
         .collect();
@@ -565,8 +607,10 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
             }),
             liveness: Some(liveness),
             agent: None,
+            parent: None,
         });
     }
+    separate_family_parents(&mut sessions, &mut unmeasured);
     for row in &mut sessions {
         if let Some(facts) = row.measured.facts.as_mut() {
             price(facts, prices.table());
@@ -588,10 +632,15 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
     }
     let outside = outside_sessions(&ledger, &sessions, &unmeasured);
     selection.ledger_gaps = read.gaps;
+    let mut children = read_all(unbound_spawned(&sessions), &BTreeMap::new());
+    for facts in children.values_mut().flatten() {
+        price(facts, prices.table());
+    }
     let view = View {
         by: &query.by,
         prices: &prices,
         allocate_even: query.allocate_even,
+        children: &children,
     };
     let mut report = render_report(&selection, &runs, &sessions, &outside, &ledger, &view);
     if let Some(footprint) = &query.footprint {
@@ -603,6 +652,7 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
             runs.iter().map(|run| ExecutorRun {
                 work: work.label(),
                 model: run.model.clone(),
+                role: run.role,
                 sessions: if run.conflicting {
                     Vec::new()
                 } else {
@@ -631,6 +681,300 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
         runs: executor_runs,
         participants,
     })
+}
+
+/// The spawned children each row's recording names under their own session
+/// ids that no row holds: they are listed under their parent, outside every
+/// total, and read for that listing alone.
+fn unbound_spawned(sessions: &[SessionRow]) -> BTreeSet<(String, String)> {
+    let rows: BTreeSet<String> = sessions.iter().map(SessionRow::key).collect();
+    sessions
+        .iter()
+        .filter_map(|row| row.measured.facts.as_ref()?.lineage.as_ref())
+        .flat_map(|lineage| &lineage.children)
+        .filter(|child| !rows.contains(&format!("{}:{}", child.harness, child.session)))
+        .map(|child| (child.harness.clone(), child.session.clone()))
+        .collect()
+}
+
+/// A figure of `counters` alone, in the request basis of `base`, the facts
+/// of the session whose recording family holds them.
+fn counted_facts(
+    base: &CostFacts,
+    harness: &str,
+    counters: &CostCounters,
+    complete: bool,
+) -> CostFacts {
+    let mut facts = base.clone();
+    facts.spans = None;
+    facts.residual = None;
+    facts.events = None;
+    facts.lineage = None;
+    facts.list_price = None;
+    facts.by_model = Vec::new();
+    facts.served_model = None;
+    facts.cost_coverage = None;
+    facts.harness_estimate_usd = None;
+    facts.basis = Some("summed-requests".to_string());
+    facts.coverage = Some("session".to_string());
+    facts.counters = counters.clone();
+    let tokens = agent_tapes_core::model::Tokens {
+        input: counters.input,
+        output: counters.output,
+        reasoning: counters.reasoning,
+        cache_read: counters.cache_read,
+        cache_write: counters.cache_write,
+    };
+    facts.disjoint = agent_tapes_core::model::TokenConvention::of(harness)
+        .map(|convention| {
+            agent_tapes_core::model::DisjointTokens::from_native(&tokens, convention, None)
+        })
+        .as_ref()
+        .and_then(cost_disjoint);
+    let mut gaps: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for category in CATEGORIES {
+        if counter(counters, category).is_none() {
+            gaps.entry(category.to_string())
+                .or_default()
+                .push("recorded category is absent".to_string());
+        }
+    }
+    gaps.entry("usd".to_string())
+        .or_default()
+        .push("recorded category is absent".to_string());
+    facts.quantity_gaps = Some(gaps);
+    facts.incomplete = if complete {
+        Vec::new()
+    } else {
+        vec![CHILD_SOURCE_INCOMPLETE.to_string()]
+    };
+    facts
+}
+
+/// Why a child recording's figure in its family is a known subtotal: tapes
+/// read a record it could not count, or a request that failed.
+const CHILD_SOURCE_INCOMPLETE: &str = "the child recording holds records its requests do not count";
+
+/// A parent's native family: each child its recording names, bound to a
+/// row or listed with the consumption no binding assigns, outside every
+/// total; and for a Claude parent, the recorded total reconciled with the
+/// requests of the whole family, and whether the parent's own requests and
+/// each child's add up to that union.
+fn family_json(row: &SessionRow, sessions: &[SessionRow], view: &View<'_>) -> Option<Value> {
+    let table = view.prices.table();
+    let facts = row.measured.facts.as_ref();
+    let lineage = facts.and_then(|facts| facts.lineage.as_ref());
+    let bound: Vec<&SessionRow> = sessions
+        .iter()
+        .filter(|child| {
+            child.harness == row.harness && child.parent.as_deref() == Some(&row.session)
+        })
+        .collect();
+    let bound_key = |key: &str| {
+        bound
+            .iter()
+            .find(|child| child.key() == key)
+            .map(|child| child.key())
+    };
+    let natives: Vec<&CostNativeChild> = lineage
+        .map(|lineage| {
+            lineage
+                .native_children
+                .iter()
+                .filter(|child| !child.mirror())
+                .collect()
+        })
+        .unwrap_or_default();
+    let spawned: Vec<&CostRelative> = lineage
+        .map(|lineage| lineage.children.iter().collect())
+        .unwrap_or_default();
+    if bound.is_empty() && natives.is_empty() && spawned.is_empty() {
+        return None;
+    }
+    let residual = facts
+        .and_then(|facts| facts.residual.as_ref())
+        .filter(|residual| residual.unavailable.is_none());
+    let source_of = |agent: &str| {
+        residual.and_then(|residual| {
+            residual
+                .sources
+                .iter()
+                .find(|source| source.role == "child" && source.agent.as_deref() == Some(agent))
+        })
+    };
+    let scope = |what: &str| format!("session {} {what}", row.key());
+    let mut children = Vec::new();
+    let mut unassigned: Vec<SessionRow> = Vec::new();
+    let mut unmeasured = 0usize;
+    for child in &natives {
+        let key = format!("{}:{}::{}", row.harness, row.session, child.agent);
+        let held = bound_key(&key);
+        let figure = facts
+            .zip(source_of(&child.agent))
+            .and_then(|(facts, source)| {
+                let counters = source.identified.as_ref()?;
+                let mut figure = counted_facts(facts, &row.harness, counters, source.complete);
+                price(&mut figure, table);
+                Some((row.with_facts(figure), source.requests))
+            });
+        let recording = if child.resolved { "present" } else { "missing" };
+        let mut entry = json!({"agent": child.agent, "key": key, "role": child.role,
+            "recording": recording, "bound": held.is_some()});
+        match &figure {
+            Some((figure, requests)) => {
+                entry["requests"] = json!(requests);
+                entry["totals"] = totals(&[figure], &[], &scope(&format!("child {}", child.agent)));
+            }
+            None => {
+                entry["reason"] = json!(if child.resolved {
+                    "the family reconciliation holds no figure for it"
+                } else {
+                    CHILD_MISSING
+                });
+            }
+        }
+        if held.is_none() {
+            match figure {
+                Some((figure, _)) => unassigned.push(figure),
+                None => unmeasured += 1,
+            }
+        }
+        children.push(entry);
+    }
+    for child in &spawned {
+        let key = format!("{}:{}", child.harness, child.session);
+        let held = bound_key(&key);
+        let mut entry = json!({"session": child.session, "key": key, "bound": held.is_some()});
+        if held.is_none() {
+            match view
+                .children
+                .get(&(child.harness.clone(), child.session.clone()))
+            {
+                Some(Ok(facts)) => {
+                    let figure = row.with_facts(facts.clone());
+                    entry["totals"] =
+                        totals(&[&figure], &[], &scope(&format!("child {}", child.session)));
+                    unassigned.push(figure);
+                }
+                Some(Err(reason)) => {
+                    entry["reason"] = json!(reason);
+                    unmeasured += 1;
+                }
+                None => {
+                    entry["reason"] = json!("usage read failed");
+                    unmeasured += 1;
+                }
+            }
+        }
+        children.push(entry);
+    }
+    let held: Vec<&SessionRow> = unassigned.iter().collect();
+    let mut value = json!({
+        "statement": "a parent's figure is its own requests; each child is measured from its own recording, as an executor row where a binding names it, and otherwise listed here outside every total",
+        "bound": bound.iter().map(|child| child.key()).collect::<Vec<_>>(),
+        "children": children,
+        "unassigned": {"children": unassigned.len() + unmeasured, "unmeasured": unmeasured,
+            "totals": totals(&held, &[], &scope("unassigned children"))},
+    });
+    if row.harness == "claude" {
+        value["reconciliation"] =
+            family_reconciliation(facts.and_then(|facts| facts.residual.as_ref()));
+    }
+    Some(value)
+}
+
+/// The recorded total against the family's identified requests, and whether
+/// the parent's own requests and every child's add up to that union. The
+/// residual, the recorded total less that union, is the parent's and is no
+/// child's; it is shown, never added to a total.
+fn family_reconciliation(residual: Option<&CostResidual>) -> Value {
+    let Some(residual) = residual else {
+        return json!({"status": "unavailable", "reason": "reconciliation was not read"});
+    };
+    if let Some(reason) = &residual.unavailable {
+        return json!({"status": "unavailable", "reason": reason});
+    }
+    let mut differs = Vec::new();
+    let mut unestablished = residual.identity_coverage.as_deref() != Some("validated-family");
+    for row in &residual.counters {
+        // A counter no recording in the family records has nothing to add.
+        let recorded = residual.sources.iter().any(|source| {
+            source
+                .identified
+                .as_ref()
+                .is_some_and(|counters| counter(counters, &row.counter).is_some())
+        });
+        if !recorded && row.identified.is_none() {
+            continue;
+        }
+        let parts: Option<u64> = residual.sources.iter().try_fold(0u64, |sum, source| {
+            let counters = source.identified.as_ref();
+            match counters.and_then(|counters| counter(counters, &row.counter)) {
+                Some(amount) => sum.checked_add(amount),
+                None if source.requests == 0 => Some(sum),
+                None => None,
+            }
+        });
+        match (parts, row.identified) {
+            (Some(parts), Some(union)) if parts == union => {}
+            (Some(_), Some(_)) => differs.push(row.counter.clone()),
+            _ => unestablished = true,
+        }
+    }
+    let status = if unestablished {
+        "unestablished"
+    } else if differs.is_empty() {
+        "conserved"
+    } else {
+        "not-conserved"
+    };
+    json!({
+        "status": status,
+        "statement": "the parent's own requests and each child's add up to the family's identified union per counter unless `differs` names one, as a request two recordings both hold leaves it; the residual is the recorded total less that union, the parent's own, and joins no total",
+        "differs": differs,
+        "residual": residual.counters,
+        "scope_established": residual.scope_established,
+    })
+}
+
+/// Why a parent session has no figure in a view that measures its native
+/// children apart: the only figure held is a recorded total, which covers
+/// those children too, so counting it beside them would count them twice.
+const PARENT_TOTAL_COVERS_CHILDREN: &str = "recorded total covers its native children";
+
+/// A Claude parent whose native children the view measures apart, or whose
+/// recording names children with consumption of their own, counts only its
+/// own requests. Held facts in the recorded-total basis cannot be separated,
+/// so the parent is unmeasured rather than counted with its children twice.
+fn separate_family_parents(
+    sessions: &mut [SessionRow],
+    unmeasured: &mut BTreeMap<(String, String), String>,
+) {
+    let parents: BTreeSet<(String, String)> = sessions
+        .iter()
+        .filter_map(|row| Some((row.harness.clone(), row.parent.clone()?)))
+        .collect();
+    for row in sessions.iter_mut().filter(|row| row.harness == "claude") {
+        let Some(facts) = row.measured.facts.as_ref() else {
+            continue;
+        };
+        let spawned = facts
+            .lineage
+            .as_ref()
+            .is_some_and(|lineage| lineage.native_children.iter().any(|child| !child.mirror()));
+        let bound = parents.contains(&(row.harness.clone(), row.session.clone()));
+        if (spawned || bound) && facts.basis.as_deref() == Some("recorded-total") {
+            row.measured.facts = None;
+            row.measured.source = Source::Unavailable(PARENT_TOTAL_COVERS_CHILDREN.to_string());
+            row.split = Split::Unsplit(span::UNMEASURED);
+            if row.participation.is_some() {
+                unmeasured.insert(
+                    (row.harness.clone(), row.session.clone()),
+                    PARENT_TOTAL_COVERS_CHILDREN.to_string(),
+                );
+            }
+        }
+    }
 }
 
 /// Retain the normalized facts a fresh read of each bound or participating
@@ -701,7 +1045,7 @@ pub fn retain_cost(ctx: &Ctx, target: &str) -> Result<()> {
             Payload::CostFactsRetained {
                 executor_harness: harness,
                 executor_session: session,
-                facts,
+                facts: Box::new(facts),
             },
         )?;
         store.append_local_repository_event(&mut event)?;
@@ -1109,6 +1453,7 @@ struct AssignedRun {
     dispatch_event_id: String,
     /// The executor model the dispatch's route names, effort dropped.
     model: Option<String>,
+    role: &'static str,
     round: Option<usize>,
     candidates: Vec<String>,
     conflicting: bool,
@@ -1229,6 +1574,7 @@ fn assign(ctx: &Ctx, selection: &mut Selection, events: &[Event]) -> Assigned {
                 binding.executor_session,
                 binding.handle,
                 binding.forked_from,
+                binding.parent_session,
             )
         });
         let readable: Vec<_> = bindings
@@ -1236,11 +1582,24 @@ fn assign(ctx: &Ctx, selection: &mut Selection, events: &[Event]) -> Assigned {
             .filter(|binding| {
                 plain_session_id(binding.executor_harness)
                     && plain_session_id(binding.executor_session)
+                    && binding
+                        .parent_session
+                        .as_deref()
+                        .is_none_or(plain_session_id)
             })
             .collect();
+        // A native child is measured under the key its harness reads it by.
+        let session_of = |binding: &&&super::run::RunBinding<'_>| match binding.parent_session {
+            Some(parent) => super::native_child::child_key(
+                binding.executor_harness,
+                parent,
+                binding.executor_session,
+            ),
+            None => binding.executor_session.clone(),
+        };
         let candidates: BTreeSet<String> = readable
             .iter()
-            .map(|binding| format!("{}:{}", binding.executor_harness, binding.executor_session))
+            .map(|binding| format!("{}:{}", binding.executor_harness, session_of(binding)))
             .collect();
         if selected.contains(&work) {
             let model = match &round.dispatch.payload {
@@ -1250,6 +1609,12 @@ fn assign(ctx: &Ctx, selection: &mut Selection, events: &[Event]) -> Assigned {
             runs.entry(work.clone()).or_default().push(AssignedRun {
                 dispatch_event_id: round.dispatch.event_id.clone(),
                 model,
+                role: executor_role(
+                    round
+                        .binding
+                        .as_ref()
+                        .and_then(|binding| binding.role.as_deref()),
+                ),
                 round: round.round,
                 candidates: candidates.into_iter().collect(),
                 conflicting: bindings.len() > 1,
@@ -1268,11 +1633,8 @@ fn assign(ctx: &Ctx, selection: &mut Selection, events: &[Event]) -> Assigned {
                 },
             );
         }
-        for binding in readable {
-            let key = (
-                binding.executor_harness.clone(),
-                binding.executor_session.clone(),
-            );
+        for binding in readable.iter() {
+            let key = (binding.executor_harness.clone(), session_of(binding));
             bound.insert(key.clone());
             if !uncertain.is_empty() {
                 possible_sessions.insert(key.clone());
@@ -1292,6 +1654,8 @@ fn assign(ctx: &Ctx, selection: &mut Selection, events: &[Event]) -> Assigned {
                     .as_ref()
                     .filter(|id| plain_session_id(id))
                     .cloned(),
+                parent: binding.parent_session.clone(),
+                role: binding.role.clone(),
                 round: round.round,
                 work: work.clone(),
             });
@@ -1321,7 +1685,9 @@ fn retained_for<'a>(
                 executor_harness,
                 executor_session,
                 facts,
-            } if executor_harness == harness && executor_session == session => Some((event, facts)),
+            } if executor_harness == harness && executor_session == session => {
+                Some((event, &**facts))
+            }
             _ => None,
         })
         .collect()
@@ -1491,7 +1857,9 @@ fn measurement_facts(facts: &CostFacts) -> Value {
 
 /// Measure one session through the pinned tapes reader, over its whole
 /// recording, and per segment of `plan` when the ledger gives it several
-/// spans.
+/// spans. A Claude session that spawned native children is measured by its
+/// own requests: its recorded total covers its children too, and they are
+/// measured from their own recordings.
 fn read_fresh(
     harness: &str,
     session: &str,
@@ -1504,6 +1872,9 @@ fn read_fresh(
             .collect();
     if backends.is_empty() {
         return Err("session store unsupported".to_string());
+    }
+    if let Some((parent, _)) = session.split_once("::") {
+        return read_child(&backends, harness, parent, session, plan);
     }
     let resolved = agent_tapes_core::resolve_session(&backends, session)
         .map_err(|_| "usage read failed".to_string())?;
@@ -1527,11 +1898,11 @@ fn read_fresh(
     let whole = backend
         .stream_session(&resolved.session, &read)
         .map_err(|_| "usage read failed".to_string())?;
-    let span_tally = (!plan.is_empty()).then(|| tally.clone());
-    let view = agent_tapes_core::usage::streamed(&whole, tally, &read);
-    let mut facts = normalize(&view, selection_warnings, harness);
-    if let Some(tally) = span_tally {
-        facts.spans = Some(read_spans(
+    let lineage = read_lineage(&backends, harness, session);
+    let family = harness == "claude" && lineage.native_children.iter().any(|child| !child.mirror());
+    let view = agent_tapes_core::usage::streamed(&whole, tally.clone(), &read);
+    let mut facts = if family {
+        let spans = read_spans(
             backend.as_ref(),
             &resolved.session,
             &read,
@@ -1539,8 +1910,28 @@ fn read_fresh(
             plan,
             selection_warnings,
             harness,
-        ));
-    }
+        );
+        let mut own = *spans
+            .whole
+            .clone()
+            .ok_or_else(|| OWN_REQUESTS_UNREAD.to_string())?;
+        own.spans = (!plan.is_empty()).then_some(spans);
+        own
+    } else {
+        let mut facts = normalize(&view, selection_warnings, harness);
+        if !plan.is_empty() {
+            facts.spans = Some(read_spans(
+                backend.as_ref(),
+                &resolved.session,
+                &read,
+                &tally,
+                plan,
+                selection_warnings,
+                harness,
+            ));
+        }
+        facts
+    };
     if harness == "claude" {
         facts.residual = Some(residual(
             backend.as_ref(),
@@ -1554,81 +1945,178 @@ fn read_fresh(
         || view.truncated
         || !view.truncation.is_empty()
         || view.read.as_ref().is_none_or(|read| !read.gaps.is_empty());
-    let fork_parent_unestablished = view
+    let mut lineage = lineage;
+    if view
         .consumption
         .as_ref()
-        .is_some_and(|consumption| consumption.identity.fork_parent_unestablished);
-    facts.lineage = Some(
-        match agent_tapes_core::lineage_with_backends(
-            &backends,
-            agent_tapes_core::Selection::IdInHarness {
-                id: session,
-                harness,
-            },
-        ) {
-            Ok(view) if view.session.id == session => {
-                let mut unknown = Vec::new();
-                if !view.notes.is_empty() {
-                    unknown.push(format!("{} lineage notes", view.notes.len()));
-                }
-                if view.truncated {
-                    unknown.push("lineage read bounded".to_string());
-                }
-                let parent = view.lineage.parent.and_then(|parent| {
-                    if !parent.resolved && plain_session_id(&parent.native_id) {
-                        unknown.push("lineage relative unresolved".to_string());
-                    }
-                    safe_relative(parent.native_id, &mut unknown)
-                });
-                let children = view
-                    .lineage
-                    .children
-                    .into_iter()
-                    .filter_map(|child| {
-                        if !child.resolved {
-                            unknown.push("lineage relative unresolved".to_string());
-                        }
-                        let Some(session) = child.session_id else {
-                            unknown.push("lineage relative unresolved".to_string());
-                            return None;
-                        };
-                        if !plain_session_id(&child.harness) {
-                            unknown.push("lineage relative is not a plain session id".to_string());
-                            return None;
-                        }
-                        safe_relative(session, &mut unknown).map(|session| CostRelative {
-                            harness: child.harness,
-                            session,
-                        })
-                    })
-                    .collect();
-                let forked_from = view
-                    .lineage
-                    .forked_from
-                    .and_then(|id| safe_relative(id, &mut unknown));
-                if fork_parent_unestablished {
-                    unknown.push("lineage relative unresolved".to_string());
-                }
-                unknown.sort();
-                unknown.dedup();
-                CostLineage {
-                    parent,
-                    children,
-                    forked_from,
-                    unknown,
-                }
-            }
-            Ok(_) => CostLineage {
+        .is_some_and(|consumption| consumption.identity.fork_parent_unestablished)
+    {
+        lineage
+            .unknown
+            .push("lineage relative unresolved".to_string());
+        lineage.unknown.sort();
+        lineage.unknown.dedup();
+    }
+    facts.lineage = Some(lineage);
+    Ok(facts)
+}
+
+/// Why a Claude parent with native children has no figure: its own requests
+/// could not be read apart from the recorded total that covers its children.
+const OWN_REQUESTS_UNREAD: &str = "parent requests unread apart from its children";
+
+/// Measure a native child held under its parent's recording, by its own
+/// requests. Its tie to the parent is the binding's, not an overlap.
+fn read_child(
+    backends: &[Box<dyn agent_tapes_core::backend::Backend>],
+    harness: &str,
+    parent: &str,
+    key: &str,
+    plan: &[Segment],
+) -> std::result::Result<CostFacts, String> {
+    let resolved = agent_tapes_core::resolve_session(backends, parent)
+        .ok()
+        .filter(|resolved| resolved.session.id == parent)
+        .ok_or_else(|| "usage read failed".to_string())?;
+    let backend = &backends[resolved.backend_index];
+    let (children, failures) = backend.window_children(&resolved.session);
+    let Some(child) = children.into_iter().find(|child| child.id == key) else {
+        let unreadable = failures.iter().any(|failure| failure.starts_with(key));
+        return Err(if unreadable {
+            "usage read failed"
+        } else {
+            CHILD_MISSING
+        }
+        .to_string());
+    };
+    let mut tally = agent_tapes_core::usage::TurnTally::default();
+    let mut earliest = None;
+    let read = backend
+        .stream_transcript(&child, None, &mut |turn| {
+            earliest = earliest.into_iter().chain(turn.ts).min();
+            tally.add(&turn);
+            Ok(())
+        })
+        .map_err(|_| "usage read failed".to_string())?;
+    let selection_warnings = resolved
+        .diagnostics
+        .latest_warnings(&resolved.session)
+        .len();
+    let spans = read_spans(
+        backend.as_ref(),
+        &child,
+        &read,
+        &tally,
+        plan,
+        selection_warnings,
+        harness,
+    );
+    let mut facts = *spans
+        .whole
+        .clone()
+        .ok_or_else(|| "usage read failed".to_string())?;
+    facts.spans = (!plan.is_empty()).then_some(spans);
+    facts.source_started_at = earliest.into_iter().chain(child.started_at).min();
+    facts.source_start_uncertain = child.start_uncertain || !read.gaps.is_empty();
+    facts.lineage = Some(CostLineage::default());
+    Ok(facts)
+}
+
+/// Why a bound native child has no figure: its parent's store holds no
+/// recording for it.
+const CHILD_MISSING: &str = "child recording missing";
+
+/// The session's recorded relatives. A child recording its parent's store
+/// holds under it, named by agent id rather than a session id, is a native
+/// child: it is measured from its own recording when a binding names it, and
+/// is listed under its parent otherwise, never an unresolved relative.
+fn read_lineage(
+    backends: &[Box<dyn agent_tapes_core::backend::Backend>],
+    harness: &str,
+    session: &str,
+) -> CostLineage {
+    let view = match agent_tapes_core::lineage_with_backends(
+        backends,
+        agent_tapes_core::Selection::IdInHarness {
+            id: session,
+            harness,
+        },
+    ) {
+        Ok(view) if view.session.id == session => view,
+        Ok(_) => {
+            return CostLineage {
                 unknown: vec!["lineage identity mismatch".to_string()],
                 ..CostLineage::default()
-            },
-            Err(_) => CostLineage {
+            }
+        }
+        Err(_) => {
+            return CostLineage {
                 unknown: vec!["lineage read failed".to_string()],
                 ..CostLineage::default()
-            },
-        },
-    );
-    Ok(facts)
+            }
+        }
+    };
+    let mut unknown = Vec::new();
+    if !view.notes.is_empty() {
+        unknown.push(format!("{} lineage notes", view.notes.len()));
+    }
+    if view.truncated {
+        unknown.push("lineage read bounded".to_string());
+    }
+    let parent = view.lineage.parent.and_then(|parent| {
+        if !parent.resolved && plain_session_id(&parent.native_id) {
+            unknown.push("lineage relative unresolved".to_string());
+        }
+        safe_relative(parent.native_id, &mut unknown)
+    });
+    let mut native_children = Vec::new();
+    let children = view
+        .lineage
+        .children
+        .into_iter()
+        .filter_map(|child| {
+            let Some(session) = child.session_id else {
+                if harness == "claude" && plain_session_id(&child.reference) {
+                    native_children.push(CostNativeChild {
+                        agent: child.reference,
+                        role: child
+                            .role
+                            .filter(|role| portable_cost_metadata(role) && !role.is_empty()),
+                        resolved: child.resolved,
+                    });
+                } else {
+                    unknown.push("lineage relative unresolved".to_string());
+                }
+                return None;
+            };
+            if !child.resolved {
+                unknown.push("lineage relative unresolved".to_string());
+            }
+            if !plain_session_id(&child.harness) {
+                unknown.push("lineage relative is not a plain session id".to_string());
+                return None;
+            }
+            safe_relative(session, &mut unknown).map(|session| CostRelative {
+                harness: child.harness,
+                session,
+            })
+        })
+        .collect();
+    let forked_from = view
+        .lineage
+        .forked_from
+        .and_then(|id| safe_relative(id, &mut unknown));
+    unknown.sort();
+    unknown.dedup();
+    native_children.sort_by(|left, right| left.agent.cmp(&right.agent));
+    native_children.dedup_by(|left, right| left.agent == right.agent);
+    CostLineage {
+        parent,
+        children,
+        forked_from,
+        unknown,
+        native_children,
+    }
 }
 
 /// The session's figure in each segment of `plan`, read in one pass. The
@@ -1851,6 +2339,24 @@ fn sanitized_facts(held: &CostFacts) -> CostFacts {
             .forked_from
             .take()
             .and_then(|id| safe_relative(id, &mut lineage.unknown));
+        lineage.native_children.retain(|child| {
+            let safe = plain_session_id(&child.agent);
+            if !safe {
+                lineage
+                    .unknown
+                    .push("lineage relative is not a plain session id".to_string());
+            }
+            safe
+        });
+        for child in &mut lineage.native_children {
+            if child
+                .role
+                .as_deref()
+                .is_some_and(|role| !portable_cost_metadata(role))
+            {
+                child.role = None;
+            }
+        }
         lineage.children.retain(|child| {
             let safe = plain_session_id(&child.harness) && plain_session_id(&child.session);
             if !safe {
@@ -2291,6 +2797,15 @@ fn residual(
             .iter()
             .map(|source| CostResidualSource {
                 role: kebab(source.role).unwrap_or_default(),
+                agent: source.agent_id.clone(),
+                requests: source.requests as u64,
+                identified: source.identified.as_ref().map(|tokens| CostCounters {
+                    input: tokens.input,
+                    output: tokens.output,
+                    reasoning: tokens.reasoning,
+                    cache_read: tokens.cache_read,
+                    cache_write: tokens.cache_write,
+                }),
                 frontier: source.length,
                 digest: source
                     .sha256
@@ -2720,6 +3235,17 @@ fn round_amount(value: f64) -> f64 {
 
 /// Connected components include named relatives outside the selected figure.
 fn lineage_groups(sessions: &[SessionRow]) -> Vec<BTreeSet<String>> {
+    // A spawn a binding identified is a parent and a child with recordings of
+    // their own, not one recording copying another, so it groups nothing.
+    let spawns: BTreeSet<(String, String)> = sessions
+        .iter()
+        .filter_map(|row| {
+            let parent = row.parent.as_ref()?;
+            Some((format!("{}:{parent}", row.harness), row.key()))
+        })
+        .collect();
+    let spawned =
+        |parent: &str, child: &str| spawns.contains(&(parent.to_string(), child.to_string()));
     let mut groups: Vec<BTreeSet<String>> = Vec::new();
     for row in sessions {
         let mut group = BTreeSet::from([row.key()]);
@@ -2736,14 +3262,20 @@ fn lineage_groups(sessions: &[SessionRow]) -> Vec<BTreeSet<String>> {
             .as_ref()
             .and_then(|facts| facts.lineage.as_ref())
         {
-            for relative in [&lineage.parent, &lineage.forked_from]
-                .into_iter()
-                .flatten()
-            {
-                group.insert(format!("{}:{relative}", row.harness));
+            if let Some(parent) = &lineage.parent {
+                let parent = format!("{}:{parent}", row.harness);
+                if !spawned(&parent, &row.key()) {
+                    group.insert(parent);
+                }
+            }
+            if let Some(origin) = &lineage.forked_from {
+                group.insert(format!("{}:{origin}", row.harness));
             }
             for child in &lineage.children {
-                group.insert(format!("{}:{}", child.harness, child.session));
+                let child = format!("{}:{}", child.harness, child.session);
+                if !spawned(&row.key(), &child) {
+                    group.insert(child);
+                }
             }
         }
         let mut index = 0;
@@ -3305,7 +3837,11 @@ struct View<'a> {
     by: &'a [String],
     prices: &'a agent_tapes_core::pricing::PriceLookup,
     allocate_even: bool,
+    /// The fresh reads of spawned children no row holds, by harness and id.
+    children: &'a Children,
 }
+
+type Children = BTreeMap<(String, String), std::result::Result<CostFacts, String>>;
 
 impl SessionRow {
     /// The session's segment figures, when its figure is divided.
@@ -3335,6 +3871,7 @@ impl SessionRow {
             participation: self.participation.clone(),
             liveness: self.liveness.clone(),
             agent: self.agent.clone(),
+            parent: self.parent.clone(),
         }
     }
 
@@ -3740,7 +4277,13 @@ fn render_report(
 
     let session_rows: Vec<Value> = sessions
         .iter()
-        .map(|row| session_json(row, table))
+        .map(|row| {
+            let mut value = session_json(row, table);
+            if let Some(family) = family_json(row, sessions, view) {
+                value["family"] = family;
+            }
+            value
+        })
         .collect();
     let unmeasured: BTreeMap<String, Vec<String>> = sessions
         .iter()
@@ -3899,18 +4442,38 @@ fn footprint_figure(report: &Value, footprint: &str) -> Value {
 /// apart one id under two harnesses. Time-ordered ids share long prefixes,
 /// so the cut is per view.
 fn short_ids(sessions: &[SessionRow]) -> Vec<String> {
-    sessions
-        .iter()
-        .map(|row| {
-            let id: Vec<char> = row.session.chars().collect();
-            (8..id.len())
-                .map(|length| id[..length].iter().collect::<String>())
-                .find(|prefix| {
-                    sessions.iter().all(|other| {
-                        other.session == row.session || !other.session.starts_with(prefix.as_str())
-                    })
-                })
-                .unwrap_or_else(|| row.session.clone())
+    // A native child's key is its parent's id and its agent id: each part is
+    // shortened among the ids in its own position.
+    let parts = |row: &SessionRow| match row.session.split_once("::") {
+        Some((parent, agent)) => (parent.to_string(), Some(agent.to_string())),
+        None => (row.session.clone(), None),
+    };
+    let held: Vec<(String, Option<String>)> = sessions.iter().map(parts).collect();
+    let shortest = |id: &str, among: &mut dyn Iterator<Item = &str>| {
+        let others: Vec<&str> = among.filter(|other| *other != id).collect();
+        let chars: Vec<char> = id.chars().collect();
+        (8..chars.len())
+            .map(|length| chars[..length].iter().collect::<String>())
+            .find(|prefix| {
+                others
+                    .iter()
+                    .all(|other| !other.starts_with(prefix.as_str()))
+            })
+            .unwrap_or_else(|| id.to_string())
+    };
+    held.iter()
+        .map(|(session, agent)| {
+            let head = shortest(session, &mut held.iter().map(|(other, _)| other.as_str()));
+            match agent {
+                Some(agent) => format!(
+                    "{head}::{}",
+                    shortest(
+                        agent,
+                        &mut held.iter().filter_map(|(_, other)| other.as_deref())
+                    )
+                ),
+                None => head,
+            }
         })
         .collect()
 }
@@ -4151,9 +4714,48 @@ fn cost_table(
             figure
         })
         .collect::<Vec<_>>());
+    let short_of = |key: &str| {
+        sessions
+            .iter()
+            .zip(&short)
+            .find(|(row, _)| row.key() == key)
+            .map(|(_, short)| short.clone())
+    };
+    let families: Vec<Value> = report["sessions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|row| row["family"].is_object())
+        .map(|row| {
+            let family = &row["family"];
+            let key = row["key"].as_str().unwrap_or_default();
+            let mut unassigned = table_figure(&family["unassigned"]["totals"]);
+            unassigned["children"] = family["unassigned"]["children"].clone();
+            unassigned["unmeasured"] = family["unassigned"]["unmeasured"].clone();
+            let residual: Vec<Value> = family["reconciliation"]["residual"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|counter| counter["status"] != "reconciled")
+                .map(|counter| json!({"counter": counter["counter"], "difference": counter["difference"], "status": counter["status"]}))
+                .collect();
+            json!({
+                "key": key,
+                "session": short_of(key),
+                "bound": family["bound"].as_array().into_iter().flatten()
+                    .filter_map(|key| short_of(key.as_str()?)).collect::<Vec<_>>(),
+                "unassigned": unassigned,
+                "missing": family["children"].as_array().into_iter().flatten()
+                    .filter(|child| child["recording"] == "missing").count(),
+                "reconciliation": family["reconciliation"]["status"],
+                "residual": residual,
+            })
+        })
+        .collect();
     let mut value = json!({
         "rows": rows,
         "total": total,
+        "families": families,
         "unattributed": outside,
         "coverage": {"qualifications": total_qualifications, "by_kind": qualifications},
         "by": view.by,
@@ -4365,6 +4967,9 @@ fn session_json(row: &SessionRow, table: Option<&agent_tapes_core::pricing::Pric
     }
     if let Some(liveness) = &row.liveness {
         value["measurement"]["liveness"] = liveness.json();
+    }
+    if let Some(parent) = &row.parent {
+        value["parent"] = json!(format!("{}:{parent}", row.harness));
     }
     value
 }

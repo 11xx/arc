@@ -232,6 +232,10 @@ struct BindingRow {
     handle: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     forked_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_session: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<String>,
     bound_at: DateTime<Utc>,
     /// Other distinct binding tuples held for this dispatch.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -408,6 +412,10 @@ pub struct BindingInput {
     pub executor_session: String,
     pub handle: Option<String>,
     pub forked_from: Option<String>,
+    /// The session that spawned the executor as its native child.
+    pub parent_session: Option<String>,
+    /// `implementer` or `reviewer`.
+    pub role: Option<String>,
 }
 
 /// Record which backend session executed a previously recorded dispatch.
@@ -422,23 +430,44 @@ pub fn bind_run(ctx: &Ctx, dispatch_event_id: &str, binding: BindingInput) -> Re
         executor_session,
         handle,
         forked_from,
+        parent_session,
+        role,
     } = binding;
     for (flag, value, harness) in [
         ("--executor-harness", Some(&executor_harness), true),
         ("--executor-session", Some(&executor_session), false),
         ("--handle", handle.as_ref(), false),
         ("--forked-from", forked_from.as_ref(), false),
+        ("--parent-session", parent_session.as_ref(), false),
     ] {
         if let Some(defect) = value.and_then(|value| binding_defect(value, harness)) {
             bail!("run bind refused: {flag}: {defect}; omit a value nobody established");
         }
     }
+    if executor_session.contains("::") {
+        bail!("run bind refused: --executor-session: a native child is named by its own id, with its parent under --parent-session");
+    }
+    // The reader identifies a native child before the ledger lock is taken:
+    // a recording can be large, and other writers wait on the lock.
+    let mirror = match parent_session.as_deref() {
+        Some(parent) => {
+            match super::native_child::identify(&executor_harness, parent, &executor_session) {
+                Ok(super::native_child::NativeChild::Measured) => None,
+                Ok(super::native_child::NativeChild::Mirror(handle)) => Some(handle),
+                Err(reason) => bail!("run bind refused: --parent-session: {reason}"),
+            }
+        }
+        None => None,
+    };
 
     let store = ctx.store()?;
     let _repository_events = store.lock_repository_events()?;
     let events = store.load_repository_events()?;
     ensure_portable_bindings(&events)?;
     find_dispatch(&store, &events, dispatch_event_id, "run bind")?;
+    if let Some(handle) = mirror {
+        bail!("{}", mirror_refusal(&events, handle.as_deref()));
+    }
     if let Some(existing) = binding_for(&events, dispatch_event_id) {
         if !existing.conflicts.is_empty() {
             bail!("run bind refused: dispatch {dispatch_event_id} has a binding conflict");
@@ -447,6 +476,8 @@ pub fn bind_run(ctx: &Ctx, dispatch_event_id: &str, binding: BindingInput) -> Re
             && existing.executor_session == &executor_session
             && existing.handle == &handle
             && existing.forked_from == &forked_from
+            && existing.parent_session == &parent_session
+            && existing.role == &role
         {
             println!(
                 "run already bound: {} session {}",
@@ -471,12 +502,45 @@ pub fn bind_run(ctx: &Ctx, dispatch_event_id: &str, binding: BindingInput) -> Re
             executor_session: executor_session.clone(),
             handle,
             forked_from,
+            parent_session: parent_session.clone(),
+            role,
         },
     )?;
     store.append_local_repository_event(&mut event)?;
-    println!("run bound: {executor_harness} session {executor_session}");
+    match &parent_session {
+        Some(parent) => {
+            println!("run bound: {executor_harness} child {executor_session} of session {parent}")
+        }
+        None => println!("run bound: {executor_harness} session {executor_session}"),
+    }
     println!("event: {}", event.event_id);
     Ok(())
+}
+
+/// The refusal for binding a mirror row: the consumption is the delegated
+/// session's, so the run to bind is the agent-delegate run the row mirrors,
+/// named by the dispatch whose binding carries its handle when one does.
+fn mirror_refusal(events: &[Event], handle: Option<&str>) -> String {
+    let dispatch = handle.and_then(|handle| {
+        events.iter().rev().find_map(|event| match &event.payload {
+            Payload::RunBound {
+                dispatch_event_id,
+                handle: Some(bound),
+                ..
+            } if bound == handle => Some(dispatch_event_id.clone()),
+            _ => None,
+        })
+    });
+    let run = match (handle, dispatch) {
+        (Some(handle), Some(dispatch)) => {
+            format!("agent-delegate run {handle}, which dispatch {dispatch} binds to its delegated session")
+        }
+        (Some(handle), None) => format!(
+            "agent-delegate run {handle}: bind its dispatch to the delegated session it ran in"
+        ),
+        (None, _) => "agent-delegate run it mirrors: bind that run's dispatch to the delegated session it ran in".to_string(),
+    };
+    format!("run bind refused: the child is a delegated-agents mirror row with no consumption of its own; its consumption is the {run}")
 }
 
 /// Why a binding value cannot be recorded, or nothing when it can. A harness
@@ -682,6 +746,7 @@ pub(crate) fn ensure_portable_bindings(events: &[Event]) -> Result<()> {
             executor_session,
             handle,
             forked_from,
+            parent_session,
             ..
         } = &event.payload
         {
@@ -690,6 +755,7 @@ pub(crate) fn ensure_portable_bindings(events: &[Event]) -> Result<()> {
                 executor_session,
                 handle,
                 forked_from,
+                parent_session,
             ) {
                 bail!(
                     "run binding {} contains nonportable metadata; assignment is incomplete",
@@ -738,6 +804,12 @@ fn print_round(row: &RunRow) {
             }
             if let Some(origin) = &binding.forked_from {
                 bound.push_str(&format!(" forked-from={}", crate::render::one_line(origin)));
+            }
+            if let Some(parent) = &binding.parent_session {
+                bound.push_str(&format!(" parent={}", crate::render::one_line(parent)));
+            }
+            if let Some(role) = &binding.role {
+                bound.push_str(&format!(" role={}", crate::render::one_line(role)));
             }
             println!("{bound}");
             for conflict in &binding.conflicts {
@@ -862,6 +934,8 @@ fn binding_row(binding: &RunBinding<'_>) -> BindingRow {
         executor_session: binding.executor_session.clone(),
         handle: binding.handle.clone(),
         forked_from: binding.forked_from.clone(),
+        parent_session: binding.parent_session.clone(),
+        role: binding.role.clone(),
         bound_at: binding.event.created_at,
         conflicts: binding.conflicts.iter().map(binding_row).collect(),
     }
@@ -913,6 +987,8 @@ pub struct RunBinding<'a> {
     /// Distinct tuples observed for the same dispatch; equal tuples are duplicates.
     pub conflicts: Vec<RunBinding<'a>>,
     pub forked_from: &'a Option<String>,
+    pub parent_session: &'a Option<String>,
+    pub role: &'a Option<String>,
 }
 
 impl RunBinding<'_> {
@@ -928,6 +1004,12 @@ impl RunBinding<'_> {
         if let Some(origin) = self.forked_from {
             described.push_str(&format!(" forked-from {origin}"));
         }
+        if let Some(parent) = self.parent_session {
+            described.push_str(&format!(" parent {parent}"));
+        }
+        if let Some(role) = self.role {
+            described.push_str(&format!(" role {role}"));
+        }
         described
     }
 }
@@ -942,6 +1024,8 @@ pub fn binding_for<'a>(events: &'a [Event], dispatch_event_id: &str) -> Option<R
             executor_session,
             handle,
             forked_from,
+            parent_session,
+            role,
         } if id == dispatch_event_id => Some(RunBinding {
             event,
             executor_harness,
@@ -949,6 +1033,8 @@ pub fn binding_for<'a>(events: &'a [Event], dispatch_event_id: &str) -> Option<R
             handle,
             conflicts: Vec::new(),
             forked_from,
+            parent_session,
+            role,
         }),
         _ => None,
     });
@@ -959,6 +1045,8 @@ pub fn binding_for<'a>(events: &'a [Event], dispatch_event_id: &str) -> Option<R
                 && held.executor_session == binding.executor_session
                 && held.handle == binding.handle
                 && held.forked_from == binding.forked_from
+                && held.parent_session == binding.parent_session
+                && held.role == binding.role
         };
         if !same(&first) && !first.conflicts.iter().any(same) {
             first.conflicts.push(binding);

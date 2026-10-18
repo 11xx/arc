@@ -890,12 +890,14 @@ pub fn parse_typed_event(value: &Value) -> Result<Option<Event>> {
             executor_session,
             handle,
             forked_from,
+            parent_session,
             ..
         } if !crate::model::portable_binding(
             executor_harness,
             executor_session,
             handle,
             forked_from,
+            parent_session,
         ) =>
         {
             bail!("run binding transport refused: recording locators are not binding identities");
@@ -905,7 +907,7 @@ pub fn parse_typed_event(value: &Value) -> Result<Option<Event>> {
             executor_session,
             facts,
         } if !crate::model::plain_session_id(executor_harness)
-            || !crate::model::plain_session_id(executor_session)
+            || !crate::model::native_session_key(executor_session)
             || !facts.portable() =>
         {
             bail!("cost facts transport refused: identities, metadata, quantities and reason categories must be portable");

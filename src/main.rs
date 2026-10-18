@@ -269,6 +269,22 @@ impl From<KeptKindArg> for model::KeptKind {
     }
 }
 
+/// The role a bound executor served in, as `run bind --executor-role` spells it.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum ExecutorRoleArg {
+    Implementer,
+    Reviewer,
+}
+
+impl ExecutorRoleArg {
+    fn name(self) -> &'static str {
+        match self {
+            ExecutorRoleArg::Implementer => "implementer",
+            ExecutorRoleArg::Reviewer => "reviewer",
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Read indexed workflow topics or search instruction text without project state
@@ -4341,7 +4357,12 @@ enum RunCmd {
     /// dispatch refuses even when the supplied tuple matches one observation.
     /// Binding values carry no '/', '\\' or '~'; refusals never echo values
     /// A held binding with a locator refuses reads and retries with a fixed
-    /// diagnostic; the ledger fact is preserved
+    /// diagnostic; the ledger fact is preserved. With --parent-session the
+    /// executor is a native child of that session, a Claude subagent or a
+    /// Codex `thread_spawn` thread, and the pinned tapes reader must find
+    /// exactly one recording naming both, or the binding refuses with a fixed
+    /// reason. A delegated-agents mirror row refuses and names the
+    /// agent-delegate run it mirrors
     Bind {
         /// RunDispatched event ID being bound
         dispatch_event_id: String,
@@ -4357,6 +4378,16 @@ enum RunCmd {
         /// Session in the same harness whose history the executor began as a copy of
         #[arg(long, value_name = "SESSION")]
         forked_from: Option<String>,
+        /// The session that spawned the executor as its native child, with
+        /// --executor-session naming the child: a Claude subagent by the agent
+        /// id the Agent tool's result names (its recording is
+        /// `<parent>::<agent>`), a Codex child by its own thread id, whose
+        /// recording names this session as `parent_thread_id`
+        #[arg(long = "parent-session", value_name = "SESSION")]
+        parent_session: Option<String>,
+        /// The role the executor served in; absent reads as implementer
+        #[arg(long = "executor-role", value_enum, value_name = "ROLE")]
+        executor_role: Option<ExecutorRoleArg>,
     },
     /// Record the terminal outcome of a dispatched run, with what the round
     /// reviewed, raised, and deliberately left
@@ -4393,7 +4424,8 @@ enum RunCmd {
     /// transitions, oldest first; text names the newest as `(now <file>)`.
     /// JSON is an `arc-run-list/1` object carrying `schema` and a `runs`
     /// array. Rows carry `binding` as null or {event_id, executor_harness,
-    /// executor_session, handle, forked_from, bound_at}, with `conflicts` listing other
+    /// executor_session, handle, forked_from, parent_session, role,
+    /// bound_at}, with `conflicts` listing other
     /// distinct tuples when imports disagree. Equal tuples are harmless
     /// duplicate observations; a conflict names every distinct tuple,
     /// including fork origins. A held locator refuses the view without
@@ -4467,6 +4499,24 @@ enum CostCmd {
     /// recorded total below its requests qualifies that counter. A recorded
     /// zero price beside nonzero or unknown usage is unpriced, never a
     /// measured zero. Token arithmetic preserves integers and refuses overflow.
+    /// A native child a binding names is an executor row measured from its
+    /// own recording by its own requests, with `parent`, roles from
+    /// `--executor-role`, and its agent from its recording's served model,
+    /// else its routes. A Claude session whose recording names native
+    /// children with consumption of their own is measured by its own
+    /// requests, because its recorded total covers them; held only in the
+    /// recorded-total basis it is unmeasured (`recorded total covers its
+    /// native children`), never counted beside them. A spawn a binding
+    /// identified groups no overlap; a bound child whose recording is gone
+    /// is unmeasured (`child recording missing`). Each parent row carries
+    /// `family`: its bound child rows, every child its recording names with
+    /// its recording present or missing and an unbound child's figure, the
+    /// `unassigned` figure outside every total, and for Claude the
+    /// `reconciliation`: whether its own requests and each child's add up to
+    /// the family's identified union (`conserved`, `not-conserved` with
+    /// `differs`, `unestablished`), with the residual, the recorded total
+    /// less that union, the parent's and in no total. A delegated-agents
+    /// mirror row is never listed.
     /// A recording that starts before its session's first dispatch has
     /// pre-dispatch consumption: assignment is incomplete and work totals
     /// are withheld. An unknown opening boundary likewise withholds them;
@@ -4571,12 +4621,15 @@ enum CostCmd {
     /// with a row per accounting partition when it spans several, and with
     /// `--allocate even` the allocated total beside it; `unattributed shared`
     /// holds each session's part outside it, with a line naming each session's
-    /// reasons; one line counts the qualifications `--detail` explains.
+    /// reasons; one line counts the qualifications `--detail` explains; a
+    /// `children` line per parent of native children names its bound rows
+    /// and the unassigned figure outside the total, and a `family` line its
+    /// reconciliation and each residual counter that does not reconcile.
     /// `--detail` prints the per-category report instead. `--by` groups counted
     /// rows with one subtotal per group, never adding incompatible accounting
     /// domains. `--json` adds the table's rows, total, allocated total,
-    /// unattributed figure, qualification count, groups and price table under
-    /// `table`, each session's segments, shares, run figures and unattributed
+    /// unattributed figure, qualification count, groups, families and price
+    /// table under `table`, each session's segments, shares, run figures and unattributed
     /// parts under `sessions[].split`, allocated figures under
     /// `work[].allocated`, the price table under `prices`, and the footprint
     /// under `footprint`.
@@ -4590,9 +4643,10 @@ enum CostCmd {
     /// commits, and states that the change's figures are shared by those
     /// commits and that none is per commit. Each role trailer on the commit
     /// lists the sessions recorded for that role. `Implemented-by` lists the
-    /// sessions bound to the change's runs whose route model, effort
-    /// dropped, equals the trailer's model. `Reviewed-by` lists the
-    /// participants that acted as reviewer, and `Planned-by` and
+    /// sessions bound as implementer to the change's runs whose route model,
+    /// effort dropped, equals the trailer's model. `Reviewed-by` lists the
+    /// sessions bound as reviewer on the same terms and the participants
+    /// that acted as reviewer, and `Planned-by` and
     /// `Orchestrated-by` those that acted as orchestrator, whose declared
     /// model equals the trailer's. A matching session's figure is its whole
     /// figure, shared exactly as the change view shares it, with the change's
@@ -6797,6 +6851,8 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 executor_session,
                 handle,
                 forked_from,
+                parent_session,
+                executor_role,
             } => {
                 commands::bind_run(
                     &ctx,
@@ -6806,6 +6862,8 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                         executor_session,
                         handle,
                         forked_from,
+                        parent_session,
+                        role: executor_role.map(|role| role.name().to_string()),
                     },
                 )?;
                 Ok(0)

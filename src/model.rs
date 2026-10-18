@@ -1847,6 +1847,16 @@ pub enum Payload {
         /// Session in the executor's harness whose history it began as a copy of.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         forked_from: Option<String>,
+        /// The session that spawned the executor as its native child: a Claude
+        /// subagent's parent, whose recording holds the subagent's as
+        /// `<parent>::<agent>`, or the session another harness's child names
+        /// as its parent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_session: Option<String>,
+        /// The role the executor served in, `implementer` or `reviewer`;
+        /// absent reads as `implementer`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role: Option<String>,
     },
     /// Normalized consumption facts arc read from one executor or participant
     /// session, kept so the cost view's arithmetic replays after the source
@@ -1858,7 +1868,7 @@ pub enum Payload {
     CostFactsRetained {
         executor_harness: String,
         executor_session: String,
-        facts: CostFacts,
+        facts: Box<CostFacts>,
     },
     /// A caller told arc that a dispatched run reached a terminal outcome.
     /// `unknown` records that no more specific outcome is known.
@@ -3201,11 +3211,21 @@ pub struct CostCounterResidual {
 pub struct CostResidualSource {
     /// `parent` or `child`.
     pub role: String,
+    /// A child recording's native agent id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frontier: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub digest: Option<String>,
     pub complete: bool,
+    /// The distinct requests this recording identifies.
+    #[serde(default)]
+    pub requests: u64,
+    /// The counters of those requests, a separate observation from every
+    /// other recording's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identified: Option<CostCounters>,
 }
 
 /// Native session relations used to detect potentially overlapping recordings.
@@ -3216,6 +3236,41 @@ pub struct CostLineage {
     pub forked_from: Option<String>,
     /// Failed or bounded reads cannot establish absence of other relatives.
     pub unknown: Vec<String>,
+    /// Children whose recordings the parent's own store holds under it, such
+    /// as Claude subagents, named by native agent id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_children: Vec<CostNativeChild>,
+}
+
+/// A child recording held under its parent's, named by its native agent id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CostNativeChild {
+    pub agent: String,
+    /// The agent type the harness recorded, in its own vocabulary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// Whether the child's own recording is in the store.
+    pub resolved: bool,
+}
+
+/// The agent type the delegated-agents plugin records for a native subagent
+/// row that mirrors an agent-delegate run: it carries no consumption of its
+/// own, and the run's consumption is the delegated session's.
+pub const MIRROR_AGENT_TYPE: &str = "delegated-agents:run";
+
+impl CostNativeChild {
+    pub fn mirror(&self) -> bool {
+        self.role.as_deref() == Some(MIRROR_AGENT_TYPE)
+    }
+}
+
+/// A session key a cost read measures: a plain native id, or a native child
+/// held under its parent's recording as `<parent>::<agent>`.
+pub(crate) fn native_session_key(key: &str) -> bool {
+    match key.split_once("::") {
+        Some((parent, agent)) => plain_session_id(parent) && plain_session_id(agent),
+        None => plain_session_id(key),
+    }
 }
 
 pub(crate) fn plain_session_id(id: &str) -> bool {
@@ -3387,6 +3442,7 @@ impl CostResidual {
             && self.sources.iter().all(|source| {
                 matches!(source.role.as_str(), "parent" | "child")
                     && source.digest.as_deref().is_none_or(portable_cost_metadata)
+                    && source.agent.as_deref().is_none_or(plain_session_id)
             })
     }
 }
@@ -3400,12 +3456,14 @@ pub(crate) fn portable_binding(
     session: &str,
     handle: &Option<String>,
     origin: &Option<String>,
+    parent: &Option<String>,
 ) -> bool {
     [
         Some(harness),
         Some(session),
         handle.as_deref(),
         origin.as_deref(),
+        parent.as_deref(),
     ]
     .into_iter()
     .flatten()
@@ -3457,6 +3515,10 @@ impl CostFacts {
                         .unknown
                         .iter()
                         .all(|reason| portable_lineage_reason(reason))
+                    && lineage.native_children.iter().all(|child| {
+                        plain_session_id(&child.agent)
+                            && child.role.as_deref().is_none_or(portable_cost_metadata)
+                    })
             })
             && self.selection.as_deref().is_none_or(portable_selection)
             && self.liveness.as_deref().is_none_or(portable_liveness)
