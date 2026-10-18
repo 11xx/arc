@@ -36,7 +36,15 @@ pub fn with_deadline<T>(deadline: Option<Instant>, f: impl FnOnce() -> Result<T>
 ///
 /// Every Git subprocess arc runs is built here, so there is one answer to
 /// this rather than one per call site.
+static PROCESSES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many Git commands this process has built.
+pub fn processes() -> usize {
+    PROCESSES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn git_command() -> Command {
+    PROCESSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut command = Command::new("git");
     command.env("GIT_NO_LAZY_FETCH", "1");
     command.env("GIT_EDITOR", "true");
@@ -147,12 +155,34 @@ fn join_before_deadline<T>(
         .with_context(|| format!("git probe timed out waiting for {name}"))
 }
 
-/// The common Git directory shared by every worktree of one repository.
+/// The common Git directory shared by every worktree of one repository. A
+/// process that shares its ledger reads asks Git once per directory.
 pub fn common_dir(cwd: &Path) -> Result<PathBuf> {
+    static RESOLVED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, PathBuf>>,
+    > = std::sync::OnceLock::new();
+    let shared = crate::store::shares_reads();
+    let resolved = RESOLVED.get_or_init(Default::default);
+    if shared {
+        if let Some(dir) = resolved
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(cwd)
+        {
+            return Ok(dir.clone());
+        }
+    }
     let raw = git(cwd, &["rev-parse", "--git-common-dir"])?;
     let p = PathBuf::from(raw);
     let abs = if p.is_absolute() { p } else { cwd.join(p) };
-    Ok(std::fs::canonicalize(&abs).unwrap_or(abs))
+    let dir = std::fs::canonicalize(&abs).unwrap_or(abs);
+    if shared {
+        resolved
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(cwd.to_path_buf(), dir.clone());
+    }
+    Ok(dir)
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]

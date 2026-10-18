@@ -142,7 +142,7 @@ impl<'a> CostRead<'a> {
         for path in paths(&directory, change, &mut self.gaps) {
             let value = regular(&path)
                 .then(|| {
-                    std::fs::read(&path)
+                    crate::store::read_ledger_file(&path)
                         .ok()
                         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
                 })

@@ -216,7 +216,7 @@ impl Drop for TransitionLock {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImportBatch {
     pub schema: String,
@@ -224,6 +224,177 @@ pub struct ImportBatch {
     pub events: Vec<serde_json::Value>,
     pub repository_events: Vec<serde_json::Value>,
     pub authorization: Option<crate::import_authorization::ImportAuthorization>,
+}
+
+/// What one process reads from a ledger once and shares across every store
+/// handle it opens. A command that only reads, and never watches the ledger
+/// move, turns sharing on at start with `share_reads`. Each event file, the
+/// import batches, the privilege scope and the readable states are then read
+/// once per process. Any ledger write the process makes forgets everything
+/// shared, so a later read sees it, and a failed read is never held.
+mod shared {
+    use super::{ImportBatch, PrivilegeScope};
+    use std::collections::{BTreeMap, HashMap};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    pub(super) type RawEvents = Vec<(String, serde_json::Value)>;
+
+    static FILES: OnceLock<Mutex<HashMap<PathBuf, Arc<Vec<u8>>>>> = OnceLock::new();
+
+    static DISK_READS: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+
+    fn read_from_disk(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+        if std::env::var_os(super::READ_COUNTS_VAR).is_some() {
+            *DISK_READS
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(path.to_path_buf())
+                .or_default() += 1;
+        }
+        std::fs::read(path)
+    }
+
+    /// How often the most-read file under each directory kind was read from
+    /// disk: `repository` event files, `change` event files and `import`
+    /// batches.
+    pub(super) fn disk_reads() -> BTreeMap<&'static str, usize> {
+        let mut most = BTreeMap::new();
+        if let Some(reads) = DISK_READS.get() {
+            for (path, count) in reads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+            {
+                let path = path.to_string_lossy();
+                let kind = if path.contains("/repository/events/") {
+                    "repository"
+                } else if path.contains("/changes/") {
+                    "change"
+                } else {
+                    "import"
+                };
+                let held = most.entry(kind).or_insert(0);
+                *held = (*held).max(*count);
+            }
+        }
+        most
+    }
+
+    /// A ledger file's bytes, read once while sharing is on.
+    pub(super) fn file(path: &std::path::Path) -> std::io::Result<Arc<Vec<u8>>> {
+        if !enabled() {
+            return read_from_disk(path).map(Arc::new);
+        }
+        let files = FILES.get_or_init(Default::default);
+        if let Some(bytes) = files
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(path)
+        {
+            return Ok(Arc::clone(bytes));
+        }
+        let bytes = Arc::new(read_from_disk(path)?);
+        files
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(path.to_path_buf(), Arc::clone(&bytes));
+        Ok(bytes)
+    }
+
+    #[derive(Default)]
+    pub(super) struct Memo {
+        pub repository_files: Option<RawEvents>,
+        pub change_files: HashMap<String, (RawEvents, bool)>,
+        pub import_batches: Option<Vec<ImportBatch>>,
+        pub scope: Option<Arc<PrivilegeScope>>,
+        /// The readable states, and the warning naming each unreadable one.
+        pub states: Option<(BTreeMap<String, crate::state::ChangeState>, Vec<String>)>,
+    }
+
+    static ENABLED: AtomicBool = AtomicBool::new(false);
+    static MEMOS: OnceLock<Mutex<HashMap<PathBuf, Memo>>> = OnceLock::new();
+
+    pub fn enable() {
+        ENABLED.store(true, Ordering::Relaxed);
+    }
+
+    pub(super) fn enabled() -> bool {
+        ENABLED.load(Ordering::Relaxed)
+    }
+
+    /// Forget every shared read: the process wrote to a ledger.
+    pub(crate) fn forget() {
+        if let Some(memos) = MEMOS.get() {
+            memos
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
+        }
+        if let Some(files) = FILES.get() {
+            files
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
+        }
+    }
+
+    pub(super) fn with<T>(root: &std::path::Path, use_memo: impl FnOnce(&mut Memo) -> T) -> T {
+        let memos = MEMOS.get_or_init(Default::default);
+        let mut memos = memos
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        use_memo(memos.entry(root.to_path_buf()).or_default())
+    }
+}
+
+/// Share ledger reads across the store handles this process opens for
+/// reading. Called once, at start, by a command that only reads and never
+/// watches the ledger move.
+pub fn share_reads() {
+    shared::enable();
+}
+
+/// A ledger file's bytes, shared with every other read of it while the
+/// process shares reads.
+pub(crate) fn read_ledger_file(path: &Path) -> std::io::Result<Arc<Vec<u8>>> {
+    shared::file(path)
+}
+
+/// A ledger event file's JSON: an unreadable file fails as its I/O error, an
+/// unparseable one as malformed.
+fn event_file_value(path: &Path) -> Result<serde_json::Value> {
+    serde_json::from_slice(&read_ledger_file(path)?)
+        .with_context(|| format!("malformed event file {}", path.display()))
+}
+
+/// Names a file a process writes its ledger read counts to as it exits, for
+/// tests that bound how often one command reads the ledger.
+const READ_COUNTS_VAR: &str = "ARC_TEST_LEDGER_READS";
+
+/// Write how often the most-read ledger file of each kind was read from disk,
+/// and how many Git processes ran, to the file `ARC_TEST_LEDGER_READS` names.
+pub(crate) fn write_read_counts() {
+    let Some(path) = std::env::var_os(READ_COUNTS_VAR) else {
+        return;
+    };
+    let counts = serde_json::json!({
+        "most_reads_per_file": shared::disk_reads(),
+        "git_processes": crate::gitio::processes(),
+    });
+    let _ = std::fs::write(path, counts.to_string());
+}
+
+/// Whether this process shares its ledger reads.
+pub(crate) fn shares_reads() -> bool {
+    shared::enabled()
+}
+
+/// Forget the process's shared ledger reads after a ledger write.
+pub(crate) fn forget_shared_reads() {
+    shared::forget();
 }
 
 /// Only published JSON records participate in ledger reads.
@@ -258,7 +429,7 @@ fn import_batches_with_paths(root: &Path) -> Result<Vec<(PathBuf, ImportBatch)>>
 }
 
 pub(crate) fn read_import_batch(path: &Path) -> Result<ImportBatch> {
-    let batch: ImportBatch = serde_json::from_slice(&fs::read(path)?)
+    let batch: ImportBatch = serde_json::from_slice(&read_ledger_file(path)?)
         .with_context(|| format!("malformed import batch {}", path.display()))?;
     if batch.schema != "arc-import-batch/1" {
         bail!("unsupported import batch schema {}", batch.schema);
@@ -836,7 +1007,7 @@ impl Store {
         for id in event_file_stems(&self.repository_events_dir())? {
             include(&id)?;
         }
-        for batch in import_batches(&self.root)? {
+        for batch in self.import_batches()? {
             for event in batch.events.iter().chain(&batch.repository_events) {
                 include(
                     event["event_id"]
@@ -1063,7 +1234,7 @@ impl Store {
     pub fn list_change_ids(&self) -> Result<Vec<String>> {
         let dir = self.changes_dir();
         let mut ids_out = self.change_dir_ids(&dir)?;
-        for batch in import_batches(&self.root)? {
+        for batch in self.import_batches()? {
             ids_out.insert(batch.change_id);
         }
         Ok(ids_out.into_iter().collect())
@@ -1611,6 +1782,7 @@ impl Store {
         cfg.schema_version = introduced_in;
         let body = serde_json::to_vec_pretty(&cfg)?;
         let temporary = config_path.with_extension(format!("json.{}", ids::new_identifier()));
+        forget_shared_reads();
         fs::write(&temporary, &body)?;
         fs::rename(&temporary, &config_path)
             .with_context(|| format!("cannot stamp store format in {}", config_path.display()))
@@ -1794,14 +1966,49 @@ impl Store {
     /// `state_in` and `project_state_in`; a reader that writes between reads
     /// derives a fresh one for each.
     pub fn privilege_scope(&self) -> Result<Arc<PrivilegeScope>> {
-        Ok(Arc::new(PrivilegeScope::for_store(self)?))
+        self.shared_or(
+            |memo| &mut memo.scope,
+            || Ok(Arc::new(PrivilegeScope::for_store(self)?)),
+        )
+    }
+
+    /// Whether this handle shares the process's reads of its ledger.
+    fn shares_reads(&self) -> bool {
+        shared::enabled()
+    }
+
+    /// A shared value when this handle shares reads and one is held, else the
+    /// value `read` gives, held for later reads when it succeeds.
+    fn shared_or<T: Clone>(
+        &self,
+        held: impl Fn(&mut shared::Memo) -> &mut Option<T>,
+        read: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        if !self.shares_reads() {
+            return read();
+        }
+        if let Some(value) = shared::with(&self.root, |memo| held(memo).clone()) {
+            return Ok(value);
+        }
+        let value = read()?;
+        // A read that ran while the memo was unlocked holds the same files.
+        shared::with(&self.root, |memo| *held(memo) = Some(value.clone()));
+        Ok(value)
+    }
+
+    /// The published import batches, read once when this handle shares reads.
+    fn import_batches(&self) -> Result<Vec<ImportBatch>> {
+        self.shared_or(
+            |memo| &mut memo.import_batches,
+            || import_batches(&self.root),
+        )
     }
 
     /// Open one read of the ledger as it stands.
     pub fn read(&self) -> Result<LedgerRead<'_>> {
         Ok(LedgerRead {
             store: self,
-            batches: import_batches(&self.root)?,
+            batches: self.import_batches()?,
             scope: Default::default(),
             rewrites: Default::default(),
             repository_events: Default::default(),
@@ -1815,19 +2022,30 @@ impl Store {
     /// The scope is derived once for the whole view, so the cost of an
     /// aggregate read does not multiply by the number of changes.
     pub fn readable_states(&self) -> Result<BTreeMap<String, crate::state::ChangeState>> {
+        let (states, warnings) = self.shared_or(|memo| &mut memo.states, || self.read_states())?;
+        for warning in &warnings {
+            eprintln!("{warning}");
+        }
+        Ok(states)
+    }
+
+    /// Every readable change's state, and a warning naming each unreadable one.
+    fn read_states(&self) -> Result<(BTreeMap<String, crate::state::ChangeState>, Vec<String>)> {
         let read = self.read()?;
         read.rewrites()?;
         let mut states = BTreeMap::new();
+        let mut warnings = Vec::new();
         for change_id in read.change_ids()? {
-            let result = read.state(&change_id);
-            match result {
+            match read.state(&change_id) {
                 Ok(state) => {
                     states.insert(change_id, state);
                 }
-                Err(error) => eprintln!("warning: unreadable change {change_id}: {error:#}"),
+                Err(error) => {
+                    warnings.push(format!("warning: unreadable change {change_id}: {error:#}"))
+                }
             }
         }
-        Ok(states)
+        Ok((states, warnings))
     }
 
     /// Every history rewrite this repository recorded, flattened into one
@@ -1883,7 +2101,7 @@ impl Store {
             change_id,
             events,
             directory_present,
-            &import_batches(&self.root)?,
+            &self.import_batches()?,
             seen,
         )
     }
@@ -1891,6 +2109,27 @@ impl Store {
     /// The change's event files not in `seen`, and whether its directory
     /// exists.
     fn event_files_unseen(
+        &self,
+        change_id: &str,
+        seen: &BTreeSet<String>,
+    ) -> Result<(Vec<(String, serde_json::Value)>, bool)> {
+        if !seen.is_empty() || !self.shares_reads() {
+            return self.read_event_files(change_id, seen);
+        }
+        if let Some(held) =
+            shared::with(&self.root, |memo| memo.change_files.get(change_id).cloned())
+        {
+            return Ok(held);
+        }
+        let read = self.read_event_files(change_id, seen)?;
+        shared::with(&self.root, |memo| {
+            memo.change_files
+                .insert(change_id.to_string(), read.clone())
+        });
+        Ok(read)
+    }
+
+    fn read_event_files(
         &self,
         change_id: &str,
         seen: &BTreeSet<String>,
@@ -1918,9 +2157,7 @@ impl Store {
             if seen.contains(event_id) {
                 continue;
             }
-            let path = entry.path();
-            let value = serde_json::from_slice(&fs::read(&path)?)
-                .with_context(|| format!("malformed event file {}", path.display()))?;
+            let value = event_file_value(&entry.path())?;
             events.push((event_id.to_string(), value));
         }
         Ok((events, dir.is_dir()))
@@ -2000,9 +2237,12 @@ impl Store {
             let Some(event_id) = name.strip_suffix(".json") else {
                 continue;
             };
-            files.push((event_id.to_string(), fs::read(dir.join(&name))?));
+            files.push((
+                event_id.to_string(),
+                read_ledger_file(&dir.join(&name))?.to_vec(),
+            ));
         }
-        for batch in import_batches(&self.root)? {
+        for batch in self.import_batches()? {
             for value in batch.repository_events {
                 let id = value["event_id"]
                     .as_str()
@@ -2022,7 +2262,7 @@ impl Store {
         seen: &BTreeSet<String>,
     ) -> Result<Vec<(String, serde_json::Value)>> {
         let mut events = self.repository_event_files_unseen(seen)?;
-        for batch in import_batches(&self.root)? {
+        for batch in self.import_batches()? {
             merge_raw(&mut events, batch.repository_events, seen)?;
         }
         events.sort_by(|a, b| a.0.cmp(&b.0));
@@ -2061,6 +2301,19 @@ impl Store {
         &self,
         seen: &BTreeSet<String>,
     ) -> Result<Vec<(String, serde_json::Value)>> {
+        if seen.is_empty() {
+            return self.shared_or(
+                |memo| &mut memo.repository_files,
+                || self.read_repository_event_files(seen),
+            );
+        }
+        self.read_repository_event_files(seen)
+    }
+
+    fn read_repository_event_files(
+        &self,
+        seen: &BTreeSet<String>,
+    ) -> Result<Vec<(String, serde_json::Value)>> {
         let dir = self.repository_events_dir();
         let entries = match fs::read_dir(&dir) {
             Ok(entries) => Some(entries),
@@ -2078,8 +2331,7 @@ impl Store {
             if seen.contains(event_id) {
                 continue;
             }
-            let value: serde_json::Value = serde_json::from_slice(&fs::read(dir.join(&name))?)
-                .with_context(|| format!("malformed event file {}", dir.join(&name).display()))?;
+            let value = event_file_value(&dir.join(&name))?;
             events.push((event_id.to_string(), value));
         }
         Ok(events)
@@ -2350,6 +2602,7 @@ thread_local! {
 /// Durably publishes a new file by fsyncing its contents, hard-linking it into
 /// place, and fsyncing the containing directory.
 fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<()> {
+    forget_shared_reads();
     let file_name = path
         .file_name()
         .context("exclusive-write path has no file name")?

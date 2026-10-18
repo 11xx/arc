@@ -4788,7 +4788,11 @@ fn parse_cli() -> Result<(Cli, bool), clap::Error> {
         }
     };
     refuse_change_role_values(&matches)?;
-    let reads_only = commands::READ_ONLY_COMMANDS.contains(&command_path(&matches).as_str());
+    let path = command_path(&matches);
+    let reads_only = commands::READ_ONLY_COMMANDS.contains(&path.as_str());
+    if reads_only && commands::SHARED_READ_COMMANDS.contains(&path.as_str()) {
+        store::share_reads();
+    }
     let mut cli = Cli::from_arg_matches(&matches)?;
     if let Some(Cmd::Query { actor, harness, .. }) = cli.cmd.as_mut() {
         let query = matches.subcommand_matches("query");
@@ -4983,7 +4987,9 @@ fn main() {
             std::process::exit(error.exit_code());
         }
     };
-    match run(cli, reads_only) {
+    let result = run(cli, reads_only);
+    store::write_read_counts();
+    match result {
         Ok(code) => std::process::exit(code),
         Err(e) => {
             eprintln!("error: {e:#}");

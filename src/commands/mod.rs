@@ -126,6 +126,29 @@ pub use workspace::{
 /// one reads the ledger through a handle that never parses the invoking
 /// checkout's append policy and refuses every append, and the guide prints its
 /// list from here.
+/// Read-only commands that read the ledger once and render it: each shares
+/// one read of every ledger file, the privilege scope and the readable states
+/// across the store handles it opens. A command that follows the ledger as
+/// it moves, such as `watch` or `events`, reads afresh and is not one.
+pub(crate) const SHARED_READ_COMMANDS: &[&str] = &[
+    "status",
+    "show",
+    "explain",
+    "list",
+    "query",
+    "inbox",
+    "catchup",
+    "stats",
+    "resume",
+    "cost show",
+    "cost note",
+    "workspace inbox",
+    "workspace inventory",
+    "workspace backlog",
+    "workspace report",
+    "journal catchup",
+];
+
 pub(crate) const READ_ONLY_COMMANDS: &[&str] = &[
     "guide",
     "forge show",
@@ -1365,6 +1388,19 @@ fn hostname_or_unknown(hostname: std::io::Result<std::ffi::OsString>) -> String 
 
 #[cfg(test)]
 mod tests {
+
+    /// Claim: only read-only commands share ledger reads, and none that
+    /// follows the ledger as it moves. Rejects a shared projection a write or
+    /// a later observation could leave stale.
+    #[test]
+    fn shared_read_commands_only_read_and_never_follow() {
+        for command in SHARED_READ_COMMANDS {
+            assert!(READ_ONLY_COMMANDS.contains(command), "{command}");
+        }
+        for follower in ["watch", "events"] {
+            assert!(!SHARED_READ_COMMANDS.contains(&follower), "{follower}");
+        }
+    }
     use super::*;
 
     #[test]

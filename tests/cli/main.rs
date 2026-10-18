@@ -16,6 +16,7 @@ mod context;
 mod contribution;
 mod cost;
 mod cost_completeness;
+mod cost_replay_once;
 mod cost_report_ranges;
 mod cross_links;
 mod debt_plan;

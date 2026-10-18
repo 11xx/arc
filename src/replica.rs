@@ -1674,6 +1674,7 @@ fn create_private_dir_all(path: &Path) -> Result<()> {
 
 /// Publish one complete JSON record without replacing an existing fact.
 pub(crate) fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<()> {
+    crate::store::forget_shared_reads();
     let file_name = path
         .file_name()
         .context("replica event path has no file name")?
