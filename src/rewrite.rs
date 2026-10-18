@@ -400,11 +400,24 @@ impl RewriteMap {
         {
             return Ok(Step::Unmapped);
         }
-        let candidates: Vec<&String> = self
+        // The keys `revision` abbreviates sort together from it onwards, and
+        // the keys abbreviating it are its own prefixes; both are found by
+        // lookup, in key order, without visiting every recorded revision.
+        let mut candidates: BTreeSet<&String> = self
             .steps
-            .keys()
-            .filter(|old| old.starts_with(revision) || revision.starts_with(old.as_str()))
+            .range::<str, _>((
+                std::ops::Bound::Included(revision),
+                std::ops::Bound::Unbounded,
+            ))
+            .map(|(old, _)| old)
+            .take_while(|old| old.starts_with(revision))
             .collect();
+        candidates.extend(
+            (1..revision.len())
+                .filter_map(|length| self.steps.get_key_value(&revision[..length]))
+                .map(|(old, _)| old),
+        );
+        let candidates: Vec<&String> = candidates.into_iter().collect();
         match candidates.as_slice() {
             [] => Ok(Step::Unmapped),
             [old] => Ok(Step::Mapped {
@@ -650,6 +663,66 @@ mod tests {
             map.fate("aaaaaaaaaaaa").unwrap(),
             Some(Fate::Rewritten("cccccccccc".into()))
         );
+    }
+
+    /// Claim: a step finds exactly the recorded revisions a scan of every key
+    /// would, in both abbreviation directions, with any refusal naming them
+    /// in the same order. Rejects a lookup that misses a key the query
+    /// abbreviates or one abbreviating the query.
+    #[test]
+    fn a_step_finds_what_a_scan_of_every_key_finds() {
+        let keys = [
+            "a",
+            "ab12",
+            "ab12cd3",
+            "ab12cd34",
+            "ab12cd34ef",
+            "ab12cd35",
+            "ab13",
+            "abcdef0",
+            "abcdef01",
+            "abcdef0123",
+            "b0",
+            "ffffffff",
+        ];
+        let map = map(&keys.map(|key| (key, Some("1111111111"))));
+        let scan = |revision: &str| -> Vec<&str> {
+            keys.iter()
+                .copied()
+                .filter(|old| old.starts_with(revision) || revision.starts_with(old))
+                .collect()
+        };
+        for revision in [
+            "ab12cd3",
+            "ab12cd34",
+            "ab12cd34e",
+            "ab12cd34ef9",
+            "ab12cd3x",
+            "abcdef0",
+            "abcdef012",
+            "abcdef0123456",
+            "ffffffff00",
+            "ab12cd36",
+            "0000000",
+        ] {
+            let expected = scan(revision);
+            match map.step(revision) {
+                Ok(Step::Unmapped) => assert!(
+                    expected.is_empty()
+                        || revision.len() < ABBREVIATION_FLOOR
+                        || !revision.chars().all(|c| c.is_ascii_hexdigit()),
+                    "{revision}: {expected:?}"
+                ),
+                Ok(Step::Mapped { key, .. }) => assert!(
+                    key == revision || expected == [key.as_str()],
+                    "{revision}: {key} against {expected:?}"
+                ),
+                Err(refusal) => assert!(
+                    refusal.to_string().contains(&expected.join(", ")),
+                    "{revision}: {refusal} against {expected:?}"
+                ),
+            }
+        }
     }
 
     /// An abbreviation two recorded revisions answer names neither, and the
