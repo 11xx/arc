@@ -3507,7 +3507,9 @@ RULES THAT CHANGE WHAT YOU DO
     first item`, `between items`, `after last item` and `request time
     unrecorded`. Conservation holds per counter within the segments'
     accounting basis: the item shares and the unattributed part add up to the
-    session's whole figure in that basis. A recorded total no span divides,
+    session's whole figure in that basis. Where tapes' segment figures do not,
+    as a Codex counter reset can leave them, the split names each counter that
+    does not conserve under `conservation`. A recorded total no span divides,
     such as a Claude cost-state or an OpenCode session row, stays whole in its
     own basis on the session row while the shares take the request basis tapes
     reads spans in, and the unattributed part then names `recorded total not

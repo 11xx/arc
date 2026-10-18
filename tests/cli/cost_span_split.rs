@@ -248,6 +248,7 @@ fn assert_conserves(row: &Value) {
         amount(&split["whole"], "disjoint", "total").is_some(),
         "{row}"
     );
+    assert_eq!(split["conservation"]["status"], "conserved", "{row}");
     let parts: Vec<&Value> = split["shares"]
         .as_array()
         .unwrap()

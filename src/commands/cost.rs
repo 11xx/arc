@@ -4273,7 +4273,20 @@ fn split_json(row: &SessionRow, table: Option<&agent_tapes_core::pricing::PriceT
     json!({"status": "divided", "basis": spans.whole.as_ref().and_then(|whole| whole.basis.clone()),
         "segments": segments, "shares": shares, "runs": runs,
         "unattributed": unattributed, "unattributed_parts": parts, "whole": whole,
-        "statement": "the shares and the unattributed part add up to the whole in the segments' basis, per counter"})
+        "conservation": conservation(row, spans),
+        "statement": "the shares and the unattributed part add up to the whole in the segments' basis, per counter, unless conservation names a counter they do not"})
+}
+
+/// Whether the segment figures add up to the whole, and the counters where
+/// they do not.
+fn conservation(row: &SessionRow, spans: &CostSpans) -> Value {
+    let differs = row
+        .measured
+        .facts
+        .as_ref()
+        .map(|facts| span::unconserved(facts, spans))
+        .unwrap_or_default();
+    json!({"status": if differs.is_empty() { "conserved" } else { "not-conserved" }, "differs": differs})
 }
 
 fn session_json(row: &SessionRow, table: Option<&agent_tapes_core::pricing::PriceTable>) -> Value {
@@ -4699,6 +4712,13 @@ fn write_split(out: &mut String, split: &Value) {
                     .as_str()
                     .unwrap_or("accounting basis unknown")
             );
+            if split["conservation"]["status"] == "not-conserved" {
+                emit!(
+                    out,
+                    "    the segments do not add up to the whole in: {}",
+                    role_names(&split["conservation"]["differs"])
+                );
+            }
             for share in split["shares"].as_array().into_iter().flatten() {
                 let label = format!("share of {}", share["work"].as_str().unwrap_or_default());
                 write_totals(out, "      ", &label, &share["totals"]);

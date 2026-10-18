@@ -4482,7 +4482,9 @@ enum CostCmd {
     /// and a request with no recorded time are unattributed, with the reasons
     /// `overlap`, `before first item`, `between items`, `after last item` and
     /// `request time unrecorded`. The shares and the unattributed part add up
-    /// to the whole in the segments' accounting basis, per counter. A recorded
+    /// to the whole in the segments' accounting basis, per counter, and the
+    /// split names under `conservation` any counter whose segment figures do
+    /// not, as a Codex counter reset can leave them. A recorded
     /// total no span divides stays whole in its own basis on the session row,
     /// and the unattributed part names `recorded total not splittable`. A
     /// session that cannot be divided (`span reading unsupported`,

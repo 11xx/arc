@@ -368,6 +368,51 @@ fn counter_mut<'a>(
     }
 }
 
+/// The counters and disjoint categories the segments and the remainder do
+/// not add up to the whole in, where both are measured. tapes' span figures
+/// conserve; a figure that restarts its counters inside the recording, as a
+/// Codex counter reset does, can leave them apart.
+pub(super) fn unconserved(session: &CostFacts, spans: &crate::model::CostSpans) -> Vec<String> {
+    let Some(whole) = spans.whole.as_deref() else {
+        return Vec::new();
+    };
+    let parts: Vec<Part<'_>> = spans
+        .segments
+        .iter()
+        .map(|segment| (&*segment.facts, segment.requests))
+        .chain(
+            spans
+                .remainder
+                .as_deref()
+                .map(|remainder| (remainder, spans.remainder_requests)),
+        )
+        .collect();
+    let sum = sum_facts(session, whole, &parts);
+    let mut differs: Vec<String> = CATEGORIES
+        .into_iter()
+        .filter(|category| {
+            let pair = (
+                super::counter(&sum.counters, category),
+                super::counter(&whole.counters, category),
+            );
+            matches!(pair, (Some(held), Some(total)) if held != total)
+        })
+        .map(str::to_string)
+        .collect();
+    if let (Some(held), Some(total)) = (&sum.disjoint, &whole.disjoint) {
+        for category in ["uncached_input", "cache_read", "cache_write", "output"] {
+            let pair = (
+                super::disjoint_amount(held, category),
+                super::disjoint_amount(total, category),
+            );
+            if matches!(pair, (Some(held), Some(total)) if held != total) {
+                differs.push(format!("disjoint {category}"));
+            }
+        }
+    }
+    differs
+}
+
 /// The `index`th of `shares` even shares of a figure. Tokens stay whole: each
 /// share is the quotient, and the first shares take one token each of the
 /// remainder, so the shares add up to the figure.
@@ -449,6 +494,38 @@ mod tests {
         for pair in cut.windows(2) {
             assert_eq!(pair[0].to, pair[1].from);
         }
+    }
+
+    fn facts(input: u64) -> CostFacts {
+        serde_json::from_value(serde_json::json!({
+            "reader": "r", "calculation": "c", "frontier": 0, "counters": {"input": input},
+        }))
+        .unwrap()
+    }
+
+    // Claim: a split whose segment figures exceed the whole, as a counter
+    // reset leaves them, names the counter that does not conserve, and one
+    // whose figures add up names none. Rejects reporting conservation the
+    // figures do not show.
+    #[test]
+    fn a_split_names_the_counters_its_segments_do_not_conserve() {
+        let segment = |input: u64| CostSegment {
+            from: None,
+            to: None,
+            work: Vec::new(),
+            runs: Vec::new(),
+            requests: 1,
+            facts: Box::new(facts(input)),
+        };
+        let spans = |whole: u64| crate::model::CostSpans {
+            unsplit: None,
+            segments: vec![segment(3), segment(4)],
+            remainder: None,
+            remainder_requests: 0,
+            whole: Some(Box::new(facts(whole))),
+        };
+        assert_eq!(unconserved(&facts(7), &spans(7)), Vec::<String>::new());
+        assert_eq!(unconserved(&facts(5), &spans(5)), vec!["input".to_string()]);
     }
 
     #[test]
