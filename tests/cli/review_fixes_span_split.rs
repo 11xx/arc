@@ -466,3 +466,105 @@ fn one_model_at_two_efforts_in_a_segment_prices_both() {
         "{priced} != {expected}: {list:#}"
     );
 }
+
+/// A Codex rollout whose cumulative token count restarts between requests,
+/// as a Codex counter reset writes it: each `token_count` carries the
+/// running `total_token_usage` and that request's `last_token_usage`.
+fn codex_rollout(repo: &Repo, id: &str, requests: &[(&str, u64, u64)]) {
+    let path = repo
+        .home
+        .join(".codex/sessions/2026/01/01")
+        .join(format!("rollout-2026-01-01T09-00-00-{id}.jsonl"));
+    let usage = |input: u64| json!({"input_tokens": input, "cached_input_tokens": 0, "output_tokens": 10, "reasoning_output_tokens": 0, "total_tokens": input + 10});
+    let mut lines = vec![
+        json!({"timestamp": at("09:00:00"), "type": "session_meta", "payload": {"id": id, "session_id": id, "timestamp": at("09:00:00"), "cwd": "/fixture/project", "model_provider": "fixture"}}),
+        json!({"timestamp": at("09:00:01"), "type": "turn_context", "payload": {"cwd": "/fixture/project", "model": "fixture-model", "effort": "high"}}),
+    ];
+    for (clock, total, last) in requests {
+        lines.push(json!({"timestamp": at(clock), "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Done."}]}}));
+        lines.push(json!({"timestamp": at(clock), "type": "event_msg", "payload": {"type": "token_count", "info": {
+            "total_token_usage": usage(*total), "last_token_usage": usage(*last), "model_context_window": 100000}, "rate_limits": null}}));
+    }
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let body: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    fs::write(path, body).unwrap();
+}
+
+/// Claim: a Codex executor divided by three runs, whose cumulative counter
+/// restarts during the last one, conserves: its shares and unattributed part
+/// add up to its whole per counter, in the summed-requests basis. Rejects
+/// span figures that difference cumulative totals across a restart and leave
+/// the parts far from the whole.
+#[test]
+fn a_codex_split_across_a_counter_restart_conserves() {
+    let repo = Repo::new();
+    let codex = "019a0000-0000-7000-8000-0000000001c0";
+    codex_rollout(
+        &repo,
+        codex,
+        &[
+            ("10:05:00", 100, 100),
+            ("10:25:00", 300, 200),
+            ("10:45:00", 50, 50),
+            ("10:50:00", 120, 70),
+        ],
+    );
+    let mut runs = Vec::new();
+    for (change, start, end) in [
+        ("codex-one", "08:59:00", "10:10:00"),
+        ("codex-two", "10:20:00", "10:30:00"),
+        ("codex-three", "10:40:00", "10:55:00"),
+    ] {
+        let mut anonymous = repo.arc(&repo.root);
+        anonymous
+            .env_remove("ARC_HARNESS")
+            .env_remove("ARC_SESSION");
+        let dispatch = event_id(&stdout(anonymous.args([
+            "run",
+            "dispatch",
+            "--route",
+            "fixture-route",
+            "--worktree",
+            "/work/run",
+            "--change",
+            change,
+        ])));
+        retime(&repo, &dispatch, &at(start));
+        stdout(repo.arc(&repo.root).args([
+            "run",
+            "bind",
+            &dispatch,
+            "--executor-harness",
+            "codex",
+            "--executor-session",
+            codex,
+        ]));
+        let ended = event_id(&stdout(repo.arc(&repo.root).args([
+            "run",
+            "end",
+            &dispatch,
+            "--outcome",
+            "completed",
+        ])));
+        retime(&repo, &ended, &at(end));
+        runs.push(change);
+    }
+    let view = report(&repo, &runs);
+    let row = session(&view, &format!("codex:{codex}"));
+    let split = &row["split"];
+    assert_eq!(split["status"], "divided", "{split:#}");
+    assert_eq!(split["basis"], "summed-requests", "{split:#}");
+    assert_eq!(split["conservation"]["status"], "conserved", "{split:#}");
+    let input = |totals: &Value| amount(totals, "native", "input");
+    let shares: u64 = split["shares"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|share| input(&share["totals"]).unwrap_or_else(|| panic!("{share:#}")))
+        .sum();
+    let outside = split["unattributed"]["totals"]
+        .as_object()
+        .map_or(0, |_| input(&split["unattributed"]["totals"]).unwrap_or(0));
+    assert_eq!(Some(shares + outside), input(&split["whole"]), "{split:#}");
+    assert_eq!(shares + outside, 420, "every request once: {split:#}");
+}
