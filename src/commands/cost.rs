@@ -396,7 +396,7 @@ impl SessionRow {
         // lead's route names what it asked for, the recording what served.
         if self.parent.is_some() {
             if let Some(coordinate) = recording {
-                self.agent = Some((coordinate, "recording"));
+                self.agent = Some((on_harness(&self.harness, coordinate), "recording"));
                 return;
             }
         }
@@ -414,7 +414,8 @@ impl SessionRow {
                     .as_ref()
                     .and_then(|facts| facts.served_model.clone())
                     .map(|coordinate| (coordinate, "recording"))
-            });
+            })
+            .map(|(coordinate, source)| (on_harness(&self.harness, coordinate), source));
     }
 
     /// `harness:model#effort`, or the harness alone when no model is
@@ -1743,10 +1744,18 @@ fn assign(ctx: &Ctx, selection: &mut Selection, events: &[Event]) -> Assigned {
             .map(|binding| format!("{}:{}", binding.executor_harness, session_of(binding)))
             .collect();
         if selected.contains(&work) {
+            let harnesses: BTreeSet<&String> = readable
+                .iter()
+                .map(|binding| binding.executor_harness)
+                .collect();
             let model = match &round.dispatch.payload {
                 Payload::RunDispatched { route, .. } => model_of(route),
                 _ => None,
-            };
+            }
+            .map(|model| match harnesses.first() {
+                Some(harness) if harnesses.len() == 1 => on_harness(harness, model),
+                _ => model,
+            });
             runs.entry(work.clone()).or_default().push(AssignedRun {
                 dispatch_event_id: round.dispatch.event_id.clone(),
                 model,
@@ -3430,6 +3439,19 @@ fn route_coordinate(route: &str) -> Option<String> {
     portable_coordinate(head).then(|| head.to_string())
 }
 
+/// A coordinate as read under the harness that ran it: a route or a declared
+/// model may carry that harness as a prefix, `claude:claude-opus-5-5#medium`,
+/// which a `harness:model#effort` label already names once.
+fn on_harness(harness: &str, coordinate: String) -> String {
+    match coordinate
+        .strip_prefix(harness)
+        .and_then(|rest| rest.strip_prefix(':'))
+    {
+        Some(rest) if !rest.is_empty() => rest.to_string(),
+        _ => coordinate,
+    }
+}
+
 /// The model of a `model[#effort]` coordinate, without its effort.
 fn model_of(coordinate: &str) -> Option<String> {
     let model = coordinate.split('#').next().unwrap_or(coordinate).trim();
@@ -3537,6 +3559,7 @@ fn read_ledger(
             .map(|key| (key, true))
             .chain(subject.map(|key| (key, false)));
         for (key, own) in named {
+            let harness = key.0.clone();
             let person = ledger.people.entry(key).or_default();
             if own {
                 person
@@ -3567,6 +3590,7 @@ fn read_ledger(
                 person.acts = true;
                 person.roles.insert(role);
                 if let Some(model) = event.model.as_deref().and_then(model_of).filter(|_| own) {
+                    let model = on_harness(&harness, model);
                     person.models.entry(role).or_default().insert(model);
                 }
             }

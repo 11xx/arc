@@ -4658,7 +4658,8 @@ enum CostCmd {
     /// (`harness:model#effort`, from the bound dispatches' routes, else the
     /// session's own event models, else the model its recording says served
     /// it, effort unnamed when it served several; the harness alone when none
-    /// establishes one), roles (impl, review,
+    /// establishes one; a coordinate that carries the row's harness as a
+    /// prefix names it once), roles (impl, review,
     /// orch, integ), the shortest unique session id prefix of at least eight
     /// characters, runs, spans, the disjoint token total, the money columns,
     /// and a status (`complete`, `subtotal`, `split ×N`, `shared ×N`, `live`,
@@ -4696,7 +4697,8 @@ enum CostCmd {
     /// commits and that none is per commit. Each role trailer on the commit
     /// lists the sessions recorded for that role. `Implemented-by` lists the
     /// sessions bound as implementer to the change's runs whose route model,
-    /// effort dropped, equals the trailer's model. `Reviewed-by` lists the
+    /// effort and a prefix naming the executor's harness dropped, equals the
+    /// trailer's model. `Reviewed-by` lists the
     /// sessions bound as reviewer on the same terms and the participants
     /// that acted as reviewer, and `Planned-by` and
     /// `Orchestrated-by` those that acted as orchestrator, whose declared
