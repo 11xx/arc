@@ -49,7 +49,7 @@ fn ledger(count: usize) -> Repo {
 }
 
 /// Run `arc catchup` with `args` and return its read counts and output.
-fn counted(repo: &Repo, args: &[&str]) -> (Value, String) {
+pub(crate) fn counted(repo: &Repo, args: &[&str]) -> (Value, String) {
     let counts = repo.home.join("catchup-reads.json");
     let output = stdout(
         repo.arc(&repo.root)

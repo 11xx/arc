@@ -114,6 +114,9 @@ impl DebtSummary {
     }
 
     fn touching<'a>(&'a self, ctx: &Ctx, state: &ChangeState) -> Vec<&'a DebtEntry> {
+        if self.entries.is_empty() {
+            return Vec::new();
+        }
         let changed = change_surfaces(ctx, state);
         if changed.is_empty() {
             return Vec::new();
@@ -129,6 +132,18 @@ impl DebtSummary {
                     .any(|surface| changed.contains(surface))
             })
             .collect()
+    }
+
+    /// Read, in one batch, the paths each of `states` touches, for the
+    /// `render_touched` calls a listing makes for each of them.
+    fn prefetch_touched<'a>(&self, ctx: &Ctx, states: impl Iterator<Item = &'a ChangeState>) {
+        if self.entries.is_empty() {
+            return;
+        }
+        let ranges: Vec<_> = states
+            .filter_map(|state| change_range(ctx, state))
+            .collect();
+        crate::gitio::listing::prefetch_changed_paths(&ctx.cwd, &ranges);
     }
 
     pub(crate) fn render_touched(&self, ctx: &Ctx, state: &ChangeState) {
@@ -289,18 +304,24 @@ fn debt_range<'a>(
         })
 }
 
-fn change_surfaces(ctx: &Ctx, state: &ChangeState) -> BTreeSet<String> {
-    let Some(head) = crate::gitio::branch_head(&ctx.cwd, &state.branch)
+/// The range whose diff is the paths a change touches: its base to its branch
+/// head, else to its latest patchset's head.
+fn change_range(ctx: &Ctx, state: &ChangeState) -> Option<(String, String)> {
+    let head = crate::gitio::branch_head(&ctx.cwd, &state.branch)
         .ok()
         .or_else(|| {
             state
                 .latest_patchset()
                 .map(|patchset| patchset.head.clone())
-        })
-    else {
+        })?;
+    Some((state.base.clone(), head))
+}
+
+fn change_surfaces(ctx: &Ctx, state: &ChangeState) -> BTreeSet<String> {
+    let Some((base, head)) = change_range(ctx, state) else {
         return BTreeSet::new();
     };
-    crate::gitio::changed_paths(&ctx.cwd, &state.base, &head)
+    crate::gitio::changed_paths(&ctx.cwd, &base, &head)
         .unwrap_or_default()
         .into_iter()
         .collect()
@@ -1173,6 +1194,15 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
     crate::replica::render_status(&replica);
     let mut any = false;
     let mut rendered_debt_details = BTreeSet::new();
+    debts.prefetch_touched(
+        ctx,
+        inbox
+            .sections()
+            .into_iter()
+            .filter(|(name, _)| *name != "debt-owed")
+            .flat_map(|(_, rows)| rows.iter().take(limit))
+            .filter_map(|row| states.get(&row.change_id)),
+    );
     for (name, rows) in inbox.sections() {
         // Owed audits are rendered below as one summary, while touched debts
         // are attached to the change whose diff can carry them forward.
