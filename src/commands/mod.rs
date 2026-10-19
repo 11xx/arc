@@ -103,7 +103,9 @@ pub use replica::{
     reclaim as replica_reclaim, status as replica_status,
 };
 pub use rescue::rescue;
-pub use review::{comment, finding, keep, read_review, reply, resolve, review, ReviewArgs};
+pub use review::{
+    comment, finding, keep, read_review, reply, resolve, review, review_start, ReviewArgs,
+};
 pub use rewrite::{
     instructions_git, sign as rewrite_sign, trailers as rewrite_trailers, SignArgs, TrailerArgs,
 };

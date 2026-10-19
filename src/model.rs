@@ -1237,6 +1237,12 @@ pub enum Payload {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         cites: Vec<String>,
     },
+    /// A reviewer began reading the change, so its share of the reviewer's
+    /// session runs from here to its last event on the change.
+    ReviewStarted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        patchset_id: Option<String>,
+    },
     CommentAdded {
         body: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -2469,6 +2475,7 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         | Payload::ClaimReleased { .. }
         | Payload::ContextKept { .. }
         | Payload::CommentAdded { .. }
+        | Payload::ReviewStarted { .. }
         | Payload::ReplyAdded { .. }
         | Payload::HoldReleased { .. }
         | Payload::ForgeObservationRecorded { .. }

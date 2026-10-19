@@ -206,6 +206,7 @@ impl Role {
 fn role_of(payload: &Payload) -> Option<Role> {
     match payload {
         Payload::PatchsetAdded { .. }
+        | Payload::ReviewStarted { .. }
         | Payload::VerdictRecorded { .. }
         | Payload::ExternalVerdictRecorded { .. }
         | Payload::AuditVerdictRecorded { .. } => Some(Role::Reviewer),

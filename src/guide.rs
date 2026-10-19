@@ -3521,7 +3521,10 @@ RULES THAT CHANGE WHAT YOU DO
     session's own ledger records, never from proximity: an executor's span is
     each bound run, from its dispatch to its recorded `run end`, open to the
     read frontier while it has none; a participant's span on a work item runs
-    from its first to its last ledger event there, both inclusive. A session
+    from its first to its last ledger event there, both inclusive. Any event
+    its own session records counts, so a reviewer opens its span with `arc
+    review <change> --start` before it reads, as a claim its session records
+    also does, and the span then runs to its verdict. A session
     with several spans is cut at every span boundary into disjoint segments,
     read in one pass through tapes' span reader, so no request is counted
     twice. A segment one work item alone covers is that item's share. A

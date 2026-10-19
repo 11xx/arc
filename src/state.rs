@@ -2451,6 +2451,9 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 actor: ev.actor.clone(),
                 created_at: ev.created_at,
             }),
+            // A review start bounds a reviewer's span in a cost view and
+            // changes no state.
+            Payload::ReviewStarted { .. } => {}
             Payload::CommentAdded {
                 body,
                 patchset_id,

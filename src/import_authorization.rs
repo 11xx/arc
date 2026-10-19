@@ -175,6 +175,7 @@ pub fn required_roles(payload: &Payload) -> Option<Vec<Vec<Role>>> {
         | StageSet { .. }
         | ContextKept { .. }
         | CommentAdded { .. }
+        | ReviewStarted { .. }
         | FindingAdded { .. }
         | ReplyAdded { .. }
         | AuditFindingAdded { .. }

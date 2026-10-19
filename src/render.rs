@@ -2249,6 +2249,10 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             }
         }
         Payload::CommentAdded { body, .. } => ("comment-added", first_line(body)),
+        Payload::ReviewStarted { patchset_id } => (
+            "review-started",
+            patchset_id.clone().unwrap_or_default(),
+        ),
         Payload::FindingAdded {
             finding_id,
             severity,

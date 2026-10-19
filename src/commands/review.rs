@@ -968,6 +968,19 @@ fn validate_citations(store: &Store, change_id: &str, cites: Vec<String>) -> Res
     Ok(recorded)
 }
 
+/// Record that this session began reviewing a change, on the patchset it
+/// reads: the start of its span on the change in a cost view.
+pub fn review_start(ctx: &Ctx, reference: &str, patchset: Option<String>) -> Result<()> {
+    let store = ctx.store()?;
+    let (change_id, st) = ctx.load_state(&store, reference)?;
+    let patchset_id = resolve_patchset_id(&st, patchset)?;
+    let mut ev = ctx.event(&store, &change_id, Payload::ReviewStarted { patchset_id })?;
+    store.append_local_event(&mut ev)?;
+    println!("review started: {change_id}");
+    println!("event: {}", ev.event_id);
+    Ok(())
+}
+
 pub fn comment(
     ctx: &Ctx,
     reference: &str,

@@ -1801,6 +1801,12 @@ enum Cmd {
         /// The conclusion recorded
         #[arg(long, value_enum)]
         verdict: Option<Verdict>,
+        /// Record that this session began reviewing the change, on
+        /// `--patchset` or the latest, before or after integration. A cost
+        /// view counts the reviewer's session toward the change from this
+        /// start to its last event on the change
+        #[arg(long, conflicts_with_all = ["verdict", "json", "snapshot", "findings_json", "provisional"])]
+        start: bool,
         /// Emit the read view as a versioned JSON object
         #[arg(long, conflicts_with = "verdict")]
         json: bool,
@@ -4533,7 +4539,9 @@ enum CostCmd {
     /// records, never from proximity: an executor's span is each bound run,
     /// from its dispatch to its recorded `run end`, open to the read frontier
     /// while it has none; a participant's span on a work item runs from its
-    /// first to its last ledger event there, both inclusive. A session with
+    /// first to its last ledger event there, both inclusive; a review start
+    /// (`arc review --start`) or a claim its own session records opens it. A
+    /// session with
     /// several spans is cut at every span boundary into disjoint segments, read
     /// in one pass, so no request counts twice. A segment one item alone covers
     /// is that item's share; a segment several items cover, one none covers,
@@ -4830,6 +4838,7 @@ fn role_refusal(role: ExecutionRole, command: &Cmd) -> Option<(&'static str, &'s
             Cmd::Review {
                 verdict: Some(_), ..
             } => Some(("review", "reviewer or lead")),
+            Cmd::Review { start: true, .. } => Some(("review start", "reviewer or lead")),
             Cmd::External { .. } => Some(("external verdict", "reviewer or lead")),
             Cmd::Resolve { .. } => Some(("resolve", "reviewer or lead")),
             Cmd::Hold { .. } => Some(("hold", "reviewer or lead")),
@@ -6125,6 +6134,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
         Cmd::Review {
             change,
             verdict,
+            start,
             relation,
             json,
             body,
@@ -6138,7 +6148,9 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             route_version,
         } => {
             let change = infer(change.as_deref())?;
-            if let Some(verdict) = verdict {
+            if start {
+                commands::review_start(&ctx, &change, patchset)?;
+            } else if let Some(verdict) = verdict {
                 let body = match (&body.body, &body.body_file) {
                     (None, None) => None,
                     _ => Some(commands::read_body(body.body, body.body_file)?),
