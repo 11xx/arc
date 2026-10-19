@@ -3016,6 +3016,36 @@ pub struct CostSpans {
     /// The whole session in the segments' accounting basis.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub whole: Option<Box<CostFacts>>,
+    /// How a participant's unattributed segments were estimated, when the
+    /// read estimated them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate: Option<CostEstimate>,
+}
+
+/// The working-stretch estimate of a participant's unattributed segments:
+/// its basis, the idle gap that cuts a stretch, and why no part was
+/// estimated when none was.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CostEstimate {
+    pub basis: String,
+    pub idle_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withheld: Option<String>,
+}
+
+/// One part of an unattributed segment, cut by the participant's working
+/// stretches and its own events in them, and the item the estimate gives
+/// it: none for a stretch without an event of the participant.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CostEstimatePart {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work: Option<String>,
+    pub requests: u64,
+    pub facts: Box<CostFacts>,
 }
 
 /// One segment `[from, to)` of a session's timeline, the work items and runs
@@ -3035,6 +3065,11 @@ pub struct CostSegment {
     /// Counted requests the segment holds.
     pub requests: u64,
     pub facts: Box<CostFacts>,
+    /// For a segment no single item covers in a participant's read, the
+    /// parts the working-stretch estimate cuts it into, which together hold
+    /// every timed request the segment holds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub estimates: Vec<CostEstimatePart>,
 }
 
 /// What defines a segment: its bounds, covering work items and runs.
@@ -3064,9 +3099,22 @@ impl CostSpans {
                     .chain(&segment.runs)
                     .all(|label| portable_cost_metadata(label) && !label.is_empty())
                     && segment.facts.portable()
+                    && segment.estimates.iter().all(|part| {
+                        part.work
+                            .as_deref()
+                            .is_none_or(|label| portable_cost_metadata(label) && !label.is_empty())
+                            && part.facts.portable()
+                    })
             })
             && self.remainder.as_deref().is_none_or(CostFacts::portable)
             && self.whole.as_deref().is_none_or(CostFacts::portable)
+            && self.estimate.as_ref().is_none_or(|estimate| {
+                estimate.basis == "working-stretch"
+                    && estimate
+                        .withheld
+                        .as_deref()
+                        .is_none_or(portable_cost_metadata)
+            })
     }
 }
 

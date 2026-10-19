@@ -269,9 +269,27 @@ pub(super) fn table_text(report: &Value) -> String {
     }
     rows.push(figure_row("total".to_string(), &table["total"], priced));
     rows.extend(partition_rows("total", &table["total"], priced));
+    if table["estimated"].is_object() {
+        rows.push(figure_row(
+            format!(
+                "total with estimates (working stretches, idle {})",
+                table["estimated"]["estimate"]["idle"]
+                    .as_str()
+                    .unwrap_or_default()
+            ),
+            &table["estimated"],
+            priced,
+        ));
+        rows.extend(partition_rows("estimated", &table["estimated"], priced));
+    }
     if table["allocated"].is_object() {
         rows.push(figure_row(
-            "total allocated even".to_string(),
+            format!(
+                "total allocated {}",
+                table["allocated"]["allocation"]
+                    .as_str()
+                    .unwrap_or_default()
+            ),
             &table["allocated"],
             priced,
         ));

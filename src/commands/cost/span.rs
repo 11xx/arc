@@ -86,6 +86,23 @@ impl Segment {
     }
 }
 
+/// How a session with several spans is read: its segments, and for a
+/// participant, its own events on each item, which its working-stretch
+/// estimate is cut by.
+#[derive(Clone, Default)]
+pub(super) struct Plan {
+    pub segments: Vec<Segment>,
+    pub events: Vec<(Instant, WorkKey)>,
+}
+
+impl std::ops::Deref for Plan {
+    type Target = [Segment];
+
+    fn deref(&self) -> &[Segment] {
+        &self.segments
+    }
+}
+
 /// The session's timeline cut at every boundary of its spans: the segment
 /// before the first boundary, one between each pair, and the one after the
 /// last, each with the spans covering all of it.
@@ -114,6 +131,104 @@ pub(super) fn segments(spans: &[ItemSpan]) -> Vec<Segment> {
             }
         })
         .collect()
+}
+
+/// The working-stretch estimate's basis, as figures name it.
+pub(super) const ESTIMATE_BASIS: &str = "working-stretch";
+/// Why a participant's read estimated nothing: its reader keeps no request
+/// timeline for it.
+pub(super) const TIMELINE_UNAVAILABLE: &str = "request timeline unavailable";
+
+/// One part `[from, to)` of a segment no item covers, as a participant's
+/// working stretches and its own events in them cut it, and the item the
+/// estimate gives it: none for a stretch with no event of the participant.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Window {
+    pub segment: usize,
+    pub from: Option<Instant>,
+    pub to: Option<Instant>,
+    pub work: Option<WorkKey>,
+}
+
+/// The later of two starts, an absent one being the timeline's beginning.
+fn later(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, None) | (None, a) => a,
+    }
+}
+
+/// The earlier of two ends, an absent one being the timeline's end.
+fn earlier(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, None) | (None, a) => a,
+    }
+}
+
+fn nonempty(from: Option<Instant>, to: Option<Instant>) -> bool {
+    from.zip(to).is_none_or(|(from, to)| from < to)
+}
+
+/// The estimate parts of every segment no item covers. Working stretch `i`
+/// holds the requests from its first stamp, `starts[i]`, to the next
+/// stretch's, the first from the timeline's beginning and the last to its
+/// end, as tapes places requests in stretches, and the participant's events
+/// in that window are the stretch's. Within a stretch, the requests up to
+/// and including an event serve that event's item, and those after its last
+/// event serve the same item; a stretch with no event serves none. A
+/// segment several items cover is left to its evidence.
+pub(super) fn estimate_windows(
+    segments: &[Segment],
+    starts: &[Instant],
+    events: &[(Instant, WorkKey)],
+) -> Vec<Window> {
+    let mut pieces: Vec<(Option<Instant>, Option<Instant>, Option<WorkKey>)> = Vec::new();
+    for index in 0..starts.len() {
+        let from = (index > 0).then(|| starts[index]);
+        let to = starts.get(index + 1).copied();
+        let mut inside: Vec<&(Instant, WorkKey)> = events
+            .iter()
+            .filter(|(at, _)| from.is_none_or(|from| *at >= from) && to.is_none_or(|to| *at < to))
+            .collect();
+        inside.sort_by_key(|(at, _)| *at);
+        let Some((_, last)) = inside.last() else {
+            pieces.push((from, to, None));
+            continue;
+        };
+        let mut cursor = from;
+        for (at, work) in &inside {
+            let cut = Some(*at + chrono::Duration::nanoseconds(1));
+            pieces.push((cursor, cut, Some(work.clone())));
+            cursor = cut;
+        }
+        pieces.push((cursor, to, Some(last.clone())));
+    }
+    let mut windows: Vec<Window> = Vec::new();
+    for (index, segment) in segments.iter().enumerate() {
+        if !segment.work.is_empty() {
+            continue;
+        }
+        for (from, to, work) in &pieces {
+            let from = later(segment.from, *from);
+            let to = earlier(segment.to, *to);
+            if !nonempty(from, to) {
+                continue;
+            }
+            match windows.last_mut() {
+                Some(last) if last.segment == index && &last.work == work && last.to == from => {
+                    last.to = to;
+                }
+                _ => windows.push(Window {
+                    segment: index,
+                    from,
+                    to,
+                    work: work.clone(),
+                }),
+            }
+        }
+    }
+    windows
 }
 
 /// Why a segment is no single item's, or `None` when one item covers it.
@@ -527,6 +642,60 @@ mod tests {
         .unwrap()
     }
 
+    // Claim: a participant's events cut the segments no item covers within
+    // each working stretch: requests up to an event serve its item, those
+    // after a stretch's last event serve the same item, a stretch with no
+    // event serves none, and a segment one item covers is not cut. Rejects
+    // an estimate that crosses an idle gap or touches measured segments.
+    #[test]
+    fn working_stretches_and_events_cut_the_uncovered_segments() {
+        let change = |name: &str| WorkKey::Change(name.to_string());
+        let plain = segments(&[
+            ItemSpan::events(change("a"), at(20), at(20)),
+            ItemSpan::events(change("b"), at(50), at(50)),
+        ]);
+        let events = vec![(at(20), change("a")), (at(50), change("b"))];
+        let nanosecond = chrono::Duration::nanoseconds(1);
+        // One stretch from 10:00, and another from 10:40 with no event of its
+        // own before the second verdict at 10:50.
+        let windows = estimate_windows(&plain, &[at(0), at(40)], &events);
+        let cut: Vec<(Option<Instant>, Option<Instant>, Option<String>)> = windows
+            .iter()
+            .map(|window| {
+                (
+                    window.from,
+                    window.to,
+                    window.work.as_ref().map(WorkKey::label),
+                )
+            })
+            .collect();
+        assert_eq!(
+            cut,
+            vec![
+                (None, Some(at(20)), Some("change:a".to_string())),
+                (
+                    Some(at(20) + nanosecond),
+                    Some(at(40)),
+                    Some("change:a".to_string())
+                ),
+                (Some(at(40)), Some(at(50)), Some("change:b".to_string())),
+                (
+                    Some(at(50) + nanosecond),
+                    None,
+                    Some("change:b".to_string())
+                ),
+            ]
+        );
+        assert!(windows
+            .iter()
+            .all(|window| plain[window.segment].work.is_empty()));
+        // A stretch with no event of the participant serves no item.
+        let windows = estimate_windows(&plain, &[at(0), at(30), at(45)], &events);
+        assert!(windows.iter().any(|window| window.from == Some(at(30))
+            && window.to == Some(at(45))
+            && window.work.is_none()));
+    }
+
     // Claim: a split whose segment figures exceed the whole, as a counter
     // reset leaves them, names the counter that does not conserve, and one
     // whose figures add up names none. Rejects reporting conservation the
@@ -540,6 +709,7 @@ mod tests {
             runs: Vec::new(),
             requests: 1,
             facts: Box::new(facts(input)),
+            estimates: Vec::new(),
         };
         let spans = |whole: u64| crate::model::CostSpans {
             unsplit: None,
@@ -547,6 +717,7 @@ mod tests {
             remainder: None,
             remainder_requests: 0,
             whole: Some(Box::new(facts(whole))),
+            estimate: None,
         };
         assert!(conservation(&facts(7), &spans(7)).differs.is_empty());
         assert_eq!(

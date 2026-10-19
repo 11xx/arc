@@ -3559,8 +3559,30 @@ RULES THAT CHANGE WHAT YOU DO
     withholds as above. `--allocate even`
     divides each segment several items cover evenly among them, tokens kept
     whole with the first items in order taking one token each of the
-    remainder. Every allocated figure is labelled `allocated` beside the
-    conserving one and never replaces it, and allocation is never the default.
+    remainder. `--allocate following` gives what remains unattributed
+    between two items, after a participant's estimated parts, to the next
+    item. Every allocated figure is labelled `allocated`, with its
+    `allocation` method, beside the conserving one and never replaces it,
+    and allocation is never the default.
+    A participant's segments no item covers are estimated from its working
+    stretches, read from the same transcript pass as its spans: its
+    activity cut wherever the gap between two stamps exceeds `--idle`
+    (default `45m`, as `tapes stats` reads active time). Within a stretch,
+    the requests up to and including one of the participant's own events
+    serve that event's item, those after the stretch's last event serve the
+    same item, and a stretch with no event of the participant stays
+    unattributed; a segment several items cover keeps to its evidence.
+    Estimates never apply to an executor, whose run spans are exact. Each
+    estimated part is labelled `estimated` with its basis
+    (`working-stretch`) and idle gap, and never enters the measured figure:
+    `sessions[].split.estimate` holds each item's estimated share, what stays
+    unattributed, and whether the measured shares, the estimated shares and
+    that remainder add up to the whole. Every figure a participant's
+    estimate touches carries the figure with estimates beside the measured
+    one, under `work[].estimated` and `union.estimated`, and the table adds
+    a `total with estimates` row. A read past the request timeline's bound
+    estimates nothing and names tapes' reason, as does a reader that keeps
+    no timeline (`request timeline unavailable`).
     Lineage relatives are plain session ids. A non-id reference makes
     identity unknown with a fixed reason; arc does not parse a recording path
     to infer an id. Lineage is read from the whole recording, as usage is,
@@ -3697,7 +3719,8 @@ RULES THAT CHANGE WHAT YOU DO
     one the harness-written estimate alone, and a footer line says how to
     install a table. Footer rows hold the total, which is the union figure
     with its status and a row per accounting partition when it spans several;
-    with `--allocate even`, the allocated total beside it; the `unattributed
+    the `total with estimates` row when a participant's estimate touches it;
+    with `--allocate`, the allocated total beside it; the `unattributed
     shared` row with everything of each session outside the total, its
     unattributed part and its shares of items the view does not select
     (`unselected item`), and one line per session naming its reasons; and a line counting the qualifications

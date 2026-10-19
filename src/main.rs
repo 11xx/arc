@@ -4447,6 +4447,8 @@ enum RunCmd {
     },
 }
 
+// Parsed once per process, so the size of its largest variant costs nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum CostCmd {
     /// Report the work cost of a change, or of a journal artifact with its
@@ -4563,8 +4565,17 @@ enum CostCmd {
     /// items' shares, even one holding all of its work, so its unattributed
     /// part is never charged to a selection. A divided session's consumption
     /// before its first span is unattributed and withholds no share. `--allocate even` divides each segment several items cover evenly
-    /// among them, labelled `allocated` beside the conserving figure;
-    /// allocation is never the default.
+    /// among them, and `--allocate following` gives what remains between two
+    /// items to the next, labelled `allocated` beside the conserving figure;
+    /// allocation is never the default. A participant's segments no item
+    /// covers are estimated by its working stretches at `--idle` (default
+    /// 45m): requests up to its own event serve that event's item, those
+    /// after a stretch's last event serve the same item, and a stretch with
+    /// no event of it stays unattributed. Estimates never apply to an
+    /// executor; each is labelled `estimated` with basis `working-stretch`
+    /// and its idle gap under `sessions[].split.estimate`, and figures carry
+    /// the figure with estimates beside the measured one under
+    /// `work[].estimated` and `union.estimated`.
     /// Lineage relatives are plain session ids, read from the whole
     /// recording. Unresolved locators and lineage notes make identity
     /// unknown; reasons are fixed categories.
@@ -4640,8 +4651,9 @@ enum CostCmd {
     /// the list-price estimate, then the harness-written estimate; without one
     /// the harness-written estimate alone, and a footer line says how to
     /// install a table. The `total` row is the union figure with its status,
-    /// with a row per accounting partition when it spans several, and with
-    /// `--allocate even` the allocated total beside it; `unattributed shared`
+    /// with a row per accounting partition when it spans several, the
+    /// `total with estimates` row when a participant's estimate touches it,
+    /// and with `--allocate` the allocated total beside it; `unattributed shared`
     /// holds everything of each session outside it, its unattributed part and
     /// its shares of unselected items (`unselected item`), with a line naming
     /// each session's reasons; one line counts the qualifications `--detail` explains; a
@@ -4728,12 +4740,21 @@ enum CostCmd {
         #[arg(long, value_delimiter = ',', conflicts_with = "commit",
             value_parser = clap::builder::PossibleValuesParser::new(commands::COST_GROUPINGS))]
         by: Vec<String>,
-        /// Divide requests in overlapping spans evenly among the overlapping
-        /// work items. Each allocated figure is labelled `allocated` beside the
+        /// Allocate what no single item holds beside the conserving figures:
+        /// `even` divides requests in overlapping spans evenly among the
+        /// overlapping work items; `following` gives what remains between
+        /// items, after a participant's estimated parts, to the next item.
+        /// Each allocated figure is labelled `allocated` beside the
         /// conserving one, which leaves those requests unattributed
         #[arg(long, value_name = "METHOD", conflicts_with = "commit",
-            value_parser = clap::builder::PossibleValuesParser::new(["even"]))]
+            value_parser = clap::builder::PossibleValuesParser::new(["even", "following"]))]
         allocate: Option<String>,
+        /// The idle gap that ends a participant's working stretch, such as
+        /// `45m`, `15m` or `2h`; a participant's requests no item's span holds
+        /// are estimated stretch by stretch
+        #[arg(long, value_name = "DURATION", conflicts_with = "commit",
+            value_parser = parse_idle)]
+        idle: Option<u64>,
         /// A `tapes-price-table/1` file to price every figure with; else the
         /// file `TAPES_PRICES` names, else `$XDG_CONFIG_HOME/tapes/prices.toml`
         #[arg(long, value_name = "FILE")]
@@ -4926,6 +4947,27 @@ fn cli_command() -> clap::Command {
 ///
 /// Whether the command is read-only is answered here, from the complete
 /// subcommand path, so the table the guide prints is the one dispatch obeys.
+/// A positive whole number of seconds, minutes or hours, `90s`, `45m` or
+/// `2h`, in milliseconds.
+fn parse_idle(value: &str) -> std::result::Result<u64, String> {
+    let refuse = || format!("{value:?} is not a duration such as 90s, 45m or 2h");
+    let (number, unit) = value.split_at(value.len().checked_sub(1).ok_or_else(refuse)?);
+    let number: u64 = number
+        .parse()
+        .ok()
+        .filter(|number| *number > 0)
+        .ok_or_else(refuse)?;
+    let seconds = match unit {
+        "s" => Some(number),
+        "m" => number.checked_mul(60),
+        "h" => number.checked_mul(3600),
+        _ => None,
+    }
+    .and_then(|seconds| seconds.checked_mul(1000))
+    .ok_or_else(refuse)?;
+    Ok(seconds)
+}
+
 fn parse_cli() -> Result<(Cli, bool), clap::Error> {
     let matches = match cli_command().try_get_matches() {
         Ok(matches) => matches,
@@ -6952,6 +6994,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 all,
                 by,
                 allocate,
+                idle,
                 prices,
                 detail,
                 commit,
@@ -6972,7 +7015,10 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                         until: instant(until)?,
                         all,
                         by,
-                        allocate_even: allocate.is_some(),
+                        allocation: allocate
+                            .as_deref()
+                            .and_then(commands::CostAllocation::parse),
+                        idle,
                         prices,
                     };
                     commands::show_cost(&ctx, &query, json, detail).map(|_| 0)
