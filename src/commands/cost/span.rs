@@ -305,41 +305,6 @@ pub(super) fn sum_facts(session: &CostFacts, basis: &CostFacts, parts: &[Part<'_
             .collect();
         sum_disjoint(convention, &held)
     });
-    let models: BTreeSet<&String> = parts
-        .iter()
-        .flat_map(|(part, _)| part.by_model.iter().map(|share| &share.model))
-        .collect();
-    facts.by_model = match convention {
-        Some(convention) => models
-            .into_iter()
-            .map(|model| {
-                // A part with no share of the model consumed none of it; a
-                // part whose facts keep a share per effort, as another
-                // calculation retained them, adds every one of them.
-                let held: Vec<(Option<&CostDisjoint>, u64)> = parts
-                    .iter()
-                    .flat_map(|(part, requests)| {
-                        let shares: Vec<(Option<&CostDisjoint>, u64)> = part
-                            .by_model
-                            .iter()
-                            .filter(|share| &share.model == model)
-                            .map(|share| (Some(&share.disjoint), *requests))
-                            .collect();
-                        if shares.is_empty() {
-                            vec![(None, 0)]
-                        } else {
-                            shares
-                        }
-                    })
-                    .collect();
-                CostModelShare {
-                    model: model.clone(),
-                    disjoint: sum_disjoint(convention.clone(), &held),
-                }
-            })
-            .collect(),
-        None => Vec::new(),
-    };
     let mut gaps: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (part, requests) in parts {
         for (name, reasons) in part.quantity_gaps.iter().flatten() {
@@ -401,6 +366,59 @@ pub(super) fn sum_facts(session: &CostFacts, basis: &CostFacts, parts: &[Part<'_
             _ => None,
         };
     }
+    // Where the parts name several models, a part one model served whole
+    // is that model's share.
+    let shares: Vec<Vec<(String, &CostDisjoint)>> = parts
+        .iter()
+        .map(|(part, _)| {
+            if !part.by_model.is_empty() {
+                return part
+                    .by_model
+                    .iter()
+                    .map(|share| (share.model.clone(), &share.disjoint))
+                    .collect();
+            }
+            part.served_model
+                .as_deref()
+                .filter(|_| facts.served_model.is_none())
+                .and_then(super::model_of)
+                .zip(part.disjoint.as_ref())
+                .into_iter()
+                .collect()
+        })
+        .collect();
+    let models: BTreeSet<&String> = shares.iter().flatten().map(|(model, _)| model).collect();
+    facts.by_model = match convention {
+        Some(convention) => models
+            .into_iter()
+            .map(|model| {
+                // A part with no share of the model consumed none of it; a
+                // part whose facts keep a share per effort, as another
+                // calculation retained them, adds every one of them.
+                let held: Vec<(Option<&CostDisjoint>, u64)> = parts
+                    .iter()
+                    .zip(&shares)
+                    .flat_map(|((_, requests), shares)| {
+                        let shares: Vec<(Option<&CostDisjoint>, u64)> = shares
+                            .iter()
+                            .filter(|(held, _)| held == model)
+                            .map(|(_, disjoint)| (Some(*disjoint), *requests))
+                            .collect();
+                        if shares.is_empty() {
+                            vec![(None, 0)]
+                        } else {
+                            shares
+                        }
+                    })
+                    .collect();
+                CostModelShare {
+                    model: model.clone(),
+                    disjoint: sum_disjoint(convention.clone(), &held),
+                }
+            })
+            .collect(),
+        None => Vec::new(),
+    };
     // A part that holds no request measured nothing to qualify.
     for (part, _) in parts.iter().filter(|(_, requests)| *requests > 0) {
         for reason in &part.incomplete {

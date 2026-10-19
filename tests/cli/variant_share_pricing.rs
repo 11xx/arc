@@ -342,3 +342,49 @@ fn an_effort_share_without_request_times_stays_a_range() {
         "{list:#}"
     );
 }
+
+/// Claim: a figure added up from a divided session's segments, its part no
+/// item holds, prices each model by its own requests where one segment
+/// was one model's at two efforts and another a second model's alone: two
+/// `fixture-model` requests and one `other-model` request, all at peak,
+/// are a complete 4.0, and the session's shares and that part add up to
+/// its whole. Rejects leaving a segment's sole model out of the summed
+/// figure's models, which prices it as no model's or leaves its requests
+/// unattributed.
+#[test]
+fn a_summed_figure_prices_each_segments_model() {
+    let repo = Repo::new();
+    pi_session(
+        &repo,
+        &[
+            ("fixture-model", "high", Some("10:00:00")),
+            ("fixture-model", "max", Some("10:10:00")),
+            ("fixture-model", "max", Some("10:45:00")),
+            ("other-model", "max", Some("12:00:00")),
+            ("other-model", "max", Some("13:30:00")),
+        ],
+    );
+    let first = opened_change(&repo, "first");
+    let second = opened_change(&repo, "second");
+    run(&repo, &first, "10:30:00", "11:00:00");
+    run(&repo, &second, "13:00:00", "14:00:00");
+    let row = session_row(&repo, &[&first, &second]);
+
+    let unattributed = quantity(&row["split"]["unattributed"]["totals"]);
+    assert_eq!(unattributed["status"], "complete", "{unattributed:#}");
+    close(&unattributed["amount"], 2.0 * PEAK + OTHER, &unattributed);
+    let whole = quantity(&row["totals"]);
+    assert_eq!(whole["status"], "complete", "{whole:#}");
+    close(&whole["amount"], 3.0 * PEAK + 2.0 * OTHER, &whole);
+    let shares: f64 = row["split"]["shares"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no shares: {row:#}"))
+        .iter()
+        .map(|share| {
+            let list = quantity(&share["totals"]);
+            assert_eq!(list["status"], "complete", "{list:#}");
+            list["amount"].as_f64().unwrap()
+        })
+        .sum();
+    close(&json!(shares), PEAK + OTHER, &row);
+}

@@ -3474,7 +3474,8 @@ RULES THAT CHANGE WHAT YOU DO
     uses the table rows of the one model the recording says served the
     figure, or each model's rows where the recording splits it by model,
     through tapes' pricing; a model served at several efforts is one share,
-    priced over every request it served. A `/2` row's terms set by the request, a
+    priced over every request it served, and a figure added up from a
+    divided session's segments holds each segment's models. A `/2` row's terms set by the request, a
     long-context rate above a prompt size for the billing it applies to,
     time-of-day rates and a validity window, are priced request by request
     over the requests a fresh read kept, a Pi figure's on every branch its

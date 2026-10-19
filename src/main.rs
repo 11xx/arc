@@ -4477,8 +4477,9 @@ enum CostCmd {
     /// estimate prices the disjoint categories by a `tapes-price-table/1` or
     /// `/2` table (`--prices`, else `TAPES_PRICES`, else
     /// `$XDG_CONFIG_HOME/tapes/prices.toml`) and the row of the model that
-    /// served them, a model's efforts priced together, never retained and
-    /// absent with a reason when no table, model or row prices it. A `/2` row's long-context, time-of-day and
+    /// served them, a model's efforts priced together and a figure added up
+    /// from segments by each segment's models, never retained and absent
+    /// with a reason when no table, model or row prices it. A `/2` row's long-context, time-of-day and
     /// validity terms are priced request by request from a fresh read, under
     /// the billing its recording establishes; retained facts hold no
     /// requests, so a term they could pay leaves a known subtotal. A price
