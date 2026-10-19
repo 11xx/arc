@@ -3388,6 +3388,9 @@ pub(crate) fn portable_quantity_reason(reason: &str) -> bool {
             | "recorded cost kind is unsupported"
             | "the price table has no row for the model that served the usage"
             | "some cache writes recorded no TTL"
+            | "a price term set by the request may apply to requests the figure does not hold one by one"
+            | "the recording does not establish whether a long-context surcharge was billed"
+            | "no price row was in effect at the request's time"
     )
 }
 

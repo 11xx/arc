@@ -2647,6 +2647,13 @@ fn arc_reason(reason: MeasurementReason) -> &'static str {
         MeasurementReason::UnrecognizedUsage => "some records carrying usage were not read",
         MeasurementReason::UnlistedModel => UNLISTED_MODEL,
         MeasurementReason::TtlUnrecorded => TTL_UNRECORDED,
+        MeasurementReason::RequestTermsUnknown => {
+            "a price term set by the request may apply to requests the figure does not hold one by one"
+        }
+        MeasurementReason::BillingUnestablished => {
+            "the recording does not establish whether a long-context surcharge was billed"
+        }
+        MeasurementReason::OutsideValidity => "no price row was in effect at the request's time",
     }
 }
 
