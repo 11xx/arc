@@ -1291,13 +1291,20 @@ impl CostQuery {
     }
 }
 
-/// A `harness:id` footprint selector, split at its first colon.
+/// A `harness:id` footprint selector, split at its first colon. The id is a
+/// session id, or a native child's `<parent>::<agent>` key.
 fn footprint_key(raw: &str) -> Result<(String, String)> {
+    let plain_or_child = |session: &str| match session.split_once("::") {
+        Some((parent, agent)) => plain_session_id(parent) && plain_session_id(agent),
+        None => plain_session_id(session),
+    };
     match raw.split_once(':') {
-        Some((harness, session)) if plain_session_id(harness) && plain_session_id(session) => {
+        Some((harness, session)) if plain_session_id(harness) && plain_or_child(session) => {
             Ok((harness.to_string(), session.to_string()))
         }
-        _ => bail!("--footprint takes harness:session, such as claude:<session id>"),
+        _ => bail!(
+            "--footprint takes harness:session, such as claude:<session id>, or a native child's claude:<parent>::<agent>"
+        ),
     }
 }
 
@@ -1321,6 +1328,7 @@ fn range_targets(
         event.harness.as_deref() == Some(harness.as_str())
             && event.session.as_deref() == Some(session.as_str())
     };
+    let mut child_bound = false;
     for round in rounds(events) {
         let subject = match &round.subject {
             Some(RunSubject::Change { id }) => id.clone(),
@@ -1338,12 +1346,29 @@ fn range_targets(
                     std::iter::once(binding)
                         .chain(&binding.conflicts)
                         .any(|binding| {
-                            binding.executor_harness == &key.0 && binding.executor_session == &key.1
+                            let session = match binding.parent_session {
+                                Some(parent) => super::native_child::child_key(
+                                    binding.executor_harness,
+                                    parent,
+                                    binding.executor_session,
+                                ),
+                                None => binding.executor_session.clone(),
+                            };
+                            binding.executor_harness == &key.0 && session == key.1
                         })
                 })
         });
+        child_bound |= bound;
         if windowed_in || bound {
             targets.push(subject);
+        }
+    }
+    if let Some((harness, session)) = footprint
+        .as_ref()
+        .filter(|(_, session)| session.contains("::"))
+    {
+        if !child_bound {
+            bail!("--footprint {harness}:{session} names a native child no binding records");
         }
     }
     for id in &ids {

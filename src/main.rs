@@ -4693,7 +4693,9 @@ enum CostCmd {
         #[arg(long, conflicts_with = "commit")]
         tag: Vec<String>,
         /// Every change and journal item the session `harness:id` was bound
-        /// to or acted on, with that session's whole figure beside them
+        /// to or acted on, with that session's whole figure beside them. A
+        /// native child is `claude:<parent>::<agent>`, selecting the work its
+        /// bindings name; a child key no binding records is refused
         #[arg(long, value_name = "HARNESS:ID", conflicts_with = "commit")]
         footprint: Option<String>,
         /// Every change with a ledger event at or after this journal stamp

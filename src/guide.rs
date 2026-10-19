@@ -3671,7 +3671,9 @@ RULES THAT CHANGE WHAT YOU DO
     required, selects each change carrying it as `begin --tag` and `arc meta
     --tag` record it. `--footprint <harness:id>` selects each change and
     journal item that session was bound to, dispatched or acted on, and
-    shows its whole figure beside them. `--since` and `--until` select each
+    shows its whole figure beside them. A native child is named by its
+    measured key, `claude:<parent>::<agent>`, and selects the work its
+    bindings name; a child key no binding records is refused. `--since` and `--until` select each
     change with a ledger event, or a run dispatched or ended for it, in the
     window; the window selects work items only, and a session is divided by
     its spans, never by the window's edges. `--all` selects every change in this ledger. Each selected
