@@ -2562,7 +2562,7 @@ fn append_policy_has_a_single_authority() {
         "lifecycle.rs::list::.filter(|state|!open_only||!state.is_closed())",
         "lifecycle.rs::list_row::\"state\":ifstate.is_closed(){\"closed\"}else{\"open\"},",
         "lifecycle.rs::status_matches::\"closed\"=>state.is_closed(),",
-        "messaging.rs::collect_inbox::ifstate.is_closed(){",
+        "messaging.rs::collect_inbox_with_reports::ifstate.is_closed(){",
         "mod.rs::find_unblocked_changes::&&!candidate.is_closed()",
         "stats.rs::change_stats::state:ifstate.is_closed(){\"closed\"}else{\"open\"},",
         "workspace.rs::restack::.filter(|candidate|!candidate.is_closed()&&candidate.blocked_by.contains(&change_id))",

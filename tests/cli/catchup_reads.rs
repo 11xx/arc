@@ -1,6 +1,6 @@
 //! `catchup` reads what it renders once: each journal's event log is read
-//! and parsed once, and the Git processes it runs do not grow with the
-//! number of changes. Counts come from the file `ARC_TEST_LEDGER_READS`
+//! and parsed once, each open change's status report is built once, and the
+//! Git processes it runs do not grow with the number of changes. Counts come from the file `ARC_TEST_LEDGER_READS`
 //! names, which arc writes as it exits.
 
 use super::common::*;
@@ -98,5 +98,18 @@ fn catchup_git_processes_do_not_grow_with_the_ledger() {
             small, large,
             "catchup {args:?}: {small} Git processes for 3 changes, {large} for 6"
         );
+    }
+}
+
+/// Claim: `catchup`, in text and JSON, builds one status report per open
+/// change. Rejects the text view building a listed change's report again to
+/// print its review subject.
+#[test]
+fn catchup_builds_each_open_change_status_once() {
+    let repo = ledger(3);
+    for args in [&[][..], &["--json"][..]] {
+        let (counts, output) = counted(&repo, args);
+        assert_eq!(counts["status_reports"], 2, "catchup {args:?}: {counts}");
+        assert!(output.contains("open-1"), "{output}");
     }
 }

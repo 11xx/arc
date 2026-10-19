@@ -690,7 +690,21 @@ pub(crate) fn collect_inbox(
     store: &crate::store::Store,
     assigned_to: Option<&str>,
 ) -> Result<crate::inbox::Inbox> {
+    Ok(collect_inbox_with_reports(ctx, store, assigned_to)?.0)
+}
+
+/// The inbox, with the status report each open change was classified by,
+/// keyed by change id.
+fn collect_inbox_with_reports(
+    ctx: &Ctx,
+    store: &crate::store::Store,
+    assigned_to: Option<&str>,
+) -> Result<(
+    crate::inbox::Inbox,
+    BTreeMap<String, crate::status::StatusReport>,
+)> {
     let states = store.readable_states()?;
+    let mut reports = BTreeMap::new();
     let filter = assigned_to.map(str::trim).filter(|f| !f.is_empty());
     let mut inbox = crate::inbox::Inbox::new(filter.map(str::to_string));
     let wanted = |state: &&ChangeState| {
@@ -710,10 +724,11 @@ pub(crate) fn collect_inbox(
         }
         let report = ctx.report_with_states(state, &states)?;
         inbox.absorb(state, &report);
+        reports.insert(state.change_id.clone(), report);
     }
     inbox.sort_by_priority();
     inbox.deferred = open_deferrals(store);
-    Ok(inbox)
+    Ok((inbox, reports))
 }
 
 /// Deferrals delegated rounds left open, as inbox rows. A deferral binds to
@@ -1119,7 +1134,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
     });
     let store = ctx.store()?;
     let replica = crate::replica::status(&store)?;
-    let mut inbox = collect_inbox(ctx, &store, None)?;
+    let (mut inbox, reports) = collect_inbox_with_reports(ctx, &store, None)?;
     if let Ok(unowned) = crate::context::unowned_surface(ctx) {
         inbox.absorb_unowned(unowned);
     }
@@ -1216,15 +1231,11 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
         println!("{name} ({}):", rows.len());
         for row in rows.iter().take(limit) {
             println!("  {}  {} → {}", row.change_id, row.title, row.next_actor);
-            if let Some(state) = states.get(&row.change_id) {
-                if let Some(line) = ctx
-                    .report(&store, state)?
-                    .review_subject
-                    .as_ref()
-                    .map(crate::render::review_subject_detail)
-                {
-                    println!("    {line}");
-                }
+            if let Some(line) = reports
+                .get(&row.change_id)
+                .and_then(crate::render::review_subject_line)
+            {
+                println!("    {line}");
             }
             if rendered_debt_details.insert(row.change_id.clone()) {
                 if let Some(state) = states.get(&row.change_id) {
