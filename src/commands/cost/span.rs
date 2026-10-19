@@ -314,8 +314,8 @@ pub(super) fn sum_facts(session: &CostFacts, basis: &CostFacts, parts: &[Part<'_
             .into_iter()
             .map(|model| {
                 // A part with no share of the model consumed none of it; a
-                // part that served it at several efforts holds a share for
-                // each, and every one of them adds.
+                // part whose facts keep a share per effort, as another
+                // calculation retained them, adds every one of them.
                 let held: Vec<(Option<&CostDisjoint>, u64)> = parts
                     .iter()
                     .flat_map(|(part, requests)| {
@@ -413,7 +413,7 @@ pub(super) fn sum_facts(session: &CostFacts, basis: &CostFacts, parts: &[Part<'_
 }
 
 /// Disjoint categories added up, each with the requests its part holds.
-fn sum_disjoint(
+pub(super) fn sum_disjoint(
     convention: CostConvention,
     parts: &[(Option<&CostDisjoint>, u64)],
 ) -> CostDisjoint {

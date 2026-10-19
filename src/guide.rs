@@ -3473,7 +3473,8 @@ RULES THAT CHANGE WHAT YOU DO
     `$XDG_CONFIG_HOME/tapes/prices.toml` (`~/.config/tapes/prices.toml`). It
     uses the table rows of the one model the recording says served the
     figure, or each model's rows where the recording splits it by model,
-    through tapes' pricing. A `/2` row's terms set by the request, a
+    through tapes' pricing; a model served at several efforts is one share,
+    priced over every request it served. A `/2` row's terms set by the request, a
     long-context rate above a prompt size for the billing it applies to,
     time-of-day rates and a validity window, are priced request by request
     over the requests a fresh read kept, a Pi figure's on every branch its
@@ -3726,7 +3727,8 @@ RULES THAT CHANGE WHAT YOU DO
     Text output is a table, one row per session: its agent
     (`harness:model#effort`, from the bound dispatches' routes when each
     names one coordinate, else the models its own events carry, else the one
-    model its recording says served it; the harness alone when none
+    model its recording says served it, effort unnamed when it served
+    several; the harness alone when none
     establishes a single model), roles (impl, review, orch, integ), the
     shortest session id prefix of at least eight characters no other row
     shares, runs and spans, the disjoint token total, the money columns, and a
@@ -3771,8 +3773,8 @@ RULES THAT CHANGE WHAT YOU DO
     identity, the Claude residual, and any harness-written dollar figure
     with its pricing coverage, plus lineage relations, read failures
     as fixed categories, the one model the recording says served the
-    session when it names one, each model's disjoint categories where it names
-    several, the segments a session with several spans was read in, each with
+    session when it names one, each model's disjoint categories, its efforts
+    added together, where it names several, the segments a session with several spans was read in, each with
     its bounds, covering work items and runs, request count and facts, the
     remainder and the whole in the segments' basis, and the liveness
     agent-status answered then (`live`, `ended` or `unknown`). A list-price

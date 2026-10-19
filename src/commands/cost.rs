@@ -49,7 +49,7 @@ pub const TAPES_READER: &str = env!("ARC_TAPES_READER");
 
 /// How arc normalizes a reader's usage answer into retained facts. It moves
 /// when that normalization does, so facts from an older one stay identifiable.
-pub const COST_CALCULATION: &str = "usage-normalization 6";
+pub const COST_CALCULATION: &str = "usage-normalization 7";
 
 const USD_KIND: &str = "harness-calculated-estimate";
 const TOKEN_KIND: &str = "resource-quantity";
@@ -2729,9 +2729,9 @@ fn is_absence(reason: MeasurementReason) -> bool {
 /// typed answer for the figure measured; the only prose arc still counts is
 /// the reader's `--latest` selection warnings, which no typed field carries.
 /// The one model the recording says served the session, if it names one.
-/// It names one in its per-model split, or, with no split, in the model
-/// selections it observed, or in the session's model when it observed no
-/// mix of models.
+/// It names one in its per-model split, its effort unnamed when the split
+/// names several, or, with no split, in the model selections it observed,
+/// or in the session's model when it observed no mix of models.
 fn served_model(view: &agent_tapes_core::usage::UsageView) -> Option<String> {
     let coordinate = |model: &str, variant: Option<&String>| match variant {
         Some(variant) => format!("{model}#{variant}"),
@@ -2740,6 +2740,9 @@ fn served_model(view: &agent_tapes_core::usage::UsageView) -> Option<String> {
     let session = &view.session;
     let coordinate = match view.by_model.as_deref().unwrap_or_default() {
         [model] => coordinate(&model.model, model.variant.as_ref()),
+        [first, rest @ ..] if rest.iter().all(|model| model.model == first.model) => {
+            first.model.clone()
+        }
         // One model selected at several efforts is that model, effort unnamed.
         [] if !session.model_selections.is_empty() => {
             let selections = &session.model_selections;
@@ -3006,8 +3009,10 @@ fn cost_disjoint(disjoint: &agent_tapes_core::model::DisjointTokens) -> Option<C
     })
 }
 
-/// Each model's disjoint categories, where the recording names several
-/// models; one model is `served_model`.
+/// Each model's disjoint categories, its efforts added together, where the
+/// recording names several models; one model is `served_model`. A share is
+/// priced by the requests that model served, which a recording keeps by
+/// model but not always by effort, so it holds every effort's tokens.
 fn by_model(
     view: &agent_tapes_core::usage::UsageView,
     harness: &str,
@@ -3016,21 +3021,34 @@ fn by_model(
     let Some(convention) = agent_tapes_core::model::TokenConvention::of(harness) else {
         return Vec::new();
     };
-    if models.len() < 2 {
+    let ids: BTreeSet<&str> = models.iter().map(|model| model.model.as_str()).collect();
+    if ids.len() < 2 {
         return Vec::new();
     }
-    models
+    let mut efforts: BTreeMap<&str, Vec<CostDisjoint>> = BTreeMap::new();
+    for model in models
         .iter()
         .filter(|model| portable_coordinate(&model.model))
-        .filter_map(|model| {
-            let tokens = model.tokens.as_ref()?;
-            let disjoint =
-                agent_tapes_core::model::DisjointTokens::from_native(tokens, convention, None)
-                    .with_completeness(&model.measurement_completeness);
-            Some(crate::model::CostModelShare {
-                model: model.model.clone(),
-                disjoint: cost_disjoint(&disjoint)?,
-            })
+    {
+        let Some(tokens) = model.tokens.as_ref() else {
+            continue;
+        };
+        let disjoint =
+            agent_tapes_core::model::DisjointTokens::from_native(tokens, convention, None)
+                .with_completeness(&model.measurement_completeness);
+        if let Some(disjoint) = cost_disjoint(&disjoint) {
+            efforts.entry(&model.model).or_default().push(disjoint);
+        }
+    }
+    efforts
+        .into_iter()
+        .map(|(model, efforts)| {
+            let held: Vec<(Option<&CostDisjoint>, u64)> =
+                efforts.iter().map(|effort| (Some(effort), 1)).collect();
+            crate::model::CostModelShare {
+                model: model.to_string(),
+                disjoint: span::sum_disjoint(efforts[0].convention.clone(), &held),
+            }
         })
         .collect()
 }

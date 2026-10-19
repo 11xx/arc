@@ -4477,8 +4477,8 @@ enum CostCmd {
     /// estimate prices the disjoint categories by a `tapes-price-table/1` or
     /// `/2` table (`--prices`, else `TAPES_PRICES`, else
     /// `$XDG_CONFIG_HOME/tapes/prices.toml`) and the row of the model that
-    /// served them, never retained and absent with a reason when no table,
-    /// model or row prices it. A `/2` row's long-context, time-of-day and
+    /// served them, a model's efforts priced together, never retained and
+    /// absent with a reason when no table, model or row prices it. A `/2` row's long-context, time-of-day and
     /// validity terms are priced request by request from a fresh read, under
     /// the billing its recording establishes; retained facts hold no
     /// requests, so a term they could pay leaves a known subtotal. A price
@@ -4649,7 +4649,8 @@ enum CostCmd {
     /// Text output is a table with one row per session: agent
     /// (`harness:model#effort`, from the bound dispatches' routes, else the
     /// session's own event models, else the model its recording says served
-    /// it; the harness alone when none establishes one), roles (impl, review,
+    /// it, effort unnamed when it served several; the harness alone when none
+    /// establishes one), roles (impl, review,
     /// orch, integ), the shortest unique session id prefix of at least eight
     /// characters, runs, spans, the disjoint token total, the money columns,
     /// and a status (`complete`, `subtotal`, `split ×N`, `shared ×N`, `live`,
@@ -4791,7 +4792,8 @@ enum CostCmd {
     /// any harness-written dollar figure with its pricing coverage, plus
     /// lineage relations, read failures as fixed categories, the one model the
     /// recording says served the session when it names one, each model's
-    /// disjoint categories where it names several, the segments a session
+    /// disjoint categories, its efforts added together, where it names
+    /// several, the segments a session
     /// with several spans was read in (bounds, covering work items and runs,
     /// request count and facts, with the remainder and the whole in the
     /// segments' basis), and the liveness
