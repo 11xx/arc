@@ -3276,11 +3276,25 @@ fn lineage_groups(sessions: &[SessionRow]) -> Vec<BTreeSet<String>> {
             Some((format!("{}:{parent}", row.harness), row.key()))
         })
         .collect();
+    // A Claude child recording can hold a request its parent's recording
+    // holds too. Unless the family's reconciliation shows the parent's own
+    // requests and each child's add up to its identified union, a measured
+    // parent and its bound child may overlap.
+    let shares_requests = |row: &SessionRow| -> Option<String> {
+        let parent = row.parent.as_ref().filter(|_| row.harness == "claude")?;
+        let parent = sessions
+            .iter()
+            .find(|candidate| candidate.harness == row.harness && &candidate.session == parent)?;
+        let facts = parent.measured.facts.as_ref()?;
+        (family_reconciliation(facts.residual.as_ref())["status"] != "conserved")
+            .then(|| parent.key())
+    };
     let spawned =
         |parent: &str, child: &str| spawns.contains(&(parent.to_string(), child.to_string()));
     let mut groups: Vec<BTreeSet<String>> = Vec::new();
     for row in sessions {
         let mut group = BTreeSet::from([row.key()]);
+        group.extend(shares_requests(row));
         for origin in row
             .spans
             .iter()

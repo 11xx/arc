@@ -4510,8 +4510,11 @@ enum CostCmd {
     /// requests, because its recorded total covers them; held only in the
     /// recorded-total basis it is unmeasured (`recorded total covers its
     /// native children`), never counted beside them. A spawn a binding
-    /// identified groups no overlap; a bound child whose recording is gone
-    /// is unmeasured (`child recording missing`). Each parent row carries
+    /// identified groups no overlap unless a Claude parent's family
+    /// reconciliation is not `conserved`: a request both recordings hold
+    /// then withholds a total holding the parent and its bound child between
+    /// the larger and their sum. A bound child whose recording is gone is
+    /// unmeasured (`child recording missing`). Each parent row carries
     /// `family`: its bound child rows, every child its recording names with
     /// its recording present or missing, `bound` when any dispatch binds it,
     /// and an unbound child's figure, the

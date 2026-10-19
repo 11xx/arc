@@ -3641,7 +3641,12 @@ RULES THAT CHANGE WHAT YOU DO
     too; a session whose only figure is held in the recorded-total basis is
     unmeasured (`recorded total covers its native children`) rather than
     counted beside its children. A spawn a binding identified is a parent
-    and a child with recordings of their own, so it groups no overlap. A
+    and a child with recordings of their own, so it groups no overlap,
+    except that a Claude child's recording can hold a request its parent's
+    holds too: unless the parent's family reconciliation is `conserved`, a
+    measured parent and its bound child are one overlap group, and a total
+    holding both is withheld between its largest member and their sum,
+    with identity incomplete, never a complete double count. A
     bound child whose recording is gone is unmeasured (`child recording
     missing`). Each parent row carries `family`: `bound`, its bound child
     rows; `children`, every child its recording names, `bound` when any
