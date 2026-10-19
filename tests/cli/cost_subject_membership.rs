@@ -1,8 +1,9 @@
 //! Which work a session is part of, whether it acted itself or was recorded
 //! on behalf of. One rule gives a session its membership, the changes
 //! `--footprint` selects for it and the participant a trailer names; a
-//! subject names a session when its harness's reader locates the id, and a
-//! coordinate naming another harness than its row's is shown beside it.
+//! subject names a session when its harness's reader locates the id,
+//! whatever shape that harness gives its ids, and a coordinate naming
+//! another harness than its row's is shown beside it.
 //! Every recording is written into the fixture's own home, named as its
 //! harness names it.
 
@@ -14,6 +15,8 @@ const REVIEWER: &str = "019a0000-0000-7000-8000-0000000000c1";
 const EXECUTOR: &str = "019a0000-0000-4000-8000-0000000000e1";
 /// An OpenCode session id, shaped as OpenCode writes one.
 const OPENCODE_REVIEWER: &str = "ses_0f8a3ec487ffeFixtureRevwr1";
+/// A Pi session id its launcher chose, as a Pi recording's header names it.
+const PI_REVIEWER: &str = "review-lane-20260101T100000Z-a1b2";
 
 fn write_lines(path: &Path, lines: &[Value]) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -437,6 +440,26 @@ fn an_opencode_subject_its_reader_locates_is_a_participant() {
     keys.sort_unstable();
     let lead_key = format!("pi:{LEAD}");
     assert_eq!(keys, vec![subject.as_str(), lead_key.as_str()], "{view:#}");
+}
+
+/// Claim: a Pi reviewer recorded on behalf of whose session id is the name
+/// its launcher gave it, not a UUID, is a participant measured from its
+/// recording. Rejects reading only UUID-shaped ids as sessions, which drops
+/// the reviewer and its consumption from the change view.
+#[test]
+fn a_pi_subject_with_a_named_session_id_is_a_participant() {
+    let repo = Repo::new();
+    pi_recording(&repo, LEAD, 7);
+    pi_recording(&repo, PI_REVIEWER, 900);
+    let (change, _) = integrated(&repo, "named-pi", "feat: named pi");
+    let subject = format!("pi:{PI_REVIEWER}");
+    audit_for(&repo, &change, &subject);
+
+    let view = report(&repo, &[&change]);
+    let row = session(&view, &subject).unwrap_or_else(|| panic!("no reviewer row: {view:#}"));
+    assert_eq!(row["kind"], "participant", "{row:#}");
+    assert_eq!(row["roles"], json!(["reviewer"]), "{row:#}");
+    assert_eq!(row["measurement"]["source"], "fresh", "{row:#}");
 }
 
 /// Claim: a dispatch route naming a harness other than its bound

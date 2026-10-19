@@ -4602,8 +4602,8 @@ enum CostCmd {
     /// recorded `--on-behalf-of` a `harness:<id>` subject naming a session is
     /// the subject's event too, giving it the kind's role while the invoker
     /// keeps its own. The subject names a session when its harness's tapes
-    /// reader locates the id (an OpenCode `ses_…`, a Claude, Codex or Pi
-    /// UUID), when that store cannot answer, or when the ledger retains facts
+    /// reader locates the id (an OpenCode `ses_…`, a Pi id as its recording
+    /// names it, a Claude or Codex UUID), when that store cannot answer, or when the ledger retains facts
     /// for it; a person, a label, a `harness:model` or an id nothing locates
     /// names none. It is divided by its span on each work item; one with
     /// several members, one of which only events recorded on its behalf name,

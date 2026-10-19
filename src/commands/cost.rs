@@ -3584,10 +3584,10 @@ fn subject_of(event: &Event) -> Option<(String, String)> {
 
 /// The `--on-behalf-of` subjects in this ledger that name a session: an id
 /// the subject harness's tapes reader locates as one of its recordings, as
-/// each harness shapes its ids (OpenCode's `ses_…`, a Claude, Codex or Pi
-/// UUID), one whose store could not answer, or one the ledger retains facts
-/// for. Any other subject, a person, a label or a `harness:model`, names a
-/// party and no session.
+/// each harness shapes its ids (OpenCode's `ses_…`, a Pi id as its
+/// recording names it, a Claude or Codex UUID), one whose store could not
+/// answer, or one the ledger retains facts for. Any other subject, a person,
+/// a label or a `harness:model`, names a party and no session.
 struct Subjects(BTreeSet<(String, String)>);
 
 impl Subjects {

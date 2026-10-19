@@ -3640,8 +3640,8 @@ RULES THAT CHANGE WHAT YOU DO
     keeps its own roles for the event it ran. The subject names a session
     when the tapes reader of its harness locates the id as one of that
     harness's recordings, each harness shaping its own ids (an OpenCode
-    `ses_…`, a Claude, Codex or Pi UUID), when that harness's store cannot
-    answer, or when the ledger retains facts for it. A subject naming a
+    `ses_…`, a Pi id as its recording names it, a Claude or Codex UUID),
+    when that harness's store cannot answer, or when the ledger retains facts for it. A subject naming a
     person, a label, a `harness:model` or an id no reader locates and no
     retained facts name names no session. A participant is measured through the same
     reader as an executor, or from retained facts when its source no longer
