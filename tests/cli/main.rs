@@ -76,6 +76,7 @@ mod replicas;
 mod rescue;
 mod retention;
 mod review;
+mod review3_fixes_cost;
 mod review_fixes_cost;
 mod review_fixes_native_child;
 mod review_fixes_span_split;

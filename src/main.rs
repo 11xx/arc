@@ -4938,6 +4938,27 @@ fn cli_command() -> clap::Command {
     ))
 }
 
+/// A positive whole number of seconds, minutes or hours, `90s`, `45m` or
+/// `2h`, in milliseconds.
+fn parse_idle(value: &str) -> std::result::Result<u64, String> {
+    let refuse = || format!("{value:?} is not a duration such as 90s, 45m or 2h");
+    let unit = value.chars().next_back().ok_or_else(refuse)?;
+    let number: u64 = value[..value.len() - unit.len_utf8()]
+        .parse()
+        .ok()
+        .filter(|number| *number > 0)
+        .ok_or_else(refuse)?;
+    let seconds = match unit {
+        's' => Some(number),
+        'm' => number.checked_mul(60),
+        'h' => number.checked_mul(3600),
+        _ => None,
+    }
+    .and_then(|seconds| seconds.checked_mul(1000))
+    .ok_or_else(refuse)?;
+    Ok(seconds)
+}
+
 /// Identity flags such as `--actor` and `--harness` are global and read the
 /// environment, so every command records who is acting without being told. A
 /// command that also filters on one of those names gets a single argument for
@@ -4947,27 +4968,6 @@ fn cli_command() -> clap::Command {
 ///
 /// Whether the command is read-only is answered here, from the complete
 /// subcommand path, so the table the guide prints is the one dispatch obeys.
-/// A positive whole number of seconds, minutes or hours, `90s`, `45m` or
-/// `2h`, in milliseconds.
-fn parse_idle(value: &str) -> std::result::Result<u64, String> {
-    let refuse = || format!("{value:?} is not a duration such as 90s, 45m or 2h");
-    let (number, unit) = value.split_at(value.len().checked_sub(1).ok_or_else(refuse)?);
-    let number: u64 = number
-        .parse()
-        .ok()
-        .filter(|number| *number > 0)
-        .ok_or_else(refuse)?;
-    let seconds = match unit {
-        "s" => Some(number),
-        "m" => number.checked_mul(60),
-        "h" => number.checked_mul(3600),
-        _ => None,
-    }
-    .and_then(|seconds| seconds.checked_mul(1000))
-    .ok_or_else(refuse)?;
-    Ok(seconds)
-}
-
 fn parse_cli() -> Result<(Cli, bool), clap::Error> {
     let matches = match cli_command().try_get_matches() {
         Ok(matches) => matches,
