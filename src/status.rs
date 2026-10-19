@@ -1081,6 +1081,36 @@ pub fn build_at(
     )
 }
 
+/// Ask Git, in batches, for what `build_at_with_shape` reads about each open
+/// change among `states`, so that a listing reporting on all of them runs the
+/// same Git commands however many there are.
+pub fn prefetch_listing<'a>(cwd: &Path, states: impl Iterator<Item = &'a ChangeState>) {
+    if !crate::store::shares_reads() {
+        return;
+    }
+    let mut wanted = gitio::listing::Wanted::default();
+    for state in states.filter(|state| !state.is_closed()) {
+        let target = gitio::branch_head(cwd, &state.target_branch).ok();
+        if let (Some(head), Some(target)) = (gitio::branch_head(cwd, &state.branch).ok(), &target) {
+            wanted.merges.push((target.clone(), head));
+        }
+        if let (Some(patchset), Some(target)) = (state.latest_patchset(), &target) {
+            wanted
+                .ancestry
+                .push((target.clone(), patchset.head.clone()));
+        }
+        if let Some(worktree) = state
+            .worktree
+            .as_deref()
+            .map(Path::new)
+            .filter(|worktree| worktree.exists())
+        {
+            wanted.worktrees.push(worktree.to_path_buf());
+        }
+    }
+    gitio::listing::prefetch(cwd, &wanted);
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_at_with_shape(
     state: &ChangeState,

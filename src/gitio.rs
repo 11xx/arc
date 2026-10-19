@@ -9,6 +9,8 @@ use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+pub mod listing;
+
 thread_local! {
     static COMMAND_DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
 }
@@ -83,6 +85,40 @@ pub fn git_inherit(cwd: &Path, args: &[String]) -> Result<()> {
         bail!("git {} failed with {}", args.join(" "), output.status);
     }
     Ok(())
+}
+
+/// A Git run's working directory and arguments.
+type GitRun = (PathBuf, Vec<String>);
+
+static SHARED_OUTPUTS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<GitRun, String>>,
+> = std::sync::OnceLock::new();
+
+/// `git`, run once per working directory and arguments while the process
+/// shares its reads, for a read whose answer only a ref move or a checkout
+/// change could alter. A failure is not held.
+fn shared_git(cwd: &Path, args: &[&str]) -> Result<String> {
+    if !crate::store::shares_reads() {
+        return git(cwd, args);
+    }
+    let key = (
+        cwd.to_path_buf(),
+        args.iter().map(|arg| (*arg).to_string()).collect(),
+    );
+    let outputs = SHARED_OUTPUTS.get_or_init(Default::default);
+    if let Some(output) = outputs
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&key)
+    {
+        return Ok(output.clone());
+    }
+    let output = git(cwd, args)?;
+    outputs
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(key, output.clone());
+    Ok(output)
 }
 
 fn command_output(command: &mut Command) -> Result<Output> {
@@ -264,7 +300,10 @@ pub fn worktree_owner_matches(checkout: &Path, change_id: &str, token: Option<&s
 }
 
 pub fn toplevel(cwd: &Path) -> Result<PathBuf> {
-    Ok(PathBuf::from(git(cwd, &["rev-parse", "--show-toplevel"])?))
+    Ok(PathBuf::from(shared_git(
+        cwd,
+        &["rev-parse", "--show-toplevel"],
+    )?))
 }
 
 /// Resolve a path under the Git directory, honoring `core.hooksPath` and
@@ -355,6 +394,9 @@ pub fn current_branch(cwd: &Path) -> Result<Option<String>> {
 
 /// Repository-relative paths a change touched between two revisions.
 pub fn changed_paths(cwd: &Path, base: &str, head: &str) -> Result<Vec<String>> {
+    if let Some(paths) = listing::changed_paths(cwd, base, head) {
+        return Ok(paths);
+    }
     let out = git(cwd, &["diff", "--name-only", &format!("{base}...{head}")])?;
     Ok(out
         .lines()
@@ -384,6 +426,9 @@ pub struct MergeOutcome {
 }
 
 pub fn merge_outcome(cwd: &Path, target_rev: &str, head_rev: &str) -> Result<MergeOutcome> {
+    if let Some(outcome) = listing::merge_outcome(cwd, target_rev, head_rev) {
+        return Ok(outcome);
+    }
     let out = git_command()
         .args([
             "merge-tree",
@@ -728,6 +773,9 @@ impl RawCommit {
 
 /// Every commit in `base..head`, oldest first, with its message.
 pub fn range_messages(cwd: &Path, base: &str, head: &str) -> Result<Vec<(String, Vec<u8>)>> {
+    if let Some(messages) = listing::range_messages(cwd, base, head) {
+        return Ok(messages);
+    }
     let commits = git(cwd, &["rev-list", "--reverse", &format!("{base}..{head}")])?;
     let revisions: Vec<_> = commits.lines().collect();
     let read = read_commits(cwd, &revisions)?;
@@ -1464,6 +1512,11 @@ pub fn blob_oid(cwd: &Path, rev: &str, path: &str) -> Option<String> {
 /// The tree a commit points at, for comparing what was committed with what was
 /// actually there.
 pub fn commit_tree(cwd: &Path, rev: &str) -> Result<String> {
+    if let Some(Object::Found { id, kind, .. }) = shared_object(cwd, &format!("{rev}^{{tree}}")) {
+        if kind == "tree" {
+            return Ok(id);
+        }
+    }
     git(cwd, &["rev-parse", &format!("{rev}^{{tree}}")])
 }
 
@@ -1516,6 +1569,9 @@ pub fn worktree_tree(cwd: &Path) -> Result<String> {
 }
 
 pub fn is_clean(cwd: &Path) -> Result<bool> {
+    if let Some(clean) = listing::is_clean(cwd) {
+        return Ok(clean);
+    }
     Ok(git(cwd, &["status", "--porcelain"])?.is_empty())
 }
 
@@ -1549,7 +1605,7 @@ pub fn dirt(cwd: &Path) -> Result<Dirt> {
 }
 
 pub fn branch_exists(cwd: &Path, branch: &str) -> bool {
-    git(
+    shared_git(
         cwd,
         &[
             "show-ref",
@@ -1982,7 +2038,7 @@ pub fn worktree_for_branch(cwd: &Path, branch: &str) -> Result<Option<PathBuf>> 
 /// The primary worktree path (the first entry from `git worktree list`),
 /// including when its HEAD is detached.
 pub fn primary_worktree(cwd: &Path) -> Result<PathBuf> {
-    let out = git(cwd, &["worktree", "list", "--porcelain"])?;
+    let out = shared_git(cwd, &["worktree", "list", "--porcelain"])?;
     out.lines()
         .find_map(|line| line.strip_prefix("worktree "))
         .map(PathBuf::from)
@@ -2347,6 +2403,9 @@ fn batch_check<'a>(
 }
 
 pub fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
+    if let Some(answer) = listing::is_ancestor(cwd, ancestor, descendant) {
+        return Ok(answer);
+    }
     let out = git_command()
         .args(["merge-base", "--is-ancestor", ancestor, descendant])
         .current_dir(cwd)
