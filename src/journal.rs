@@ -6232,6 +6232,7 @@ pub(crate) fn filed_report_in(
     stale_days: u64,
 ) -> Result<FiledReport> {
     let events = read_events(dir)?;
+    let index = FileIndex::new(&events);
     let changes = match Store::resolve_root(project) {
         Ok(root) => Store::open_at(&root)?
             .map(|store| {
@@ -6250,7 +6251,7 @@ pub(crate) fn filed_report_in(
     let mut stale_count = 0;
     for event in events
         .iter()
-        .filter(|event| event.creates_artifact(dir, &events))
+        .filter(|event| event.creates_artifact_in(dir, |file| index.of(file)))
     {
         let Some(file) = event.file.as_deref() else {
             continue;
@@ -6261,7 +6262,8 @@ pub(crate) fn filed_report_in(
         if !seen.insert(file.to_string()) {
             continue;
         }
-        let sources = artifact_sources(&events, file);
+        let related = index.of(file);
+        let sources = artifact_sources(related, file);
         if session.is_some_and(|session| {
             event.session() != Some(session)
                 && !sources
@@ -6270,7 +6272,7 @@ pub(crate) fn filed_report_in(
         }) {
             continue;
         }
-        let activity = events
+        let activity = related
             .iter()
             .filter(|event| event.file.as_deref() == Some(file))
             .filter_map(JournalEvent::timestamp)
@@ -6282,7 +6284,7 @@ pub(crate) fn filed_report_in(
             .map(|promotion| promotion.change_id)
             .collect();
         promotions.extend(
-            events
+            related
                 .iter()
                 .filter(|event| event.file.as_deref() == Some(file))
                 .filter_map(|event| {
@@ -6294,7 +6296,7 @@ pub(crate) fn filed_report_in(
         );
         promotions.sort();
         promotions.dedup();
-        let consumed = events
+        let consumed = related
             .iter()
             .rev()
             .find(|event| event.file.as_deref() == Some(file) && event.event == "consumed");
@@ -6307,20 +6309,20 @@ pub(crate) fn filed_report_in(
                             .any(|change| note == format!("change {change}"))
                     }))
         });
-        let fate = if relocation(&events, file).is_some() {
+        let fate = if relocation(related, file).is_some() {
             "relocated".to_string()
         } else if promoted_consumption || (consumed.is_none() && !promotions.is_empty()) {
             "taken".to_string()
-        } else if let Some(outcome) = consumption(&events, file) {
+        } else if let Some(outcome) = consumption(related, file) {
             outcome
         } else {
             "open".to_string()
         };
-        let evidence = events
+        let evidence = related
             .iter()
             .filter(|event| event.event == "evidence" && event.file.as_deref() == Some(file))
             .count();
-        let claimed = open_artifact_claims(&events, file)
+        let claimed = open_artifact_claims(related, file)
             .iter()
             .any(|claim| state::claim_timing_at(&claim.state, now).active);
         let stale = fate == "open"
@@ -6355,7 +6357,7 @@ pub(crate) fn filed_report_in(
             supersedes_relocated: event
                 .supersedes
                 .as_deref()
-                .is_some_and(|origin| relocation(&events, origin).is_some()),
+                .is_some_and(|origin| relocation(index.of(origin), origin).is_some()),
             last_activity: activity.to_rfc3339(),
             fate,
             untouched_days,
@@ -8919,13 +8921,23 @@ impl JournalEvent {
 
     /// Publication requires a complete prepared body or a recorded retirement.
     fn creates_artifact(&self, dir: &Path, events: &[JournalEvent]) -> bool {
+        self.creates_artifact_in(dir, |_| events)
+    }
+
+    /// As [`Self::creates_artifact`], reading only the events `related`
+    /// gives for an artifact: at least every event naming it as its file.
+    fn creates_artifact_in<'a>(
+        &self,
+        dir: &Path,
+        related: impl Fn(&str) -> &'a [JournalEvent],
+    ) -> bool {
         match self.event.as_str() {
             "note" => true,
             "transition"
                 if self
                     .file
                     .as_deref()
-                    .is_some_and(|file| relocation(events, file).is_some()) =>
+                    .is_some_and(|file| relocation(related(file), file).is_some()) =>
             {
                 true
             }
@@ -8944,7 +8956,7 @@ impl JournalEvent {
                                 && std::fs::read(path).is_ok_and(|body| body.starts_with(&prepared))
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                            events.iter().any(|event| {
+                            related(source).iter().any(|event| {
                                 event.event == "consumed"
                                     && event.file.as_deref() == Some(source)
                                     && event.outcome.as_deref() == Some("superseded")
@@ -10018,12 +10030,68 @@ fn parse_lane_marker(message: &str) -> Option<LaneMarker> {
 }
 
 /// Replay understood events in the order the append lock published them.
+/// A journal's replayed events. While the process shares its ledger reads,
+/// each journal is projected once and every later read takes a copy.
 pub(crate) fn read_events(dir: &Path) -> Result<Vec<JournalEvent>> {
-    Ok(replay_events(read_understood_records(dir)?))
+    if !crate::store::shares_reads() {
+        return Ok(replay_events(read_understood_records(dir)?));
+    }
+    let key = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let projected = PROJECTED.get_or_init(Default::default);
+    if let Some(events) = projected
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&key)
+    {
+        return Ok(events.as_ref().clone());
+    }
+    let events = std::sync::Arc::new(replay_events(read_understood_records(dir)?));
+    projected
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(key, std::sync::Arc::clone(&events));
+    Ok(events.as_ref().clone())
+}
+
+type Projected = std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<Vec<JournalEvent>>>>;
+
+static PROJECTED: std::sync::OnceLock<Projected> = std::sync::OnceLock::new();
+
+/// Forget every shared journal projection: the process wrote.
+pub(crate) fn forget_projections() {
+    if let Some(projected) = PROJECTED.get() {
+        projected
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+}
+
+static PROJECTIONS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, usize>>> =
+    std::sync::OnceLock::new();
+
+/// How many times this process read and parsed one journal's event log, for
+/// the journal it read most often.
+pub(crate) fn projections() -> usize {
+    PROJECTIONS.get().map_or(0, |counts| {
+        counts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .copied()
+            .max()
+            .unwrap_or(0)
+    })
 }
 
 /// Understood physical records include events that state replay rejects.
 fn read_understood_records(dir: &Path) -> Result<Vec<JournalEvent>> {
+    *PROJECTIONS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(dir.to_path_buf())
+        .or_default() += 1;
     let mut events = Vec::new();
     let jsonl = dir.join("events.jsonl");
     if jsonl.is_file() {
@@ -16896,6 +16964,41 @@ fn pending_storage<'a>(events: &'a [JournalEvent], filename: &str) -> Option<&'a
             && e.file.as_deref() == Some(filename)
             && !storage_is_complete(events, e)
     })
+}
+
+/// Each artifact's events in log order: those naming it as their file or as
+/// the artifact they supersede.
+struct FileIndex {
+    by_file: HashMap<String, Vec<JournalEvent>>,
+}
+
+impl FileIndex {
+    fn new(events: &[JournalEvent]) -> Self {
+        let mut by_file: HashMap<String, Vec<JournalEvent>> = HashMap::new();
+        for event in events {
+            let file = event.file.as_deref();
+            for named in [
+                file,
+                event
+                    .supersedes
+                    .as_deref()
+                    .filter(|source| Some(*source) != file),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                by_file
+                    .entry(named.to_string())
+                    .or_default()
+                    .push(event.clone());
+            }
+        }
+        Self { by_file }
+    }
+
+    fn of(&self, file: &str) -> &[JournalEvent] {
+        self.by_file.get(file).map_or(&[], Vec::as_slice)
+    }
 }
 
 /// The tombstone of an artifact relocated out of this journal.

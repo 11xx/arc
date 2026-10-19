@@ -375,7 +375,8 @@ fn event_file_value(path: &Path) -> Result<serde_json::Value> {
 const READ_COUNTS_VAR: &str = "ARC_TEST_LEDGER_READS";
 
 /// Write how often the most-read ledger file of each kind was read from disk,
-/// and how many Git processes ran, to the file `ARC_TEST_LEDGER_READS` names.
+/// how many Git processes ran, and how often the most-read journal's event
+/// log was read and parsed, to the file `ARC_TEST_LEDGER_READS` names.
 pub(crate) fn write_read_counts() {
     let Some(path) = std::env::var_os(READ_COUNTS_VAR) else {
         return;
@@ -383,6 +384,7 @@ pub(crate) fn write_read_counts() {
     let counts = serde_json::json!({
         "most_reads_per_file": shared::disk_reads(),
         "git_processes": crate::gitio::processes(),
+        "most_projections_per_journal": crate::journal::projections(),
     });
     let _ = std::fs::write(path, counts.to_string());
 }
@@ -395,6 +397,7 @@ pub(crate) fn shares_reads() -> bool {
 /// Forget the process's shared ledger reads after a ledger write.
 pub(crate) fn forget_shared_reads() {
     shared::forget();
+    crate::journal::forget_projections();
 }
 
 /// Only published JSON records participate in ledger reads.
