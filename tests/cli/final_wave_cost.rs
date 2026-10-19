@@ -255,3 +255,157 @@ fn a_pi_figure_is_priced_by_its_own_requests() {
         close(&union["amount"], expected, union);
     }
 }
+
+// --- Lineage evidence outside a bounded read's windows ---------------------
+
+const CODEX: &str = "019a0000-0000-7000-8000-0000000000b1";
+const CLAUDE: &str = "019a0000-0000-7000-8000-0000000000d1";
+const AGENT: &str = "d1000000000000001";
+
+/// Bytes before the evidence, past tapes' 1 MiB head probe.
+const BEFORE: usize = 2 * 1024 * 1024;
+/// Bytes after the evidence, past tapes' 4 MiB bounded tail.
+const AFTER: usize = 5 * 1024 * 1024;
+
+/// A Codex rollout whose only lineage evidence, a `spawn_agent` call and
+/// its output naming the spawned agent, sits between `BEFORE` and `AFTER`
+/// bytes of prompts. The spawned agent's own rollout is not in the store.
+fn codex_spawner(repo: &Repo) {
+    let path = repo
+        .home
+        .join(".codex/sessions/2026/01/01")
+        .join(format!("rollout-2026-01-01T10-00-00-{CODEX}.jsonl"));
+    let prompt = |clock: &str, size: usize| {
+        json!({"timestamp": at(clock), "type": "response_item", "payload": {"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "x".repeat(size)}]}})
+    };
+    let usage = json!({"input_tokens": 100, "cached_input_tokens": 0, "output_tokens": 20,
+        "reasoning_output_tokens": 0, "total_tokens": 120});
+    write_lines(
+        &path,
+        &[
+            json!({"timestamp": at("10:00:00"), "type": "session_meta", "payload": {"id": CODEX, "session_id": CODEX,
+                "timestamp": at("10:00:00"), "cwd": "/fixture/project", "model_provider": "openai"}}),
+            json!({"timestamp": at("10:00:01"), "type": "turn_context", "payload": {"cwd": "/fixture/project", "model": "fixture-model", "effort": "high"}}),
+            prompt("10:00:02", BEFORE),
+            json!({"timestamp": at("10:00:03"), "type": "response_item", "payload": {"type": "function_call", "name": "spawn_agent",
+                "call_id": "call_spawn", "arguments": json!({"task_name": "worker", "message": "Work.", "model": "fixture-model"}).to_string()}}),
+            json!({"timestamp": at("10:00:04"), "type": "response_item", "payload": {"type": "function_call_output",
+                "call_id": "call_spawn", "output": json!({"task_name": "/root/worker"}).to_string()}}),
+            prompt("10:00:05", AFTER),
+            json!({"timestamp": at("10:00:06"), "type": "event_msg", "payload": {"type": "token_count", "info": {
+                "total_token_usage": usage, "last_token_usage": usage, "model_context_window": 1_000_000}}}),
+            json!({"timestamp": at("10:00:07"), "type": "event_msg", "payload": {"type": "task_complete"}}),
+        ],
+    );
+}
+
+/// A Claude recording whose only lineage evidence, an `Agent` call and its
+/// result naming the agent it launched, sits between `BEFORE` and `AFTER`
+/// bytes of prompts. The agent's own transcript is not in the store.
+fn claude_spawner(repo: &Repo) {
+    let path = repo
+        .home
+        .join(".claude/projects/-fixture-project")
+        .join(format!("{CLAUDE}.jsonl"));
+    let record = |kind: &str, uuid: &str, parent: Option<&str>, clock: &str, message: Value| {
+        json!({"type": kind, "sessionId": CLAUDE, "uuid": uuid, "parentUuid": parent, "timestamp": at(clock),
+            "cwd": "/fixture/project", "entrypoint": "cli", "isSidechain": false, "message": message})
+    };
+    let usage = json!({"input_tokens": 3, "output_tokens": 20, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0});
+    let mut launched = record(
+        "user",
+        "launch",
+        Some("call"),
+        "10:00:04",
+        json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_spawn", "content": "launched"}]}),
+    );
+    launched["toolUseResult"] = json!({"isAsync": true, "status": "async_launched", "agentId": AGENT, "description": "Work"});
+    let mut call = record(
+        "assistant",
+        "call",
+        Some("before"),
+        "10:00:03",
+        json!({"id": "msg_call", "role": "assistant", "model": "fixture-model", "usage": usage,
+            "content": [{"type": "tool_use", "id": "toolu_spawn", "name": "Agent",
+                "input": {"description": "Work", "prompt": "Work.", "subagent_type": "general-purpose"}}]}),
+    );
+    call["requestId"] = json!("req_call");
+    let mut answer = record(
+        "assistant",
+        "answer",
+        Some("after"),
+        "10:00:06",
+        json!({"id": "msg_answer", "role": "assistant", "model": "fixture-model", "usage": usage,
+            "content": [{"type": "text", "text": "Done."}]}),
+    );
+    answer["requestId"] = json!("req_answer");
+    write_lines(
+        &path,
+        &[
+            record(
+                "user",
+                "before",
+                None,
+                "10:00:02",
+                json!({"role": "user", "content": "x".repeat(BEFORE)}),
+            ),
+            call,
+            launched,
+            record(
+                "user",
+                "after",
+                Some("launch"),
+                "10:00:05",
+                json!({"role": "user", "content": "x".repeat(AFTER)}),
+            ),
+            answer,
+        ],
+    );
+}
+
+/// Claim: a Codex recording larger than the bounded read window whose only
+/// spawned-agent evidence lies past the read's head and before its tail
+/// still names that unresolved child, so identity is not established and
+/// the union says why, never `lineage read bounded`. Rejects a lineage
+/// reader that keeps the bounded windows and drops their warning, which
+/// would miss the child and call identity complete.
+#[test]
+fn a_codex_child_marker_mid_recording_keeps_identity_unestablished() {
+    let repo = Repo::new();
+    codex_spawner(&repo);
+    let change = executed_change(&repo, "codex", &[("codex", CODEX)]);
+    let view = report(&repo, &[&change]);
+    let identity = &view["union"]["identity"];
+    assert_eq!(identity["status"], "incomplete", "{identity:#}");
+    assert_eq!(
+        identity["unknown"][format!("codex:{CODEX}")],
+        json!(["lineage relative unresolved"]),
+        "{identity:#}"
+    );
+}
+
+/// Claim: a Claude recording larger than the bounded read window whose
+/// only `Agent` launch lies past the read's head and before its tail still
+/// lists that native child under its family, its recording missing, and
+/// the lineage is not reported bounded. Rejects a lineage reader that
+/// keeps the bounded windows and drops their warning, which would list no
+/// child.
+#[test]
+fn a_claude_child_marker_mid_recording_is_listed_in_its_family() {
+    let repo = Repo::new();
+    claude_spawner(&repo);
+    let change = executed_change(&repo, "claude", &[("claude", CLAUDE)]);
+    let view = report(&repo, &[&change]);
+    let row = session(&view, &format!("claude:{CLAUDE}"));
+    let children = &row["family"]["children"];
+    assert_eq!(children.as_array().map(Vec::len), Some(1), "{row:#}");
+    assert_eq!(children[0]["agent"], AGENT, "{row:#}");
+    assert_eq!(children[0]["recording"], "missing", "{row:#}");
+    assert!(
+        !row["measurement"]["lineage"]
+            .to_string()
+            .contains("lineage read bounded"),
+        "{row:#}"
+    );
+}
