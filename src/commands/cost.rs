@@ -540,10 +540,18 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
             .get(&(harness.to_string(), session.to_string()))
             .map_or(&[][..], Vec::as_slice)
     };
+    let backends = std::cell::OnceCell::new();
     let mut fresh_read = |harness: &str, session: &str| {
         fresh
             .remove(&(harness.to_string(), session.to_string()))
-            .unwrap_or_else(|| read_fresh(harness, session, plan_of(harness, session)))
+            .unwrap_or_else(|| {
+                read_fresh(
+                    backends.get_or_init(Backends::new),
+                    harness,
+                    session,
+                    plan_of(harness, session),
+                )
+            })
     };
     let snapshot = std::cell::OnceCell::new();
     let mut sessions: Vec<SessionRow> = sessions
@@ -1780,17 +1788,20 @@ fn read_all(
     let reads = std::sync::Mutex::new(BTreeMap::new());
     std::thread::scope(|scope| {
         for _ in 0..workers.min(keys.len()) {
-            scope.spawn(|| loop {
-                let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let Some((harness, session)) = keys.get(index) else {
-                    break;
-                };
-                let plan = plans
-                    .get(&(harness.clone(), session.clone()))
-                    .map_or(&[][..], Vec::as_slice);
-                let read = read_fresh(harness, session, plan);
-                if let Ok(mut reads) = reads.lock() {
-                    reads.insert((harness.clone(), session.clone()), read);
+            scope.spawn(|| {
+                let backends = Backends::new();
+                loop {
+                    let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some((harness, session)) = keys.get(index) else {
+                        break;
+                    };
+                    let plan = plans
+                        .get(&(harness.clone(), session.clone()))
+                        .map_or(&[][..], Vec::as_slice);
+                    let read = read_fresh(&backends, harness, session, plan);
+                    if let Ok(mut reads) = reads.lock() {
+                        reads.insert((harness.clone(), session.clone()), read);
+                    }
                 }
             });
         }
@@ -1925,28 +1936,56 @@ fn measurement_facts(facts: &CostFacts) -> Value {
     value
 }
 
+static BACKEND_SETS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many sets of tapes backends this process built for cost reads.
+pub(crate) fn backend_sets() -> usize {
+    BACKEND_SETS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The tapes backends one reader reads every session through, by harness.
+/// Built once per reader, so a store's walk, its catalog and its lineage
+/// index serve every session the reader reads; the sessions a held
+/// backend lists are those its walk found.
+struct Backends(BTreeMap<String, Vec<Box<dyn agent_tapes_core::backend::Backend>>>);
+
+impl Backends {
+    fn new() -> Self {
+        BACKEND_SETS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut by_harness: BTreeMap<String, Vec<_>> = BTreeMap::new();
+        for backend in agent_tapes_core::backend::backends() {
+            by_harness
+                .entry(backend.harness().to_string())
+                .or_default()
+                .push(backend);
+        }
+        Self(by_harness)
+    }
+
+    fn of(&self, harness: &str) -> &[Box<dyn agent_tapes_core::backend::Backend>] {
+        self.0.get(harness).map_or(&[], Vec::as_slice)
+    }
+}
+
 /// Measure one session through the pinned tapes reader, over its whole
 /// recording, and per segment of `plan` when the ledger gives it several
 /// spans. A Claude session that spawned native children is measured by its
 /// own requests: its recorded total covers its children too, and they are
 /// measured from their own recordings.
 fn read_fresh(
+    backends: &Backends,
     harness: &str,
     session: &str,
     plan: &[Segment],
 ) -> std::result::Result<CostFacts, String> {
-    let backends: Vec<Box<dyn agent_tapes_core::backend::Backend>> =
-        agent_tapes_core::backend::backends()
-            .into_iter()
-            .filter(|backend| backend.harness() == harness)
-            .collect();
+    let backends = backends.of(harness);
     if backends.is_empty() {
         return Err("session store unsupported".to_string());
     }
     if let Some((parent, _)) = session.split_once("::") {
-        return read_child(&backends, harness, parent, session, plan);
+        return read_child(backends, harness, parent, session, plan);
     }
-    let resolved = agent_tapes_core::resolve_session(&backends, session)
+    let resolved = agent_tapes_core::resolve_session(backends, session)
         .map_err(|_| "usage read failed".to_string())?;
     if resolved.session.id != session {
         return Err("usage identity mismatch".to_string());
@@ -1968,7 +2007,7 @@ fn read_fresh(
     let whole = backend
         .stream_session(&resolved.session, &read)
         .map_err(|_| "usage read failed".to_string())?;
-    let lineage = read_lineage(&backends, harness, session);
+    let lineage = read_lineage(backends, harness, session);
     let family = harness == "claude" && lineage.native_children.iter().any(|child| !child.mirror());
     let view = agent_tapes_core::usage::streamed(&whole, tally.clone(), &read);
     let mut facts = if family {

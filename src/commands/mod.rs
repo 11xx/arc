@@ -70,6 +70,7 @@ pub use changelog::changelog;
 pub use claims::{claim, release_claim, stage, take};
 use clap::ValueEnum;
 pub use config_cmd::check_writable;
+pub(crate) use cost::backend_sets as cost_backend_sets;
 pub use cost::{retain_cost, show_cost, CostQuery, GROUPINGS as COST_GROUPINGS};
 pub use cost_commit::{note_cost, show_commit_cost};
 pub use diff::{diff, DiffArgs};
