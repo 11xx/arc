@@ -3469,15 +3469,24 @@ RULES THAT CHANGE WHAT YOU DO
     figure is a harness-calculated estimate with an unknown pricing basis;
     token counts are resource quantities by tapes' categories. A list-price
     estimate prices a figure's disjoint categories by a `tapes-price-table/1`
-    table: `--prices <file>`, else the file `TAPES_PRICES` names, else
+    or `/2` table: `--prices <file>`, else the file `TAPES_PRICES` names, else
     `$XDG_CONFIG_HOME/tapes/prices.toml` (`~/.config/tapes/prices.toml`). It
-    uses the table row of the one model the recording says served the figure,
-    or each model's row where the recording splits it by model; a model the
+    uses the table rows of the one model the recording says served the
+    figure, or each model's rows where the recording splits it by model,
+    through tapes' pricing. A `/2` row's terms set by the request, a
+    long-context rate above a prompt size for the billing it applies to,
+    time-of-day rates and a validity window, are priced request by request
+    over the requests a fresh read kept, under the billing the recording
+    establishes; a subscription pays no long-context surcharge. A model the
     table lacks, a figure no model is known to have served, a category
-    measured incompletely, and a cache write with no recorded TTL, priced at
-    the least it can cost, each leave a known subtotal with a fixed reason.
-    The estimate is priced when the view is shown, from fresh or retained
-    facts alike, and is never retained. With no table it is absent with the
+    measured incompletely, a cache write with no recorded TTL, a term the
+    figure's requests do not settle, billing the recording does not
+    establish, and a request no row was in effect for each leave a known
+    subtotal with a fixed reason, priced at the least it can cost where a
+    rate is in doubt. Retained facts, a share of a request and a child's
+    figure from its family hold no request one by one, so a term they could
+    pay leaves such a subtotal. The estimate is priced when the view is
+    shown, from fresh or retained facts alike, and is never retained. With no table it is absent with the
     reason `no price table is loaded`; an invalid default table is reported
     and leaves it absent, and a named or environment table that cannot be read
     refuses. A harness's

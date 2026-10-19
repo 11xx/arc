@@ -9,7 +9,7 @@
 use super::{WorkKey, CATEGORIES};
 use crate::model::{
     CostCacheWrites, CostConvention, CostDisjoint, CostFacts, CostModelShare, CostPricing,
-    CostSegment,
+    CostRequestTerms, CostSegment,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -277,6 +277,7 @@ pub(super) fn sum_facts(session: &CostFacts, basis: &CostFacts, parts: &[Part<'_
     facts.residual = None;
     facts.events = None;
     facts.list_price = None;
+    facts.request_terms = request_terms(session, parts);
     facts.basis.clone_from(&basis.basis);
     facts.coverage.clone_from(&basis.coverage);
     let zero = Some(0);
@@ -555,6 +556,44 @@ pub(super) fn conservation(session: &CostFacts, spans: &crate::model::CostSpans)
     held
 }
 
+/// The requests the parts hold, one by one where every part with requests
+/// kept them, and the activity they span, open at an end a part leaves
+/// unknown.
+fn request_terms(session: &CostFacts, parts: &[Part<'_>]) -> CostRequestTerms {
+    let held: Vec<&CostRequestTerms> = parts
+        .iter()
+        .filter(|(_, requests)| *requests > 0)
+        .map(|(part, _)| &part.request_terms)
+        .collect();
+    let requests = held.iter().try_fold(
+        agent_tapes_core::pricing::RequestUses::default(),
+        |mut sum, terms| {
+            sum.extend(terms.requests.as_ref()?);
+            Some(sum)
+        },
+    );
+    let from = held
+        .iter()
+        .map(|terms| terms.from)
+        .try_fold(None, |earliest: Option<Instant>, from| {
+            Some(earliest.into_iter().chain(Some(from?)).min())
+        })
+        .flatten();
+    let to = held
+        .iter()
+        .map(|terms| terms.to)
+        .try_fold(None, |latest: Option<Instant>, to| {
+            Some(latest.into_iter().chain(Some(to?)).max())
+        })
+        .flatten();
+    CostRequestTerms {
+        requests,
+        billing: session.request_terms.billing.clone(),
+        from,
+        to,
+    }
+}
+
 /// The `index`th of `shares` even shares of a figure. Tokens stay whole: each
 /// share is the quotient, and the first shares take one token each of the
 /// remainder, so the shares add up to the figure.
@@ -570,6 +609,8 @@ pub(super) fn even_share(facts: &CostFacts, shares: usize, index: usize) -> Cost
     share.harness_estimate_usd = facts
         .harness_estimate_usd
         .map(|amount| amount / shares as f64);
+    // A share of each request is no request of its own.
+    share.request_terms.requests = None;
     let scale = |disjoint: &mut CostDisjoint| {
         for slot in [
             &mut disjoint.uncached_input,

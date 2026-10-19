@@ -4474,12 +4474,16 @@ enum CostCmd {
     /// over the selection, a divided one by the selected items' shares. A run's figure is the segments that run alone covers. Every
     /// total names its quantity kind: the dollar figure a harness wrote is a
     /// harness-calculated estimate with an unknown pricing basis, a list-price
-    /// estimate prices the disjoint categories by a `tapes-price-table/1` table
-    /// (`--prices`, else `TAPES_PRICES`, else
+    /// estimate prices the disjoint categories by a `tapes-price-table/1` or
+    /// `/2` table (`--prices`, else `TAPES_PRICES`, else
     /// `$XDG_CONFIG_HOME/tapes/prices.toml`) and the row of the model that
     /// served them, never retained and absent with a reason when no table,
-    /// model or row prices it, and token counts are resource quantities by
-    /// tapes' categories. A harness's native counters add only within that harness:
+    /// model or row prices it. A `/2` row's long-context, time-of-day and
+    /// validity terms are priced request by request from a fresh read, under
+    /// the billing its recording establishes; retained facts hold no
+    /// requests, so a term they could pay leaves the least it can cost as a
+    /// known subtotal. Token counts are resource quantities by tapes'
+    /// categories. A harness's native counters add only within that harness:
     /// a raw input sum across harnesses is refused and other native sums are
     /// withheld. Tapes' disjoint categories (uncached input, cache read,
     /// cache write by TTL, output, reasoning as a subset of output, and their
@@ -4756,8 +4760,9 @@ enum CostCmd {
         #[arg(long, value_name = "DURATION", conflicts_with = "commit",
             value_parser = parse_idle)]
         idle: Option<u64>,
-        /// A `tapes-price-table/1` file to price every figure with; else the
-        /// file `TAPES_PRICES` names, else `$XDG_CONFIG_HOME/tapes/prices.toml`
+        /// A `tapes-price-table/1` or `/2` file to price every figure with;
+        /// else the file `TAPES_PRICES` names, else
+        /// `$XDG_CONFIG_HOME/tapes/prices.toml`
         #[arg(long, value_name = "FILE")]
         prices: Option<std::path::PathBuf>,
         /// Print every figure by category with its reasons and coverage, in

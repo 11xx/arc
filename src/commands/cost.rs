@@ -24,8 +24,8 @@ use crate::model::{
     portable_lineage_reason, portable_liveness, portable_quantity_reason, portable_selection,
     CostCacheWrites, CostConvention, CostCounterResidual, CostCounters, CostDisjoint, CostEstimate,
     CostEstimatePart, CostEventCoverage, CostEventIdentity, CostEvents, CostFacts, CostLineage,
-    CostListPrice, CostNativeChild, CostPricing, CostRelative, CostResidual, CostResidualSource,
-    CostSegment, CostSpans, Event, Payload, DISJOINT_CATEGORIES,
+    CostListPrice, CostNativeChild, CostPricing, CostRelative, CostRequestTerms, CostResidual,
+    CostResidualSource, CostSegment, CostSpans, Event, Payload, DISJOINT_CATEGORIES,
 };
 use agent_tapes_core::measurement::{MeasurementCompleteness, MeasurementReason};
 use serde_json::{json, Value};
@@ -748,6 +748,12 @@ fn counted_facts(
     facts.events = None;
     facts.lineage = Some(CostLineage::default());
     facts.list_price = None;
+    // The child's requests and activity are not its parent's; only the
+    // billing of the recording family is shared.
+    facts.request_terms = CostRequestTerms {
+        billing: base.request_terms.billing.clone(),
+        ..CostRequestTerms::default()
+    };
     facts.by_model = Vec::new();
     facts.served_model = None;
     facts.cost_coverage = None;
@@ -2912,6 +2918,14 @@ fn normalize(
         residual: None,
         spans: None,
         list_price: None,
+        // Consumption over other branches holds requests the active
+        // branch's do not, so it keeps none one by one.
+        request_terms: CostRequestTerms {
+            requests: view.request_uses.clone().filter(|_| consumption.is_none()),
+            billing: view.billing.clone(),
+            from: view.session.started_at,
+            to: view.session.last_activity_at,
+        },
     };
     let mut gaps: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let typed = |counter: &str, absent: bool| -> Vec<String> {
@@ -3217,15 +3231,85 @@ fn tapes_disjoint(disjoint: &CostDisjoint) -> Option<agent_tapes_core::model::Di
     })
 }
 
-/// A figure's list price: its disjoint categories priced by the table row of
-/// the one model that served it, or model by model where several did. What
-/// the table cannot price is a fixed reason, a category the figure measured
-/// incompletely qualifies the estimate, and so does any part of a category
-/// the models' shares leave unattributed.
+/// One model's part of a figure priced through tapes: by its rows' flat
+/// rates, or, where a row carries terms set by the request, request by
+/// request over the requests the figure holds one by one, under the billing
+/// its recording establishes, and between every rate it could pay for what
+/// it does not hold. `sole` says the model served the whole figure, so a
+/// request no model is named for is its too.
+fn price_model(
+    disjoint: &agent_tapes_core::model::DisjointTokens,
+    model: &str,
+    sole: bool,
+    table: &agent_tapes_core::pricing::PriceTable,
+    terms: &CostRequestTerms,
+) -> agent_tapes_core::pricing::EstimateSum {
+    use agent_tapes_core::model::{
+        InputConvention, Model, OutputConvention, TokenConvention, Tokens,
+    };
+    use agent_tapes_core::pricing::{PricedFigure, RequestTerms};
+    let terms = RequestTerms {
+        requests: terms.requests.as_ref(),
+        billing: terms.billing.as_ref(),
+        from: terms.from,
+        to: terms.to,
+    };
+    let served = Model {
+        id: model.to_string(),
+        variant: None,
+    };
+    // A share among several models is a tapes model share whose counters
+    // keep uncached input apart and reasoning inside output, so they restate
+    // its disjoint categories unchanged.
+    let restated = TokenConvention {
+        input: InputConvention::ExcludesCache,
+        output: OutputConvention::IncludesReasoning,
+    };
+    let share = (!sole).then(|| agent_tapes_core::usage::ModelUsage {
+        model: model.to_string(),
+        variant: None,
+        tokens: Some(Tokens {
+            input: disjoint.uncached_input,
+            output: disjoint.output,
+            reasoning: disjoint.reasoning,
+            cache_read: disjoint.cache_read,
+            cache_write: disjoint.cache_write.map(|writes| writes.total()),
+        }),
+        cost: None,
+        cost_coverage: None,
+        request_count: None,
+        measurement_coverage: BTreeMap::new(),
+        measurement_incomplete: Vec::new(),
+        measurement_completeness: MeasurementCompleteness::default(),
+        list_price_estimate: None,
+        cache_write_by_ttl: disjoint.cache_write,
+    });
+    PricedFigure {
+        disjoint: Some(disjoint),
+        convention: Some(restated),
+        model: sole.then_some(&served),
+        selections: &[],
+        observation: None,
+        by_model: share.as_ref().map(std::slice::from_ref),
+        terms,
+    }
+    .estimate(table)
+    .whole
+    .unwrap_or_default()
+}
+
+/// A figure's list price: its disjoint categories priced by the table rows
+/// of the one model that served it, or model by model where several did.
+/// What the table cannot price is a fixed reason, a category the figure
+/// measured incompletely qualifies the estimate, and so does any part of a
+/// category the models' shares leave unattributed, a term set by the request
+/// the figure's requests do not settle, and billing its recording does not
+/// establish.
 fn list_price(facts: &CostFacts, table: &agent_tapes_core::pricing::PriceTable) -> CostListPrice {
-    use agent_tapes_core::pricing::{price_share, EstimateSum, PRICED_CATEGORIES};
+    use agent_tapes_core::pricing::{EstimateSum, PRICED_CATEGORIES};
     let unpriced = |gaps: Vec<String>| CostListPrice {
         currency: table.currency.clone(),
+        schema: table.schema,
         amount: None,
         models: Vec::new(),
         gaps,
@@ -3238,13 +3322,18 @@ fn list_price(facts: &CostFacts, table: &agent_tapes_core::pricing::PriceTable) 
         .collect();
     let mut sum = EstimateSum::default();
     let mut unlisted = false;
-    let mut price = |model: &str, disjoint: &agent_tapes_core::model::DisjointTokens| {
-        let row = table.price(model);
-        unlisted |= row.is_none();
-        sum.merge(price_share(disjoint, row, table));
+    let mut price = |model: &str, disjoint: &agent_tapes_core::model::DisjointTokens, sole| {
+        unlisted |= table.price(model).is_none();
+        sum.merge(price_model(
+            disjoint,
+            model,
+            sole,
+            table,
+            &facts.request_terms,
+        ));
     };
     match facts.served_model.as_deref().and_then(model_of) {
-        Some(model) => price(&model, &whole),
+        Some(model) => price(&model, &whole, true),
         None if !facts.by_model.is_empty() => {
             let shares: Vec<_> = facts
                 .by_model
@@ -3252,7 +3341,7 @@ fn list_price(facts: &CostFacts, table: &agent_tapes_core::pricing::PriceTable) 
                 .filter_map(|share| Some((share, tapes_disjoint(&share.disjoint)?)))
                 .collect();
             for (share, disjoint) in &shares {
-                price(&share.model, disjoint);
+                price(&share.model, disjoint, false);
             }
             let amount =
                 |disjoint: &agent_tapes_core::model::DisjointTokens, category: &str| match category
@@ -3293,14 +3382,15 @@ fn list_price(facts: &CostFacts, table: &agent_tapes_core::pricing::PriceTable) 
     ));
     CostListPrice {
         currency: estimate.currency,
-        // A cache write with no recorded TTL leaves the least it can cost.
+        schema: estimate.schema,
+        // A cache write with no recorded TTL, or a term the figure's requests
+        // do not settle, leaves the least it can cost.
         amount: estimate.amount.or(estimate.at_least),
         models: estimate.models.into_iter().map(|model| model.id).collect(),
         gaps: gaps.into_iter().collect(),
     }
 }
 
-/// The model of a `model[#effort]` coordinate, without its effort.
 /// The model coordinate a free-form route names: the whole route, or what
 /// precedes ` via <harness>`, when that is one coordinate. A route that is a
 /// profile name or prose names none.
@@ -3312,6 +3402,7 @@ fn route_coordinate(route: &str) -> Option<String> {
     portable_coordinate(head).then(|| head.to_string())
 }
 
+/// The model of a `model[#effort]` coordinate, without its effort.
 fn model_of(coordinate: &str) -> Option<String> {
     let model = coordinate.split('#').next().unwrap_or(coordinate).trim();
     (!model.is_empty()).then(|| model.to_string())
@@ -3784,7 +3875,11 @@ fn base(
                         .clone(),
                 )
             });
-            json!({"kind": LIST_KIND, "unit": currency, "schema": agent_tapes_core::pricing::PRICE_TABLE_SCHEMA,
+            let schema = members
+                .iter()
+                .find_map(|row| Some(row.measured.facts.as_ref()?.list_price.as_ref()?.schema))
+                .unwrap_or(agent_tapes_core::pricing::PRICE_TABLE_SCHEMA);
+            json!({"kind": LIST_KIND, "unit": currency, "schema": schema,
                 "pricing_basis": "the price table's list price per million tokens of each disjoint category, by the model that served them",
                 "source": "price table", "precision": "currency sums rounded to ten fractional places; smaller nonzero values preserved", "scope": scope})
         }
@@ -4991,7 +5086,7 @@ fn prices_json(prices: &agent_tapes_core::pricing::PriceLookup) -> Value {
     use agent_tapes_core::pricing::PriceLookup;
     let schema = agent_tapes_core::pricing::PRICE_TABLE_SCHEMA;
     match prices {
-        PriceLookup::Loaded(loaded) => json!({"status": "loaded", "schema": schema,
+        PriceLookup::Loaded(loaded) => json!({"status": "loaded", "schema": loaded.table.schema,
             "origin": kebab(loaded.origin), "currency": loaded.table.currency,
             "models": loaded.table.models.len()}),
         PriceLookup::Absent => json!({"status": "absent", "schema": schema}),

@@ -2986,6 +2986,31 @@ pub struct CostFacts {
     /// priced from these facts when they are shown and is never retained.
     #[serde(skip)]
     pub list_price: Option<CostListPrice>,
+    /// What price terms set by the request read, as the read that measured
+    /// the figure kept it. Never retained, so retained facts hold none.
+    #[serde(skip)]
+    pub request_terms: CostRequestTerms,
+}
+
+/// The requests a figure counted, one by one, and the billing its
+/// recording establishes, which a price table's terms set by the request
+/// read. It describes how the figure is priced, not what it measures, so
+/// any two compare equal.
+#[derive(Debug, Clone, Default)]
+pub struct CostRequestTerms {
+    /// Absent when the read did not keep the figure's requests one by one.
+    pub requests: Option<agent_tapes_core::pricing::RequestUses>,
+    pub billing: Option<agent_tapes_core::pricing::Billing>,
+    /// The first and last activity the figure spans, which bound the
+    /// validity windows its requests could fall in.
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+}
+
+impl PartialEq for CostRequestTerms {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
 }
 
 /// One model's part of a figure, by its model id.
@@ -3124,6 +3149,8 @@ impl CostSpans {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CostListPrice {
     pub currency: String,
+    /// The schema of the table that priced it.
+    pub schema: &'static str,
     /// Absent when nothing in the figure could be priced.
     pub amount: Option<f64>,
     pub models: Vec<String>,
