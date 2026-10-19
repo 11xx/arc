@@ -776,6 +776,30 @@ fn child_row(parent: &SessionRow, harness: &str, session: &str, facts: CostFacts
     child
 }
 
+/// A child listed under `parent` that has no figure, for `reason`: a total
+/// holding it has no amount beside its known subtotal.
+fn unmeasured_child(parent: &SessionRow, harness: &str, session: &str, reason: &str) -> SessionRow {
+    let mut child = parent.clone();
+    child.harness = harness.to_string();
+    child.session = session.to_string();
+    child.spans = Vec::new();
+    child.membership = BTreeSet::new();
+    child.measured = Measured {
+        source: Source::Unavailable(reason.to_string()),
+        facts: None,
+        conflict: None,
+        retained_liveness: None,
+        retained_at: None,
+    };
+    child.split = Split::Unsplit(span::UNMEASURED);
+    child.overlap = BTreeSet::new();
+    child.participation = None;
+    child.liveness = None;
+    child.agent = None;
+    child.parent = Some(parent.session.clone());
+    child
+}
+
 /// Why a child recording's figure in its family is a known subtotal: tapes
 /// read a record it could not count, or a request that failed.
 const CHILD_SOURCE_INCOMPLETE: &str = "the child recording holds records its requests do not count";
@@ -849,23 +873,25 @@ fn family_json(row: &SessionRow, sessions: &[SessionRow], view: &View<'_>) -> Op
         let recording = if child.resolved { "present" } else { "missing" };
         let mut entry = json!({"agent": child.agent, "key": key, "role": child.role,
             "recording": recording, "bound": held, "row": bound.iter().any(|row| row.key() == key)});
+        let reason = if child.resolved {
+            "the family reconciliation holds no figure for it"
+        } else {
+            CHILD_MISSING
+        };
         match &figure {
             Some((figure, requests)) => {
                 entry["requests"] = json!(requests);
                 entry["totals"] = totals(&[figure], &[], &scope(&format!("child {}", child.agent)));
             }
-            None => {
-                entry["reason"] = json!(if child.resolved {
-                    "the family reconciliation holds no figure for it"
-                } else {
-                    CHILD_MISSING
-                });
-            }
+            None => entry["reason"] = json!(reason),
         }
         if !held {
             match figure {
                 Some((figure, _)) => unassigned.push(figure),
-                None => unmeasured += 1,
+                None => {
+                    unassigned.push(unmeasured_child(row, &row.harness, &session, reason));
+                    unmeasured += 1;
+                }
             }
         }
         children.push(entry);
@@ -888,10 +914,22 @@ fn family_json(row: &SessionRow, sessions: &[SessionRow], view: &View<'_>) -> Op
                 }
                 Some(Err(reason)) => {
                     entry["reason"] = json!(reason);
+                    unassigned.push(unmeasured_child(
+                        row,
+                        &child.harness,
+                        &child.session,
+                        reason,
+                    ));
                     unmeasured += 1;
                 }
                 None => {
                     entry["reason"] = json!("usage read failed");
+                    unassigned.push(unmeasured_child(
+                        row,
+                        &child.harness,
+                        &child.session,
+                        "usage read failed",
+                    ));
                     unmeasured += 1;
                 }
             }
@@ -903,7 +941,7 @@ fn family_json(row: &SessionRow, sessions: &[SessionRow], view: &View<'_>) -> Op
         "statement": "a parent's figure is its own requests; each child is measured from its own recording, as an executor row where a binding names it, and otherwise listed here outside every total",
         "bound": bound.iter().map(|child| child.key()).collect::<Vec<_>>(),
         "children": children,
-        "unassigned": {"children": unassigned.len() + unmeasured, "unmeasured": unmeasured,
+        "unassigned": {"children": unassigned.len(), "unmeasured": unmeasured,
             "totals": totals(&held, &[], &scope("unassigned children"))},
     });
     if row.harness == "claude" {
@@ -3352,7 +3390,13 @@ fn identity_groups(members: &[&SessionRow]) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// Whether a row's recorded relatives are unknown, so it may overlap any
+/// other. A native child's identity is its parent's recording naming it,
+/// whether or not it was measured.
 fn lineage_unknown(row: &SessionRow) -> bool {
+    if row.parent.is_some() {
+        return false;
+    }
     row.measured
         .facts
         .as_ref()

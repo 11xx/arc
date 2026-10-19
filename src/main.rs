@@ -4518,7 +4518,8 @@ enum CostCmd {
     /// `family`: its bound child rows, every child its recording names with
     /// its recording present or missing, `bound` when any dispatch binds it,
     /// and an unbound child's figure, the
-    /// `unassigned` figure outside every total, and for Claude the
+    /// `unassigned` figure outside every total, absent beside its known
+    /// subtotal when a child in it has no figure, and for Claude the
     /// `reconciliation`: whether its own requests and each child's add up to
     /// the family's identified union (`conserved`, `not-conserved` with
     /// `differs`, `unestablished`), with the residual, the recorded total

@@ -3655,7 +3655,8 @@ RULES THAT CHANGE WHAT YOU DO
     its figure, from
     tapes' family reconciliation for a Claude subagent and a fresh read for
     a child with its own session; and `unassigned`, those children's figure,
-    listed and never in a total. A mirror row is never listed. A Claude
+    listed and never in a total. An unassigned child without a figure
+    leaves that figure absent beside its known subtotal, naming the child. A mirror row is never listed. A Claude
     parent's `family.reconciliation` says whether its own requests and each
     child's add up to the family's identified union per counter
     (`conserved`, `not-conserved` naming each counter under `differs`, as a
