@@ -18,6 +18,7 @@ mod context;
 mod contribution;
 mod cost;
 mod cost_completeness;
+mod cost_lineage_whole;
 mod cost_replay_once;
 mod cost_report_ranges;
 mod cost_span_split;
