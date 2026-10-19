@@ -58,18 +58,25 @@ fn money(amount: f64) -> String {
     format!("${amount:.4}")
 }
 
-/// What a cell shows: its amount, its known subtotal, or the least an
-/// overlapping figure is known to be; `--detail` shows both ends of that
-/// bound. A cell with none of them is blank.
+/// What a cell shows: its amount; its known subtotal, up to the most a list
+/// price in doubt can cost where its bound gives one; or the least an
+/// overlapping figure is known to be, whose both ends `--detail` shows. A
+/// cell with none of them is blank.
 fn shown(cell: &Value, render: fn(&Value) -> Option<String>) -> String {
-    if let Some(text) = render(&cell["amount"]).or_else(|| render(&cell["known_subtotal"])) {
-        return text;
-    }
     let bound = if cell["bound"].is_object() {
         &cell["bound"]
     } else {
         &cell["known_bound"]
     };
+    if let Some(text) = render(&cell["amount"]) {
+        return text;
+    }
+    if let Some(known) = render(&cell["known_subtotal"]) {
+        return match render(&bound["at_most"]) {
+            Some(most) => format!("{known}–{most}"),
+            None => known,
+        };
+    }
     render(&bound["at_least"]).map_or_else(String::new, |low| format!("≥{low}"))
 }
 

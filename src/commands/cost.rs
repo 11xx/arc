@@ -3314,6 +3314,7 @@ fn list_price(facts: &CostFacts, table: &agent_tapes_core::pricing::PriceTable) 
         currency: table.currency.clone(),
         schema: table.schema,
         amount: None,
+        at_most: None,
         models: Vec::new(),
         gaps,
     };
@@ -3387,8 +3388,9 @@ fn list_price(facts: &CostFacts, table: &agent_tapes_core::pricing::PriceTable) 
         currency: estimate.currency,
         schema: estimate.schema,
         // A cache write with no recorded TTL, or a term the figure's requests
-        // do not settle, leaves the least it can cost.
+        // do not settle, leaves the least and the most it can cost.
         amount: estimate.amount.or(estimate.at_least),
+        at_most: estimate.at_most.filter(|_| estimate.amount.is_none()),
         models: estimate.models.into_iter().map(|model| model.id).collect(),
         gaps: gaps.into_iter().collect(),
     }
@@ -4056,13 +4058,45 @@ fn recorded_amount(facts: &CostFacts, figure: Figure) -> Option<Amount> {
     }
 }
 
+/// The most a session's figure can be: the upper bound of a list price in
+/// doubt, else its recorded amount.
+fn recorded_most(facts: &CostFacts, figure: Figure) -> Option<Amount> {
+    match (figure, &facts.list_price) {
+        (Figure::ListPrice, Some(price)) => price.at_most.or(price.amount).map(Amount::Usd),
+        _ => recorded_amount(facts, figure),
+    }
+}
+
+/// A reason a list price is priced between the least and the most it can
+/// cost, which its bound accounts for.
+fn priced_in_doubt(reason: &str) -> bool {
+    reason == TTL_UNRECORDED
+        || reason == arc_reason(MeasurementReason::RequestTermsUnknown)
+        || reason == arc_reason(MeasurementReason::BillingUnestablished)
+}
+
+const OVERLAP_BASIS: &str =
+    "sum of disjoint groups; each overlapping group is at least its largest member and at most its sum";
+const OVERLAP_PRICE_BASIS: &str = "sum of disjoint groups; each overlapping group is at least its largest member and at most its sum, each list price in doubt at the least and the most it can cost";
+const PRICE_BASIS: &str =
+    "sum of the members' list prices, each in doubt at the least and the most it can cost";
+
+/// What a quantity with no established amount lies between.
+struct Bounds {
+    lower: Amount,
+    upper: Amount,
+    /// Whether they bound only the recorded amounts, not the whole figure.
+    known_only: bool,
+    basis: &'static str,
+}
+
 /// The status, amount, known subtotal, and reasons of one quantity.
 struct Aggregate {
     status: &'static str,
     amount: Option<Amount>,
     known: Option<Amount>,
     reasons: Vec<String>,
-    bounds: Option<(Amount, Amount, bool)>,
+    bounds: Option<Bounds>,
 }
 
 impl Aggregate {
@@ -4105,8 +4139,13 @@ fn aggregate(members: &[&SessionRow], withheld: &[String], figure: Figure) -> Ag
         }]);
     }
     let mut amounts = Vec::new();
+    let mut mosts = Vec::new();
     let mut missing = Vec::new();
     let mut gaps = BTreeSet::new();
+    // Whether a member's list price is in doubt, and whether a reason
+    // its range does not account for qualifies the figure.
+    let mut ranged = false;
+    let mut beyond_range = false;
     for row in members {
         match row.measured.facts.as_ref() {
             Some(facts) => {
@@ -4114,10 +4153,20 @@ fn aggregate(members: &[&SessionRow], withheld: &[String], figure: Figure) -> Ag
                     Some(amount) => amounts.push(amount),
                     None => missing.push(row.key()),
                 }
+                mosts.extend(recorded_most(facts, figure));
+                ranged |= matches!(figure, Figure::ListPrice)
+                    && facts
+                        .list_price
+                        .as_ref()
+                        .is_some_and(|price| price.at_most.is_some());
+                let figure_gaps = figure_gaps(facts, figure);
+                beyond_range |= !facts.incomplete.is_empty()
+                    || facts.basis.is_none()
+                    || !figure_gaps.iter().all(|reason| priced_in_doubt(reason));
                 for reason in &facts.incomplete {
                     gaps.insert(format!("{}: {reason}", row.key()));
                 }
-                for reason in figure_gaps(facts, figure) {
+                for reason in figure_gaps {
                     gaps.insert(format!("{}: {reason}", row.key()));
                 }
                 if facts.basis.is_none() {
@@ -4127,9 +4176,22 @@ fn aggregate(members: &[&SessionRow], withheld: &[String], figure: Figure) -> Ag
             None => missing.push(row.key()),
         }
     }
-    let known = match sum_amounts(amounts) {
-        Ok(known) => known,
-        Err(reason) => return Aggregate::withheld(vec![reason.to_string()]),
+    let (known, most) = match (sum_amounts(amounts), sum_amounts(mosts)) {
+        (Ok(known), Ok(most)) => (known, most),
+        (Err(reason), _) | (_, Err(reason)) => {
+            return Aggregate::withheld(vec![reason.to_string()])
+        }
+    };
+    let range = |known_only: bool| {
+        known
+            .zip(most)
+            .filter(|_| ranged)
+            .map(|(lower, upper)| Bounds {
+                lower,
+                upper,
+                known_only,
+                basis: PRICE_BASIS,
+            })
     };
     let groups = identity_groups(members);
     if !groups.is_empty() {
@@ -4178,9 +4240,16 @@ fn aggregate(members: &[&SessionRow], withheld: &[String], figure: Figure) -> Ag
             status: "withheld",
             amount: None,
             known: None,
-            bounds: lower
-                .zip(known)
-                .map(|(lower, upper)| (lower, upper, !missing.is_empty() || !gaps.is_empty())),
+            bounds: lower.zip(most).map(|(lower, upper)| Bounds {
+                lower,
+                upper,
+                known_only: !missing.is_empty() || !gaps.is_empty(),
+                basis: if ranged {
+                    OVERLAP_PRICE_BASIS
+                } else {
+                    OVERLAP_BASIS
+                },
+            }),
             reasons,
         };
     }
@@ -4188,7 +4257,7 @@ fn aggregate(members: &[&SessionRow], withheld: &[String], figure: Figure) -> Ag
         let mut reasons = vec![format!("no recorded amount for {}", missing.join(", "))];
         reasons.extend(gaps);
         return Aggregate {
-            bounds: None,
+            bounds: range(true),
             status: "absent",
             amount: None,
             known,
@@ -4197,7 +4266,7 @@ fn aggregate(members: &[&SessionRow], withheld: &[String], figure: Figure) -> Ag
     }
     if !gaps.is_empty() {
         return Aggregate {
-            bounds: None,
+            bounds: range(beyond_range),
             status: "incomplete",
             amount: None,
             known,
@@ -4214,11 +4283,12 @@ fn aggregate(members: &[&SessionRow], withheld: &[String], figure: Figure) -> Ag
 }
 
 fn quantity(mut base: Value, aggregate: Aggregate) -> Value {
-    if let Some((lower, upper, known_only)) = aggregate.bounds {
+    if let Some(bounds) = aggregate.bounds {
+        let known_only = bounds.known_only;
         let field = if known_only { "known_bound" } else { "bound" };
         base[field] = json!({"scope": if known_only { "known recorded amounts" } else { "whole figure" },
-            "at_least": lower.bound_json(false), "at_most": upper.bound_json(true),
-            "basis": "sum of disjoint groups; each overlapping group is at least its largest member and at most its sum"});
+            "at_least": bounds.lower.bound_json(false), "at_most": bounds.upper.bound_json(true),
+            "basis": bounds.basis});
     }
     base["status"] = json!(aggregate.status);
     if let Some(amount) = aggregate.amount {
@@ -5815,9 +5885,15 @@ fn describe_quantity(quantity: &Value) -> String {
     let status = quantity["status"].as_str().unwrap_or_default();
     match (&quantity["amount"], &quantity["known_subtotal"]) {
         (Value::Number(amount), _) => format!("{label} {amount} {unit}"),
-        (_, Value::Number(known)) => {
-            format!("{label} {status} (known subtotal {known} {unit})")
-        }
+        (_, Value::Number(known)) => match quantity["bound"]
+            .get("at_most")
+            .or_else(|| quantity["known_bound"].get("at_most"))
+        {
+            Some(most) => {
+                format!("{label} {status} (known subtotal {known} {unit}, at most {most} {unit})")
+            }
+            None => format!("{label} {status} (known subtotal {known} {unit})"),
+        },
         _ if quantity["bound"].is_object() || quantity["known_bound"].is_object() => {
             let (bound, qualifier) = if quantity["bound"].is_object() {
                 (&quantity["bound"], "")

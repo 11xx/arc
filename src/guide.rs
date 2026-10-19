@@ -3484,10 +3484,13 @@ RULES THAT CHANGE WHAT YOU DO
     figure's requests do not settle, billing the recording does not
     establish, and a request no row was in effect for each leave a known
     subtotal with a fixed reason, priced at the least it can cost where a
-    rate is in doubt. Retained facts, a share of a request and a child's
-    figure from its family hold no request one by one, so a term they could
-    pay leaves such a subtotal. The estimate is priced when the view is
-    shown, from fresh or retained facts alike, and is never retained. With no table it is absent with the
+    rate is in doubt, with the most it can cost under `bound`: `whole
+    figure` when those doubts are its only reasons, else `known_bound`. A
+    total adds its members' least and most alike. Retained facts, a share
+    of a request and a child's figure from its family hold no request one
+    by one, so a term they could pay leaves such a subtotal. The estimate
+    is priced when the view is shown, from fresh or retained facts alike,
+    and is never retained. With no table it is absent with the
     reason `no price table is loaded`; an invalid default table is reported
     and leaves it absent, and a named or environment table that cannot be read
     refuses. A harness's
@@ -3611,8 +3614,10 @@ RULES THAT CHANGE WHAT YOU DO
     these groups. Unknown lineage may overlap any other session.
     Overlapping groups make identity incomplete and withhold exact
     totals; each group's consumption is bounded by its largest member and
-    the sum of its members. Disjoint group bounds add. Missing or incomplete
-    measurements qualify the bounds as covering only known recorded amounts.
+    the sum of its members, a list price in doubt counting its least toward
+    the first and its most toward the second. Disjoint group bounds add.
+    Missing or incomplete measurements qualify the bounds as covering only
+    known recorded amounts.
     Per-session figures remain available. The top-level identity status
     summarizes the figures. A participant is a session no dispatch binds
     whose ledger events act on the selected work; a session a dispatch binds
@@ -3741,8 +3746,9 @@ RULES THAT CHANGE WHAT YOU DO
     line naming its bound rows, the children bound to unselected work, and
     the unassigned figure outside the total,
     and a `family` line with the reconciliation status and each residual
-    counter that does not reconcile. An amount not established is shown as its known subtotal, or
-    as `≥` the least an overlapping figure is known to be, with its status
+    counter that does not reconcile. An amount not established is shown as
+    its known subtotal, as `least–most` for a list price in doubt, or as `≥`
+    the least an overlapping figure is known to be, with its status
     beside it. `--detail` prints the per-category report instead. `--by
     agent|role|model|harness|change|session`, repeatable or comma-separated,
     groups the counted rows with one subtotal per group; a subtotal never

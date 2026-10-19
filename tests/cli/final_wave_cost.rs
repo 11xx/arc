@@ -256,6 +256,90 @@ fn a_pi_figure_is_priced_by_its_own_requests() {
     }
 }
 
+// --- The most a bounded list price can cost --------------------------------
+
+const PI_OTHER: &str = "019a0000-0000-7000-8000-0000000000a2";
+
+/// Claim: a list price tapes bounds carries the most it can cost beside
+/// the least, on the session and in every total holding it: a Pi request
+/// on an abandoned branch with no time of its own is priced between its
+/// off-peak and peak rates, so the session is a known subtotal at 2.0 with
+/// a whole-figure bound up to 2.5, the union with a complete 1.5 session is
+/// 3.5 to 4.0, and the table cell shows the range. Rejects dropping tapes'
+/// upper bound so a reader sees only the floor.
+#[test]
+fn a_bounded_list_price_shows_its_upper_bound() {
+    let repo = Repo::new();
+    abandoned_branch(&repo, PI, None);
+    single_branch(&repo, PI_OTHER);
+    let change = executed_change(&repo, "bounded", &[("pi", PI), ("pi", PI_OTHER)]);
+    let prices = time_of_day_table(&repo);
+    let view = report(&repo, &[&change, "--prices", &prices]);
+
+    let row = session(&view, &format!("pi:{PI}"));
+    let list = list_price(&row["totals"]);
+    assert_eq!(list["status"], "incomplete", "{list:#}");
+    close(&list["known_subtotal"], PEAK + 2.0 * OFF_PEAK, list);
+    assert_eq!(list["bound"]["scope"], "whole figure", "{list:#}");
+    close(&list["bound"]["at_least"], PEAK + 2.0 * OFF_PEAK, list);
+    close(&list["bound"]["at_most"], 2.0 * PEAK + OFF_PEAK, list);
+    assert!(
+        list["reasons"].to_string().contains(
+            "a price term set by the request may apply to requests the figure does not hold one by one"
+        ),
+        "{list:#}"
+    );
+
+    let union = list_price(&view["union"]);
+    assert_eq!(union["status"], "incomplete", "{union:#}");
+    close(&union["known_subtotal"], 2.0 * PEAK + 3.0 * OFF_PEAK, union);
+    assert_eq!(union["bound"]["scope"], "whole figure", "{union:#}");
+    close(
+        &union["bound"]["at_least"],
+        2.0 * PEAK + 3.0 * OFF_PEAK,
+        union,
+    );
+    close(
+        &union["bound"]["at_most"],
+        3.0 * PEAK + 2.0 * OFF_PEAK,
+        union,
+    );
+
+    let table = stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "show", &change, "--prices", &prices]),
+    );
+    assert!(table.contains("$2.0000–$2.5000"), "{table}");
+    assert!(table.contains("$3.5000–$4.0000"), "{table}");
+}
+
+/// Claim: a bound beside a reason it does not account for, a record the
+/// read could not parse, covers only the known recorded amounts: the
+/// session's list price carries a `known_bound` from 2.0 to 2.5 and no
+/// whole-figure bound. Rejects calling such a range the whole figure.
+#[test]
+fn a_bounded_list_price_beside_another_reason_bounds_only_known_amounts() {
+    let repo = Repo::new();
+    abandoned_branch(&repo, PI, None);
+    let path = repo
+        .home
+        .join(".pi/agent/sessions/--fixture-project--")
+        .join(format!("2026-01-01T09-30-00-000Z_{PI}.jsonl"));
+    let mut recording = fs::read_to_string(&path).unwrap();
+    recording.push_str("{not json\n");
+    fs::write(&path, recording).unwrap();
+    let change = executed_change(&repo, "partial", &[("pi", PI)]);
+    let prices = time_of_day_table(&repo);
+    let view = report(&repo, &[&change, "--prices", &prices]);
+    let row = session(&view, &format!("pi:{PI}"));
+    let list = list_price(&row["totals"]);
+    assert!(list.get("bound").is_none(), "{list:#}");
+    let bound = &list["known_bound"];
+    assert_eq!(bound["scope"], "known recorded amounts", "{list:#}");
+    close(&bound["at_least"], PEAK + 2.0 * OFF_PEAK, list);
+    close(&bound["at_most"], 2.0 * PEAK + OFF_PEAK, list);
+}
+
 // --- Lineage evidence outside a bounded read's windows ---------------------
 
 const CODEX: &str = "019a0000-0000-7000-8000-0000000000b1";

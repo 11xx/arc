@@ -4481,9 +4481,11 @@ enum CostCmd {
     /// model or row prices it. A `/2` row's long-context, time-of-day and
     /// validity terms are priced request by request from a fresh read, under
     /// the billing its recording establishes; retained facts hold no
-    /// requests, so a term they could pay leaves the least it can cost as a
-    /// known subtotal. Token counts are resource quantities by tapes'
-    /// categories. A harness's native counters add only within that harness:
+    /// requests, so a term they could pay leaves a known subtotal. A price
+    /// in doubt is a known subtotal at the least it can cost, with the most
+    /// under `bound`, or `known_bound` where other reasons qualify it, in
+    /// every total holding it. Token counts are resource quantities by
+    /// tapes' categories. A harness's native counters add only within that harness:
     /// a raw input sum across harnesses is refused and other native sums are
     /// withheld. Tapes' disjoint categories (uncached input, cache read,
     /// cache write by TTL, output, reasoning as a subset of output, and their
@@ -4651,7 +4653,8 @@ enum CostCmd {
     /// orch, integ), the shortest unique session id prefix of at least eight
     /// characters, runs, spans, the disjoint token total, the money columns,
     /// and a status (`complete`, `subtotal`, `split ×N`, `shared ×N`, `live`,
-    /// `unmeasured` or `withheld`). With a price table the money columns are
+    /// `unmeasured` or `withheld`); a list price in doubt shows as
+    /// `least–most`. With a price table the money columns are
     /// the list-price estimate, then the harness-written estimate; without one
     /// the harness-written estimate alone, and a footer line says how to
     /// install a table. The `total` row is the union figure with its status,

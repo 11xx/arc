@@ -3144,8 +3144,8 @@ impl CostSpans {
 }
 
 /// A list-price estimate of one figure: an amount where every priced token
-/// has one price, else the least it can be, the table rows it used, and why
-/// it is not a complete estimate.
+/// has one price, else the least and the most it can be, the table rows it
+/// used, and why it is not a complete estimate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CostListPrice {
     pub currency: String,
@@ -3153,6 +3153,9 @@ pub struct CostListPrice {
     pub schema: &'static str,
     /// Absent when nothing in the figure could be priced.
     pub amount: Option<f64>,
+    /// The most the priced part can cost, present only where a price in
+    /// doubt leaves `amount` the least it can.
+    pub at_most: Option<f64>,
     pub models: Vec<String>,
     pub gaps: Vec<String>,
 }
