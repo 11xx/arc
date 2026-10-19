@@ -90,9 +90,11 @@ fn patchset_range(state: &ChangeState) -> Option<(&str, &str)> {
 }
 
 /// Every readable change's state and the commit graph its patchset ranges
-/// span, read once for every commit a command locates.
+/// span, read once for every commit a command locates, with the changes whose
+/// state could not be read: any of them might record a commit.
 struct Changes {
     states: Vec<ChangeState>,
+    unreadable: Vec<String>,
     /// Absent when the one-pass graph read failed: each range is then walked
     /// on its own, as `rev-list` answers it.
     graph: Option<gitio::CommitGraph>,
@@ -103,9 +105,14 @@ impl Changes {
         let store = ctx.store()?;
         let read = store.read()?;
         let mut states = Vec::new();
+        let mut unreadable = Vec::new();
         for change_id in read.change_ids()? {
-            if let Ok(state) = read.state(&change_id) {
-                states.push(state);
+            match read.state(&change_id) {
+                Ok(state) => states.push(state),
+                Err(error) => {
+                    eprintln!("warning: unreadable change {change_id}: {error:#}");
+                    unreadable.push(change_id);
+                }
             }
         }
         let revisions = states
@@ -113,7 +120,41 @@ impl Changes {
             .filter_map(patchset_range)
             .flat_map(|(base, head)| [base, head]);
         let graph = gitio::CommitGraph::reachable_from(&ctx.cwd, revisions).ok();
-        Ok(Self { states, graph })
+        Ok(Self {
+            states,
+            unreadable,
+            graph,
+        })
+    }
+
+    /// How far a lookup over these changes is authoritative: absent when every
+    /// change was read, otherwise its status and the unreadable changes.
+    fn lookup(&self, matched: bool) -> Option<Value> {
+        if self.unreadable.is_empty() {
+            return None;
+        }
+        Some(json!({
+            "status": if matched { "may-not-be-unique" } else { "unresolved" },
+            "unreadable": self.unreadable,
+            "statement": if matched {
+                "a change whose state could not be read might also record this commit, so the match may not be unique"
+            } else {
+                "no readable change records this commit, and a change whose state could not be read might"
+            },
+        }))
+    }
+
+    /// The answer for a commit no readable change records: a no-match only
+    /// when every change was read.
+    fn no_match(&self) -> String {
+        if self.unreadable.is_empty() {
+            "no change records this commit".to_string()
+        } else {
+            format!(
+                "no readable change records this commit; unreadable changes might: {}",
+                self.unreadable.join(", ")
+            )
+        }
     }
 
     /// The changes whose current patchset range `base..head` holds `commit`.
@@ -356,18 +397,23 @@ fn view_of(ctx: &Ctx, commit: &str, located: &Located, cost: &CostView) -> Resul
 fn commit_view(ctx: &Ctx, revision: &str, prices: Option<&std::path::Path>) -> Result<Value> {
     let commit = gitio::rev_parse(&ctx.cwd, revision)
         .with_context(|| format!("{revision} is not a commit"))?;
-    match locate(ctx, &Changes::read(ctx)?, &commit)? {
+    let changes = Changes::read(ctx)?;
+    let mut view = match locate(ctx, &changes, &commit)? {
         Some(located) => {
             let cost = read_cost(ctx, &located.state.change_id, prices)?;
-            view_of(ctx, &commit, &located, &cost)
+            view_of(ctx, &commit, &located, &cost)?
         }
-        None => Ok(json!({
+        None => json!({
             "schema": COMMIT_SCHEMA,
             "commit": commit,
             "change": null,
-            "answer": "no change records this commit",
-        })),
+            "answer": changes.no_match(),
+        }),
+    };
+    if let Some(lookup) = changes.lookup(!view["change"].is_null()) {
+        view["lookup"] = lookup;
     }
+    Ok(view)
 }
 
 fn short(sha: &str) -> &str {
@@ -395,6 +441,19 @@ fn view_text(view: &Value, detail: bool) -> String {
         _ => String::new(),
     };
     emit!(out, "commit {}{}", short(sha), free(&view["subject"]));
+    if view["lookup"]["status"] == "may-not-be-unique" {
+        emit!(
+            out,
+            "this match may not be unique: unreadable changes might also record the commit: {}",
+            view["lookup"]["unreadable"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     if view["change"].is_null() {
         emit!(out, "{}", view["answer"].as_str().unwrap_or_default());
         return out;
@@ -537,8 +596,9 @@ fn beyond_opening(text: &str) -> &str {
 pub fn note_cost(ctx: &Ctx, target: Option<&str>, all: bool) -> Result<()> {
     let store = ctx.store()?;
     let mut states: BTreeMap<String, ChangeState> = BTreeMap::new();
-    // Each commit to note, and whether a refresh may leave it as it is.
-    let mut jobs: BTreeMap<String, (String, bool)> = BTreeMap::new();
+    // Each commit to note, whether a refresh may leave it as it is, and
+    // whether a commit lookup found its change.
+    let mut jobs: BTreeMap<String, (String, bool, bool)> = BTreeMap::new();
     // Every change is read once however many commits are located.
     let held = std::cell::OnceCell::new();
     let changes = || -> Result<&Changes> {
@@ -549,18 +609,22 @@ pub fn note_cost(ctx: &Ctx, target: Option<&str>, all: bool) -> Result<()> {
         Ok(held.get_or_init(|| read))
     };
     if let Some(target) = target {
+        let mut looked_up = false;
         let state = match store.resolve_change(target) {
             Ok(change_id) => store.read()?.state(&change_id)?,
             Err(_) => {
                 let commit = gitio::rev_parse(&ctx.cwd, target)
                     .with_context(|| format!("{target} is neither a change nor a commit"))?;
-                locate(ctx, changes()?, &commit)?
-                    .context("no change records this commit")?
-                    .state
+                let changes = changes()?;
+                looked_up = true;
+                match locate(ctx, changes, &commit)? {
+                    Some(located) => located.state,
+                    None => bail!("{}", changes.no_match()),
+                }
             }
         };
         for commit in change_commits(ctx, &state) {
-            jobs.insert(commit, (state.change_id.clone(), false));
+            jobs.insert(commit, (state.change_id.clone(), false, looked_up));
         }
         states.insert(state.change_id.clone(), state);
     }
@@ -569,22 +633,28 @@ pub fn note_cost(ctx: &Ctx, target: Option<&str>, all: bool) -> Result<()> {
             if jobs.contains_key(&commit) {
                 continue;
             }
-            match locate(ctx, changes()?, &commit)? {
+            let changes = changes()?;
+            match locate(ctx, changes, &commit)? {
                 Some(located) => {
                     let change_id = located.state.change_id.clone();
                     states.entry(change_id.clone()).or_insert(located.state);
-                    jobs.insert(commit, (change_id, true));
+                    jobs.insert(commit, (change_id, true, true));
                 }
-                None => println!(
+                None if changes.unreadable.is_empty() => println!(
                     "no change records {}: its note is left as it is",
                     short(&commit)
+                ),
+                None => println!(
+                    "no readable change records {}: its note is left as it is; unreadable changes might: {}",
+                    short(&commit),
+                    changes.unreadable.join(", ")
                 ),
             }
         }
     }
     let mut costs: BTreeMap<String, CostView> = BTreeMap::new();
     let mut refused = 0usize;
-    for (commit, (change_id, refresh)) in &jobs {
+    for (commit, (change_id, refresh, looked_up)) in &jobs {
         if !costs.contains_key(change_id) {
             costs.insert(change_id.clone(), read_cost(ctx, change_id, None)?);
         }
@@ -595,7 +665,14 @@ pub fn note_cost(ctx: &Ctx, target: Option<&str>, all: bool) -> Result<()> {
             state: state.clone(),
             commits,
         };
-        let view = view_of(ctx, commit, &located, &costs[change_id])?;
+        let mut view = view_of(ctx, commit, &located, &costs[change_id])?;
+        if let Some(lookup) = held
+            .get()
+            .filter(|_| *looked_up)
+            .and_then(|changes| changes.lookup(true))
+        {
+            view["lookup"] = lookup;
+        }
         let text = match note_text(&view) {
             Ok(text) => text,
             Err(error) => {

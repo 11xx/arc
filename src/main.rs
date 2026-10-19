@@ -4661,7 +4661,14 @@ enum CostCmd {
     /// share beside it when the view divides the session. A trailer no
     /// recorded session answers reads `no session recorded`, never zero. A
     /// commit no change records answers `no change records this commit`,
-    /// shows no figure, and succeeds. A commit that several changes record
+    /// shows no figure, and succeeds. The lookup follows the aggregate read
+    /// rule: each change whose state cannot be read is named with its error
+    /// on stderr and the command succeeds. A lookup that skipped one never
+    /// answers that no-match: it answers `no readable change records this
+    /// commit` naming them, with `lookup.status` `unresolved`; a match found
+    /// beside one is shown with `lookup.status` `may-not-be-unique` and a line
+    /// saying so; `lookup.unreadable` lists them, and a lookup that read every
+    /// change carries no `lookup`. A commit that several changes record
     /// is refused, naming them. With `--commit`, `--json` emits
     /// `arc-cost-commit/1`, which wraps the embedded `arc-cost/1`.
     Show {
@@ -4714,7 +4721,8 @@ enum CostCmd {
         #[arg(long)]
         detail: bool,
         /// A commit, resolved with Git and then to the change that records it,
-        /// in place of a target
+        /// in place of a target; a change whose state cannot be read keeps
+        /// the answer from reading as a no-match or an unqualified match
         #[arg(long, value_name = "REV")]
         commit: Option<String>,
         /// Emit the machine-readable JSON view instead of text
@@ -4772,7 +4780,11 @@ enum CostCmd {
     /// newer read. `--all` refreshes every commit that already holds an
     /// arc-cost note, wherever a newer read changes its text beyond its
     /// opening time, and leaves the others as they are; a noted commit no
-    /// change records keeps its note. The notes ref is local: arc never
+    /// change records keeps its note. A commit is located as `cost show
+    /// --commit` locates it: a target no readable change records is refused
+    /// naming the unreadable changes, a noted one is left as it is with them
+    /// named, and a note from a match found beside an unreadable change says
+    /// the match may not be unique. The notes ref is local: arc never
     /// configures it for push, never adds it to a refspec and never pushes
     /// it. Records no ledger events
     Note {

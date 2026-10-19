@@ -11,6 +11,7 @@ mod changelog;
 mod checkout_defaults;
 mod claims;
 mod codex_model_checkpoint;
+mod commit_lookup_gaps;
 mod common;
 mod context;
 mod contribution;

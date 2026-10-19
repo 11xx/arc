@@ -3751,7 +3751,16 @@ RULES THAT CHANGE WHAT YOU DO
     beside it when the view divides the session. A trailer no recorded
     session answers, such as a person's or another model's, reads `no
     session recorded`, never zero. A commit no change records answers `no
-    change records this commit`, shows no figure and succeeds. `--json`
+    change records this commit`, shows no figure and succeeds. The lookup
+    reads every change's state and follows the aggregate read rule: each
+    change whose state cannot be read is named with its error on stderr,
+    and the command still succeeds. Such a change might record the commit,
+    so a lookup that skipped one never answers that no-match: it answers
+    `no readable change records this commit` naming the unreadable changes,
+    with `lookup.status` `unresolved`. A match found beside one is still
+    shown, with `lookup.status` `may-not-be-unique` and a line saying so.
+    `lookup.unreadable` lists the changes either way, and a lookup that read
+    every change carries no `lookup`. `--json`
     emits `arc-cost-commit/1`, wrapping the embedded `arc-cost/1`. A price
     never enters a commit message: a figure is incomplete while a session
     runs, and no session's spend has a per-commit split.
@@ -3771,9 +3780,13 @@ RULES THAT CHANGE WHAT YOU DO
     refresh. `--all` refreshes every commit that already holds an arc-cost
     note, wherever a newer read changes its text beyond the opening time,
     and leaves the others as they are; a noted commit no change records
-    keeps its note. The notes ref is local: arc never configures it for
-    push, never adds it to a refspec and never pushes it. The command
-    records no ledger event.
+    keeps its note. A commit target or a noted commit is located as `cost
+    show --commit` locates it: a target no readable change records is
+    refused naming the unreadable changes, a noted one is left as it is with
+    them named, and a note written from a match found beside an unreadable
+    change carries the same `may not be unique` line. The notes ref is
+    local: arc never configures it for push, never adds it to a refspec and
+    never pushes it. The command records no ledger event.
   - A bounded round records what it deliberately left, so the next round
     inherits a list instead of a memory: `arc run end <dispatch> --outcome
     <o> --reviewed-head <sha> --raised-json <path|-> --deferred-json <path|->`.
