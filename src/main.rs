@@ -4557,8 +4557,9 @@ enum CostCmd {
     /// before its first span is unattributed and withholds no share. `--allocate even` divides each segment several items cover evenly
     /// among them, labelled `allocated` beside the conserving figure;
     /// allocation is never the default.
-    /// Lineage relatives are plain session ids. Unresolved locators and
-    /// lineage notes make identity unknown; reasons are fixed categories.
+    /// Lineage relatives are plain session ids, read from the whole
+    /// recording. Unresolved locators and lineage notes make identity
+    /// unknown; reasons are fixed categories.
     /// Recorded lineage and binding fork origins group potentially
     /// overlapping sessions transitively; exact unions of
     /// those groups are withheld beside bounds from the largest member to

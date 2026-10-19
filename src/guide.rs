@@ -3560,15 +3560,17 @@ RULES THAT CHANGE WHAT YOU DO
     conserving one and never replaces it, and allocation is never the default.
     Lineage relatives are plain session ids. A non-id reference makes
     identity unknown with a fixed reason; arc does not parse a recording path
-    to infer an id. Lineage notes, failed reads and bounded reads also make
-    identity unknown, using fixed categories and note counts.
+    to infer an id. Lineage is read from the whole recording, as usage is,
+    so a large recording with no fork, copy or child evidence keeps its
+    identity established. Lineage notes and failed reads make identity
+    unknown, using fixed categories and note counts.
     Every direct, inclusive, and union figure groups recorded parent, child,
     and fork relations transitively, including a binding's declared
     `--forked-from`.
     An origin outside the figure contributes no consumption and does not
     make the figure's identity incomplete by itself. Binding relations are
     durable alongside retained usage facts, so source rotation preserves
-    these groups. Unknown or bounded lineage may overlap any other session.
+    these groups. Unknown lineage may overlap any other session.
     Overlapping groups make identity incomplete and withhold exact
     totals; each group's consumption is bounded by its largest member and
     the sum of its members. Disjoint group bounds add. Missing or incomplete

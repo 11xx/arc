@@ -2144,7 +2144,7 @@ fn read_lineage(
     harness: &str,
     session: &str,
 ) -> CostLineage {
-    let view = match agent_tapes_core::lineage_with_backends(
+    let view = match agent_tapes_core::lineage_full_with_backends(
         backends,
         agent_tapes_core::Selection::IdInHarness {
             id: session,
