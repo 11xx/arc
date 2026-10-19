@@ -3646,8 +3646,9 @@ RULES THAT CHANGE WHAT YOU DO
     retained facts name names no session. A participant is measured through the same
     reader as an executor, or from retained facts when its source no longer
     answers, and divided by its span on each work item. Its membership is
-    every change in this ledger whose events carry it, as their session or
-    their subject, read in one pass.
+    every change in this ledger with an event of any kind that names it, as
+    its session or its subject, read in one pass; `--footprint` selects by
+    the same rule.
     Undivided, it counts whole where the item holds every member. Divided,
     its share joins each item's total, and a union takes the selected items'
     shares. It is listed in `participants` with its whole figure, roles,
@@ -3732,9 +3733,11 @@ RULES THAT CHANGE WHAT YOU DO
     counts each session once. `--tag <t>`, repeatable with every tag
     required, selects each change carrying it as `begin --tag` and `arc meta
     --tag` record it. `--footprint <harness:id>` selects each change and
-    journal item that session was bound to, dispatched or acted on, itself
-    or as the `--on-behalf-of` subject, and shows its whole figure beside
-    them. A native child is named by its
+    journal item that session was bound to or dispatched, and each change
+    with an event of any kind that names it, as its session or its
+    `--on-behalf-of` subject: the work its membership holds, so a session
+    counted whole in a change view is counted whole beside them. It shows
+    its whole figure beside them. A native child is named by its
     measured key, `claude:<parent>::<agent>`, and selects the work its
     bindings name; a child key no binding records is refused. `--since` and `--until` select each
     change with a ledger event, or a run dispatched or ended for it, in the

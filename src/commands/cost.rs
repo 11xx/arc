@@ -1426,11 +1426,9 @@ fn range_targets(
             && change_events
                 .iter()
                 .any(|event| in_window(&event.created_at));
-        let acted = footprint.as_ref().is_some_and(|key| {
-            change_events
-                .iter()
-                .any(|event| names(event, key) && role_of(&event.payload).is_some())
-        });
+        let acted = footprint
+            .as_ref()
+            .is_some_and(|key| change_events.iter().any(|event| names(event, key)));
         if query.all || tagged || windowed_in || acted {
             targets.push(id.clone());
         }
@@ -3587,7 +3585,8 @@ impl Subjects {
 }
 
 /// The sessions an event names, each once: its acting session, marked own,
-/// and the session it was recorded on behalf of.
+/// and the session it was recorded on behalf of. This one rule decides the
+/// work a session is part of, for its membership and for `--footprint`.
 fn named_sessions(event: &Event, subjects: &Subjects) -> Vec<((String, String), bool)> {
     let actor = match (&event.harness, &event.session) {
         (Some(harness), Some(session))

@@ -4608,8 +4608,8 @@ enum CostCmd {
     /// names none. It is divided by its span on each work item; one with
     /// several members, one of which only events recorded on its behalf name,
     /// is not divided (`recorded on its behalf`). Its membership is every
-    /// change in this ledger whose events carry it, as their session or their
-    /// subject. Undivided, it counts whole where the item
+    /// change in this ledger with an event of any kind naming it, as its
+    /// session or its subject, the rule `--footprint` selects by. Undivided, it counts whole where the item
     /// holds every member; divided, its share joins each item's total and a
     /// union takes the selected items' shares. It is listed in `participants`
     /// with its whole figure, roles, span count (its members), `counted` and
@@ -4652,8 +4652,9 @@ enum CostCmd {
     ///
     /// Several targets and the range selectors select their union, and the
     /// union counts each session once: `--tag` every change carrying the tags,
-    /// `--footprint` every change and journal item one session was bound to,
-    /// dispatched or acted on, itself or as the subject, beside its whole figure, `--since`/`--until`
+    /// `--footprint` every change and journal item one session was bound to
+    /// or dispatched and every change with an event naming it, itself or as
+    /// the subject (its membership), beside its whole figure, `--since`/`--until`
     /// every change with a ledger event or run in the window (the window
     /// selects work items; a session is divided by its spans, never by the
     /// window's edges), and `--all`
@@ -4736,8 +4737,9 @@ enum CostCmd {
         #[arg(long, conflicts_with = "commit")]
         tag: Vec<String>,
         /// Every change and journal item the session `harness:id` was bound
-        /// to or acted on, itself or as the `--on-behalf-of` subject, with
-        /// that session's whole figure beside them. A
+        /// to or dispatched, and every change with an event of any kind naming
+        /// it, itself or as the `--on-behalf-of` subject, with that session's
+        /// whole figure beside them. A
         /// native child is `claude:<parent>::<agent>`, selecting the work its
         /// bindings name; a child key no binding records is refused
         #[arg(long, value_name = "HARNESS:ID", conflicts_with = "commit")]
