@@ -4599,10 +4599,13 @@ enum CostCmd {
     /// never a participant. Its roles come only from the kinds of its events:
     /// a snapshot or a verdict is a reviewer's, an integration, a debt or a
     /// closure an integrator's, a dispatch an orchestrator's. An event
-    /// recorded `--on-behalf-of` a `harness:<session id>` subject is the
-    /// subject's event too, giving it the kind's role while the invoker keeps
-    /// its own; a subject naming a person, a label or a `harness:model` names
-    /// no session. It is divided by its span on each work item; one with
+    /// recorded `--on-behalf-of` a `harness:<id>` subject naming a session is
+    /// the subject's event too, giving it the kind's role while the invoker
+    /// keeps its own. The subject names a session when its harness's tapes
+    /// reader locates the id (an OpenCode `ses_…`, a Claude, Codex or Pi
+    /// UUID), when that store cannot answer, or when the ledger retains facts
+    /// for it; a person, a label, a `harness:model` or an id nothing locates
+    /// names none. It is divided by its span on each work item; one with
     /// several members, one of which only events recorded on its behalf name,
     /// is not divided (`recorded on its behalf`). Its membership is every
     /// change in this ledger whose events carry it, as their session or their

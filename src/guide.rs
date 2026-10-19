@@ -3635,10 +3635,15 @@ RULES THAT CHANGE WHAT YOU DO
     reviewer, an integration, a debt or a closure an integrator, and a
     dispatch an orchestrator; any other kind makes no participant, and
     prose and trailers name none. An event recorded `--on-behalf-of` a
-    `harness:<session id>` subject is the subject's event too: it gives the
-    subject the kind's role and membership while the invoker keeps its own
-    roles for the event it ran. A subject naming a person, a label or a
-    `harness:model` names no session. A participant is measured through the same
+    `harness:<id>` subject that names a session is the subject's event too:
+    it gives the subject the kind's role and membership while the invoker
+    keeps its own roles for the event it ran. The subject names a session
+    when the tapes reader of its harness locates the id as one of that
+    harness's recordings, each harness shaping its own ids (an OpenCode
+    `ses_…`, a Claude, Codex or Pi UUID), when that harness's store cannot
+    answer, or when the ledger retains facts for it. A subject naming a
+    person, a label, a `harness:model` or an id no reader locates and no
+    retained facts name names no session. A participant is measured through the same
     reader as an executor, or from retained facts when its source no longer
     answers, and divided by its span on each work item. Its membership is
     every change in this ledger whose events carry it, as their session or

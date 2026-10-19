@@ -515,13 +515,15 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
     let store = ctx.store()?;
     let mut read = CostRead::new(&store);
     let events = read.events(Store::REPOSITORY_SCOPE);
-    let mut selection = select_query(ctx, &mut read, query, &events)?;
+    let backends = std::cell::OnceCell::new();
+    let subjects = Subjects::read(&mut read, &events, &backends);
+    let mut selection = select_query(ctx, &mut read, query, &events, &subjects)?;
     qualify_ledger(&mut selection, &read.gaps);
     let assigned = assign(ctx, &mut selection, &events);
     if !selection.readable && assigned.runs.is_empty() && assigned.sessions.is_empty() {
         bail!("cost target has no readable metadata");
     }
-    let ledger = read_ledger(&mut read, &selection, &events, &assigned);
+    let ledger = read_ledger(&mut read, &selection, &events, &assigned, &subjects);
     let Assigned {
         runs,
         sessions,
@@ -544,7 +546,6 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
             .get(&(harness.to_string(), session.to_string()))
             .unwrap_or(&empty)
     };
-    let backends = std::cell::OnceCell::new();
     let mut fresh_read = |harness: &str, session: &str| {
         fresh
             .remove(&(harness.to_string(), session.to_string()))
@@ -1091,13 +1092,14 @@ pub fn retain_cost(ctx: &Ctx, target: &str) -> Result<()> {
     let store = ctx.store()?;
     let mut read = CostRead::new(&store);
     let events = read.events(Store::REPOSITORY_SCOPE);
+    let subjects = Subjects::read(&mut read, &events, &std::cell::OnceCell::new());
     let mut selection = select(ctx, &mut read, target, &events)?;
     qualify_ledger(&mut selection, &read.gaps);
     let assigned = assign(ctx, &mut selection, &events);
     if !selection.readable && assigned.runs.is_empty() && assigned.sessions.is_empty() {
         bail!("cost target has no readable metadata");
     }
-    let ledger = read_ledger(&mut read, &selection, &events, &assigned);
+    let ledger = read_ledger(&mut read, &selection, &events, &assigned, &subjects);
     print_read_gaps(&selection.gaps, &read.gaps);
     let plans = span_plans(&assigned.sessions, &ledger);
     let mut keys: BTreeSet<(String, String)> = assigned.sessions.into_keys().collect();
@@ -1352,6 +1354,7 @@ fn range_targets(
     read: &mut CostRead<'_>,
     query: &CostQuery,
     events: &[Event],
+    subjects: &Subjects,
     gaps: &mut Vec<Value>,
 ) -> Result<Vec<String>> {
     let mut targets: Vec<String> = query.targets.clone();
@@ -1362,10 +1365,9 @@ fn range_targets(
     let windowed = query.since.is_some() || query.until.is_some();
     let footprint = query.footprint.as_deref().map(footprint_key).transpose()?;
     let names = |event: &Event, key: &(String, String)| {
-        let (harness, session) = key;
-        (event.harness.as_deref() == Some(harness.as_str())
-            && event.session.as_deref() == Some(session.as_str()))
-            || subject_session(event).as_ref() == Some(key)
+        named_sessions(event, subjects)
+            .iter()
+            .any(|(named, _)| named == key)
     };
     let mut child_bound = false;
     for round in rounds(events) {
@@ -1445,12 +1447,13 @@ fn select_query(
     read: &mut CostRead<'_>,
     query: &CostQuery,
     events: &[Event],
+    subjects: &Subjects,
 ) -> Result<Selection> {
     if !query.ranged() {
         return select(ctx, read, &query.targets[0], events);
     }
     let mut gaps = Vec::new();
-    let targets = range_targets(read, query, events, &mut gaps)?;
+    let targets = range_targets(read, query, events, subjects, &mut gaps)?;
     if targets.is_empty() {
         bail!("the cost range selects no work");
     }
@@ -3531,13 +3534,77 @@ fn model_of(coordinate: &str) -> Option<String> {
     (!model.is_empty()).then(|| model.to_string())
 }
 
-/// The session an event was recorded on behalf of: a `harness:<session id>`
-/// subject, its id shaped as arc reads a session id. Any other subject, a
-/// name or a `harness:model`, names a party and no session.
-fn subject_session(event: &Event) -> Option<(String, String)> {
-    let (harness, session) = event.on_behalf_of.as_deref()?.trim().split_once(':')?;
-    (plain_session_id(harness) && crate::coordinate::is_session_id(session, None))
-        .then(|| (harness.to_string(), session.to_string()))
+/// The `harness:id` an event was recorded on behalf of, before anything
+/// says whether it names a session.
+fn subject_of(event: &Event) -> Option<(String, String)> {
+    let (harness, id) = event.on_behalf_of.as_deref()?.trim().split_once(':')?;
+    (plain_session_id(harness) && plain_session_id(id))
+        .then(|| (harness.to_string(), id.to_string()))
+}
+
+/// The `--on-behalf-of` subjects in this ledger that name a session: an id
+/// the subject harness's tapes reader locates as one of its recordings, as
+/// each harness shapes its ids (OpenCode's `ses_…`, a Claude, Codex or Pi
+/// UUID), one whose store could not answer, or one the ledger retains facts
+/// for. Any other subject, a person, a label or a `harness:model`, names a
+/// party and no session.
+struct Subjects(BTreeSet<(String, String)>);
+
+impl Subjects {
+    fn read(
+        read: &mut CostRead<'_>,
+        repository: &[Event],
+        backends: &std::cell::OnceCell<Backends>,
+    ) -> Self {
+        let mut candidates: BTreeSet<(String, String)> =
+            repository.iter().filter_map(subject_of).collect();
+        for change_id in read.change_ids() {
+            candidates.extend(read.events(&change_id).iter().filter_map(subject_of));
+        }
+        let sessions = candidates
+            .into_iter()
+            .filter(|(harness, id)| {
+                !retained_for(repository, harness, id).is_empty()
+                    || backends
+                        .get_or_init(Backends::new)
+                        .of(harness)
+                        .iter()
+                        .any(|backend| {
+                            // A join that expects misses: no store is walked twice.
+                            backend.locate_relative(id).map_or(true, |session| {
+                                session.is_some_and(|session| &session.id == id)
+                            })
+                        })
+            })
+            .collect();
+        Self(sessions)
+    }
+
+    /// The session `event` was recorded on behalf of, if its subject names one.
+    fn of(&self, event: &Event) -> Option<(String, String)> {
+        subject_of(event).filter(|subject| self.0.contains(subject))
+    }
+}
+
+/// The sessions an event names, each once: its acting session, marked own,
+/// and the session it was recorded on behalf of.
+fn named_sessions(event: &Event, subjects: &Subjects) -> Vec<((String, String), bool)> {
+    let actor = match (&event.harness, &event.session) {
+        (Some(harness), Some(session))
+            if plain_session_id(harness) && plain_session_id(session) =>
+        {
+            Some((harness.clone(), session.clone()))
+        }
+        _ => None,
+    };
+    let subject = subjects
+        .of(event)
+        .filter(|subject| Some(subject) != actor.as_ref());
+    actor
+        .into_iter()
+        .map(|key| (key, true))
+        .chain(subject.map(|key| (key, false)))
+        .collect()
 }
 
 /// A session the ledger's events name.
@@ -3603,6 +3670,7 @@ fn read_ledger(
     selection: &Selection,
     repository: &[Event],
     assigned: &Assigned,
+    subjects: &Subjects,
 ) -> Ledger {
     let selected: BTreeSet<&WorkKey> = selection.items.iter().map(|item| &item.key).collect();
     let mut ledger = Ledger {
@@ -3613,24 +3681,12 @@ fn read_ledger(
     let mut note = |event: &Event, work: WorkKey| {
         let role = role_of(&event.payload);
         let on_selection = selected.contains(&work);
-        let actor = match (&event.harness, &event.session) {
-            (Some(harness), Some(session))
-                if plain_session_id(harness) && plain_session_id(session) =>
-            {
-                Some((harness.clone(), session.clone()))
-            }
-            _ => None,
-        };
-        if actor.is_none() && on_selection && role.is_some() {
+        let named = named_sessions(event, subjects);
+        if !named.iter().any(|(_, own)| *own) && on_selection && role.is_some() {
             ledger.unattributed_events += 1;
         }
         // The subject's event was recorded by the invoker: its instant, model
         // and session are the invoker's, so it opens no span of the subject.
-        let subject = subject_session(event).filter(|subject| Some(subject) != actor.as_ref());
-        let named = actor
-            .into_iter()
-            .map(|key| (key, true))
-            .chain(subject.map(|key| (key, false)));
         for (key, own) in named {
             let harness = key.0.clone();
             let person = ledger.people.entry(key).or_default();
