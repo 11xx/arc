@@ -2918,10 +2918,13 @@ fn normalize(
         residual: None,
         spans: None,
         list_price: None,
-        // Consumption over other branches holds requests the active
-        // branch's do not, so it keeps none one by one.
+        // Consumption keeps its own requests, those on other branches too,
+        // never the active branch's alone.
         request_terms: CostRequestTerms {
-            requests: view.request_uses.clone().filter(|_| consumption.is_none()),
+            requests: match consumption {
+                Some(consumption) => consumption.request_uses.clone(),
+                None => view.request_uses.clone(),
+            },
             billing: view.billing.clone(),
             from: view.session.started_at,
             to: view.session.last_activity_at,

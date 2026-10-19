@@ -32,6 +32,7 @@ mod doctor;
 mod explain;
 mod external;
 mod falsification_transport;
+mod final_wave_cost;
 mod findings;
 mod forge;
 mod forge_custody;

@@ -3476,8 +3476,9 @@ RULES THAT CHANGE WHAT YOU DO
     through tapes' pricing. A `/2` row's terms set by the request, a
     long-context rate above a prompt size for the billing it applies to,
     time-of-day rates and a validity window, are priced request by request
-    over the requests a fresh read kept, under the billing the recording
-    establishes; a subscription pays no long-context surcharge. A model the
+    over the requests a fresh read kept, a Pi figure's on every branch its
+    recording retains, under the billing the recording establishes; a
+    subscription pays no long-context surcharge. A model the
     table lacks, a figure no model is known to have served, a category
     measured incompletely, a cache write with no recorded TTL, a term the
     figure's requests do not settle, billing the recording does not
