@@ -328,7 +328,14 @@ pub fn head_if_present(cwd: &Path) -> Result<Option<String>> {
 }
 
 pub fn branch_head(cwd: &Path, branch: &str) -> Result<String> {
-    rev_parse(cwd, &format!("refs/heads/{branch}"))
+    let name = format!("refs/heads/{branch}");
+    if let Some(Object::Found { id, kind, .. }) = shared_object(cwd, &format!("{name}^{{commit}}"))
+    {
+        if kind == "commit" {
+            return Ok(id);
+        }
+    }
+    rev_parse(cwd, &name)
 }
 
 pub fn current_branch(cwd: &Path) -> Result<Option<String>> {
@@ -1308,6 +1315,15 @@ fn piped_output_with(
 /// holds no such path.
 pub fn file_at(cwd: &Path, rev: &str, path: &str) -> Result<Option<String>> {
     let object = format!("{rev}:{path}");
+    match shared_object(cwd, &object) {
+        Some(Object::Missing) => return Ok(None),
+        Some(Object::Found { kind, bytes, .. }) if kind == "blob" => {
+            return String::from_utf8(bytes)
+                .map(Some)
+                .with_context(|| format!("{object} is not UTF-8"));
+        }
+        _ => {}
+    }
     let out = git_command()
         .args(["rev-parse", "--verify", "-q", &object])
         .current_dir(cwd)
@@ -1751,6 +1767,27 @@ pub fn divergence(cwd: &Path, target: &str, branch: &str) -> Result<(usize, usiz
         .and_then(|value| value.parse().ok())
         .context("git rev-list --left-right returned no right count")?;
     Ok((behind, ahead))
+}
+
+/// Each local branch's `(behind, ahead)` against `target`, as [`divergence`]
+/// counts it, from one `for-each-ref`; `None` when this Git cannot answer
+/// them that way.
+pub fn branch_divergences(
+    cwd: &Path,
+    target: &str,
+) -> Option<std::collections::HashMap<String, (usize, usize)>> {
+    let format = format!("--format=%(refname:short)%00%(ahead-behind:{target})");
+    let out = git(cwd, &["for-each-ref", &format, "refs/heads/"]).ok()?;
+    out.lines()
+        .map(|line| {
+            let (name, counts) = line.split_once('\0')?;
+            let (ahead, behind) = counts.trim().split_once(' ')?;
+            Some((
+                name.to_string(),
+                (behind.parse().ok()?, ahead.parse().ok()?),
+            ))
+        })
+        .collect()
 }
 
 /// The upstream a local branch is configured to track (`branch.<name>.remote`
@@ -2501,6 +2538,252 @@ pub fn commit_tree_unsigned(
     }
     args.extend(["-m", message]);
     git(cwd, &args)
+}
+
+/// An object as `cat-file --batch` answers a name.
+enum Object {
+    Found {
+        id: String,
+        kind: String,
+        bytes: Vec<u8>,
+    },
+    Missing,
+}
+
+/// One `cat-file --batch` kept open for a checkout, answering one name at a
+/// time.
+struct ObjectReader {
+    _child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    stdout: std::io::BufReader<std::process::ChildStdout>,
+}
+
+impl ObjectReader {
+    fn spawn(cwd: &Path) -> Option<Self> {
+        let mut child = git_command()
+            .args(["cat-file", "--batch"])
+            .current_dir(cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        let stdin = child.stdin.take()?;
+        let stdout = std::io::BufReader::new(child.stdout.take()?);
+        Some(Self {
+            _child: child,
+            stdin,
+            stdout,
+        })
+    }
+
+    /// The object `name` resolves to, `Missing`, or `None` for any other
+    /// answer, such as an ambiguous name, which the caller asks Git for on
+    /// its own to report as Git does.
+    fn read(&mut self, name: &str) -> Option<Object> {
+        use std::io::BufRead;
+        writeln!(self.stdin, "{name}").ok()?;
+        self.stdin.flush().ok()?;
+        let mut header = String::new();
+        self.stdout.read_line(&mut header).ok()?;
+        let header = header.strip_suffix('\n')?;
+        if header.strip_suffix(" missing") == Some(name) {
+            return Some(Object::Missing);
+        }
+        let mut fields = header.split(' ');
+        let (Some(id), Some(kind), Some(size), None) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            return None;
+        };
+        let size: usize = size.parse().ok()?;
+        let mut bytes = vec![0; size + 1];
+        self.stdout.read_exact(&mut bytes).ok()?;
+        bytes.pop().filter(|end| *end == b'\n')?;
+        Some(Object::Found {
+            id: id.to_string(),
+            kind: kind.to_string(),
+            bytes,
+        })
+    }
+}
+
+static OBJECT_READERS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, ObjectReader>>,
+> = std::sync::OnceLock::new();
+
+/// While the process shares its reads, the object `name` names, read through
+/// the one `cat-file --batch` this process keeps for `cwd`. `None` when reads
+/// are not shared, the name cannot be one query line, or the reader failed;
+/// a failed reader is dropped and the next lookup starts another.
+fn shared_object(cwd: &Path, name: &str) -> Option<Object> {
+    if !crate::store::shares_reads() || name.contains(['\n', '\r']) {
+        return None;
+    }
+    let mut readers = OBJECT_READERS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let reader = match readers.entry(cwd.to_path_buf()) {
+        std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+        std::collections::hash_map::Entry::Vacant(entry) => entry.insert(ObjectReader::spawn(cwd)?),
+    };
+    let answer = reader.read(name);
+    if answer.is_none() {
+        readers.remove(cwd);
+    }
+    answer
+}
+
+/// The paths `git diff --name-only <base>...<head>` lists for each range,
+/// keyed by the range. One `cat-file --batch-check` resolves every revision,
+/// one `rev-list --parents` reads the history the heads reach, and one
+/// `diff-tree --stdin` diffs every range whose base its head reaches, where
+/// the merge base is the base itself. Any other range is diffed on its own.
+/// A range Git cannot diff is absent.
+pub fn changed_paths_of(
+    cwd: &Path,
+    ranges: &[(String, String)],
+) -> std::collections::HashMap<(String, String), Vec<String>> {
+    let mut answers = std::collections::HashMap::new();
+    let mut alone: Vec<&(String, String)> = Vec::new();
+    let mut batched: Vec<(&(String, String), String, String)> = Vec::new();
+    let names: Vec<String> = ranges
+        .iter()
+        .flat_map(|(base, head)| {
+            [
+                format!("{base}^{{commit}}"),
+                format!("{head}^{{commit}}"),
+                format!("{base}^{{tree}}"),
+                format!("{head}^{{tree}}"),
+            ]
+        })
+        .collect();
+    let resolved: std::collections::HashMap<String, String> =
+        batch_check(cwd, names.iter().map(String::as_str))
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(name, answer)| {
+                let (id, kind) = answer.split_once(' ')?;
+                matches!(kind, "commit" | "tree").then(|| (name, id.to_string()))
+            })
+            .collect();
+    let commit = |rev: &str| resolved.get(&format!("{rev}^{{commit}}"));
+    let tree = |rev: &str| resolved.get(&format!("{rev}^{{tree}}"));
+    let heads: BTreeSet<&String> = ranges.iter().filter_map(|(_, head)| commit(head)).collect();
+    let parents = parent_map(cwd, heads.into_iter().map(String::as_str));
+    for range in ranges {
+        let (base, head) = range;
+        match (commit(base), commit(head), tree(base), tree(head), &parents) {
+            (Some(base_id), Some(head_id), Some(base_tree), Some(head_tree), Some(parents))
+                if reaches(parents, head_id, base_id) =>
+            {
+                batched.push((range, base_tree.clone(), head_tree.clone()));
+            }
+            _ => alone.push(range),
+        }
+    }
+    if !batched.is_empty() {
+        let input: String = batched
+            .iter()
+            .map(|(_, base, head)| format!("{base} {head}\n"))
+            .collect();
+        let mut args = vec!["diff-tree", "--stdin", "-r", "--name-only"];
+        args.extend(rename_detection(cwd));
+        match git_piped(cwd, &args, input.as_bytes()) {
+            Ok(output) => {
+                let text = String::from_utf8_lossy(&output);
+                let mut lines = text.lines().peekable();
+                for (range, base, head) in &batched {
+                    let header = format!("{base} {head}");
+                    if lines.next_if(|line| *line == header).is_none() {
+                        break;
+                    }
+                    let mut paths = Vec::new();
+                    while let Some(line) = lines
+                        .next_if(|line| batched.iter().all(|(_, b, h)| *line != format!("{b} {h}")))
+                    {
+                        let line = line.trim();
+                        if !line.is_empty() {
+                            paths.push(line.to_string());
+                        }
+                    }
+                    answers.insert((*range).clone(), paths);
+                }
+            }
+            Err(_) => alone.extend(batched.iter().map(|(range, _, _)| *range)),
+        }
+        alone.extend(
+            batched
+                .iter()
+                .map(|(range, _, _)| *range)
+                .filter(|range| !answers.contains_key(*range)),
+        );
+    }
+    for range in alone {
+        if let Ok(paths) = changed_paths(cwd, &range.0, &range.1) {
+            answers.insert(range.clone(), paths);
+        }
+    }
+    answers
+}
+
+/// The rename detection `git diff` applies by default, as `diff.renames`
+/// sets it, for a plumbing diff that applies none of its own.
+fn rename_detection(cwd: &Path) -> Option<&'static str> {
+    let setting = git(cwd, &["config", "--get", "diff.renames"]).unwrap_or_default();
+    match setting.trim().to_ascii_lowercase().as_str() {
+        "false" | "no" | "off" | "0" => None,
+        "copy" | "copies" => Some("-C"),
+        _ => Some("-M"),
+    }
+}
+
+/// Each commit the `heads` reach, with its parents, from one
+/// `rev-list --parents`; `None` when Git could not list them.
+fn parent_map<'a>(
+    cwd: &Path,
+    heads: impl Iterator<Item = &'a str>,
+) -> Option<std::collections::HashMap<String, Vec<String>>> {
+    let input: String = heads.map(|head| format!("{head}\n")).collect();
+    if input.is_empty() {
+        return Some(Default::default());
+    }
+    let listed = git_piped(cwd, &["rev-list", "--parents", "--stdin"], input.as_bytes()).ok()?;
+    Some(
+        String::from_utf8_lossy(&listed)
+            .lines()
+            .filter_map(|line| {
+                let mut ids = line.split_whitespace().map(str::to_string);
+                Some((ids.next()?, ids.collect()))
+            })
+            .collect(),
+    )
+}
+
+/// Whether `ancestor` is `from` or reachable from it through `parents`.
+fn reaches(
+    parents: &std::collections::HashMap<String, Vec<String>>,
+    from: &str,
+    ancestor: &str,
+) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    let mut pending = vec![from];
+    while let Some(commit) = pending.pop() {
+        if commit == ancestor {
+            return true;
+        }
+        if seen.insert(commit) {
+            pending.extend(
+                parents
+                    .get(commit)
+                    .into_iter()
+                    .flatten()
+                    .map(String::as_str),
+            );
+        }
+    }
+    false
 }
 
 #[cfg(test)]

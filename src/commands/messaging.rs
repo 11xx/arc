@@ -163,11 +163,24 @@ pub(crate) fn collect_debts(
     ctx: &Ctx,
     states: &BTreeMap<String, ChangeState>,
 ) -> Result<DebtSummary> {
+    let owed: Vec<(&ChangeState, &crate::state::Debt)> = states
+        .values()
+        .filter_map(|state| {
+            state
+                .debt
+                .as_ref()
+                .filter(|_| state.debt_outstanding())
+                .map(|debt| (state, debt))
+        })
+        .collect();
+    let ranges: Vec<(String, String)> = owed
+        .iter()
+        .filter_map(|(state, debt)| debt_range(state, debt))
+        .map(|(base, head)| (base.to_string(), head.to_string()))
+        .collect();
+    let mut changed = crate::gitio::changed_paths_of(&ctx.cwd, &ranges);
     let mut entries = Vec::new();
-    for state in states.values() {
-        let Some(debt) = state.debt.as_ref().filter(|_| state.debt_outstanding()) else {
-            continue;
-        };
+    for (state, debt) in owed {
         entries.push(DebtEntry {
             change_id: state.change_id.clone(),
             title: state.title.clone(),
@@ -180,7 +193,8 @@ pub(crate) fn collect_debts(
                 .debt_subject_patchset()
                 .map(crate::status::review_subject_for_patchset),
             declared_at: debt.declared_at,
-            surfaces: debt_surfaces(&ctx.cwd, state, debt),
+            surfaces: debt_range(state, debt)
+                .and_then(|(base, head)| changed.remove(&(base.to_string(), head.to_string()))),
         });
     }
     entries.sort_by(|a, b| a.change_id.cmp(&b.change_id));
@@ -240,7 +254,17 @@ pub(crate) fn debt_surfaces(
     state: &ChangeState,
     debt: &crate::state::Debt,
 ) -> Option<Vec<String>> {
-    let range = state
+    let (base, head) = debt_range(state, debt)?;
+    crate::gitio::changed_paths(cwd, base, head).ok()
+}
+
+/// The range whose diff a debt's surfaces are: the integration, else the
+/// patchset the debt names, else the latest patchset.
+fn debt_range<'a>(
+    state: &'a ChangeState,
+    debt: &'a crate::state::Debt,
+) -> Option<(&'a str, &'a str)> {
+    state
         .closure
         .as_ref()
         .and_then(|closure| {
@@ -262,9 +286,7 @@ pub(crate) fn debt_surfaces(
             state
                 .latest_patchset()
                 .map(|patchset| (patchset.base.as_str(), patchset.head.as_str()))
-        });
-    let (base, head) = range?;
-    crate::gitio::changed_paths(cwd, base, head).ok()
+        })
 }
 
 fn change_surfaces(ctx: &Ctx, state: &ChangeState) -> BTreeSet<String> {

@@ -1002,16 +1002,35 @@ pub(crate) fn unowned_surface(ctx: &Ctx) -> Result<crate::inbox::Unowned> {
 
     let now = chrono::Utc::now();
     let mut unowned = crate::inbox::Unowned::default();
+    let inventory = gitio::worktree_inventory(&ctx.cwd);
+    let mut divergences = None;
     for tip in gitio::branch_tips(&ctx.cwd).unwrap_or_default() {
         if owned_branches.contains(&tip.name) {
             continue;
         }
-        let worktree = gitio::worktree_for_branch(&ctx.cwd, &tip.name)
+        let worktree = inventory
+            .as_ref()
             .ok()
-            .flatten()
-            .map(|path| path.display().to_string());
-        let merged = gitio::is_ancestor(&ctx.cwd, &tip.name, &target).unwrap_or(false);
-        let (behind, ahead) = gitio::divergence(&ctx.cwd, &target, &tip.name)
+            .and_then(|inventory| {
+                inventory.iter().find(|entry| {
+                    !entry.prunable
+                        && entry.path.exists()
+                        && entry.branch.as_deref() == Some(tip.name.as_str())
+                })
+            })
+            .map(|entry| entry.path.display().to_string());
+        // A branch holds nothing the target lacks exactly when it is the
+        // target's ancestor, so one count answers both.
+        let counted = divergences
+            .get_or_insert_with(|| gitio::branch_divergences(&ctx.cwd, &target))
+            .as_ref()
+            .and_then(|counts| counts.get(&tip.name).copied())
+            .or_else(|| gitio::divergence(&ctx.cwd, &target, &tip.name).ok());
+        let merged = match counted {
+            Some((_, ahead)) => ahead == 0,
+            None => gitio::is_ancestor(&ctx.cwd, &tip.name, &target).unwrap_or(false),
+        };
+        let (behind, ahead) = counted
             .map(|(behind, ahead)| (Some(behind), Some(ahead)))
             .unwrap_or((None, None));
         let age_days = tip
@@ -1041,7 +1060,7 @@ pub(crate) fn unowned_surface(ctx: &Ctx) -> Result<crate::inbox::Unowned> {
     }
 
     let primary = gitio::primary_worktree(&ctx.cwd).ok();
-    for entry in gitio::worktree_inventory(&ctx.cwd).unwrap_or_default() {
+    for entry in inventory.unwrap_or_default() {
         if entry.prunable || primary.as_deref() == Some(entry.path.as_path()) {
             continue;
         }
