@@ -113,3 +113,54 @@ fn catchup_builds_each_open_change_status_once() {
         assert!(output.contains("open-1"), "{output}");
     }
 }
+
+/// Claim: every owed debt over the same commit range names that range's
+/// touched paths in `catchup`, both in the debt summary and beneath an open
+/// change touching them. Rejects the first debt taking the range's paths and
+/// leaving the next with its surfaces unknown and unmatched.
+#[test]
+fn catchup_names_the_surfaces_of_every_debt_over_one_range() {
+    let repo = Repo::new();
+    let (_, first, head) = change_with_patchset(&repo, "first");
+    stdout(repo.arc(&repo.root).args(["begin", "second"]));
+    let second = repo.home.join(".worktrees/repo-second");
+    git(&second, &["reset", "--hard", &head]);
+    stdout(repo.arc(&second).args(["snapshot", "second"]));
+    git(&repo.root, &["merge", "--ff-only", &head]);
+    for (slug, worktree) in [("first", &first), ("second", &second)] {
+        repo.arc(&repo.root)
+            .args([
+                "debt",
+                slug,
+                "--reason",
+                "no reviewer reachable",
+                "--kind",
+                "nothing-read",
+            ])
+            .assert()
+            .success();
+        repo.arc(worktree)
+            .args(["close", slug, "--assert-integrated", &head])
+            .assert()
+            .success();
+    }
+    stdout(repo.arc(&repo.root).args(["begin", "touching"]));
+    let touching = repo.home.join(".worktrees/repo-touching");
+    repo.commit(&touching, "first.txt", "edited\n", "test: edit first");
+    stdout(repo.arc(&touching).args(["snapshot", "touching"]));
+
+    let output = stdout(repo.arc(&repo.root).arg("catchup"));
+    let summary = output
+        .lines()
+        .find(|line| line.starts_with("debt-owed (2):"))
+        .unwrap_or_else(|| panic!("no debt summary: {output}"));
+    assert!(summary.contains("surfaces (1): first.txt;"), "{summary}");
+    assert!(!summary.contains("unknown for"), "{summary}");
+    for slug in ["first", "second"] {
+        let line = output
+            .lines()
+            .find(|line| line.starts_with(&format!("    debt {slug}-")))
+            .unwrap_or_else(|| panic!("{slug} not beneath touching: {output}"));
+        assert!(line.contains("surfaces: first.txt;"), "{line}");
+    }
+}

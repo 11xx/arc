@@ -193,7 +193,7 @@ pub(crate) fn collect_debts(
         .filter_map(|(state, debt)| debt_range(state, debt))
         .map(|(base, head)| (base.to_string(), head.to_string()))
         .collect();
-    let mut changed = crate::gitio::changed_paths_of(&ctx.cwd, &ranges);
+    let changed = crate::gitio::changed_paths_of(&ctx.cwd, &ranges);
     let mut entries = Vec::new();
     for (state, debt) in owed {
         entries.push(DebtEntry {
@@ -209,7 +209,8 @@ pub(crate) fn collect_debts(
                 .map(crate::status::review_subject_for_patchset),
             declared_at: debt.declared_at,
             surfaces: debt_range(state, debt)
-                .and_then(|(base, head)| changed.remove(&(base.to_string(), head.to_string()))),
+                .and_then(|(base, head)| changed.get(&(base.to_string(), head.to_string())))
+                .cloned(),
         });
     }
     entries.sort_by(|a, b| a.change_id.cmp(&b.change_id));
