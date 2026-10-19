@@ -3539,7 +3539,9 @@ RULES THAT CHANGE WHAT YOU DO
     from its first to its last ledger event there, both inclusive. Any event
     its own session records counts, so a reviewer opens its span with `arc
     review <change> --start` before it reads, as a claim its session records
-    also does, and the span then runs to its verdict. A session
+    also does, and the span then runs to its verdict. An event a lead records
+    on its behalf carries the lead's instant, not the session's, and opens
+    no span of it. A session
     with several spans is cut at every span boundary into disjoint segments,
     read in one pass through tapes' span reader, so no request is counted
     twice. A segment one work item alone covers is that item's share. A
@@ -3563,7 +3565,9 @@ RULES THAT CHANGE WHAT YOU DO
     reading unsupported`), one with no measurement (`unmeasured`), a
     participant whose ledger records are not all readable (`ledger records are
     unreadable`), and retained facts whose segments are not the ones the
-    ledger gives now (`retained spans do not match the ledger`) stay
+    ledger gives now (`retained spans do not match the ledger`), and a
+    participant with several members one of which only events recorded on
+    its behalf name (`recorded on its behalf`) stay
     undivided, outside every share with that reason. An undivided session
     that also acted on work the figure does not hold has an unknown share in
     it, so every figure it would join is withheld, naming the session. A
@@ -3627,10 +3631,15 @@ RULES THAT CHANGE WHAT YOU DO
     only source of its roles: a snapshot or a verdict makes the session a
     reviewer, an integration, a debt or a closure an integrator, and a
     dispatch an orchestrator; any other kind makes no participant, and
-    prose and trailers name none. A participant is measured through the same
+    prose and trailers name none. An event recorded `--on-behalf-of` a
+    `harness:<session id>` subject is the subject's event too: it gives the
+    subject the kind's role and membership while the invoker keeps its own
+    roles for the event it ran. A subject naming a person, a label or a
+    `harness:model` names no session. A participant is measured through the same
     reader as an executor, or from retained facts when its source no longer
     answers, and divided by its span on each work item. Its membership is
-    every change in this ledger whose events carry it, read in one pass.
+    every change in this ledger whose events carry it, as their session or
+    their subject, read in one pass.
     Undivided, it counts whole where the item holds every member. Divided,
     its share joins each item's total, and a union takes the selected items'
     shares. It is listed in `participants` with its whole figure, roles,
@@ -3715,8 +3724,9 @@ RULES THAT CHANGE WHAT YOU DO
     counts each session once. `--tag <t>`, repeatable with every tag
     required, selects each change carrying it as `begin --tag` and `arc meta
     --tag` record it. `--footprint <harness:id>` selects each change and
-    journal item that session was bound to, dispatched or acted on, and
-    shows its whole figure beside them. A native child is named by its
+    journal item that session was bound to, dispatched or acted on, itself
+    or as the `--on-behalf-of` subject, and shows its whole figure beside
+    them. A native child is named by its
     measured key, `claude:<parent>::<agent>`, and selects the work its
     bindings name; a child key no binding records is refused. `--since` and `--until` select each
     change with a ledger event, or a run dispatched or ended for it, in the

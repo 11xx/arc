@@ -4549,8 +4549,9 @@ enum CostCmd {
     /// from its dispatch to its recorded `run end`, open to the read frontier
     /// while it has none; a participant's span on a work item runs from its
     /// first to its last ledger event there, both inclusive; a review start
-    /// (`arc review --start`) or a claim its own session records opens it. A
-    /// session with
+    /// (`arc review --start`) or a claim its own session records opens it;
+    /// an event recorded on its behalf carries the invoker's instant and opens
+    /// none. A session with
     /// several spans is cut at every span boundary into disjoint segments, read
     /// in one pass, so no request counts twice. A segment one item alone covers
     /// is that item's share; a segment several items cover, one none covers,
@@ -4566,7 +4567,7 @@ enum CostCmd {
     /// and the unattributed part names `recorded total not splittable`. A
     /// session that cannot be divided (`span reading unsupported`,
     /// `unmeasured`, `ledger records are unreadable`, `retained spans do not
-    /// match the ledger`) stays outside every share; when it also acted on
+    /// match the ledger`, `recorded on its behalf`) stays outside every share; when it also acted on
     /// work a figure does not hold, its share there is unknown and the figure
     /// is withheld, naming it. A divided session joins every figure by its
     /// items' shares, even one holding all of its work, so its unattributed
@@ -4595,9 +4596,15 @@ enum CostCmd {
     /// on the selected work; a session a dispatch binds is an executor and
     /// never a participant. Its roles come only from the kinds of its events:
     /// a snapshot or a verdict is a reviewer's, an integration, a debt or a
-    /// closure an integrator's, a dispatch an orchestrator's. It is divided by
-    /// its span on each work item. Its membership is every change in this
-    /// ledger whose events carry it. Undivided, it counts whole where the item
+    /// closure an integrator's, a dispatch an orchestrator's. An event
+    /// recorded `--on-behalf-of` a `harness:<session id>` subject is the
+    /// subject's event too, giving it the kind's role while the invoker keeps
+    /// its own; a subject naming a person, a label or a `harness:model` names
+    /// no session. It is divided by its span on each work item; one with
+    /// several members, one of which only events recorded on its behalf name,
+    /// is not divided (`recorded on its behalf`). Its membership is every
+    /// change in this ledger whose events carry it, as their session or their
+    /// subject. Undivided, it counts whole where the item
     /// holds every member; divided, its share joins each item's total and a
     /// union takes the selected items' shares. It is listed in `participants`
     /// with its whole figure, roles, span count (its members), `counted` and
@@ -4641,7 +4648,7 @@ enum CostCmd {
     /// Several targets and the range selectors select their union, and the
     /// union counts each session once: `--tag` every change carrying the tags,
     /// `--footprint` every change and journal item one session was bound to,
-    /// dispatched or acted on, beside its whole figure, `--since`/`--until`
+    /// dispatched or acted on, itself or as the subject, beside its whole figure, `--since`/`--until`
     /// every change with a ledger event or run in the window (the window
     /// selects work items; a session is divided by its spans, never by the
     /// window's edges), and `--all`
@@ -4722,7 +4729,8 @@ enum CostCmd {
         #[arg(long, conflicts_with = "commit")]
         tag: Vec<String>,
         /// Every change and journal item the session `harness:id` was bound
-        /// to or acted on, with that session's whole figure beside them. A
+        /// to or acted on, itself or as the `--on-behalf-of` subject, with
+        /// that session's whole figure beside them. A
         /// native child is `claude:<parent>::<agent>`, selecting the work its
         /// bindings name; a child key no binding records is refused
         #[arg(long, value_name = "HARNESS:ID", conflicts_with = "commit")]

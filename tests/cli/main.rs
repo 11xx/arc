@@ -20,6 +20,7 @@ mod contribution;
 mod cost;
 mod cost_completeness;
 mod cost_lineage_whole;
+mod cost_on_behalf_reviewer;
 mod cost_participant_share;
 mod cost_replay_once;
 mod cost_report_ranges;

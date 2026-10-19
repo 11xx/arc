@@ -621,7 +621,10 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
                 );
             }
         }
-        let split = split_of(&measured, plan_of(harness, session), ledger.complete);
+        let split = match split_of(&measured, plan_of(harness, session), ledger.complete) {
+            Split::Whole if person.spanless() => Split::Unsplit(span::ON_BEHALF),
+            split => split,
+        };
         sessions.push(SessionRow {
             harness: harness.clone(),
             session: session.clone(),
@@ -1357,9 +1360,11 @@ fn range_targets(
     };
     let windowed = query.since.is_some() || query.until.is_some();
     let footprint = query.footprint.as_deref().map(footprint_key).transpose()?;
-    let names = |event: &Event, (harness, session): &(String, String)| {
-        event.harness.as_deref() == Some(harness.as_str())
-            && event.session.as_deref() == Some(session.as_str())
+    let names = |event: &Event, key: &(String, String)| {
+        let (harness, session) = key;
+        (event.harness.as_deref() == Some(harness.as_str())
+            && event.session.as_deref() == Some(session.as_str()))
+            || subject_session(event).as_ref() == Some(key)
     };
     let mut child_bound = false;
     for round in rounds(events) {
@@ -3431,12 +3436,22 @@ fn model_of(coordinate: &str) -> Option<String> {
     (!model.is_empty()).then(|| model.to_string())
 }
 
+/// The session an event was recorded on behalf of: a `harness:<session id>`
+/// subject, its id shaped as arc reads a session id. Any other subject, a
+/// name or a `harness:model`, names a party and no session.
+fn subject_session(event: &Event) -> Option<(String, String)> {
+    let (harness, session) = event.on_behalf_of.as_deref()?.trim().split_once(':')?;
+    (plain_session_id(harness) && crate::coordinate::is_session_id(session, None))
+        .then(|| (harness.to_string(), session.to_string()))
+}
+
 /// A session the ledger's events name.
 #[derive(Default)]
 struct Person {
-    /// Every work item in this ledger whose events carry the session.
+    /// Every work item in this ledger whose events carry the session, as
+    /// their acting session or the subject they were recorded on behalf of.
     membership: BTreeSet<WorkKey>,
-    /// Its first and last event on each of those items.
+    /// Its first and last own event on each item it recorded events on.
     bounds: BTreeMap<WorkKey, (span::Instant, span::Instant)>,
     /// Every event it recorded on those items, with the item.
     events: Vec<(span::Instant, WorkKey)>,
@@ -3467,6 +3482,14 @@ struct Ledger {
     complete: bool,
 }
 
+impl Person {
+    /// It has several members, and one of them only events recorded on its
+    /// behalf name, which give it no span there.
+    fn spanless(&self) -> bool {
+        self.membership.len() > 1 && self.membership.len() > self.bounds.len()
+    }
+}
+
 impl Ledger {
     /// The sessions measured as participants: unbound, and acting on the
     /// selected work.
@@ -3495,14 +3518,27 @@ fn read_ledger(
     let mut note = |event: &Event, work: WorkKey| {
         let role = role_of(&event.payload);
         let on_selection = selected.contains(&work);
-        match (&event.harness, &event.session) {
+        let actor = match (&event.harness, &event.session) {
             (Some(harness), Some(session))
                 if plain_session_id(harness) && plain_session_id(session) =>
             {
-                let person = ledger
-                    .people
-                    .entry((harness.clone(), session.clone()))
-                    .or_default();
+                Some((harness.clone(), session.clone()))
+            }
+            _ => None,
+        };
+        if actor.is_none() && on_selection && role.is_some() {
+            ledger.unattributed_events += 1;
+        }
+        // The subject's event was recorded by the invoker: its instant, model
+        // and session are the invoker's, so it opens no span of the subject.
+        let subject = subject_session(event).filter(|subject| Some(subject) != actor.as_ref());
+        let named = actor
+            .into_iter()
+            .map(|key| (key, true))
+            .chain(subject.map(|key| (key, false)));
+        for (key, own) in named {
+            let person = ledger.people.entry(key).or_default();
+            if own {
                 person
                     .bounds
                     .entry(work.clone())
@@ -3512,28 +3548,26 @@ fn read_ledger(
                     })
                     .or_insert((event.created_at, event.created_at));
                 person.events.push((event.created_at, work.clone()));
-                person.membership.insert(work);
-                if on_selection {
-                    person.selected_events += 1;
-                    if let Some(model) = event
-                        .model
-                        .as_deref()
-                        .filter(|model| portable_coordinate(model))
-                    {
-                        person.coordinates.insert(model.to_string());
-                    }
-                    if let Some(role) = role {
-                        person.acts = true;
-                        person.roles.insert(role);
-                        if let Some(model) = event.model.as_deref().and_then(model_of) {
-                            person.models.entry(role).or_default().insert(model);
-                        }
-                    }
+            }
+            person.membership.insert(work.clone());
+            if !on_selection {
+                continue;
+            }
+            person.selected_events += 1;
+            if own {
+                if let Some(model) = event
+                    .model
+                    .as_deref()
+                    .filter(|model| portable_coordinate(model))
+                {
+                    person.coordinates.insert(model.to_string());
                 }
             }
-            _ => {
-                if on_selection && role.is_some() {
-                    ledger.unattributed_events += 1;
+            if let Some(role) = role {
+                person.acts = true;
+                person.roles.insert(role);
+                if let Some(model) = event.model.as_deref().and_then(model_of).filter(|_| own) {
+                    person.models.entry(role).or_default().insert(model);
                 }
             }
         }
@@ -3579,7 +3613,7 @@ fn span_plans(sessions: &Sessions, ledger: &Ledger) -> BTreeMap<(String, String)
         });
     let participants = ledger
         .participants()
-        .filter(|(_, person)| person.bounds.len() > 1)
+        .filter(|(_, person)| person.bounds.len() > 1 && !person.spanless())
         .map(|(key, person)| {
             let spans: Vec<ItemSpan> = person
                 .bounds

@@ -27,6 +27,9 @@ pub(super) const UNSUPPORTED: &str = "span reading unsupported";
 pub(super) const RETAINED_MISMATCH: &str = "retained spans do not match the ledger";
 pub(super) const UNMEASURED: &str = "unmeasured";
 pub(super) const INCOMPLETE_MEMBERSHIP: &str = "ledger records are unreadable";
+/// Why a participant with an item only events recorded on its behalf name
+/// is not divided: those events carry the invoker's instants, not its own.
+pub(super) const ON_BEHALF: &str = "recorded on its behalf";
 
 /// One span the ledger gives a session.
 #[derive(Clone)]
