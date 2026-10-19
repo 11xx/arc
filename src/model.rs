@@ -3376,17 +3376,27 @@ pub(crate) fn portable_selection(selection: &str) -> bool {
     matches!(selection, "active-branch" | "retained-branches")
 }
 
-/// A model coordinate, `model` or `model#effort`: one token of lowercase
-/// letters, digits, dots, dashes and underscores, with at most one `#`.
+/// A model coordinate, `model` or `model#effort`, with at most one `#`. A
+/// model is the id its provider gives it: ASCII letters, digits and `.-_:@+`,
+/// in `/`-separated namespace segments (`z-ai/glm-5.3-flash`), none of them
+/// empty, `.` or `..`, so no model reads as a path.
 pub(crate) fn portable_coordinate(coordinate: &str) -> bool {
-    let mut parts = coordinate.split('#');
-    let segment = |part: &str| {
+    let token = |part: &str| {
         !part.is_empty()
+            && !matches!(part, "." | "..")
             && part.chars().all(|c| {
-                c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '-' | '_')
+                c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '@' | '+')
             })
     };
-    parts.next().is_some_and(segment) && parts.next().is_none_or(segment) && parts.next().is_none()
+    let mut parts = coordinate.split('#');
+    coordinate.len() <= 256
+        && parts
+            .next()
+            .is_some_and(|model| model.split('/').all(token))
+        && parts
+            .next()
+            .is_none_or(|effort| !effort.contains('/') && token(effort))
+        && parts.next().is_none()
 }
 
 pub(crate) fn portable_liveness(liveness: &str) -> bool {
@@ -3912,6 +3922,20 @@ mod tests {
             &|f| f.served_model = Some("/home/user/model".into())
         ));
         assert!(refused(&|f| f.served_model = Some("a#b#c".into())));
+        assert!(refused(&|f| f.served_model = Some("home/../model".into())));
+        assert!(refused(&|f| f.served_model = Some("~/model".into())));
+        assert!(refused(&|f| f.served_model = Some("vendor//model".into())));
+        for model in [
+            "z-ai/glm-5.3-flash",
+            "@or:z-ai:fp8:z-ai/glm-5.3-flash",
+            "MiniMax-M2#high",
+            "anthropic/claude-haiku-5.5:batch",
+        ] {
+            assert!(
+                !refused(&|f| f.served_model = Some(model.into())),
+                "{model}"
+            );
+        }
         assert!(refused(&|f| f
             .disjoint
             .as_mut()

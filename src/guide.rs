@@ -3698,7 +3698,11 @@ RULES THAT CHANGE WHAT YOU DO
     agent|role|model|harness|change|session`, repeatable or comma-separated,
     groups the counted rows with one subtotal per group; a subtotal never
     adds incompatible accounting domains and shows their partitions as the
-    total does. `--json` carries the same rows, total, allocated total,
+    total does. `change` gives each selected change its subtotal: a divided
+    session joins each by its share of it, never by its membership, and a
+    session several selected changes hold undivided forms one group naming
+    them. A model groups under the id its recording gives, namespace and
+    case kept (`z-ai/glm-5.3-flash`). `--json` carries the same rows, total, allocated total,
     unattributed figure, qualification count, groups, families and price
     table under `table`, each session's segments, shares, run figures and unattributed
     parts under `sessions[].split`, each item's allocated figures under

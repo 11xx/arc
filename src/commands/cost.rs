@@ -4704,14 +4704,16 @@ fn group_value(row: &SessionRow, grouping: &str) -> String {
             .and_then(|(coordinate, _)| model_of(coordinate))
             .unwrap_or_else(|| "unestablished".to_string()),
         "harness" => row.harness.clone(),
-        "change" => row
-            .membership
-            .iter()
-            .map(WorkKey::label)
-            .collect::<Vec<_>>()
-            .join(", "),
         _ => row.key(),
     }
+}
+
+fn membership_label(row: &SessionRow) -> String {
+    row.membership
+        .iter()
+        .map(WorkKey::label)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The rows the text table shows, the total it ends with, what of each
@@ -4785,18 +4787,52 @@ fn cost_table(
         .flatten()
         .filter_map(|(_, count)| count.as_u64())
         .sum();
+    // Each union row with the change it is counted for. Under `change`, a
+    // divided session's union share is its share of each selected change,
+    // and a session counted whole is counted for its whole membership.
+    let mut counted_for: Vec<(String, std::borrow::Cow<'_, SessionRow>)> = union
+        .whole
+        .iter()
+        .map(|row| (membership_label(row), std::borrow::Cow::Borrowed(*row)))
+        .collect();
+    if view.by.iter().any(|grouping| grouping == "change") {
+        for share in &union.shares {
+            let Some(row) = sessions.iter().find(|row| row.key() == share.key()) else {
+                continue;
+            };
+            for key in row
+                .membership
+                .iter()
+                .filter(|key| selected.contains(&key.label()))
+            {
+                if let Some(part) = row.share(&[key], false, table) {
+                    counted_for.push((key.label(), std::borrow::Cow::Owned(part)));
+                }
+            }
+        }
+    } else {
+        counted_for.extend(
+            union
+                .shares
+                .iter()
+                .map(|row| (membership_label(row), std::borrow::Cow::Borrowed(row))),
+        );
+    }
     let mut groups: BTreeMap<Vec<String>, Vec<&SessionRow>> = BTreeMap::new();
     if !view.by.is_empty() {
-        for row in union.rows() {
+        for (change, row) in &counted_for {
             groups
                 .entry(
                     view.by
                         .iter()
-                        .map(|grouping| group_value(row, grouping))
+                        .map(|grouping| match grouping.as_str() {
+                            "change" => change.clone(),
+                            _ => group_value(row, grouping),
+                        })
                         .collect(),
                 )
                 .or_default()
-                .push(row);
+                .push(&**row);
         }
     }
     let groups: Vec<Value> = groups

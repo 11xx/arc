@@ -4705,7 +4705,11 @@ enum CostCmd {
         all: bool,
         /// Group table rows, with one subtotal per group: agent, role,
         /// model, harness, change or session. Repeat or separate with commas
-        /// to group by several
+        /// to group by several. `change` subtotals each selected change: a
+        /// divided session joins each by its share of it, and a session
+        /// several selected changes hold undivided forms one group naming
+        /// them. A model is grouped under the id its recording gives,
+        /// namespace and case kept
         #[arg(long, value_delimiter = ',', conflicts_with = "commit",
             value_parser = clap::builder::PossibleValuesParser::new(commands::COST_GROUPINGS))]
         by: Vec<String>,
