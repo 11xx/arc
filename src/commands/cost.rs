@@ -1043,10 +1043,12 @@ pub fn retain_cost(ctx: &Ctx, target: &str) -> Result<()> {
                 (harness, session, read)
             })
             .collect();
+    // Under the lock, only records published since the first read are
+    // opened, so a retention another writer just made is seen.
     let _repository_events = store.lock_repository_events()?;
-    let mut held = CostRead::new(&store);
-    let events = held.events(Store::REPOSITORY_SCOPE);
-    print_read_gaps(&[], &held.gaps);
+    let known_gaps = read.gaps.len();
+    let events = read.refreshed(Store::REPOSITORY_SCOPE);
+    print_read_gaps(&[], &read.gaps[known_gaps..]);
     for (harness, session, read) in reads {
         let key = format!("{harness}:{session}");
         let facts = match read {

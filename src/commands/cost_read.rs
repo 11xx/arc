@@ -12,6 +12,8 @@ pub(super) struct CostRead<'a> {
     batches: Vec<ImportBatch>,
     pub gaps: Vec<Value>,
     read: BTreeMap<String, Vec<Event>>,
+    /// The record files each scope's read has opened.
+    opened: BTreeMap<String, BTreeSet<std::path::PathBuf>>,
 }
 
 fn record_id(scope: &str, path: &Path) -> String {
@@ -77,6 +79,7 @@ impl<'a> CostRead<'a> {
             batches,
             gaps,
             read: BTreeMap::new(),
+            opened: BTreeMap::new(),
         }
     }
 
@@ -124,12 +127,28 @@ impl<'a> CostRead<'a> {
         if let Some(events) = self.read.get(change) {
             return events.clone();
         }
-        let events = self.read_events(change);
+        let events = self.read_events(change, false);
         self.read.insert(change.to_string(), events.clone());
         events
     }
 
-    fn read_events(&mut self, change: &str) -> Vec<Event> {
+    /// One scope's readable events as they stand now: those already read,
+    /// and each record published since, the only files this opens.
+    pub fn refreshed(&mut self, change: &str) -> Vec<Event> {
+        let mut events = self.events(change);
+        let held: BTreeSet<String> = events.iter().map(|event| event.event_id.clone()).collect();
+        events.extend(
+            self.read_events(change, true)
+                .into_iter()
+                .filter(|event| !held.contains(&event.event_id)),
+        );
+        self.read.insert(change.to_string(), events.clone());
+        events
+    }
+
+    /// A scope's records and, unless `published_since`, its import batches'
+    /// events; with it, only the record files no read of the scope opened.
+    fn read_events(&mut self, change: &str, published_since: bool) -> Vec<Event> {
         let directory = if change == Store::REPOSITORY_SCOPE {
             self.store.root.join("repository/events")
         } else {
@@ -140,6 +159,10 @@ impl<'a> CostRead<'a> {
         let mut assignment = BTreeMap::new();
         let mut incoming = Vec::new();
         for path in paths(&directory, change, &mut self.gaps) {
+            let opened = self.opened.entry(change.to_string()).or_default();
+            if !opened.insert(path.clone()) && published_since {
+                continue;
+            }
             let value = regular(&path)
                 .then(|| {
                     crate::store::read_ledger_file(&path)
@@ -152,7 +175,7 @@ impl<'a> CostRead<'a> {
                 _ => self.gaps.push(json!({"record": record_id(change, &path), "reason": "ledger record unreadable"})),
             }
         }
-        for batch in &self.batches {
+        for batch in self.batches.iter().filter(|_| !published_since) {
             if change == Store::REPOSITORY_SCOPE {
                 incoming.extend(batch.repository_events.iter().cloned());
             } else if batch.change_id == change {
