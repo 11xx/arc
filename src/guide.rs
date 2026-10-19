@@ -3753,8 +3753,11 @@ RULES THAT CHANGE WHAT YOU DO
     several; the harness alone when none
     establishes a single model; a coordinate that carries the row's harness
     as a prefix, such as a route `claude:claude-opus-5-5#medium`, names it
-    once), roles (impl, review, orch, integ), the
-    shortest session id prefix of at least eight characters no other row
+    once; one whose prefix names another harness tapes reads establishes
+    none and is shown beside the agent with its source, as in
+    `claude:claude-opus-5-5 (route codex:gpt-6.1-sol#high)`, and in
+    `agent_conflict`), roles (impl, review, orch, integ), the shortest
+    session id prefix of at least eight characters no other row
     shares, runs and spans, the disjoint token total, the money columns, and a
     status: `complete`, `subtotal`, `split ×N` (divided among N work items,
     its share in the total), `shared ×N` (undivided and outside the total),

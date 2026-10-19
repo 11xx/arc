@@ -1,15 +1,17 @@
 //! Which work a session is part of, whether it acted itself or was recorded
 //! on behalf of. One rule gives a session its membership, the changes
 //! `--footprint` selects for it and the participant a trailer names; a
-//! subject names a session when its harness's reader locates the id. Every
-//! recording is written into the fixture's own home, named as its harness
-//! names it.
+//! subject names a session when its harness's reader locates the id, and a
+//! coordinate naming another harness than its row's is shown beside it.
+//! Every recording is written into the fixture's own home, named as its
+//! harness names it.
 
 use super::common::*;
 use serde_json::{json, Value};
 
 const LEAD: &str = "019a0000-0000-7000-8000-0000000000a1";
 const REVIEWER: &str = "019a0000-0000-7000-8000-0000000000c1";
+const EXECUTOR: &str = "019a0000-0000-4000-8000-0000000000e1";
 /// An OpenCode session id, shaped as OpenCode writes one.
 const OPENCODE_REVIEWER: &str = "ses_0f8a3ec487ffeFixtureRevwr1";
 
@@ -68,6 +70,31 @@ fn codex_recording(repo: &Repo, id: &str, models: &[&str], input: u64) {
         ]);
     }
     write_lines(&path, &lines);
+}
+
+/// A Claude recording with one request of `input` uncached tokens.
+fn claude_recording(repo: &Repo, id: &str, input: u64) {
+    let path = repo
+        .home
+        .join(".claude/projects/-fixture-project")
+        .join(format!("{id}.jsonl"));
+    write_lines(
+        &path,
+        &[
+            json!({"type": "user", "sessionId": id, "uuid": "prompt-1", "timestamp": "2026-01-01T10:00:00Z", "cwd": "/fixture/project", "message": {"role": "user", "content": "Work."}}),
+            json!({"type": "assistant", "sessionId": id, "uuid": "assistant-1", "requestId": "request-1", "timestamp": "2026-01-01T10:00:01Z", "cwd": "/fixture/project",
+                "message": {"role": "assistant", "model": "claude-opus-5-5", "content": [{"type": "text", "text": "Done."}],
+                    "usage": {"input_tokens": input, "output_tokens": 30, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}}),
+        ],
+    );
+}
+
+fn event_id(output: &str) -> String {
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .expect("command output should contain an event id")
+        .to_string()
 }
 
 fn acting(repo: &Repo, cwd: &Path, harness: &str, session: &str) -> AssertCommand {
@@ -172,6 +199,15 @@ fn session<'a>(report: &'a Value, key: &str) -> Option<&'a Value> {
         .unwrap()
         .iter()
         .find(|row| row["key"] == key)
+}
+
+fn table_row<'a>(report: &'a Value, key: &str) -> &'a Value {
+    report["table"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["key"] == key)
+        .unwrap_or_else(|| panic!("no table row {key}: {report:#}"))
 }
 
 fn work_keys(report: &Value) -> Vec<String> {
@@ -401,4 +437,60 @@ fn an_opencode_subject_its_reader_locates_is_a_participant() {
     keys.sort_unstable();
     let lead_key = format!("pi:{LEAD}");
     assert_eq!(keys, vec![subject.as_str(), lead_key.as_str()], "{view:#}");
+}
+
+/// Claim: a dispatch route naming a harness other than its bound
+/// executor's is shown beside the agent the row's own evidence establishes,
+/// never joined to the row's harness. Rejects `claude:codex:gpt-6.1-sol#high`.
+#[test]
+fn a_route_naming_another_harness_is_shown_beside_the_agent() {
+    let repo = Repo::new();
+    pi_recording(&repo, LEAD, 7);
+    claude_recording(&repo, EXECUTOR, 300);
+    let (change, _) = integrated(&repo, "crossed", "feat: crossed");
+    let route = "codex:gpt-6.1-sol#high";
+    let dispatch = event_id(&stdout(lead(&repo, &repo.root).args([
+        "run",
+        "dispatch",
+        "--route",
+        route,
+        "--worktree",
+        "/work/run",
+        "--change",
+        &change,
+    ])));
+    stdout(repo.arc(&repo.root).args([
+        "run",
+        "bind",
+        &dispatch,
+        "--executor-harness",
+        "claude",
+        "--executor-session",
+        EXECUTOR,
+    ]));
+    stdout_any_status(repo.arc(&repo.root).args([
+        "run",
+        "end",
+        &dispatch,
+        "--outcome",
+        "completed",
+    ]));
+
+    let view = report(&repo, &[&change]);
+    let key = format!("claude:{EXECUTOR}");
+    let row = table_row(&view, &key);
+    assert_eq!(
+        row["agent"],
+        format!("claude:claude-opus-5-5 (route {route})"),
+        "{row:#}"
+    );
+    let measured = session(&view, &key).unwrap();
+    assert_eq!(
+        measured["agent_conflict"],
+        json!({"coordinate": route, "source": "route"}),
+        "{measured:#}"
+    );
+    assert_eq!(measured["agent_source"], "recording", "{measured:#}");
+    let text = stdout(repo.arc(&repo.root).args(["cost", "show", &change]));
+    assert!(!text.contains("claude:codex:"), "{text}");
 }

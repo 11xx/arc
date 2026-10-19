@@ -363,6 +363,8 @@ struct SessionRow {
     liveness: Option<SessionLiveness>,
     /// The model coordinate the row is attributed to, and where it came from.
     agent: Option<(String, &'static str)>,
+    /// A coordinate a source gave the row that names another harness.
+    agent_conflict: Option<(String, &'static str)>,
     /// The session that spawned this executor as its native child, as its
     /// bindings name it.
     parent: Option<String>,
@@ -372,7 +374,9 @@ impl SessionRow {
     /// The first source that names one coordinate: the bound dispatches'
     /// routes, the models the session's own events carry, then the model its
     /// recording says served it. Several distinct coordinates in one source
-    /// establish none there.
+    /// establish none there, and neither does a coordinate whose prefix names
+    /// a harness other than the row's: the first such one is kept as the
+    /// row's conflict.
     fn attribute(&mut self, person: Option<&Person>) {
         let one = |coordinates: BTreeSet<String>| {
             let mut coordinates = coordinates.into_iter();
@@ -387,6 +391,9 @@ impl SessionRow {
             .filter_map(|span| span.route.clone())
             .collect())
         .filter(|_| self.spans.iter().all(|span| span.route.is_some()));
+        let events = one(person
+            .map(|person| person.coordinates.clone())
+            .unwrap_or_default());
         let recording = self
             .measured
             .facts
@@ -394,36 +401,47 @@ impl SessionRow {
             .and_then(|facts| facts.served_model.clone());
         // A native child is attributed by its own model evidence first: the
         // lead's route names what it asked for, the recording what served.
-        if self.parent.is_some() {
-            if let Some(coordinate) = recording {
-                self.agent = Some((on_harness(&self.harness, coordinate), "recording"));
-                return;
+        let sources = if self.parent.is_some() {
+            [
+                (recording, "recording"),
+                (routes, "route"),
+                (events, "events"),
+            ]
+        } else {
+            [
+                (routes, "route"),
+                (events, "events"),
+                (recording, "recording"),
+            ]
+        };
+        self.agent = None;
+        self.agent_conflict = None;
+        for (coordinate, source) in sources {
+            let Some(coordinate) =
+                coordinate.map(|coordinate| on_harness(&self.harness, coordinate))
+            else {
+                continue;
+            };
+            if names_harness(&coordinate) {
+                self.agent_conflict.get_or_insert((coordinate, source));
+                continue;
             }
+            self.agent = Some((coordinate, source));
+            break;
         }
-        self.agent = routes
-            .map(|coordinate| (coordinate, "route"))
-            .or_else(|| {
-                one(person
-                    .map(|person| person.coordinates.clone())
-                    .unwrap_or_default())
-                .map(|coordinate| (coordinate, "events"))
-            })
-            .or_else(|| {
-                self.measured
-                    .facts
-                    .as_ref()
-                    .and_then(|facts| facts.served_model.clone())
-                    .map(|coordinate| (coordinate, "recording"))
-            })
-            .map(|(coordinate, source)| (on_harness(&self.harness, coordinate), source));
     }
 
     /// `harness:model#effort`, or the harness alone when no model is
-    /// established.
+    /// established, then any coordinate naming another harness beside it:
+    /// `claude (route codex:gpt-6.1-sol#high)`.
     fn agent_label(&self) -> String {
-        match &self.agent {
+        let label = match &self.agent {
             Some((coordinate, _)) => format!("{}:{coordinate}", self.harness),
             None => self.harness.clone(),
+        };
+        match &self.agent_conflict {
+            Some((coordinate, source)) => format!("{label} ({source} {coordinate})"),
+            None => label,
         }
     }
 
@@ -596,6 +614,7 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
                 participation: None,
                 liveness: Some(liveness),
                 agent: None,
+                agent_conflict: None,
                 parent,
             }
         })
@@ -645,6 +664,7 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
             }),
             liveness: Some(liveness),
             agent: None,
+            agent_conflict: None,
             parent: None,
         });
     }
@@ -824,6 +844,7 @@ fn child_row(parent: &SessionRow, harness: &str, session: &str, facts: CostFacts
     child.participation = None;
     child.liveness = None;
     child.agent = None;
+    child.agent_conflict = None;
     child.parent = Some(parent.session.clone());
     child
 }
@@ -848,6 +869,7 @@ fn unmeasured_child(parent: &SessionRow, harness: &str, session: &str, reason: &
     child.participation = None;
     child.liveness = None;
     child.agent = None;
+    child.agent_conflict = None;
     child.parent = Some(parent.session.clone());
     child
 }
@@ -3538,6 +3560,14 @@ fn on_harness(harness: &str, coordinate: String) -> String {
     }
 }
 
+/// Whether a coordinate's prefix names a harness tapes reads recordings of,
+/// as `codex` in `codex:gpt-6.1-sol#high` does.
+fn names_harness(coordinate: &str) -> bool {
+    coordinate.split_once(':').is_some_and(|(prefix, rest)| {
+        !rest.is_empty() && agent_tapes_core::model::TokenConvention::of(prefix).is_some()
+    })
+}
+
 /// The model of a `model[#effort]` coordinate, without its effort.
 fn model_of(coordinate: &str) -> Option<String> {
     let model = coordinate.split('#').next().unwrap_or(coordinate).trim();
@@ -4649,6 +4679,7 @@ impl SessionRow {
             participation: self.participation.clone(),
             liveness: self.liveness.clone(),
             agent: self.agent.clone(),
+            agent_conflict: self.agent_conflict.clone(),
             parent: self.parent.clone(),
         }
     }
@@ -6044,6 +6075,7 @@ fn session_json(row: &SessionRow, table: Option<&agent_tapes_core::pricing::Pric
         "kind": if row.participation.is_some() { "participant" } else { "executor" },
         "agent": row.agent_label(),
         "agent_source": row.agent.as_ref().map(|(_, source)| *source),
+        "agent_conflict": row.agent_conflict.as_ref().map(|(coordinate, source)| json!({"coordinate": coordinate, "source": source})),
         "roles": row.roles(),
         "spans": row.spans.iter().map(|span| json!({
             "dispatch_event_id": span.dispatch_event_id,

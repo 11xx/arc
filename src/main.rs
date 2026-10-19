@@ -4665,7 +4665,9 @@ enum CostCmd {
     /// session's own event models, else the model its recording says served
     /// it, effort unnamed when it served several; the harness alone when none
     /// establishes one; a coordinate that carries the row's harness as a
-    /// prefix names it once), roles (impl, review,
+    /// prefix names it once; one whose prefix names another harness
+    /// establishes none and is shown beside the agent, `claude (route
+    /// codex:gpt-6.1-sol#high)`), roles (impl, review,
     /// orch, integ), the shortest unique session id prefix of at least eight
     /// characters, runs, spans, the disjoint token total, the money columns,
     /// and a status (`complete`, `subtotal`, `split ×N`, `shared ×N`, `live`,
