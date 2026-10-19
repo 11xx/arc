@@ -3472,8 +3472,11 @@ RULES THAT CHANGE WHAT YOU DO
     or `/2` table: `--prices <file>`, else the file `TAPES_PRICES` names, else
     `$XDG_CONFIG_HOME/tapes/prices.toml` (`~/.config/tapes/prices.toml`). It
     uses the table rows of the one model the recording says served the
-    figure, or each model's rows where the recording splits it by model,
-    through tapes' pricing; a model served at several efforts is one share,
+    figure, or each model's rows share by share, through tapes' pricing,
+    where the recording splits it by several models, where it counts events
+    on branches besides the active one, each priced by the model it names,
+    or where its attribution is uncertain and the split leaves part of it to
+    no model, a part no row prices; a model served at several efforts is one share,
     priced over every request it served, and a figure added up from a
     divided session's segments holds each segment's models. A `/2` row's terms set by the request, a
     long-context rate above a prompt size for the billing it applies to,
@@ -3787,7 +3790,7 @@ RULES THAT CHANGE WHAT YOU DO
     with its pricing coverage, plus lineage relations, read failures
     as fixed categories, the one model the recording says served the
     session when it names one, each model's disjoint categories, its efforts
-    added together, where it names several, the segments a session with several spans was read in, each with
+    added together, where the figure is priced share by share, the segments a session with several spans was read in, each with
     its bounds, covering work items and runs, request count and facts, the
     remainder and the whole in the segments' basis, and the liveness
     agent-status answered then (`live`, `ended` or `unknown`). A list-price

@@ -49,7 +49,7 @@ pub const TAPES_READER: &str = env!("ARC_TAPES_READER");
 
 /// How arc normalizes a reader's usage answer into retained facts. It moves
 /// when that normalization does, so facts from an older one stay identifiable.
-pub const COST_CALCULATION: &str = "usage-normalization 7";
+pub const COST_CALCULATION: &str = "usage-normalization 8";
 
 const USD_KIND: &str = "harness-calculated-estimate";
 const TOKEN_KIND: &str = "resource-quantity";
@@ -2925,7 +2925,7 @@ fn normalize(
         liveness: None,
         served_model: served_model(view),
         disjoint: disjoint.as_ref().and_then(cost_disjoint),
-        by_model: by_model(view, harness),
+        by_model: priced_shares(view, harness, disjoint.as_ref()),
         cost_coverage: cost_coverage.map(|coverage| CostPricing {
             complete: coverage.complete,
             zero_written_requests: coverage.zero_written_requests as u64,
@@ -3023,22 +3023,67 @@ fn cost_disjoint(disjoint: &agent_tapes_core::model::DisjointTokens) -> Option<C
     })
 }
 
-/// Each model's disjoint categories, its efforts added together, where the
-/// recording names several models; one model is `served_model`. A share is
-/// priced by the requests that model served, which a recording keeps by
-/// model but not always by effort, so it holds every effort's tokens.
-fn by_model(
+/// The model shares a figure is priced by one by one, each model's
+/// disjoint categories with its efforts added together; none where the one
+/// model `served_model` names prices it whole. A figure is priced share by
+/// share where its recording names several models; where it counts events
+/// on other branches than the active one, by the model each event names,
+/// since the session's model evidence is the active branch's; and where its
+/// attribution is uncertain and its shares leave part of it out, so the
+/// part no model is named for stays unpriced. A share is priced by the
+/// requests that model served, which a recording keeps by model but not
+/// always by effort, so it holds every effort's tokens.
+fn priced_shares(
     view: &agent_tapes_core::usage::UsageView,
     harness: &str,
+    whole: Option<&agent_tapes_core::model::DisjointTokens>,
 ) -> Vec<crate::model::CostModelShare> {
-    let models = view.by_model.as_deref().unwrap_or_default();
     let Some(convention) = agent_tapes_core::model::TokenConvention::of(harness) else {
         return Vec::new();
     };
-    let ids: BTreeSet<&str> = models.iter().map(|model| model.model.as_str()).collect();
-    if ids.len() < 2 {
-        return Vec::new();
+    if let Some(consumption) = view
+        .consumption
+        .as_ref()
+        .filter(|consumption| consumption.events.other_branches > 0)
+    {
+        return model_shares(
+            &consumption.served,
+            &consumption.measurement_completeness,
+            convention,
+        );
     }
+    let models = view.by_model.as_deref().unwrap_or_default();
+    let shares = model_shares(models, &MeasurementCompleteness::default(), convention);
+    let ids: BTreeSet<&str> = models.iter().map(|model| model.model.as_str()).collect();
+    let uncertain = view
+        .session
+        .model_observation
+        .as_ref()
+        .is_some_and(|status| status.attribution_uncertain);
+    let unattributed = uncertain
+        && !models.is_empty()
+        && whole.is_some_and(|whole| {
+            agent_tapes_core::pricing::PRICED_CATEGORIES
+                .iter()
+                .any(|category| {
+                    category_amount(whole, category).is_some()
+                        && !shares_cover(whole, &shares, category)
+                })
+        });
+    if ids.len() > 1 || unattributed {
+        shares
+    } else {
+        Vec::new()
+    }
+}
+
+/// Each model's disjoint categories among `models`, its efforts added
+/// together, each qualified by `completeness` beside its own.
+fn model_shares(
+    models: &[agent_tapes_core::usage::ModelUsage],
+    completeness: &MeasurementCompleteness,
+    convention: agent_tapes_core::model::TokenConvention,
+) -> Vec<crate::model::CostModelShare> {
     let mut efforts: BTreeMap<&str, Vec<CostDisjoint>> = BTreeMap::new();
     for model in models
         .iter()
@@ -3047,9 +3092,11 @@ fn by_model(
         let Some(tokens) = model.tokens.as_ref() else {
             continue;
         };
+        let mut qualified = model.measurement_completeness.clone();
+        qualified.merge(completeness);
         let disjoint =
             agent_tapes_core::model::DisjointTokens::from_native(tokens, convention, None)
-                .with_completeness(&model.measurement_completeness);
+                .with_completeness(&qualified);
         if let Some(disjoint) = cost_disjoint(&disjoint) {
             efforts.entry(&model.model).or_default().push(disjoint);
         }
@@ -3065,6 +3112,37 @@ fn by_model(
             }
         })
         .collect()
+}
+
+/// A figure's amount of one priced category.
+fn category_amount(
+    disjoint: &agent_tapes_core::model::DisjointTokens,
+    category: &str,
+) -> Option<u64> {
+    match category {
+        "uncached_input" => disjoint.uncached_input,
+        "cache_read" => disjoint.cache_read,
+        "cache_write" => disjoint.cache_write.map(|writes| writes.total()),
+        _ => disjoint.output,
+    }
+}
+
+/// Whether the model shares account for all of the figure's `category`.
+fn shares_cover(
+    whole: &agent_tapes_core::model::DisjointTokens,
+    shares: &[crate::model::CostModelShare],
+    category: &str,
+) -> bool {
+    let Some(total) = category_amount(whole, category) else {
+        return false;
+    };
+    shares
+        .iter()
+        .try_fold(0u64, |held, share| {
+            let part = tapes_disjoint(&share.disjoint)?;
+            held.checked_add(category_amount(&part, category)?)
+        })
+        .is_some_and(|covered| covered >= total)
 }
 
 fn unavailable_residual(reason: &str) -> CostResidual {
@@ -3334,7 +3412,8 @@ fn price_model(
 }
 
 /// A figure's list price: its disjoint categories priced by the table rows
-/// of the one model that served it, or model by model where several did.
+/// of the one model that served it, or share by share where its model
+/// shares price it.
 /// What the table cannot price is a fixed reason, a category the figure
 /// measured incompletely qualifies the estimate, and so does any part of a
 /// category the models' shares leave unattributed, a term set by the request
@@ -3368,38 +3447,32 @@ fn list_price(facts: &CostFacts, table: &agent_tapes_core::pricing::PriceTable) 
             &facts.request_terms,
         ));
     };
+    // Events on other branches than the active one are priced by the model
+    // each names, never by the one model the session's evidence names.
+    let other_branches = facts
+        .events
+        .as_ref()
+        .is_some_and(|events| events.other_branches > 0);
     match facts.served_model.as_deref().and_then(model_of) {
-        Some(model) => price(&model, &whole, true),
-        None if !facts.by_model.is_empty() => {
-            let shares: Vec<_> = facts
-                .by_model
-                .iter()
-                .filter_map(|share| Some((share, tapes_disjoint(&share.disjoint)?)))
-                .collect();
-            for (share, disjoint) in &shares {
-                price(&share.model, disjoint, false);
+        Some(model) if facts.by_model.is_empty() && !other_branches => price(&model, &whole, true),
+        _ if !facts.by_model.is_empty() => {
+            for share in &facts.by_model {
+                if let Some(disjoint) = tapes_disjoint(&share.disjoint) {
+                    price(&share.model, &disjoint, false);
+                }
             }
-            let amount =
-                |disjoint: &agent_tapes_core::model::DisjointTokens, category: &str| match category
-                {
-                    "uncached_input" => disjoint.uncached_input,
-                    "cache_read" => disjoint.cache_read,
-                    "cache_write" => disjoint.cache_write.map(|writes| writes.total()),
-                    _ => disjoint.output,
-                };
             for category in PRICED_CATEGORIES {
-                let covered = shares.iter().try_fold(0u64, |held, (_, disjoint)| {
-                    held.checked_add(amount(disjoint, category)?)
-                });
-                if covered
-                    .zip(amount(&whole, category))
-                    .is_none_or(|(covered, total)| covered < total)
-                {
+                if !shares_cover(&whole, &facts.by_model, category) {
                     gaps.insert(arc_reason(MeasurementReason::IncompleteAttribution).to_string());
                 }
             }
         }
-        None => return unpriced(vec![NO_SERVED_MODEL.to_string()]),
+        _ if other_branches => {
+            return unpriced(vec![
+                arc_reason(MeasurementReason::IncompleteAttribution).to_string()
+            ])
+        }
+        _ => return unpriced(vec![NO_SERVED_MODEL.to_string()]),
     }
     if unlisted {
         gaps.insert(UNLISTED_MODEL.to_string());

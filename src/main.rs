@@ -4477,7 +4477,9 @@ enum CostCmd {
     /// estimate prices the disjoint categories by a `tapes-price-table/1` or
     /// `/2` table (`--prices`, else `TAPES_PRICES`, else
     /// `$XDG_CONFIG_HOME/tapes/prices.toml`) and the row of the model that
-    /// served them, a model's efforts priced together and a figure added up
+    /// served them, an event on a branch besides the active one by the model
+    /// it names, a model's efforts priced together, a part no model is named
+    /// for under uncertain attribution by no row, and a figure added up
     /// from segments by each segment's models, never retained and absent
     /// with a reason when no table, model or row prices it. A `/2` row's long-context, time-of-day and
     /// validity terms are priced request by request from a fresh read, under
@@ -4803,8 +4805,8 @@ enum CostCmd {
     /// any harness-written dollar figure with its pricing coverage, plus
     /// lineage relations, read failures as fixed categories, the one model the
     /// recording says served the session when it names one, each model's
-    /// disjoint categories, its efforts added together, where it names
-    /// several, the segments a session
+    /// disjoint categories, its efforts added together, where the figure is
+    /// priced share by share, the segments a session
     /// with several spans was read in (bounds, covering work items and runs,
     /// request count and facts, with the remainder and the whole in the
     /// segments' basis), and the liveness

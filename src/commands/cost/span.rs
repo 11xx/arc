@@ -369,8 +369,10 @@ pub(super) fn sum_facts(session: &CostFacts, basis: &CostFacts, parts: &[Part<'_
             _ => None,
         };
     }
-    // Where the parts name several models, a part one model served whole
-    // is that model's share.
+    // Where the parts name several models, or a part is priced share by
+    // share, a part one model served whole is that model's share.
+    let by_shares =
+        facts.served_model.is_none() || parts.iter().any(|(part, _)| !part.by_model.is_empty());
     let shares: Vec<Vec<(String, &CostDisjoint)>> = parts
         .iter()
         .map(|(part, _)| {
@@ -383,7 +385,7 @@ pub(super) fn sum_facts(session: &CostFacts, basis: &CostFacts, parts: &[Part<'_
             }
             part.served_model
                 .as_deref()
-                .filter(|_| facts.served_model.is_none())
+                .filter(|_| by_shares)
                 .and_then(super::model_of)
                 .zip(part.disjoint.as_ref())
                 .into_iter()

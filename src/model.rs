@@ -2975,8 +2975,11 @@ pub struct CostFacts {
     /// several.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub served_model: Option<String>,
-    /// The disjoint categories of each model the recording says served the
-    /// figure, where it names several.
+    /// The disjoint categories of each model the figure is priced by, share
+    /// by share: where the recording names several models, counts events on
+    /// branches besides the active one, or, under uncertain attribution,
+    /// leaves part of the figure to no model. Empty where `served_model`
+    /// prices the figure whole.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub by_model: Vec<CostModelShare>,
     /// The session read per span, when the ledger gives it more than one.
