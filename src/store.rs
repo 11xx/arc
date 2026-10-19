@@ -375,9 +375,10 @@ fn event_file_value(path: &Path) -> Result<serde_json::Value> {
 const READ_COUNTS_VAR: &str = "ARC_TEST_LEDGER_READS";
 
 /// Write how often the most-read ledger file of each kind was read from disk,
-/// how many Git processes ran, how often the most-read journal's event log
-/// was read and parsed, and the tapes reader's work (backend sets built and
-/// whole-recording passes), to the file `ARC_TEST_LEDGER_READS` names.
+/// how many Git processes ran, how many status reports were built, how often
+/// the most-read journal's event log was read and parsed, and the tapes
+/// reader's work (backend sets built and whole-recording passes), to the file
+/// `ARC_TEST_LEDGER_READS` names.
 pub(crate) fn write_read_counts() {
     let Some(path) = std::env::var_os(READ_COUNTS_VAR) else {
         return;
@@ -385,6 +386,7 @@ pub(crate) fn write_read_counts() {
     let counts = serde_json::json!({
         "most_reads_per_file": shared::disk_reads(),
         "git_processes": crate::gitio::processes(),
+        "status_reports": crate::status::reports_built(),
         "most_projections_per_journal": crate::journal::projections(),
         "tapes": {
             "backend_sets": crate::commands::cost_backend_sets(),

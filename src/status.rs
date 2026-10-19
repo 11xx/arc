@@ -1242,6 +1242,13 @@ pub fn build_as_of(
     )
 }
 
+static REPORTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many status reports this process has built.
+pub(crate) fn reports_built() -> usize {
+    REPORTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// `probe_cwd` is the checkout a declared environment probe runs in, when the
 /// report is built where the environment can be observed. A ledger replay
 /// passes `None` and reports recorded identities without probing.
@@ -1263,6 +1270,7 @@ fn build_report(
     danger: DangerScope,
     fork: Option<String>,
 ) -> Result<StatusReport> {
+    REPORTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let provenance_mode = policy.provenance.git_identity;
     let provenance_check_enabled = provenance_mode == crate::config::GitIdentityMode::PerActor;
     let mut latest_patchset = state.latest_patchset().cloned();
