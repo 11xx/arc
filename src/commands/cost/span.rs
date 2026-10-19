@@ -138,6 +138,9 @@ pub(super) const ESTIMATE_BASIS: &str = "working-stretch";
 /// Why a participant's read estimated nothing: its reader keeps no request
 /// timeline for it.
 pub(super) const TIMELINE_UNAVAILABLE: &str = "request timeline unavailable";
+/// Why retained facts estimate nothing for a view: they were estimated at
+/// another idle gap than the one it asks for.
+pub(super) const RETAINED_IDLE: &str = "retained facts were estimated at another idle gap";
 
 /// One part `[from, to)` of a segment no item covers, as a participant's
 /// working stretches and its own events in them cut it, and the item the

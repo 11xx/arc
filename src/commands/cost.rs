@@ -561,7 +561,13 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
     let mut sessions: Vec<SessionRow> = sessions
         .into_iter()
         .map(|((harness, session), (spans, membership))| {
-            let mut measured = measure(&events, &harness, &session, fresh_read(&harness, &session));
+            let mut measured = measure(
+                &events,
+                &harness,
+                &session,
+                fresh_read(&harness, &session),
+                query.idle_ms(),
+            );
             let liveness = SessionLiveness::executor(
                 &measured,
                 snapshot.get_or_init(Snapshot::read).of(&harness, &session),
@@ -592,7 +598,13 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
     // missing figure qualifies every total it would have joined.
     let mut unmeasured = BTreeMap::new();
     for ((harness, session), person) in ledger.participants() {
-        let mut measured = measure(&events, harness, session, fresh_read(harness, session));
+        let mut measured = measure(
+            &events,
+            harness,
+            session,
+            fresh_read(harness, session),
+            query.idle_ms(),
+        );
         let liveness = SessionLiveness::participant(
             &measured,
             snapshot.get_or_init(Snapshot::read).of(harness, session),
@@ -1856,6 +1868,7 @@ fn measure(
     harness: &str,
     session: &str,
     fresh: std::result::Result<CostFacts, String>,
+    idle_ms: u64,
 ) -> Measured {
     // The furthest frontier, and among equal frontiers the latest retention.
     let retained = retained_for(events, harness, session)
@@ -1892,13 +1905,16 @@ fn measure(
             }
         }
         Err(reason) => match retained {
-            Some((event, held)) => Measured {
-                source: Source::Retained(event.event_id.clone(), reason),
-                retained_liveness: held.liveness.clone(),
-                retained_at: Some(event.created_at),
-                facts: Some(held),
-                conflict: None,
-            },
+            Some((event, mut held)) => {
+                at_idle(&mut held, idle_ms);
+                Measured {
+                    source: Source::Retained(event.event_id.clone(), reason),
+                    retained_liveness: held.liveness.clone(),
+                    retained_at: Some(event.created_at),
+                    facts: Some(held),
+                    conflict: None,
+                }
+            }
             None => Measured {
                 source: Source::Unavailable(reason),
                 facts: None,
@@ -1907,6 +1923,29 @@ fn measure(
                 retained_at: None,
             },
         },
+    }
+}
+
+/// Retained facts as a view at `idle_ms` reads them: an estimate made at
+/// another idle gap answers another question, so it is withheld and the
+/// measured segments stand.
+fn at_idle(facts: &mut CostFacts, idle_ms: u64) {
+    let Some(spans) = facts.spans.as_mut() else {
+        return;
+    };
+    let Some(estimate) = spans
+        .estimate
+        .as_mut()
+        .filter(|estimate| estimate.idle_ms != idle_ms)
+    else {
+        return;
+    };
+    estimate.idle_ms = idle_ms;
+    estimate
+        .withheld
+        .get_or_insert_with(|| span::RETAINED_IDLE.to_string());
+    for segment in &mut spans.segments {
+        segment.estimates.clear();
     }
 }
 

@@ -4751,7 +4751,8 @@ enum CostCmd {
         allocate: Option<String>,
         /// The idle gap that ends a participant's working stretch, such as
         /// `45m`, `15m` or `2h`; a participant's requests no item's span holds
-        /// are estimated stretch by stretch
+        /// are estimated stretch by stretch. Retained facts estimated at
+        /// another gap estimate nothing
         #[arg(long, value_name = "DURATION", conflicts_with = "commit",
             value_parser = parse_idle)]
         idle: Option<u64>,

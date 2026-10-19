@@ -3582,7 +3582,10 @@ RULES THAT CHANGE WHAT YOU DO
     one, under `work[].estimated` and `union.estimated`, and the table adds
     a `total with estimates` row. A read past the request timeline's bound
     estimates nothing and names tapes' reason, as does a reader that keeps
-    no timeline (`request timeline unavailable`).
+    no timeline (`request timeline unavailable`). An estimate answers only
+    the idle gap it was read at: retained facts estimated at another gap
+    than `--idle` estimate nothing (`retained facts were estimated at
+    another idle gap`), and their measured split stands.
     Lineage relatives are plain session ids. A non-id reference makes
     identity unknown with a fixed reason; arc does not parse a recording path
     to infer an id. Lineage is read from the whole recording, as usage is,
