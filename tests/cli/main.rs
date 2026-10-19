@@ -6,6 +6,7 @@ mod audit;
 mod briefs;
 mod bundle;
 mod candidate;
+mod catchup_reads;
 mod chain;
 mod changelog;
 mod checkout_defaults;
