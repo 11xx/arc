@@ -185,13 +185,22 @@ fn prepare_commit_msg(ctx: &Ctx, args: &[String]) -> Result<()> {
 
 /// Changes whose recorded revisions match a commit (unique-prefix accepted):
 /// any patchset head, or the integration/closure commit. Ledger-only — no
-/// commit-trailer scanning.
+/// commit-trailer scanning. A change whose state cannot be read is named on
+/// stderr, and the answer says it might also record the commit.
 pub fn query_commit(ctx: &Ctx, sha: &str) -> Result<()> {
     let store = ctx.store()?;
     let mut matched = Vec::new();
+    let mut unreadable = Vec::new();
     let read = store.read()?;
     for change_id in read.change_ids()? {
-        let state = read.state(&change_id)?;
+        let state = match read.state(&change_id) {
+            Ok(state) => state,
+            Err(error) => {
+                eprintln!("warning: unreadable change {change_id}: {error:#}");
+                unreadable.push(change_id);
+                continue;
+            }
+        };
         let mut revisions: Vec<&str> = state
             .patchsets
             .iter()
@@ -206,6 +215,7 @@ pub fn query_commit(ctx: &Ctx, sha: &str) -> Result<()> {
             matched.push(state);
         }
     }
+    let found = !matched.is_empty();
     for state in matched {
         println!(
             "{}  [{}] {}",
@@ -213,6 +223,16 @@ pub fn query_commit(ctx: &Ctx, sha: &str) -> Result<()> {
             change_status(&state),
             state.title
         );
+    }
+    if !unreadable.is_empty() {
+        let unreadable = unreadable.join(", ");
+        if found {
+            println!("this match may not be unique: unreadable changes might also record the commit: {unreadable}");
+        } else {
+            println!(
+                "no readable change records this commit; unreadable changes might: {unreadable}"
+            );
+        }
     }
     Ok(())
 }

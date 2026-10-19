@@ -141,25 +141,3 @@ fn a_complete_lookup_carries_no_qualification() {
     );
     assert!(view.get("lookup").is_none(), "{view:#}");
 }
-
-/// Claim: `query --commit` keeps its own recorded-revision lookup, which
-/// refuses when a change cannot be read rather than answering for the
-/// readable ones, so it never gives a no-match beside a gap. Rejects a
-/// query that skips the unreadable change and prints nothing as if no change
-/// recorded the commit.
-#[test]
-fn query_commit_refuses_beside_an_unreadable_change() {
-    let repo = Repo::new();
-    let (unreadable, commit) = snapshotted(&repo, "hidden");
-    snapshotted(&repo, "visible");
-    corrupt(&repo, &unreadable);
-    let refused = repo
-        .arc(&repo.root)
-        .args(["query", "--commit", &commit])
-        .assert()
-        .failure();
-    let output = refused.get_output();
-    assert!(output.stdout.is_empty(), "{output:?}");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains(&unreadable), "{stderr}");
-}

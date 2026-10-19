@@ -505,7 +505,10 @@ enum Cmd {
         #[arg(long)]
         harness: Option<String>,
         /// Report changes whose patchset, integration, or closure commit
-        /// matches this revision (unique prefix accepted)
+        /// matches this revision (unique prefix accepted). Each change whose
+        /// state cannot be read is named with its error on stderr, and a
+        /// closing line names them all: a match beside one may not be unique,
+        /// and no match beside one is not a no-match
         #[arg(long)]
         commit: Option<String>,
         /// Recorded identities and explicitly related acceptance/source changes,
