@@ -376,9 +376,8 @@ const READ_COUNTS_VAR: &str = "ARC_TEST_LEDGER_READS";
 
 /// Write how often the most-read ledger file of each kind was read from disk,
 /// how many Git processes ran, how often the most-read journal's event log
-/// was read and parsed, and the tapes reader's work (backend sets built,
-/// whole-recording passes, lineage header reads), to the file
-/// `ARC_TEST_LEDGER_READS` names.
+/// was read and parsed, and the tapes reader's work (backend sets built and
+/// whole-recording passes), to the file `ARC_TEST_LEDGER_READS` names.
 pub(crate) fn write_read_counts() {
     let Some(path) = std::env::var_os(READ_COUNTS_VAR) else {
         return;
@@ -390,7 +389,6 @@ pub(crate) fn write_read_counts() {
         "tapes": {
             "backend_sets": crate::commands::cost_backend_sets(),
             "recording_passes": agent_tapes_core::counters::recording_passes(),
-            "lineage_header_reads": agent_tapes_core::counters::lineage_header_reads(),
         },
     });
     let _ = std::fs::write(path, counts.to_string());
