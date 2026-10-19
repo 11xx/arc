@@ -469,11 +469,15 @@ pub(super) struct ExecutorRun {
     pub sessions: Vec<String>,
 }
 
-/// A session whose ledger events act on the selected work: the models it
-/// declared in each role, and why it has no figure when it has none.
+/// A session whose ledger events act on the selected work: its roles, the
+/// models its own events declared in each, the model its recording says
+/// served it, and why it has no figure when it has none.
 pub(super) struct Participant {
     pub key: String,
+    pub roles: BTreeSet<&'static str>,
     pub models: BTreeMap<&'static str, BTreeSet<String>>,
+    /// The served model, effort and a prefix naming its harness dropped.
+    pub served: Option<String>,
     pub unmeasured: Option<String>,
 }
 
@@ -705,7 +709,15 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
         .participants()
         .map(|((harness, session), person)| {
             let key = format!("{harness}:{session}");
+            let served = sessions
+                .iter()
+                .find(|row| row.participation.is_some() && row.key() == key)
+                .and_then(|row| row.measured.facts.as_ref()?.served_model.as_deref())
+                .and_then(model_of)
+                .map(|model| on_harness(harness, model));
             Participant {
+                roles: person.roles.iter().map(|role| role.name()).collect(),
+                served,
                 models: person
                     .models
                     .iter()

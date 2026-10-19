@@ -11,12 +11,14 @@
 //! the truth, and a refresh replaces the note with a newer read. arc never
 //! pushes the notes ref or adds it to a refspec.
 
-use super::cost::{emit, read_cost, report_text, write_totals, CostView, TAPES_READER};
+use super::cost::{
+    emit, read_cost, report_text, write_totals, CostView, Participant, TAPES_READER,
+};
 use super::*;
 use crate::model::portable_cost_metadata;
 use crate::state::ChangeState;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const COMMIT_SCHEMA: &str = "arc-cost-commit/1";
 
@@ -294,6 +296,8 @@ fn trailer_row(trailer: &str, value: &str, cost: &CostView, change_key: &str) ->
     let model = crate::trailers::coordinate_model(value);
     let mut keys: BTreeMap<String, &str> = BTreeMap::new();
     let mut unmeasured: BTreeMap<String, String> = BTreeMap::new();
+    let mut sources: BTreeMap<String, &str> = BTreeMap::new();
+    let mut unestablished: Vec<Value> = Vec::new();
     if let Some(model) = model {
         let executor_role = match trailer {
             "Implemented-by" => Some("implementer"),
@@ -313,16 +317,28 @@ fn trailer_row(trailer: &str, value: &str, cost: &CostView, change_key: &str) ->
         }
         if trailer != "Implemented-by" {
             let role = participant_role(trailer);
-            for participant in &cost.participants {
-                let named = participant
-                    .models
-                    .get(role)
-                    .is_some_and(|models| models.contains(model));
-                if named {
-                    keys.insert(participant.key.clone(), "participant");
-                    if let Some(reason) = &participant.unmeasured {
-                        unmeasured.insert(participant.key.clone(), reason.clone());
+            let harness = value.trim().split_once(':').map(|(harness, _)| harness);
+            for participant in cost
+                .participants
+                .iter()
+                .filter(|participant| participant.roles.contains(role))
+            {
+                match participant_model(participant, role) {
+                    Some((models, source)) if models.contains(model) => {
+                        keys.insert(participant.key.clone(), "participant");
+                        sources.insert(participant.key.clone(), source);
+                        if let Some(reason) = &participant.unmeasured {
+                            unmeasured.insert(participant.key.clone(), reason.clone());
+                        }
                     }
+                    None if harness.is_some_and(|harness| {
+                        participant.key.starts_with(&format!("{harness}:"))
+                    }) =>
+                    {
+                        unestablished
+                            .push(json!({"key": participant.key, "reason": UNESTABLISHED}));
+                    }
+                    _ => {}
                 }
             }
         }
@@ -334,16 +350,47 @@ fn trailer_row(trailer: &str, value: &str, cost: &CostView, change_key: &str) ->
             if let Some(reason) = unmeasured.get(key) {
                 entry["reason"] = json!(reason);
             }
+            if let Some(source) = sources.get(key) {
+                entry["model_source"] = json!(source);
+            }
             entry
         })
         .collect();
-    json!({
+    let mut row = json!({
         "trailer": trailer,
         "value": value,
         "model": model,
         "status": if sessions.is_empty() { "no-session-recorded" } else { "recorded" },
         "sessions": sessions,
-    })
+    });
+    if !unestablished.is_empty() {
+        row["unestablished"] = json!(unestablished);
+    }
+    row
+}
+
+/// Why a participant holding a trailer's role is not matched to it.
+const UNESTABLISHED: &str = "no model of its own is established";
+
+/// The models that answer for a participant in `role`, with their source:
+/// those its own events declared in the role, else the one its recording
+/// says served it. A participant only events recorded on its behalf name in
+/// the role declared none, and the invoker's model on them is not its own.
+fn participant_model<'a>(
+    participant: &'a Participant,
+    role: &str,
+) -> Option<(BTreeSet<&'a str>, &'static str)> {
+    match participant
+        .models
+        .get(role)
+        .filter(|models| !models.is_empty())
+    {
+        Some(models) => Some((models.iter().map(String::as_str).collect(), "events")),
+        None => participant
+            .served
+            .as_deref()
+            .map(|served| (BTreeSet::from([served]), "recording")),
+    }
 }
 
 fn shared_statement(commits: usize) -> String {
@@ -505,8 +552,20 @@ fn view_text(view: &Value, detail: bool) -> String {
             trailer_value(role["value"].as_str().unwrap_or_default(), detail)
         );
         let sessions = role["sessions"].as_array().cloned().unwrap_or_default();
-        if sessions.is_empty() {
+        let unestablished = role["unestablished"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if sessions.is_empty() && unestablished.is_empty() {
             emit!(out, "    no session recorded");
+        }
+        for participant in &unestablished {
+            emit!(
+                out,
+                "    participant {}  unmatched: {}",
+                participant["key"].as_str().unwrap_or_default(),
+                participant["reason"].as_str().unwrap_or_default()
+            );
         }
         for session in &sessions {
             emit!(
@@ -524,6 +583,9 @@ fn view_text(view: &Value, detail: bool) -> String {
                     .as_str()
                     .map_or(String::new(), |reason| format!(": {reason}"))
             );
+            if session["model_source"] == "recording" {
+                emit!(out, "      model from its recording");
+            }
             if session["totals"].is_object() {
                 write_totals(&mut out, "      ", "whole", &session["totals"]);
             }

@@ -3831,13 +3831,20 @@ RULES THAT CHANGE WHAT YOU DO
     the trailer's model. `Reviewed-by` lists
     the sessions bound as reviewer on the same terms, and the participants
     that acted as reviewer, and `Planned-by` and
-    `Orchestrated-by` those that acted as orchestrator, whose declared model
-    equals the trailer's. A matching session's figure is its whole figure,
-    shared exactly as the change view shares it, with the change's share
-    beside it when the view divides the session. A trailer no recorded
-    session answers, such as a person's or another model's, reads `no
-    session recorded`, never zero. A commit no change records answers `no
-    change records this commit`, shows no figure and succeeds. The lookup
+    `Orchestrated-by` those that acted as orchestrator, whose own model
+    equals the trailer's: the models the participant's own events declared
+    in that role, else the one model its recording says served it, effort
+    dropped, never the invoker's model on an event recorded on its behalf.
+    Each matched participant names its `model_source` (`events` or
+    `recording`). A participant in that role of the trailer's harness that
+    no source gives a model is listed in `unestablished` as unmatched, `no
+    model of its own is established`, rather than matched by a guess. A
+    matching session's figure is its whole figure, shared exactly as the
+    change view shares it, with the change's share beside it when the view
+    divides the session. A trailer no recorded session answers, such as a
+    person's or another model's, reads `no session recorded` when no
+    participant is unmatched, never zero. A commit no change records answers
+    `no change records this commit`, shows no figure and succeeds. The lookup
     reads every change's state and follows the aggregate read rule: each
     change whose state cannot be read is named with its error on stderr,
     and the command still succeeds. Such a change might record the commit,

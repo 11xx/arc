@@ -4707,11 +4707,16 @@ enum CostCmd {
     /// trailer's model. `Reviewed-by` lists the
     /// sessions bound as reviewer on the same terms and the participants
     /// that acted as reviewer, and `Planned-by` and
-    /// `Orchestrated-by` those that acted as orchestrator, whose declared
-    /// model equals the trailer's. A matching session's figure is its whole
-    /// figure, shared exactly as the change view shares it, with the change's
-    /// share beside it when the view divides the session. A trailer no
-    /// recorded session answers reads `no session recorded`, never zero. A
+    /// `Orchestrated-by` those that acted as orchestrator, whose own model
+    /// equals the trailer's: the models its own events declared in the role,
+    /// else the one model its recording says served it (`model_source`),
+    /// never the invoker's model on an event recorded on its behalf. A
+    /// participant in the role of the trailer's harness with no such model
+    /// is listed unmatched (`unestablished`). A matching session's figure is
+    /// its whole figure, shared exactly as the change view shares it, with
+    /// the change's share beside it when the view divides the session. A
+    /// trailer no recorded session answers and no participant is unmatched
+    /// for reads `no session recorded`, never zero. A
     /// commit no change records answers `no change records this commit`,
     /// shows no figure, and succeeds. The lookup follows the aggregate read
     /// rule: each change whose state cannot be read is named with its error

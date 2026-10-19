@@ -1,8 +1,9 @@
 //! Which work a session is part of, whether it acted itself or was recorded
-//! on behalf of. One rule gives a session its membership and the changes
-//! `--footprint` selects for it; a subject names a session when its
-//! harness's reader locates the id. Every recording is written into the
-//! fixture's own home, named as its harness names it.
+//! on behalf of. One rule gives a session its membership, the changes
+//! `--footprint` selects for it and the participant a trailer names; a
+//! subject names a session when its harness's reader locates the id. Every
+//! recording is written into the fixture's own home, named as its harness
+//! names it.
 
 use super::common::*;
 use serde_json::{json, Value};
@@ -182,6 +183,15 @@ fn work_keys(report: &Value) -> Vec<String> {
         .collect()
 }
 
+fn commit_role<'a>(view: &'a Value, trailer: &str) -> &'a Value {
+    view["roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["trailer"] == trailer)
+        .unwrap_or_else(|| panic!("no {trailer} row: {view:#}"))
+}
+
 /// Claim: a disposition the lead recorded on a reviewer's behalf makes that
 /// change part of the reviewer's work in its footprint as in its
 /// membership, so the footprint selects both changes and counts the
@@ -244,6 +254,88 @@ fn a_session_s_own_event_of_any_kind_is_part_of_its_footprint() {
     let row = &footprint["footprint"]["row"];
     assert_eq!(row["status"], "split ×2", "{row:#}");
     assert_eq!(row["share"], true, "{row:#}");
+}
+
+/// Claim: a `Reviewed-by` trailer finds the reviewer a lead recorded on
+/// behalf of by the model the reviewer's own recording says served it, and
+/// says that source. Rejects matching only models the reviewer's own events
+/// declared, of which it has none, which answers `no session recorded`, and
+/// matching the lead's model on the event, which names the lead.
+#[test]
+fn a_reviewed_by_trailer_finds_a_subject_reviewer_by_its_recording_s_model() {
+    let repo = Repo::new();
+    pi_recording(&repo, LEAD, 7);
+    codex_recording(&repo, REVIEWER, &["reviewer-model"], 5000);
+    let (change, worktree) = integrated(
+        &repo,
+        "reviewed",
+        "feat: reviewed\n\nReviewed-by: codex:reviewer-model#high",
+    );
+    audit_for(&repo, &change, &format!("codex:{REVIEWER}"));
+    let commit = git_out(&worktree, &["rev-parse", "HEAD"]);
+
+    let view = json_stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "show", "--commit", &commit, "--json"]),
+    );
+    let reviewed = commit_role(&view, "Reviewed-by");
+    assert_eq!(reviewed["status"], "recorded", "{reviewed:#}");
+    let sessions = reviewed["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1, "{reviewed:#}");
+    assert_eq!(
+        sessions[0]["key"],
+        format!("codex:{REVIEWER}"),
+        "{reviewed:#}"
+    );
+    assert_eq!(sessions[0]["model_source"], "recording", "{reviewed:#}");
+
+    let text = stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "show", "--commit", &commit]),
+    );
+    assert!(text.contains("model from its recording"), "{text}");
+}
+
+/// Claim: a reviewer recorded on behalf of whose recording names no one
+/// model is listed beside the `Reviewed-by` trailer of its harness as
+/// unmatched, saying its model is not established. Rejects guessing a
+/// model for it and rejects a bare `no session recorded`, which hides that
+/// a reviewer participant exists.
+#[test]
+fn a_subject_reviewer_with_no_model_of_its_own_is_named_unmatched() {
+    let repo = Repo::new();
+    pi_recording(&repo, LEAD, 7);
+    codex_recording(&repo, REVIEWER, &["first-model", "second-model"], 5000);
+    let (change, worktree) = integrated(
+        &repo,
+        "unmatched",
+        "feat: unmatched\n\nReviewed-by: codex:first-model#high",
+    );
+    audit_for(&repo, &change, &format!("codex:{REVIEWER}"));
+    let commit = git_out(&worktree, &["rev-parse", "HEAD"]);
+
+    let view = json_stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "show", "--commit", &commit, "--json"]),
+    );
+    let reviewed = commit_role(&view, "Reviewed-by");
+    assert_eq!(reviewed["sessions"], json!([]), "{reviewed:#}");
+    assert_eq!(
+        reviewed["unestablished"],
+        json!([{"key": format!("codex:{REVIEWER}"), "reason": "no model of its own is established"}]),
+        "{reviewed:#}"
+    );
+    let text = stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "show", "--commit", &commit]),
+    );
+    assert!(
+        text.contains(&format!(
+            "participant codex:{REVIEWER}  unmatched: no model of its own is established"
+        )),
+        "{text}"
+    );
+    assert!(!text.contains("no session recorded"), "{text}");
 }
 
 /// A stable OpenCode store tapes reads through `sqlite3`: the fixture's
