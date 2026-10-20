@@ -3480,11 +3480,12 @@ fn tapes_disjoint(disjoint: &CostDisjoint) -> Option<agent_tapes_core::model::Di
     })
 }
 
-/// One model's part of a figure priced through tapes: by its rows' flat
-/// rates, or, where a row carries terms set by the request, request by
-/// request over the requests the figure holds one by one, under the billing
-/// its recording establishes, and between every rate it could pay for what
-/// it does not hold. `sole` says the model served the whole figure, so a
+/// One model's part of a figure priced through tapes' share pricing: by its
+/// rows' flat rates, or, where a row carries terms set by the request,
+/// request by request over the requests the figure holds one by one, under
+/// the billing its recording establishes, and between every rate it could
+/// pay for what it does not hold, each category keeping the reasons the
+/// share gives it. `sole` says the model served the whole figure, so a
 /// request no model is named for is its too.
 fn price_model(
     disjoint: &agent_tapes_core::model::DisjointTokens,
@@ -3493,82 +3494,19 @@ fn price_model(
     table: &agent_tapes_core::pricing::PriceTable,
     terms: &CostRequestTerms,
 ) -> agent_tapes_core::pricing::EstimateSum {
-    use agent_tapes_core::model::{
-        InputConvention, Model, OutputConvention, TokenConvention, Tokens,
-    };
-    use agent_tapes_core::pricing::{PricedFigure, RequestTerms};
-    let terms = RequestTerms {
-        requests: terms.requests.as_ref(),
-        billing: terms.billing.as_ref(),
-        from: terms.from,
-        to: terms.to,
-    };
-    let served = Model {
-        id: model.to_string(),
+    agent_tapes_core::pricing::PricedShare {
+        disjoint,
+        model,
         variant: None,
-    };
-    // A share among several models is a tapes model share whose counters
-    // keep uncached input apart and reasoning inside output, so they restate
-    // its disjoint categories, and the reasons each carries, unchanged.
-    let restated = TokenConvention {
-        input: InputConvention::ExcludesCache,
-        output: OutputConvention::IncludesReasoning,
-    };
-    let mut completeness = MeasurementCompleteness::default();
-    for (category, reasons) in disjoint.measurement_completeness.iter() {
-        let counter = match category {
-            "uncached_input" => "input",
-            category => category,
-        };
-        for reason in reasons {
-            completeness.qualify(counter, *reason);
-        }
-    }
-    let share = (!sole).then(|| agent_tapes_core::usage::ModelUsage {
-        model: model.to_string(),
-        variant: None,
-        tokens: Some(Tokens {
-            input: disjoint.uncached_input,
-            output: disjoint.output,
-            reasoning: disjoint.reasoning,
-            cache_read: disjoint.cache_read,
-            cache_write: disjoint.cache_write.map(|writes| writes.total()),
-        }),
-        cost: None,
-        cost_coverage: None,
-        request_count: None,
-        measurement_coverage: BTreeMap::new(),
-        measurement_incomplete: Vec::new(),
-        measurement_completeness: completeness,
-        list_price_estimate: None,
-        cache_write_by_ttl: disjoint.cache_write,
-    });
-    PricedFigure {
-        disjoint: Some(disjoint),
-        convention: Some(restated),
-        model: sole.then_some(&served),
-        selections: &[],
-        observation: None,
-        by_model: share.as_ref().map(std::slice::from_ref),
-        terms,
+        sole,
+        terms: agent_tapes_core::pricing::RequestTerms {
+            requests: terms.requests.as_ref(),
+            billing: terms.billing.as_ref(),
+            from: terms.from,
+            to: terms.to,
+        },
     }
     .estimate(table)
-    .whole
-    .unwrap_or_default()
-}
-
-/// Whether tapes prices a share's `category` as a missing counter: where
-/// the share's own reasons name one, or where it holds no amount and no
-/// reason.
-fn names_missing(share: &agent_tapes_core::model::DisjointTokens, category: &str) -> bool {
-    match share
-        .measurement_completeness
-        .iter()
-        .find(|(held, _)| *held == category)
-    {
-        Some((_, reasons)) => reasons.contains(&MeasurementReason::MissingCounter),
-        None => category_amount(share, category).is_none(),
-    }
 }
 
 /// A figure's list price: its disjoint categories priced by the table rows
@@ -3614,10 +3552,6 @@ fn list_price(facts: &CostFacts, table: &agent_tapes_core::pricing::PriceTable) 
         .events
         .as_ref()
         .is_some_and(|events| events.other_branches > 0);
-    // A share restated for tapes' pricing is a missing counter in each
-    // category it holds no amount for, which tapes names only as
-    // `names_missing` says.
-    let mut restated_missing: BTreeSet<&str> = BTreeSet::new();
     match facts.served_model.as_deref().and_then(model_of) {
         Some(model) if facts.by_model.is_empty() && !other_branches => {
             price(&model, &whole, true);
@@ -3626,23 +3560,14 @@ fn list_price(facts: &CostFacts, table: &agent_tapes_core::pricing::PriceTable) 
             }
         }
         _ if !facts.by_model.is_empty() => {
-            let shares: Vec<_> = facts
-                .by_model
-                .iter()
-                .filter_map(|share| Some((&share.model, tapes_disjoint(&share.disjoint)?)))
-                .collect();
-            for (model, disjoint) in &shares {
-                price(model, disjoint, false);
+            for share in &facts.by_model {
+                if let Some(disjoint) = tapes_disjoint(&share.disjoint) {
+                    price(&share.model, &disjoint, false);
+                }
             }
             for category in PRICED_CATEGORIES {
                 if !shares_cover(&whole, &facts.by_model, category) {
                     gaps.insert(arc_reason(MeasurementReason::IncompleteAttribution).to_string());
-                }
-                if !shares
-                    .iter()
-                    .any(|(_, share)| names_missing(share, category))
-                {
-                    restated_missing.insert(category);
                 }
             }
         }
@@ -3662,17 +3587,11 @@ fn list_price(facts: &CostFacts, table: &agent_tapes_core::pricing::PriceTable) 
         }
         return unpriced(gaps.into_iter().collect());
     };
-    let restated_missing = &restated_missing;
     gaps.extend(arc_reasons(
         estimate
             .measurement_completeness
             .iter()
-            .flat_map(|(category, reasons)| {
-                reasons.iter().filter(move |reason| {
-                    **reason != MeasurementReason::MissingCounter
-                        || !restated_missing.contains(category)
-                })
-            }),
+            .flat_map(|(_, reasons)| reasons),
     ));
     CostListPrice {
         currency: estimate.currency,
@@ -6749,6 +6668,88 @@ fn write_participants(out: &mut String, indent: &str, participants: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A model share's estimate is the estimate tapes gives that share of a
+    /// usage answer, category by category: a Codex share whose cache reads
+    /// exceed its input leaves uncached input `undetermined` and nothing
+    /// else. Rejects pricing a share as the whole figure of its own
+    /// restatement, which also names that category a missing counter and an
+    /// unattributed part.
+    #[test]
+    fn a_share_estimate_carries_only_the_reasons_tapes_gives_the_share() {
+        use agent_tapes_core::model::{TokenConvention, Tokens};
+        use agent_tapes_core::pricing::{PriceTable, PricedFigure, RequestTerms};
+        let table = PriceTable::parse(
+            r#"schema = "tapes-price-table/1"
+currency = "USD"
+
+[[models]]
+id = "cheap-model"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 1.0, cache_read = 0.1, cache_write_5m = 1.25, output = 4.0 }
+"#,
+        )
+        .unwrap();
+        let convention = TokenConvention::of("codex").unwrap();
+        let usage = agent_tapes_core::usage::ModelUsage {
+            model: "cheap-model".to_string(),
+            variant: None,
+            tokens: Some(Tokens {
+                input: Some(1_000_000),
+                output: Some(0),
+                reasoning: Some(0),
+                cache_read: Some(2_000_000),
+                cache_write: Some(0),
+            }),
+            cost: None,
+            cost_coverage: None,
+            request_count: None,
+            measurement_coverage: BTreeMap::new(),
+            measurement_incomplete: Vec::new(),
+            measurement_completeness: MeasurementCompleteness::default(),
+            list_price_estimate: None,
+            cache_write_by_ttl: None,
+        };
+        let shares = std::slice::from_ref(&usage);
+        let tapes = PricedFigure {
+            disjoint: None,
+            convention: Some(convention),
+            model: None,
+            selections: &[],
+            observation: None,
+            by_model: Some(shares),
+            terms: RequestTerms {
+                requests: None,
+                billing: None,
+                from: None,
+                to: None,
+            },
+        }
+        .estimate(&table)
+        .by_model
+        .remove(0)
+        .expect("tapes prices the share");
+        let [share] = &model_shares(shares, &MeasurementCompleteness::default(), convention)[..]
+        else {
+            panic!("one share");
+        };
+        let disjoint = tapes_disjoint(&share.disjoint).unwrap();
+        let arc = price_model(
+            &disjoint,
+            &share.model,
+            false,
+            &table,
+            &CostRequestTerms::default(),
+        )
+        .finish()
+        .expect("arc prices the share");
+        assert_eq!(
+            arc.measurement_completeness, tapes.measurement_completeness,
+            "{tapes:#?}"
+        );
+        assert_eq!(arc.amount, tapes.amount);
+    }
 
     /// Each reason tapes names has its own fixed reason, which travels.
     #[test]
