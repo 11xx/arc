@@ -4596,12 +4596,14 @@ enum CostCmd {
     ///
     /// A participant is a session no dispatch binds whose ledger events act
     /// on the selected work; a session a dispatch binds is an executor and
-    /// never a participant. Its roles come only from the kinds of its events:
-    /// a snapshot or a verdict is a reviewer's, an integration, a debt or a
-    /// closure an integrator's, a dispatch an orchestrator's. An event
-    /// recorded `--on-behalf-of` a `harness:<id>` subject naming a session is
-    /// the subject's event too, giving it the kind's role while the invoker
-    /// keeps its own. The subject names a session when its harness's tapes
+    /// never a participant. One rule gives every session its roles: its
+    /// bindings' and its events' kinds'. A snapshot or a verdict is a
+    /// reviewer's, an integration, a debt or a closure an integrator's, a
+    /// dispatch an orchestrator's; a bound session's snapshot is its bound
+    /// work and names none, while its own verdicts give it the reviewer role
+    /// beside its binding's. An event recorded `--on-behalf-of` a
+    /// `harness:<id>` subject naming a session is the subject's event too,
+    /// giving it the kind's role while the invoker keeps its own. The subject names a session when its harness's tapes
     /// reader locates the id (an OpenCode `ses_…`, a Pi id as its recording
     /// names it, a Claude or Codex UUID), when that store cannot answer, or when the ledger retains facts
     /// for it; a person, a label, a `harness:model` or an id nothing locates
@@ -4707,18 +4709,18 @@ enum CostCmd {
     /// sessions bound as implementer to the change's runs whose route model,
     /// effort and a prefix naming the executor's harness dropped, equals the
     /// trailer's model. `Reviewed-by` lists the
-    /// sessions bound as reviewer on the same terms and the participants
-    /// that acted as reviewer, and `Planned-by` and
-    /// `Orchestrated-by` those that acted as orchestrator, whose own model
-    /// equals the trailer's: the models its own events declared in the role,
-    /// else the one model its recording says served it (`model_source`),
-    /// never the invoker's model on an event recorded on its behalf. A
-    /// participant in the role of the trailer's harness with no such model
-    /// is listed unmatched (`unestablished`). A matching session's figure is
+    /// sessions bound as reviewer on the same terms and the sessions, bound
+    /// or not, whose events give them the reviewer role, and `Planned-by` and
+    /// `Orchestrated-by` those whose events give them the orchestrator role,
+    /// whose own model equals the trailer's: the models its own events
+    /// declared in the role, else the one model its recording says served it
+    /// (`model_source`), never the invoker's model on an event recorded on
+    /// its behalf. A session in the role of the trailer's harness with no
+    /// such model is listed unmatched (`unestablished`). A matching session's figure is
     /// its whole figure, shared exactly as the change view shares it, with
     /// the change's share beside it when the view divides the session. A
-    /// trailer no recorded session answers and no participant is unmatched
-    /// for reads `no session recorded`, never zero. A
+    /// trailer no recorded session answers and no session is unmatched for
+    /// reads `no session recorded`, never zero. A
     /// commit no change records answers `no change records this commit`,
     /// shows no figure, and succeeds. The lookup follows the aggregate read
     /// rule: each change whose state cannot be read is named with its error

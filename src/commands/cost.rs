@@ -180,7 +180,7 @@ struct Measured {
     retained_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-/// What a participant's events show it did. The variants are the fixed role
+/// What a session's events show it did. The variants are the fixed role
 /// names, in the order the view lists them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Role {
@@ -219,6 +219,18 @@ fn role_of(payload: &Payload) -> Option<Role> {
         | Payload::ChangeClosed { .. } => Some(Role::Integrator),
         Payload::RunDispatched { .. } => Some(Role::Orchestrator),
         _ => None,
+    }
+}
+
+/// The role an event gives a session it names: the role its kind names,
+/// except that a patchset makes a reviewer only of a session no dispatch
+/// binds. A bound session's patchsets are the work its binding gave it, and
+/// its own verdicts, integrations and dispatches give it their roles beside
+/// that one.
+fn acting_role(payload: &Payload, bound: bool) -> Option<Role> {
+    match payload {
+        Payload::PatchsetAdded { .. } if bound => None,
+        _ => role_of(payload),
     }
 }
 
@@ -360,6 +372,9 @@ struct SessionRow {
     split: Split,
     overlap: BTreeSet<String>,
     participation: Option<Participation>,
+    /// The roles its own events and those recorded on its behalf give it on
+    /// the selected work, beside the roles its bindings name.
+    acted: BTreeSet<Role>,
     liveness: Option<SessionLiveness>,
     /// The model coordinate the row is attributed to, and where it came from.
     agent: Option<(String, &'static str)>,
@@ -445,21 +460,19 @@ impl SessionRow {
         }
     }
 
+    /// The roles its bindings name and the roles its events give it, by one
+    /// rule for an executor and a participant alike.
     fn roles(&self) -> Vec<&'static str> {
-        match &self.participation {
-            Some(participation) => participation.roles.iter().map(|role| role.name()).collect(),
-            None => {
-                let roles: BTreeSet<&'static str> = self
-                    .spans
-                    .iter()
-                    .map(|span| executor_role(span.role.as_deref()))
-                    .collect();
-                if roles.is_empty() {
-                    vec!["implementer"]
-                } else {
-                    roles.into_iter().collect()
-                }
-            }
+        let mut roles: BTreeSet<&'static str> = self
+            .spans
+            .iter()
+            .map(|span| executor_role(span.role.as_deref()))
+            .collect();
+        roles.extend(self.acted.iter().map(|role| role.name()));
+        if roles.is_empty() {
+            vec!["implementer"]
+        } else {
+            roles.into_iter().collect()
         }
     }
 }
@@ -487,11 +500,14 @@ pub(super) struct ExecutorRun {
     pub sessions: Vec<String>,
 }
 
-/// A session whose ledger events act on the selected work: its roles, the
-/// models its own events declared in each, the model its recording says
-/// served it, and why it has no figure when it has none.
-pub(super) struct Participant {
+/// A session whose ledger events act on the selected work, bound or not: its
+/// kind, the roles its events give it, the models its own events declared in
+/// each, the model its recording says served it, and why it has no figure
+/// when it has none.
+pub(super) struct Acting {
     pub key: String,
+    /// `executor` when a dispatch binds it, else `participant`.
+    pub kind: &'static str,
     pub roles: BTreeSet<&'static str>,
     pub models: BTreeMap<&'static str, BTreeSet<String>>,
     /// The served model, effort and a prefix naming its harness dropped.
@@ -504,7 +520,7 @@ pub(super) struct Participant {
 pub(super) struct CostView {
     pub report: Value,
     pub runs: Vec<ExecutorRun>,
-    pub participants: Vec<Participant>,
+    pub acting: Vec<Acting>,
 }
 
 /// Print the read-only cost view of a change or a journal artifact.
@@ -603,6 +619,11 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
             }
             let split = split_of(&measured, plan_of(&harness, &session), true);
             let parent = spans.iter().find_map(|span| span.parent.clone());
+            let acted = ledger
+                .people
+                .get(&(harness.clone(), session.clone()))
+                .map(|person| person.roles.clone())
+                .unwrap_or_default();
             SessionRow {
                 harness,
                 session,
@@ -612,6 +633,7 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
                 split,
                 overlap: BTreeSet::new(),
                 participation: None,
+                acted,
                 liveness: Some(liveness),
                 agent: None,
                 agent_conflict: None,
@@ -662,6 +684,7 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
                 roles: person.roles.clone(),
                 membership_complete: ledger.complete,
             }),
+            acted: person.roles.clone(),
             liveness: Some(liveness),
             agent: None,
             agent_conflict: None,
@@ -725,17 +748,26 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
             })
         })
         .collect();
-    let participants = ledger
-        .participants()
-        .map(|((harness, session), person)| {
+    let acting = ledger
+        .people
+        .iter()
+        .filter(|(_, person)| person.acts)
+        .filter_map(|((harness, session), person)| {
             let key = format!("{harness}:{session}");
-            let served = sessions
-                .iter()
-                .find(|row| row.participation.is_some() && row.key() == key)
-                .and_then(|row| row.measured.facts.as_ref()?.served_model.as_deref())
+            let row = sessions.iter().find(|row| row.key() == key)?;
+            let served = row
+                .measured
+                .facts
+                .as_ref()
+                .and_then(|facts| facts.served_model.as_deref())
                 .and_then(model_of)
                 .map(|model| on_harness(harness, model));
-            Participant {
+            Some(Acting {
+                kind: if person.bound {
+                    "executor"
+                } else {
+                    "participant"
+                },
                 roles: person.roles.iter().map(|role| role.name()).collect(),
                 served,
                 models: person
@@ -745,13 +777,13 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
                     .collect(),
                 unmeasured: unmeasured.get(&(harness.clone(), session.clone())).cloned(),
                 key,
-            }
+            })
         })
         .collect();
     Ok(CostView {
         report,
         runs: executor_runs,
-        participants,
+        acting,
     })
 }
 
@@ -842,6 +874,7 @@ fn child_row(parent: &SessionRow, harness: &str, session: &str, facts: CostFacts
     child.split = Split::Whole;
     child.overlap = BTreeSet::new();
     child.participation = None;
+    child.acted = BTreeSet::new();
     child.liveness = None;
     child.agent = None;
     child.agent_conflict = None;
@@ -867,6 +900,7 @@ fn unmeasured_child(parent: &SessionRow, harness: &str, session: &str, reason: &
     child.split = Split::Unsplit(span::UNMEASURED);
     child.overlap = BTreeSet::new();
     child.participation = None;
+    child.acted = BTreeSet::new();
     child.liveness = None;
     child.agent = None;
     child.agent_conflict = None;
@@ -3720,15 +3754,15 @@ fn read_ledger(
         complete: false,
     };
     let mut note = |event: &Event, work: WorkKey| {
-        let role = role_of(&event.payload);
         let on_selection = selected.contains(&work);
         let named = named_sessions(event, subjects);
-        if !named.iter().any(|(_, own)| *own) && on_selection && role.is_some() {
+        if !named.iter().any(|(_, own)| *own) && on_selection && role_of(&event.payload).is_some() {
             ledger.unattributed_events += 1;
         }
         // The subject's event was recorded by the invoker: its instant, model
         // and session are the invoker's, so it opens no span of the subject.
         for (key, own) in named {
+            let role = acting_role(&event.payload, assigned.bound.contains(&key));
             let harness = key.0.clone();
             let person = ledger.people.entry(key).or_default();
             if own {
@@ -4677,6 +4711,7 @@ impl SessionRow {
             split: self.split,
             overlap: self.overlap.clone(),
             participation: self.participation.clone(),
+            acted: self.acted.clone(),
             liveness: self.liveness.clone(),
             agent: self.agent.clone(),
             agent_conflict: self.agent_conflict.clone(),

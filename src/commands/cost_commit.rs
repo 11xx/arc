@@ -11,9 +11,7 @@
 //! the truth, and a refresh replaces the note with a newer read. arc never
 //! pushes the notes ref or adds it to a refspec.
 
-use super::cost::{
-    emit, read_cost, report_text, write_totals, CostView, Participant, TAPES_READER,
-};
+use super::cost::{emit, read_cost, report_text, write_totals, Acting, CostView, TAPES_READER};
 use super::*;
 use crate::model::portable_cost_metadata;
 use crate::state::ChangeState;
@@ -237,9 +235,9 @@ fn subject(message: &[u8]) -> String {
         .to_string()
 }
 
-/// The role the ledger records for the session behind a trailer: executors
-/// are the runs bound to the change, and a lead's events name the rest.
-fn participant_role(trailer: &str) -> &'static str {
+/// The role a session's own events give it that answers a trailer, beside the
+/// executors bound to the change's runs in that role.
+fn acting_role(trailer: &str) -> &'static str {
     match trailer {
         "Reviewed-by" => "reviewer",
         _ => "orchestrator",
@@ -316,27 +314,29 @@ fn trailer_row(trailer: &str, value: &str, cost: &CostView, change_key: &str) ->
             }
         }
         if trailer != "Implemented-by" {
-            let role = participant_role(trailer);
+            let role = acting_role(trailer);
             let harness = value.trim().split_once(':').map(|(harness, _)| harness);
-            for participant in cost
-                .participants
+            for acting in cost
+                .acting
                 .iter()
-                .filter(|participant| participant.roles.contains(role))
+                .filter(|acting| acting.roles.contains(role))
             {
-                match participant_model(participant, role) {
+                // An executor its binding already matched is listed once.
+                if keys.contains_key(&acting.key) {
+                    continue;
+                }
+                match acting_model(acting, role) {
                     Some((models, source)) if models.contains(model) => {
-                        keys.insert(participant.key.clone(), "participant");
-                        sources.insert(participant.key.clone(), source);
-                        if let Some(reason) = &participant.unmeasured {
-                            unmeasured.insert(participant.key.clone(), reason.clone());
+                        keys.insert(acting.key.clone(), acting.kind);
+                        sources.insert(acting.key.clone(), source);
+                        if let Some(reason) = &acting.unmeasured {
+                            unmeasured.insert(acting.key.clone(), reason.clone());
                         }
                     }
-                    None if harness.is_some_and(|harness| {
-                        participant.key.starts_with(&format!("{harness}:"))
-                    }) =>
+                    None if harness
+                        .is_some_and(|harness| acting.key.starts_with(&format!("{harness}:"))) =>
                     {
-                        unestablished
-                            .push(json!({"key": participant.key, "reason": UNESTABLISHED}));
+                        unestablished.push(json!({"key": acting.key, "reason": UNESTABLISHED}));
                     }
                     _ => {}
                 }
@@ -369,24 +369,17 @@ fn trailer_row(trailer: &str, value: &str, cost: &CostView, change_key: &str) ->
     row
 }
 
-/// Why a participant holding a trailer's role is not matched to it.
+/// Why a session holding a trailer's role by its events is not matched to it.
 const UNESTABLISHED: &str = "no model of its own is established";
 
-/// The models that answer for a participant in `role`, with their source:
-/// those its own events declared in the role, else the one its recording
-/// says served it. A participant only events recorded on its behalf name in
-/// the role declared none, and the invoker's model on them is not its own.
-fn participant_model<'a>(
-    participant: &'a Participant,
-    role: &str,
-) -> Option<(BTreeSet<&'a str>, &'static str)> {
-    match participant
-        .models
-        .get(role)
-        .filter(|models| !models.is_empty())
-    {
+/// The models that answer for a session in `role`, with their source: those
+/// its own events declared in the role, else the one its recording says
+/// served it. The invoker's model on an event recorded on its behalf is never
+/// its own.
+fn acting_model<'a>(acting: &'a Acting, role: &str) -> Option<(BTreeSet<&'a str>, &'static str)> {
+    match acting.models.get(role).filter(|models| !models.is_empty()) {
         Some(models) => Some((models.iter().map(String::as_str).collect(), "events")),
-        None => participant
+        None => acting
             .served
             .as_deref()
             .map(|served| (BTreeSet::from([served]), "recording")),
@@ -559,12 +552,20 @@ fn view_text(view: &Value, detail: bool) -> String {
         if sessions.is_empty() && unestablished.is_empty() {
             emit!(out, "    no session recorded");
         }
-        for participant in &unestablished {
+        for unmatched in &unestablished {
+            let key = &unmatched["key"];
+            let kind = view["cost"]["sessions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|row| &row["key"] == key)
+                .and_then(|row| row["kind"].as_str())
+                .unwrap_or("participant");
             emit!(
                 out,
-                "    participant {}  unmatched: {}",
-                participant["key"].as_str().unwrap_or_default(),
-                participant["reason"].as_str().unwrap_or_default()
+                "    {kind} {}  unmatched: {}",
+                key.as_str().unwrap_or_default(),
+                unmatched["reason"].as_str().unwrap_or_default()
             );
         }
         for session in &sessions {

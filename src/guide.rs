@@ -3630,11 +3630,15 @@ RULES THAT CHANGE WHAT YOU DO
     Per-session figures remain available. The top-level identity status
     summarizes the figures. A participant is a session no dispatch binds
     whose ledger events act on the selected work; a session a dispatch binds
-    is an executor and never a participant. The kind of an event is the
-    only source of its roles: a snapshot or a verdict makes the session a
-    reviewer, an integration, a debt or a closure an integrator, and a
-    dispatch an orchestrator; any other kind makes no participant, and
-    prose and trailers name none. An event recorded `--on-behalf-of` a
+    is an executor and never a participant. One rule gives every session
+    its roles: those its bindings name (an executor's `--executor-role`),
+    and those the kinds of its events name. A snapshot or a verdict makes
+    the session a reviewer, an integration, a debt or a closure an
+    integrator, and a dispatch an orchestrator; any other kind names no
+    role and makes no participant, and prose and trailers name none. A
+    bound session's snapshot is the work its binding gave it and names no
+    role, while its own verdicts, integrations and dispatches give it those
+    roles beside its binding's. An event recorded `--on-behalf-of` a
     `harness:<id>` subject that names a session is the subject's event too:
     it gives the subject the kind's role and membership while the invoker
     keeps its own roles for the event it ran. The subject names a session
@@ -3832,21 +3836,22 @@ RULES THAT CHANGE WHAT YOU DO
     the sessions bound as implementer to the change's runs whose route
     model, effort and a prefix naming the executor's harness dropped, equals
     the trailer's model. `Reviewed-by` lists
-    the sessions bound as reviewer on the same terms, and the participants
-    that acted as reviewer, and `Planned-by` and
-    `Orchestrated-by` those that acted as orchestrator, whose own model
-    equals the trailer's: the models the participant's own events declared
-    in that role, else the one model its recording says served it, effort
-    dropped, never the invoker's model on an event recorded on its behalf.
-    Each matched participant names its `model_source` (`events` or
-    `recording`). A participant in that role of the trailer's harness that
-    no source gives a model is listed in `unestablished` as unmatched, `no
-    model of its own is established`, rather than matched by a guess. A
+    the sessions bound as reviewer on the same terms, and the sessions,
+    bound or not, whose events give them the reviewer role, and `Planned-by`
+    and `Orchestrated-by` those whose events give them the orchestrator
+    role, whose own model equals the trailer's: the models the session's
+    own events declared in that role, else the one model its recording says
+    served it, effort dropped, never the invoker's model on an event
+    recorded on its behalf. Each session matched by its events names its
+    `model_source` (`events` or `recording`). A session in that role of the
+    trailer's harness that no source gives a model is listed in
+    `unestablished` as unmatched, `no model of its own is established`,
+    rather than matched by a guess. A
     matching session's figure is its whole figure, shared exactly as the
     change view shares it, with the change's share beside it when the view
     divides the session. A trailer no recorded session answers, such as a
     person's or another model's, reads `no session recorded` when no
-    participant is unmatched, never zero. A commit no change records answers
+    session is unmatched, never zero. A commit no change records answers
     `no change records this commit`, shows no figure and succeeds. The lookup
     reads every change's state and follows the aggregate read rule: each
     change whose state cannot be read is named with its error on stderr,
