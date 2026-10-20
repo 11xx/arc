@@ -25,6 +25,7 @@ mod cost_participant_share;
 mod cost_replay_once;
 mod cost_report_ranges;
 mod cost_reviewer_subjects;
+mod cost_share_pricing;
 mod cost_span_split;
 mod cost_subject_membership;
 mod cross_links;

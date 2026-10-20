@@ -49,7 +49,7 @@ pub const TAPES_READER: &str = env!("ARC_TAPES_READER");
 
 /// How arc normalizes a reader's usage answer into retained facts. It moves
 /// when that normalization does, so facts from an older one stay identifiable.
-pub const COST_CALCULATION: &str = "usage-normalization 8";
+pub const COST_CALCULATION: &str = "usage-normalization 9";
 
 const USD_KIND: &str = "harness-calculated-estimate";
 const TOKEN_KIND: &str = "resource-quantity";
@@ -3159,7 +3159,8 @@ fn priced_shares(
 }
 
 /// Each model's disjoint categories among `models`, its efforts added
-/// together, each qualified by `completeness` beside its own.
+/// together, each qualified by `completeness` beside its own and its cache
+/// writes split by the TTLs its recording names.
 fn model_shares(
     models: &[agent_tapes_core::usage::ModelUsage],
     completeness: &MeasurementCompleteness,
@@ -3175,9 +3176,12 @@ fn model_shares(
         };
         let mut qualified = model.measurement_completeness.clone();
         qualified.merge(completeness);
-        let disjoint =
-            agent_tapes_core::model::DisjointTokens::from_native(tokens, convention, None)
-                .with_completeness(&qualified);
+        let disjoint = agent_tapes_core::model::DisjointTokens::from_native(
+            tokens,
+            convention,
+            model.cache_write_by_ttl.as_ref(),
+        )
+        .with_completeness(&qualified);
         if let Some(disjoint) = cost_disjoint(&disjoint) {
             efforts.entry(&model.model).or_default().push(disjoint);
         }
