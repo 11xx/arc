@@ -3478,7 +3478,8 @@ RULES THAT CHANGE WHAT YOU DO
     or where its attribution is uncertain and the split leaves part of it to
     no model, a part no row prices; a model served at several efforts is one share,
     priced over every request it served, and a figure added up from a
-    divided session's segments holds each segment's models. A `/2` row's terms set by the request, a
+    divided session's segments holds each segment's models. Each share is
+    priced by its own recorded cache-write TTLs and keeps its own reasons. A `/2` row's terms set by the request, a
     long-context rate above a prompt size for the billing it applies to,
     time-of-day rates and a validity window, are priced request by request
     over the requests a fresh read kept, a Pi figure's on every branch its
@@ -3814,7 +3815,8 @@ RULES THAT CHANGE WHAT YOU DO
     with its pricing coverage, plus lineage relations, read failures
     as fixed categories, the one model the recording says served the
     session when it names one, each model's disjoint categories, its efforts
-    added together, where the figure is priced share by share, the segments a session with several spans was read in, each with
+    added together and its cache writes by TTL, where the figure is priced
+    share by share, the segments a session with several spans was read in, each with
     its bounds, covering work items and runs, request count and facts, the
     remainder and the whole in the segments' basis, and the liveness
     agent-status answered then (`live`, `ended` or `unknown`). A list-price
