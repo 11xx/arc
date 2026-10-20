@@ -3931,16 +3931,16 @@ RULES THAT CHANGE WHAT YOU DO
     read, writes nothing, as does a session `cost show` names without a
     figure; standard error counts both. Each record's work is `label`, the
     change id or journal artifact as `cost show` names it; `commits`, the
-    commits the change made itself, in full: its commits as `cost note`
-    finds them less the current-patchset commits of every change below it in
-    a stack, and always with its own integration commit. A change is below
-    another when it is open or integrated and its current patchset head,
-    different from the other's, lies in the other's patchset range; a change
-    closed without integration is below nothing, and changes with one head
-    exclude nothing from each other. Left out for a change that has none and
-    for an artifact; and `repository`, the `origin`
-    remote URL without credentials, left out when there is none or it names
-    a place on this machine. Where a dispatch records both the session that
+    commits the change made itself, in full, left out for a change that has
+    none and for an artifact; and `repository`, the `origin` remote URL
+    without credentials, left out when there is none or it names a place on
+    this machine. A change's commits are those `cost note` finds for it less
+    the current-patchset commits of every change below it in a stack, and
+    always include its own integration commit. A change is below another
+    when it is open or integrated and its current patchset head, different
+    from the other's, lies in the other's patchset range; a change closed
+    without integration is below nothing, and changes with one head exclude
+    nothing from each other. Where a dispatch records both the session that
     made it and the executor it bound, one `lineage` record per distinct pair
     is written at the earliest such dispatch, with the binding's handle as
     `label` and the work as `subject`; a native child is linked by its
@@ -3948,9 +3948,9 @@ RULES THAT CHANGE WHAT YOU DO
     so two exports of an unchanged ledger differ only in `written_at`.
     Standard error summarizes the sessions written, the records by kind, the
     commits that still appear under several labels, the sessions without a
-    figure, the sessions the ledger does not divide, and
-    the runs still open. Every session is measured as `cost show` measures
-    it, and the command records no ledger event.
+    figure, the sessions the ledger does not divide, and the runs still open.
+    Every session is measured as `cost show` measures it, and the command
+    records no ledger event.
   - A bounded round records what it deliberately left, so the next round
     inherits a list instead of a memory: `arc run end <dispatch> --outcome
     <o> --reviewed-head <sha> --raised-json <path|-> --deferred-json <path|->`.

@@ -4850,16 +4850,17 @@ enum CostCmd {
     /// A session `cost show` names without a figure writes nothing and is
     /// counted. Each record's work is the change id or journal artifact as
     /// `cost show` names it, as `label`; `commits` holds the commits the
-    /// change made itself (full object names): the change's commits as `cost
-    /// note` finds them, less the current-patchset commits of every change
-    /// below it in a stack, and always with its own integration commit. A
-    /// change is below another when it is open or integrated and its current
-    /// patchset head, different from the other's, lies in the other's
-    /// patchset range; a change closed without integration is below nothing,
-    /// and changes with one head exclude nothing from each other. `commits`
-    /// is left out for a change that has none and for a journal artifact; `repository` is the
+    /// change made itself (full object names), and is left out for a change
+    /// that has none and for a journal artifact; `repository` is the
     /// repository's `origin` remote URL without credentials, and is left out
-    /// when there is none or it names a place on this machine. Where a
+    /// when there is none or it names a place on this machine. A change's
+    /// commits are those `cost note` finds for it less the current-patchset
+    /// commits of every change below it in a stack, and always include its
+    /// own integration commit. A change is below another when it is open or
+    /// integrated and its current patchset head, different from the other's,
+    /// lies in the other's patchset range; a change closed without
+    /// integration is below nothing, and changes with one head exclude
+    /// nothing from each other. Where a
     /// dispatch records both the session that dispatched it and the executor
     /// it bound, one `lineage` record per distinct pair is written, at the
     /// earliest such dispatch: tier `bound`, `at` the dispatch, `label` the
