@@ -667,10 +667,7 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
                 unmeasured.insert((harness.clone(), session.clone()), reason.clone());
             }
             (None, _) => {
-                unmeasured.insert(
-                    (harness.clone(), session.clone()),
-                    "usage read failed".to_string(),
-                );
+                unmeasured.insert((harness.clone(), session.clone()), READ_FAILED.to_string());
             }
         }
         let split = match split_of(&measured, plan_of(harness, session), ledger.complete) {
@@ -1037,12 +1034,12 @@ fn family_json(row: &SessionRow, sessions: &[SessionRow], view: &View<'_>) -> Op
                     unmeasured += 1;
                 }
                 None => {
-                    entry["reason"] = json!("usage read failed");
+                    entry["reason"] = json!(READ_FAILED);
                     unassigned.push(unmeasured_child(
                         row,
                         &child.harness,
                         &child.session,
-                        "usage read failed",
+                        READ_FAILED,
                     ));
                     unmeasured += 1;
                 }
@@ -2162,6 +2159,23 @@ impl Backends {
     }
 }
 
+/// Why a tapes read gave no figure.
+const READ_FAILED: &str = "usage read failed";
+
+/// Why a tapes read gave no figure when its store stayed busy or
+/// unavailable through every attempt tapes makes: reading again may
+/// measure the session.
+const READ_TRANSIENT: &str = "usage read failed transiently; a later read may succeed";
+
+fn read_failed(transient: bool) -> String {
+    if transient {
+        READ_TRANSIENT
+    } else {
+        READ_FAILED
+    }
+    .to_string()
+}
+
 /// Measure one session through the pinned tapes reader, over its whole
 /// recording, and per segment of `plan` when the ledger gives it several
 /// spans. A Claude session that spawned native children is measured by its
@@ -2182,7 +2196,7 @@ fn read_fresh(
         return read_child(backends, harness, parent, session, &plan.segments);
     }
     let resolved = agent_tapes_core::resolve_session(backends, session)
-        .map_err(|_| "usage read failed".to_string())?;
+        .map_err(|error| read_failed(error.is_transient()))?;
     if resolved.session.id != session {
         return Err("usage identity mismatch".to_string());
     }
@@ -2200,7 +2214,7 @@ fn read_fresh(
             tally.add(&turn);
             Ok(())
         })
-        .map_err(|_| "usage read failed".to_string())?;
+        .map_err(|error| read_failed(agent_tapes_core::transient::is_transient(&error)))?;
     let estimating = (!plan.events.is_empty()).then(|| {
         let stretches = agent_tapes_core::usage::stretches(&read, idle_ms as i64);
         Estimating {
@@ -2224,7 +2238,7 @@ fn read_fresh(
         .len();
     let whole = backend
         .stream_session(&resolved.session, &read)
-        .map_err(|_| "usage read failed".to_string())?;
+        .map_err(|error| read_failed(agent_tapes_core::transient::is_transient(&error)))?;
     let lineage = read_lineage(backends, harness, session);
     let family = harness == "claude" && lineage.native_children.iter().any(|child| !child.mirror());
     let view = agent_tapes_core::usage::streamed(&whole, tally.clone(), &read);
@@ -2304,15 +2318,16 @@ fn read_child(
     plan: &[Segment],
 ) -> std::result::Result<CostFacts, String> {
     let resolved = agent_tapes_core::resolve_session(backends, parent)
-        .ok()
-        .filter(|resolved| resolved.session.id == parent)
-        .ok_or_else(|| "usage read failed".to_string())?;
+        .map_err(|error| read_failed(error.is_transient()))?;
+    if resolved.session.id != parent {
+        return Err(READ_FAILED.to_string());
+    }
     let backend = &backends[resolved.backend_index];
     let (children, failures) = backend.window_children(&resolved.session);
     let Some(child) = children.into_iter().find(|child| child.id == key) else {
         let unreadable = failures.iter().any(|failure| failure.starts_with(key));
         return Err(if unreadable {
-            "usage read failed"
+            READ_FAILED
         } else {
             CHILD_MISSING
         }
@@ -2326,7 +2341,7 @@ fn read_child(
             tally.add(&turn);
             Ok(())
         })
-        .map_err(|_| "usage read failed".to_string())?;
+        .map_err(|error| read_failed(agent_tapes_core::transient::is_transient(&error)))?;
     let selection_warnings = resolved
         .diagnostics
         .latest_warnings(&resolved.session)
@@ -2341,10 +2356,7 @@ fn read_child(
         selection_warnings,
         harness,
     );
-    let mut facts = *spans
-        .whole
-        .clone()
-        .ok_or_else(|| "usage read failed".to_string())?;
+    let mut facts = *spans.whole.clone().ok_or_else(|| READ_FAILED.to_string())?;
     facts.spans = (!plan.is_empty()).then_some(spans);
     facts.source_started_at = earliest.into_iter().chain(child.started_at).min();
     facts.source_start_uncertain = child.start_uncertain || !read.gaps.is_empty();

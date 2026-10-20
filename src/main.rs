@@ -4467,7 +4467,11 @@ enum CostCmd {
     /// measured through the pinned tapes reader over its whole recording, or,
     /// when the source is unavailable, from the facts `cost retain` kept, and
     /// the report says which. A fresh read that disagrees with facts retained at the same
-    /// frontier shows the conflict. Direct totals count each undivided
+    /// frontier shows the conflict. A session whose read failed and
+    /// that no retained facts measure is unmeasured with `usage read failed`,
+    /// or with `usage read failed transiently; a later read may succeed` where
+    /// tapes found its store busy or unavailable through every attempt it
+    /// makes. Direct totals count each undivided
     /// session whose work the item holds, and the item's share of each divided
     /// session with a span on it; inclusive totals for a change add the
     /// journal artifact it was begun from; the union counts each session once

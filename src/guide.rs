@@ -3460,7 +3460,12 @@ RULES THAT CHANGE WHAT YOU DO
     --from-journal` add no consumption. Each session is measured through
     the pinned tapes reader, or from retained facts when its source no longer
     answers, and the report says which; a fresh read that disagrees with
-    facts retained at the same frontier shows the conflict. Direct totals hold
+    facts retained at the same frontier shows the conflict. A session
+    whose read failed and that no retained facts measure is unmeasured with
+    `usage read failed`, or with `usage read failed transiently; a later
+    read may succeed` where tapes found its store busy or unavailable
+    through every attempt it makes, so reading again may measure it. Direct
+    totals hold
     each undivided session whose work the item holds, and the item's share of
     each divided session with a span on it; inclusive totals add the artifact
     a change was begun from, and the union counts each session once, a
