@@ -1,7 +1,9 @@
 //! Every reviewer a ledger records is found. A subject recorded as
 //! `harness:session:model#effort (label)` is the session it names, with the
 //! model it declares; a bound session's own verdicts give it the reviewer
-//! role beside the role its binding names.
+//! role beside the role its binding names; and a session-shaped subject
+//! nothing on this machine locates is still named, unmeasured, so the
+//! figures it would join say they are incomplete.
 //! Every recording is written into the fixture's own home, named as its
 //! harness names it.
 
@@ -11,6 +13,8 @@ use serde_json::{json, Value};
 const LEAD: &str = "019a0000-0000-7000-8000-0000000000a1";
 const REVIEWER: &str = "019a0000-0000-7000-8000-0000000000c1";
 const EXECUTOR: &str = "019a0000-0000-4000-8000-0000000000e1";
+/// A Codex session id no recording in the fixture's home holds.
+const ELSEWHERE: &str = "019a0000-0000-7000-8000-0000000000f9";
 
 fn write_lines(path: &Path, lines: &[Value]) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -173,6 +177,26 @@ fn session<'a>(report: &'a Value, key: &str) -> Option<&'a Value> {
         .find(|row| row["key"] == key)
 }
 
+fn session_keys(report: &Value) -> Vec<String> {
+    let mut keys: Vec<String> = report["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|row| row["key"].as_str().map(str::to_string))
+        .collect();
+    keys.sort_unstable();
+    keys
+}
+
+fn table_row<'a>(report: &'a Value, key: &str) -> &'a Value {
+    report["table"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["key"] == key)
+        .unwrap_or_else(|| panic!("no table row {key}: {report:#}"))
+}
+
 fn commit_view(repo: &Repo, worktree: &Path) -> Value {
     let commit = git_out(worktree, &["rev-parse", "HEAD"]);
     json_stdout(
@@ -188,6 +212,20 @@ fn commit_role<'a>(view: &'a Value, trailer: &str) -> &'a Value {
         .iter()
         .find(|row| row["trailer"] == trailer)
         .unwrap_or_else(|| panic!("no {trailer} row: {view:#}"))
+}
+
+fn outside_session<'a>(report: &'a Value, key: &str) -> Option<&'a Value> {
+    report["coverage"]["assignment"]["outside"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| {
+            format!(
+                "{}:{}",
+                row["harness"].as_str().unwrap(),
+                row["session"].as_str().unwrap()
+            ) == key
+        })
 }
 
 /// Claim: a subject recorded as `pi:<session>:<model>#<effort> (<label>)`
@@ -319,4 +357,46 @@ fn a_bound_implementer_s_own_snapshot_makes_it_no_reviewer() {
     let reviewed = commit_role(&commit, "Reviewed-by");
     assert_eq!(reviewed["status"], "no-session-recorded", "{reviewed:#}");
     assert!(reviewed.get("unestablished").is_none(), "{reviewed:#}");
+}
+
+/// Claim: a subject whose id is shaped as its harness shapes a session id,
+/// and that nothing on this machine locates, is named as an unmeasured
+/// participant with the reason `not located on this machine`, and the
+/// change's total says it is incomplete. A subject naming a model, or a
+/// plain name nothing locates, still adds no row. Rejects dropping the
+/// unlocated session, which reports the lead's figure as the change's whole
+/// consumption, and rejects naming every unlocated subject, which lists a
+/// model or a label as a session.
+#[test]
+fn a_session_subject_nothing_locates_is_named_unmeasured() {
+    let repo = Repo::new();
+    pi_recording(&repo, LEAD, 7);
+    let (change, worktree) = snapshotted(&repo, "elsewhere", "feat: elsewhere");
+    integrate(&repo, &worktree, "elsewhere");
+    let subject = format!("codex:{ELSEWHERE}");
+    audit_for(&repo, &change, &subject);
+    audit_for(&repo, &change, "codex:gpt-6.1-sol");
+    audit_for(&repo, &change, "pi:review-lane");
+
+    let view = report(&repo, &change);
+    assert_eq!(
+        session_keys(&view),
+        vec![subject.clone(), format!("pi:{LEAD}")],
+        "{view:#}"
+    );
+    let row = session(&view, &subject).unwrap();
+    assert_eq!(row["kind"], "participant", "{row:#}");
+    assert_eq!(row["measurement"]["status"], "unmeasured", "{row:#}");
+    let outside =
+        outside_session(&view, &subject).unwrap_or_else(|| panic!("no outside entry: {view:#}"));
+    assert_eq!(
+        outside["reason"], "not located on this machine",
+        "{outside:#}"
+    );
+    assert_eq!(view["table"]["total"]["status"], "withheld", "{view:#}");
+    assert_eq!(
+        table_row(&view, &subject)["status"],
+        "unmeasured",
+        "{view:#}"
+    );
 }

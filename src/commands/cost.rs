@@ -574,6 +574,7 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
         sessions
             .keys()
             .chain(ledger.participants().map(|(key, _)| key))
+            .filter(|key| !subjects.unlocated.contains(*key))
             .cloned()
             .collect(),
         &plans,
@@ -646,13 +647,15 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
     // missing figure qualifies every total it would have joined.
     let mut unmeasured = BTreeMap::new();
     for ((harness, session), person) in ledger.participants() {
-        let mut measured = measure(
-            &events,
-            harness,
-            session,
-            fresh_read(harness, session),
-            query.idle_ms(),
-        );
+        let fresh = if subjects
+            .unlocated
+            .contains(&(harness.clone(), session.clone()))
+        {
+            Err(NOT_LOCATED.to_string())
+        } else {
+            fresh_read(harness, session)
+        };
+        let mut measured = measure(&events, harness, session, fresh, query.idle_ms());
         let liveness = SessionLiveness::participant(
             &measured,
             snapshot.get_or_init(Snapshot::read).of(harness, session),
@@ -1180,17 +1183,25 @@ pub fn retain_cost(ctx: &Ctx, target: &str) -> Result<()> {
     // Read every source before taking the ledger lock: a recording can be
     // large, and other writers wait on the lock.
     let snapshot = Snapshot::read();
-    let reads: Vec<(String, String, std::result::Result<CostFacts, String>)> =
-        read_all(keys, &plans, DEFAULT_IDLE_MS)
+    let (unlocated, keys): (BTreeSet<_>, BTreeSet<_>) = keys
+        .into_iter()
+        .partition(|key| subjects.unlocated.contains(key));
+    let mut reads = read_all(keys, &plans, DEFAULT_IDLE_MS);
+    reads.extend(
+        unlocated
             .into_iter()
-            .map(|((harness, session), read)| {
-                let read = read.map(|mut facts| {
-                    facts.liveness = Some(snapshot.of(&harness, &session).answer().to_string());
-                    facts
-                });
-                (harness, session, read)
-            })
-            .collect();
+            .map(|key| (key, Err(NOT_LOCATED.to_string()))),
+    );
+    let reads: Vec<(String, String, std::result::Result<CostFacts, String>)> = reads
+        .into_iter()
+        .map(|((harness, session), read)| {
+            let read = read.map(|mut facts| {
+                facts.liveness = Some(snapshot.of(&harness, &session).answer().to_string());
+                facts
+            });
+            (harness, session, read)
+        })
+        .collect();
     // Under the lock, only records published since the first read are
     // opened, so a retention another writer just made is seen.
     let _repository_events = store.lock_repository_events()?;
@@ -3630,13 +3641,31 @@ fn subject_of(event: &Event) -> Option<((String, String), Option<String>)> {
     .then(|| ((harness.to_string(), id.to_string()), model))
 }
 
+/// Why a subject session nothing on this machine holds has no figure.
+const NOT_LOCATED: &str = "not located on this machine";
+
+/// Whether `id` has the shape `harness` gives a session id, so it names no
+/// model, person or label: a UUID, as Claude, Codex and Pi write one, or an
+/// OpenCode `ses_…`.
+fn session_shaped(harness: &str, id: &str) -> bool {
+    crate::coordinate::is_session_id(id, None)
+        || (harness == "opencode" && id.strip_prefix("ses_").is_some_and(|rest| !rest.is_empty()))
+}
+
 /// The `--on-behalf-of` subjects in this ledger that name a session: an id
 /// the subject harness's tapes reader locates as one of its recordings, as
 /// each harness shapes its ids (OpenCode's `ses_…`, a Pi id as its
 /// recording names it, a Claude or Codex UUID), one whose store could not
-/// answer, or one the ledger retains facts for. Any other subject, a person,
-/// a label or a `harness:model`, names a party and no session.
-struct Subjects(BTreeSet<(String, String)>);
+/// answer, one the ledger retains facts for, or one shaped as its harness
+/// shapes a session id that nothing on this machine locates. Any other
+/// subject, a person, a label or a `harness:model`, names a party and no
+/// session.
+struct Subjects {
+    sessions: BTreeSet<(String, String)>,
+    /// The sessions among them that only their shape names: their recording
+    /// is not on this machine.
+    unlocated: BTreeSet<(String, String)>,
+}
 
 impl Subjects {
     fn read(
@@ -3657,29 +3686,35 @@ impl Subjects {
                     .map(|(key, _)| key),
             );
         }
-        let sessions = candidates
-            .into_iter()
-            .filter(|(harness, id)| {
-                !retained_for(repository, harness, id).is_empty()
-                    || backends
-                        .get_or_init(Backends::new)
-                        .of(harness)
-                        .iter()
-                        .any(|backend| {
-                            // A join that expects misses: no store is walked twice.
-                            backend.locate_relative(id).map_or(true, |session| {
-                                session.is_some_and(|session| &session.id == id)
-                            })
-                        })
-            })
-            .collect();
-        Self(sessions)
+        let mut subjects = Self {
+            sessions: BTreeSet::new(),
+            unlocated: BTreeSet::new(),
+        };
+        for (harness, id) in candidates {
+            let stores = backends.get_or_init(Backends::new).of(&harness);
+            let located = !retained_for(repository, &harness, &id).is_empty()
+                || stores.iter().any(|backend| {
+                    // A join that expects misses: no store is walked twice.
+                    backend.locate_relative(&id).map_or(true, |session| {
+                        session.is_some_and(|session| session.id == id)
+                    })
+                });
+            let shaped = !stores.is_empty() && session_shaped(&harness, &id);
+            if !located && !shaped {
+                continue;
+            }
+            if !located {
+                subjects.unlocated.insert((harness.clone(), id.clone()));
+            }
+            subjects.sessions.insert((harness, id));
+        }
+        subjects
     }
 
     /// The session `event` was recorded on behalf of, if its subject names
     /// one, with the model the subject declares for it.
     fn of(&self, event: &Event) -> Option<((String, String), Option<String>)> {
-        subject_of(event).filter(|(key, _)| self.0.contains(key))
+        subject_of(event).filter(|(key, _)| self.sessions.contains(key))
     }
 }
 

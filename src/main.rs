@@ -4608,8 +4608,11 @@ enum CostCmd {
     /// declares its model. The subject names a session when its harness's
     /// tapes reader locates the id (an OpenCode `ses_…`, a Pi id as its
     /// recording names it, a Claude or Codex UUID), when that store cannot
-    /// answer, or when the ledger retains facts for it; a person, a label, a
-    /// `harness:model` or an id nothing locates names none. It is divided by its span on each work item; one with
+    /// answer, when the ledger retains facts for it, or when the id is shaped
+    /// as its harness shapes a session id (a UUID, an OpenCode `ses_…`)
+    /// though nothing on this machine locates it, which leaves a participant
+    /// without a figure (`not located on this machine`); a person, a label, a
+    /// `harness:model` or any other id nothing locates names none. It is divided by its span on each work item; one with
     /// several members, one of which only events recorded on its behalf name,
     /// is not divided (`recorded on its behalf`). Its membership is every
     /// change in this ledger with an event of any kind naming it, as its
@@ -4642,7 +4645,8 @@ enum CostCmd {
     /// never counted as the work's alone. Acting events without a usable
     /// harness and session are counted as `unattributed_events` and make
     /// assignment incomplete. A participant that is not measured, such as
-    /// one the store cannot resolve, is a session row without a figure:
+    /// one the store cannot resolve or a subject not located on this
+    /// machine, is a session row without a figure:
     /// every total it would join is absent or withheld beside its known
     /// subtotal, never complete, and it is named outside assignment coverage
     /// with its event count and reason, making assignment incomplete. A bound
