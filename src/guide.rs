@@ -3485,9 +3485,10 @@ RULES THAT CHANGE WHAT YOU DO
     over the requests a fresh read kept, a Pi figure's on every branch its
     recording retains, under the billing the recording establishes; a
     subscription pays no long-context surcharge. A model the
-    table lacks, a figure no model is known to have served, a category
-    measured incompletely, a cache write with no recorded TTL, a term the
-    figure's requests do not settle, billing the recording does not
+    table lacks, a figure no model is known to have served, a figure one
+    model served whole where its read leaves attribution uncertain, a
+    category measured incompletely, a cache write with no recorded TTL, a
+    term the figure's requests do not settle, billing the recording does not
     establish, and a request no row was in effect for each leave a known
     subtotal with a fixed reason, priced at the least it can cost where a
     rate is in doubt, with the most it can cost under `bound`: `whole
@@ -3814,9 +3815,10 @@ RULES THAT CHANGE WHAT YOU DO
     identity, the Claude residual, and any harness-written dollar figure
     with its pricing coverage, plus lineage relations, read failures
     as fixed categories, the one model the recording says served the
-    session when it names one, each model's disjoint categories, its efforts
-    added together and its cache writes by TTL, where the figure is priced
-    share by share, the segments a session with several spans was read in, each with
+    session when it names one, whether the recording leaves its attribution
+    uncertain, each model's disjoint categories, its efforts added together
+    and its cache writes by TTL, where the figure is priced share by share,
+    the segments a session with several spans was read in, each with
     its bounds, covering work items and runs, request count and facts, the
     remainder and the whole in the segments' basis, and the liveness
     agent-status answered then (`live`, `ended` or `unknown`). A list-price

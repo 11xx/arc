@@ -829,6 +829,7 @@ fn counted_facts(
     };
     facts.by_model = Vec::new();
     facts.served_model = None;
+    facts.attribution_uncertain = false;
     facts.cost_coverage = None;
     facts.harness_estimate_usd = None;
     facts.basis = Some("summed-requests".to_string());
@@ -3032,6 +3033,11 @@ fn normalize(
         selection,
         liveness: None,
         served_model: served_model(view),
+        attribution_uncertain: view
+            .session
+            .model_observation
+            .as_ref()
+            .is_some_and(|status| status.attribution_uncertain),
         disjoint: disjoint.as_ref().and_then(cost_disjoint),
         by_model: priced_shares(view, harness, disjoint.as_ref()),
         cost_coverage: cost_coverage.map(|coverage| CostPricing {
@@ -3555,8 +3561,9 @@ fn names_missing(share: &agent_tapes_core::model::DisjointTokens, category: &str
 }
 
 /// A figure's list price: its disjoint categories priced by the table rows
-/// of the one model that served it, or share by share where its model
-/// shares price it.
+/// of the one model that served it, not all of it certainly where its
+/// attribution is uncertain, or share by share where its model shares
+/// price it.
 /// What the table cannot price is a fixed reason, a category the figure
 /// measured incompletely qualifies the estimate, and so does any part of a
 /// category the models' shares leave unattributed, a term set by the request
@@ -3601,7 +3608,12 @@ fn list_price(facts: &CostFacts, table: &agent_tapes_core::pricing::PriceTable) 
     // `names_missing` says.
     let mut restated_missing: BTreeSet<&str> = BTreeSet::new();
     match facts.served_model.as_deref().and_then(model_of) {
-        Some(model) if facts.by_model.is_empty() && !other_branches => price(&model, &whole, true),
+        Some(model) if facts.by_model.is_empty() && !other_branches => {
+            price(&model, &whole, true);
+            if facts.attribution_uncertain {
+                gaps.insert(arc_reason(MeasurementReason::IncompleteAttribution).to_string());
+            }
+        }
         _ if !facts.by_model.is_empty() => {
             let shares: Vec<_> = facts
                 .by_model

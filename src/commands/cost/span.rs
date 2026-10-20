@@ -369,6 +369,9 @@ pub(super) fn sum_facts(session: &CostFacts, basis: &CostFacts, parts: &[Part<'_
             _ => None,
         };
     }
+    facts.attribution_uncertain = parts
+        .iter()
+        .any(|(part, requests)| *requests > 0 && part.attribution_uncertain);
     // Where the parts name several models, or a part is priced share by
     // share, a part one model served whole is that model's share.
     let by_shares =

@@ -1,6 +1,7 @@
 //! A figure priced share by share, or whole by its one model, is priced as
 //! tapes prices the same recording: each share by its recorded cache-write
-//! TTLs, and each share or whole figure with its own completeness. Recordings are
+//! TTLs and its own completeness, and a figure one model served under
+//! uncertain attribution qualified as tapes qualifies it. Recordings are
 //! written into the fixture's own home, named as each harness names them,
 //! so tapes reads them as it reads a harness store.
 
@@ -465,4 +466,130 @@ fn a_figure_priced_whole_keeps_its_own_completeness() {
     for list in [list_price(&row["totals"]), list_price(&union)] {
         same_price(&list, estimate, &format!("codex:{CODEX}"));
     }
+}
+
+/// Claim: a figure one model served whole under uncertain attribution is
+/// qualified with the unattributed-request reason, as tapes qualifies it,
+/// even where the model's share covers the whole figure: a Claude
+/// recording whose one model-selection record carries a native id too long
+/// to keep is a known subtotal of 1.0. Rejects pricing it whole as
+/// complete at 1.0.
+#[test]
+fn a_figure_priced_whole_under_uncertain_attribution_is_qualified() {
+    let repo = Repo::new();
+    uncertain_recording(&repo, &["10:05:00"]);
+    let tapes = tapes_figure(claude_backend(&repo), CLAUDE, TTL_TABLE);
+    assert_eq!(
+        tapes["session"]["model_observation"]["attribution_uncertain"], true,
+        "{tapes:#}"
+    );
+    let estimate = &tapes["list_price_estimate"];
+    assert_eq!(estimate["amount"], 1.0, "{tapes:#}");
+    let change = executed_change(&repo, "claude", CLAUDE);
+    let (row, union) = view(&repo, &change, TTL_TABLE, "claude", CLAUDE);
+    for list in [list_price(&row["totals"]), list_price(&union)] {
+        same_price(&list, estimate, &format!("claude:{CLAUDE}"));
+    }
+}
+
+/// A Claude recording of one request at each of `clocks` on the fixture
+/// model, 1M uncached input tokens each, whose first model-selection record
+/// carries a native id too long to keep.
+fn uncertain_recording(repo: &Repo, clocks: &[&str]) {
+    let usage = json!({"input_tokens": 1_000_000, "output_tokens": 0, "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 0}});
+    let requests: Vec<(&str, &str, Value)> = clocks
+        .iter()
+        .map(|clock| (*clock, "fixture-model", usage.clone()))
+        .collect();
+    let mut lines = claude_lines(&requests);
+    lines[1]["uuid"] = json!("u".repeat(5000));
+    claude_recording(repo, &lines);
+}
+
+/// Claim: the attribution uncertainty that qualifies a figure one model
+/// served whole is retained with its facts, so the figure read from them
+/// once its recording is gone names the unattributed-request reason tapes
+/// gave it. Rejects facts that drop it, read as complete at 1.0.
+#[test]
+fn retained_facts_keep_the_attribution_uncertainty() {
+    let repo = Repo::new();
+    uncertain_recording(&repo, &["10:05:00"]);
+    let tapes = tapes_figure(claude_backend(&repo), CLAUDE, TTL_TABLE);
+    let estimate = tapes["list_price_estimate"].clone();
+    let change = executed_change(&repo, "claude", CLAUDE);
+    stdout(repo.arc(&repo.root).args(["cost", "retain", &change]));
+    fs::remove_dir_all(repo.home.join(".claude/projects")).unwrap();
+    let (row, union) = view(&repo, &change, TTL_TABLE, "claude", CLAUDE);
+    assert_eq!(row["measurement"]["source"], "retained", "{row:#}");
+    for list in [list_price(&row["totals"]), list_price(&union)] {
+        same_price(&list, &estimate, &format!("claude:{CLAUDE}"));
+    }
+}
+
+/// tapes' estimates of the Claude session's spans from each of `bounds`
+/// to the next under `table`, through the span read arc pins.
+fn tapes_spans(repo: &Repo, bounds: &[(&str, &str)], table: &str) -> Vec<Value> {
+    let spans: Vec<agent_tapes_core::span::SpanBounds> = bounds
+        .iter()
+        .map(|(from, to)| {
+            serde_json::from_value(json!({"kind": "time", "from": at(from), "to": at(to)})).unwrap()
+        })
+        .collect();
+    let mut usage = agent_tapes_core::usage_spans_with_backends(
+        &[claude_backend(repo)],
+        agent_tapes_core::Selection::Id(CLAUDE),
+        &spans,
+    )
+    .unwrap();
+    let table = agent_tapes_core::pricing::PriceTable::parse(table).unwrap();
+    agent_tapes_core::pricing::price_spans(&mut usage, &table);
+    let usage = serde_json::to_value(&usage).unwrap();
+    usage["spans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|span| span["list_price_estimate"].clone())
+        .collect()
+}
+
+/// Claim: a divided session's figure added up from segments one model
+/// served keeps each segment's own attribution uncertainty: with the
+/// selection record whose id is too long to keep in the first run's
+/// segment, that run's figure is tapes' known subtotal of 1.0 with the
+/// unattributed-request reason, the second run's is tapes' complete 1.0,
+/// and their union is tapes' qualified 2.0 for the session. Rejects a sum
+/// that takes the session's uncertainty for every segment, qualifying the
+/// second run's figure too.
+#[test]
+fn segments_one_model_served_keep_their_own_attribution_uncertainty() {
+    let repo = Repo::new();
+    uncertain_recording(&repo, &["10:05:00", "10:15:00"]);
+    let tapes = tapes_figure(claude_backend(&repo), CLAUDE, TTL_TABLE);
+    let session = &tapes["list_price_estimate"];
+    assert_eq!(session["amount"], 2.0, "{tapes:#}");
+    let spans = tapes_spans(
+        &repo,
+        &[("10:00:00", "10:10:00"), ("10:10:00", "10:30:00")],
+        TTL_TABLE,
+    );
+    let morning = run_change(&repo, "morning", "claude", CLAUDE, "10:00:00", "10:10:00");
+    let later = run_change(&repo, "later", "claude", CLAUDE, "10:10:00", "10:30:00");
+    let prices = prices(&repo, TTL_TABLE);
+    let view = json_stdout(repo.arc(&repo.root).args([
+        "cost", "show", "--json", "--prices", &prices, &morning, &later,
+    ]));
+    let key = format!("claude:{CLAUDE}");
+    same_price(&list_price(&view["union"]), session, &key);
+    for (change, span) in [(&morning, &spans[0]), (&later, &spans[1])] {
+        let work = view["work"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|work| work["key"] == format!("change:{change}"))
+            .unwrap_or_else(|| panic!("no work {change}: {view:#}"));
+        same_price(&list_price(&work["direct"]), span, &key);
+    }
+    assert!(spans[1]["measurement_completeness"].is_null(), "{spans:#?}");
 }

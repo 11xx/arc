@@ -2975,6 +2975,11 @@ pub struct CostFacts {
     /// several.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub served_model: Option<String>,
+    /// The recording leaves attribution uncertain, as tapes' model
+    /// observation says, so the one model that served the figure did not
+    /// certainly serve all of it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub attribution_uncertain: bool,
     /// The disjoint categories of each model the figure is priced by, share
     /// by share: where the recording names several models, counts events on
     /// branches besides the active one, or, under uncertain attribution,
