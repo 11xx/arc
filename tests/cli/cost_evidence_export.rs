@@ -1117,3 +1117,147 @@ fn changes_with_the_same_head_keep_their_commits_and_are_counted() {
         "{summary}"
     );
 }
+
+/// The names of the entries directly inside `dir`, sorted.
+fn names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// An evidence file as JSON lines, its header without `written_at`.
+fn without_written_at(text: &str) -> Vec<Value> {
+    let mut file = lines(text);
+    let written_at = file[0].as_object_mut().unwrap().remove("written_at");
+    assert!(
+        rfc3339(
+            written_at
+                .as_ref()
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+        ),
+        "{text}"
+    );
+    file
+}
+
+// Claim: `--output-dir` writes the export into a new or empty directory as
+// `evidence-0001.jsonl`, holding the header and the records standard output
+// carries, leaves standard output empty, and adds the file count to the
+// summary; tapes reads that directory to its end. Rejects an export that
+// still prints the file, a file whose records differ from the printed ones,
+// a name tapes does not read, a file tapes reads only part of, and a staging
+// directory left beside the output.
+#[test]
+fn an_output_directory_holds_the_records_standard_output_carries() {
+    let repo = Repo::new();
+    pi_session(
+        &repo,
+        EXECUTOR,
+        &[("10:05:00", 1), ("10:35:00", 10), ("11:05:00", 100)],
+    );
+    pi_session(&repo, REVIEWER, &[("10:05:00", 1), ("10:35:00", 10)]);
+    let (first, second) = (change(&repo, "dir-one"), change(&repo, "dir-two"));
+    run(
+        &repo,
+        &first,
+        EXECUTOR,
+        "10:00:00",
+        Some("10:20:00"),
+        Some(CALLER),
+        Some("handle"),
+    );
+    run(
+        &repo,
+        &second,
+        EXECUTOR,
+        "10:30:00",
+        Some("11:00:00"),
+        Some(CALLER),
+        None,
+    );
+    review(&repo, REVIEWER, &first, "10:00:00", "10:20:00");
+    review(&repo, REVIEWER, &second, "10:30:00", "10:50:00");
+    let (printed, printed_summary) = export(&repo, &["--all"]);
+    let records = lines(&printed).len() - 1;
+    assert!(records > 1, "{printed}");
+
+    let exports = repo.home.join("exports");
+    let empty = repo.home.join("empty");
+    fs::create_dir(&empty).unwrap();
+    for dir in [exports.join("evidence"), empty.clone()] {
+        let (out, summary) = export(&repo, &["--all", "--output-dir", dir.to_str().unwrap()]);
+        assert_eq!(out, "", "standard output carries nothing");
+        assert_eq!(summary_line(&summary, "files: "), "1", "{summary}");
+        assert_eq!(
+            summary.strip_suffix("files: 1\n"),
+            Some(printed_summary.as_str()),
+            "{summary}"
+        );
+        assert_eq!(names(&dir), ["evidence-0001.jsonl"], "{}", dir.display());
+        let written = fs::read_to_string(dir.join("evidence-0001.jsonl")).unwrap();
+        assert_eq!(
+            without_written_at(&written),
+            without_written_at(&printed),
+            "{written}"
+        );
+
+        let read =
+            agent_tapes_core::attribution_evidence::read_paths(std::slice::from_ref(&dir)).unwrap();
+        assert_eq!(read.len(), 1, "{}", dir.display());
+        let report = &read[0].report;
+        assert_eq!(report.truncated, None, "{report:?}");
+        assert!(report.malformed.is_empty(), "{report:?}");
+        assert_eq!(
+            report.lineage.read + report.binding.read + report.event.read,
+            records,
+            "{report:?}"
+        );
+    }
+    assert_eq!(names(&exports), ["evidence"]);
+    assert!(
+        names(&repo.home)
+            .iter()
+            .all(|name| !name.contains("staging")),
+        "{:?}",
+        names(&repo.home)
+    );
+}
+
+// Claim: an `--output-dir` that exists and is not an empty directory is
+// refused before the ledger is read, naming the flag, and is left as it was.
+// Rejects reading the ledger first, which spends the whole read before
+// refusing, and writing into or beside a location that holds files.
+#[test]
+fn an_occupied_output_directory_is_refused_before_the_read() {
+    let repo = Repo::new();
+    let occupied = repo.home.join("occupied");
+    fs::create_dir(&occupied).unwrap();
+    fs::write(occupied.join("kept.jsonl"), "kept\n").unwrap();
+    let file = repo.home.join("file");
+    fs::write(&file, "kept\n").unwrap();
+    let before = (tree(&occupied), names(&repo.home));
+
+    for (dir, refusal) in [(&occupied, "is not empty"), (&file, "is not a directory")] {
+        // `missing` names no work: a read before the check refuses it instead.
+        let output = repo
+            .arc(&repo.root)
+            .args(["cost", "evidence", "missing", "--output-dir"])
+            .arg(dir)
+            .assert()
+            .failure()
+            .get_output()
+            .clone();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains(&format!("--output-dir {} {refusal}", dir.display())),
+            "{stderr}"
+        );
+        assert!(output.stdout.is_empty());
+    }
+    assert!(before == (tree(&occupied), names(&repo.home)));
+    assert_eq!(fs::read_to_string(&file).unwrap(), "kept\n");
+}
