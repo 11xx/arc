@@ -3641,13 +3641,16 @@ RULES THAT CHANGE WHAT YOU DO
     roles beside its binding's. An event recorded `--on-behalf-of` a
     `harness:<id>` subject that names a session is the subject's event too:
     it gives the subject the kind's role and membership while the invoker
-    keeps its own roles for the event it ran. The subject names a session
+    keeps its own roles for the event it ran. A subject
+    `harness:<id>:<model>[#effort]`, followed by a parenthesized label or
+    not, names the session `<id>` and declares `<model>` as that session's
+    model on the event. The subject names a session
     when the tapes reader of its harness locates the id as one of that
     harness's recordings, each harness shaping its own ids (an OpenCode
     `ses_…`, a Pi id as its recording names it, a Claude or Codex UUID),
-    when that harness's store cannot answer, or when the ledger retains facts for it. A subject naming a
-    person, a label, a `harness:model` or an id no reader locates and no
-    retained facts name names no session. A participant is measured through the same
+    when that harness's store cannot answer, or when the ledger retains
+    facts for it. A subject naming a person, a label, a `harness:model` or
+    an id no reader locates and no retained facts name names no session. A participant is measured through the same
     reader as an executor, or from retained facts when its source no longer
     answers, and divided by its span on each work item. Its membership is
     every change in this ledger with an event of any kind that names it, as
@@ -3752,7 +3755,8 @@ RULES THAT CHANGE WHAT YOU DO
     refuses.
     Text output is a table, one row per session: its agent
     (`harness:model#effort`, from the bound dispatches' routes when each
-    names one coordinate, else the models its own events carry, else the one
+    names one coordinate, else the models its own events carry and the
+    subjects recorded on its behalf declare, else the one
     model its recording says served it, effort unnamed when it served
     several; the harness alone when none
     establishes a single model; a coordinate that carries the row's harness
@@ -3840,13 +3844,13 @@ RULES THAT CHANGE WHAT YOU DO
     bound or not, whose events give them the reviewer role, and `Planned-by`
     and `Orchestrated-by` those whose events give them the orchestrator
     role, whose own model equals the trailer's: the models the session's
-    own events declared in that role, else the one model its recording says
-    served it, effort dropped, never the invoker's model on an event
-    recorded on its behalf. Each session matched by its events names its
-    `model_source` (`events` or `recording`). A session in that role of the
-    trailer's harness that no source gives a model is listed in
-    `unestablished` as unmatched, `no model of its own is established`,
-    rather than matched by a guess. A
+    own events, or a subject recorded on its behalf, declared in that role,
+    else the one model its recording says served it, effort dropped, never
+    the invoker's model on an event recorded on its behalf. Each session
+    matched by its events names its `model_source` (`events` or
+    `recording`). A session in that role of the trailer's harness that no
+    source gives a model is listed in `unestablished` as unmatched, `no
+    model of its own is established`, rather than matched by a guess. A
     matching session's figure is its whole figure, shared exactly as the
     change view shares it, with the change's share beside it when the view
     divides the session. A trailer no recorded session answers, such as a

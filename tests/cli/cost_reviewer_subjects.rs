@@ -1,5 +1,7 @@
-//! Every reviewer a ledger records is found: a bound session's own verdicts
-//! give it the reviewer role beside the role its binding names.
+//! Every reviewer a ledger records is found. A subject recorded as
+//! `harness:session:model#effort (label)` is the session it names, with the
+//! model it declares; a bound session's own verdicts give it the reviewer
+//! role beside the role its binding names.
 //! Every recording is written into the fixture's own home, named as its
 //! harness names it.
 
@@ -7,6 +9,7 @@ use super::common::*;
 use serde_json::{json, Value};
 
 const LEAD: &str = "019a0000-0000-7000-8000-0000000000a1";
+const REVIEWER: &str = "019a0000-0000-7000-8000-0000000000c1";
 const EXECUTOR: &str = "019a0000-0000-4000-8000-0000000000e1";
 
 fn write_lines(path: &Path, lines: &[Value]) {
@@ -15,7 +18,8 @@ fn write_lines(path: &Path, lines: &[Value]) {
     fs::write(path, body).unwrap();
 }
 
-/// A Pi recording with one request of `input` uncached tokens.
+/// A Pi recording with one request of `input` uncached tokens, served by
+/// `served-model`.
 fn pi_recording(repo: &Repo, id: &str, input: u64) {
     let path = repo
         .home
@@ -102,6 +106,21 @@ fn integrate(repo: &Repo, worktree: &Path, slug: &str) {
         .success();
 }
 
+/// The lead records the approving audit `subject` performed on `change`.
+fn audit_for(repo: &Repo, change: &str, subject: &str) {
+    lead(repo, &repo.root)
+        .args([
+            "audit",
+            change,
+            "--verdict",
+            "approved",
+            "--on-behalf-of",
+            subject,
+        ])
+        .assert()
+        .success();
+}
+
 /// The lead dispatches `change` through `route` and binds the run to the
 /// Codex `EXECUTOR` as its implementer. Returns the dispatch.
 fn bind_implementer(repo: &Repo, change: &str, route: &str) -> String {
@@ -169,6 +188,48 @@ fn commit_role<'a>(view: &'a Value, trailer: &str) -> &'a Value {
         .iter()
         .find(|row| row["trailer"] == trailer)
         .unwrap_or_else(|| panic!("no {trailer} row: {view:#}"))
+}
+
+/// Claim: a subject recorded as `pi:<session>:<model>#<effort> (<label>)`
+/// is the Pi session it names: a participant measured from its recording,
+/// attributed to the model the subject declares, and the session a
+/// `Reviewed-by` trailer naming that model finds. Rejects splitting the
+/// subject at its first colon only, which reads the model and label as part
+/// of the id, locates nothing, and leaves the reviewer and its consumption
+/// out of the view and the trailer at `no session recorded`.
+#[test]
+fn a_subject_with_a_model_suffix_is_the_session_it_names() {
+    let repo = Repo::new();
+    pi_recording(&repo, LEAD, 7);
+    pi_recording(&repo, REVIEWER, 900);
+    let (change, worktree) = snapshotted(
+        &repo,
+        "suffixed",
+        "feat: suffixed\n\nReviewed-by: pi:declared-model#medium",
+    );
+    integrate(&repo, &worktree, "suffixed");
+    audit_for(
+        &repo,
+        &change,
+        &format!("pi:{REVIEWER}:declared-model#medium (correctness reviewer)"),
+    );
+
+    let view = report(&repo, &change);
+    let key = format!("pi:{REVIEWER}");
+    let row = session(&view, &key).unwrap_or_else(|| panic!("no reviewer row: {view:#}"));
+    assert_eq!(row["kind"], "participant", "{row:#}");
+    assert_eq!(row["roles"], json!(["reviewer"]), "{row:#}");
+    assert_eq!(row["measurement"]["source"], "fresh", "{row:#}");
+    assert_eq!(row["agent"], "pi:declared-model#medium", "{row:#}");
+    assert_eq!(row["agent_source"], "events", "{row:#}");
+
+    let commit = commit_view(&repo, &worktree);
+    let reviewed = commit_role(&commit, "Reviewed-by");
+    assert_eq!(reviewed["status"], "recorded", "{reviewed:#}");
+    let sessions = reviewed["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1, "{reviewed:#}");
+    assert_eq!(sessions[0]["key"], key, "{reviewed:#}");
+    assert_eq!(sessions[0]["model_source"], "events", "{reviewed:#}");
 }
 
 /// Claim: an executor a dispatch bound as implementer that recorded a

@@ -4603,11 +4603,13 @@ enum CostCmd {
     /// work and names none, while its own verdicts give it the reviewer role
     /// beside its binding's. An event recorded `--on-behalf-of` a
     /// `harness:<id>` subject naming a session is the subject's event too,
-    /// giving it the kind's role while the invoker keeps its own. The subject names a session when its harness's tapes
-    /// reader locates the id (an OpenCode `ses_…`, a Pi id as its recording
-    /// names it, a Claude or Codex UUID), when that store cannot answer, or when the ledger retains facts
-    /// for it; a person, a label, a `harness:model` or an id nothing locates
-    /// names none. It is divided by its span on each work item; one with
+    /// giving it the kind's role while the invoker keeps its own; a subject
+    /// `harness:<id>:<model>[#effort] (<label>)` names the session `<id>` and
+    /// declares its model. The subject names a session when its harness's
+    /// tapes reader locates the id (an OpenCode `ses_…`, a Pi id as its
+    /// recording names it, a Claude or Codex UUID), when that store cannot
+    /// answer, or when the ledger retains facts for it; a person, a label, a
+    /// `harness:model` or an id nothing locates names none. It is divided by its span on each work item; one with
     /// several members, one of which only events recorded on its behalf name,
     /// is not divided (`recorded on its behalf`). Its membership is every
     /// change in this ledger with an event of any kind naming it, as its
@@ -4664,7 +4666,8 @@ enum CostCmd {
     ///
     /// Text output is a table with one row per session: agent
     /// (`harness:model#effort`, from the bound dispatches' routes, else the
-    /// session's own event models, else the model its recording says served
+    /// session's own event models and the models subjects declare for it,
+    /// else the model its recording says served
     /// it, effort unnamed when it served several; the harness alone when none
     /// establishes one; a coordinate that carries the row's harness as a
     /// prefix names it once; one whose prefix names another harness
@@ -4712,11 +4715,12 @@ enum CostCmd {
     /// sessions bound as reviewer on the same terms and the sessions, bound
     /// or not, whose events give them the reviewer role, and `Planned-by` and
     /// `Orchestrated-by` those whose events give them the orchestrator role,
-    /// whose own model equals the trailer's: the models its own events
-    /// declared in the role, else the one model its recording says served it
-    /// (`model_source`), never the invoker's model on an event recorded on
-    /// its behalf. A session in the role of the trailer's harness with no
-    /// such model is listed unmatched (`unestablished`). A matching session's figure is
+    /// whose own model equals the trailer's: the models its own events, or a
+    /// subject recorded on its behalf, declared in the role, else the one
+    /// model its recording says served it (`model_source`), never the
+    /// invoker's model on an event recorded on its behalf. A session in the
+    /// role of the trailer's harness with no such model is listed unmatched
+    /// (`unestablished`). A matching session's figure is
     /// its whole figure, shared exactly as the change view shares it, with
     /// the change's share beside it when the view divides the session. A
     /// trailer no recorded session answers and no session is unmatched for

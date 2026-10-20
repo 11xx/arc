@@ -373,9 +373,9 @@ fn trailer_row(trailer: &str, value: &str, cost: &CostView, change_key: &str) ->
 const UNESTABLISHED: &str = "no model of its own is established";
 
 /// The models that answer for a session in `role`, with their source: those
-/// its own events declared in the role, else the one its recording says
-/// served it. The invoker's model on an event recorded on its behalf is never
-/// its own.
+/// its own events, or the subject recorded on its behalf, declared in the
+/// role, else the one its recording says served it. The invoker's model on
+/// an event recorded on its behalf is never its own.
 fn acting_model<'a>(acting: &'a Acting, role: &str) -> Option<(BTreeSet<&'a str>, &'static str)> {
     match acting.models.get(role).filter(|models| !models.is_empty()) {
         Some(models) => Some((models.iter().map(String::as_str).collect(), "events")),

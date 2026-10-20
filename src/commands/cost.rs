@@ -387,7 +387,8 @@ struct SessionRow {
 
 impl SessionRow {
     /// The first source that names one coordinate: the bound dispatches'
-    /// routes, the models the session's own events carry, then the model its
+    /// routes, the models the session's own events carry and its subjects
+    /// declare, then the model its
     /// recording says served it. Several distinct coordinates in one source
     /// establish none there, and neither does a coordinate whose prefix names
     /// a harness other than the row's: the first such one is kept as the
@@ -501,9 +502,9 @@ pub(super) struct ExecutorRun {
 }
 
 /// A session whose ledger events act on the selected work, bound or not: its
-/// kind, the roles its events give it, the models its own events declared in
-/// each, the model its recording says served it, and why it has no figure
-/// when it has none.
+/// kind, the roles its events give it, the models its own events, or the
+/// subject recorded on its behalf, declared in each, the model its recording
+/// says served it, and why it has no figure when it has none.
 pub(super) struct Acting {
     pub key: String,
     /// `executor` when a dispatch binds it, else `participant`.
@@ -1435,7 +1436,7 @@ fn range_targets(
     let names = |event: &Event, key: &(String, String)| {
         named_sessions(event, subjects)
             .iter()
-            .any(|(named, _)| named == key)
+            .any(|named| &named.key == key)
     };
     let mut child_bound = false;
     for round in rounds(events) {
@@ -3609,11 +3610,24 @@ fn model_of(coordinate: &str) -> Option<String> {
 }
 
 /// The `harness:id` an event was recorded on behalf of, before anything
-/// says whether it names a session.
-fn subject_of(event: &Event) -> Option<(String, String)> {
-    let (harness, id) = event.on_behalf_of.as_deref()?.trim().split_once(':')?;
-    (plain_session_id(harness) && plain_session_id(id))
-        .then(|| (harness.to_string(), id.to_string()))
+/// says whether it names a session, with the model the subject declares for
+/// it: `harness:id:model[#effort]`, either form followed by a parenthesized
+/// label or not, names the session `id` served by `model`.
+fn subject_of(event: &Event) -> Option<((String, String), Option<String>)> {
+    let subject = event.on_behalf_of.as_deref()?.trim();
+    let subject = match subject.split_once(" (") {
+        Some((head, label)) if label.ends_with(')') => head,
+        _ => subject,
+    };
+    let (harness, rest) = subject.split_once(':')?;
+    let (id, model) = match rest.split_once(':') {
+        Some((id, model)) => (id, Some(model.to_string())),
+        None => (rest, None),
+    };
+    (plain_session_id(harness)
+        && plain_session_id(id)
+        && model.as_deref().is_none_or(portable_coordinate))
+    .then(|| ((harness.to_string(), id.to_string()), model))
 }
 
 /// The `--on-behalf-of` subjects in this ledger that name a session: an id
@@ -3630,10 +3644,18 @@ impl Subjects {
         repository: &[Event],
         backends: &std::cell::OnceCell<Backends>,
     ) -> Self {
-        let mut candidates: BTreeSet<(String, String)> =
-            repository.iter().filter_map(subject_of).collect();
+        let mut candidates: BTreeSet<(String, String)> = repository
+            .iter()
+            .filter_map(subject_of)
+            .map(|(key, _)| key)
+            .collect();
         for change_id in read.change_ids() {
-            candidates.extend(read.events(&change_id).iter().filter_map(subject_of));
+            candidates.extend(
+                read.events(&change_id)
+                    .iter()
+                    .filter_map(subject_of)
+                    .map(|(key, _)| key),
+            );
         }
         let sessions = candidates
             .into_iter()
@@ -3654,16 +3676,27 @@ impl Subjects {
         Self(sessions)
     }
 
-    /// The session `event` was recorded on behalf of, if its subject names one.
-    fn of(&self, event: &Event) -> Option<(String, String)> {
-        subject_of(event).filter(|subject| self.0.contains(subject))
+    /// The session `event` was recorded on behalf of, if its subject names
+    /// one, with the model the subject declares for it.
+    fn of(&self, event: &Event) -> Option<((String, String), Option<String>)> {
+        subject_of(event).filter(|(key, _)| self.0.contains(key))
     }
+}
+
+/// A session an event names.
+struct Named {
+    key: (String, String),
+    /// It is the event's acting session, not the subject it was recorded on
+    /// behalf of.
+    own: bool,
+    /// The model coordinate a subject declares for its session.
+    declared: Option<String>,
 }
 
 /// The sessions an event names, each once: its acting session, marked own,
 /// and the session it was recorded on behalf of. This one rule decides the
 /// work a session is part of, for its membership and for `--footprint`.
-fn named_sessions(event: &Event, subjects: &Subjects) -> Vec<((String, String), bool)> {
+fn named_sessions(event: &Event, subjects: &Subjects) -> Vec<Named> {
     let actor = match (&event.harness, &event.session) {
         (Some(harness), Some(session))
             if plain_session_id(harness) && plain_session_id(session) =>
@@ -3674,11 +3707,19 @@ fn named_sessions(event: &Event, subjects: &Subjects) -> Vec<((String, String), 
     };
     let subject = subjects
         .of(event)
-        .filter(|subject| Some(subject) != actor.as_ref());
+        .filter(|(subject, _)| Some(subject) != actor.as_ref());
     actor
         .into_iter()
-        .map(|key| (key, true))
-        .chain(subject.map(|key| (key, false)))
+        .map(|key| Named {
+            key,
+            own: true,
+            declared: None,
+        })
+        .chain(subject.map(|(key, declared)| Named {
+            key,
+            own: false,
+            declared,
+        }))
         .collect()
 }
 
@@ -3694,11 +3735,11 @@ struct Person {
     events: Vec<(span::Instant, WorkKey)>,
     /// What its events on the selected work show it did.
     roles: BTreeSet<Role>,
-    /// The models its events declared in each role on the selected work,
-    /// effort dropped.
+    /// The models its own events, or the subjects recorded on its behalf,
+    /// declared in each role on the selected work, effort dropped.
     models: BTreeMap<Role, BTreeSet<String>>,
-    /// The model coordinates its events on the selected work declared or
-    /// resolved, effort kept.
+    /// The model coordinates its own events on the selected work declared or
+    /// resolved, and those its subjects declared, effort kept.
     coordinates: BTreeSet<String>,
     /// Its events on the selected work, of any kind.
     selected_events: usize,
@@ -3756,12 +3797,14 @@ fn read_ledger(
     let mut note = |event: &Event, work: WorkKey| {
         let on_selection = selected.contains(&work);
         let named = named_sessions(event, subjects);
-        if !named.iter().any(|(_, own)| *own) && on_selection && role_of(&event.payload).is_some() {
+        if !named.iter().any(|named| named.own) && on_selection && role_of(&event.payload).is_some()
+        {
             ledger.unattributed_events += 1;
         }
         // The subject's event was recorded by the invoker: its instant, model
-        // and session are the invoker's, so it opens no span of the subject.
-        for (key, own) in named {
+        // and session are the invoker's, so it opens no span of the subject
+        // and declares only the model its subject names.
+        for Named { key, own, declared } in named {
             let role = acting_role(&event.payload, assigned.bound.contains(&key));
             let harness = key.0.clone();
             let person = ledger.people.entry(key).or_default();
@@ -3781,19 +3824,14 @@ fn read_ledger(
                 continue;
             }
             person.selected_events += 1;
-            if own {
-                if let Some(model) = event
-                    .model
-                    .as_deref()
-                    .filter(|model| portable_coordinate(model))
-                {
-                    person.coordinates.insert(model.to_string());
-                }
+            let model = if own { event.model.clone() } else { declared };
+            if let Some(model) = model.as_deref().filter(|model| portable_coordinate(model)) {
+                person.coordinates.insert(model.to_string());
             }
             if let Some(role) = role {
                 person.acts = true;
                 person.roles.insert(role);
-                if let Some(model) = event.model.as_deref().and_then(model_of).filter(|_| own) {
+                if let Some(model) = model.as_deref().and_then(model_of) {
                     let model = on_harness(&harness, model);
                     person.models.entry(role).or_default().insert(model);
                 }
