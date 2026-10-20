@@ -292,7 +292,7 @@ fn origin(ctx: &Ctx) -> Option<String> {
     let url = configured.trim();
     if let Some((scheme, rest)) = url.split_once("://") {
         if scheme.is_empty()
-            || scheme == "file"
+            || scheme.eq_ignore_ascii_case("file")
             || !scheme
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
@@ -303,6 +303,12 @@ fn origin(ctx: &Ctx) -> Option<String> {
         let host = authority
             .rsplit_once('@')
             .map_or(authority, |(_, host)| host);
+        // A query or fragment can carry a token as a user name can; one in
+        // the authority leaves no path.
+        let (host, path) = match host.split_once(['?', '#']) {
+            Some((host, _)) => (host, ""),
+            None => (host, path.split(['?', '#']).next().unwrap_or_default()),
+        };
         return (!host.is_empty()).then(|| format!("{scheme}://{host}/{path}"));
     }
     let (host, path) = url.split_once(':')?;

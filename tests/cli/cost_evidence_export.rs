@@ -505,8 +505,9 @@ fn work_carries_the_commits_of_its_change_and_a_change_without_commits_its_label
 }
 
 // Claim: the repository is the `origin` remote URL without any credential
-// it carries, and is left out when there is no origin or it names a place on
-// this machine. Rejects writing a local path or a token.
+// it carries, in its user information, query or fragment, and is left out
+// when there is no origin or it names a place on this machine, whatever the
+// scheme's case. Rejects writing a local path or a token.
 #[test]
 fn the_repository_is_the_origin_url_without_credentials_and_never_a_local_path() {
     let repo = Repo::new();
@@ -546,6 +547,25 @@ fn the_repository_is_the_origin_url_without_credentials_and_never_a_local_path()
         "{out}"
     );
 
+    for (url, kept) in [
+        (
+            "https://example.com/owner/project.git?access_token=query-token#fragment-token",
+            "https://example.com/owner/project.git",
+        ),
+        (
+            "https://example.com?access_token=query-token/owner",
+            "https://example.com/",
+        ),
+    ] {
+        git(&repo.root, &["remote", "set-url", "origin", url]);
+        let (out, _) = export(&repo, &["--all"]);
+        assert_eq!(repository(&out), Some(json!(kept)), "{url}: {out}");
+        assert!(
+            !out.contains("query-token") && !out.contains("fragment-token"),
+            "{out}"
+        );
+    }
+
     git(
         &repo.root,
         &[
@@ -562,7 +582,11 @@ fn the_repository_is_the_origin_url_without_credentials_and_never_a_local_path()
         "{out}"
     );
 
-    for local in [repo.home.to_str().unwrap(), "file:///srv/project.git"] {
+    for local in [
+        repo.home.to_str().unwrap(),
+        "file:///srv/project.git",
+        "FILE://localhost/srv/project.git",
+    ] {
         git(&repo.root, &["remote", "set-url", "origin", local]);
         let (out, _) = export(&repo, &["--all"]);
         assert_eq!(repository(&out), None, "{local}: {out}");
