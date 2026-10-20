@@ -14,11 +14,14 @@ use super::{
 };
 use crate::commands::cost_commit;
 use crate::gitio;
-use agent_tapes_core::attribution_evidence::{MAX_LINES, MAX_LINE_BYTES};
-use anyhow::{bail, Result};
+use agent_tapes_core::attribution_evidence::{MAX_DIRECTORY_FILES, MAX_LINES, MAX_LINE_BYTES};
+use anyhow::{bail, ensure, Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::io::{ErrorKind, Write};
+use std::path::{Path, PathBuf};
 
 pub const SCHEMA: &str = "tapes-attribution-evidence/1";
 
@@ -396,11 +399,10 @@ impl Written {
     }
 }
 
-/// The file's lines: the header, then lineage by time, parent and child, and
-/// then each session's bindings and events by time and work, so two renders
-/// of one ledger differ only in `written_at`, which also ends each span of a
-/// run still open. A render tapes would stop reading before its end is
-/// refused.
+/// The export's lines: the header, then lineage by time, parent and child,
+/// and then each session's bindings and events by time and work, so two
+/// renders of one ledger differ only in `written_at`, which also ends each
+/// span of a run still open. [`divide`] decides the files they make.
 pub(super) fn render(
     ctx: &Ctx,
     exported: &Exported,
@@ -530,33 +532,243 @@ pub(super) fn render(
         }
     }
     written.shared_commits = labels.values().filter(|held| held.len() > 1).count();
-    readable_whole(&text)?;
     written.text = text;
     Ok(written)
 }
 
-/// Refuse evidence tapes reads only part of: more than [`MAX_LINES`] lines
-/// after the header, or a line longer than [`MAX_LINE_BYTES`].
-fn readable_whole(text: &str) -> Result<()> {
-    let records = text.lines().count().saturating_sub(1);
-    if records > MAX_LINES {
-        bail!(
-            "the evidence holds {records} records, and tapes reads at most {MAX_LINES} from \
-             one file; select less work"
-        );
+/// The files an export makes, in write order. Each is the header followed by
+/// at most [`MAX_LINES`] records, so tapes reads every file to its end; the
+/// records keep the export's order, and no record is split.
+pub(super) struct Division<'a> {
+    header: &'a str,
+    parts: Vec<&'a str>,
+    records: usize,
+}
+
+/// A directory's file names are numbered to four digits, so name order is
+/// write order for every count tapes reads.
+const _: () = assert!(MAX_DIRECTORY_FILES < 10_000);
+
+impl<'a> Division<'a> {
+    pub fn len(&self) -> usize {
+        self.parts.len()
     }
-    if let Some((at, line)) = text
-        .lines()
-        .enumerate()
-        .find(|(_, line)| line.len() > MAX_LINE_BYTES)
-    {
-        bail!(
-            "line {} of the evidence is {} bytes, and tapes reads at most {MAX_LINE_BYTES} \
-             of a line",
-            at + 1,
-            line.len()
-        );
+
+    /// Each file's text: the header, then its records.
+    pub fn files(&self) -> impl Iterator<Item = [&'a str; 2]> + '_ {
+        self.parts.iter().map(|records| [self.header, *records])
     }
+
+    /// The export as one file, refused when tapes would stop reading that
+    /// file before its end.
+    pub fn whole(&self) -> Result<[&'a str; 2]> {
+        match self.parts.as_slice() {
+            [records] => Ok([self.header, *records]),
+            _ => bail!(
+                "the evidence holds {} records, and tapes reads at most {MAX_LINES} from one \
+                 file; write it as a directory of files with --output-dir DIR, or select less \
+                 work",
+                self.records
+            ),
+        }
+    }
+}
+
+/// Divide rendered evidence into the files tapes reads whole. Refused when a
+/// line is longer than [`MAX_LINE_BYTES`], which no file can hold whole, or
+/// when the files would number more than the [`MAX_DIRECTORY_FILES`] tapes
+/// reads from a directory.
+pub(super) fn divide(text: &str) -> Result<Division<'_>> {
+    let mut division = Division {
+        header: "",
+        parts: Vec::new(),
+        records: 0,
+    };
+    let (mut start, mut end, mut held) = (0, 0, 0);
+    for (index, line) in text.split_inclusive('\n').enumerate() {
+        let bytes = line.strip_suffix('\n').unwrap_or(line).len();
+        ensure!(
+            bytes <= MAX_LINE_BYTES,
+            "line {} of the evidence is {bytes} bytes, and tapes reads at most \
+             {MAX_LINE_BYTES} of a line",
+            index + 1
+        );
+        if index == 0 {
+            division.header = line;
+            (start, end) = (line.len(), line.len());
+            continue;
+        }
+        if held == MAX_LINES {
+            division.parts.push(&text[start..end]);
+            (start, held) = (end, 0);
+        }
+        end += line.len();
+        held += 1;
+        division.records += 1;
+    }
+    division.parts.push(&text[start..end]);
+    ensure!(
+        division.parts.len() <= MAX_DIRECTORY_FILES,
+        "the evidence holds {} records, {} files of at most {MAX_LINES}, and tapes reads at \
+         most {MAX_DIRECTORY_FILES} files from a directory; select less work",
+        division.records,
+        division.parts.len()
+    );
+    Ok(division)
+}
+
+/// The location `dir` names: its links resolved when it exists, as named
+/// when it does not.
+fn destination(dir: &Path) -> Result<PathBuf> {
+    match fs::canonicalize(dir) {
+        Ok(found) => Ok(found),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(dir.to_path_buf()),
+        Err(error) => Err(error).with_context(|| format!("cannot use {}", dir.display())),
+    }
+}
+
+/// A directory's parent, `.` for a bare name.
+fn parent_of(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+}
+
+/// Refuse an output directory that exists and is not an empty directory, or
+/// that is absent and cannot be created: a link to nothing, or a file
+/// standing where a directory above it would be.
+pub(super) fn vacant(dir: &Path) -> Result<()> {
+    match fs::metadata(dir) {
+        Ok(metadata) => {
+            ensure!(
+                metadata.is_dir(),
+                "--output-dir {} is not a directory; name a new or empty directory",
+                dir.display()
+            );
+            let mut entries = fs::read_dir(dir)
+                .with_context(|| format!("cannot read --output-dir {}", dir.display()))?;
+            ensure!(
+                entries.next().is_none(),
+                "--output-dir {} is not empty; name a new or empty directory",
+                dir.display()
+            );
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            ensure!(
+                fs::symlink_metadata(dir).is_err(),
+                "--output-dir {} is a link to nothing; name a new or empty directory",
+                dir.display()
+            );
+            let above = dir
+                .ancestors()
+                .skip(1)
+                .map(|ancestor| {
+                    if ancestor.as_os_str().is_empty() {
+                        Path::new(".")
+                    } else {
+                        ancestor
+                    }
+                })
+                .find(|ancestor| ancestor.exists());
+            if let Some(above) = above {
+                ensure!(
+                    above.is_dir(),
+                    "--output-dir {} cannot be created: {} is not a directory",
+                    dir.display(),
+                    above.display()
+                );
+            }
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("cannot use --output-dir {}", dir.display()))
+        }
+    }
+    Ok(())
+}
+
+/// What a directory write created, removed again unless it is disarmed: the
+/// staging directory with everything in it, then each ancestor it created,
+/// deepest first, while that ancestor is empty.
+struct Created {
+    staging: Option<PathBuf>,
+    ancestors: Vec<PathBuf>,
+}
+
+impl Drop for Created {
+    fn drop(&mut self) {
+        if let Some(staging) = &self.staging {
+            let _ = fs::remove_dir_all(staging);
+        }
+        for ancestor in &self.ancestors {
+            let _ = fs::remove_dir(ancestor);
+        }
+    }
+}
+
+/// Write each file of `division` into `dir` as `evidence-0001.jsonl`,
+/// `evidence-0002.jsonl`, and so on, so that name order is write order.
+/// `dir` must be absent or an empty directory. The files are written into a
+/// directory beside `dir` and moved into place together, so `dir` holds every
+/// file or what it held before; a failure removes what the write created and
+/// leaves an empty directory it replaced empty.
+pub(super) fn write_directory(dir: &Path, division: &Division) -> Result<()> {
+    vacant(dir)?;
+    let destination = destination(dir)?;
+    let replaces = match fs::metadata(&destination) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => return Err(error).with_context(|| format!("cannot use {}", dir.display())),
+    };
+    let name = destination
+        .file_name()
+        .with_context(|| format!("--output-dir {} names no directory", dir.display()))?
+        .to_string_lossy();
+    let parent = parent_of(&destination);
+    let mut created = Created {
+        staging: None,
+        ancestors: parent
+            .ancestors()
+            .take_while(|ancestor| !ancestor.as_os_str().is_empty() && !ancestor.exists())
+            .map(Path::to_path_buf)
+            .collect(),
+    };
+    fs::create_dir_all(parent).with_context(|| format!("cannot create {}", parent.display()))?;
+    let staging = parent.join(format!(".{name}.{}.staging", crate::ids::new_identifier()));
+    fs::create_dir(&staging).with_context(|| format!("cannot create {}", staging.display()))?;
+    created.staging = Some(staging.clone());
+    for (index, file) in division.files().enumerate() {
+        let path = staging.join(format!("evidence-{:04}.jsonl", index + 1));
+        let mut written = fs::File::create_new(&path)
+            .with_context(|| format!("cannot create {}", path.display()))?;
+        for text in file {
+            written
+                .write_all(text.as_bytes())
+                .with_context(|| format!("cannot write {}", path.display()))?;
+        }
+        written
+            .sync_all()
+            .with_context(|| format!("cannot sync {}", path.display()))?;
+    }
+    if let Some(permissions) = replaces.clone() {
+        fs::set_permissions(&staging, permissions)
+            .with_context(|| format!("cannot set the mode of {}", staging.display()))?;
+    }
+    fs::File::open(&staging)
+        .and_then(|opened| opened.sync_all())
+        .with_context(|| format!("cannot sync {}", staging.display()))?;
+    fs::rename(&staging, &destination)
+        .with_context(|| format!("cannot move the evidence into {}", dir.display()))?;
+    created.staging = None;
+    let synced = fs::File::open(parent).and_then(|opened| opened.sync_all());
+    if let Err(error) = synced {
+        let _ = fs::remove_dir_all(&destination);
+        if let Some(permissions) = replaces {
+            let _ = fs::create_dir(&destination)
+                .and_then(|()| fs::set_permissions(&destination, permissions));
+        }
+        return Err(error).with_context(|| format!("cannot sync {}", parent.display()));
+    }
+    created.ancestors.clear();
     Ok(())
 }
 
@@ -564,8 +776,10 @@ fn readable_whole(text: &str) -> Result<()> {
 mod tests {
     use super::*;
 
+    const HEADER: &str = "{\"schema\":\"tapes-attribution-evidence/1\"}\n";
+
     fn evidence(records: usize, last: usize) -> String {
-        let mut text = String::from("{\"schema\":\"tapes-attribution-evidence/1\"}\n");
+        let mut text = String::from(HEADER);
         for _ in 1..records {
             text.push_str("{\"kind\":\"event\"}\n");
         }
@@ -576,16 +790,80 @@ mod tests {
         text
     }
 
-    // Claim: evidence tapes reads to its end is written, and evidence it
-    // would stop reading early is refused, at tapes' own bounds. Rejects a
-    // file one record or one byte past either bound, and a refusal of one
-    // exactly at it.
+    /// The header and `records` distinct records, each naming its position.
+    fn numbered(records: usize) -> String {
+        let mut text = String::from(HEADER);
+        for record in 0..records {
+            text.push_str(&format!("{record}\n"));
+        }
+        text
+    }
+
+    // Claim: evidence tapes reads to its end is written to one file, and
+    // evidence it would stop reading early is refused, at tapes' own bounds,
+    // with a refusal of too many records naming `--output-dir`. Rejects a
+    // file one record or one byte past either bound, a refusal of one exactly
+    // at it, and a refusal that leaves the reader no way to export the rest.
     #[test]
     fn evidence_past_what_tapes_reads_whole_is_refused() {
-        readable_whole(&evidence(MAX_LINES, MAX_LINE_BYTES)).unwrap();
-        let records = readable_whole(&evidence(MAX_LINES + 1, 16)).unwrap_err();
-        assert!(records.to_string().contains("10001 records"), "{records}");
-        let line = readable_whole(&evidence(3, MAX_LINE_BYTES + 1)).unwrap_err();
+        let text = evidence(MAX_LINES, MAX_LINE_BYTES);
+        assert_eq!(divide(&text).unwrap().whole().unwrap().concat(), text);
+        let records = divide(&evidence(MAX_LINES + 1, 16))
+            .unwrap()
+            .whole()
+            .unwrap_err()
+            .to_string();
+        assert!(records.contains("10001 records"), "{records}");
+        assert!(records.contains("--output-dir"), "{records}");
+        let line = divide(&evidence(3, MAX_LINE_BYTES + 1))
+            .err()
+            .expect("an overlong line");
         assert!(line.to_string().starts_with("line 4 "), "{line}");
+    }
+
+    // Claim: a directory export makes one file per `MAX_LINES` records, each
+    // opening with the header, whose records concatenate back to the export
+    // in order, and refuses what tapes would not read whole: more files than
+    // a directory may hold, or a line no file can hold. Rejects a division
+    // one record off at the bound, a later file without the header, records
+    // reordered or lost between files, and either bound taken one past or one
+    // short.
+    #[test]
+    fn a_directory_export_divides_at_tapes_bounds() {
+        for (records, files) in [(0, 1), (1, 1), (MAX_LINES, 1), (MAX_LINES + 1, 2)] {
+            let text = numbered(records);
+            let division = divide(&text).unwrap();
+            assert_eq!(division.len(), files, "{records} records");
+            let mut rejoined = String::from(HEADER);
+            for (index, [opening, held]) in division.files().enumerate() {
+                assert_eq!(opening, HEADER, "file {index} of {records} records");
+                assert!(held.lines().count() <= MAX_LINES, "file {index}");
+                rejoined.push_str(held);
+            }
+            assert_eq!(rejoined, text, "{records} records");
+        }
+        let split = numbered(MAX_LINES + 1);
+        let held: Vec<[&str; 2]> = divide(&split).unwrap().files().collect();
+        assert_eq!(held[0][1].lines().count(), MAX_LINES);
+        assert_eq!(held[1][1], format!("{MAX_LINES}\n"));
+
+        let most = MAX_LINES * MAX_DIRECTORY_FILES;
+        let full = format!("{HEADER}{}", "\n".repeat(most));
+        assert_eq!(divide(&full).unwrap().len(), MAX_DIRECTORY_FILES);
+        let over = format!("{HEADER}{}", "\n".repeat(most + 1));
+        let refused = divide(&over).err().expect("one file too many").to_string();
+        assert!(
+            refused.contains("1001 files") && refused.contains("at most 1000 files"),
+            "{refused}"
+        );
+
+        let longest = format!("{HEADER}{}\ny\n", "x".repeat(MAX_LINE_BYTES));
+        assert_eq!(divide(&longest).unwrap().len(), 1);
+        let overlong = format!("{HEADER}0\n{}\n", "x".repeat(MAX_LINE_BYTES + 1));
+        let refused = divide(&overlong)
+            .err()
+            .expect("an overlong line")
+            .to_string();
+        assert!(refused.starts_with("line 3 "), "{refused}");
     }
 }

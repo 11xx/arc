@@ -4829,7 +4829,8 @@ enum CostCmd {
         json: bool,
     },
     /// Write the evidence `cost show` divides its sessions by to standard
-    /// output, as a `tapes-attribution-evidence/1` file tapes reads
+    /// output, as a `tapes-attribution-evidence/1` file tapes reads, or into
+    /// a directory of such files
     ///
     /// The selection is `cost show`'s: change ids and journal artifacts,
     /// `--tag`, `--footprint`, `--since`/`--until` and `--all`, read the same
@@ -4869,14 +4870,26 @@ enum CostCmd {
     /// child, then each session's bindings and events, by session, time and
     /// work. Two exports of an unchanged ledger differ only in `written_at`,
     /// which also ends each span of a run still open. Evidence tapes would stop
-    /// reading before its end, more than 10,000 records after the header or a
-    /// line longer than 256 KiB, is refused and nothing is written. Standard
-    /// error summarizes the sessions written, the records by kind, the commits
-    /// that still appear under several labels, the sessions without a figure,
-    /// the sessions the ledger does not divide, and the runs still open.
-    /// Every session is measured as `cost show` measures it, so the read
-    /// takes as long. Reads the ledger and the recordings and records no
-    /// event; read the file with `tapes usage SESSION --evidence FILE`
+    /// reading before its end is refused and nothing is written: standard
+    /// output carries one file, of at most 10,000 records after the header,
+    /// and a longer export is refused naming `--output-dir`. `--output-dir
+    /// DIR` writes `evidence-0001.jsonl`, `evidence-0002.jsonl`, ... into DIR,
+    /// which must be absent or an empty directory and is checked before the
+    /// ledger is read, and leaves standard output empty. Name order is write
+    /// order; each file is the header, with one `written_at` for every file,
+    /// followed by at most 10,000 records, which keep the export's order and
+    /// are never split. Evidence that would need more than the 1,000 files
+    /// tapes reads from a directory, or that holds a line longer than 256 KiB,
+    /// which no file holds whole, is refused either way. The files are written
+    /// beside DIR and moved into place together, so a failure leaves DIR as it
+    /// was. Standard error summarizes the sessions written, the records by
+    /// kind, the commits that still appear under several labels, the sessions
+    /// without a figure, the sessions the ledger does not divide, the runs
+    /// still open, and with `--output-dir` the files written. Every session is
+    /// measured as `cost show` measures it, so the read takes as long. Reads
+    /// the ledger and the recordings and records no event; read the file with
+    /// `tapes usage SESSION --evidence FILE`, and a directory with `tapes
+    /// usage SESSION --evidence DIR`
     Evidence {
         /// Change IDs or unique prefixes, and journal artifacts, as `cost
         /// show` takes them. Several targets and range selectors select
@@ -4904,6 +4917,11 @@ enum CostCmd {
         /// Every change in this ledger
         #[arg(long)]
         all: bool,
+        /// Write the evidence into this new or empty directory as
+        /// `evidence-0001.jsonl`, `evidence-0002.jsonl`, ..., each a whole
+        /// file of at most 10,000 records, in place of standard output
+        #[arg(long, value_name = "DIR")]
+        output_dir: Option<std::path::PathBuf>,
     },
     /// Retain the normalized facts a fresh read of each bound or participating
     /// session gives:
@@ -7166,6 +7184,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 since,
                 until,
                 all,
+                output_dir,
             } => {
                 let instant = |raw: Option<String>| {
                     raw.map(|raw| crate::journal::parse_since(&raw)).transpose()
@@ -7179,7 +7198,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     all,
                     ..commands::CostQuery::default()
                 };
-                commands::export_cost_evidence(&ctx, &query).map(|_| 0)
+                commands::export_cost_evidence(&ctx, &query, output_dir.as_deref()).map(|_| 0)
             }
             CostCmd::Note { target, all } => {
                 commands::note_cost(&ctx, target.as_deref(), all).map(|_| 0)

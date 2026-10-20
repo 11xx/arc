@@ -3913,8 +3913,10 @@ RULES THAT CHANGE WHAT YOU DO
   - `arc cost evidence <change|journal-file>... | --all` writes the evidence
     `cost show` divides its sessions by to standard output, as a
     `tapes-attribution-evidence/1` file (UTF-8 JSON Lines) that `tapes usage
-    SESSION --evidence FILE` reads, so tapes gives arc's figure wherever arc's
-    ledger exists. It takes `cost show`'s selection, read the same way.
+    SESSION --evidence FILE` reads, or with `--output-dir DIR` into a
+    directory of such files that `tapes usage SESSION --evidence DIR` reads,
+    so tapes gives arc's figure wherever arc's ledger exists. It takes `cost
+    show`'s selection, read the same way.
     Export `--all` for exact figures: a participant's division rests on every
     piece of work it took part in, not only the selected one. The first line
     is the header, with producer `arc/<version>`. A session `cost show` gives
@@ -3948,13 +3950,23 @@ RULES THAT CHANGE WHAT YOU DO
     first, by time, parent and child, then each session's bindings and events,
     by session, time and work. Two exports of an unchanged ledger differ only
     in `written_at`, which also ends each span of a run still open. Evidence
-    tapes would stop reading before its end, more than 10,000 records after
-    the header or a line longer than 256 KiB, is refused and nothing is
-    written. Standard error summarizes the sessions written, the records by
-    kind, the commits that still appear under several labels, the sessions
-    without a figure, the sessions the ledger does not divide, and the runs
-    still open. Every session is measured as `cost show` measures it, and the
-    command records no ledger event.
+    tapes would stop reading before its end is refused and nothing is
+    written. Standard output carries one file, of at most 10,000 records
+    after the header; a longer export is refused naming `--output-dir`.
+    `--output-dir DIR` takes an absent or empty directory, checked before the
+    ledger is read, writes `evidence-0001.jsonl`, `evidence-0002.jsonl`, ...
+    into it in name order, and leaves standard output empty: each file is the
+    header, one `written_at` for all, followed by at most 10,000 records,
+    which keep the export's order and are never split. Evidence that would
+    need more than the 1,000 files tapes reads from a directory, or that holds
+    a line longer than 256 KiB, which no file holds whole, is refused either
+    way. The files are written beside DIR and moved into place together, so a
+    failure leaves DIR as it was. Standard error summarizes the sessions
+    written, the records by kind, the commits that still appear under several
+    labels, the sessions without a figure, the sessions the ledger does not
+    divide, the runs still open, and with `--output-dir` the files written.
+    Every session is measured as `cost show` measures it, and the command
+    records no ledger event.
   - A bounded round records what it deliberately left, so the next round
     inherits a list instead of a memory: `arc run end <dispatch> --outcome
     <o> --reviewed-head <sha> --raised-json <path|-> --deferred-json <path|->`.

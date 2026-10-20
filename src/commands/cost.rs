@@ -546,13 +546,32 @@ pub fn show_cost(ctx: &Ctx, query: &CostQuery, json: bool, detail: bool) -> Resu
 }
 
 /// Write the evidence the sessions' figures of a query rest on to standard
-/// output, and summarize it on standard error.
-pub fn export_evidence(ctx: &Ctx, query: &CostQuery) -> Result<()> {
+/// output as one file, or into `output_dir` as a directory of files, and
+/// summarize it on standard error. An output directory tapes could not be
+/// given is refused before the query is read.
+pub fn export_evidence(
+    ctx: &Ctx,
+    query: &CostQuery,
+    output_dir: Option<&std::path::Path>,
+) -> Result<()> {
+    if let Some(dir) = output_dir {
+        evidence::vacant(dir)?;
+    }
     let view = read_query(ctx, query)?;
     let producer = format!("arc/{}", env!("CARGO_PKG_VERSION"));
     let written = evidence::render(ctx, &view.evidence, &producer, chrono::Utc::now())?;
-    print!("{}", written.text);
-    eprint!("{}", written.summary());
+    let division = evidence::divide(&written.text)?;
+    match output_dir {
+        None => {
+            let [header, records] = division.whole()?;
+            print!("{header}{records}");
+            eprint!("{}", written.summary());
+        }
+        Some(dir) => {
+            evidence::write_directory(dir, &division)?;
+            eprintln!("{}files: {}", written.summary(), division.len());
+        }
+    }
     Ok(())
 }
 
