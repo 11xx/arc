@@ -2797,6 +2797,33 @@ fn arc_reason(reason: MeasurementReason) -> &'static str {
     }
 }
 
+/// Every reason `arc_reason` names.
+const REASONS: [MeasurementReason; 16] = [
+    MeasurementReason::MissingCounter,
+    MeasurementReason::MissingPrice,
+    MeasurementReason::Unpriced,
+    MeasurementReason::StoppedAttempt,
+    MeasurementReason::UnreadableRecord,
+    MeasurementReason::ReadWindow,
+    MeasurementReason::SinceReset,
+    MeasurementReason::UnestablishedScope,
+    MeasurementReason::IncompleteAttribution,
+    MeasurementReason::Undetermined,
+    MeasurementReason::UnrecognizedUsage,
+    MeasurementReason::UnlistedModel,
+    MeasurementReason::TtlUnrecorded,
+    MeasurementReason::RequestTermsUnknown,
+    MeasurementReason::BillingUnestablished,
+    MeasurementReason::OutsideValidity,
+];
+
+/// The tapes reason arc names `text`, if it names one.
+fn tapes_reason(text: &str) -> Option<MeasurementReason> {
+    REASONS
+        .into_iter()
+        .find(|reason| arc_reason(*reason) == text)
+}
+
 fn arc_reasons<'a>(reasons: impl IntoIterator<Item = &'a MeasurementReason>) -> Vec<String> {
     let mut reasons: Vec<String> = reasons
         .into_iter()
@@ -3409,9 +3436,16 @@ fn price(facts: &mut CostFacts, table: Option<&agent_tapes_core::pricing::PriceT
     facts.list_price = table.map(|table| list_price(facts, table));
 }
 
-/// tapes' disjoint categories of a figure, as the pricing reads them.
+/// tapes' disjoint categories of a figure, as the pricing reads them, each
+/// with the tapes reasons its gaps name.
 fn tapes_disjoint(disjoint: &CostDisjoint) -> Option<agent_tapes_core::model::DisjointTokens> {
     use agent_tapes_core::model::{CacheWrites, DisjointTokens, TokenConvention};
+    let mut completeness = MeasurementCompleteness::default();
+    for (category, reasons) in disjoint.gaps.iter().flatten() {
+        for reason in reasons.iter().filter_map(|reason| tapes_reason(reason)) {
+            completeness.qualify(category, reason);
+        }
+    }
     Some(DisjointTokens {
         convention: serde_json::from_value::<TokenConvention>(json!(disjoint.convention)).ok()?,
         uncached_input: disjoint.uncached_input,
@@ -3424,7 +3458,7 @@ fn tapes_disjoint(disjoint: &CostDisjoint) -> Option<agent_tapes_core::model::Di
         output: disjoint.output,
         reasoning: disjoint.reasoning,
         total: None,
-        measurement_completeness: MeasurementCompleteness::default(),
+        measurement_completeness: completeness,
         missing: Vec::new(),
     })
 }
@@ -3458,11 +3492,21 @@ fn price_model(
     };
     // A share among several models is a tapes model share whose counters
     // keep uncached input apart and reasoning inside output, so they restate
-    // its disjoint categories unchanged.
+    // its disjoint categories, and the reasons each carries, unchanged.
     let restated = TokenConvention {
         input: InputConvention::ExcludesCache,
         output: OutputConvention::IncludesReasoning,
     };
+    let mut completeness = MeasurementCompleteness::default();
+    for (category, reasons) in disjoint.measurement_completeness.iter() {
+        let counter = match category {
+            "uncached_input" => "input",
+            category => category,
+        };
+        for reason in reasons {
+            completeness.qualify(counter, *reason);
+        }
+    }
     let share = (!sole).then(|| agent_tapes_core::usage::ModelUsage {
         model: model.to_string(),
         variant: None,
@@ -3478,7 +3522,7 @@ fn price_model(
         request_count: None,
         measurement_coverage: BTreeMap::new(),
         measurement_incomplete: Vec::new(),
-        measurement_completeness: MeasurementCompleteness::default(),
+        measurement_completeness: completeness,
         list_price_estimate: None,
         cache_write_by_ttl: disjoint.cache_write,
     });
@@ -3494,6 +3538,20 @@ fn price_model(
     .estimate(table)
     .whole
     .unwrap_or_default()
+}
+
+/// Whether tapes prices a share's `category` as a missing counter: where
+/// the share's own reasons name one, or where it holds no amount and no
+/// reason.
+fn names_missing(share: &agent_tapes_core::model::DisjointTokens, category: &str) -> bool {
+    match share
+        .measurement_completeness
+        .iter()
+        .find(|(held, _)| *held == category)
+    {
+        Some((_, reasons)) => reasons.contains(&MeasurementReason::MissingCounter),
+        None => category_amount(share, category).is_none(),
+    }
 }
 
 /// A figure's list price: its disjoint categories priced by the table rows
@@ -3538,17 +3596,30 @@ fn list_price(facts: &CostFacts, table: &agent_tapes_core::pricing::PriceTable) 
         .events
         .as_ref()
         .is_some_and(|events| events.other_branches > 0);
+    // A share restated for tapes' pricing is a missing counter in each
+    // category it holds no amount for, which tapes names only as
+    // `names_missing` says.
+    let mut restated_missing: BTreeSet<&str> = BTreeSet::new();
     match facts.served_model.as_deref().and_then(model_of) {
         Some(model) if facts.by_model.is_empty() && !other_branches => price(&model, &whole, true),
         _ if !facts.by_model.is_empty() => {
-            for share in &facts.by_model {
-                if let Some(disjoint) = tapes_disjoint(&share.disjoint) {
-                    price(&share.model, &disjoint, false);
-                }
+            let shares: Vec<_> = facts
+                .by_model
+                .iter()
+                .filter_map(|share| Some((&share.model, tapes_disjoint(&share.disjoint)?)))
+                .collect();
+            for (model, disjoint) in &shares {
+                price(model, disjoint, false);
             }
             for category in PRICED_CATEGORIES {
                 if !shares_cover(&whole, &facts.by_model, category) {
                     gaps.insert(arc_reason(MeasurementReason::IncompleteAttribution).to_string());
+                }
+                if !shares
+                    .iter()
+                    .any(|(_, share)| names_missing(share, category))
+                {
+                    restated_missing.insert(category);
                 }
             }
         }
@@ -3568,11 +3639,17 @@ fn list_price(facts: &CostFacts, table: &agent_tapes_core::pricing::PriceTable) 
         }
         return unpriced(gaps.into_iter().collect());
     };
+    let restated_missing = &restated_missing;
     gaps.extend(arc_reasons(
         estimate
             .measurement_completeness
             .iter()
-            .flat_map(|(_, reasons)| reasons),
+            .flat_map(|(category, reasons)| {
+                reasons.iter().filter(move |reason| {
+                    **reason != MeasurementReason::MissingCounter
+                        || !restated_missing.contains(category)
+                })
+            }),
     ));
     CostListPrice {
         currency: estimate.currency,
