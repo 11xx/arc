@@ -100,21 +100,90 @@ struct Changes {
     graph: Option<gitio::CommitGraph>,
 }
 
-impl Changes {
-    fn read(ctx: &Ctx) -> Result<Self> {
-        let store = ctx.store()?;
-        let read = store.read()?;
-        let mut states = Vec::new();
-        let mut unreadable = Vec::new();
-        for change_id in read.change_ids()? {
-            match read.state(&change_id) {
-                Ok(state) => states.push(state),
-                Err(error) => {
-                    eprintln!("warning: unreadable change {change_id}: {error:#}");
-                    unreadable.push(change_id);
+/// Every readable change's state, and the changes whose state could not be
+/// read.
+fn read_states(ctx: &Ctx) -> Result<(Vec<ChangeState>, Vec<String>)> {
+    let store = ctx.store()?;
+    let read = store.read()?;
+    let mut states = Vec::new();
+    let mut unreadable = Vec::new();
+    for change_id in read.change_ids()? {
+        match read.state(&change_id) {
+            Ok(state) => states.push(state),
+            Err(error) => {
+                eprintln!("warning: unreadable change {change_id}: {error:#}");
+                unreadable.push(change_id);
+            }
+        }
+    }
+    Ok((states, unreadable))
+}
+
+/// A change below another in a stack still stands in it: it is open or
+/// integrated. A change closed without integration shipped nothing of its own.
+fn stands(state: &ChangeState) -> bool {
+    state
+        .closure
+        .as_ref()
+        .is_none_or(|closure| closure.outcome == crate::model::Closure::Integrated)
+}
+
+/// The commits each of the `wanted` changes made itself, by change id: its
+/// change commits less the current-patchset commits of every change below it
+/// in a stack, and always with its own integration commit. A change is below
+/// another when it is open or integrated and its current patchset head lies in
+/// the other's patchset range at a head of its own. Changes with the same
+/// head exclude nothing from each other. A change whose state cannot be read
+/// is absent.
+pub(super) fn own_commits(ctx: &Ctx, wanted: &BTreeSet<String>) -> BTreeMap<String, Vec<String>> {
+    let Ok((states, _)) = read_states(ctx) else {
+        return BTreeMap::new();
+    };
+    let mut standing: BTreeMap<&str, Vec<&ChangeState>> = BTreeMap::new();
+    for state in states.iter().filter(|state| stands(state)) {
+        if let Some((_, head)) = patchset_range(state) {
+            standing.entry(head).or_default().push(state);
+        }
+    }
+    let mut ranges: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut range_of = |state: &ChangeState| -> Vec<String> {
+        ranges
+            .entry(state.change_id.clone())
+            .or_insert_with(|| patchset_commits(ctx, state))
+            .clone()
+    };
+    let mut own = BTreeMap::new();
+    for state in states
+        .iter()
+        .filter(|state| wanted.contains(&state.change_id))
+    {
+        let head = patchset_range(state).map(|(_, head)| head);
+        let range = range_of(state);
+        let mut below: BTreeSet<String> = BTreeSet::new();
+        for commit in &range {
+            for lower in standing.get(commit.as_str()).into_iter().flatten() {
+                if lower.change_id != state.change_id && Some(commit.as_str()) != head {
+                    below.extend(range_of(lower));
                 }
             }
         }
+        let mut commits: Vec<String> = range
+            .into_iter()
+            .filter(|commit| !below.contains(commit))
+            .collect();
+        if let Some(integrated) = integrated_commit(state) {
+            if !commits.iter().any(|commit| commit == integrated) {
+                commits.push(integrated.to_string());
+            }
+        }
+        own.insert(state.change_id.clone(), commits);
+    }
+    own
+}
+
+impl Changes {
+    fn read(ctx: &Ctx) -> Result<Self> {
+        let (states, unreadable) = read_states(ctx)?;
         let revisions = states
             .iter()
             .filter_map(patchset_range)

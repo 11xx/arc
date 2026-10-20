@@ -4849,9 +4849,15 @@ enum CostCmd {
     /// a ledger record that could not be read, writes nothing and is counted.
     /// A session `cost show` names without a figure writes nothing and is
     /// counted. Each record's work is the change id or journal artifact as
-    /// `cost show` names it, as `label`; `commits` holds the change's commits
-    /// as `cost note` finds them (full object names), and is left out for a
-    /// change that has none and for a journal artifact; `repository` is the
+    /// `cost show` names it, as `label`; `commits` holds the commits the
+    /// change made itself (full object names): the change's commits as `cost
+    /// note` finds them, less the current-patchset commits of every change
+    /// below it in a stack, and always with its own integration commit. A
+    /// change is below another when it is open or integrated and its current
+    /// patchset head, different from the other's, lies in the other's
+    /// patchset range; a change closed without integration is below nothing,
+    /// and changes with one head exclude nothing from each other. `commits`
+    /// is left out for a change that has none and for a journal artifact; `repository` is the
     /// repository's `origin` remote URL without credentials, and is left out
     /// when there is none or it names a place on this machine. Where a
     /// dispatch records both the session that dispatched it and the executor
@@ -4861,8 +4867,9 @@ enum CostCmd {
     /// native child is linked by its recording and writes none. Records are
     /// ordered by time, then session and work, so two exports of an unchanged
     /// ledger differ only in `written_at`. Standard error summarizes the
-    /// sessions written, the records by kind, the sessions without a figure,
-    /// the sessions the ledger does not divide, and the runs still open.
+    /// sessions written, the records by kind, the commits that still appear
+    /// under several labels, the sessions without a figure, the sessions the
+    /// ledger does not divide, and the runs still open.
     /// Every session is measured as `cost show` measures it, so the read
     /// takes as long. Reads the ledger and the recordings and records no
     /// event; read the file with `tapes usage SESSION --evidence FILE`

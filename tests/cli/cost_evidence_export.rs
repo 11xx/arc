@@ -913,3 +913,183 @@ fn a_bare_export_is_refused() {
         .assert()
         .failure();
 }
+
+/// The branch a change was begun on, found by its slug.
+fn branch_of(repo: &Repo, slug: &str) -> String {
+    git_out(
+        &repo.root,
+        &["branch", "--list", "--format=%(refname:short)"],
+    )
+    .lines()
+    .find(|branch| branch.contains(slug))
+    .unwrap_or_else(|| panic!("no branch for {slug}"))
+    .to_string()
+}
+
+/// A change begun from the target and snapshotted after its worktree took
+/// `below`'s branch, with `own` commits of its own on top: its patchset
+/// range holds everything `below` holds.
+fn stacked(repo: &Repo, slug: &str, below: &str, own: bool) -> String {
+    let change = opened_change_id(&stdout(anonymous(repo, &repo.root).args(["begin", slug])));
+    let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+    git(&worktree, &["merge", "--ff-only", &branch_of(repo, below)]);
+    if own {
+        repo.commit(
+            &worktree,
+            &format!("{slug}.txt"),
+            "x\n",
+            &format!("feat: {slug}"),
+        );
+    }
+    stdout(anonymous(repo, &worktree).args(["snapshot", slug]));
+    settle(repo, &change, "06:00:00");
+    change
+}
+
+/// Approve and integrate the change `slug` names.
+fn land(repo: &Repo, slug: &str, change: &str) {
+    anonymous(repo, &repo.root)
+        .args(["review", slug, "--verdict", "approved"])
+        .assert()
+        .success();
+    anonymous(repo, &repo.root)
+        .args(["integrate", slug])
+        .assert()
+        .success();
+    settle(repo, change, "06:00:00");
+}
+
+fn head_of(repo: &Repo, slug: &str) -> String {
+    git_out(&repo.root, &["rev-parse", &branch_of(repo, slug)])
+        .trim()
+        .to_string()
+}
+
+/// The commits a change's work carries in the export, by session.
+fn commits_of(file: &[Value], session: &str) -> Vec<String> {
+    let mut commits: Vec<String> = records(file, "binding", session)[0]["work"]["commits"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|commit| commit.as_str().unwrap().to_string())
+        .collect();
+    commits.sort();
+    commits
+}
+
+/// A lower and an upper change, each with an executor run so both are
+/// exported.
+fn run_both(repo: &Repo, lower: &str, upper: &str) {
+    pi_session(repo, EXECUTOR, &[("10:05:00", 1)]);
+    pi_session(repo, OTHER_EXECUTOR, &[("10:05:00", 1)]);
+    for (change, executor) in [(lower, EXECUTOR), (upper, OTHER_EXECUTOR)] {
+        run(
+            repo,
+            change,
+            executor,
+            "10:00:00",
+            Some("10:20:00"),
+            None,
+            None,
+        );
+    }
+}
+
+// Claim: a change built on an integrated change exports its own commits and
+// its integration commit, and the lower change its own and its integration
+// commit. Rejects the upper change carrying the lower change's commits,
+// which tapes would then share the lower change's consumption over.
+#[test]
+fn a_stacked_integrated_change_exports_only_its_own_commits() {
+    let repo = Repo::new();
+    let lower = change(&repo, "base-layer");
+    let upper = stacked(&repo, "top-layer", "base-layer", true);
+    let (lower_head, upper_head) = (head_of(&repo, "base-layer"), head_of(&repo, "top-layer"));
+    land(&repo, "base-layer", &lower);
+    land(&repo, "top-layer", &upper);
+    run_both(&repo, &lower, &upper);
+
+    let (out, summary) = export(&repo, &["--all"]);
+    let file = lines(&out);
+    let integration = git_out(&repo.root, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    let mut expected_upper = vec![upper_head.clone(), integration.clone()];
+    expected_upper.sort();
+    expected_upper.dedup();
+    assert_eq!(commits_of(&file, OTHER_EXECUTOR), expected_upper, "{out}");
+    assert!(
+        !commits_of(&file, OTHER_EXECUTOR).contains(&lower_head),
+        "{out}"
+    );
+    let lower_commits = commits_of(&file, EXECUTOR);
+    assert!(lower_commits.contains(&lower_head), "{out}");
+    assert!(!lower_commits.contains(&upper_head), "{out}");
+    assert_eq!(
+        summary_line(&summary, "commits under several labels: "),
+        "0",
+        "{summary}"
+    );
+}
+
+// Claim: a change built on an open change excludes that change's commits.
+// Rejects the upper change carrying them.
+#[test]
+fn a_change_stacked_on_an_open_change_excludes_its_commits() {
+    let repo = Repo::new();
+    let lower = change(&repo, "open-base");
+    let upper = stacked(&repo, "open-top", "open-base", true);
+    let (lower_head, upper_head) = (head_of(&repo, "open-base"), head_of(&repo, "open-top"));
+    run_both(&repo, &lower, &upper);
+
+    let (out, _) = export(&repo, &["--all"]);
+    let file = lines(&out);
+    assert_eq!(commits_of(&file, OTHER_EXECUTOR), vec![upper_head], "{out}");
+    assert_eq!(commits_of(&file, EXECUTOR), vec![lower_head], "{out}");
+}
+
+// Claim: a change built on an abandoned change keeps that change's commits,
+// since they ship only with it. Rejects excluding commits of a change that
+// stands nowhere.
+#[test]
+fn a_change_stacked_on_an_abandoned_change_keeps_its_commits() {
+    let repo = Repo::new();
+    let lower = change(&repo, "gone-base");
+    let upper = stacked(&repo, "gone-top", "gone-base", true);
+    let (lower_head, upper_head) = (head_of(&repo, "gone-base"), head_of(&repo, "gone-top"));
+    anonymous(&repo, &repo.root)
+        .args(["close", "gone-base", "--abandoned"])
+        .assert()
+        .success();
+    settle(&repo, &lower, "06:00:00");
+    run_both(&repo, &lower, &upper);
+
+    let (out, _) = export(&repo, &["--all"]);
+    let file = lines(&out);
+    let mut expected = vec![lower_head, upper_head];
+    expected.sort();
+    assert_eq!(commits_of(&file, OTHER_EXECUTOR), expected, "{out}");
+}
+
+// Claim: two changes with the same patchset head keep their commits, and the
+// summary counts the commits under both labels. Rejects either change
+// excluding the other's commits.
+#[test]
+fn changes_with_the_same_head_keep_their_commits_and_are_counted() {
+    let repo = Repo::new();
+    let first = change(&repo, "twin-one");
+    let second = stacked(&repo, "twin-two", "twin-one", false);
+    let head = head_of(&repo, "twin-one");
+    run_both(&repo, &first, &second);
+
+    let (out, summary) = export(&repo, &["--all"]);
+    let file = lines(&out);
+    assert_eq!(commits_of(&file, EXECUTOR), vec![head.clone()], "{out}");
+    assert_eq!(commits_of(&file, OTHER_EXECUTOR), vec![head], "{out}");
+    assert_eq!(
+        summary_line(&summary, "commits under several labels: "),
+        "1",
+        "{summary}"
+    );
+}

@@ -319,13 +319,13 @@ fn full_object_name(name: &str) -> bool {
 
 /// The work a record names: the change id or journal artifact as arc names
 /// it, the commits the change holds, and the repository.
-struct Works<'a> {
-    ctx: &'a Ctx,
+struct Works {
+    own: BTreeMap<String, Vec<String>>,
     repository: Option<String>,
     named: BTreeMap<WorkKey, Work>,
 }
 
-impl Works<'_> {
+impl Works {
     fn of(&mut self, key: &WorkKey) -> &Work {
         if !self.named.contains_key(key) {
             let (label, commits) = match key {
@@ -343,18 +343,16 @@ impl Works<'_> {
         &self.named[key]
     }
 
-    /// The commits `cost note` finds for the change; none when its state is
+    /// The commits the change made itself; none when its state is
     /// unreadable.
     fn commits(&self, change_id: &str) -> Vec<String> {
-        let Ok(store) = self.ctx.store() else {
-            return Vec::new();
-        };
-        let Ok(state) = store.read().and_then(|read| read.state(change_id)) else {
-            return Vec::new();
-        };
-        let mut commits: Vec<String> = cost_commit::change_commits(self.ctx, &state)
+        let mut commits: Vec<String> = self
+            .own
+            .get(change_id)
             .into_iter()
+            .flatten()
             .filter(|commit| full_object_name(commit))
+            .cloned()
             .collect();
         commits.sort();
         commits.dedup();
@@ -369,6 +367,7 @@ pub(super) struct Written {
     pub bindings: usize,
     pub events: usize,
     pub lineage: usize,
+    pub shared_commits: usize,
     pub unfigured: usize,
     pub undivided: usize,
     pub open_runs: usize,
@@ -377,11 +376,12 @@ pub(super) struct Written {
 impl Written {
     pub fn summary(&self) -> String {
         format!(
-            "sessions: {}\nrecords: {} binding, {} event, {} lineage\nsessions without a figure: {}\nsessions whose work the ledger does not divide: {}\nruns still open: {}\n",
+            "sessions: {}\nrecords: {} binding, {} event, {} lineage\ncommits under several labels: {}\nsessions without a figure: {}\nsessions whose work the ledger does not divide: {}\nruns still open: {}\n",
             self.sessions,
             self.bindings,
             self.events,
             self.lineage,
+            self.shared_commits,
             self.unfigured,
             self.undivided,
             self.open_runs,
@@ -398,8 +398,18 @@ pub(super) fn render(
     producer: &str,
     written_at: DateTime<Utc>,
 ) -> Result<Written> {
+    let changes: BTreeSet<String> = exported
+        .records
+        .iter()
+        .map(|record| &record.work)
+        .chain(exported.launches.iter().map(|launch| &launch.work))
+        .filter_map(|work| match work {
+            WorkKey::Change(id) => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
     let mut works = Works {
-        ctx,
+        own: cost_commit::own_commits(ctx, &changes),
         repository: origin(ctx),
         named: BTreeMap::new(),
     };
@@ -415,6 +425,7 @@ pub(super) fn render(
         bindings: 0,
         events: 0,
         lineage: 0,
+        shared_commits: 0,
         unfigured: exported.unfigured,
         undivided: exported.undivided,
         open_runs: exported.open_runs.len(),
@@ -503,6 +514,13 @@ pub(super) fn render(
             written.bindings += 1;
         }
     }
+    let mut labels: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for work in works.named.values() {
+        for commit in &work.commits {
+            labels.entry(commit).or_default().insert(&work.label);
+        }
+    }
+    written.shared_commits = labels.values().filter(|held| held.len() > 1).count();
     written.text = text;
     Ok(written)
 }
