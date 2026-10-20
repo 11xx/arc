@@ -3933,24 +3933,28 @@ RULES THAT CHANGE WHAT YOU DO
     change id or journal artifact as `cost show` names it; `commits`, the
     commits the change made itself, in full, left out for a change that has
     none and for an artifact; and `repository`, the `origin` remote URL
-    without credentials, left out when there is none or it names a place on
-    this machine. A change's commits are those `cost note` finds for it less
-    the current-patchset commits of every change below it in a stack, and
-    always include its own integration commit. A change is below another
-    when it is open or integrated and its current patchset head, different
-    from the other's, lies in the other's patchset range; a change closed
-    without integration is below nothing, and changes with one head exclude
-    nothing from each other. Where a dispatch records both the session that
-    made it and the executor it bound, one `lineage` record per distinct pair
-    is written at the earliest such dispatch, with the binding's handle as
-    `label` and the work as `subject`; a native child is linked by its
-    recording and writes none. Lines are ordered by time, session and work,
-    so two exports of an unchanged ledger differ only in `written_at`.
-    Standard error summarizes the sessions written, the records by kind, the
-    commits that still appear under several labels, the sessions without a
-    figure, the sessions the ledger does not divide, and the runs still open.
-    Every session is measured as `cost show` measures it, and the command
-    records no ledger event.
+    without its user information, query or fragment, left out when there is
+    none or it names a place on this machine. A change's commits are those
+    `cost note` finds for it less the current-patchset commits of every change
+    below it in a stack, and always include its own integration commit. A
+    change is below another when it is open or integrated and its current
+    patchset head, different from the other's, lies in the other's patchset
+    range; a change closed without integration is below nothing, and changes
+    with one head exclude nothing from each other. Where a dispatch records
+    both the session that made it and the executor it bound, one `lineage`
+    record per distinct pair is written at the earliest such dispatch, with
+    the binding's handle as `label` and the work as `subject`; a native child
+    is linked by its recording and writes none. The `lineage` lines come
+    first, by time, parent and child, then each session's bindings and events,
+    by session, time and work. Two exports of an unchanged ledger differ only
+    in `written_at`, which also ends each span of a run still open. Evidence
+    tapes would stop reading before its end, more than 10,000 records after
+    the header or a line longer than 256 KiB, is refused and nothing is
+    written. Standard error summarizes the sessions written, the records by
+    kind, the commits that still appear under several labels, the sessions
+    without a figure, the sessions the ledger does not divide, and the runs
+    still open. Every session is measured as `cost show` measures it, and the
+    command records no ledger event.
   - A bounded round records what it deliberately left, so the next round
     inherits a list instead of a memory: `arc run end <dispatch> --outcome
     <o> --reviewed-head <sha> --raised-json <path|-> --deferred-json <path|->`.

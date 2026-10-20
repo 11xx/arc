@@ -14,7 +14,8 @@ use super::{
 };
 use crate::commands::cost_commit;
 use crate::gitio;
-use anyhow::Result;
+use agent_tapes_core::attribution_evidence::{MAX_LINES, MAX_LINE_BYTES};
+use anyhow::{bail, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -397,7 +398,9 @@ impl Written {
 
 /// The file's lines: the header, then lineage by time, parent and child, and
 /// then each session's bindings and events by time and work, so two renders
-/// of one ledger differ only in `written_at`.
+/// of one ledger differ only in `written_at`, which also ends each span of a
+/// run still open. A render tapes would stop reading before its end is
+/// refused.
 pub(super) fn render(
     ctx: &Ctx,
     exported: &Exported,
@@ -527,6 +530,62 @@ pub(super) fn render(
         }
     }
     written.shared_commits = labels.values().filter(|held| held.len() > 1).count();
+    readable_whole(&text)?;
     written.text = text;
     Ok(written)
+}
+
+/// Refuse evidence tapes reads only part of: more than [`MAX_LINES`] lines
+/// after the header, or a line longer than [`MAX_LINE_BYTES`].
+fn readable_whole(text: &str) -> Result<()> {
+    let records = text.lines().count().saturating_sub(1);
+    if records > MAX_LINES {
+        bail!(
+            "the evidence holds {records} records, and tapes reads at most {MAX_LINES} from \
+             one file; select less work"
+        );
+    }
+    if let Some((at, line)) = text
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.len() > MAX_LINE_BYTES)
+    {
+        bail!(
+            "line {} of the evidence is {} bytes, and tapes reads at most {MAX_LINE_BYTES} \
+             of a line",
+            at + 1,
+            line.len()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn evidence(records: usize, last: usize) -> String {
+        let mut text = String::from("{\"schema\":\"tapes-attribution-evidence/1\"}\n");
+        for _ in 1..records {
+            text.push_str("{\"kind\":\"event\"}\n");
+        }
+        if records > 0 {
+            text.push_str(&"x".repeat(last));
+            text.push('\n');
+        }
+        text
+    }
+
+    // Claim: evidence tapes reads to its end is written, and evidence it
+    // would stop reading early is refused, at tapes' own bounds. Rejects a
+    // file one record or one byte past either bound, and a refusal of one
+    // exactly at it.
+    #[test]
+    fn evidence_past_what_tapes_reads_whole_is_refused() {
+        readable_whole(&evidence(MAX_LINES, MAX_LINE_BYTES)).unwrap();
+        let records = readable_whole(&evidence(MAX_LINES + 1, 16)).unwrap_err();
+        assert!(records.to_string().contains("10001 records"), "{records}");
+        let line = readable_whole(&evidence(3, MAX_LINE_BYTES + 1)).unwrap_err();
+        assert!(line.to_string().starts_with("line 4 "), "{line}");
+    }
 }
