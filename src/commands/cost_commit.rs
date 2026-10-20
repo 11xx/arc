@@ -64,7 +64,7 @@ fn integrated_commit(state: &ChangeState) -> Option<&str> {
 
 /// Every commit a change holds a note for: its current patchset's commits and
 /// the commit that integrated it.
-fn change_commits(ctx: &Ctx, state: &ChangeState) -> Vec<String> {
+pub(super) fn change_commits(ctx: &Ctx, state: &ChangeState) -> Vec<String> {
     let mut commits = patchset_commits(ctx, state);
     if let Some(integrated) = integrated_commit(state) {
         if !commits.iter().any(|commit| commit == integrated) {

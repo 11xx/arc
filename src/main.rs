@@ -2693,7 +2693,8 @@ enum Cmd {
         cmd: RunCmd,
     },
     /// Report what the executor sessions bound to a change's or a journal
-    /// artifact's runs consumed, and retain the facts the report rests on
+    /// artifact's runs consumed, retain the facts the report rests on, and
+    /// export the evidence its sessions are divided by
     Cost {
         #[command(subcommand)]
         cmd: CostCmd,
@@ -4826,6 +4827,72 @@ enum CostCmd {
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
+    },
+    /// Write the evidence `cost show` divides its sessions by to standard
+    /// output, as a `tapes-attribution-evidence/1` file tapes reads
+    ///
+    /// The selection is `cost show`'s: change ids and journal artifacts,
+    /// `--tag`, `--footprint`, `--since`/`--until` and `--all`, read the same
+    /// way. Export `--all` for exact figures: a participant's division rests
+    /// on every piece of work it took part in, not only the selected one.
+    /// The first line is the header, whose producer is `arc/<version>`. A
+    /// session `cost show` gives a figure writes the evidence that decides
+    /// it, every record at tier `bound`. An executor the ledger gives one run
+    /// writes one `binding` with no span, which tapes reads as the whole
+    /// session; one with several runs writes a `binding` per run, its span
+    /// from the dispatch to the recorded `run end`, or to `written_at` while
+    /// the run has none, with the run's role. A participant divided by its
+    /// own events writes one `event` per event, with the role its kind gives
+    /// it; one acting on a single piece of work writes a `binding` with no
+    /// span, with its role when it has one. A participant the ledger does not
+    /// divide, because an item only an event recorded on its behalf names, or
+    /// a ledger record that could not be read, writes nothing and is counted.
+    /// A session `cost show` names without a figure writes nothing and is
+    /// counted. Each record's work is the change id or journal artifact as
+    /// `cost show` names it, as `label`; `commits` holds the change's commits
+    /// as `cost note` finds them (full object names), and is left out for a
+    /// change that has none and for a journal artifact; `repository` is the
+    /// repository's `origin` remote URL without credentials, and is left out
+    /// when there is none or it names a place on this machine. Where a
+    /// dispatch records both the session that dispatched it and the executor
+    /// it bound, one `lineage` record per distinct pair is written, at the
+    /// earliest such dispatch: tier `bound`, `at` the dispatch, `label` the
+    /// binding's handle, and `subject` the change or journal artifact. A
+    /// native child is linked by its recording and writes none. Records are
+    /// ordered by time, then session and work, so two exports of an unchanged
+    /// ledger differ only in `written_at`. Standard error summarizes the
+    /// sessions written, the records by kind, the sessions without a figure,
+    /// the sessions the ledger does not divide, and the runs still open.
+    /// Every session is measured as `cost show` measures it, so the read
+    /// takes as long. Reads the ledger and the recordings and records no
+    /// event; read the file with `tapes usage SESSION --evidence FILE`
+    Evidence {
+        /// Change IDs or unique prefixes, and journal artifacts, as `cost
+        /// show` takes them. Several targets and range selectors select
+        /// their union
+        #[arg(required_unless_present_any = ["tag", "footprint", "since", "until", "all"])]
+        targets: Vec<String>,
+        /// Every change carrying this tag, as `begin --tag` and `arc meta --tag`
+        /// record it; repeat to require several
+        #[arg(long)]
+        tag: Vec<String>,
+        /// Every change and journal item the session `harness:id` was bound
+        /// to or dispatched, and every change with an event of any kind naming
+        /// it, itself or as the `--on-behalf-of` subject. A native child is
+        /// `claude:<parent>::<agent>`
+        #[arg(long, value_name = "HARNESS:ID")]
+        footprint: Option<String>,
+        /// Every change with a ledger event at or after this journal stamp
+        /// (20260101T000000Z) or RFC 3339 timestamp
+        #[arg(long)]
+        since: Option<String>,
+        /// Every change with a ledger event at or before this instant, as
+        /// `--since` reads one
+        #[arg(long)]
+        until: Option<String>,
+        /// Every change in this ledger
+        #[arg(long)]
+        all: bool,
     },
     /// Retain the normalized facts a fresh read of each bound or participating
     /// session gives:
@@ -7081,6 +7148,28 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     commands::show_cost(&ctx, &query, json, detail).map(|_| 0)
                 }
             },
+            CostCmd::Evidence {
+                targets,
+                tag,
+                footprint,
+                since,
+                until,
+                all,
+            } => {
+                let instant = |raw: Option<String>| {
+                    raw.map(|raw| crate::journal::parse_since(&raw)).transpose()
+                };
+                let query = commands::CostQuery {
+                    targets,
+                    tags: tag,
+                    footprint,
+                    since: instant(since)?,
+                    until: instant(until)?,
+                    all,
+                    ..commands::CostQuery::default()
+                };
+                commands::export_cost_evidence(&ctx, &query).map(|_| 0)
+            }
             CostCmd::Note { target, all } => {
                 commands::note_cost(&ctx, target.as_deref(), all).map(|_| 0)
             }

@@ -72,7 +72,8 @@ use clap::ValueEnum;
 pub use config_cmd::check_writable;
 pub(crate) use cost::backend_sets as cost_backend_sets;
 pub use cost::{
-    retain_cost, show_cost, Allocation as CostAllocation, CostQuery, GROUPINGS as COST_GROUPINGS,
+    export_evidence as export_cost_evidence, retain_cost, show_cost, Allocation as CostAllocation,
+    CostQuery, GROUPINGS as COST_GROUPINGS,
 };
 pub use cost_commit::{note_cost, show_commit_cost};
 pub use diff::{diff, DiffArgs};
@@ -147,6 +148,7 @@ pub(crate) const SHARED_READ_COMMANDS: &[&str] = &[
     "stats",
     "resume",
     "cost show",
+    "cost evidence",
     "cost note",
     "workspace inbox",
     "workspace inventory",
@@ -194,6 +196,7 @@ pub(crate) const READ_ONLY_COMMANDS: &[&str] = &[
     "pass list",
     "run list",
     "cost show",
+    "cost evidence",
     "cost note",
     "policy show",
     "policy path",

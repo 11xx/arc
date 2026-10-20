@@ -3910,6 +3910,40 @@ RULES THAT CHANGE WHAT YOU DO
     change carries the same `may not be unique` line. The notes ref is
     local: arc never configures it for push, never adds it to a refspec and
     never pushes it. The command records no ledger event.
+  - `arc cost evidence <change|journal-file>... | --all` writes the evidence
+    `cost show` divides its sessions by to standard output, as a
+    `tapes-attribution-evidence/1` file (UTF-8 JSON Lines) that `tapes usage
+    SESSION --evidence FILE` reads, so tapes gives arc's figure wherever arc's
+    ledger exists. It takes `cost show`'s selection, read the same way.
+    Export `--all` for exact figures: a participant's division rests on every
+    piece of work it took part in, not only the selected one. The first line
+    is the header, with producer `arc/<version>`. A session `cost show` gives
+    a figure writes the evidence that decides it, every record at tier
+    `bound`: an executor the ledger gives one run, one `binding` with no
+    span, the whole session; an executor with several runs, one `binding` per
+    run with a `span` from the dispatch to its recorded `run end`, or to the
+    header's `written_at` while the run has none, and the run's role; a
+    participant divided by its own events, one `event` per event with the
+    role its kind gives it; a participant acting on one piece of work, one
+    `binding` with no span, with its role when its events give it exactly
+    one. A participant the ledger does not divide, because an event recorded
+    on its behalf names an item, or because a ledger record could not be
+    read, writes nothing, as does a session `cost show` names without a
+    figure; standard error counts both. Each record's work is `label`, the
+    change id or journal artifact as `cost show` names it; `commits`, the
+    change's commits as `cost note` finds them, in full, left out for a
+    change that has none and for an artifact; and `repository`, the `origin`
+    remote URL without credentials, left out when there is none or it names
+    a place on this machine. Where a dispatch records both the session that
+    made it and the executor it bound, one `lineage` record per distinct pair
+    is written at the earliest such dispatch, with the binding's handle as
+    `label` and the work as `subject`; a native child is linked by its
+    recording and writes none. Lines are ordered by time, session and work,
+    so two exports of an unchanged ledger differ only in `written_at`.
+    Standard error summarizes the sessions written, the records by kind, the
+    sessions without a figure, the sessions the ledger does not divide, and
+    the runs still open. Every session is measured as `cost show` measures
+    it, and the command records no ledger event.
   - A bounded round records what it deliberately left, so the next round
     inherits a list instead of a memory: `arc run end <dispatch> --outcome
     <o> --reviewed-head <sha> --raised-json <path|-> --deferred-json <path|->`.
@@ -4268,6 +4302,10 @@ SCHEMAS
     `journal-events/2`               events.jsonl, streamed by arc journal events
     `arc-journal-spool/2`            .arc/outbox/<ts>-<kind>-<topic>.json
     `arc-trailer-edits/1`            arc rewrite trailers --edits
+
+  `arc cost evidence` writes `tapes-attribution-evidence/1`, a format tapes
+  owns and versions; this rule counts the shapes arc defines, so that file
+  takes no arc schema string.
 
   Imports accept `arc-bundle/5` and `arc-replica-bundle/2` alongside
   current export formats. Journal imports accept

@@ -1215,6 +1215,7 @@ fn every_read_only_command_reads_past_a_broken_policy() {
         vec!["run", "list", "--json"],
         vec!["cost", "show", "missing", "--json"],
         vec!["cost", "show", "--commit", &merged, "--json"],
+        vec!["cost", "evidence", "missing"],
         vec!["cost", "note", "missing"],
         vec!["policy", "path"],
         vec!["config", "--check-writable", "--json"],

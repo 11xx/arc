@@ -13,6 +13,7 @@
 //! join and is never counted as zero. A total names its quantity kind and is
 //! withheld, refused, or absent rather than understated.
 
+mod evidence;
 mod span;
 
 use super::cost_liveness::{Liveness, Snapshot};
@@ -156,6 +157,10 @@ struct Span {
     forked_from: Option<String>,
     /// The session that spawned the executor as its native child.
     parent: Option<String>,
+    /// The session that recorded the dispatch, when it names one.
+    caller: Option<(String, String)>,
+    /// The delegate's handle for the run, when the binding names one.
+    handle: Option<String>,
     /// The role the binding names; absent reads as implementer.
     role: Option<String>,
     round: Option<usize>,
@@ -522,6 +527,7 @@ pub(super) struct Acting {
 /// facts that map a role to the sessions behind it.
 pub(super) struct CostView {
     pub report: Value,
+    evidence: evidence::Exported,
     pub runs: Vec<ExecutorRun>,
     pub acting: Vec<Acting>,
 }
@@ -536,6 +542,17 @@ pub fn show_cost(ctx: &Ctx, query: &CostQuery, json: bool, detail: bool) -> Resu
     } else {
         print!("{}", super::cost_table::table_text(&view.report));
     }
+    Ok(())
+}
+
+/// Write the evidence the sessions' figures of a query rest on to standard
+/// output, and summarize it on standard error.
+pub fn export_evidence(ctx: &Ctx, query: &CostQuery) -> Result<()> {
+    let view = read_query(ctx, query)?;
+    let producer = format!("arc/{}", env!("CARGO_PKG_VERSION"));
+    let written = evidence::render(ctx, &view.evidence, &producer, chrono::Utc::now())?;
+    print!("{}", written.text);
+    eprint!("{}", written.summary());
     Ok(())
 }
 
@@ -715,6 +732,7 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
         row.attribute(person);
     }
     let outside = outside_sessions(&ledger, &sessions, &unmeasured);
+    let evidence = evidence::collect(&sessions, &ledger, &outside);
     selection.ledger_gaps = read.gaps;
     let mut children = read_all(
         unbound_spawned(&sessions, &bound),
@@ -785,6 +803,7 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
         .collect();
     Ok(CostView {
         report,
+        evidence,
         runs: executor_runs,
         acting,
     })
@@ -1886,6 +1905,12 @@ fn assign(ctx: &Ctx, selection: &mut Selection, events: &[Event]) -> Assigned {
                     .filter(|id| plain_session_id(id))
                     .cloned(),
                 parent: binding.parent_session.clone(),
+                caller: round
+                    .dispatch
+                    .harness
+                    .clone()
+                    .zip(round.dispatch.session.clone()),
+                handle: binding.handle.clone(),
                 role: binding.role.clone(),
                 round: round.round,
                 work: work.clone(),
@@ -3798,8 +3823,9 @@ struct Person {
     membership: BTreeSet<WorkKey>,
     /// Every item it recorded an own event on.
     spanned: BTreeSet<WorkKey>,
-    /// Every event it recorded on those items, with the item.
-    events: Vec<agent_tapes_core::attribution::Event<WorkKey>>,
+    /// Every event it recorded on those items, with the item and the role
+    /// its kind gives it.
+    events: Vec<(agent_tapes_core::attribution::Event<WorkKey>, Option<Role>)>,
     /// What its events on the selected work show it did.
     roles: BTreeSet<Role>,
     /// The models its own events, or the subjects recorded on its behalf,
@@ -3877,11 +3903,14 @@ fn read_ledger(
             let person = ledger.people.entry(key).or_default();
             if own {
                 person.spanned.insert(work.clone());
-                person.events.push(agent_tapes_core::attribution::Event {
-                    at: event.created_at,
-                    work: work.clone(),
-                    tier: Tier::Bound,
-                });
+                person.events.push((
+                    agent_tapes_core::attribution::Event {
+                        at: event.created_at,
+                        work: work.clone(),
+                        tier: Tier::Bound,
+                    },
+                    role,
+                ));
             }
             person.membership.insert(work.clone());
             if !on_selection {
@@ -3943,11 +3972,15 @@ fn span_plans(sessions: &Sessions, ledger: &Ledger) -> BTreeMap<(String, String)
         });
     let participants = ledger
         .participants()
-        .filter(|(_, person)| person.spanned.len() > 1 && !person.spanless())
+        .filter(|(_, person)| person.divided())
         .map(|(key, person)| {
             let plan = Plan {
                 spans: Vec::new(),
-                events: person.events.clone(),
+                events: person
+                    .events
+                    .iter()
+                    .map(|(event, _)| event.clone())
+                    .collect(),
             };
             (key.clone(), plan)
         });
