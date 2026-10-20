@@ -1,28 +1,25 @@
-//! A session's consumption divided among the work its spans cover. The
-//! ledger gives each span: an executor's run from its dispatch to its
-//! recorded end, open while it has none, and a participant's events on one
-//! item, first to last inclusive. The session's timeline is cut at every span
-//! boundary into disjoint segments, each read once, so no request is counted
-//! twice. A segment one item covers is that item's share; one several items
-//! cover, and one no item covers, is nobody's, with a fixed reason.
+//! How arc reads a session's division among the work its ledger spans
+//! cover, through tapes' attribution engine. The ledger gives the evidence:
+//! an executor's run from its dispatch to its recorded end, open while it has
+//! none, and a participant's own events on each item. The engine cuts the
+//! session's timeline into the segments and estimate windows a read takes one
+//! figure for, and divides the figures a read retained among the items. arc
+//! keeps the figure arithmetic and the reasons that come from its ledger.
 
 use super::{WorkKey, CATEGORIES};
 use crate::model::{
     CostCacheWrites, CostConvention, CostDisjoint, CostFacts, CostModelShare, CostPricing,
-    CostRequestTerms, CostSegment,
+    CostRequestTerms, CostSegment, CostSpans,
 };
+use agent_tapes_core::attribution::{
+    self, merge_reasons, sum_amounts, sum_counts, Allocation, Attribution, Basis, Conservation,
+    Cover, Evidence, Figure, Figures, Requests, Take, Tier, Window, ABSENT_CATEGORY,
+};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(super) type Instant = chrono::DateTime<chrono::Utc>;
+pub(super) type Instant = agent_tapes_core::span::Instant;
 
-pub(super) const OVERLAP: &str = "overlap";
-pub(super) const BEFORE: &str = "before first item";
-pub(super) const BETWEEN: &str = "between items";
-pub(super) const AFTER: &str = "after last item";
-pub(super) const UNTIMED: &str = "request time unrecorded";
-pub(super) const NOT_SPLITTABLE: &str = "recorded total not splittable";
-/// Why a share is outside a view's total: the item it belongs to is not selected.
-pub(super) const UNSELECTED: &str = "unselected item";
 pub(super) const UNSUPPORTED: &str = "span reading unsupported";
 pub(super) const RETAINED_MISMATCH: &str = "retained spans do not match the ledger";
 pub(super) const UNMEASURED: &str = "unmeasured";
@@ -31,113 +28,48 @@ pub(super) const INCOMPLETE_MEMBERSHIP: &str = "ledger records are unreadable";
 /// is not divided: those events carry the invoker's instants, not its own.
 pub(super) const ON_BEHALF: &str = "recorded on its behalf";
 
-/// One span the ledger gives a session.
-#[derive(Clone)]
-pub(super) struct ItemSpan {
-    pub work: WorkKey,
-    /// The run's dispatch, for an executor.
-    pub run: Option<String>,
-    pub from: Instant,
-    /// Exclusive; open while a run has no recorded end.
-    pub to: Option<Instant>,
-}
-
-impl ItemSpan {
-    /// A participant's span on one item: its first to its last event there,
-    /// inclusive, so the end is one nanosecond past the last event.
-    pub fn events(work: WorkKey, first: Instant, last: Instant) -> Self {
-        Self {
-            work,
-            run: None,
-            from: first,
-            to: Some(last + chrono::Duration::nanoseconds(1)),
-        }
-    }
-
-    fn covers(&self, from: Option<Instant>, to: Option<Instant>) -> bool {
-        from.is_some_and(|from| self.from <= from)
-            && self.to.is_none_or(|end| to.is_some_and(|to| to <= end))
-    }
-}
-
-/// One disjoint segment `[from, to)` of a session's timeline and the spans
-/// that cover it.
-#[derive(Clone)]
-pub(super) struct Segment {
-    pub from: Option<Instant>,
-    pub to: Option<Instant>,
-    pub work: BTreeSet<WorkKey>,
-    pub runs: BTreeSet<String>,
-}
-
-impl Segment {
-    pub fn work_labels(&self) -> Vec<String> {
-        self.work.iter().map(WorkKey::label).collect()
-    }
-
-    pub fn bounds(&self) -> agent_tapes_core::span::SpanBounds {
-        agent_tapes_core::span::SpanBounds::Time {
-            from: self.from,
-            to: self.to,
-        }
-    }
-
-    /// Whether a retained segment has this definition.
-    pub fn defines(&self, retained: &CostSegment) -> bool {
-        let runs: Vec<String> = self.runs.iter().cloned().collect();
-        retained.bounds() == (self.from, self.to, &self.work_labels()[..], &runs[..])
-    }
-}
-
-/// How a session with several spans is read: its segments, and for a
-/// participant, its own events on each item, which its working-stretch
-/// estimate is cut by.
+/// The evidence the ledger gives one session with several spans: an
+/// executor's runs, or a participant's own events.
 #[derive(Clone, Default)]
 pub(super) struct Plan {
-    pub segments: Vec<Segment>,
-    pub events: Vec<(Instant, WorkKey)>,
+    pub spans: Vec<attribution::Span<WorkKey>>,
+    pub events: Vec<attribution::Event<WorkKey>>,
 }
 
-impl std::ops::Deref for Plan {
-    type Target = [Segment];
+impl Plan {
+    /// The ledger gives the session no spans to divide it by.
+    pub fn is_empty(&self) -> bool {
+        self.spans.is_empty() && self.events.is_empty()
+    }
 
-    fn deref(&self) -> &[Segment] {
-        &self.segments
+    /// The segments and estimate windows a read takes one figure for. A
+    /// participant's segments no item covers are cut by its working
+    /// stretches, whose first stamps are `starts`, where the read has them.
+    pub fn cut(&self, starts: Option<&[Instant]>) -> attribution::Plan<WorkKey> {
+        attribution::Plan::new(&self.spans, &self.events, starts)
     }
 }
 
-/// The session's timeline cut at every boundary of its spans: the segment
-/// before the first boundary, one between each pair, and the one after the
-/// last, each with the spans covering all of it.
-pub(super) fn segments(spans: &[ItemSpan]) -> Vec<Segment> {
-    let cuts: BTreeSet<Instant> = spans
+/// The covering work items of a segment, by their view labels.
+pub(super) fn work_labels(segment: &attribution::Segment<WorkKey>) -> Vec<String> {
+    segment
+        .work
         .iter()
-        .flat_map(|span| std::iter::once(span.from).chain(span.to))
-        .collect();
-    let mut edges: Vec<Option<Instant>> = vec![None];
-    edges.extend(cuts.into_iter().map(Some));
-    edges.push(None);
-    edges
-        .windows(2)
-        .map(|pair| {
-            let (from, to) = (pair[0], pair[1]);
-            let covering: Vec<&ItemSpan> =
-                spans.iter().filter(|span| span.covers(from, to)).collect();
-            Segment {
-                from,
-                to,
-                work: covering.iter().map(|span| span.work.clone()).collect(),
-                runs: covering
-                    .iter()
-                    .filter_map(|span| span.run.clone())
-                    .collect(),
-            }
-        })
+        .map(|cover| cover.work.label())
         .collect()
 }
 
-/// The working-stretch estimate's basis, as figures name it.
-pub(super) const ESTIMATE_BASIS: &str = "working-stretch";
+/// Whether a retained segment has this definition.
+pub(super) fn defines(segment: &attribution::Segment<WorkKey>, retained: &CostSegment) -> bool {
+    retained.bounds()
+        == (
+            segment.from,
+            segment.to,
+            &work_labels(segment)[..],
+            &segment.runs[..],
+        )
+}
+
 /// Why a participant's read estimated nothing: its reader keeps no request
 /// timeline for it.
 pub(super) const TIMELINE_UNAVAILABLE: &str = "request timeline unavailable";
@@ -145,131 +77,169 @@ pub(super) const TIMELINE_UNAVAILABLE: &str = "request timeline unavailable";
 /// another idle gap than the one it asks for.
 pub(super) const RETAINED_IDLE: &str = "retained facts were estimated at another idle gap";
 
-/// One part `[from, to)` of a segment no item covers, as a participant's
-/// working stretches and its own events in them cut it, and the item the
-/// estimate gives it: none for a stretch with no event of the participant.
-#[derive(Clone, Debug, PartialEq)]
-pub(super) struct Window {
-    pub segment: usize,
-    pub from: Option<Instant>,
-    pub to: Option<Instant>,
-    pub work: Option<WorkKey>,
-}
-
-/// The later of two starts, an absent one being the timeline's beginning.
-fn later(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
-    match (a, b) {
-        (Some(a), Some(b)) => Some(a.max(b)),
-        (a, None) | (None, a) => a,
-    }
-}
-
-/// The earlier of two ends, an absent one being the timeline's end.
-fn earlier(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
-    match (a, b) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, None) | (None, a) => a,
-    }
-}
-
-fn nonempty(from: Option<Instant>, to: Option<Instant>) -> bool {
-    from.zip(to).is_none_or(|(from, to)| from < to)
-}
-
-/// The estimate parts of every segment no item covers. Working stretch `i`
-/// holds the requests from its first stamp, `starts[i]`, to the next
-/// stretch's, the first from the timeline's beginning and the last to its
-/// end, as tapes places requests in stretches, and the participant's events
-/// in that window are the stretch's. Within a stretch, the requests up to
-/// and including an event serve that event's item, and those after its last
-/// event serve the same item; a stretch with no event serves none. A
-/// segment several items cover is left to its evidence.
-pub(super) fn estimate_windows(
-    segments: &[Segment],
-    starts: &[Instant],
-    events: &[(Instant, WorkKey)],
-) -> Vec<Window> {
-    let mut pieces: Vec<(Option<Instant>, Option<Instant>, Option<WorkKey>)> = Vec::new();
-    for index in 0..starts.len() {
-        let from = (index > 0).then(|| starts[index]);
-        let to = starts.get(index + 1).copied();
-        let mut inside: Vec<&(Instant, WorkKey)> = events
-            .iter()
-            .filter(|(at, _)| from.is_none_or(|from| *at >= from) && to.is_none_or(|to| *at < to))
-            .collect();
-        inside.sort_by_key(|(at, _)| *at);
-        let Some((_, last)) = inside.last() else {
-            pieces.push((from, to, None));
-            continue;
-        };
-        let mut cursor = from;
-        for (at, work) in &inside {
-            let cut = Some(*at + chrono::Duration::nanoseconds(1));
-            pieces.push((cursor, cut, Some(work.clone())));
-            cursor = cut;
-        }
-        pieces.push((cursor, to, Some(last.clone())));
-    }
-    let mut windows: Vec<Window> = Vec::new();
-    for (index, segment) in segments.iter().enumerate() {
-        if !segment.work.is_empty() {
-            continue;
-        }
-        for (from, to, work) in &pieces {
-            let from = later(segment.from, *from);
-            let to = earlier(segment.to, *to);
-            if !nonempty(from, to) {
-                continue;
-            }
-            match windows.last_mut() {
-                Some(last) if last.segment == index && &last.work == work && last.to == from => {
-                    last.to = to;
-                }
-                _ => windows.push(Window {
-                    segment: index,
-                    from,
-                    to,
+/// The plan retained segments were read along, by their items' view labels.
+/// Each segment keeps its items in the order it retained them, which even
+/// shares are indexed by. A covered segment with a run is an executor's
+/// span; one without is a participant's event window.
+pub(super) fn retained_plan(spans: &CostSpans) -> attribution::Plan<String> {
+    let segments = spans
+        .segments
+        .iter()
+        .map(|segment| attribution::Segment {
+            from: segment.from,
+            to: segment.to,
+            work: segment
+                .work
+                .iter()
+                .map(|work| Cover {
                     work: work.clone(),
-                }),
-            }
-        }
-    }
-    windows
+                    evidence: Evidence {
+                        tier: Tier::Bound,
+                        basis: if segment.runs.is_empty() {
+                            Basis::EventWindow
+                        } else {
+                            Basis::Span
+                        },
+                    },
+                })
+                .collect(),
+            runs: segment.runs.clone(),
+        })
+        .collect();
+    let windows = spans
+        .segments
+        .iter()
+        .enumerate()
+        .flat_map(|(index, segment)| {
+            segment.estimates.iter().map(move |part| Window {
+                segment: index,
+                from: part.from,
+                to: part.to,
+                work: part.work.clone().map(|work| (work, Tier::Estimated)),
+            })
+        })
+        .collect();
+    attribution::Plan { segments, windows }
 }
 
-/// Why a segment is no single item's, or `None` when one item covers it.
-pub(super) fn unattributed_reason(segments: &[CostSegment], index: usize) -> Option<&'static str> {
-    match segments[index].work.len() {
-        1 => None,
-        0 => {
-            let covered = |segment: &CostSegment| !segment.work.is_empty();
-            if !segments[..index].iter().any(covered) {
-                Some(BEFORE)
-            } else if !segments[index + 1..].iter().any(covered) {
-                Some(AFTER)
-            } else {
-                Some(BETWEEN)
-            }
+/// A divided session's retained figures, as the engine divides them.
+pub(super) struct Retained<'a> {
+    session: &'a CostFacts,
+    spans: &'a CostSpans,
+    pub plan: attribution::Plan<String>,
+    pub requests: Requests,
+    figures: Figures<Held<'a>>,
+}
+
+/// One retained figure, or a share of one.
+#[derive(Clone)]
+struct Held<'a>(Cow<'a, CostFacts>);
+
+impl Figure for Held<'_> {
+    fn even_share(&self, shares: usize, index: usize) -> Self {
+        Held(Cow::Owned(even_share(&self.0, shares, index)))
+    }
+}
+
+impl<'a> Retained<'a> {
+    pub fn new(session: &'a CostFacts, spans: &'a CostSpans) -> Self {
+        let held = |facts: &'a CostFacts| Held(Cow::Borrowed(facts));
+        let parts = || spans.segments.iter().flat_map(|segment| &segment.estimates);
+        Self {
+            session,
+            spans,
+            plan: retained_plan(spans),
+            requests: Requests {
+                segments: spans
+                    .segments
+                    .iter()
+                    .map(|segment| segment.requests)
+                    .collect(),
+                windows: parts().map(|part| part.requests).collect(),
+                remainder: spans.remainder_requests,
+            },
+            figures: Figures {
+                segments: spans
+                    .segments
+                    .iter()
+                    .map(|segment| held(&segment.facts))
+                    .collect(),
+                windows: parts().map(|part| held(&part.facts)).collect(),
+                remainder: spans.remainder.as_deref().map(held),
+            },
         }
-        _ => Some(OVERLAP),
+    }
+
+    /// The session's layers, with the allocation `method` asks for.
+    pub fn attribute(&self, method: Option<Allocation>) -> Option<Attribution<String>> {
+        let splittable = !self
+            .spans
+            .whole
+            .as_ref()
+            .is_some_and(|whole| whole.basis != self.session.basis);
+        self.plan.attribute(&self.requests, method, splittable)
+    }
+
+    /// The layer `take` names.
+    pub fn layer(&self, take: Take) -> Option<attribution::Layer<String>> {
+        let method = match take {
+            Take::Allocated(method) => Some(method),
+            Take::Conserving | Take::Estimated => None,
+        };
+        let attribution = self.attribute(method)?;
+        attribution.layer(take).cloned()
+    }
+
+    /// The figure `parts` add up to, in the segments' basis.
+    pub fn sum(&self, parts: &[attribution::Part]) -> Option<CostFacts> {
+        let whole = self.spans.whole.as_deref()?;
+        let held = self.figures.parts(parts)?;
+        let parts: Vec<Part<'_>> = held
+            .iter()
+            .map(|(figure, requests)| (&*figure.0, *requests))
+            .collect();
+        Some(sum_facts(self.session, whole, &parts))
+    }
+
+    /// How the parts of layer `take` stand against the whole in the
+    /// segments' basis.
+    pub fn conservation(&self, take: Take) -> Conservation {
+        let sum = self.layer(take).and_then(|layer| {
+            let parts: Vec<attribution::Part> = layer.parts.iter().map(|(part, _)| *part).collect();
+            self.sum(&parts)
+        });
+        let (Some(whole), Some(sum)) = (self.spans.whole.as_deref(), sum) else {
+            return Conservation {
+                uncompared: vec!["whole".to_string()],
+                ..Conservation::default()
+            };
+        };
+        let mut held = Conservation::default();
+        for category in CATEGORIES {
+            held.compare(
+                category,
+                super::counter(&sum.counters, category),
+                super::counter(&whole.counters, category),
+            );
+        }
+        for category in ["uncached_input", "cache_read", "cache_write", "output"] {
+            let amount = |disjoint: &Option<CostDisjoint>| {
+                disjoint
+                    .as_ref()
+                    .and_then(|disjoint| super::disjoint_amount(disjoint, category))
+            };
+            held.compare(
+                format!("disjoint {category}"),
+                amount(&sum.disjoint),
+                amount(&whole.disjoint),
+            );
+        }
+        held
     }
 }
 
 /// One part of a split figure: its facts and the requests it holds.
 pub(super) type Part<'a> = (&'a CostFacts, u64);
-
-/// A reason that says only that a part holding no request recorded nothing.
-fn empty_part_reason(reason: &str) -> bool {
-    reason == "recorded category is absent"
-}
-
-fn add_tokens(sum: Option<u64>, part: Option<u64>, requests: u64) -> Option<u64> {
-    let part = match part {
-        None if requests == 0 => 0,
-        part => part?,
-    };
-    sum?.checked_add(part)
-}
 
 /// The figure the parts add up to, in the accounting basis of `basis`, with
 /// the session-wide facts of `session`. A part with no request adds zero; a
@@ -283,19 +253,18 @@ pub(super) fn sum_facts(session: &CostFacts, basis: &CostFacts, parts: &[Part<'_
     facts.request_terms = request_terms(session, parts);
     facts.basis.clone_from(&basis.basis);
     facts.coverage.clone_from(&basis.coverage);
-    let zero = Some(0);
     for category in CATEGORIES {
-        let sum = parts.iter().fold(zero, |sum, (part, requests)| {
-            add_tokens(sum, super::counter(&part.counters, category), *requests)
-        });
-        *counter_mut(&mut facts.counters, category) = sum;
+        *counter_mut(&mut facts.counters, category) = sum_counts(
+            parts
+                .iter()
+                .map(|(part, requests)| (super::counter(&part.counters, category), *requests)),
+        );
     }
-    facts.harness_estimate_usd = parts.iter().try_fold(0.0, |sum, (part, requests)| {
-        match part.harness_estimate_usd {
-            None if *requests == 0 => Some(sum),
-            amount => Some(sum + amount?),
-        }
-    });
+    facts.harness_estimate_usd = sum_amounts(
+        parts
+            .iter()
+            .map(|(part, requests)| (part.harness_estimate_usd, *requests)),
+    );
     let convention = basis
         .disjoint
         .as_ref()
@@ -316,21 +285,11 @@ pub(super) fn sum_facts(session: &CostFacts, basis: &CostFacts, parts: &[Part<'_
     }
     for category in CATEGORIES {
         if super::counter(&facts.counters, category).is_none() {
-            merge_reasons(
-                &mut gaps,
-                category,
-                &["recorded category is absent".to_string()],
-                1,
-            );
+            merge_reasons(&mut gaps, category, &[ABSENT_CATEGORY.to_string()], 1);
         }
     }
     if facts.harness_estimate_usd.is_none() {
-        merge_reasons(
-            &mut gaps,
-            "usd",
-            &["recorded category is absent".to_string()],
-            1,
-        );
+        merge_reasons(&mut gaps, "usd", &[ABSENT_CATEGORY.to_string()], 1);
     }
     facts.quantity_gaps = Some(gaps);
     let priced: Vec<&CostPricing> = parts
@@ -443,25 +402,24 @@ pub(super) fn sum_disjoint(
     convention: CostConvention,
     parts: &[(Option<&CostDisjoint>, u64)],
 ) -> CostDisjoint {
-    let zero = Some(0);
     let category = |name: &str| {
-        parts.iter().fold(zero, |sum, (part, requests)| {
+        sum_counts(parts.iter().map(|(part, requests)| {
             let amount = part.and_then(|disjoint| match name {
                 "uncached_input" => disjoint.uncached_input,
                 "cache_read" => disjoint.cache_read,
                 "output" => disjoint.output,
                 _ => disjoint.reasoning,
             });
-            add_tokens(sum, amount, *requests)
-        })
+            (amount, *requests)
+        }))
     };
     let bucket = |pick: fn(&CostCacheWrites) -> u64| {
-        parts.iter().fold(zero, |sum, (part, requests)| {
+        sum_counts(parts.iter().map(|(part, requests)| {
             let amount = part
                 .and_then(|disjoint| disjoint.cache_write.as_ref())
                 .map(pick);
-            add_tokens(sum, amount, *requests)
-        })
+            (amount, *requests)
+        }))
     };
     let writes = bucket(|writes| writes.ephemeral_5m)
         .zip(bucket(|writes| writes.ephemeral_1h))
@@ -494,24 +452,6 @@ pub(super) fn sum_disjoint(
     }
 }
 
-fn merge_reasons(
-    gaps: &mut BTreeMap<String, Vec<String>>,
-    name: &str,
-    reasons: &[String],
-    requests: u64,
-) {
-    for reason in reasons {
-        if requests == 0 && empty_part_reason(reason) {
-            continue;
-        }
-        let held = gaps.entry(name.to_string()).or_default();
-        if !held.contains(reason) {
-            held.push(reason.clone());
-            held.sort();
-        }
-    }
-}
-
 fn counter_mut<'a>(
     counters: &'a mut crate::model::CostCounters,
     category: &str,
@@ -529,57 +469,8 @@ fn counter_mut<'a>(
 /// and disjoint categories they do not add up to, and those one side leaves
 /// unknown, which cannot be compared. A category neither side records is
 /// neither.
-#[derive(Default)]
-pub(super) struct Conservation {
-    pub differs: Vec<String>,
-    pub uncompared: Vec<String>,
-}
-
-pub(super) fn conservation(session: &CostFacts, spans: &crate::model::CostSpans) -> Conservation {
-    let mut held = Conservation::default();
-    let Some(whole) = spans.whole.as_deref() else {
-        held.uncompared.push("whole".to_string());
-        return held;
-    };
-    let parts: Vec<Part<'_>> = spans
-        .segments
-        .iter()
-        .map(|segment| (&*segment.facts, segment.requests))
-        .chain(
-            spans
-                .remainder
-                .as_deref()
-                .map(|remainder| (remainder, spans.remainder_requests)),
-        )
-        .collect();
-    let sum = sum_facts(session, whole, &parts);
-    let mut compare = |name: String, pair: (Option<u64>, Option<u64>)| match pair {
-        (Some(parts), Some(total)) if parts != total => held.differs.push(name),
-        (Some(_), None) | (None, Some(_)) => held.uncompared.push(name),
-        _ => {}
-    };
-    for category in CATEGORIES {
-        compare(
-            category.to_string(),
-            (
-                super::counter(&sum.counters, category),
-                super::counter(&whole.counters, category),
-            ),
-        );
-    }
-    let categories = ["uncached_input", "cache_read", "cache_write", "output"];
-    for category in categories {
-        let amount = |disjoint: &Option<CostDisjoint>| {
-            disjoint
-                .as_ref()
-                .and_then(|disjoint| super::disjoint_amount(disjoint, category))
-        };
-        compare(
-            format!("disjoint {category}"),
-            (amount(&sum.disjoint), amount(&whole.disjoint)),
-        );
-    }
-    held
+pub(super) fn conservation(session: &CostFacts, spans: &CostSpans) -> Conservation {
+    Retained::new(session, spans).conservation(Take::Conserving)
 }
 
 /// The requests the parts hold, one by one where every part with requests
@@ -624,9 +515,7 @@ fn request_terms(session: &CostFacts, parts: &[Part<'_>]) -> CostRequestTerms {
 /// share is the quotient, and the first shares take one token each of the
 /// remainder, so the shares add up to the figure.
 pub(super) fn even_share(facts: &CostFacts, shares: usize, index: usize) -> CostFacts {
-    let shares = shares.max(1) as u64;
-    let index = index as u64;
-    let split = |count: u64| count / shares + u64::from(index < count % shares);
+    let split = |count: u64| attribution::even_split(count, shares, index);
     let mut share = facts.clone();
     for category in CATEGORIES {
         let slot = counter_mut(&mut share.counters, category);
@@ -634,7 +523,7 @@ pub(super) fn even_share(facts: &CostFacts, shares: usize, index: usize) -> Cost
     }
     share.harness_estimate_usd = facts
         .harness_estimate_usd
-        .map(|amount| amount / shares as f64);
+        .map(|amount| attribution::even_amount(amount, shares));
     // A share of each request is no request of its own.
     share.request_terms.requests = None;
     let scale = |disjoint: &mut CostDisjoint| {
@@ -664,106 +553,11 @@ pub(super) fn even_share(facts: &CostFacts, shares: usize, index: usize) -> Cost
 mod tests {
     use super::*;
 
-    fn at(minute: u32) -> Instant {
-        chrono::DateTime::parse_from_rfc3339(&format!("2026-01-01T10:{minute:02}:00Z"))
-            .unwrap()
-            .with_timezone(&chrono::Utc)
-    }
-
-    fn span(work: &str, from: u32, to: Option<u32>) -> ItemSpan {
-        ItemSpan {
-            work: WorkKey::Change(work.to_string()),
-            run: None,
-            from: at(from),
-            to: to.map(at),
-        }
-    }
-
-    #[test]
-    fn segments_cut_the_timeline_at_every_boundary_and_never_share_a_request() {
-        let cut = segments(&[
-            span("a", 1, Some(5)),
-            span("b", 3, Some(8)),
-            span("c", 9, None),
-        ]);
-        let covered: Vec<Vec<String>> = cut.iter().map(Segment::work_labels).collect();
-        assert_eq!(
-            covered,
-            [
-                vec![],
-                vec!["change:a".to_string()],
-                vec!["change:a".to_string(), "change:b".to_string()],
-                vec!["change:b".to_string()],
-                vec![],
-                vec!["change:c".to_string()],
-            ]
-        );
-        assert_eq!(cut.first().unwrap().from, None);
-        assert_eq!(cut.last().unwrap().to, None);
-        for pair in cut.windows(2) {
-            assert_eq!(pair[0].to, pair[1].from);
-        }
-    }
-
     fn facts(input: u64) -> CostFacts {
         serde_json::from_value(serde_json::json!({
             "reader": "r", "calculation": "c", "frontier": 0, "counters": {"input": input},
         }))
         .unwrap()
-    }
-
-    // Claim: a participant's events cut the segments no item covers within
-    // each working stretch: requests up to an event serve its item, those
-    // after a stretch's last event serve the same item, a stretch with no
-    // event serves none, and a segment one item covers is not cut. Rejects
-    // an estimate that crosses an idle gap or touches measured segments.
-    #[test]
-    fn working_stretches_and_events_cut_the_uncovered_segments() {
-        let change = |name: &str| WorkKey::Change(name.to_string());
-        let plain = segments(&[
-            ItemSpan::events(change("a"), at(20), at(20)),
-            ItemSpan::events(change("b"), at(50), at(50)),
-        ]);
-        let events = vec![(at(20), change("a")), (at(50), change("b"))];
-        let nanosecond = chrono::Duration::nanoseconds(1);
-        // One stretch from 10:00, and another from 10:40 with no event of its
-        // own before the second verdict at 10:50.
-        let windows = estimate_windows(&plain, &[at(0), at(40)], &events);
-        let cut: Vec<(Option<Instant>, Option<Instant>, Option<String>)> = windows
-            .iter()
-            .map(|window| {
-                (
-                    window.from,
-                    window.to,
-                    window.work.as_ref().map(WorkKey::label),
-                )
-            })
-            .collect();
-        assert_eq!(
-            cut,
-            vec![
-                (None, Some(at(20)), Some("change:a".to_string())),
-                (
-                    Some(at(20) + nanosecond),
-                    Some(at(40)),
-                    Some("change:a".to_string())
-                ),
-                (Some(at(40)), Some(at(50)), Some("change:b".to_string())),
-                (
-                    Some(at(50) + nanosecond),
-                    None,
-                    Some("change:b".to_string())
-                ),
-            ]
-        );
-        assert!(windows
-            .iter()
-            .all(|window| plain[window.segment].work.is_empty()));
-        // A stretch with no event of the participant serves no item.
-        let windows = estimate_windows(&plain, &[at(0), at(30), at(45)], &events);
-        assert!(windows.iter().any(|window| window.from == Some(at(30))
-            && window.to == Some(at(45))
-            && window.work.is_none()));
     }
 
     // Claim: a split whose segment figures exceed the whole, as a counter
