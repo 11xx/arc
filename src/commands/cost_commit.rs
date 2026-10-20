@@ -245,7 +245,7 @@ fn acting_role(trailer: &str) -> &'static str {
 }
 
 /// One session behind a trailer, with its whole figure as the change view
-/// shares it.
+/// shares it and the status word the change's table gives its row.
 fn session_entry(report: &Value, change_key: &str, key: &str, kind: &str) -> Value {
     let row = report["sessions"]
         .as_array()
@@ -253,8 +253,14 @@ fn session_entry(report: &Value, change_key: &str, key: &str, kind: &str) -> Val
         .flatten()
         .find(|row| row["key"] == key);
     let Some(row) = row else {
-        return json!({"key": key, "kind": kind, "measurement": "unmeasured"});
+        return json!({"key": key, "kind": kind, "status": "unmeasured", "measurement": "unmeasured"});
     };
+    let status = report["table"]["rows"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|row| row["key"] == key)
+        .map_or(Value::Null, |row| row["status"].clone());
     let item = report["work"]
         .as_array()
         .into_iter()
@@ -272,6 +278,7 @@ fn session_entry(report: &Value, change_key: &str, key: &str, kind: &str) -> Val
         "kind": row["kind"],
         "per_run": row["per_run"],
         "shared": shared,
+        "status": status,
         "measurement": row["measurement"]["status"],
         "source": row["measurement"]["source"],
         "totals": row["totals"],
@@ -571,15 +578,10 @@ fn view_text(view: &Value, detail: bool) -> String {
         for session in &sessions {
             emit!(
                 out,
-                "    {} {}  {}{}{}",
+                "    {} {}  {}{}",
                 session["kind"].as_str().unwrap_or_default(),
                 session["key"].as_str().unwrap_or_default(),
-                session["measurement"].as_str().unwrap_or_default(),
-                if session["shared"] == true {
-                    "  shared"
-                } else {
-                    ""
-                },
+                session["status"].as_str().unwrap_or_default(),
                 session["reason"]
                     .as_str()
                     .map_or(String::new(), |reason| format!(": {reason}"))

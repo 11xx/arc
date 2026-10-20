@@ -4730,7 +4730,9 @@ enum CostCmd {
     /// role of the trailer's harness with no such model is listed unmatched
     /// (`unestablished`). A matching session's figure is
     /// its whole figure, shared exactly as the change view shares it, with
-    /// the change's share beside it when the view divides the session. A
+    /// the change's share beside it when the view divides the session, and
+    /// its `status` is the word the change's table gives its row, beside its
+    /// `measurement` status. A
     /// trailer no recorded session answers and no session is unmatched for
     /// reads `no session recorded`, never zero. A
     /// commit no change records answers `no change records this commit`,

@@ -3863,7 +3863,10 @@ RULES THAT CHANGE WHAT YOU DO
     model of its own is established`, rather than matched by a guess. A
     matching session's figure is its whole figure, shared exactly as the
     change view shares it, with the change's share beside it when the view
-    divides the session. A trailer no recorded session answers, such as a
+    divides the session, and its `status` is the word the change's table
+    gives its row (`complete`, `subtotal`, `split ×N`, `unmeasured`, ...);
+    `measurement` keeps whether the reader's counters cover its recording.
+    A trailer no recorded session answers, such as a
     person's or another model's, reads `no session recorded` when no
     session is unmatched, never zero. A commit no change records answers
     `no change records this commit`, shows no figure and succeeds. The lookup

@@ -4,7 +4,8 @@
 //! role beside the role its binding names; and a session-shaped subject
 //! nothing on this machine locates, a Claude cloud session's included, is
 //! still named, unmeasured, so the figures it would join say they are
-//! incomplete.
+//! incomplete. A commit view describes a session's figure with the word its
+//! change's table uses.
 //! Every recording is written into the fixture's own home, named as its
 //! harness names it.
 
@@ -432,4 +433,48 @@ fn a_claude_cloud_session_subject_nothing_locates_is_named_unmeasured() {
         "{outside:#}"
     );
     assert_eq!(view["table"]["total"]["status"], "withheld", "{view:#}");
+}
+
+/// Claim: a commit view names each session's figure with the one status
+/// word the change's table gives its row, in its JSON `status` and on its
+/// text line, and keeps the measurement status beside it. Rejects printing
+/// the measurement status in its place, which gives the same figure another
+/// word than the table's.
+#[test]
+fn a_commit_view_states_a_session_s_figure_as_the_table_does() {
+    let repo = Repo::new();
+    pi_recording(&repo, LEAD, 7);
+    codex_recording(&repo, REVIEWER, "review-model", 5000);
+    let (change, worktree) = snapshotted(
+        &repo,
+        "worded",
+        "feat: worded\n\nReviewed-by: codex:review-model#high",
+    );
+    integrate(&repo, &worktree, "worded");
+    audit_for(&repo, &change, &format!("codex:{REVIEWER}"));
+
+    let key = format!("codex:{REVIEWER}");
+    let commit = commit_view(&repo, &worktree);
+    let table_status = table_row(&commit["cost"], &key)["status"].clone();
+    let measurement = session(&commit["cost"], &key).unwrap()["measurement"]["status"].clone();
+    assert_ne!(
+        table_status, measurement,
+        "the fixture's figure must tell the two apart"
+    );
+    let reviewed = commit_role(&commit, "Reviewed-by");
+    let entry = &reviewed["sessions"][0];
+    assert_eq!(entry["key"], key, "{reviewed:#}");
+    assert_eq!(entry["status"], table_status, "{reviewed:#}");
+    assert_eq!(entry["measurement"], measurement, "{reviewed:#}");
+
+    let sha = git_out(&worktree, &["rev-parse", "HEAD"]);
+    let text = stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "show", "--commit", &sha]),
+    );
+    let line = format!("participant {key}  {}", table_status.as_str().unwrap());
+    assert!(
+        text.lines().any(|held| held.trim() == line),
+        "{line}\n{text}"
+    );
 }
