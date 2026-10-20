@@ -3738,10 +3738,13 @@ fn subject_of(event: &Event) -> Option<((String, String), Option<String>)> {
 const NOT_LOCATED: &str = "not located on this machine";
 
 /// Whether `id` has the shape `harness` gives a session id, so it names no
-/// model, person or label: a UUID, as Claude, Codex and Pi write one, or an
-/// OpenCode `ses_…`.
+/// model, person or label: a UUID, as Claude, Codex and Pi write one, a
+/// Claude cloud session's `cse_…`, or an OpenCode `ses_…`.
 fn session_shaped(harness: &str, id: &str) -> bool {
+    let cloud =
+        |rest: &str| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_alphanumeric());
     crate::coordinate::is_session_id(id, None)
+        || (harness == "claude" && id.strip_prefix("cse_").is_some_and(cloud))
         || (harness == "opencode" && id.strip_prefix("ses_").is_some_and(|rest| !rest.is_empty()))
 }
 

@@ -4613,8 +4613,8 @@ enum CostCmd {
     /// tapes reader locates the id (an OpenCode `ses_…`, a Pi id as its
     /// recording names it, a Claude or Codex UUID), when that store cannot
     /// answer, when the ledger retains facts for it, or when the id is shaped
-    /// as its harness shapes a session id (a UUID, an OpenCode `ses_…`)
-    /// though nothing on this machine locates it, which leaves a participant
+    /// as its harness shapes a session id (a UUID, a Claude cloud session's
+    /// `cse_…`, an OpenCode `ses_…`) though nothing on this machine locates it, which leaves a participant
     /// without a figure (`not located on this machine`); a person, a label, a
     /// `harness:model` or any other id nothing locates names none. It is divided by its span on each work item; one with
     /// several members, one of which only events recorded on its behalf name,

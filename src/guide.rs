@@ -3652,7 +3652,8 @@ RULES THAT CHANGE WHAT YOU DO
     `ses_…`, a Pi id as its recording names it, a Claude or Codex UUID),
     when that harness's store cannot answer, when the ledger retains facts
     for it, or when the id is shaped as that harness shapes a session id (a
-    UUID, an OpenCode `ses_…`) though nothing on this machine locates it:
+    UUID, a Claude cloud session's `cse_…`, an OpenCode `ses_…`) though
+    nothing on this machine locates it:
     such a session is a participant without a figure, `not located on this
     machine`, so the figures it would join say they are incomplete. A
     subject naming a person, a label, a `harness:model`, or any other id no

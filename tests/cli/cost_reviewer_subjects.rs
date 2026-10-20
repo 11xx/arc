@@ -2,8 +2,9 @@
 //! `harness:session:model#effort (label)` is the session it names, with the
 //! model it declares; a bound session's own verdicts give it the reviewer
 //! role beside the role its binding names; and a session-shaped subject
-//! nothing on this machine locates is still named, unmeasured, so the
-//! figures it would join say they are incomplete.
+//! nothing on this machine locates, a Claude cloud session's included, is
+//! still named, unmeasured, so the figures it would join say they are
+//! incomplete.
 //! Every recording is written into the fixture's own home, named as its
 //! harness names it.
 
@@ -15,6 +16,8 @@ const REVIEWER: &str = "019a0000-0000-7000-8000-0000000000c1";
 const EXECUTOR: &str = "019a0000-0000-4000-8000-0000000000e1";
 /// A Codex session id no recording in the fixture's home holds.
 const ELSEWHERE: &str = "019a0000-0000-7000-8000-0000000000f9";
+/// A synthetic Claude cloud session id, shaped as Claude writes one.
+const CLOUD: &str = "cse_FixtureCloudSessionAbc12";
 
 fn write_lines(path: &Path, lines: &[Value]) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -399,4 +402,34 @@ fn a_session_subject_nothing_locates_is_named_unmeasured() {
         "unmeasured",
         "{view:#}"
     );
+}
+
+/// Claim: a Claude cloud session recorded as a subject, `claude:cse_…`,
+/// names a session: nothing on this machine holds its recording, so it is
+/// an unmeasured participant, `not located on this machine`, and the
+/// change's total is withheld. Rejects reading only UUIDs as Claude session
+/// ids, which drops the cloud reviewer and reports the lead's figure as the
+/// change's whole consumption.
+#[test]
+fn a_claude_cloud_session_subject_nothing_locates_is_named_unmeasured() {
+    let repo = Repo::new();
+    pi_recording(&repo, LEAD, 7);
+    let (change, worktree) = snapshotted(&repo, "cloud", "feat: cloud");
+    integrate(&repo, &worktree, "cloud");
+    let subject = format!("claude:{CLOUD}");
+    audit_for(&repo, &change, &subject);
+
+    let view = report(&repo, &change);
+    assert_eq!(
+        session_keys(&view),
+        vec![subject.clone(), format!("pi:{LEAD}")],
+        "{view:#}"
+    );
+    let outside =
+        outside_session(&view, &subject).unwrap_or_else(|| panic!("no outside entry: {view:#}"));
+    assert_eq!(
+        outside["reason"], "not located on this machine",
+        "{outside:#}"
+    );
+    assert_eq!(view["table"]["total"]["status"], "withheld", "{view:#}");
 }
