@@ -5,7 +5,7 @@
 //! nothing on this machine locates, a Claude cloud session's included, is
 //! still named, unmeasured, so the figures it would join say they are
 //! incomplete. A commit view describes a session's figure with the word its
-//! change's table uses.
+//! change's table uses, and a coverage reason reads as prose.
 //! Every recording is written into the fixture's own home, named as its
 //! harness names it.
 
@@ -19,6 +19,8 @@ const EXECUTOR: &str = "019a0000-0000-4000-8000-0000000000e1";
 const ELSEWHERE: &str = "019a0000-0000-7000-8000-0000000000f9";
 /// A synthetic Claude cloud session id, shaped as Claude writes one.
 const CLOUD: &str = "cse_FixtureCloudSessionAbc12";
+/// A Codex session whose counters restart inside its recording.
+const RESTARTED: &str = "019a0000-0000-7000-8000-0000000000d1";
 
 fn write_lines(path: &Path, lines: &[Value]) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -69,6 +71,34 @@ fn codex_recording(repo: &Repo, id: &str, model: &str, input: u64) {
             json!({"timestamp": "2026-01-01T10:00:05Z", "type": "event_msg", "payload": {"type": "task_complete"}}),
         ],
     );
+}
+
+/// A Codex rollout of two turns whose cumulative counters restart at the
+/// second: its total falls from `5000 + 50` to `100 + 50`.
+fn codex_restarted_recording(repo: &Repo, id: &str) {
+    let path = repo
+        .home
+        .join(".codex/sessions/2026/01/01")
+        .join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl"));
+    let usage = |input: u64| {
+        json!({"input_tokens": input, "cached_input_tokens": 0, "output_tokens": 50,
+            "reasoning_output_tokens": 10, "total_tokens": input + 50})
+    };
+    let mut lines = vec![
+        json!({"timestamp": "2026-01-01T10:00:00Z", "type": "session_meta", "payload": {"id": id, "session_id": id, "timestamp": "2026-01-01T10:00:00Z", "cwd": "/fixture/project", "model_provider": "fixture"}}),
+    ];
+    for (turn, (total, last)) in [(5000, 5000), (100, 100)].into_iter().enumerate() {
+        let at = |second: usize| format!("2026-01-01T10:0{turn}:0{second}Z");
+        lines.extend([
+            json!({"timestamp": at(1), "type": "turn_context", "payload": {"cwd": "/fixture/project", "model": "review-model", "effort": "high"}}),
+            json!({"timestamp": at(2), "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Review."}]}}),
+            json!({"timestamp": at(3), "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Reviewed."}]}}),
+            json!({"timestamp": at(4), "type": "event_msg", "payload": {"type": "token_count", "info": {
+                "total_token_usage": usage(total), "last_token_usage": usage(last), "model_context_window": 1000}, "rate_limits": null}}),
+            json!({"timestamp": at(5), "type": "event_msg", "payload": {"type": "task_complete"}}),
+        ]);
+    }
+    write_lines(&path, &lines);
 }
 
 fn event_id(output: &str) -> String {
@@ -476,5 +506,88 @@ fn a_commit_view_states_a_session_s_figure_as_the_table_does() {
     assert!(
         text.lines().any(|held| held.trim() == line),
         "{line}\n{text}"
+    );
+}
+
+/// Claim: a figure whose counters restarted inside the session names that
+/// in words, `the counters cover only what followed their last reset, not
+/// the whole session`. Rejects a reason that interpolates the kebab
+/// coverage name, `the counters cover the since-reset, …`.
+#[test]
+fn a_counter_reset_reads_as_prose() {
+    let repo = Repo::new();
+    pi_recording(&repo, LEAD, 7);
+    codex_restarted_recording(&repo, RESTARTED);
+    let (change, worktree) = snapshotted(&repo, "restarted", "feat: restarted");
+    integrate(&repo, &worktree, "restarted");
+    audit_for(&repo, &change, &format!("codex:{RESTARTED}"));
+
+    let view = report(&repo, &change);
+    let row = session(&view, &format!("codex:{RESTARTED}")).unwrap();
+    assert_eq!(row["measurement"]["coverage"], "since-reset", "{row:#}");
+    let reasons = &row["measurement"]["reasons"];
+    assert!(
+        reasons.as_array().unwrap().iter().any(|reason| reason
+            == "the counters cover only what followed their last reset, not the whole session"),
+        "{reasons:#}"
+    );
+    let detail = stdout(
+        repo.arc(&repo.root)
+            .args(["cost", "show", "--detail", &change]),
+    );
+    assert!(!detail.contains("the since-reset"), "{detail}");
+}
+
+/// Every file under `dir` holding `from`, with `from` replaced by `to`;
+/// returns how many held it.
+fn rewrite_under(dir: &Path, from: &str, to: &str) -> usize {
+    let mut rewritten = 0;
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            rewritten += rewrite_under(&path, from, to);
+        } else if let Ok(text) = fs::read_to_string(&path) {
+            if text.contains(from) {
+                fs::write(&path, text.replace(from, to)).unwrap();
+                rewritten += 1;
+            }
+        }
+    }
+    rewritten
+}
+
+/// Claim: facts retained with a coverage reason in its kebab wording read
+/// back in words once the recording is gone. Rejects passing the retained
+/// string through, which prints `the counters cover the since-reset, …`.
+#[test]
+fn a_retained_kebab_coverage_reason_reads_as_prose() {
+    let repo = Repo::new();
+    pi_recording(&repo, LEAD, 7);
+    codex_restarted_recording(&repo, RESTARTED);
+    let (change, worktree) = snapshotted(&repo, "retained", "feat: retained");
+    integrate(&repo, &worktree, "retained");
+    audit_for(&repo, &change, &format!("codex:{RESTARTED}"));
+    lead(&repo, &repo.root)
+        .args(["cost", "retain", &change])
+        .assert()
+        .success();
+    let prose = "the counters cover only what followed their last reset, not the whole session";
+    let kebab = "the counters cover the since-reset, not the whole session";
+    let ledger = repo.root.join(".git/arc");
+    rewrite_under(&ledger, prose, kebab);
+    assert!(
+        rewrite_under(&ledger, kebab, kebab) > 0,
+        "the retained facts should hold the kebab wording"
+    );
+    fs::remove_dir_all(repo.home.join(".codex/sessions")).unwrap();
+
+    let view = report(&repo, &change);
+    let row = session(&view, &format!("codex:{RESTARTED}")).unwrap();
+    assert_eq!(row["measurement"]["source"], "retained", "{row:#}");
+    let reasons = row["measurement"]["reasons"].as_array().unwrap();
+    assert!(reasons.iter().any(|reason| reason == prose), "{reasons:#?}");
+    assert!(
+        !reasons.iter().any(|reason| reason == kebab),
+        "{reasons:#?}"
     );
 }

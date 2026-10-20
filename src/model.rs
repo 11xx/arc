@@ -3390,6 +3390,24 @@ pub(crate) fn portable_lineage_reason(reason: &str) -> bool {
     ) || counted_reason(reason, " lineage notes")
 }
 
+/// Why a figure whose counters cover only the window the read reached is
+/// incomplete.
+pub(crate) const COUNTERS_READ_WINDOW: &str =
+    "the counters cover only the window the read reached, not the whole session";
+/// Why a figure whose counters restarted inside the session is incomplete.
+pub(crate) const COUNTERS_SINCE_RESET: &str =
+    "the counters cover only what followed their last reset, not the whole session";
+
+/// The accounting coverage a retained reason names in an earlier wording,
+/// which retained facts may still hold.
+pub(crate) fn retained_coverage_reason(reason: &str) -> Option<&'static str> {
+    match reason {
+        "the counters cover the read-window, not the whole session" => Some("read-window"),
+        "the counters cover the since-reset, not the whole session" => Some("since-reset"),
+        _ => None,
+    }
+}
+
 pub(crate) fn portable_cost_reason(reason: &str) -> bool {
     matches!(
         reason,
@@ -3397,10 +3415,12 @@ pub(crate) fn portable_cost_reason(reason: &str) -> bool {
             | "the read was bounded and withheld part of the source"
             | "the reader established no source frontier"
             | "abandoned branch consumption is outside the pinned reader's active branch"
-            | "the counters cover the read-window, not the whole session"
-            | "the counters cover the since-reset, not the whole session"
+            | COUNTERS_READ_WINDOW
+            | COUNTERS_SINCE_RESET
+            | "the counters cover less than the whole session"
             | "retained measurement gap"
-    ) || counted_reason(reason, " source read gaps")
+    ) || retained_coverage_reason(reason).is_some()
+        || counted_reason(reason, " source read gaps")
         || counted_reason(reason, " selection warnings")
 }
 

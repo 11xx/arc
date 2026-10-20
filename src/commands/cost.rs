@@ -22,10 +22,11 @@ use super::*;
 use crate::model::{
     plain_session_id, portable_coordinate, portable_cost_metadata, portable_cost_reason,
     portable_lineage_reason, portable_liveness, portable_quantity_reason, portable_selection,
-    CostCacheWrites, CostConvention, CostCounterResidual, CostCounters, CostDisjoint, CostEstimate,
-    CostEstimatePart, CostEventCoverage, CostEventIdentity, CostEvents, CostFacts, CostLineage,
-    CostListPrice, CostNativeChild, CostPricing, CostRelative, CostRequestTerms, CostResidual,
-    CostResidualSource, CostSegment, CostSpans, Event, Payload, DISJOINT_CATEGORIES,
+    retained_coverage_reason, CostCacheWrites, CostConvention, CostCounterResidual, CostCounters,
+    CostDisjoint, CostEstimate, CostEstimatePart, CostEventCoverage, CostEventIdentity, CostEvents,
+    CostFacts, CostLineage, CostListPrice, CostNativeChild, CostPricing, CostRelative,
+    CostRequestTerms, CostResidual, CostResidualSource, CostSegment, CostSpans, Event, Payload,
+    COUNTERS_READ_WINDOW, COUNTERS_SINCE_RESET, DISJOINT_CATEGORIES,
 };
 use agent_tapes_core::measurement::{MeasurementCompleteness, MeasurementReason};
 use serde_json::{json, Value};
@@ -2690,7 +2691,9 @@ fn sanitized_facts(held: &CostFacts) -> CostFacts {
     }
     qualify_price(&mut facts);
     for reason in &mut facts.incomplete {
-        if !portable_cost_reason(reason) {
+        if let Some(coverage) = retained_coverage_reason(reason) {
+            *reason = partial_coverage(coverage).to_string();
+        } else if !portable_cost_reason(reason) {
             *reason = "retained measurement gap".to_string();
         }
     }
@@ -2900,6 +2903,16 @@ fn served_model(view: &agent_tapes_core::usage::UsageView) -> Option<String> {
     portable_coordinate(&coordinate).then_some(coordinate)
 }
 
+/// Why a figure whose counters cover less than the whole session is
+/// incomplete, in words for each accounting coverage.
+fn partial_coverage(coverage: &str) -> &'static str {
+    match coverage {
+        "read-window" => COUNTERS_READ_WINDOW,
+        "since-reset" => COUNTERS_SINCE_RESET,
+        _ => "the counters cover less than the whole session",
+    }
+}
+
 fn normalize(
     view: &agent_tapes_core::usage::UsageView,
     selection_warnings: usize,
@@ -2928,9 +2941,7 @@ fn normalize(
         .as_deref()
         .filter(|coverage| *coverage != "session")
     {
-        incomplete.push(format!(
-            "the counters cover the {coverage}, not the whole session"
-        ));
+        incomplete.push(partial_coverage(coverage).to_string());
     }
     if view.truncated || !view.truncation.is_empty() {
         incomplete.push("the read was bounded and withheld part of the source".to_string());
