@@ -1891,13 +1891,16 @@ enum Cmd {
     /// Require publication gates at a local target branch's current head.
     /// Use this guard from push and release tooling before publishing that revision.
     Publication {
+        /// Local target branch whose committed gate declarations apply
         #[arg(long)]
         target: String,
         /// Require the full commit ID queued by the caller's push or release
         #[arg(long)]
         revision: Option<String>,
+        /// Gate profile required for publication
         #[arg(long, default_value = "local")]
         profile: String,
+        /// Reuse a complete publication pass at the same tree and environment
         #[arg(long)]
         skip_green: bool,
     },
