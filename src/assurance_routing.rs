@@ -12,12 +12,13 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::Read;
 use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 const FRONTIER_SCHEMA: &str = "agent-routing-frontier/1";
 const REFUSAL_SCHEMA: &str = "agent-routing-refusal/1";
 const DEADLINE: Duration = Duration::from_secs(30);
+const RESPONSE_BYTES: u64 = 1024 * 1024;
 
 /// Why no answer could be had, as a fixed token.
 pub type Reason = &'static str;
@@ -104,7 +105,7 @@ enum Refused {
     Author,
     /// A reviewer coordinate was refused.
     Reviewer,
-    Other,
+    Other(Reason),
 }
 
 fn parse(text: &str, asked: usize) -> Result<Answer, Reason> {
@@ -159,40 +160,91 @@ fn run(author: &str, reads: &[String]) -> Result<Output, Reason> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
-    let mut child = command.spawn().map_err(|_| ROUTING_UNAVAILABLE)?;
-    let mut stdout = child.stdout.take().ok_or(ROUTING_UNAVAILABLE)?;
-    let mut stderr = child.stderr.take().ok_or(ROUTING_UNAVAILABLE)?;
-    let reader = std::thread::spawn(move || {
-        let mut text = String::new();
-        stdout.read_to_string(&mut text).map(|_| text)
-    });
+    run_command(command, DEADLINE)
+}
+
+fn read_document(reader: impl Read) -> std::io::Result<String> {
+    let mut bytes = Vec::new();
+    reader.take(RESPONSE_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > RESPONSE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "routing response exceeds its bound",
+        ));
+    }
+    String::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+struct RoutingChild(Child);
+
+impl Drop for RoutingChild {
+    fn drop(&mut self) {
+        let _ = crate::process_group::kill_process_group(self.0.id());
+        let _ = self.0.wait();
+    }
+}
+
+fn exit_without_reaping(child: &Child) -> std::io::Result<Option<bool>> {
+    let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+    // SAFETY: waitid initializes info and WNOWAIT reserves the leader's PID
+    // until RoutingChild stops its process group and reaps it.
+    if unsafe {
+        libc::waitid(
+            libc::P_PID,
+            child.id(),
+            info.as_mut_ptr(),
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: a successful waitid initialized the child-exit fields.
+    let info = unsafe { info.assume_init() };
+    Ok(unsafe {
+        (info.si_pid() != 0).then(|| info.si_code == libc::CLD_EXITED && info.si_status() == 0)
+    })
+}
+
+fn run_command(mut command: Command, timeout: Duration) -> Result<Output, Reason> {
+    let mut child = RoutingChild(command.spawn().map_err(|_| ROUTING_UNAVAILABLE)?);
+    let stdout = child.0.stdout.take().ok_or(ROUTING_UNAVAILABLE)?;
+    let mut stderr = child.0.stderr.take().ok_or(ROUTING_UNAVAILABLE)?;
+    let reader = std::thread::spawn(move || read_document(stdout));
     let diagnostics = std::thread::spawn(move || {
         crate::process_group::read_tail(&mut stderr, crate::process_group::STDERR_TAIL_BYTES)
     });
-    let deadline = Instant::now() + DEADLINE;
+    let deadline = Instant::now() + timeout;
     let status = loop {
-        match child.try_wait() {
+        match exit_without_reaping(&child.0) {
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(10));
             }
             _ => {
-                let _ = crate::process_group::kill_process_group(child.id());
-                let _ = child.wait();
                 return Err(ROUTING_UNAVAILABLE);
             }
         }
     };
-    let text = reader
-        .join()
-        .map_err(|_| ROUTING_UNAVAILABLE)?
+    let text = crate::process_group::join_before_deadline(reader, Some(deadline), "routing stdout")
         .map_err(|_| ROUTING_UNAVAILABLE)?;
-    let diagnostics = diagnostics
-        .join()
-        .map_err(|_| ROUTING_UNAVAILABLE)?
-        .map_err(|_| ROUTING_UNAVAILABLE)?;
+    let diagnostics =
+        crate::process_group::join_before_deadline(diagnostics, Some(deadline), "routing stderr")
+            .map_err(|_| ROUTING_UNAVAILABLE)?;
+    let (Some(text), Some(diagnostics)) = (text, diagnostics) else {
+        return Err(ROUTING_UNAVAILABLE);
+    };
+    let text = text.map_err(|error| {
+        if error.kind() == std::io::ErrorKind::InvalidData {
+            ROUTING_MALFORMED
+        } else {
+            ROUTING_UNAVAILABLE
+        }
+    })?;
+    let diagnostics = diagnostics.map_err(|_| ROUTING_UNAVAILABLE)?;
     Ok(Output {
-        success: status.success(),
+        success: status,
         stdout: text,
         stderr: diagnostics,
     })
@@ -214,22 +266,23 @@ fn refusal(output: &Output) -> Refused {
             let refusal = serde_json::from_str::<RawRefusal>(line).ok()?;
             (refusal.schema == REFUSAL_SCHEMA).then_some(refusal)
         })
-        .map_or(Refused::Other, |refusal| match refusal.role.as_deref() {
-            Some("author") => Refused::Author,
-            Some("reviewer") => Refused::Reviewer,
-            _ => Refused::Other,
-        })
+        .map_or(
+            Refused::Other(ROUTING_UNAVAILABLE),
+            |refusal| match refusal.role.as_deref() {
+                Some("author") => Refused::Author,
+                Some("reviewer") => Refused::Reviewer,
+                _ => Refused::Other(ROUTING_UNAVAILABLE),
+            },
+        )
 }
 
 /// One spawn for `author` and `reads`. A refused reviewer coordinate fails the
 /// whole call in routing, so the caller falls back to one read at a time.
 fn ask_once(author: &str, reads: &[String]) -> Result<Answer, Refused> {
     match run(author, reads) {
-        Ok(output) if output.success => {
-            parse(&output.stdout, reads.len()).map_err(|_| Refused::Other)
-        }
+        Ok(output) if output.success => parse(&output.stdout, reads.len()).map_err(Refused::Other),
         Ok(output) => Err(refusal(&output)),
-        Err(_) => Err(Refused::Other),
+        Err(reason) => Err(Refused::Other(reason)),
     }
 }
 
@@ -255,7 +308,7 @@ impl Routing {
     fn ask(&mut self, author: &str, reads: &[String]) -> Result<Answer, Reason> {
         match ask_once(author, reads) {
             Ok(answer) => Ok(answer),
-            Err(Refused::Other) => Err(ROUTING_UNAVAILABLE),
+            Err(Refused::Other(reason)) => Err(reason),
             Err(Refused::Author) => Err(ROUTING_REFUSED),
             Err(Refused::Reviewer) if reads.len() > 1 => {
                 // One reviewer routing does not know must not hide the rest.
@@ -280,6 +333,7 @@ impl Routing {
                 // frontier are still answerable without it.
                 let mut answer = ask_once(author, &[]).map_err(|refused| match refused {
                     Refused::Author => ROUTING_REFUSED,
+                    Refused::Other(reason) => reason,
                     _ => ROUTING_UNAVAILABLE,
                 })?;
                 answer.reads = vec![None];
@@ -320,5 +374,29 @@ mod tests {
         assert_eq!(parse("{}", 0), Err(ROUTING_MALFORMED));
         let other = document("").replace("frontier/1", "frontier/2");
         assert_eq!(parse(&other, 0), Err(ROUTING_MALFORMED));
+    }
+
+    #[test]
+    fn a_routing_descendant_cannot_extend_the_pipe_deadline() {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 5 & printf '{}'"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        let started = Instant::now();
+        let result = run_command(command, Duration::from_millis(100));
+        assert!(matches!(result, Err(ROUTING_UNAVAILABLE)));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn a_routing_document_is_bounded_and_valid_utf8() {
+        let oversized = vec![b'x'; RESPONSE_BYTES as usize + 1];
+        for bytes in [oversized, vec![0xff]] {
+            let error = read_document(std::io::Cursor::new(bytes)).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        }
     }
 }

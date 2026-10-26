@@ -2451,6 +2451,10 @@ REVIEW ASSURANCE
     the read it names, a refused author costs the change its standing. Its
     own error text and paths never reach the view.
 
+  Routing requests and their output pipes share a 30-second deadline.
+  Responses larger than 1 MiB or invalid UTF-8 are malformed; Arc prints
+  only fixed failure reasons.
+
   With `--stale` each row shows four components, in this order, each
   displayed and none stored:
 

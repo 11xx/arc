@@ -311,15 +311,15 @@ fn judge_author(
         gap: None,
         route_version: answer.route_version.clone(),
     };
+    if answer.status == "floor-unknown" {
+        judged.reason = Some(FLOOR_UNKNOWN);
+        return judged;
+    }
     if eligible.is_empty() {
         match unassessed.or(refused.then_some(READ_UNASSESSED)) {
             Some(reason) => judged.reason = Some(reason),
             None => judged.standing = Standing::Owed,
         }
-        return judged;
-    }
-    if answer.status == "floor-unknown" {
-        judged.reason = Some(FLOOR_UNKNOWN);
         return judged;
     }
     if answer.status != "frontier" {

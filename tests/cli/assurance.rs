@@ -360,6 +360,60 @@ fn a_same_family_read_at_the_frontier_tier_leaves_the_change_owed() {
 }
 
 #[test]
+fn an_unestablished_author_floor_is_unknown_with_no_eligible_read() {
+    let repo = Repo::new();
+    let fake = FakeRouting::new(&repo);
+    fake.author_with_status("claude-sonnet-5-5#high", "floor-unknown", None)
+        .read(OPUS_READ, false, 3, "unranked");
+    let id = integrate(&repo, &change("unknown-floor", &[OPUS_READ]));
+
+    let report = assurance(&fake, &repo, &["--stale"]);
+    assert_eq!(standing(&report, &id), "unknown", "{report}");
+    assert_eq!(
+        row(&report, &id)["assurance"]["reason"],
+        "floor-unknown",
+        "{report}"
+    );
+}
+
+#[test]
+fn a_malformed_routing_answer_keeps_its_fixed_reason() {
+    let repo = Repo::new();
+    let fake = FakeRouting::new(&repo);
+    fake.author("claude-sonnet-5-5#high", FRONTIER_TIER)
+        .read(OPUS_READ, true, 3, "not-a-standing");
+    let id = integrate(&repo, &change("malformed-routing", &[OPUS_READ]));
+
+    let report = assurance(&fake, &repo, &["--stale"]);
+    assert_eq!(standing(&report, &id), "unknown", "{report}");
+    assert_eq!(
+        row(&report, &id)["assurance"]["reason"],
+        "routing-malformed",
+        "{report}"
+    );
+}
+
+#[test]
+fn an_oversized_routing_answer_is_unknown() {
+    let repo = Repo::new();
+    let fake = FakeRouting::new(&repo);
+    fake.author("claude-sonnet-5-5#high", FRONTIER_TIER)
+        .read(OPUS_READ, true, 2, "below");
+    let author = fake.dir.join("author-claude-sonnet-5-5_high.json");
+    let header = fs::read_to_string(&author).unwrap();
+    fs::write(&author, format!("{}{header}", " ".repeat(1024 * 1024))).unwrap();
+    let id = integrate(&repo, &change("oversized-routing", &[OPUS_READ]));
+
+    let report = assurance(&fake, &repo, &["--stale"]);
+    assert_eq!(standing(&report, &id), "unknown", "{report}");
+    assert_eq!(
+        row(&report, &id)["assurance"]["reason"],
+        "routing-malformed",
+        "{report}"
+    );
+}
+
+#[test]
 fn a_change_whose_only_read_is_below_the_frontier_is_stale_with_its_gap() {
     let repo = Repo::new();
     let fake = FakeRouting::new(&repo);
