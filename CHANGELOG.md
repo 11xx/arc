@@ -665,6 +665,14 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Select integration and publication gate tiers, reuse clean integration
+  evidence through complete project delta selectors, and check exact
+  publication revisions with retained batch receipts. Prepare worktrees
+  through bounded project hooks with leased caches and source-bound build
+  outputs. Preserve journal staging ownership and retirement checks,
+  signature-only rewrite identity, and bounded assurance reads with
+  explicit unknown reasons.
+
 - `arc cost show` reads sessions faster, with the same figures: on one
   ledger, one change went from about 2.2 s to 1.4 s and `--all` from about
   12.5 s to 12.0 s. A large recording's lines now decode ahead in parallel

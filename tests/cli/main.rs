@@ -68,6 +68,7 @@ mod native_child_binding;
 mod observe;
 mod orchestrate;
 mod pass;
+mod path_stable_builds;
 mod paths;
 mod placeholders;
 mod planners;

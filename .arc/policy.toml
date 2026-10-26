@@ -33,6 +33,7 @@ paths = [
   "src/policy.rs",
   "src/gates.rs",
   "src/warm_worktree.rs",
+  "src/warm_worktree/stable.rs",
   # Chooses whose gate and policy declarations a change is judged by.
   "src/declarations.rs",
   "src/status.rs",

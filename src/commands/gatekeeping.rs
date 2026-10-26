@@ -465,6 +465,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         if required.is_empty() {
             bail!("no gates declared for profile {}", st.profile);
         }
+        crate::warm_worktree::prepare(&run_ctx.cwd)?;
         let total = required.len();
         let head = gitio::head(&run_ctx.cwd)?;
         let tree = gitio::commit_tree(&run_ctx.cwd, &head)?;
@@ -619,6 +620,9 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         (Some(_), Some(_)) => bail!("--gate and --command are mutually exclusive"),
         (None, None) => bail!("provide --gate <name> or --command <cmd>"),
     };
+    if !attest {
+        crate::warm_worktree::prepare(&run_ctx.cwd)?;
+    }
     // An attested run happened where arc cannot observe an environment, so
     // the caller states the identity. A run arc performs reads it from the
     // gate's declared probe; a declaration with no probe has nothing for an
@@ -2392,15 +2396,6 @@ pub(super) fn run_gate(
     output_root: &Path,
     producing_store: &str,
 ) -> Result<GateRun> {
-    crate::warm_worktree::prepare(cwd)?;
-    let started = Instant::now();
-    let deadline = timeout_seconds
-        .map(|seconds| {
-            started
-                .checked_add(Duration::from_secs(seconds))
-                .context("gate timeout is too large")
-        })
-        .transpose()?;
     let mut command = std::process::Command::new("sh");
     command
         .arg("-c")
@@ -2409,7 +2404,15 @@ pub(super) fn run_gate(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0);
-    crate::warm_worktree::configure_command(&mut command, cwd);
+    let _preparation = crate::warm_worktree::prepare_command(&mut command, cwd)?;
+    let started = Instant::now();
+    let deadline = timeout_seconds
+        .map(|seconds| {
+            started
+                .checked_add(Duration::from_secs(seconds))
+                .context("gate timeout is too large")
+        })
+        .transpose()?;
     let mut child = command.spawn().context("failed to run gate command")?;
     let stdout = child
         .stdout

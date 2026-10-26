@@ -199,7 +199,19 @@ pub fn environment_probe(cwd: &Path, probe: &str, timeout: Option<u64>) -> Resul
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
-    crate::warm_worktree::configure_command(&mut command, cwd);
+    let _preparation = match crate::warm_worktree::configure_command(&mut command, cwd) {
+        Ok(lease) => lease,
+        Err(error) => {
+            return Ok(ProbeRun {
+                identity: None,
+                failure: Some(ProbeFailure {
+                    exit_code: None,
+                    timed_out: false,
+                    detail: format!("worktree storage unavailable: {error:#}"),
+                }),
+            });
+        }
+    };
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {

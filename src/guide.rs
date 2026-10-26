@@ -4255,9 +4255,9 @@ FILES
     timeout = "30s"
 
   Preparation runs after begin, fork, acceptance and replay checkout
-  population. Its working directory and `ARC_WORKTREE_BUILD` name an
-  Arc-owned directory specific to that checkout and source tree. Gates and
-  probes use prepared output only with a matching successful receipt;
+  population. The default `source-bound` mode gives its working directory
+  and `ARC_WORKTREE_BUILD` a checkout-specific source-tree directory. Gates
+  and probes use prepared output only with a matching successful receipt;
   otherwise they receive fresh cold storage.
   `ARC_WORKTREE_PATH`, `ARC_WORKTREE_REVISION` and `ARC_WORKTREE_TREE` identify
   the source; `ARC_WORKTREE_CACHE` names a shared cache protected by a lease.
@@ -4270,6 +4270,48 @@ FILES
   variables. A project selects its prepared output explicitly, such as
   `CARGO_TARGET_DIR="$ARC_WORKTREE_BUILD/target"`. An administrative receipt
   reuses preparation at unchanged source; changed source prepares again.
+
+  A project whose compiler workspace depends on absolute paths can select
+  persistent storage:
+
+    [prepare]
+    mode = "path-stable"
+    directory = "../build"
+    command = "<project incremental preparation command>"
+    timeout = "30s"
+
+  `directory` is a literal absolute path or a path relative to the source
+  checkout. Without it, storage under the Git common directory is keyed by
+  the canonical checkout path, independently of its tree or administrative
+  allocation. Stable storage survives `integrate --cleanup`. Project slot
+  drivers can recreate a fixed `--worktree` source path beside `../build`;
+  Arc does not allocate a source-slot pool or relocate compiler outputs.
+  The slot driver owns source allocation and drains its external writers
+  before checkout cleanup.
+  Keeping only the build path fixed cannot stabilize changing source paths.
+
+  A stable directory is available without a per-tree preparation receipt.
+  `command` is optional in this mode: project hooks or gates establish
+  compiler, header, dependency and source-metadata freshness. Their ordinary
+  checks remain authoritative. Arc never copies or clears the directory.
+  Control files live beside it, so a compiler clean can remove its outputs
+  without removing the active lease. The parent directory must remain
+  writable and control files must be preserved while writers are active.
+  A foreign owner, busy lease or failed preparation refuses stable use.
+  Failed or interrupted hooks retain an incomplete marker until successful
+  preparation retries; readiness probes do not run preparation or compile.
+  A busy or incomplete directory makes its probe identity unavailable.
+
+  Arc holds the exclusive build lease through each owned hook, probe and
+  gate. `ARC_WORKTREE_BUILD_LEASE` names it and
+  `ARC_WORKTREE_BUILD_LEASE_FD` identifies the inherited held descriptor.
+  Cooperating project commands keep that descriptor open through their
+  writers and reuse it rather than flocking the file again; external builds
+  acquire the same lease. Parent death does not close the child's inherited
+  descriptor. Source/index/HEAD mutation checks and gate evidence rules
+  apply in both modes; build storage and preparation grant no verification.
+  Index checks compare indexed content and flags, permitting harmless stat
+  refreshes when a project restores timestamps for byte-identical sources.
 
   A timeout bounds the process and its output-pipe cleanup. A descendant
   holding a pipe after the leader exits still times out; arc kills the

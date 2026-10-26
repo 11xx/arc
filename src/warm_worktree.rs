@@ -1,4 +1,4 @@
-//! Project-owned build preparation with source-bound output directories.
+//! Project-owned build preparation with isolated or persistent output directories.
 
 use crate::{gitio, process_group};
 use anyhow::{bail, Context, Result};
@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+mod stable;
+
 const CONFIG: &str = ".arc/worktrees.toml";
 
 #[derive(Deserialize)]
@@ -24,8 +26,53 @@ struct Configuration {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Hook {
-    command: String,
+    command: Option<String>,
     timeout: Option<String>,
+    #[serde(default)]
+    mode: Mode,
+    directory: Option<PathBuf>,
+}
+
+#[derive(Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum Mode {
+    #[default]
+    SourceBound,
+    PathStable,
+}
+
+/// Keeps a configured command's mutable build storage exclusively leased.
+#[derive(Default)]
+pub struct CommandLease {
+    files: Vec<File>,
+    build_lease: Option<PathBuf>,
+}
+
+impl CommandLease {
+    fn inherit(&self, command: &mut Command) {
+        if let Some(path) = &self.build_lease {
+            command.env("ARC_WORKTREE_BUILD_LEASE", path).env(
+                "ARC_WORKTREE_BUILD_LEASE_FD",
+                self.files[0].as_raw_fd().to_string(),
+            );
+        }
+        let descriptors: Vec<_> = self.files.iter().map(AsRawFd::as_raw_fd).collect();
+        // SAFETY: fcntl is async-signal-safe. Only the owned child clears
+        // CLOEXEC; every parent descriptor remains closed across unrelated execs.
+        unsafe {
+            command.pre_exec(move || {
+                for descriptor in &descriptors {
+                    let flags = libc::fcntl(*descriptor, libc::F_GETFD);
+                    if flags < 0
+                        || libc::fcntl(*descriptor, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
+                    {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+    }
 }
 
 #[derive(PartialEq, Eq)]
@@ -39,6 +86,20 @@ struct Source {
 }
 
 impl Source {
+    fn changed_fields(&self, other: &Self) -> String {
+        [
+            ("revision", self.revision != other.revision),
+            ("tree", self.tree != other.tree),
+            ("tracked source", self.tracked != other.tracked),
+            ("staged source", self.staged != other.staged),
+            ("untracked paths", self.untracked != other.untracked),
+            ("index", self.index != other.index),
+        ]
+        .into_iter()
+        .filter_map(|(name, changed)| changed.then_some(name))
+        .collect::<Vec<_>>()
+        .join(", ")
+    }
     fn observe(path: &Path) -> Result<Self> {
         Ok(Self {
             revision: gitio::head(path)?,
@@ -46,7 +107,7 @@ impl Source {
             tracked: source_bytes(path, &["diff", "--binary", "HEAD", "--"])?,
             staged: source_bytes(path, &["diff", "--cached", "--binary", "HEAD", "--"])?,
             untracked: source_bytes(path, &["ls-files", "--others", "--exclude-standard", "-z"])?,
-            index: fs::read(gitio::worktree_admin_dir(path)?.join("index"))?,
+            index: index_entries(path)?,
         })
     }
 
@@ -67,6 +128,16 @@ impl Source {
     }
 }
 
+fn index_entries(path: &Path) -> Result<Vec<u8>> {
+    let mut entries = Vec::new();
+    for flag in ["-v", "-f"] {
+        let observed = source_bytes(path, &["ls-files", "--stage", flag, "-z"])?;
+        entries.extend_from_slice(&(observed.len() as u64).to_le_bytes());
+        entries.extend_from_slice(&observed);
+    }
+    Ok(entries)
+}
+
 fn source_bytes(path: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let output = gitio::git_command()
         .args(args)
@@ -82,25 +153,28 @@ fn source_bytes(path: &Path, args: &[&str]) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
-/// Prepare an existing checkout. Cache failures leave it cold; a hook that
-/// changes its source, index or HEAD makes the checkout unsafe to continue.
+/// Prepare a checkout. Source-bound cache failures continue cold; persistent
+/// storage failures and source, index or HEAD mutations refuse further use.
 pub fn prepare(path: &Path) -> Result<()> {
     let text = match fs::read_to_string(path.join(CONFIG)) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            cold(&error.to_string());
-            return Ok(());
-        }
+        Err(error) => return Err(error).context("cannot read .arc/worktrees.toml"),
     };
     let hook = match configuration(&text) {
         Ok(hook) => hook,
         Err(error) => {
+            if explicit_mode(&text)? {
+                return Err(error);
+            }
             cold(&format!("{error:#}"));
             return Ok(());
         }
     };
     let path = fs::canonicalize(path).context("cannot resolve preparation checkout")?;
+    if hook.0.mode == Mode::PathStable {
+        return stable::prepare(&path, &hook);
+    }
     let before = Source::observe(&path)?;
     let outcome = run(&path, &before, &hook);
     if Source::observe(&path)? != before {
@@ -115,10 +189,39 @@ pub fn prepare(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn explicit_mode(text: &str) -> Result<bool> {
+    let value: toml::Value = toml::from_str(text).context("invalid .arc/worktrees.toml")?;
+    Ok(value
+        .get("prepare")
+        .and_then(|prepare| prepare.get("mode"))
+        .is_some_and(|mode| mode.as_str() != Some("source-bound")))
+}
+
 fn configuration(text: &str) -> Result<(Hook, u64)> {
     let config: Configuration = toml::from_str(text).context("invalid .arc/worktrees.toml")?;
-    if config.prepare.command.trim().is_empty() {
+    if config
+        .prepare
+        .command
+        .as_ref()
+        .is_some_and(|command| command.trim().is_empty())
+    {
         bail!("worktree preparation command is empty");
+    }
+    if config.prepare.mode == Mode::SourceBound {
+        if config.prepare.command.is_none() {
+            bail!("source-bound worktree preparation requires a command");
+        }
+        if config.prepare.directory.is_some() {
+            bail!("worktree preparation directory requires path-stable mode");
+        }
+    }
+    if config
+        .prepare
+        .directory
+        .as_ref()
+        .is_some_and(|directory| directory.as_os_str().is_empty())
+    {
+        bail!("worktree preparation directory is empty");
     }
     let timeout = config
         .prepare
@@ -137,53 +240,78 @@ fn cold(reason: &str) {
     eprintln!("warning: worktree preparation unavailable; continuing cold: {reason}");
 }
 
-/// Give gates and their environment probes the same source-bound storage
-/// paths as preparation. Computing these paths writes nothing.
-pub fn configure_command(command: &mut Command, path: &Path) {
-    let context = (|| -> Result<Vec<(&'static str, OsString)>> {
-        let text = fs::read_to_string(path.join(CONFIG))?;
-        let (hook, timeout) = configuration(&text)?;
-        let path = fs::canonicalize(path)?;
-        let key = cache_key(&hook, timeout);
-        let source = Source::observe(&path)?;
-        let cache = gitio::common_dir(&path)?
-            .join("arc/cache/worktrees")
-            .join(&key);
-        let admin = gitio::worktree_admin_dir(&path)?;
-        let source_path = source_path_key(&path);
-        let mut build = admin
-            .join("arc-warm-build")
-            .join(&key)
-            .join(&source_path)
-            .join(&source.tree);
-        let identity = preparation_identity(&source);
-        if !already_prepared(&build.join("prepared"), &identity).unwrap_or(false) {
-            build = admin
-                .join("arc-cold-build")
-                .join(invocation_key())
-                .join(&key)
-                .join(source_path)
-                .join(&source.tree);
+/// Prepare and configure a gate while retaining its build-directory lease.
+pub fn prepare_command(command: &mut Command, path: &Path) -> Result<CommandLease> {
+    configure(command, path, true)
+}
+
+/// Configure a probe without running preparation, retaining its storage lease.
+pub fn configure_command(command: &mut Command, path: &Path) -> Result<CommandLease> {
+    configure(command, path, false)
+}
+
+fn configure(command: &mut Command, path: &Path, prepare_first: bool) -> Result<CommandLease> {
+    let text = match fs::read_to_string(path.join(CONFIG)) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(CommandLease::default())
         }
-        Ok(environment(
+        Err(error) => return Err(error).context("cannot read .arc/worktrees.toml"),
+    };
+    let (hook, timeout) = match configuration(&text) {
+        Ok(configuration) => configuration,
+        Err(error) => {
+            if explicit_mode(&text)? {
+                return Err(error);
+            }
+            cold(&format!("{error:#}"));
+            return Ok(CommandLease::default());
+        }
+    };
+    let path = fs::canonicalize(path)?;
+    if hook.mode == Mode::PathStable {
+        return stable::configure(command, &path, &(hook, timeout), prepare_first);
+    }
+    if prepare_first {
+        prepare(&path)?;
+    }
+    let key = cache_key(&hook, timeout);
+    let source = Source::observe(&path)?;
+    let cache = gitio::common_dir(&path)?
+        .join("arc/cache/worktrees")
+        .join(&key);
+    let admin = gitio::worktree_admin_dir(&path)?;
+    let source_path = source_path_key(&path);
+    let mut build = admin
+        .join("arc-warm-build")
+        .join(&key)
+        .join(&source_path)
+        .join(&source.tree);
+    let identity = preparation_identity(&source);
+    if !already_prepared(&build.join("prepared"), &identity).unwrap_or(false) {
+        build = admin
+            .join("arc-cold-build")
+            .join(invocation_key())
+            .join(&key)
+            .join(source_path)
+            .join(&source.tree);
+    }
+    command
+        .envs(environment(
             &path,
             &source.revision,
             &source.tree,
             &cache,
             &build,
         ))
-    })();
-    if let Ok(context) = context {
-        command
-            .envs(context)
-            .env_remove("CARGO_TARGET_DIR")
-            .env("GIT_OPTIONAL_LOCKS", "0");
-    }
+        .env_remove("CARGO_TARGET_DIR")
+        .env("GIT_OPTIONAL_LOCKS", "0");
+    Ok(CommandLease::default())
 }
 
 fn cache_key(hook: &Hook, timeout: u64) -> String {
     hex::encode(Sha256::digest(
-        format!("{}\n{timeout}", hook.command).as_bytes(),
+        format!("{}\n{timeout}", hook.command.as_deref().unwrap_or_default()).as_bytes(),
     ))
 }
 
@@ -322,25 +450,29 @@ fn record_prepared(build: &Path, identity: &str) -> Result<()> {
 }
 
 fn lease(cache: &Path) -> Result<File> {
+    acquire_lease(&cache.join("lease"), "preparation cache")
+}
+
+fn acquire_lease(path: &Path, kind: &str) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(cache.join("lease"))?;
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(path)?;
     if !file.metadata()?.file_type().is_file() {
-        bail!("preparation cache lease is not a regular file");
+        bail!("{kind} lease is not a regular file");
     }
     // SAFETY: the descriptor belongs to `file`, which holds the lease until
     // preparation has finished and all owned children have been collected.
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         let error = std::io::Error::last_os_error();
         if error.kind() == std::io::ErrorKind::WouldBlock {
-            bail!("preparation cache lease is busy");
+            bail!("{kind} lease is busy");
         }
-        return Err(error).context("cannot lease preparation cache");
+        return Err(error).with_context(|| format!("cannot lease {kind}"));
     }
     Ok(file)
 }
@@ -381,7 +513,10 @@ fn run(path: &Path, source: &Source, (hook, timeout): &(Hook, u64)) -> Result<()
     let key = cache_key(hook, *timeout);
     let common = gitio::common_dir(path)?;
     let cache = owned_cache(&common, &key)?;
-    let _lease = lease(&cache)?;
+    let lease = CommandLease {
+        files: vec![lease(&cache)?],
+        build_lease: None,
+    };
     let admin = gitio::worktree_admin_dir(path)?;
     let build_root = private_directory(&admin, "arc-warm-build")?;
     let builds = private_directory(&build_root, &key)?;
@@ -399,25 +534,52 @@ fn run(path: &Path, source: &Source, (hook, timeout): &(Hook, u64)) -> Result<()
     if already_prepared(&build.join("prepared"), &identity)? {
         return Ok(());
     }
+    run_hook(
+        path,
+        source,
+        hook.command
+            .as_deref()
+            .context("preparation command unavailable")?,
+        *timeout,
+        &cache,
+        &build,
+        &lease,
+    )?;
+    record_prepared(&build, &identity)?;
+    Ok(())
+}
+
+fn run_hook(
+    path: &Path,
+    source: &Source,
+    hook_command: &str,
+    timeout: u64,
+    cache: &Path,
+    build: &Path,
+    lease: &CommandLease,
+) -> Result<()> {
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(*timeout))
+        .checked_add(Duration::from_secs(timeout))
         .context("worktree preparation timeout is too large")?;
-    let child = Command::new("sh")
-        .args(["-c", &hook.command])
-        .current_dir(&build)
+    let mut command = Command::new("sh");
+    command
+        .args(["-c", hook_command])
+        .current_dir(build)
         .envs(environment(
             path,
             &source.revision,
             &source.tree,
-            &cache,
-            &build,
+            cache,
+            build,
         ))
         .env_remove("CARGO_TARGET_DIR")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .process_group(0)
+        .process_group(0);
+    lease.inherit(&mut command);
+    let child = command
         .spawn()
         .context("cannot start worktree preparation")?;
     let mut child = PreparationChild(child);
@@ -469,9 +631,57 @@ fn run(path: &Path, source: &Source, (hook, timeout): &(Hook, u64)) -> Result<()
         bail!("preparation failed: {}{}", out.trim(), err.trim());
     }
     drop(child);
-    if Source::observe(path)? != *source {
-        bail!("worktree preparation changed source, index, HEAD or untracked source paths");
+    let after = Source::observe(path)?;
+    if after != *source {
+        bail!(
+            "worktree preparation changed source, index, HEAD or untracked source paths: {}",
+            source.changed_fields(&after)
+        );
     }
-    record_prepared(&build, &identity)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A lease belongs to the owned child only. Clearing CLOEXEC in the
+    /// parent lets a concurrent unrelated exec keep mutable storage busy.
+    #[test]
+    fn lease_inheritance_is_scoped_to_the_owned_command() {
+        let directory = tempfile::tempdir().unwrap();
+        let guard = CommandLease {
+            files: vec![lease(directory.path()).unwrap()],
+            build_lease: None,
+        };
+        let descriptor = guard.files[0].as_raw_fd();
+        let mut owned = Command::new("sh");
+        owned
+            .args(["-c", "test -e \"/proc/self/fd/$LEASE_FD\""])
+            .env("LEASE_FD", descriptor.to_string());
+        guard.inherit(&mut owned);
+        let mut unrelated = Command::new("sh");
+        unrelated
+            .args(["-c", "test ! -e \"/proc/self/fd/$LEASE_FD\""])
+            .env("LEASE_FD", descriptor.to_string());
+        std::thread::scope(|scope| {
+            let owned = scope.spawn(move || owned.status().unwrap());
+            let unrelated = scope.spawn(move || unrelated.status().unwrap());
+            assert!(
+                owned.join().unwrap().success(),
+                "owned child lost its lease descriptor"
+            );
+            assert!(
+                unrelated.join().unwrap().success(),
+                "unrelated child inherited a foreign lease"
+            );
+        });
+        // SAFETY: guard retains this regular file descriptor.
+        let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+        assert_ne!(
+            flags & libc::FD_CLOEXEC,
+            0,
+            "parent descriptor became inheritable"
+        );
+    }
 }

@@ -332,6 +332,9 @@ enum Cmd {
     /// Adoption recovery preserves the opening options and resolved target
     /// and base, attaching option values as --flag=<shell-quoted value> to
     /// preserve leading hyphens. Checkout selection follows the retained branch.
+    /// Optional .arc/worktrees.toml preparation runs after population. A
+    /// project can combine a fixed --worktree path with path-stable build
+    /// storage; compiler freshness remains the project's responsibility.
     ///
     /// Without --base, the change derives its base from the local target:
     /// its head, or under --adopt the adopted branch's merge base with it.
@@ -1419,6 +1422,8 @@ enum Cmd {
     /// with --custody-dir, judged as `arc import --custody-dir` judges it, in the
     /// import preview and before any effect. Without the flag the transcript
     /// says custody is unavailable, names the bound manifest digest and the flag.
+    /// Populated checkouts use .arc/worktrees.toml preparation. Path-stable
+    /// build storage remains outside checkout cleanup and is leased while used.
     Accept {
         /// Delivered arc-bundle/6 or /5 file ('-' for stdin)
         input: String,
@@ -1890,6 +1895,8 @@ enum Cmd {
     },
     /// Require publication gates at a local target branch's current head.
     /// Use this guard from push and release tooling before publishing that revision.
+    /// Scratch checkout preparation and build leases follow .arc/worktrees.toml;
+    /// stable storage never substitutes for complete publication evidence.
     Publication {
         /// Local target branch whose committed gate declarations apply
         #[arg(long)]
@@ -1919,6 +1926,10 @@ enum Cmd {
     /// and observed SHA-256 digests and sizes, and truncation or capture errors.
     /// Exports carry metadata only; expired files are unavailable diagnostics.
     /// Attested evidence carries no output capture.
+    /// Configured path-stable build storage is leased through preparation,
+    /// environment probes and gates. Probes never prepare or compile;
+    /// unavailable storage supplies no environment identity. Storage reuse
+    /// never supplies a passing gate result.
     Verify {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
