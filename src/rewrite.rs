@@ -214,11 +214,15 @@ impl RewriteMap {
                 }
                 // A claim about a revision the event does not map is not a
                 // claim about anything.
+                let mapped: BTreeSet<String> = mapping
+                    .keys()
+                    .map(|revision| canonical_revision(revision))
+                    .collect();
                 signature_only.extend(
                     judged
                         .iter()
-                        .filter(|old| mapping.contains_key(*old))
-                        .map(|old| canonical_revision(old)),
+                        .map(|old| canonical_revision(old))
+                        .filter(|old| mapped.contains(old)),
                 );
             }
         }
@@ -864,6 +868,21 @@ mod tests {
             rewrite_event("01B", "aaaaaaaaaa", "cccccccccc", &[]),
         ];
         assert!(RewriteMap::from_events(contradiction.iter()).is_err());
+    }
+
+    /// A signature-only assertion follows the same commit identity as its
+    /// map, even when they spell that identity in different letter cases.
+    #[test]
+    fn signature_only_claims_match_map_keys_without_regard_to_case() {
+        for (old, judged) in [("AAAAAAAAAA", "aaaaaaaaaa"), ("aaaaaaaaaa", "AAAAAAAAAA")] {
+            let events = [rewrite_event("01A", old, "bbbbbbbbbb", &[judged])];
+            let map = RewriteMap::from_events(events.iter()).unwrap();
+            assert_eq!(
+                map.approved_successor("aaaaaaaaaa").unwrap(),
+                "bbbbbbbbbb",
+                "the signature-only assertion and map name the same commit"
+            );
+        }
     }
 
     fn rewrite_event(id: &str, old: &str, new: &str, judged: &[&str]) -> crate::model::Event {
