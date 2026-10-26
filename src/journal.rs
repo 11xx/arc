@@ -3187,11 +3187,13 @@ fn publish_exchange_file(path: &Path, bytes: &[u8]) -> Result<()> {
         .context("journal exchange file has no parent")?;
     std::fs::create_dir_all(dir)?;
     let staging = dir.join(format!(".exchange-{}.tmp", ulid::Ulid::new()));
+    let mut created = false;
     let result = (|| -> Result<()> {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&staging)?;
+        created = true;
         if let Ok(metadata) = std::fs::metadata(path) {
             file.set_permissions(metadata.permissions())?;
         }
@@ -3201,7 +3203,7 @@ fn publish_exchange_file(path: &Path, bytes: &[u8]) -> Result<()> {
         File::open(dir)?.sync_all()?;
         Ok(())
     })();
-    if result.is_err() {
+    if result.is_err() && created {
         let _ = std::fs::remove_file(&staging);
     }
     result.with_context(|| format!("cannot publish {}", path.display()))
@@ -9750,6 +9752,9 @@ pub(crate) fn retire_registration(
     let holdings = journal_holdings(dir)?;
     refuse_retirement(&holdings, false)
         .context("the journal changed while it was being retired")?;
+    if Path::new(anchor).is_dir() {
+        bail!("the anchor {anchor} exists; its registration cannot be retired");
+    }
     let (harness, session) = identity(ctx);
     write_binding(
         dir,
@@ -16660,8 +16665,7 @@ fn execute_relocation(ctx: &Ctx, hot: &Path, plan: &RelocationPlan, reason: &str
         }
         let source = plan.copies.first().context("no copy to relocate")?;
         let body = std::fs::read(source)?;
-        let staged = directory.join(format!(".{}.relocating", plan.file));
-        let _ = std::fs::remove_file(&staged);
+        let staged = directory.join(format!(".{}.{}.relocating", plan.file, ulid::Ulid::new()));
         let mut out = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -16875,22 +16879,7 @@ fn redaction_of(
 
 /// Replace a body file atomically, keeping its permissions.
 fn replace_body(path: &Path, body: &str) -> Result<()> {
-    use std::io::Write as _;
-    let directory = path.parent().context("artifact has no parent")?;
-    let staged = directory.join(format!(
-        ".{}.redacting",
-        path.file_name().unwrap_or_default().to_string_lossy()
-    ));
-    let permissions = std::fs::metadata(path)?.permissions();
-    let mut out =
-        File::create(&staged).with_context(|| format!("cannot write {}", staged.display()))?;
-    out.write_all(body.as_bytes())?;
-    out.sync_all()?;
-    drop(out);
-    std::fs::set_permissions(&staged, permissions)?;
-    std::fs::rename(&staged, path).with_context(|| format!("cannot replace {}", path.display()))?;
-    File::open(directory)?.sync_all()?;
-    Ok(())
+    publish_exchange_file(path, body.as_bytes())
 }
 
 fn timestamp_older_than(timestamp: &str, days: u64) -> bool {
