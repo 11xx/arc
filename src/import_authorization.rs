@@ -179,6 +179,7 @@ pub fn required_roles(payload: &Payload) -> Option<Vec<Vec<Role>>> {
         | FindingAdded { .. }
         | ReplyAdded { .. }
         | AuditFindingAdded { .. }
+        | PublicationVerified { .. }
         | VerificationRunStarted { .. }
         | VerificationRecorded { .. }
         | VerificationReused { .. }

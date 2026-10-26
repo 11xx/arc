@@ -5,6 +5,7 @@
 //! retained for diagnostics and refused by gate-dependent operations.
 
 use crate::commands::parse_duration;
+use crate::model::{DeltaSelection, GateEvent};
 use crate::process_group::{
     join_before_deadline, kill_process_group, read_tail, STDERR_TAIL_BYTES,
 };
@@ -50,6 +51,10 @@ pub struct Gate {
     pub environment: Option<String>,
     #[serde(default)]
     pub profiles: Vec<String>,
+    #[serde(default)]
+    pub events: Vec<GateEvent>,
+    #[serde(default)]
+    pub selector: Option<String>,
     #[serde(default, deserialize_with = "deserialize_timeout")]
     pub timeout: Option<u64>,
     #[serde(skip, default)]
@@ -64,6 +69,7 @@ pub struct GateConflict {
 
 #[derive(Debug, Clone)]
 pub struct GateDeclaration {
+    pub selector: Option<String>,
     pub command: String,
     pub environment: Option<String>,
     pub source: String,
@@ -91,6 +97,7 @@ impl GateDivergence {
 impl GateDeclaration {
     fn of(gate: &Gate, source: &str) -> Self {
         GateDeclaration {
+            selector: gate.selector.clone(),
             command: gate.command.clone(),
             environment: gate.environment.clone(),
             source: source.to_string(),
@@ -99,12 +106,16 @@ impl GateDeclaration {
 
     /// One declaration as a conflict report names it.
     pub fn describe(&self) -> String {
-        match &self.environment {
+        let description = match &self.environment {
             Some(probe) => format!(
                 "{} declares {:?} with environment probe {:?}",
                 self.source, self.command, probe
             ),
             None => format!("{} declares {:?}", self.source, self.command),
+        };
+        match &self.selector {
+            Some(selector) => format!("{description} with delta selector {selector:?}"),
+            None => description,
         }
     }
 }
@@ -180,15 +191,16 @@ pub fn environment_probe(cwd: &Path, probe: &str, timeout: Option<u64>) -> Resul
     let deadline = Instant::now()
         .checked_add(Duration::from_secs(timeout))
         .context("environment probe timeout is too large")?;
-    let mut child = match Command::new("sh")
+    let mut command = Command::new("sh");
+    command
         .arg("-c")
         .arg(probe)
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()
-    {
+        .process_group(0);
+    crate::warm_worktree::configure_command(&mut command, cwd);
+    let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
             return Ok(ProbeRun {
@@ -361,11 +373,13 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<GatesFile> 
                         name,
                         declarations: vec![
                             GateDeclaration {
+                                selector: current.selector.clone(),
                                 command: current.command.clone(),
                                 environment: current.environment.clone(),
                                 source: current.declared_by[0].clone(),
                             },
                             GateDeclaration {
+                                selector: gate.selector,
                                 command: gate.command,
                                 environment: gate.environment,
                                 source: source.clone(),
@@ -385,14 +399,16 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<GatesFile> 
 }
 
 impl Gate {
-    /// Whether two declarations name the same check: one command run against
-    /// one environment.
+    /// Whether two declarations name the same check, environment and
+    /// project selection contract.
     fn same_check(&self, other: &Gate) -> bool {
-        self.command == other.command && self.environment == other.environment
+        self.command == other.command
+            && self.environment == other.environment
+            && self.selector == other.selector
     }
 
     /// Fold another declaration of the same check into this one. Profiles
-    /// widen and the stricter timeout wins, so one declaration cannot loosen
+    /// and events widen and the stricter timeout wins, so one declaration cannot loosen
     /// a gate the other bounds.
     fn absorb(&mut self, other: Gate) {
         if self.profiles.is_empty() || other.profiles.is_empty() {
@@ -401,6 +417,13 @@ impl Gate {
             self.profiles.extend(other.profiles);
             let profiles: BTreeSet<_> = self.profiles.drain(..).collect();
             self.profiles.extend(profiles);
+        }
+        if self.events.is_empty() || other.events.is_empty() {
+            self.events.clear();
+        } else {
+            self.events.extend(other.events);
+            self.events.sort();
+            self.events.dedup();
         }
         self.timeout = match (self.timeout, other.timeout) {
             (Some(left), Some(right)) => Some(left.min(right)),
@@ -464,12 +487,212 @@ impl GatesFile {
     }
 
     pub fn required_for<'a>(&'a self, profile: &str) -> Vec<(&'a String, &'a Gate)> {
+        self.required_for_event(profile, GateEvent::Integration)
+    }
+
+    pub fn required_for_event<'a>(
+        &'a self,
+        profile: &str,
+        event: GateEvent,
+    ) -> Vec<(&'a String, &'a Gate)> {
         self.gates
             .iter()
             .filter(|(_, gate)| {
-                gate.profiles.is_empty() || gate.profiles.iter().any(|item| item == profile)
+                (gate.profiles.is_empty() || gate.profiles.iter().any(|item| item == profile))
+                    && (gate.events.is_empty() || gate.events.contains(&event))
             })
             .collect()
+    }
+}
+
+/// Identity of the gate declaration whose evidence can be reused.
+pub fn declaration_identity(gate: &Gate) -> String {
+    let value = serde_json::json!({
+        "command": gate.command, "environment": gate.environment,
+        "profiles": gate.profiles, "events": gate.events,
+        "timeout": gate.timeout, "selector": gate.selector,
+    });
+    format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(value.to_string().as_bytes()))
+    )
+}
+
+/// Ask a project selector whether the delta affects one gate. Any incomplete,
+/// malformed, failed, oversized or timed-out answer leaves the gate to run.
+pub fn select_delta(
+    cwd: &Path,
+    gate: &Gate,
+    name: &str,
+    source_tree: &str,
+    target_tree: &str,
+    declared_gates: &[String],
+) -> Option<DeltaSelection> {
+    let selector = gate.selector.as_deref()?;
+    let raw = crate::gitio::git(
+        cwd,
+        &["diff", "--name-only", "-z", source_tree, target_tree, "--"],
+    )
+    .ok()?;
+    if raw.len() > 65536 || raw.contains('\u{fffd}') {
+        return None;
+    }
+    let paths: Vec<String> = raw
+        .split('\0')
+        .filter(|item| !item.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let input = serde_json::json!({
+        "schema": "arc-gate-delta/1", "source_tree": source_tree,
+        "target_tree": target_tree, "paths": paths, "gates": declared_gates,
+    })
+    .to_string();
+    let output = selector_output(cwd, selector, &input, gate.timeout)
+        .ok()
+        .flatten()?;
+    let answer: serde_json::Value = serde_json::from_slice(&output).ok()?;
+    if answer.get("schema")?.as_str()? != "arc-gate-selection/1"
+        || !answer.get("complete")?.as_bool()?
+    {
+        return None;
+    }
+    let selected: Vec<String> = answer
+        .get("gates")?
+        .as_array()?
+        .iter()
+        .map(|value| value.as_str().map(str::to_owned))
+        .collect::<Option<_>>()?;
+    if selected.iter().any(|item| !declared_gates.contains(item))
+        || selected.iter().any(|item| item == name)
+    {
+        return None;
+    }
+    Some(DeltaSelection {
+        against_target: None,
+        source_tree: source_tree.to_owned(),
+        target_tree: target_tree.to_owned(),
+        declaration: declaration_identity(gate),
+        selector: selector.to_owned(),
+        changed_paths: paths,
+        selected_gates: selected,
+        output_sha256: format!("sha256:{}", hex::encode(Sha256::digest(&output))),
+        output: String::from_utf8(output).ok()?,
+    })
+}
+
+struct SelectorChild(std::process::Child);
+
+impl Drop for SelectorChild {
+    fn drop(&mut self) {
+        let _ = kill_process_group(self.0.id());
+        let _ = self.0.wait();
+    }
+}
+
+fn selector_exit_without_reaping(child: &std::process::Child) -> Result<Option<bool>> {
+    let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+    // SAFETY: waitid initializes info; WNOWAIT retains ownership of the PID
+    // until SelectorChild stops its group and reaps the leader.
+    if unsafe {
+        libc::waitid(
+            libc::P_PID,
+            child.id(),
+            info.as_mut_ptr(),
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error()).context("cannot observe gate selector");
+    }
+    // SAFETY: a successful waitid initialized info and the WEXITED fields.
+    let info = unsafe { info.assume_init() };
+    Ok(unsafe {
+        (info.si_pid() != 0).then(|| info.si_code == libc::CLD_EXITED && info.si_status() == 0)
+    })
+}
+
+fn selector_output(
+    cwd: &Path,
+    selector: &str,
+    input: &str,
+    timeout: Option<u64>,
+) -> Result<Option<Vec<u8>>> {
+    use std::io::Write;
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(
+            timeout.unwrap_or(DEFAULT_PROBE_TIMEOUT_SECONDS),
+        ))
+        .context("gate selector timeout is too large")?;
+    let child = Command::new("sh")
+        .arg("-c")
+        .arg(selector)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()?;
+    let mut child = SelectorChild(child);
+    let mut stdin = child
+        .0
+        .stdin
+        .take()
+        .context("gate selector stdin unavailable")?;
+    let input = input.to_owned();
+    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+    let mut stdout = child
+        .0
+        .stdout
+        .take()
+        .context("gate selector stdout unavailable")?;
+    let reader = std::thread::spawn(move || -> std::io::Result<(Vec<u8>, bool)> {
+        let mut output = Vec::new();
+        let mut buffer = [0; 8192];
+        let mut oversized = false;
+        loop {
+            let count = stdout.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            if output.len() + count > 65536 {
+                oversized = true;
+            }
+            let keep = count.min(65536usize.saturating_sub(output.len()));
+            output.extend_from_slice(&buffer[..keep]);
+        }
+        Ok((output, oversized))
+    });
+    let stderr = child
+        .0
+        .stderr
+        .take()
+        .context("gate selector stderr unavailable")?;
+    let errors = std::thread::spawn(move || read_tail(stderr, STDERR_TAIL_BYTES));
+    let mut status = None;
+    loop {
+        if status.is_none() {
+            status = selector_exit_without_reaping(&child.0)?;
+            if status.is_some() {
+                kill_process_group(child.0.id())?;
+            }
+        }
+        if status.is_some() && reader.is_finished() && writer.is_finished() && errors.is_finished()
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let output =
+        join_before_deadline(reader, Some(deadline), "gate selector stdout")?.transpose()?;
+    let written =
+        join_before_deadline(writer, Some(deadline), "gate selector stdin")?.transpose()?;
+    let _ = join_before_deadline(errors, Some(deadline), "gate selector stderr")?.transpose()?;
+    match output {
+        Some((output, false)) if written.is_some() && status == Some(true) => Ok(Some(output)),
+        _ => Ok(None),
     }
 }
 

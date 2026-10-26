@@ -1464,10 +1464,23 @@ fn build_report(
             &lookup_tree,
             current_head.as_deref(),
         ) {
-            (Some(tree), _) => {
-                state.gate_evidence_at_tree_matching(name, tree, &resolve_tree, matches)
+            (Some(tree), _) => state.gate_evidence_at_tree_matching(
+                name,
+                tree,
+                &resolve_tree,
+                |entry: &state::VerificationEntry| {
+                    crate::state::verification_event(state, entry)
+                        == crate::model::GateEvent::Integration
+                        && matches(entry)
+                },
+            ),
+            (None, Some(head)) => {
+                state.gate_evidence_at_matching(name, head, |entry: &state::VerificationEntry| {
+                    crate::state::verification_event(state, entry)
+                        == crate::model::GateEvent::Integration
+                        && matches(entry)
+                })
             }
-            (None, Some(head)) => state.gate_evidence_at_matching(name, head, matches),
             (None, None) => None,
         };
         let newest = evidence_at(&|_| true);
@@ -2251,7 +2264,12 @@ pub fn matches_declaration(
     evidence: &crate::state::VerificationEntry,
     gate: &crate::gates::Gate,
 ) -> bool {
-    evidence.command == gate.command && evidence.timeout_seconds == gate.timeout
+    evidence.command == gate.command
+        && evidence.timeout_seconds == gate.timeout
+        && evidence.delta.as_ref().is_none_or(|delta| {
+            delta.declaration == crate::gates::declaration_identity(gate)
+                && gate.selector.as_deref() == Some(delta.selector.as_str())
+        })
 }
 
 /// Whether evidence was produced in the environment a gate declares.

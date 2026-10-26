@@ -820,6 +820,8 @@ mod tests {
         BTreeMap::from([(
             "build".to_string(),
             NormalizedGate {
+                events: Vec::new(),
+                selector: None,
                 command: "make build".to_string(),
                 profiles: Vec::new(),
                 timeout: None,
@@ -1144,6 +1146,8 @@ mod tests {
         changed_gates.insert(
             "lint".to_string(),
             NormalizedGate {
+                events: Vec::new(),
+                selector: None,
                 command: "make lint".to_string(),
                 profiles: Vec::new(),
                 timeout: None,

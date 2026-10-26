@@ -607,6 +607,9 @@ fn import_events(
                 ));
             }
         }
+        if let Some(pin) = crate::bundle::publication_pin(&ctx.cwd, &event)? {
+            pins.push(pin);
+        }
         let Payload::HistoryRewritten { retained, .. } = &event.payload else {
             continue;
         };

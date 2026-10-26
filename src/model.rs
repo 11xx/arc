@@ -1462,7 +1462,19 @@ pub enum Payload {
         #[serde(default)]
         supersedes: Vec<String>,
     },
+    PublicationVerified {
+        retention_ref: String,
+        target: String,
+        revision: String,
+        tree: String,
+        profile: String,
+        gates: std::collections::BTreeMap<String, PublicationGateResult>,
+        result: VerifyResult,
+        declarations: String,
+    },
     VerificationRunStarted {
+        #[serde(default, skip_serializing_if = "GateEvent::is_integration")]
+        event: GateEvent,
         revision: String,
         mode: VerificationRunMode,
         skip_green: bool,
@@ -1581,6 +1593,8 @@ pub enum Payload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tree: Option<String>,
         evidence_event_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delta: Option<DeltaSelection>,
     },
     HoldSet {
         reason: String,
@@ -2415,6 +2429,10 @@ pub enum DangerRule {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NormalizedGate {
     pub command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<GateEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub profiles: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2500,7 +2518,8 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         | Payload::IterationScopeSet { .. } => AppendPermission::LifecycleOwned,
         // Repository-scoped: it is never appended to a change's log, so no
         // change-phase policy applies to it.
-        Payload::HistoryRewritten { .. }
+        Payload::PublicationVerified { .. }
+        | Payload::HistoryRewritten { .. }
         | Payload::HistoryRewriteWithdrawn { .. }
         | Payload::ReviewPassOpened { .. }
         | Payload::ReviewPassCompleted { .. }
@@ -3725,6 +3744,56 @@ pub struct DeferredFinding {
 pub enum VerifyResult {
     Pass,
     Fail,
+}
+
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    clap::ValueEnum,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum GateEvent {
+    #[default]
+    Integration,
+    Publication,
+}
+
+impl GateEvent {
+    fn is_integration(&self) -> bool {
+        *self == Self::Integration
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeltaSelection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub against_target: Option<String>,
+    pub source_tree: String,
+    pub target_tree: String,
+    pub declaration: String,
+    pub selector: String,
+    pub changed_paths: Vec<String>,
+    pub selected_gates: Vec<String>,
+    pub output_sha256: String,
+    pub output: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublicationGateResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_artifact: Option<crate::verification_output::OutputArtifact>,
+    pub command: String,
+    pub timeout_seconds: Option<u64>,
+    pub environment: Option<String>,
+    pub result: VerifyResult,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

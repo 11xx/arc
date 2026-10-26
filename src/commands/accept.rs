@@ -792,6 +792,7 @@ fn check_execution(
 
 fn verify_args() -> VerifyArgs {
     VerifyArgs {
+        event: None,
         all: false,
         parallel: false,
         skip_green: false,
@@ -1147,6 +1148,7 @@ fn execute_acceptance(
                     .map(String::as_str)
                     .collect::<Vec<_>>(),
             )?;
+            crate::warm_worktree::prepare(&run.cwd)?;
             revalidate(&run, plan, &plan.head)
         })?;
     }

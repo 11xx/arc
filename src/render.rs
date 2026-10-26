@@ -2091,6 +2091,9 @@ pub(crate) fn kept_citations(cites: &[String]) -> String {
 /// Stable kebab event type plus a type-specific one-line summary.
 pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
     match payload {
+        Payload::PublicationVerified { target, revision, result, .. } => (
+            "publication-verified", format!("{target} at {revision}: {result:?}"),
+        ),
         Payload::ChangeCheckoutBound {
             branch,
             worktree,

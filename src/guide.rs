@@ -4222,9 +4222,54 @@ FILES
 
     command = "<shell command>"
     profiles = ["<profile>"]            omitted: required for every profile
+    events = ["integration"]           omitted: integration and publication
     timeout = "10m"                     s, m, or h; omitted: unbounded
     environment = "<probe command>"     evidence counts only where the probe
                                         prints the same output
+
+  `arc verify --all --event integration|publication` selects the event's
+  gates. Evidence identifies its event, tree, command and environment;
+  a publication pass does not satisfy an integration requirement.
+  Historical verification evidence with no recorded event is integration
+  evidence. An omitted event on a gate declaration applies to both events.
+  `arc publication --target <branch> --profile <profile>` runs the complete
+  publication tier at that branch's head. Push and release tooling can use
+  `--revision <full-commit-id>` to require the exact revision queued by the
+  caller and use its exit status as a local guard. Arc makes no network
+  request and installs no hook implicitly. A failed publication names the integrations since the
+  most recent successful publication pass.
+
+  A gate's optional `selector` command reads `arc-gate-delta/1` JSON with
+  `source_tree`, `target_tree`, `paths` and `gates`. It answers
+  `arc-gate-selection/1` with `complete: true` and the gate names affected by
+  that delta. Missing, failed, malformed, incomplete or unknown selections
+  run the required checks. Delta selection applies to integration; publication
+  checks every required gate on a changed tree. A reuse receipt retains the
+  passing source tree, target tree, selector and declarations; it grants no result to another
+  event or environment.
+
+  `.arc/worktrees.toml` declares optional build preparation:
+
+    [prepare]
+    command = "<project preparation command>"
+    timeout = "30s"
+
+  Preparation runs after begin, fork, acceptance and replay checkout
+  population. Its working directory and `ARC_WORKTREE_BUILD` name an
+  Arc-owned directory specific to that checkout and source tree. Gates and
+  probes use prepared output only with a matching successful receipt;
+  otherwise they receive fresh cold storage.
+  `ARC_WORKTREE_PATH`, `ARC_WORKTREE_REVISION` and `ARC_WORKTREE_TREE` identify
+  the source; `ARC_WORKTREE_CACHE` names a shared cache protected by a lease.
+  Build outputs belong in the build directory and reusable compiler data in
+  the cache. An inherited `CARGO_TARGET_DIR` is removed. A busy cache or failed
+  preparation continues cold; changed source, index, HEAD or untracked source
+  paths refuses the checkout. The timeout covers output pipes and cleanup of
+  the hook's process group. Preparation is never gate evidence.
+  Gate commands and environment probes receive the same build/source/cache
+  variables. A project selects its prepared output explicitly, such as
+  `CARGO_TARGET_DIR="$ARC_WORKTREE_BUILD/target"`. An administrative receipt
+  reuses preparation at unchanged source; changed source prepares again.
 
   A timeout bounds the process and its output-pipe cleanup. A descendant
   holding a pipe after the leader exits still times out; arc kills the
@@ -4244,6 +4289,12 @@ FILES
   it, and closing a change without integrating it releases nothing. Release
   any other with `git update-ref -d`. A registered candidate's tree is pinned by
   `refs/arc/candidate/<id>` until `arc candidate retire` releases it.
+
+  Publication receipts retain their tested commits under
+  `refs/arc/publication/<receipt-id>`, named by the receipt's `retention_ref`.
+  Export and import preserve the tested objects and pin identity. Integration cleanup keeps these refs while the
+  publication history cites them; an operator may release one deliberately
+  with `git update-ref -d`.
 
 SCHEMAS
   Every structured surface carries a `schema` string `<name>/<n>`. A shape
@@ -4278,6 +4329,8 @@ SCHEMAS
     `arc-export/1`                   arc export --json
     `arc-import/1`                   arc import --json
     `arc-integration-plan/1`         arc integrate --dry-run --json
+    `arc-gate-delta/1`               gate selector stdin
+    `arc-gate-selection/1`           gate selector stdout
     `arc-provisional-transition/2`   arc integrate --provisional --json
     `arc-brief/2`                    arc brief --json
     `arc-journal-artifact/3`         arc journal show --json

@@ -158,7 +158,7 @@ pub fn show(ctx: &Ctx) -> Result<i32> {
     }
     for (name, gate) in &gates.gates {
         println!(
-            "gate {name}: command = {:?}; profiles = {}; timeout = {}; environment = {:?}; declared by {}",
+            "gate {name}: command = {:?}; profiles = {}; timeout = {}; environment = {:?}; events = {}; selector = {:?}; declared by {}",
             gate.command,
             if gate.profiles.is_empty() {
                 "all".to_string()
@@ -167,6 +167,13 @@ pub fn show(ctx: &Ctx) -> Result<i32> {
             },
             option_value(gate.timeout),
             gate.environment.as_deref().unwrap_or("none"),
+            if gate.events.is_empty() { "all".to_owned() } else {
+                gate.events.iter().map(|event| match event {
+                    crate::model::GateEvent::Integration => "integration",
+                    crate::model::GateEvent::Publication => "publication",
+                }).collect::<Vec<_>>().join(", ")
+            },
+            gate.selector.as_deref().unwrap_or("none"),
             gate.declared_by.join(", ")
         );
     }

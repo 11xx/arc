@@ -50,6 +50,7 @@ mod store;
 mod style;
 mod trailers;
 mod verification_output;
+mod warm_worktree;
 mod worktree_usage;
 
 use anyhow::{bail, Context, Result};
@@ -57,8 +58,8 @@ use clap::parser::ValueSource;
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
 use commands::{fork, AnchorArgs, Ctx, ListFormat, QueryArgs};
 use model::{
-    ActorSource, DebtMissing, DispositionStatus, ExternalVerdict, MessageSeverity, MessageType,
-    ProbePhase, ReviewCause, ReviewQualifier, RunOutcome, Severity, Side, Verdict,
+    ActorSource, DebtMissing, DispositionStatus, ExternalVerdict, GateEvent, MessageSeverity,
+    MessageType, ProbePhase, ReviewCause, ReviewQualifier, RunOutcome, Severity, Side, Verdict,
     VerdictRelationKind, VerifyResult,
 };
 use std::path::{Path, PathBuf};
@@ -1887,6 +1888,19 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ExternalCmd,
     },
+    /// Require publication gates at a local target branch's current head.
+    /// Use this guard from push and release tooling before publishing that revision.
+    Publication {
+        #[arg(long)]
+        target: String,
+        /// Require the full commit ID queued by the caller's push or release
+        #[arg(long)]
+        revision: Option<String>,
+        #[arg(long, default_value = "local")]
+        profile: String,
+        #[arg(long)]
+        skip_green: bool,
+    },
     /// Run a declared gate (or ad hoc command) and record the evidence. Gate
     /// evidence only counts at the change's own head, so the command runs in
     /// the change's recorded worktree whichever checkout it was typed in;
@@ -1906,7 +1920,7 @@ enum Cmd {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
         change: Option<String>,
-        /// Run every gate declared for the change profile
+        /// Run every gate required for the selected event and change profile
         #[arg(long)]
         all: bool,
         /// Run all declared gates concurrently and append evidence in name order
@@ -1920,8 +1934,15 @@ enum Cmd {
         /// Reuse records that tree and requires that evidence to carry the same
         /// content key; a gate whose newest evidence failed or has neither
         /// tree nor tested_tree is rerun
+        /// Integration may reuse a clean passing source across a delta when
+        /// a complete project selector excludes the gate. Its provenance is
+        /// recorded; unavailable or uncertain selection runs the gate.
+        /// Publication checks the complete tier on changed trees.
         #[arg(long = "skip-green")]
         skip_green: bool,
+        /// Select integration or publication gates for --all or --against
+        #[arg(long, value_enum)]
+        event: Option<GateEvent>,
         /// Gate name from .arc/gates.toml
         #[arg(long)]
         gate: Option<String>,
@@ -6412,11 +6433,18 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 Ok(0)
             }
         },
+        Cmd::Publication {
+            target,
+            revision,
+            profile,
+            skip_green,
+        } => commands::publication(&ctx, &target, &profile, skip_green, revision.as_deref()),
         Cmd::Verify {
             change,
             all,
             parallel,
             skip_green,
+            event,
             gate,
             command,
             probe,
@@ -6442,6 +6470,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     all,
                     parallel,
                     skip_green,
+                    event,
                     gate,
                     command,
                     probe,

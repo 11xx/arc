@@ -57,6 +57,7 @@ struct CheckBlocker {
 }
 
 pub struct VerifyArgs {
+    pub event: Option<GateEvent>,
     pub all: bool,
     pub parallel: bool,
     pub skip_green: bool,
@@ -129,6 +130,7 @@ struct CompletedVerification {
 
 pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     let VerifyArgs {
+        event,
         all,
         parallel,
         skip_green,
@@ -149,6 +151,10 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         predicted,
         against,
     } = args;
+    if event.is_some() && !all && against.is_none() {
+        bail!("--event requires --all or --against");
+    }
+    let event = event.unwrap_or_default();
     if all
         && (gate.is_some()
             || command.is_some()
@@ -443,9 +449,11 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     // Evidence for a merge is counted at its tree rather than at the change's
     // head, so the head check below is not the question this path answers.
     if let Some(target) = against {
-        return verify_against(ctx, &store, &change_id, &st, &target, note, skip_green);
+        return verify_against(
+            ctx, &store, &change_id, &st, &target, note, skip_green, event,
+        );
     }
-    // Every path below records gate evidence, which status counts only at the
+    // The remaining paths record evidence for the selected event at the
     // change's head.
     match &tested_revision {
         Some(revision) => warn_if_attested_off_head(ctx, &st, revision),
@@ -453,7 +461,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     }
     if all {
         let gates = ctx.declarations(&st)?.gates;
-        let required = gates.required_for(&st.profile);
+        let required = gates.required_for_event(&st.profile, event);
         if required.is_empty() {
             bail!("no gates declared for profile {}", st.profile);
         }
@@ -465,8 +473,8 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         } else {
             VerificationRunMode::Sequential
         };
-        let run_id = start_verification_run(
-            run_ctx, &store, &change_id, &head, mode, skip_green, &required,
+        let run_id = start_verification_run_for_event(
+            run_ctx, &store, &change_id, &head, mode, skip_green, &required, event,
         )?;
         // Applicability is a property of this checkout, so every declared
         // probe is read before reuse is decided. A probe is run once per
@@ -478,17 +486,23 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         let legacy_trees = status::legacy_evidence_trees(&st, &run_ctx.cwd);
         let resolve_tree = |revision: &str| legacy_trees.get(revision).cloned();
         let mut reused = Vec::new();
+        let mut delta_reuses = Vec::new();
+        let declared_names = required
+            .iter()
+            .map(|(name, _)| (*name).clone())
+            .collect::<Vec<_>>();
         let mut to_run = Vec::new();
         for (name, gate) in required {
             let reusable = skip_green
                 .then(|| {
-                    reusable_evidence(
+                    reusable_evidence_for_event(
                         &st,
                         name,
                         gate,
                         &tree,
                         &resolve_tree,
                         declared_environment(&environments, gate),
+                        event,
                     )
                 })
                 .flatten();
@@ -498,11 +512,45 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
                     gate.declared_by.join(", ")
                 );
                 reused.push((name.clone(), evidence.event_id.clone()));
+            } else if let Some((source, delta)) = skip_green
+                .then(|| {
+                    incremental_evidence(
+                        run_ctx,
+                        &st,
+                        name,
+                        gate,
+                        &tree,
+                        &declared_names,
+                        declared_environment(&environments, gate),
+                        event,
+                    )
+                })
+                .flatten()
+            {
+                println!(
+                    "gate {name}: skipped (project selector proves unchanged scope from {})",
+                    delta.source_tree
+                );
+                delta_reuses.push((name.clone(), source, delta));
             } else {
                 to_run.push((name, gate));
             }
         }
         append_reuses(ctx, &store, &change_id, &run_id, &head, &tree, &reused)?;
+        append_delta_reuses(
+            ctx,
+            &store,
+            &change_id,
+            &run_id,
+            &head,
+            &tree,
+            &delta_reuses,
+        )?;
+        reused.extend(
+            delta_reuses
+                .iter()
+                .map(|(name, source, _)| (name.clone(), source.clone())),
+        );
         if parallel {
             return verify_all_parallel(
                 run_ctx,
@@ -658,6 +706,7 @@ impl ScratchWorktree {
                 .with_context(|| format!("cannot create {}", parent.display()))?;
         }
         gitio::git(repo, &["worktree", "add", "--detach", &display, revision])?;
+        crate::warm_worktree::prepare(&path)?;
         Ok(Self {
             repo: repo.to_path_buf(),
             path,
@@ -686,6 +735,7 @@ impl Drop for ScratchWorktree {
 ///
 /// `skip_green` reuses the evidence already recorded at that merged tree
 /// instead of rerunning the gate that produced it.
+#[allow(clippy::too_many_arguments)]
 fn verify_against(
     ctx: &Ctx,
     store: &Store,
@@ -694,12 +744,13 @@ fn verify_against(
     target: &str,
     note: Option<String>,
     skip_green: bool,
+    event: GateEvent,
 ) -> Result<i32> {
     let mut selected = st.clone();
     selected.target_branch = target.to_string();
     let st = &selected;
     let declarations = ctx.declarations(st)?.gates;
-    let required = declarations.required_for(&st.profile);
+    let required = declarations.required_for_event(&st.profile, event);
     if required.is_empty() {
         bail!("no gates declared for profile {}", st.profile);
     }
@@ -734,7 +785,7 @@ fn verify_against(
     println!("synthesized merge: {synthesized}");
 
     let total = required.len();
-    let run_id = start_verification_run(
+    let run_id = start_verification_run_for_event(
         ctx,
         store,
         change_id,
@@ -742,6 +793,7 @@ fn verify_against(
         VerificationRunMode::Sequential,
         skip_green,
         &required,
+        event,
     )?;
     let legacy_trees = status::legacy_evidence_trees(st, &ctx.cwd);
     let resolve_tree = |revision: &str| legacy_trees.get(revision).cloned();
@@ -752,7 +804,17 @@ fn verify_against(
     // leaves nothing to run.
     let cheap_reusable = |name: &String, gate: &gates::Gate| {
         skip_green
-            .then(|| reusable_evidence(st, name, gate, &merged_tree, &resolve_tree, None))
+            .then(|| {
+                reusable_evidence_for_event(
+                    st,
+                    name,
+                    gate,
+                    &merged_tree,
+                    &resolve_tree,
+                    None,
+                    event,
+                )
+            })
             .flatten()
     };
     let any_probe = required.iter().any(|(_, gate)| gate.environment.is_some());
@@ -774,17 +836,23 @@ fn verify_against(
         required.iter().map(|(name, gate)| (name.as_str(), *gate)),
     )?;
     let mut reused = Vec::new();
+    let mut delta_reuses = Vec::new();
+    let declared_names = required
+        .iter()
+        .map(|(name, _)| (*name).clone())
+        .collect::<Vec<_>>();
     let mut to_run = Vec::new();
     for (name, gate) in required {
         let reusable = skip_green
             .then(|| {
-                reusable_evidence(
+                reusable_evidence_for_event(
                     st,
                     name,
                     gate,
                     &merged_tree,
                     &resolve_tree,
                     declared_environment(&environments, gate),
+                    event,
                 )
             })
             .flatten();
@@ -794,6 +862,27 @@ fn verify_against(
                 gate.declared_by.join(", ")
             );
             reused.push((name.clone(), evidence.event_id.clone()));
+        } else if let Some((source, mut delta)) = skip_green
+            .then(|| {
+                incremental_evidence(
+                    probe_ctx,
+                    st,
+                    name,
+                    gate,
+                    &merged_tree,
+                    &declared_names,
+                    declared_environment(&environments, gate),
+                    event,
+                )
+            })
+            .flatten()
+        {
+            delta.against_target = Some(target_head.clone());
+            println!(
+                "gate {name}: skipped (project selector proves unchanged scope from {})",
+                delta.source_tree
+            );
+            delta_reuses.push((name.clone(), source, delta));
         } else {
             to_run.push((name, gate));
         }
@@ -807,6 +896,20 @@ fn verify_against(
         &merged_tree,
         &reused,
     )?;
+    append_delta_reuses(
+        ctx,
+        store,
+        change_id,
+        &run_id,
+        &synthesized,
+        &merged_tree,
+        &delta_reuses,
+    )?;
+    reused.extend(
+        delta_reuses
+            .iter()
+            .map(|(name, source, _)| (name.clone(), source.clone())),
+    );
 
     let mut passed = reused.len();
     if !to_run.is_empty() {
@@ -1008,9 +1111,33 @@ fn start_verification_run(
     skip_green: bool,
     gates: &[(&String, &gates::Gate)],
 ) -> Result<String> {
+    start_verification_run_for_event(
+        ctx,
+        store,
+        change_id,
+        revision,
+        mode,
+        skip_green,
+        gates,
+        GateEvent::Integration,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_verification_run_for_event(
+    ctx: &Ctx,
+    store: &Store,
+    change_id: &str,
+    revision: &str,
+    mode: VerificationRunMode,
+    skip_green: bool,
+    gates: &[(&String, &gates::Gate)],
+    event: GateEvent,
+) -> Result<String> {
     let _transition = store.lock_transition(change_id)?;
     let state = store.state(change_id)?;
     let payload = Payload::VerificationRunStarted {
+        event,
         revision: revision.to_owned(),
         mode,
         skip_green,
@@ -1040,22 +1167,108 @@ fn start_verification_run(
 /// event names the tree, and replay checks it against the content key the
 /// evidence itself carries, so newest evidence keyed only by a revision is
 /// rerun.
-fn reusable_evidence<'a>(
+#[allow(clippy::too_many_arguments)]
+fn reusable_evidence_for_event<'a>(
     st: &'a ChangeState,
     name: &str,
     gate: &gates::Gate,
     tree: &str,
     resolve_tree: &dyn Fn(&str) -> Option<String>,
     environment: Option<&str>,
+    event: GateEvent,
 ) -> Option<&'a state::VerificationEntry> {
     st.gate_evidence_at_tree_matching(name, tree, resolve_tree, |evidence| {
-        status::matches_declaration(evidence, gate)
+        state::verification_event(st, evidence) == event
+            && status::matches_declaration(evidence, gate)
             && status::matches_environment(evidence, gate, environment)
     })
     .filter(|evidence| {
         evidence.recorded_tree() == Some(tree)
             && evidence.green_at_head(st.eligible_dirty_tree_waiver())
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn incremental_evidence(
+    ctx: &Ctx,
+    st: &ChangeState,
+    name: &str,
+    gate: &gates::Gate,
+    tree: &str,
+    declared_names: &[String],
+    environment: Option<&str>,
+    event: GateEvent,
+) -> Option<(String, DeltaSelection)> {
+    if event != GateEvent::Integration {
+        return None;
+    }
+    gate.selector.as_deref()?;
+    let head = gitio::head(&ctx.cwd).ok()?;
+    if gitio::commit_tree(&ctx.cwd, &head).ok()?.as_str() != tree
+        || !gitio::git(
+            &ctx.cwd,
+            &["status", "--porcelain=v1", "--untracked-files=normal"],
+        )
+        .ok()?
+        .is_empty()
+    {
+        return None;
+    }
+    let source = st.verifications.iter().rev().find(|evidence| {
+        evidence.gate.as_deref() == Some(name)
+            && state::verification_event(st, evidence) == event
+            && status::matches_declaration(evidence, gate)
+    })?;
+    if !source.green_at_head(None) || !status::matches_environment(source, gate, environment) {
+        return None;
+    }
+    let source_tree = source.recorded_tree()?;
+    if source_tree == tree {
+        return None;
+    }
+    let delta = gates::select_delta(&ctx.cwd, gate, name, source_tree, tree, declared_names)?;
+    if gitio::head(&ctx.cwd).ok()? != head
+        || !gitio::git(
+            &ctx.cwd,
+            &["status", "--porcelain=v1", "--untracked-files=normal"],
+        )
+        .ok()?
+        .is_empty()
+    {
+        return None;
+    }
+    Some((source.event_id.clone(), delta))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_delta_reuses(
+    ctx: &Ctx,
+    store: &Store,
+    change_id: &str,
+    run_id: &str,
+    revision: &str,
+    tree: &str,
+    reused: &[(String, String, DeltaSelection)],
+) -> Result<()> {
+    if reused.is_empty() {
+        return Ok(());
+    }
+    let _transition = store.lock_transition(change_id)?;
+    let state = store.state(change_id)?;
+    for (gate, source, delta) in reused {
+        let payload = Payload::VerificationReused {
+            run_id: run_id.to_owned(),
+            gate: gate.clone(),
+            revision: revision.to_owned(),
+            tree: Some(tree.to_owned()),
+            evidence_event_id: source.clone(),
+            delta: Some(delta.clone()),
+        };
+        ensure_append_allowed(&state, &payload)?;
+        let mut event = ctx.event(store, change_id, payload)?;
+        store.append_local_event(&mut event)?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1082,6 +1295,7 @@ fn append_reuses(
             revision: revision.to_owned(),
             tree: Some(tree.to_owned()),
             evidence_event_id: evidence_event_id.clone(),
+            delta: None,
         };
         ensure_append_allowed(&state, &payload)?;
         let mut event = ctx.event(store, change_id, payload)?;
@@ -1154,6 +1368,7 @@ fn verify_recorded(
             ctx,
             reference,
             VerifyArgs {
+                event: None,
                 all: true,
                 parallel: false,
                 skip_green: true,
@@ -1247,6 +1462,7 @@ fn verify_recorded(
             ctx,
             reference,
             VerifyArgs {
+                event: None,
                 all: false,
                 parallel: false,
                 skip_green: false,
@@ -1321,6 +1537,7 @@ pub fn done(
             ctx,
             reference,
             VerifyArgs {
+                event: None,
                 all: true,
                 parallel: false,
                 skip_green: false,
@@ -2175,6 +2392,7 @@ pub(super) fn run_gate(
     output_root: &Path,
     producing_store: &str,
 ) -> Result<GateRun> {
+    crate::warm_worktree::prepare(cwd)?;
     let started = Instant::now();
     let deadline = timeout_seconds
         .map(|seconds| {
@@ -2183,15 +2401,16 @@ pub(super) fn run_gate(
                 .context("gate timeout is too large")
         })
         .transpose()?;
-    let mut child = std::process::Command::new("sh")
+    let mut command = std::process::Command::new("sh");
+    command
         .arg("-c")
         .arg(format!("exec 2>&1\n{cmd}"))
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
-        .context("failed to run gate command")?;
+        .process_group(0);
+    crate::warm_worktree::configure_command(&mut command, cwd);
+    let mut child = command.spawn().context("failed to run gate command")?;
     let stdout = child
         .stdout
         .take()
@@ -2713,7 +2932,16 @@ fn queue_step(
     }) {
         let st = store.state(change_id)?;
         let target = st.target_branch.clone();
-        let code = verify_against(ctx, &store, change_id, &st, &target, None, true)?;
+        let code = verify_against(
+            ctx,
+            &store,
+            change_id,
+            &st,
+            &target,
+            None,
+            true,
+            GateEvent::Integration,
+        )?;
         let st = store.state(change_id)?;
         report = ctx.report_for_integration(&store, &st, &st.target_branch, shape)?;
         if code != 0 {
@@ -4027,6 +4255,8 @@ pub(super) fn normalized_declarations(
                 name.clone(),
                 crate::model::NormalizedGate {
                     command: gate.command.clone(),
+                    events: gate.events.clone(),
+                    selector: gate.selector.clone(),
                     profiles: gate.profiles.clone(),
                     timeout: gate.timeout,
                     declared_by: gate.declared_by.clone(),

@@ -809,6 +809,8 @@ impl AuditVerdictEntry {
 #[derive(Debug, Clone, Serialize)]
 pub struct VerificationEntry {
     pub event_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delta: Option<crate::model::DeltaSelection>,
     pub run_id: Option<String>,
     pub probe: Option<ProbeEvidenceRef>,
     pub gate: Option<String>,
@@ -996,6 +998,43 @@ impl VerificationEntry {
     }
 }
 
+fn valid_delta_selection(delta: &crate::model::DeltaSelection) -> bool {
+    use sha2::{Digest, Sha256};
+    let Ok(answer) = serde_json::from_str::<serde_json::Value>(&delta.output) else {
+        return false;
+    };
+    let selected = answer
+        .get("gates")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|gates| {
+            gates
+                .iter()
+                .map(|name| name.as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()
+        });
+    delta.output.len() <= 65536
+        && answer.get("schema").and_then(serde_json::Value::as_str) == Some("arc-gate-selection/1")
+        && answer.get("complete").and_then(serde_json::Value::as_bool) == Some(true)
+        && selected.as_deref() == Some(delta.selected_gates.as_slice())
+        && delta.output_sha256
+            == format!(
+                "sha256:{}",
+                hex::encode(Sha256::digest(delta.output.as_bytes()))
+            )
+}
+
+pub fn verification_event(
+    state: &ChangeState,
+    evidence: &VerificationEntry,
+) -> crate::model::GateEvent {
+    evidence
+        .run_id
+        .as_deref()
+        .and_then(|id| state.verification_runs.iter().find(|run| run.run_id == id))
+        .map(|run| run.event)
+        .unwrap_or_default()
+}
+
 fn is_false_ref(value: &bool) -> bool {
     !*value
 }
@@ -1003,6 +1042,7 @@ fn is_false_ref(value: &bool) -> bool {
 #[derive(Debug, Clone, Serialize)]
 pub struct VerificationRunEntry {
     pub run_id: String,
+    pub event: crate::model::GateEvent,
     pub revision: String,
     pub mode: VerificationRunMode,
     pub skip_green: bool,
@@ -2859,6 +2899,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 });
             }
             Payload::VerificationRunStarted {
+                event,
                 revision,
                 mode,
                 skip_green,
@@ -2876,6 +2917,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 }
                 state.verification_runs.push(VerificationRunEntry {
                     run_id: ev.event_id.clone(),
+                    event: *event,
                     revision: revision.clone(),
                     mode: *mode,
                     skip_green: *skip_green,
@@ -2997,6 +3039,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 }
                 state.verifications.push(VerificationEntry {
                     event_id: ev.event_id.clone(),
+                    delta: None,
                     timeout_seconds: *timeout_seconds,
                     tested_tree: tested_tree.clone(),
                     worktree_dirty: *worktree_dirty,
@@ -3029,6 +3072,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 revision,
                 tree,
                 evidence_event_id,
+                delta,
             } => {
                 let evidence = state
                     .verifications
@@ -3041,18 +3085,48 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                             evidence_event_id
                         )
                     })?;
-                if evidence.gate.as_deref() != Some(gate)
-                    || match tree {
-                        Some(tree) => evidence.recorded_tree() != Some(tree.as_str()),
-                        None => evidence.revision != *revision,
+                let source_event = verification_event(&state, evidence);
+                let destination_event = state
+                    .verification_runs
+                    .iter()
+                    .find(|run| run.run_id == *run_id)
+                    .map(|run| run.event)
+                    .ok_or_else(|| anyhow::anyhow!("verification reuse names no run"))?;
+                let tree_matches = match delta {
+                    Some(delta) => {
+                        valid_delta_selection(delta)
+                            && tree.as_deref() == Some(delta.target_tree.as_str())
+                            && evidence.recorded_tree() == Some(delta.source_tree.as_str())
+                            && !delta.selected_gates.contains(gate)
+                            && !delta.selector.is_empty()
+                            && !delta.declaration.is_empty()
+                            && evidence.green_at_head(state.eligible_dirty_tree_waiver())
                     }
+                    None => match tree {
+                        Some(tree) => evidence.recorded_tree() == Some(tree.as_str()),
+                        None => evidence.revision == *revision,
+                    },
+                };
+                if evidence.gate.as_deref() != Some(gate)
+                    || !tree_matches
                     || evidence.result != VerifyResult::Pass
+                    || source_event != destination_event
                 {
-                    bail!(
-                        "verification reuse {} does not match passing {gate} evidence at {revision}",
-                        ev.event_id
-                    );
+                    bail!("verification reuse {} does not match passing {gate} evidence at {revision}", ev.event_id);
                 }
+                let derived = delta.as_ref().map(|delta| {
+                    let mut derived = evidence.clone();
+                    derived.event_id = ev.event_id.clone();
+                    derived.run_id = Some(run_id.clone());
+                    derived.revision = revision.clone();
+                    derived.tree = tree.clone();
+                    derived.against_target = delta.against_target.clone();
+                    derived.delta = Some(delta.clone());
+                    derived.created_at = ev.created_at;
+                    derived.falsification = None;
+                    derived.falsification_inferred = None;
+                    derived
+                });
                 add_run_terminal(
                     &mut state.verification_runs,
                     run_id,
@@ -3063,6 +3137,9 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                         reuse_event_id: ev.event_id.clone(),
                     },
                 )?;
+                if let Some(derived) = derived {
+                    state.verifications.push(derived);
+                }
             }
             Payload::HoldSet { reason } => {
                 state.holds.insert(
@@ -3361,6 +3438,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
             // unknown events before replay, so this arm is defensive: keep the
             // raw history intact without mutating the derived view.
             Payload::ContextDeclared { .. } => state.round_trip.observe(&ev.payload),
+            Payload::PublicationVerified { .. } => {}
             Payload::Unknown => {}
         }
     }
@@ -4694,6 +4772,7 @@ mod tests {
         let run = ev(
             change,
             Payload::VerificationRunStarted {
+                event: crate::model::GateEvent::Integration,
                 revision: "head".into(),
                 mode: VerificationRunMode::Sequential,
                 skip_green: true,
@@ -4742,6 +4821,7 @@ mod tests {
         let reuse_run = ev(
             change,
             Payload::VerificationRunStarted {
+                event: crate::model::GateEvent::Integration,
                 revision: "head".into(),
                 mode: VerificationRunMode::Sequential,
                 skip_green: true,
@@ -4757,6 +4837,7 @@ mod tests {
         events.push(ev(
             change,
             Payload::VerificationReused {
+                delta: None,
                 run_id: reuse_run_id,
                 gate: "unit".into(),
                 revision: "head".into(),

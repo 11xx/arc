@@ -1684,6 +1684,7 @@ pub fn populate_worktree(path: &Path) -> Result<()> {
             "1",
         ],
     )?;
+    crate::warm_worktree::prepare(path)?;
     Ok(())
 }
 

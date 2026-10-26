@@ -623,6 +623,17 @@ fn exported_objects(
         let payload = serde_json::to_value(&event.payload)?;
         let event_type = payload["event_type"].as_str().unwrap_or_default();
         collect_payload_objects(cwd, &payload, event_type, &mut objects)?;
+        if let Payload::PublicationVerified { revision, tree, .. } = &event.payload {
+            insert_object(cwd, &mut objects, revision, "retention-commit")?;
+            insert_object(cwd, &mut objects, tree, "content-tree")?;
+        }
+        if let Payload::VerificationReused {
+            delta: Some(delta), ..
+        } = &event.payload
+        {
+            insert_object(cwd, &mut objects, &delta.source_tree, "content-tree")?;
+            insert_object(cwd, &mut objects, &delta.target_tree, "content-tree")?;
+        }
         if let Payload::VerificationRecorded {
             revision,
             against_target,
@@ -679,6 +690,40 @@ fn exported_objects(
         }
     }
     Ok(objects.into_iter().collect())
+}
+
+/// A publication pin stays inside the dedicated namespace and retains the
+/// exact commit whose tree the receipt names.
+pub fn publication_pin(
+    cwd: &Path,
+    event: &crate::model::Event,
+) -> Result<Option<(String, String)>> {
+    let Payload::PublicationVerified {
+        retention_ref,
+        revision,
+        tree,
+        ..
+    } = &event.payload
+    else {
+        return Ok(None);
+    };
+    let suffix = retention_ref
+        .strip_prefix("refs/arc/publication/")
+        .context("publication receipt names no publication retention ref")?;
+    ids::validate_id_component(suffix)?;
+    if !valid_object_id(revision) || !valid_object_id(tree) {
+        bail!("publication receipt has an invalid commit or tree");
+    }
+    if crate::gitio::commit_exists(cwd, revision)? {
+        if crate::gitio::commit_tree(cwd, revision)? != *tree {
+            bail!("publication receipt tree disagrees with its commit");
+        }
+        if crate::gitio::ref_value(cwd, retention_ref)?.is_some_and(|held| held != *revision) {
+            bail!("publication retention ref already holds another commit");
+        }
+        return Ok(Some((retention_ref.clone(), revision.clone())));
+    }
+    Ok(None)
 }
 
 /// The retention refs a rewrite event names for one change, each as the name

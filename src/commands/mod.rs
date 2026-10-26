@@ -29,6 +29,8 @@ pub(crate) mod messaging;
 mod observe;
 mod pass;
 mod policy_cmd;
+mod publication;
+pub use publication::publication;
 pub(crate) mod provisional;
 pub use provisional::{check_provisional, resolve as resolve_provisional};
 mod native_child;
