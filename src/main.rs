@@ -7450,6 +7450,7 @@ mod tests {
             "resolve",
             "review",
             "external verdict",
+            "publication",
             "verify",
             "done",
             "rebase",

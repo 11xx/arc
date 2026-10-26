@@ -1002,6 +1002,10 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Reads under a model named by the debt production record's Implemented-by
+  trailers, at any effort, leave review debt owed even where self-approval
+  is allowed. Audits and pre-merge verdicts use the same independence rule.
+
 - `arc cost evidence` drops the query and fragment of the `origin` URL it
   writes as `repository`, where a token could pass through, and leaves out
   a `FILE://` origin as it leaves out `file://`. An export tapes would stop
