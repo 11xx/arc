@@ -36,6 +36,11 @@ pub fn with_deadline<T>(deadline: Option<Instant>, f: impl FnOnce() -> Result<T>
 /// every one of these calls means, and `GIT_EDITOR` is what settles it for
 /// good: it outranks `core.editor` as well as the environment's own.
 ///
+/// `GIT_REFLOG_ACTION` labels the reflog entries a caller's operation writes.
+/// arc's Git runs are its own operations, and the label is display text a
+/// caller chose, so an inherited one is dropped rather than recorded as if it
+/// described what arc did.
+///
 /// Every Git subprocess arc runs is built here, so there is one answer to
 /// this rather than one per call site.
 static PROCESSES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -51,6 +56,7 @@ pub fn git_command() -> Command {
     command.env("GIT_NO_LAZY_FETCH", "1");
     command.env("GIT_EDITOR", "true");
     command.env("GIT_SEQUENCE_EDITOR", "true");
+    command.env_remove("GIT_REFLOG_ACTION");
     command
 }
 
@@ -2440,11 +2446,15 @@ pub fn unmerged_paths(cwd: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
-/// How a rebase ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RebaseOutcome {
-    /// Every commit replayed; the branch is on the new base.
-    Replayed,
+/// How a replay ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplayOutcome {
+    /// `git replay` produced `tip`, and arc moved the branch and its worktree
+    /// to it in this same invocation.
+    Replayed { tip: String },
+    /// Git's rebase command moved the branch instead. What it produced is not
+    /// observed, so nothing about the result is a mechanical replay.
+    Rebased,
     /// Git stopped on a conflict and left the rebase in progress for a person
     /// to resolve. Nothing is aborted: the partial replay is their work.
     Stopped,
@@ -2452,26 +2462,102 @@ pub enum RebaseOutcome {
 
 /// Replay the worktree's branch onto `onto`.
 ///
-/// A rebase that stops on a conflict is an outcome, not a failure: it leaves
-/// state a person continues from. Anything else — an unknown revision, a
-/// refusal — is an error, and leaves no rebase in progress to distinguish it.
+/// `git replay` is tried first. It writes the replayed commits, runs no hooks,
+/// leaves the worktree alone, and prints the ref update it would make; arc
+/// reads the tip from that output and applies the update itself. A replay is
+/// therefore mechanical only when arc produced it, never because something
+/// the repository keeps afterwards says one happened.
 ///
-/// The branch reflog entry is written even where a repository turned reflogs
-/// off, because it is the only record Git leaves of what the rebase itself
-/// produced, and reading that record is how `arc rebase` distinguishes its own
-/// replay from work written afterwards.
-pub fn rebase(cwd: &Path, onto: &str) -> Result<RebaseOutcome> {
+/// Where Git cannot replay, refuses, or conflicts, `git rebase` performs the
+/// replay and nothing about its result is observed. A rebase that stops on a
+/// conflict is an outcome, not a failure: it leaves state a person continues
+/// from. Any other rebase failure — an unknown revision, a refusal — is an
+/// error, and leaves no rebase in progress to distinguish it.
+pub fn replay(cwd: &Path, branch: &str, onto: &str, head: &str) -> Result<ReplayOutcome> {
+    if let Some(tip) = replay_with_plumbing(cwd, branch, onto, head)? {
+        return Ok(ReplayOutcome::Replayed { tip });
+    }
+    rebase_with_command(cwd, onto)
+}
+
+/// The tip `git replay` printed for `branch`, when arc could apply it.
+///
+/// Nothing is applied unless the printed update names `head` as the value it
+/// replaces, and the branch and worktree move together: the ref by a
+/// compare-and-swap, the worktree by a two-tree merge that refuses to
+/// overwrite a local change. Neither runs a hook.
+fn replay_with_plumbing(
+    cwd: &Path,
+    branch: &str,
+    onto: &str,
+    head: &str,
+) -> Result<Option<String>> {
+    // The worktree update acts on whatever this checkout has; a branch checked
+    // out elsewhere has no worktree this call can move.
+    if current_branch(cwd)?.as_deref() != Some(branch) {
+        return Ok(None);
+    }
     let mut command = git_command();
+    // The range names the branch, not its commit: a replay prints the update
+    // for the refs its arguments name, and arc wants the one it moves.
+    let refname = format!("refs/heads/{branch}");
     command
-        .args(["-c", "core.logAllRefUpdates=always", "rebase", onto])
+        .args([
+            "replay",
+            "--onto",
+            onto,
+            "--ref-action=print",
+            &format!("{onto}..{refname}"),
+        ])
         .current_dir(cwd);
     let out = command_output(&mut command)
         .with_context(|| format!("failed to run git in {}", cwd.display()))?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    let Some(tip) = printed_replay_tip(&String::from_utf8_lossy(&out.stdout), &refname, head)
+    else {
+        return Ok(None);
+    };
+    // A worktree that cannot follow is Git rebase's refusal to report, not a
+    // branch moved onto content the worktree does not hold.
+    if git(cwd, &["read-tree", "-n", "-m", "-u", head, &tip]).is_err() {
+        return Ok(None);
+    }
+    git(cwd, &["update-ref", &refname, &tip, head])?;
+    git(cwd, &["read-tree", "-m", "-u", head, &tip]).with_context(|| {
+        format!("{branch} is at {tip}, but its worktree could not follow; reconcile it before snapshotting")
+    })?;
+    Ok(Some(tip))
+}
+
+/// The new tip in a printed replay update for `refname` that replaces `head`.
+///
+/// The lines are the replay command's own output, which no repository state
+/// can add to: an update naming another ref, or another old value, is not
+/// this replay.
+fn printed_replay_tip(output: &str, refname: &str, head: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let _verb = fields.next()?;
+        if fields.next()? != refname {
+            return None;
+        }
+        let tip = fields.next()?;
+        (fields.next()? == head).then(|| tip.to_string())
+    })
+}
+
+fn rebase_with_command(cwd: &Path, onto: &str) -> Result<ReplayOutcome> {
+    let mut command = git_command();
+    command.args(["rebase", onto]).current_dir(cwd);
+    let out = command_output(&mut command)
+        .with_context(|| format!("failed to run git in {}", cwd.display()))?;
     if out.status.success() {
-        return Ok(RebaseOutcome::Replayed);
+        return Ok(ReplayOutcome::Rebased);
     }
     if rebase_in_progress(cwd)? {
-        return Ok(RebaseOutcome::Stopped);
+        return Ok(ReplayOutcome::Stopped);
     }
     bail!(
         "git rebase {onto} failed: {}",
@@ -2483,74 +2569,6 @@ pub fn commit_count(cwd: &Path, base: &str, head: &str) -> Result<usize> {
     git(cwd, &["rev-list", "--count", &format!("{base}..{head}")])?
         .parse()
         .context("git rev-list --count returned a non-numeric commit count")
-}
-
-/// The tip Git recorded for a replay of `branch` that started at `from`.
-///
-/// A rebase writes one reflog entry for the branch it moves: the head it
-/// started from, then the last commit it replayed. Entries written after that
-/// one are work the replay did not produce — a `post-rewrite` hook's commit
-/// among them — so its new value is the only tip an observed replay may claim.
-/// `None` when the branch keeps no such record: an unlogged ref is not
-/// evidence of a replay.
-pub fn replayed_tip(cwd: &Path, branch: &str, from: &str) -> Result<Option<String>> {
-    let log = git(
-        cwd,
-        &[
-            "rev-parse",
-            "--git-path",
-            &format!("logs/refs/heads/{branch}"),
-        ],
-    )?;
-    let Ok(log) = std::fs::read_to_string(cwd.join(log.trim())) else {
-        return Ok(None);
-    };
-    let mut tip = None;
-    for line in log.lines() {
-        let mut fields = line.splitn(3, ' ');
-        let (Some(previous), Some(head)) = (fields.next(), fields.next()) else {
-            continue;
-        };
-        let subject = fields
-            .next()
-            .and_then(|rest| rest.split_once('\t'))
-            .map(|(_, subject)| subject);
-        if previous == from
-            && subject.is_some_and(|subject| subject.starts_with("rebase (finish):"))
-        {
-            tip = Some(head.to_string());
-        }
-    }
-    Ok(tip)
-}
-
-/// Whether `tip` holds exactly `count` commits replayed in order onto `onto`:
-/// a linear chain of that many commits whose first one sits on `onto`.
-pub fn replay_matches_range(cwd: &Path, onto: &str, tip: &str, count: usize) -> Result<bool> {
-    if count == 0 {
-        return Ok(false);
-    }
-    let out = git(
-        cwd,
-        &[
-            "rev-list",
-            "--reverse",
-            "--parents",
-            &format!("{onto}..{tip}"),
-        ],
-    )?;
-    let mut previous = onto.to_string();
-    let mut commits = 0;
-    for line in out.lines() {
-        let mut fields = line.split_whitespace();
-        let commit = fields.next().context("git rev-list named no commit")?;
-        if fields.collect::<Vec<_>>() != [previous.as_str()] {
-            return Ok(false);
-        }
-        previous = commit.to_string();
-        commits += 1;
-    }
-    Ok(commits == count && previous == tip)
 }
 
 /// The branch checked out in the primary worktree (the main checkout,
@@ -3189,6 +3207,32 @@ mod tests {
         let signed = commit_object_text(&commit, Some(b"-----BEGIN PGP SIGNATURE-----\n\nabc\n"));
         assert!(String::from_utf8_lossy(&signed)
             .contains("gpgsig -----BEGIN PGP SIGNATURE-----\n \n abc\n\nthe message\n"));
+    }
+
+    #[test]
+    fn a_printed_replay_names_only_the_update_it_is() {
+        let branch = "refs/heads/arc/check";
+        let old = "1111111111111111111111111111111111111111";
+        let new = "2222222222222222222222222222222222222222";
+        assert_eq!(
+            printed_replay_tip(&format!("update {branch} {new} {old}\n"), branch, old),
+            Some(new.to_string())
+        );
+        // Another ref, or an update replacing a different old value, is not
+        // this replay's result.
+        assert_eq!(
+            printed_replay_tip(
+                &format!("update refs/heads/other {new} {old}\n"),
+                branch,
+                old
+            ),
+            None
+        );
+        assert_eq!(
+            printed_replay_tip(&format!("update {branch} {new} {new}\n"), branch, old),
+            None
+        );
+        assert_eq!(printed_replay_tip("", branch, old), None);
     }
 
     #[cfg(unix)]

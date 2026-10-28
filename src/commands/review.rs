@@ -453,22 +453,24 @@ pub fn snapshot(
 pub(super) struct SnapshotRequest {
     /// A normalized declaration, as `contributor_declaration` returns it.
     contributors: Option<Vec<String>>,
-    /// The replay `arc rebase` observed Git complete from one patchset's
-    /// head. Only that path can set it, so no snapshot can claim an
-    /// inherited author by asking for one.
+    /// The replay `arc rebase` performed from one patchset's head, and the
+    /// tip its own replay call printed. Only `arc rebase` can set it, and only
+    /// from output it received itself, so no snapshot can claim an inherited
+    /// author by asking for one and nothing read back from the repository can
+    /// invent one.
     replay: Option<Replay>,
     pin_brief: bool,
     journal_refs: Vec<JournalArtifactRef>,
     thread: Option<ExternalThreadRef>,
 }
 
-/// A replay `arc rebase` observed Git complete, and the tip Git recorded for
-/// it. A snapshot whose head is any other commit records ordinary work,
-/// whatever the request says.
+/// A replay `arc rebase` performed, and the tip its own replay call printed.
+/// A snapshot whose head is any other commit records ordinary work, whatever
+/// the request says.
 pub(super) struct Replay {
     /// The patchset whose recorded head the rebase replayed.
     patchset: String,
-    /// The last commit Git recorded the replay producing.
+    /// The tip `git replay` printed as the result it produced.
     tip: String,
 }
 
@@ -486,7 +488,7 @@ impl SnapshotRequest {
     }
 
     /// A snapshot of a head arc itself replayed from `patchset` without a
-    /// stop, at the tip Git recorded for that replay. It carries the replayed
+    /// stop, at the tip that replay printed. It carries the replayed
     /// patchset's author coordinates instead of the recorder's, and honours
     /// an explicit contributor declaration as the set the replay belongs to.
     pub(super) fn replayed(
@@ -611,9 +613,9 @@ pub(super) fn snapshot_holding(
         Some(b) => gitio::rev_parse(&ctx.cwd, &b)?,
         None => default_base,
     };
-    // A clean replay is observed when `arc rebase` runs, never inferred later
-    // from a comparison of diffs. The observation names the tip Git recorded,
-    // so a head that moved past it — a hook's commit, say — is ordinary work.
+    // A clean replay is produced by `arc rebase` itself, never inferred later
+    // from a comparison of diffs. The request names the tip that replay
+    // printed, so a head that moved past it is ordinary work.
     let carried = replay
         .as_ref()
         .filter(|replay| replay.tip == head)

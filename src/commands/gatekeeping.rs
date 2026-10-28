@@ -1569,10 +1569,15 @@ pub fn done(
 
 /// Replay a change's branch onto its target branch and record the result.
 ///
-/// The rebase runs in the worktree that holds the branch: its index and reflog
-/// are the only place a stopped rebase can be continued from. A conflict stops
-/// the rebase and leaves it in progress, because the partial resolution is a
-/// person's work and aborting would discard it.
+/// Where Git can, arc performs the replay itself with `git replay` and reads
+/// the new tip from that command's output, so a replay is mechanical because
+/// arc produced it, not because anything in the repository afterwards says
+/// one happened. A `git rebase` fallback that completes is ordinary work.
+///
+/// The replay runs in the worktree that holds the branch: its index and state
+/// files are the only place a stopped rebase can be continued from. A conflict
+/// stops the rebase and leaves it in progress, because the partial resolution
+/// is a person's work and aborting would discard it.
 pub fn rebase(
     ctx: &Ctx,
     reference: &str,
@@ -1643,8 +1648,8 @@ pub fn rebase(
         chrono::Utc::now(),
     )?;
 
-    match gitio::rebase(&wt, &target_head)? {
-        gitio::RebaseOutcome::Stopped => {
+    match gitio::replay(&wt, &st.branch, &target_head, &head)? {
+        gitio::ReplayOutcome::Stopped => {
             let conflicts = gitio::unmerged_paths(&wt)?;
             println!(
                 "rebase of {} onto {} stopped on a conflict; it is left in progress",
@@ -1661,8 +1666,13 @@ pub fn rebase(
             println!("  arc snapshot {change_id} --verify   # and run every required gate");
             Ok(status::Blocker::NeedsRebase.exit_code())
         }
-        gitio::RebaseOutcome::Replayed => {
-            let replayed = gitio::branch_head(&ctx.cwd, &st.branch)?;
+        outcome => {
+            // A replay arc performed names its own tip; a fallback rebase is
+            // read from the branch it moved like any other snapshot.
+            let replayed = match &outcome {
+                gitio::ReplayOutcome::Replayed { tip } => tip.clone(),
+                _ => gitio::branch_head(&ctx.cwd, &st.branch)?,
+            };
             println!(
                 "rebased {} onto {} at {replayed}",
                 st.branch, st.target_branch
@@ -1675,21 +1685,15 @@ pub fn rebase(
                     st.target_branch
                 ),
             );
-            let request = match replay_of.and_then(|patchset| {
-                observed_replay(
-                    &ctx.cwd,
-                    &st.branch,
-                    patchset,
-                    &head,
-                    &target_head,
-                    &replayed,
-                )
-                .map(|tip| (patchset.id.clone(), tip))
-            }) {
-                Some((patchset, tip)) => {
-                    super::review::SnapshotRequest::replayed(patchset, tip, requested_contributors)
+            let request = match (&outcome, replay_of) {
+                (gitio::ReplayOutcome::Replayed { tip }, Some(patchset)) => {
+                    super::review::SnapshotRequest::replayed(
+                        patchset.id.clone(),
+                        tip.clone(),
+                        requested_contributors,
+                    )
                 }
-                None => super::review::SnapshotRequest::attributed(requested_contributors),
+                _ => super::review::SnapshotRequest::attributed(requested_contributors),
             };
             let patchset_id = super::review::snapshot_holding(
                 ctx,
@@ -1718,32 +1722,6 @@ pub fn rebase(
             Ok(code)
         }
     }
-}
-
-/// The tip Git recorded for a replay this command ran, when that tip is
-/// exactly the previous patchset's commits replayed in order onto the target.
-///
-/// The reflog entry is Git's own record of what the rebase moved: the head it
-/// started from and the last commit it produced. Anything written to the
-/// branch after that entry — a `post-rewrite` hook's commit, say — is not part
-/// of the replay, and a range whose commit count differs from the patchset's
-/// is not that patchset's mechanical replay either.
-fn observed_replay(
-    cwd: &std::path::Path,
-    branch: &str,
-    previous: &state::Patchset,
-    from: &str,
-    onto: &str,
-    head: &str,
-) -> Option<String> {
-    let tip = gitio::replayed_tip(cwd, branch, from).ok().flatten()?;
-    if tip != head {
-        return None;
-    }
-    let count = gitio::commit_count(cwd, &previous.base, &previous.head).ok()?;
-    gitio::replay_matches_range(cwd, onto, &tip, count)
-        .ok()?
-        .then_some(tip)
 }
 
 /// The worktree a change's branch is replayed in.
