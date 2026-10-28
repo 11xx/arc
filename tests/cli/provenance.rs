@@ -1212,9 +1212,9 @@ fn a_claim_attempted_while_squash_commits_cannot_strand_the_rewritten_branch() {
     assert_branch_recorded_or_untouched(&repo, &worktree, "raced-squash", &head, &out, &outcome);
 }
 
-/// The replay runs hooks and can sign every commit it makes, so a claim
-/// attempted while it runs cannot land between the rebase's claim check and
-/// the patchset it records either.
+/// A rebase that falls back to `git rebase` runs hooks and can sign every
+/// commit it makes, so a claim attempted while it runs cannot land between the
+/// rebase's claim check and the patchset it records either.
 #[test]
 fn a_claim_attempted_while_rebase_replays_cannot_strand_the_replayed_branch() {
     let repo = Repo::new();
@@ -1227,6 +1227,7 @@ fn a_claim_attempted_while_rebase_replays_cannot_strand_the_replayed_branch() {
 
     let out = repo
         .arc(&worktree)
+        .env("PATH", path_without_git_replay(&repo))
         .args(["rebase", "raced-rebase"])
         .output()
         .unwrap();

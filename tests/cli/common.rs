@@ -286,6 +286,31 @@ pub(crate) fn git_out(cwd: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+/// A PATH whose `git` refuses `replay`, as a Git that predates it does.
+pub(crate) fn path_without_git_replay(repo: &Repo) -> std::ffi::OsString {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = repo.home.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let real_git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|path| path.join("git"))
+        .find(|path| path.is_file())
+        .expect("git must be available on PATH");
+    let fake_git = bin.join("git");
+    fs::write(
+        &fake_git,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = replay ]; then\n  echo 'git: replay is not a git command' >&2\n  exit 1\nfi\nexec \"{}\" \"$@\"\n",
+            real_git.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755)).unwrap();
+    std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap()
+}
+
 /// Stdout of a command that must exit zero. Any other exit fails the test at
 /// the caller, with the command, its status, and its stderr.
 #[track_caller]
