@@ -71,6 +71,19 @@ impl Patchset {
         self.on_behalf_of.as_deref().unwrap_or(&self.actor)
     }
 
+    /// The coordinate this recording made for its own recorder. The model,
+    /// harness and session beside a patchset's actor describe that session,
+    /// not an `--on-behalf-of` subject, so the subject is left empty here.
+    fn recorded_coordinate(&self) -> DebtIdentity {
+        DebtIdentity::new(
+            self.actor.clone(),
+            None,
+            self.harness.clone(),
+            self.model.clone(),
+            self.session.clone(),
+        )
+    }
+
     /// The contributor that matches a reviewer, using the effective author as
     /// the compatibility fallback for patchsets without a contributor set.
     pub fn contributor_match(&self, reviewer: &str) -> Option<&str> {
@@ -4105,7 +4118,11 @@ impl ChangeState {
             );
         };
         let parsed = identity_from_role_value(named);
-        let mut identity = self.recorded_identity(named).unwrap_or(parsed);
+        let mut identity = if named == subject.actor {
+            subject.recorded_coordinate()
+        } else {
+            self.recorded_identity(named).unwrap_or(parsed)
+        };
         if identity.model.is_none() {
             if let Some(parsed) = identity_from_role_value(named).model {
                 identity.model = Some(parsed);
@@ -4115,20 +4132,20 @@ impl ChangeState {
     }
 
     /// The coordinate the ledger holds for one contributor of `patchset`: a
-    /// replay's carried coordinate when it names that contributor, else what
-    /// the actor's own records establish.
+    /// replay's carried coordinate when it names that contributor, this
+    /// patchset's own coordinate when it names its recorder, else what the
+    /// actor's records establish.
     fn contributor_identity(&self, patchset: &Patchset, contributor: &str) -> DebtIdentity {
-        patchset
-            .inherited_authors
-            .iter()
-            .find(|identity| {
-                contributor == identity.actor || contributor == identity.effective_actor()
-            })
-            .cloned()
-            .unwrap_or_else(|| {
-                self.recorded_identity(contributor)
-                    .unwrap_or_else(|| identity_from_role_value(contributor))
-            })
+        if let Some(inherited) = patchset.inherited_authors.iter().find(|identity| {
+            contributor == identity.actor || contributor == identity.effective_actor()
+        }) {
+            return inherited.clone();
+        }
+        if contributor == patchset.actor {
+            return patchset.recorded_coordinate();
+        }
+        self.recorded_identity(contributor)
+            .unwrap_or_else(|| identity_from_role_value(contributor))
     }
 
     /// The coordinate of every author `patchset` names: one per member of a
