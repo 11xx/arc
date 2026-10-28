@@ -588,7 +588,7 @@ fn a_nearby_context_rebase_keeps_the_implementer_coordinate() {
         "{rebased}"
     );
     assert_eq!(
-        rebased["latest_patchset"]["inherited_author"]["model"], MODEL_A,
+        rebased["latest_patchset"]["inherited_authors"][0]["model"], MODEL_A,
         "{rebased}"
     );
     integrate_with_debt(&repo, "nearby-context", REVIEWER_B, MODEL_B);
@@ -658,7 +658,7 @@ fn a_relocated_edit_at_an_unchanged_base_belongs_to_the_snapshot_recorder() {
         "{changed}"
     );
     assert!(
-        changed["latest_patchset"]["inherited_author"].is_null(),
+        changed["latest_patchset"]["inherited_authors"].is_null(),
         "{changed}"
     );
     integrate_with_debt(&repo, "relocated-edit", REVIEWER_B, MODEL_B);
@@ -820,7 +820,7 @@ fn a_solo_contributors_model_survives_a_rebase_before_integration() {
         .success();
     let pending = status(&repo, "solo-model-switch");
     assert_eq!(
-        pending["latest_patchset"]["inherited_author"]["model"], MODEL_A,
+        pending["latest_patchset"]["inherited_authors"][0]["model"], MODEL_A,
         "{pending}"
     );
     assert_eq!(
@@ -1080,5 +1080,322 @@ fn integration_on_behalf_of_another_subject_displays_the_invoking_integrator() {
     assert!(
         show.contains(&format!("integrated by {REVIEWER_B}")),
         "{show}"
+    );
+}
+
+/// An ordinary project hook that authors a commit when Git rewrites refs.
+fn install_authoring_post_rewrite_hook(repo: &Repo) {
+    use std::os::unix::fs::PermissionsExt;
+    let hooks = repo.root.join(".git/hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    let hook = hooks.join("post-rewrite");
+    fs::write(
+        &hook,
+        "#!/bin/sh\n\
+         if test \"$1\" = rebase; then\n\
+         \x20 printf 'hook content\\n' > injected.txt\n\
+         \x20 git add injected.txt\n\
+         \x20 git commit -q -m 'feat: hook authors new content'\n\
+         fi\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&hook).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&hook, permissions).unwrap();
+}
+
+#[test]
+fn a_hook_commit_after_a_replay_cannot_inherit_the_replayed_author() {
+    let repo = policy(true);
+    stdout(repo.arc(&repo.root).args(["begin", "hooked-replay"]));
+    let worktree = repo.home.join(".worktrees/repo-hooked-replay");
+    repo.commit(&worktree, "work.txt", "author work\n", "feat: author work");
+    snapshot_as(
+        &repo,
+        &worktree,
+        "hooked-replay",
+        "Author-A",
+        "codex",
+        MODEL_A,
+    );
+    repo.commit(&repo.root, "target.txt", "target\n", "chore: target");
+    install_authoring_post_rewrite_hook(&repo);
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", REVIEWER_B)
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_MODEL", MODEL_B)
+        .args(["rebase", "hooked-replay"])
+        .assert()
+        .success();
+
+    // Git replayed Author-A's commit, and the hook then wrote another one on
+    // top. The head is more than the replay, so it is Lead-B's own work.
+    let replayed = status(&repo, "hooked-replay");
+    assert_eq!(
+        replayed["latest_patchset"]["actor"], REVIEWER_B,
+        "{replayed}"
+    );
+    assert!(
+        replayed["latest_patchset"]["on_behalf_of"].is_null(),
+        "{replayed}"
+    );
+    assert!(
+        replayed["latest_patchset"]
+            .get("inherited_authors")
+            .is_none(),
+        "{replayed}"
+    );
+    assert_eq!(
+        replayed["review_subject"]["effective_author"], REVIEWER_B,
+        "{replayed}"
+    );
+
+    integrate_with_debt(&repo, "hooked-replay", REVIEWER_B, MODEL_B);
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", REVIEWER_B)
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_MODEL", MODEL_B)
+        .args(["audit", "hooked-replay", "--verdict", "approved"])
+        .assert()
+        .failure();
+    assert_eq!(debt(&repo, "hooked-replay")["standing"], "owed");
+}
+
+#[test]
+fn a_replay_keeps_the_recorded_model_of_every_contributor() {
+    let repo = policy(true);
+    stdout(repo.arc(&repo.root).args(["begin", "two-contributors"]));
+    let worktree = repo.home.join(".worktrees/repo-two-contributors");
+    repo.commit(&worktree, "a.txt", "a\n", "feat: author A work");
+    snapshot_as(
+        &repo,
+        &worktree,
+        "two-contributors",
+        "Author-A",
+        "codex",
+        MODEL_A,
+    );
+    repo.commit(&worktree, "b.txt", "b\n", "feat: author B work");
+    stdout(
+        repo.arc(&worktree)
+            .env("ARC_ACTOR", "Author-B")
+            .env("ARC_HARNESS", "claude")
+            .env("ARC_MODEL", MODEL_B)
+            .args([
+                "snapshot",
+                "two-contributors",
+                "--contributors",
+                "Author-A,Author-B",
+            ]),
+    );
+    repo.commit(&repo.root, "target.txt", "target\n", "chore: target");
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Author-B")
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_MODEL", "claude-opus-5-5#max")
+        .args(["rebase", "two-contributors"])
+        .assert()
+        .success();
+
+    // The replayer recorded a third model, so only B's stored coordinate can
+    // still say an approval at B's model is B's own read.
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Another-Actor")
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_MODEL", MODEL_B)
+        .args(["review", "two-contributors", "--verdict", "approved"])
+        .assert()
+        .success();
+    let pending = status(&repo, "two-contributors");
+    assert_eq!(pending["has_valid_approval"], false, "{pending}");
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Lander")
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_MODEL", MODEL_B)
+        .args(["integrate", "two-contributors"])
+        .assert()
+        .failure();
+
+    let replayed = status(&repo, "two-contributors");
+    assert_eq!(
+        replayed["latest_patchset"]["contributors"],
+        serde_json::json!(["Author-A", "Author-B"]),
+        "{replayed}"
+    );
+    let inherited = replayed["latest_patchset"]["inherited_authors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no per-contributor coordinates: {replayed}"));
+    let model_of = |actor: &str| {
+        inherited
+            .iter()
+            .find(|identity| identity["actor"] == actor)
+            .and_then(|identity| identity.get("model"))
+            .cloned()
+    };
+    assert_eq!(
+        model_of("Author-A"),
+        Some(serde_json::json!(MODEL_A)),
+        "{replayed}"
+    );
+    assert_eq!(
+        model_of("Author-B"),
+        Some(serde_json::json!(MODEL_B)),
+        "{replayed}"
+    );
+}
+
+#[test]
+fn an_explicit_contributor_declaration_on_rebase_is_authoritative() {
+    let repo = policy(true);
+    stdout(repo.arc(&repo.root).args(["begin", "declared-replay"]));
+    let worktree = repo.home.join(".worktrees/repo-declared-replay");
+    repo.commit(&worktree, "work.txt", "author work\n", "feat: author work");
+    snapshot_as(
+        &repo,
+        &worktree,
+        "declared-replay",
+        "Author-A",
+        "codex",
+        MODEL_A,
+    );
+    repo.commit(&repo.root, "target.txt", "target\n", "chore: target");
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", REVIEWER_B)
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_MODEL", MODEL_B)
+        .args([
+            "rebase",
+            "declared-replay",
+            "--contributors",
+            "Author-A,Lead-B",
+        ])
+        .assert()
+        .success();
+
+    let replayed = status(&repo, "declared-replay");
+    assert_eq!(
+        replayed["latest_patchset"]["contributors"],
+        serde_json::json!(["Author-A", "Lead-B"]),
+        "{replayed}"
+    );
+    assert_eq!(
+        replayed["latest_patchset"]["on_behalf_of"], "Author-A",
+        "{replayed}"
+    );
+    let inherited = replayed["latest_patchset"]["inherited_authors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no carried coordinate: {replayed}"));
+    assert_eq!(inherited.len(), 1, "{replayed}");
+    assert_eq!(inherited[0]["actor"], "Author-A", "{replayed}");
+    assert_eq!(inherited[0]["model"], MODEL_A, "{replayed}");
+
+    // The lead declared itself a contributor of the replayed patchset, so its
+    // read is authorship and leaves the debt owed.
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", REVIEWER_B)
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_MODEL", MODEL_B)
+        .args(["review", "declared-replay", "--verdict", "approved"])
+        .assert()
+        .success();
+    let pending = status(&repo, "declared-replay");
+    assert_eq!(pending["has_valid_approval"], false, "{pending}");
+    integrate_with_debt(&repo, "declared-replay", REVIEWER_B, MODEL_B);
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", REVIEWER_B)
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_MODEL", MODEL_B)
+        .args(["audit", "declared-replay", "--verdict", "approved"])
+        .assert()
+        .failure();
+    assert_eq!(debt(&repo, "declared-replay")["standing"], "owed");
+}
+
+#[test]
+fn a_solo_declaration_on_rebase_records_only_the_declared_contributor() {
+    let repo = policy(true);
+    stdout(repo.arc(&repo.root).args(["begin", "solo-replay"]));
+    let worktree = repo.home.join(".worktrees/repo-solo-replay");
+    repo.commit(&worktree, "work.txt", "author work\n", "feat: author work");
+    snapshot_as(
+        &repo,
+        &worktree,
+        "solo-replay",
+        "Author-A",
+        "codex",
+        MODEL_A,
+    );
+    repo.commit(&repo.root, "target.txt", "target\n", "chore: target");
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", REVIEWER_B)
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_MODEL", MODEL_B)
+        .args(["rebase", "solo-replay", "--solo"])
+        .assert()
+        .success();
+
+    let replayed = status(&repo, "solo-replay");
+    assert_eq!(
+        replayed["latest_patchset"]["contributors"],
+        serde_json::json!([REVIEWER_B]),
+        "{replayed}"
+    );
+    assert!(
+        replayed["latest_patchset"]["on_behalf_of"].is_null(),
+        "{replayed}"
+    );
+    assert!(
+        replayed["latest_patchset"]
+            .get("inherited_authors")
+            .is_none(),
+        "{replayed}"
+    );
+    assert_eq!(
+        replayed["review_subject"]["effective_author"], REVIEWER_B,
+        "{replayed}"
+    );
+}
+
+#[test]
+fn a_replay_that_drops_a_commit_does_not_inherit_the_replayed_author() {
+    let repo = policy(true);
+    repo.commit(&repo.root, "file.txt", "base\n", "chore: base file");
+    stdout(repo.arc(&repo.root).args(["begin", "dropped-replay"]));
+    let worktree = repo.home.join(".worktrees/repo-dropped-replay");
+    repo.commit(&worktree, "file.txt", "target\n", "feat: author file");
+    repo.commit(&worktree, "work.txt", "author work\n", "feat: author work");
+    snapshot_as(
+        &repo,
+        &worktree,
+        "dropped-replay",
+        "Author-A",
+        "codex",
+        MODEL_A,
+    );
+    // The target lands the file change already, so replaying it produces
+    // nothing and Git drops that commit; only the second one is replayed.
+    repo.commit(&repo.root, "file.txt", "target\n", "chore: target file");
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", REVIEWER_B)
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_MODEL", MODEL_B)
+        .args(["rebase", "dropped-replay"])
+        .assert()
+        .success();
+
+    // A replay that covers less than the patchset is not the patchset's
+    // mechanical replay.
+    let replayed = status(&repo, "dropped-replay");
+    assert_eq!(
+        replayed["latest_patchset"]["actor"], REVIEWER_B,
+        "{replayed}"
+    );
+    assert!(
+        replayed["latest_patchset"]["on_behalf_of"].is_null(),
+        "{replayed}"
+    );
+    assert_eq!(
+        replayed["review_subject"]["effective_author"], REVIEWER_B,
+        "{replayed}"
     );
 }
