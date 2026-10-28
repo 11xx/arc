@@ -1622,10 +1622,12 @@ enum Cmd {
     /// Only the replay `arc rebase` performs itself records an inherited
     /// author: it carries the author coordinates of the patchset whose head it
     /// replayed, every contributor at its recorded model, and the replaying
-    /// session is not its implementer. A snapshot, or the snapshot after a
-    /// rebase that fell back to `git rebase` or stopped for resolution,
-    /// records the head as its recorder's work unless `--on-behalf-of` or
-    /// `--contributors` declares another author.
+    /// session is not its implementer. That replay runs where the project's
+    /// configuration cannot define a merge driver or filter, and arc reads its
+    /// result from the ref Git updated, not from command output. A snapshot,
+    /// or the snapshot after a rebase that fell back to `git rebase` or
+    /// stopped for resolution, records the head as its recorder's work unless
+    /// `--on-behalf-of` or `--contributors` declares another author.
     /// At unchanged content, an explicit --on-behalf-of (also supplied by
     /// ARC_ON_BEHALF_OF) differing from the latest effective author records a
     /// fresh patchset. An equal or omitted subject preserves that patchset
@@ -2105,22 +2107,23 @@ enum Cmd {
     },
     /// Replay a change's branch onto its target, then snapshot the new head.
     /// Where Git can, arc replays with `git replay`: it runs no hooks, leaves
-    /// the worktree alone, and prints the new tip, which arc reads and applies
-    /// itself. The commits it creates carry no signature, whatever the
-    /// repository configures for commits it makes; `arc rewrite sign` signs a
-    /// replayed range. Such a replay is recorded as a mechanical replay of the
-    /// patchset whose head it replayed, carrying every contributor's recorded
-    /// coordinate, model included; the replaying session is not its
-    /// implementer, and the patchset names exactly the tip that replay
-    /// printed. Nothing read back from the repository decides this, so a
-    /// `post-rewrite` hook, a reflog entry, or an inherited
-    /// `GIT_REFLOG_ACTION` cannot make ordinary work look replayed. A Git that
-    /// cannot replay, a refusal, or a conflict falls back to `git rebase`,
-    /// whose result is recorded as ordinary work; a stopped rebase leaves its
-    /// partial resolution in progress. `--contributors` and `--solo` decide
-    /// the replayed patchset's contributor set; a declared member the replay
-    /// carries over keeps its recorded coordinate, and one it does not carry
-    /// is credited as declared.
+    /// the worktree alone, and writes the new tip to a ref arc reads. The
+    /// replay runs in a temporary repository with no project configuration,
+    /// sharing only the object store, so a merge driver or filter the project
+    /// configures cannot run. The commits it creates carry no signature,
+    /// whatever the repository configures for commits it makes; `arc rewrite
+    /// sign` signs a replayed range. Such a replay is recorded as a mechanical
+    /// replay of the patchset whose head it replayed, carrying every
+    /// contributor's recorded coordinate, model included; the replaying
+    /// session is not its implementer, and the patchset names exactly the tip
+    /// that replay wrote. A `post-rewrite` hook, a reflog entry, a merge
+    /// driver, or an inherited `GIT_REFLOG_ACTION` cannot make ordinary work
+    /// look replayed. A Git that cannot replay, a refusal, or a conflict falls
+    /// back to `git rebase`, whose result is recorded as ordinary work; a
+    /// stopped rebase leaves its partial resolution in progress.
+    /// `--contributors` and `--solo` decide the replayed patchset's
+    /// contributor set; a declared member the replay carries over keeps its
+    /// recorded coordinate, and one it does not carry is credited as declared.
     /// The snapshot links the artifact the change was opened from (`via: begin`)
     /// and the plan its brief names (`via: brief`), one link per file; a file
     /// named by both is linked once as `begin`. An unavailable artifact is

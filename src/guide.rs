@@ -1086,18 +1086,21 @@ RUN A CHANGE
 
   `arc rebase` is what `check` names when the selected integration shape
   requires replay onto the target. Where Git can, arc performs the replay
-  itself with `git replay`, which runs no hooks and leaves the worktree alone:
-  arc reads the new tip from that command's own output, moves the branch by a
-  compare-and-swap against the old head, and brings the worktree to it without
-  discarding a local change. The commits it creates carry no signature,
-  whatever the repository configures for commits it makes; `arc rewrite sign`
-  signs a replayed range. Such a replay is recorded as a mechanical replay
-  of the patchset whose head it replayed, carrying every contributor the
-  patchset carries at the coordinate the ledger recorded for it, model
-  included; the replaying session is not its implementer, and the patchset
-  names exactly the tip that replay printed. Nothing read back from the
-  repository decides this, so a `post-rewrite` hook, a reflog entry, or an
-  inherited `GIT_REFLOG_ACTION` cannot make ordinary work look replayed.
+  itself with `git replay`, which runs no hooks and leaves the worktree alone.
+  The replay runs in a temporary bare repository that shares the project's
+  object store and inherits none of its configuration, so a merge driver or
+  filter the project configures has no definition to run. arc reads the result
+  from the ref Git itself updated there, moves the branch by a compare-and-swap
+  against the old head, and brings the worktree to it without discarding a
+  local change. The commits it creates carry no signature, whatever the
+  repository configures for commits it makes; `arc rewrite sign` signs a
+  replayed range. Such a replay is recorded as a mechanical replay of the
+  patchset whose head it replayed, carrying every contributor the patchset
+  carries at the coordinate the ledger recorded for it, model included; the
+  replaying session is not its implementer, and the patchset names exactly
+  the tip that replay wrote. A `post-rewrite` hook, a reflog entry, a merge
+  driver, or an inherited `GIT_REFLOG_ACTION` cannot make ordinary work look
+  replayed.
   `--contributors` and `--solo` decide the replayed patchset's contributor
   set; a declared member the replay carries over keeps its recorded
   coordinate, and one it does not carry is credited as declared. Where Git
@@ -2131,12 +2134,13 @@ REVIEW COVERAGE AND DEBT
   `arc integrate`, never the subject that command was invoked on behalf of.
   Planning, orchestrating and integrating somebody else's work are not
   authorship. A clean `arc rebase` that arc performs itself — `git replay`,
-  whose printed tip arc applies — records a mechanical replay of the patchset
-  whose head it replayed, carrying every contributor's recorded coordinate,
-  model included, even when context or hunk positions moved. Only that tip,
-  applied in the same invocation, is the replay: a snapshot of any other
-  head, and any replay that fell back to `git rebase` or stopped for a person
-  to resolve, is ordinary work. Reflog text, hooks, and inherited
+  run in a repository without the project's configuration, whose ref arc
+  reads — records a mechanical replay of the patchset whose head it replayed,
+  carrying every contributor's recorded coordinate, model included, even when
+  context or hunk positions moved. Only that replay's result, applied in the
+  same invocation, is the replay: a snapshot of any other head, and any replay
+  that fell back to `git rebase` or stopped for a person to resolve, is
+  ordinary work. Reflog text, hooks, merge drivers, and inherited
   `GIT_REFLOG_ACTION` are not evidence for this and do not enter it. The
   replaying session is the replayer, never the author. An explicit
   `--contributors` or `--solo` decides the replayed patchset's contributor
