@@ -4029,67 +4029,24 @@ impl ChangeState {
             .collect()
     }
 
-    /// The ledger identity recorded for `actor`, when its records name one
-    /// coordinate for it. A session id is an actor, not a model, so a record
-    /// that carries only an actor supplies no model here.
-    fn recorded_identity(&self, actor: &str) -> Option<DebtIdentity> {
-        let opening = (
-            self.opened_by.as_str(),
-            self.opened_harness.as_deref(),
-            self.opened_model.as_deref(),
-            self.opened_session.as_deref(),
-            self.opened_on_behalf_of.as_deref(),
-        );
-        let patchsets = self.patchsets.iter().map(|patchset| {
-            (
-                patchset.actor.as_str(),
-                patchset.harness.as_deref(),
-                patchset.model.as_deref(),
-                patchset.session.as_deref(),
-                patchset.on_behalf_of.as_deref(),
-            )
-        });
-        let briefs = self.briefs.iter().map(|brief| {
-            (
-                brief.actor.as_str(),
-                brief.harness.as_deref(),
-                brief.model.as_deref(),
-                brief.session.as_deref(),
-                brief.on_behalf_of.as_deref(),
-            )
-        });
-        let mut seen = std::collections::BTreeSet::new();
-        for (recorded, harness, model, session, _on_behalf_of) in
-            std::iter::once(opening).chain(patchsets).chain(briefs)
-        {
-            // The model beside an `on-behalf-of` subject is the invoker's,
-            // not the subject's. Only a record the actor made for itself
-            // names its own model.
-            if recorded != actor {
-                continue;
-            }
-            let Some(model) = model else {
-                continue;
-            };
-            seen.insert((
-                harness.map(str::to_string),
-                model.to_string(),
-                session.map(str::to_string),
-            ));
-        }
-        match seen.len() {
-            1 => {
-                let (harness, model, session) = seen.into_iter().next().expect("one identity");
-                Some(DebtIdentity::new(
-                    actor.to_string(),
-                    None,
-                    harness,
-                    Some(model),
-                    session,
-                ))
-            }
-            _ => None,
-        }
+    /// The coordinate `actor` recorded for itself in an authoring record at
+    /// or before `subject`. A later authoring record belongs to a later
+    /// patchset, and planning, opening and other ceremony name no authorship,
+    /// so neither can rewrite what this patchset recorded. A record that
+    /// names no model establishes no coordinate and does not erase one an
+    /// earlier record named.
+    fn recorded_authoring_identity(&self, subject: &Patchset, actor: &str) -> Option<DebtIdentity> {
+        let end = self
+            .patchsets
+            .iter()
+            .position(|patchset| patchset.id == subject.id)
+            .map_or(0, |index| index + 1);
+        self.patchsets[..end]
+            .iter()
+            .rev()
+            .filter(|patchset| patchset.actor == actor && patchset.model.is_some())
+            .map(Patchset::recorded_coordinate)
+            .next()
     }
 
     /// The identity a patchset's implementer is credited with: the coordinate
@@ -4121,7 +4078,8 @@ impl ChangeState {
         let mut identity = if named == subject.actor {
             subject.recorded_coordinate()
         } else {
-            self.recorded_identity(named).unwrap_or(parsed)
+            self.recorded_authoring_identity(subject, named)
+                .unwrap_or(parsed)
         };
         if identity.model.is_none() {
             if let Some(parsed) = identity_from_role_value(named).model {
@@ -4133,8 +4091,9 @@ impl ChangeState {
 
     /// The coordinate the ledger holds for one contributor of `patchset`: a
     /// replay's carried coordinate when it names that contributor, this
-    /// patchset's own coordinate when it names its recorder, else what the
-    /// actor's records establish.
+    /// patchset's own coordinate when it names its recorder, else the
+    /// coordinate that contributor's authoring record at or before this
+    /// patchset names.
     fn contributor_identity(&self, patchset: &Patchset, contributor: &str) -> DebtIdentity {
         if let Some(inherited) = patchset.inherited_authors.iter().find(|identity| {
             contributor == identity.actor || contributor == identity.effective_actor()
@@ -4144,7 +4103,7 @@ impl ChangeState {
         if contributor == patchset.actor {
             return patchset.recorded_coordinate();
         }
-        self.recorded_identity(contributor)
+        self.recorded_authoring_identity(patchset, contributor)
             .unwrap_or_else(|| identity_from_role_value(contributor))
     }
 
