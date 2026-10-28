@@ -2,6 +2,7 @@ use super::common::*;
 
 const MODEL_A: &str = "gpt-6.1-sol#xhigh";
 const MODEL_B: &str = "claude-opus-5-5#high";
+const MODEL_C: &str = "gemini-4.1-pro#high";
 const IMPLEMENTER_A: &str = "codex:gpt-6.1-sol#xhigh";
 const REVIEWER_B: &str = "Lead-B";
 
@@ -1602,6 +1603,211 @@ fn a_replay_keeps_the_recorded_model_of_every_contributor() {
         model_of("Author-B"),
         Some(serde_json::json!(MODEL_B)),
         "{replayed}"
+    );
+}
+
+#[test]
+fn a_later_brief_does_not_erase_another_contributors_recorded_model() {
+    let repo = policy(true);
+    stdout(repo.arc(&repo.root).args(["begin", "contributor-brief"]));
+    let worktree = repo.home.join(".worktrees/repo-contributor-brief");
+    repo.commit(&worktree, "a.txt", "a\n", "feat: author A work");
+    snapshot_as(
+        &repo,
+        &worktree,
+        "contributor-brief",
+        "Author-A",
+        "codex",
+        MODEL_A,
+    );
+    repo.commit(&worktree, "b.txt", "b\n", "feat: author B work");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "Author-B")
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_MODEL", MODEL_B)
+        .args([
+            "snapshot",
+            "contributor-brief",
+            "--contributors",
+            "Author-A,Author-B",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Another-Actor")
+        .env("ARC_HARNESS", "codex")
+        .env("ARC_MODEL", MODEL_A)
+        .args(["review", "contributor-brief", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    let before = status(&repo, "contributor-brief");
+    assert_eq!(before["has_valid_approval"], false, "{before}");
+    assert!(
+        before["approval_rejection_reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("self-approval"),
+        "{before}"
+    );
+    let reviewed = before["latest_patchset"]["id"].clone();
+
+    let body = repo.home.join("contributor-brief.md");
+    fs::write(&body, "Verify the existing work.\n").unwrap();
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Author-A")
+        .env("ARC_HARNESS", "codex")
+        .env("ARC_MODEL", MODEL_C)
+        .args([
+            "brief",
+            "contributor-brief",
+            "--body-file",
+            body.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let after = status(&repo, "contributor-brief");
+    assert_eq!(after["latest_patchset"]["id"], reviewed, "{after}");
+    assert_eq!(after["has_valid_approval"], false, "{after}");
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Lander")
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_MODEL", MODEL_B)
+        .args(["integrate", "contributor-brief"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn a_later_brief_does_not_erase_an_on_behalf_of_subjects_recorded_model() {
+    let repo = policy(true);
+    stdout(repo.arc(&repo.root).args(["begin", "subject-brief"]));
+    let worktree = repo.home.join(".worktrees/repo-subject-brief");
+    repo.commit(
+        &worktree,
+        "work.txt",
+        "author A work\n",
+        "feat: author A work",
+    );
+    snapshot_as(
+        &repo,
+        &worktree,
+        "subject-brief",
+        "Author-A",
+        "codex",
+        MODEL_A,
+    );
+    repo.commit(&worktree, "more.txt", "lead B work\n", "feat: lead B work");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "Lead-B")
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_MODEL", MODEL_B)
+        .args(["snapshot", "subject-brief", "--on-behalf-of", "Author-A"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Another-Actor")
+        .env("ARC_HARNESS", "codex")
+        .env("ARC_MODEL", MODEL_A)
+        .args(["review", "subject-brief", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    let before = status(&repo, "subject-brief");
+    assert_eq!(before["has_valid_approval"], false, "{before}");
+    let reviewed = before["latest_patchset"]["id"].clone();
+
+    let body = repo.home.join("subject-brief.md");
+    fs::write(&body, "Verify the existing work.\n").unwrap();
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Author-A")
+        .env("ARC_HARNESS", "codex")
+        .env("ARC_MODEL", MODEL_C)
+        .args([
+            "brief",
+            "subject-brief",
+            "--body-file",
+            body.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let after = status(&repo, "subject-brief");
+    assert_eq!(after["latest_patchset"]["id"], reviewed, "{after}");
+    assert_eq!(after["has_valid_approval"], false, "{after}");
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Lander")
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_MODEL", MODEL_B)
+        .args(["integrate", "subject-brief"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn a_later_authoring_snapshot_moves_the_next_patchsets_contributor_coordinate() {
+    let repo = policy(true);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "authoring-moves-model"]),
+    );
+    let worktree = repo.home.join(".worktrees/repo-authoring-moves-model");
+    repo.commit(&worktree, "a.txt", "a\n", "feat: author A work");
+    snapshot_as(
+        &repo,
+        &worktree,
+        "authoring-moves-model",
+        "Author-A",
+        "codex",
+        MODEL_A,
+    );
+    repo.commit(&worktree, "b.txt", "b\n", "feat: author B work");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "Author-B")
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_MODEL", MODEL_B)
+        .args([
+            "snapshot",
+            "authoring-moves-model",
+            "--contributors",
+            "Author-A,Author-B",
+        ])
+        .assert()
+        .success();
+    repo.commit(&worktree, "c.txt", "c\n", "feat: author A moves");
+    snapshot_as(
+        &repo,
+        &worktree,
+        "authoring-moves-model",
+        "Author-A",
+        "codex",
+        MODEL_C,
+    );
+    repo.commit(&worktree, "d.txt", "d\n", "feat: author B follows");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "Author-B")
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_MODEL", MODEL_B)
+        .args([
+            "snapshot",
+            "authoring-moves-model",
+            "--contributors",
+            "Author-A,Author-B",
+        ])
+        .assert()
+        .success();
+
+    integrate_with_debt(&repo, "authoring-moves-model", REVIEWER_B, MODEL_B);
+
+    let after = debt(&repo, "authoring-moves-model");
+    assert_eq!(
+        after["production"]["implementer"]["actor"], "Author-A",
+        "{after}"
+    );
+    assert_eq!(
+        after["production"]["implementer"]["model"], MODEL_C,
+        "{after}"
     );
 }
 
