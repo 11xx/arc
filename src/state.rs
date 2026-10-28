@@ -22,8 +22,8 @@ pub struct Patchset {
     pub actor_source: Option<ActorSource>,
     /// Subject the snapshot was taken for, when a lead ran delegated ceremony.
     pub on_behalf_of: Option<String>,
-    /// The full author coordinate a replay inherited from the patchset it
-    /// replayed unchanged, model included.
+    /// The full author coordinate a clean `arc rebase` carried from the
+    /// patchset whose recorded head it replayed, model included.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherited_author: Option<crate::model::DebtIdentity>,
     pub base: String,
@@ -3920,13 +3920,40 @@ impl ChangeState {
         if !self.is_closed() {
             return self.latest_patchset();
         }
-        let shipped = self
-            .closure
-            .as_ref()
-            .and_then(|closure| closure.source_patchset_id.as_deref())?;
+        self.closure_shipped_patchset()
+    }
+
+    /// The patchset a closed change shipped, read from the ledger.
+    ///
+    /// A closure that recorded its source names it exactly. A historical
+    /// integrated closure recorded only the integrated commit, so the
+    /// patchset is the one whose head that commit is, else the latest one
+    /// recorded before the closure. A change that did not integrate shipped
+    /// nothing.
+    fn closure_shipped_patchset(&self) -> Option<&Patchset> {
+        let closure = self.closure.as_ref()?;
+        if let Some(shipped) = closure.source_patchset_id.as_deref() {
+            return self
+                .patchsets
+                .iter()
+                .find(|patchset| patchset.id == shipped);
+        }
+        if closure.outcome != Closure::Integrated {
+            return None;
+        }
+        if let Some(integrated) = closure.integrated_commit.as_deref() {
+            if let Some(patchset) = self
+                .patchsets
+                .iter()
+                .find(|patchset| patchset.head == integrated)
+            {
+                return Some(patchset);
+            }
+        }
         self.patchsets
             .iter()
-            .find(|patchset| patchset.id == shipped)
+            .rev()
+            .find(|patchset| patchset.created_at <= closure.created_at)
     }
 
     /// The head a closed change is judged at, read from the ledger alone: the
@@ -4179,10 +4206,19 @@ impl ChangeState {
         if patchset.contributors.is_empty() {
             identities.push(self.implementer_identity(patchset));
         } else {
-            identities.extend(patchset.contributors.iter().map(|contributor| {
-                self.recorded_identity(contributor)
-                    .unwrap_or_else(|| identity_from_role_value(contributor))
-            }));
+            for contributor in &patchset.contributors {
+                // A replay's inherited coordinate is the one the ledger
+                // observed, model included. Looking the actor up across the
+                // whole change instead would see the replayer's later model
+                // and lose the recorded one.
+                let inherited = patchset.inherited_author.as_ref().filter(|identity| {
+                    contributor == &identity.actor || contributor == identity.effective_actor()
+                });
+                identities.push(inherited.cloned().unwrap_or_else(|| {
+                    self.recorded_identity(contributor)
+                        .unwrap_or_else(|| identity_from_role_value(contributor))
+                }));
+            }
         }
         identities.dedup();
         identities
@@ -4361,15 +4397,7 @@ impl ChangeState {
         // debt recorded before production existed still has the shipped
         // patchset's recorded authorship. Only a range with no ledger record
         // at all has nothing to compare.
-        let shipped_patchset = self
-            .closure
-            .as_ref()
-            .and_then(|closure| closure.source_patchset_id.as_deref())
-            .and_then(|shipped| {
-                self.patchsets
-                    .iter()
-                    .find(|patchset| patchset.id == shipped)
-            })?;
+        let shipped_patchset = self.closure_shipped_patchset()?;
         let production = debt.production.as_ref();
         let authored = |actor: &str, model: Option<&str>| {
             self.authorship_match(shipped_patchset, production, actor, model)
