@@ -1620,8 +1620,7 @@ pub fn rebase(
     // that records its replay belongs to whoever produced it.
     let replay_of = st
         .latest_patchset()
-        .filter(|patchset| patchset.head == head)
-        .map(|patchset| patchset.id.clone());
+        .filter(|patchset| patchset.head == head);
     if gitio::is_ancestor(&ctx.cwd, &target_head, &head)? {
         println!(
             "{} already carries {} at {target_head}; nothing to replay",
@@ -1676,8 +1675,20 @@ pub fn rebase(
                     st.target_branch
                 ),
             );
-            let request = match replay_of {
-                Some(patchset) => super::review::SnapshotRequest::replayed(patchset),
+            let request = match replay_of.and_then(|patchset| {
+                observed_replay(
+                    &ctx.cwd,
+                    &st.branch,
+                    patchset,
+                    &head,
+                    &target_head,
+                    &replayed,
+                )
+                .map(|tip| (patchset.id.clone(), tip))
+            }) {
+                Some((patchset, tip)) => {
+                    super::review::SnapshotRequest::replayed(patchset, tip, requested_contributors)
+                }
                 None => super::review::SnapshotRequest::attributed(requested_contributors),
             };
             let patchset_id = super::review::snapshot_holding(
@@ -1707,6 +1718,32 @@ pub fn rebase(
             Ok(code)
         }
     }
+}
+
+/// The tip Git recorded for a replay this command ran, when that tip is
+/// exactly the previous patchset's commits replayed in order onto the target.
+///
+/// The reflog entry is Git's own record of what the rebase moved: the head it
+/// started from and the last commit it produced. Anything written to the
+/// branch after that entry — a `post-rewrite` hook's commit, say — is not part
+/// of the replay, and a range whose commit count differs from the patchset's
+/// is not that patchset's mechanical replay either.
+fn observed_replay(
+    cwd: &std::path::Path,
+    branch: &str,
+    previous: &state::Patchset,
+    from: &str,
+    onto: &str,
+    head: &str,
+) -> Option<String> {
+    let tip = gitio::replayed_tip(cwd, branch, from).ok().flatten()?;
+    if tip != head {
+        return None;
+    }
+    let count = gitio::commit_count(cwd, &previous.base, &previous.head).ok()?;
+    gitio::replay_matches_range(cwd, onto, &tip, count)
+        .ok()?
+        .then_some(tip)
 }
 
 /// The worktree a change's branch is replayed in.

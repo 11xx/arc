@@ -22,10 +22,11 @@ pub struct Patchset {
     pub actor_source: Option<ActorSource>,
     /// Subject the snapshot was taken for, when a lead ran delegated ceremony.
     pub on_behalf_of: Option<String>,
-    /// The full author coordinate a clean `arc rebase` carried from the
-    /// patchset whose recorded head it replayed, model included.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inherited_author: Option<crate::model::DebtIdentity>,
+    /// One author coordinate per member of the replayed patchset's
+    /// authoritative contributor set, model included. Empty on an ordinary
+    /// snapshot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherited_authors: Vec<crate::model::DebtIdentity>,
     pub base: String,
     pub head: String,
     /// The commit an approval of this patchset still stands on: `head` as
@@ -2294,7 +2295,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 journal_refs,
                 thread,
                 candidate,
-                inherited_author,
+                inherited_authors,
             } => {
                 if let Some(claim_id) = claim_id {
                     crate::ids::validate_id_component(claim_id)?;
@@ -2345,7 +2346,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     session_link: ev.session_link.clone(),
                     actor_source: ev.actor_source,
                     on_behalf_of: ev.on_behalf_of.clone(),
-                    inherited_author: inherited_author.clone(),
+                    inherited_authors: inherited_authors.clone(),
                     base: base.clone(),
                     head: head.clone(),
                     approved_head: head.clone(),
@@ -4079,21 +4080,20 @@ impl ChangeState {
     }
 
     /// The identity a patchset's implementer is credited with: the coordinate
-    /// a replay inherited, its recorded contributor set when one was declared,
-    /// its subject when one was named, else the session that recorded it.
+    /// a replay carried for that contributor, its recorded contributor set
+    /// when one was declared, its subject when one was named, else the session
+    /// that recorded it.
     pub(crate) fn implementer_identity(&self, subject: &Patchset) -> DebtIdentity {
-        if let Some(inherited) = &subject.inherited_author {
-            return inherited.clone();
-        }
         if !subject.contributors.is_empty() {
             let contributor = subject
                 .on_behalf_of
                 .as_deref()
                 .filter(|named| subject.contributors.iter().any(|value| value == named))
                 .unwrap_or(&subject.contributors[0]);
-            return self
-                .recorded_identity(contributor)
-                .unwrap_or_else(|| identity_from_role_value(contributor));
+            return self.contributor_identity(subject, contributor);
+        }
+        if let Some(inherited) = subject.inherited_authors.first() {
+            return inherited.clone();
         }
         let Some(named) = subject.on_behalf_of.as_deref() else {
             return DebtIdentity::new(
@@ -4112,6 +4112,36 @@ impl ChangeState {
             }
         }
         identity
+    }
+
+    /// The coordinate the ledger holds for one contributor of `patchset`: a
+    /// replay's carried coordinate when it names that contributor, else what
+    /// the actor's own records establish.
+    fn contributor_identity(&self, patchset: &Patchset, contributor: &str) -> DebtIdentity {
+        patchset
+            .inherited_authors
+            .iter()
+            .find(|identity| {
+                contributor == identity.actor || contributor == identity.effective_actor()
+            })
+            .cloned()
+            .unwrap_or_else(|| {
+                self.recorded_identity(contributor)
+                    .unwrap_or_else(|| identity_from_role_value(contributor))
+            })
+    }
+
+    /// The coordinate of every author `patchset` names: one per member of a
+    /// declared contributor set, else its effective author.
+    pub(crate) fn authoring_coordinates(&self, patchset: &Patchset) -> Vec<DebtIdentity> {
+        if patchset.contributors.is_empty() {
+            return vec![self.implementer_identity(patchset)];
+        }
+        patchset
+            .contributors
+            .iter()
+            .map(|contributor| self.contributor_identity(patchset, contributor))
+            .collect()
     }
 
     /// Who set the contract one patchset answered, who answered it, who
@@ -4207,21 +4237,20 @@ impl ChangeState {
             identities.push(self.implementer_identity(patchset));
         } else {
             for contributor in &patchset.contributors {
-                // A replay's inherited coordinate is the one the ledger
+                // A replay's carried coordinate is the one the ledger
                 // observed, model included. Looking the actor up across the
                 // whole change instead would see the replayer's later model
                 // and lose the recorded one.
-                let inherited = patchset.inherited_author.as_ref().filter(|identity| {
-                    contributor == &identity.actor || contributor == identity.effective_actor()
-                });
-                identities.push(inherited.cloned().unwrap_or_else(|| {
-                    self.recorded_identity(contributor)
-                        .unwrap_or_else(|| identity_from_role_value(contributor))
-                }));
+                identities.push(self.contributor_identity(patchset, contributor));
             }
         }
-        identities.dedup();
-        identities
+        let mut unique = Vec::new();
+        for identity in identities {
+            if !unique.contains(&identity) {
+                unique.push(identity);
+            }
+        }
+        unique
     }
 
     /// How an approving read under `actor` at `model` is authorship of

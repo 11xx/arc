@@ -2455,20 +2455,102 @@ pub enum RebaseOutcome {
 /// A rebase that stops on a conflict is an outcome, not a failure: it leaves
 /// state a person continues from. Anything else — an unknown revision, a
 /// refusal — is an error, and leaves no rebase in progress to distinguish it.
+///
+/// The branch reflog entry is written even where a repository turned reflogs
+/// off, because it is the only record Git leaves of what the rebase itself
+/// produced, and reading that record is how `arc rebase` distinguishes its own
+/// replay from work written afterwards.
 pub fn rebase(cwd: &Path, onto: &str) -> Result<RebaseOutcome> {
-    let Err(refusal) = git(cwd, &["rebase", onto]) else {
+    let mut command = git_command();
+    command
+        .args(["-c", "core.logAllRefUpdates=always", "rebase", onto])
+        .current_dir(cwd);
+    let out = command_output(&mut command)
+        .with_context(|| format!("failed to run git in {}", cwd.display()))?;
+    if out.status.success() {
         return Ok(RebaseOutcome::Replayed);
-    };
+    }
     if rebase_in_progress(cwd)? {
         return Ok(RebaseOutcome::Stopped);
     }
-    Err(refusal)
+    bail!(
+        "git rebase {onto} failed: {}",
+        String::from_utf8_lossy(&out.stderr).trim()
+    )
 }
 
 pub fn commit_count(cwd: &Path, base: &str, head: &str) -> Result<usize> {
     git(cwd, &["rev-list", "--count", &format!("{base}..{head}")])?
         .parse()
         .context("git rev-list --count returned a non-numeric commit count")
+}
+
+/// The tip Git recorded for a replay of `branch` that started at `from`.
+///
+/// A rebase writes one reflog entry for the branch it moves: the head it
+/// started from, then the last commit it replayed. Entries written after that
+/// one are work the replay did not produce — a `post-rewrite` hook's commit
+/// among them — so its new value is the only tip an observed replay may claim.
+/// `None` when the branch keeps no such record: an unlogged ref is not
+/// evidence of a replay.
+pub fn replayed_tip(cwd: &Path, branch: &str, from: &str) -> Result<Option<String>> {
+    let log = git(
+        cwd,
+        &[
+            "rev-parse",
+            "--git-path",
+            &format!("logs/refs/heads/{branch}"),
+        ],
+    )?;
+    let Ok(log) = std::fs::read_to_string(cwd.join(log.trim())) else {
+        return Ok(None);
+    };
+    let mut tip = None;
+    for line in log.lines() {
+        let mut fields = line.splitn(3, ' ');
+        let (Some(previous), Some(head)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        let subject = fields
+            .next()
+            .and_then(|rest| rest.split_once('\t'))
+            .map(|(_, subject)| subject);
+        if previous == from
+            && subject.is_some_and(|subject| subject.starts_with("rebase (finish):"))
+        {
+            tip = Some(head.to_string());
+        }
+    }
+    Ok(tip)
+}
+
+/// Whether `tip` holds exactly `count` commits replayed in order onto `onto`:
+/// a linear chain of that many commits whose first one sits on `onto`.
+pub fn replay_matches_range(cwd: &Path, onto: &str, tip: &str, count: usize) -> Result<bool> {
+    if count == 0 {
+        return Ok(false);
+    }
+    let out = git(
+        cwd,
+        &[
+            "rev-list",
+            "--reverse",
+            "--parents",
+            &format!("{onto}..{tip}"),
+        ],
+    )?;
+    let mut previous = onto.to_string();
+    let mut commits = 0;
+    for line in out.lines() {
+        let mut fields = line.split_whitespace();
+        let commit = fields.next().context("git rev-list named no commit")?;
+        if fields.collect::<Vec<_>>() != [previous.as_str()] {
+            return Ok(false);
+        }
+        previous = commit.to_string();
+        commits += 1;
+    }
+    Ok(commits == count && previous == tip)
 }
 
 /// The branch checked out in the primary worktree (the main checkout,

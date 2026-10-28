@@ -453,13 +453,23 @@ pub fn snapshot(
 pub(super) struct SnapshotRequest {
     /// A normalized declaration, as `contributor_declaration` returns it.
     contributors: Option<Vec<String>>,
-    /// The patchset whose head `arc rebase` replayed when Git finished the
-    /// replay without a stop. Only that path can set it, so no snapshot can
-    /// claim an inherited author by asking for one.
-    replay_of: Option<String>,
+    /// The replay `arc rebase` observed Git complete from one patchset's
+    /// head. Only that path can set it, so no snapshot can claim an
+    /// inherited author by asking for one.
+    replay: Option<Replay>,
     pin_brief: bool,
     journal_refs: Vec<JournalArtifactRef>,
     thread: Option<ExternalThreadRef>,
+}
+
+/// A replay `arc rebase` observed Git complete, and the tip Git recorded for
+/// it. A snapshot whose head is any other commit records ordinary work,
+/// whatever the request says.
+pub(super) struct Replay {
+    /// The patchset whose recorded head the rebase replayed.
+    patchset: String,
+    /// The last commit Git recorded the replay producing.
+    tip: String,
 }
 
 impl SnapshotRequest {
@@ -468,7 +478,7 @@ impl SnapshotRequest {
     pub(super) fn attributed(contributors: Option<Vec<String>>) -> Self {
         Self {
             contributors,
-            replay_of: None,
+            replay: None,
             pin_brief: false,
             journal_refs: Vec::new(),
             thread: None,
@@ -476,12 +486,17 @@ impl SnapshotRequest {
     }
 
     /// A snapshot of a head arc itself replayed from `patchset` without a
-    /// stop. It carries that patchset's author coordinate instead of the
-    /// recorder's.
-    pub(super) fn replayed(patchset: String) -> Self {
+    /// stop, at the tip Git recorded for that replay. It carries the replayed
+    /// patchset's author coordinates instead of the recorder's, and honours
+    /// an explicit contributor declaration as the set the replay belongs to.
+    pub(super) fn replayed(
+        patchset: String,
+        tip: String,
+        contributors: Option<Vec<String>>,
+    ) -> Self {
         Self {
-            contributors: None,
-            replay_of: Some(patchset),
+            contributors,
+            replay: Some(Replay { patchset, tip }),
             pin_brief: false,
             journal_refs: Vec::new(),
             thread: None,
@@ -493,7 +508,7 @@ impl SnapshotRequest {
     pub(super) fn delivered(contributors: Vec<String>) -> Self {
         Self {
             contributors: Some(contributors),
-            replay_of: None,
+            replay: None,
             pin_brief: true,
             journal_refs: Vec::new(),
             thread: None,
@@ -522,7 +537,7 @@ impl SnapshotRequest {
         }
         Ok(Self {
             contributors,
-            replay_of: None,
+            replay: None,
             pin_brief: false,
             journal_refs: resolve_journal_refs(ctx, journal_refs)?,
             thread,
@@ -585,7 +600,7 @@ pub(super) fn snapshot_holding(
     let links_supplied = request.links_supplied();
     let SnapshotRequest {
         contributors: requested_contributors,
-        replay_of,
+        replay,
         pin_brief,
         journal_refs: flagged_refs,
         thread,
@@ -596,24 +611,59 @@ pub(super) fn snapshot_holding(
         Some(b) => gitio::rev_parse(&ctx.cwd, &b)?,
         None => default_base,
     };
-    // A clean replay is observed when `arc rebase` runs, never inferred
-    // later from a comparison of diffs. The rebasing session is the replayer,
-    // not the author, so the patchset keeps the whole author coordinate of the
-    // one it replayed: subject, contributors and model.
-    let carried = replay_of
-        .as_deref()
-        .and_then(|patchset| st.patchsets.iter().find(|previous| previous.id == patchset))
-        .filter(|previous| previous.head != head);
-    let inherited_author = carried.map(|previous| st.implementer_identity(previous));
-    let inherited_subject = carried.and_then(|previous| {
-        previous.on_behalf_of.clone().or_else(|| {
-            let author = previous.effective_author();
-            (author != ctx.actor).then(|| author.to_string())
+    // A clean replay is observed when `arc rebase` runs, never inferred later
+    // from a comparison of diffs. The observation names the tip Git recorded,
+    // so a head that moved past it — a hook's commit, say — is ordinary work.
+    let carried = replay
+        .as_ref()
+        .filter(|replay| replay.tip == head)
+        .and_then(|replay| {
+            st.patchsets
+                .iter()
+                .find(|previous| previous.id == replay.patchset)
         })
-    });
-    let inherited_contributors = carried
-        .map(|previous| previous.contributors.clone())
+        .filter(|previous| previous.head != head);
+    // Every contributor the replayed patchset carries keeps the coordinate the
+    // ledger recorded for it, so a later record for the same actor is never
+    // mistaken for the one the work was authored at.
+    let carried_coordinates = carried
+        .map(|previous| st.authoring_coordinates(previous))
         .unwrap_or_default();
+    let inherited_subject = carried
+        .and_then(|previous| {
+            previous.on_behalf_of.clone().or_else(|| {
+                let author = previous.effective_author();
+                (author != ctx.actor).then(|| author.to_string())
+            })
+        })
+        .filter(|subject| {
+            requested_contributors
+                .as_ref()
+                .is_none_or(|declared| declared.iter().any(|contributor| contributor == subject))
+        });
+    let (contributors, inherited_authors) = match carried {
+        Some(previous) => {
+            let inherited = carried_coordinates
+                .into_iter()
+                .filter(|identity| {
+                    requested_contributors.as_ref().is_none_or(|declared| {
+                        declared.iter().any(|contributor| {
+                            contributor == &identity.actor
+                                || contributor == identity.effective_actor()
+                        })
+                    })
+                })
+                .collect();
+            let contributors = requested_contributors
+                .clone()
+                .unwrap_or_else(|| previous.contributors.clone());
+            (contributors, inherited)
+        }
+        None => (
+            requested_contributors.clone().unwrap_or_default(),
+            Vec::new(),
+        ),
+    };
     let brief = match brief_version {
         Some(0) => bail!("brief version 0 not found"),
         Some(version) => Some(
@@ -661,13 +711,6 @@ pub(super) fn snapshot_holding(
         .filter(|claim| state::claim_timing_at(claim, now).active);
     let attributed = requested_contributors.is_some() || inherited_subject.is_some();
     ensure_attribution_over_claim(ctx, &st, attributed, now)?;
-    let contributors = if carried.is_some() {
-        inherited_contributors.clone()
-    } else {
-        requested_contributors
-            .clone()
-            .unwrap_or_else(|| inherited_contributors.clone())
-    };
     let patchset_id = format!("ps-{:02}", st.patchsets.len() + 1);
     let unchanged_patchset = unchanged_patchset.filter(|patchset_id| {
         requested_contributors.as_ref().is_none_or(|requested| {
@@ -691,7 +734,7 @@ pub(super) fn snapshot_holding(
         committer_name: Some(identity.committer_name),
         committer_email: Some(identity.committer_email),
         contributors,
-        inherited_author,
+        inherited_authors,
         claim_id: snapshot_claim.map(|claim| claim.claim_id.clone()),
         claim_actor: snapshot_claim.map(|claim| claim.owner.actor.clone()),
         journal_refs,

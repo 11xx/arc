@@ -522,7 +522,7 @@ mod tests {
             author: None,
             committer: None,
             contributors: vec!["author".into()],
-            inherited_author: None,
+            inherited_authors: Vec::new(),
             claim_id: None,
             claim_actor: None,
             journal_refs: Vec::new(),
