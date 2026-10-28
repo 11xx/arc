@@ -1085,25 +1085,33 @@ RUN A CHANGE
   edge whitespace, is left as a placeholder the line names.
 
   `arc rebase` is what `check` names when the selected integration shape
-  requires replay onto the target. A replay Git completes without a stop is
-  recorded as a mechanical replay of the patchset whose head it replayed,
-  carrying every contributor the patchset carries at the coordinate the ledger
-  recorded for it, model included; the replaying session is not its
-  implementer. The record covers exactly what Git replayed: the head must be
-  the tip of the replayed commits on the new base, so a commit anything adds
-  afterwards — a `post-rewrite` hook, for instance — makes the snapshot
-  ordinary work. `--contributors` and `--solo` decide the replayed patchset's
-  contributor set; a declared member the replay carries over keeps its
-  recorded coordinate, and one it does not carry is credited as declared. A
-  conflict stops it and leaves the rebase in progress — the partial resolution
-  is yours, and aborting would throw it away — with the conflicting files and
-  the commands that finish the replay. Resolve, `git rebase --continue`, then
-  `arc snapshot --verify`, which records the resolved head as the snapshot
-  taker's work. Over another actor's live claim an unattributed rebase refuses
-  before the branch moves, and the change stays locked from that check until
-  the replayed head is recorded. The gates the replayed head owes are named
-  after it is recorded; a failure to evaluate them is a warning, and the rebase
-  still succeeds.
+  requires replay onto the target. Where Git can, arc performs the replay
+  itself with `git replay`, which runs no hooks and leaves the worktree alone:
+  arc reads the new tip from that command's own output, moves the branch by a
+  compare-and-swap against the old head, and brings the worktree to it without
+  discarding a local change. The commits it creates carry no signature,
+  whatever the repository configures for commits it makes; `arc rewrite sign`
+  signs a replayed range. Such a replay is recorded as a mechanical replay
+  of the patchset whose head it replayed, carrying every contributor the
+  patchset carries at the coordinate the ledger recorded for it, model
+  included; the replaying session is not its implementer, and the patchset
+  names exactly the tip that replay printed. Nothing read back from the
+  repository decides this, so a `post-rewrite` hook, a reflog entry, or an
+  inherited `GIT_REFLOG_ACTION` cannot make ordinary work look replayed.
+  `--contributors` and `--solo` decide the replayed patchset's contributor
+  set; a declared member the replay carries over keeps its recorded
+  coordinate, and one it does not carry is credited as declared. Where Git
+  cannot replay — a Git without the command, a refusal, or a conflict — the
+  replay falls back to `git rebase`, whose result is recorded as ordinary
+  work. A conflict stops it and leaves the rebase in progress — the partial
+  resolution is yours, and aborting would throw it away — with the conflicting
+  files and the commands that finish the replay. Resolve,
+  `git rebase --continue`, then `arc snapshot --verify`, which records the
+  resolved head as the snapshot taker's work. Over another actor's live claim
+  an unattributed rebase refuses before the branch moves, and the change stays
+  locked from that check until the replayed head is recorded. The gates the
+  replayed head owes are named after it is recorded; a failure to evaluate
+  them is a warning, and the rebase still succeeds.
 
   `integrate --shape ff-only|no-ff` selects the local integration shape.
   Without a flag, operator defaults, target project defaults, user config,
@@ -2122,18 +2130,19 @@ REVIEW COVERAGE AND DEBT
   recorded beside an `--on-behalf-of` subject, and its integrator the actor of
   `arc integrate`, never the subject that command was invoked on behalf of.
   Planning, orchestrating and integrating somebody else's work are not
-  authorship. A clean `arc rebase` that arc observes completing without a stop
-  records a mechanical replay of the patchset whose head it replayed, carrying
-  every contributor's recorded coordinate, model included, even when context
-  or hunk positions moved. The record covers exactly the commits Git rewrote:
-  a head past the tip Git recorded, or a replayed range whose commit count
-  differs from the patchset's, is ordinary work. The replaying session is the
-  replayer, never the author. An explicit `--contributors` or `--solo` decides
-  the replayed patchset's contributor set; members the replay carries over
-  keep their recorded coordinates. A rebase that stopped for a person to
-  resolve, and any other snapshot, records the head as ordinary work: its
-  recorder, or its explicit `--on-behalf-of` or contributor declaration, is
-  the author.
+  authorship. A clean `arc rebase` that arc performs itself — `git replay`,
+  whose printed tip arc applies — records a mechanical replay of the patchset
+  whose head it replayed, carrying every contributor's recorded coordinate,
+  model included, even when context or hunk positions moved. Only that tip,
+  applied in the same invocation, is the replay: a snapshot of any other
+  head, and any replay that fell back to `git rebase` or stopped for a person
+  to resolve, is ordinary work. Reflog text, hooks, and inherited
+  `GIT_REFLOG_ACTION` are not evidence for this and do not enter it. The
+  replaying session is the replayer, never the author. An explicit
+  `--contributors` or `--solo` decides the replayed patchset's contributor
+  set; members the replay carries over keep their recorded coordinates. Any
+  other snapshot records the head as ordinary work: its recorder, or its
+  explicit `--on-behalf-of` or contributor declaration, is the author.
 
   An approval is refused when its effective author matches the ledger's
   authorship, or when arc assumed the reviewing identity from git config or the

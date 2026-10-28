@@ -1215,8 +1215,8 @@ pub enum Payload {
         contributors: Vec<String>,
         /// One full author coordinate per member of the replayed patchset's
         /// authoritative contributor set, model included. Empty on ordinary
-        /// snapshots, including one after a rebase that stopped for
-        /// resolution.
+        /// snapshots, including one after a rebase that fell back to `git
+        /// rebase` or stopped for resolution.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         inherited_authors: Vec<DebtIdentity>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
