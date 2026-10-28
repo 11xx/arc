@@ -4029,7 +4029,7 @@ impl ChangeState {
             .collect()
     }
 
-    /// The coordinate `actor` recorded for itself in an authoring record at
+    /// The coordinate the ledger credits to `actor` in an authoring record at
     /// or before `subject`. A later authoring record belongs to a later
     /// patchset, and planning, opening and other ceremony name no authorship,
     /// so neither can rewrite what this patchset recorded. A record that
@@ -4041,12 +4041,61 @@ impl ChangeState {
             .iter()
             .position(|patchset| patchset.id == subject.id)
             .map_or(0, |index| index + 1);
-        self.patchsets[..end]
-            .iter()
-            .rev()
-            .filter(|patchset| patchset.actor == actor && patchset.model.is_some())
-            .map(Patchset::recorded_coordinate)
-            .next()
+        self.authoring_identity_before(end, actor)
+    }
+
+    /// The newest coordinate among the records before `end` that credits
+    /// `actor` with authorship. A replay credits the coordinates it carried, a
+    /// declared contributor set credits its members, an `--on-behalf-of`
+    /// subject credits itself, and an ordinary snapshot credits its recorder.
+    /// A record that only replayed or recorded somebody else's work credits
+    /// nothing, and one that names no model establishes no coordinate and does
+    /// not erase one an earlier record named.
+    fn authoring_identity_before(&self, end: usize, actor: &str) -> Option<DebtIdentity> {
+        let mut established = None;
+        for record in &self.patchsets[..end] {
+            let coordinate = if let Some(inherited) = record
+                .inherited_authors
+                .iter()
+                .find(|identity| actor == identity.actor || actor == identity.effective_actor())
+            {
+                inherited.clone()
+            } else if !record.contributors.is_empty() {
+                if !record
+                    .contributors
+                    .iter()
+                    .any(|contributor| contributor == actor)
+                {
+                    continue;
+                }
+                if actor == record.actor {
+                    record.recorded_coordinate()
+                } else {
+                    established
+                        .clone()
+                        .unwrap_or_else(|| identity_from_role_value(actor))
+                }
+            } else if let Some(subject) = record.on_behalf_of.as_deref() {
+                if subject != actor {
+                    continue;
+                }
+                if actor == record.actor {
+                    record.recorded_coordinate()
+                } else {
+                    established
+                        .clone()
+                        .unwrap_or_else(|| identity_from_role_value(actor))
+                }
+            } else if actor == record.actor {
+                record.recorded_coordinate()
+            } else {
+                continue;
+            };
+            if coordinate.model.is_some() {
+                established = Some(coordinate);
+            }
+        }
+        established
     }
 
     /// The identity a patchset's implementer is credited with: the coordinate
