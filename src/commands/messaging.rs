@@ -1165,7 +1165,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "schema": "arc-catchup/13",
+                "schema": "arc-catchup/12",
                 "ledger": inbox,
                 "journal": journal.as_ref().ok(),
                 "replica": replica,

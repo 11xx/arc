@@ -658,7 +658,7 @@ enum Cmd {
         /// event not on the change is refused
         #[arg(long)]
         at: Option<String>,
-        /// Emit `arc-explain/3` JSON instead of text
+        /// Emit `arc-explain/2` JSON instead of text
         #[arg(long)]
         json: bool,
     },
@@ -1011,7 +1011,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Lead-facing queue rollup: open changes, active claims, and outstanding debt (arc-inbox/12 schema)
+    /// Lead-facing queue rollup: open changes, active claims, and outstanding debt (arc-inbox/11 schema)
     /// Aggregate reads name unreadable changes with their errors on stderr
     /// and retain readable changes; a selected unreadable change fails
     /// Recorded producer models that are missing, placeholders or session ids
@@ -1088,7 +1088,7 @@ enum Cmd {
         #[arg(long)]
         off: bool,
     },
-    /// Machine-readable status report (the versioned arc-status/28 schema).
+    /// Machine-readable status report (the versioned arc-status/27 schema).
     /// `debt_standing` is `declared` before the change integrates, `owed`
     /// after, and `discharged` once a review answers the debt;
     /// `debt_outstanding` is true only for `owed`.

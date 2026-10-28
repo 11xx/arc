@@ -3,6 +3,7 @@
 //! describing a format nothing writes.
 
 use super::common::{stdout, Repo};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -117,15 +118,91 @@ fn collect_sources(at: &Path, sources: &mut Vec<PathBuf>) {
 fn model_provenance_versions_are_registered() {
     let output = Command::new(env!("CARGO_BIN_EXE_arc")).output().unwrap();
     let guide = String::from_utf8_lossy(&output.stdout);
-    for schema in [
-        "arc-state/4",
-        "arc-bundle/6",
-        "arc-replica-event/3",
-        "arc-replica-bundle/3",
-        "journal-events/2",
-        "arc-journal-bundle/2",
+    let schemas = schema_constants();
+    for name in [
+        "CHANGE_STATE_SCHEMA",
+        "BUNDLE_SCHEMA",
+        "EVENT_SCHEMA",
+        "JOURNAL_SCHEMA",
     ] {
-        assert!(guide.contains(&format!("`{schema}`")), "{schema}");
+        let found: Vec<&(String, String)> =
+            schemas.iter().filter(|(constant, _)| constant == name).collect();
+        assert!(!found.is_empty(), "{name} is not a schema constant");
+        for (_, schema) in found {
+            assert!(guide.contains(&format!("`{schema}`")), "{name}: {schema}");
+        }
     }
     assert!(guide.contains("store format 7"));
+}
+
+/// The guide's rule is one version per release, counted from the last one:
+/// a surface already bumped for the unreleased version keeps that number, so
+/// no schema in the tree may be more than one past the same schema in the
+/// latest release. Current values are read from the constants and inline
+/// records, not restated here.
+#[test]
+fn no_schema_advances_more_than_once_past_the_last_release() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let tags = Command::new("git")
+        .current_dir(root)
+        .args(["tag", "--list", "v20*", "--sort=-v:refname"])
+        .output();
+    let Ok(tags) = tags else {
+        return;
+    };
+    if !tags.status.success() {
+        return;
+    }
+    let tags = String::from_utf8_lossy(&tags.stdout);
+    let Some(tag) = tags.lines().next() else {
+        return;
+    };
+    let head = grep_schemas(root, None);
+    let released = grep_schemas(root, Some(tag));
+    let mut released_max: BTreeMap<&str, u32> = BTreeMap::new();
+    for (name, version) in &released {
+        let slot = released_max.entry(name.as_str()).or_default();
+        *slot = (*slot).max(*version);
+    }
+    for (name, version) in head {
+        let Some(released) = released_max.get(name.as_str()) else {
+            // Introduced after the release: there is no released baseline for
+            // it to advance past.
+            continue;
+        };
+        assert!(
+            version <= released + 1,
+            "{name}/{version} advances more than one version past {tag}'s {name}/{released};              a surface already bumped for the unreleased version keeps its number"
+        );
+    }
+}
+
+/// Every `arc-<name>/<n>` recorded in the tree, or in the tagged release.
+fn grep_schemas(root: &Path, tag: Option<&str>) -> Vec<(String, u32)> {
+    let mut args = vec![
+        "grep",
+        "-h",
+        "-o",
+        "-E",
+        "arc-[a-z0-9-]+/[0-9]+",
+    ];
+    if let Some(tag) = tag {
+        args.push(tag);
+    }
+    args.extend(["--", "src"]);
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(&args)
+        .output()
+        .unwrap();
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (name, version) = line.rsplit_once('/')?;
+            Some((name.to_string(), version.parse().ok()?))
+        })
+        .collect()
 }

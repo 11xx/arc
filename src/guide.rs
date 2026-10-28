@@ -4380,16 +4380,16 @@ SCHEMAS
 
   Commitments, derived views:
     `arc-forge-view/1`               arc forge show --json; forge reconstruction
-    `arc-state/4`                    arc show --json
+    `arc-state/3`                    arc show --json
     `arc-trailers/1`                 arc trailers --json
-    `arc-status/28`                  arc status
+    `arc-status/27`                  arc status
     `arc-assurance/1`                arc query --assurance --json
     `arc-check/4`                    arc check --json
-    `arc-inbox/12`                   arc inbox --json
-    `arc-catchup/13`                 arc catchup --json
+    `arc-inbox/11`                   arc inbox --json
+    `arc-catchup/12`                 arc catchup --json
     `arc-journal-catchup/9`          arc journal catchup --json
     `arc-resume/8`                   arc resume --json
-    `arc-explain/3`                  arc explain --json
+    `arc-explain/2`                  arc explain --json
     `arc-watch/1`                    arc watch --json, stdin of arc watch --exec
     `arc-config/1`                   arc config
     `arc-accept/1`                   arc accept --json
@@ -4421,7 +4421,7 @@ SCHEMAS
     `arc-run-list/1`                 arc run list --json
     `arc-doctor/6`                   arc doctor --json
     `arc-workspace/2`                arc workspace list|inbox --json
-    `arc-workspace-backlog/20`       arc workspace backlog --json
+    `arc-workspace-backlog/19`       arc workspace backlog --json
     `arc-workspace-report/3`         arc workspace report --json
     `arc-workspace-inventory/2`      arc workspace inventory --json
     `arc-workspace-retirement/1`     arc workspace retire|restore --json

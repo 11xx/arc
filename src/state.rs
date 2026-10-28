@@ -5,7 +5,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CHANGE_STATE_SCHEMA: &str = "arc-state/4";
+pub const CHANGE_STATE_SCHEMA: &str = "arc-state/3";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Patchset {
@@ -805,7 +805,7 @@ pub struct KeptContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence: Option<String>,
     /// Events on this change the fact cites as its grounds. Additive in
-    /// `arc-state/4` and `arc-status/28`.
+    /// `arc-state/3` and `arc-status/27`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub cites: Vec<String>,
     pub actor: String,

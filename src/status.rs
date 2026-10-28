@@ -17,7 +17,7 @@ use std::path::Path;
 
 pub use crate::blockers::Blocker;
 
-pub const STATUS_SCHEMA: &str = "arc-status/28";
+pub const STATUS_SCHEMA: &str = "arc-status/27";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 
 #[derive(Debug, Clone, Serialize)]
@@ -120,7 +120,7 @@ pub struct GateStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_tail: Option<String>,
     /// Private diagnostic capture of an executed gate, passing or failing.
-    /// Additive in `arc-status/28`.
+    /// Additive in `arc-status/27`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_artifact: Option<crate::verification_output::OutputArtifact>,
     #[serde(skip_serializing_if = "is_false")]
@@ -686,7 +686,7 @@ pub struct StatusReport {
     /// Where the declared review obligation stands: `declared` before the
     /// change integrates, `owed` after it until a review answers it,
     /// `discharged` once one has. Absent when no debt was declared.
-    /// `debt_outstanding` is true only for `owed`. Additive in `arc-status/28`.
+    /// `debt_outstanding` is true only for `owed`. Additive in `arc-status/27`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub debt_standing: Option<crate::state::DebtStanding>,
     /// The change's gating approval was recorded as owed corroboration, and

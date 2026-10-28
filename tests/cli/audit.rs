@@ -799,7 +799,7 @@ fn outstanding_debt_appears_in_the_inbox_and_catchup_after_closure() {
         .success();
 
     let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
-    assert_eq!(inbox["schema"], "arc-inbox/12");
+    assert_eq!(inbox["schema"], "arc-inbox/11");
     let owed = inbox["debt-owed"].as_array().unwrap();
     assert_eq!(owed.len(), 1, "{owed:?}");
     assert_eq!(owed[0]["next_actor"], "reviewer");
@@ -4591,12 +4591,12 @@ fn historical_producer_models_are_flagged_and_never_displayed_as_placeholders() 
             }
         };
         let catchup = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
-        assert_eq!(catchup["schema"], "arc-catchup/13");
+        assert_eq!(catchup["schema"], "arc-catchup/12");
         let production = &catchup["ledger"]["debt-owed"][0]["debt_production"];
         check_identity(&production["implementer"]);
         check_identity(&production["planner"]);
         let explain = json_stdout(repo.arc(&repo.root).args(["explain", &change, "--json"]));
-        assert_eq!(explain["schema"], "arc-explain/3");
+        assert_eq!(explain["schema"], "arc-explain/2");
         let debt = explain["coverage_at_acceptance"]["rows"]
             .as_array()
             .unwrap()
