@@ -454,23 +454,23 @@ pub(super) struct SnapshotRequest {
     /// A normalized declaration, as `contributor_declaration` returns it.
     contributors: Option<Vec<String>>,
     /// The replay `arc rebase` performed from one patchset's head, and the
-    /// tip its own replay call printed. Only `arc rebase` can set it, and only
-    /// from output it received itself, so no snapshot can claim an inherited
-    /// author by asking for one and nothing read back from the repository can
-    /// invent one.
+    /// tip its isolated replay wrote. Only `arc rebase` can set it, and only
+    /// from the replay it ran itself, so no snapshot can claim an inherited
+    /// author by asking for one and nothing read back from the project's refs
+    /// can invent one.
     replay: Option<Replay>,
     pin_brief: bool,
     journal_refs: Vec<JournalArtifactRef>,
     thread: Option<ExternalThreadRef>,
 }
 
-/// A replay `arc rebase` performed, and the tip its own replay call printed.
-/// A snapshot whose head is any other commit records ordinary work, whatever
-/// the request says.
+/// A replay `arc rebase` performed, and the tip that replay wrote to its
+/// isolated ref. A snapshot whose head is any other commit records ordinary
+/// work, whatever the request says.
 pub(super) struct Replay {
     /// The patchset whose recorded head the rebase replayed.
     patchset: String,
-    /// The tip `git replay` printed as the result it produced.
+    /// The tip `git replay` wrote to the ref of its isolated repository.
     tip: String,
 }
 
@@ -488,9 +488,10 @@ impl SnapshotRequest {
     }
 
     /// A snapshot of a head arc itself replayed from `patchset` without a
-    /// stop, at the tip that replay printed. It carries the replayed
-    /// patchset's author coordinates instead of the recorder's, and honours
-    /// an explicit contributor declaration as the set the replay belongs to.
+    /// stop, at the tip that replay wrote to its isolated ref. It carries the
+    /// replayed patchset's author coordinates instead of the recorder's, and
+    /// honours an explicit contributor declaration as the set the replay
+    /// belongs to.
     pub(super) fn replayed(
         patchset: String,
         tip: String,
@@ -615,7 +616,7 @@ pub(super) fn snapshot_holding(
     };
     // A clean replay is produced by `arc rebase` itself, never inferred later
     // from a comparison of diffs. The request names the tip that replay
-    // printed, so a head that moved past it is ordinary work.
+    // wrote; a head that moved past it is ordinary work.
     let carried = replay
         .as_ref()
         .filter(|replay| replay.tip == head)

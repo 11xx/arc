@@ -2489,10 +2489,13 @@ pub fn replay(cwd: &Path, branch: &str, onto: &str, head: &str) -> Result<Replay
 /// The replay runs in a bare repository with no configuration and shares only
 /// the project's object database, so neither a merge driver nor a filter the
 /// project configures can run. Its result is read from the ref Git updated,
-/// not from command output anything in the repository can add to, and nothing
-/// is applied unless the branch and worktree can move together: the ref by a
-/// compare-and-swap, the worktree by a two-tree merge that refuses to
-/// overwrite a local change. Neither runs a hook.
+/// not from command output anything in the repository can add to. The replay
+/// itself runs no hook. Applying its result moves the project ref by a
+/// compare-and-swap, which a reference-transaction hook can observe or move,
+/// and the worktree by a two-tree merge that refuses to overwrite a local
+/// change. A hook that leaves the branch anywhere but the replayed tip leaves
+/// the snapshot head different from that tip, so the snapshot records ordinary
+/// work.
 fn replay_with_plumbing(
     cwd: &Path,
     branch: &str,

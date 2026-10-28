@@ -1569,10 +1569,11 @@ pub fn done(
 
 /// Replay a change's branch onto its target branch and record the result.
 ///
-/// Where Git can, arc performs the replay itself with `git replay` and reads
-/// the new tip from that command's output, so a replay is mechanical because
-/// arc produced it, not because anything in the repository afterwards says
-/// one happened. A `git rebase` fallback that completes is ordinary work.
+/// Where Git can, arc performs the replay itself with `git replay` in an
+/// isolated repository and reads the new tip from the ref that replay
+/// updated, so a replay is mechanical because arc produced it, not because
+/// anything in the project afterwards says one happened. A `git rebase`
+/// fallback that completes is ordinary work.
 ///
 /// The replay runs in the worktree that holds the branch: its index and state
 /// files are the only place a stopped rebase can be continued from. A conflict

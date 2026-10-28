@@ -580,9 +580,9 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
         .latest_patchset()
         .is_some_and(|patchset| ctx.warn_verdict_not_independent(patchset, args.verdict));
     // The model is a second identity: another actor name does not make an
-    // audit independent of the model the ledger credits with the work. A
-    // production record with no model for its implementer falls back to the
-    // declared `Implemented-by` lines it kept.
+    // audit independent of the model the ledger credits with the work.
+    // Authoring models come from the ledger alone; commit trailers are kept
+    // only as declared comparison evidence and never supply one.
     let authoring_models = st
         .debt_subject_patchset()
         .or_else(|| st.latest_patchset())
