@@ -1620,11 +1620,11 @@ enum Cmd {
     /// even when the latest patchset's mapped head already matches the branch.
     /// Re-approval requires a verdict on that fresh patchset.
     /// Only a clean `arc rebase` records an inherited author: it carries the
-    /// replayed patchset's author coordinate, model included, and the
-    /// replaying session is not its implementer. A snapshot, or the snapshot
-    /// after a rebase that stopped for resolution, records the head as its
-    /// recorder's work unless `--on-behalf-of` or `--contributors` declares
-    /// another author.
+    /// author coordinates of the patchset whose head it replayed, every
+    /// contributor at its recorded model, and the replaying session is not its
+    /// implementer. A snapshot, or the snapshot after a rebase that stopped for
+    /// resolution, records the head as its recorder's work unless
+    /// `--on-behalf-of` or `--contributors` declares another author.
     /// At unchanged content, an explicit --on-behalf-of (also supplied by
     /// ARC_ON_BEHALF_OF) differing from the latest effective author records a
     /// fresh patchset. An equal or omitted subject preserves that patchset
@@ -2104,10 +2104,16 @@ enum Cmd {
     },
     /// Replay a change's branch onto its target, then snapshot the new head.
     /// A replay Git completes without a stop is recorded as a mechanical
-    /// replay of the patchset whose head it replayed, carrying that patchset's
-    /// author coordinate, model included; the replaying session is not its
-    /// implementer. A replay that stopped for resolution is recorded by the
-    /// later snapshot as ordinary work.
+    /// replay of the patchset whose head it replayed, carrying every
+    /// contributor's recorded coordinate, model included; the replaying
+    /// session is not its implementer. The record covers exactly what Git
+    /// replayed: the head must be the tip of the replayed commits on the new
+    /// base, so a commit anything adds afterwards — a `post-rewrite` hook, for
+    /// instance — makes the snapshot ordinary work. `--contributors` and
+    /// `--solo` decide the replayed patchset's contributor set; a declared
+    /// member the replay carries over keeps its recorded coordinate, and one
+    /// it does not carry is credited as declared. A replay that stopped for
+    /// resolution is recorded by the later snapshot as ordinary work.
     /// The snapshot links the artifact the change was opened from (`via: begin`)
     /// and the plan its brief names (`via: brief`), one link per file; a file
     /// named by both is linked once as `begin`. An unavailable artifact is
