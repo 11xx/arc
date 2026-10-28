@@ -662,9 +662,9 @@ impl Ctx {
         true
     }
 
-    /// Say so when a verdict is recorded under the model of an
-    /// `Implemented-by` line in the range it judges, at any effort. Reports
-    /// whether it said anything.
+    /// Say so when a verdict is recorded under a model the ledger credits to
+    /// an implementer of the range it judges, at any effort. Reports whether
+    /// it said anything.
     pub(crate) fn warn_model_not_independent(
         &self,
         implementers: &[String],
@@ -680,9 +680,9 @@ impl Ctx {
             return false;
         };
         eprintln!(
-            "warning: recorded under model {model:?}, which the audited range's \
-             `Implemented-by: {value}` names; this verdict shows that a review happened, not \
-             that it was independent of whoever wrote the work."
+            "warning: recorded under model {model:?}, which the ledger records for an \
+             implementer of the audited range ({value}); this verdict shows that a review \
+             happened, not that it was independent of whoever wrote the work."
         );
         true
     }

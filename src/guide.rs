@@ -2102,15 +2102,18 @@ REVIEW COVERAGE AND DEBT
   would retroactively turn a self-review into an independent one.
 
   It is also a relation between declared identities. The ledger, never commit
-  trailers, says who held which role. A patchset's implementer is its effective
-  author: its `--on-behalf-of` subject when one was named, else its recorder;
-  its recorded contributor set names every hand that wrote it. Its planner is
-  the plan's recorded planners, else an asserted `Planned-by`, else the
-  brief's recorder; its orchestrator is the invoker recorded beside an
-  `--on-behalf-of` subject, and its integrator the actor of `arc integrate`. A
-  rebase or snapshot that replays an unchanged patch keeps that patchset's
-  author. Planning, orchestrating and integrating somebody else's work are not
-  authorship.
+  trailers, says who held which role. A patchset's recorded contributor set,
+  when one was declared, is its authorship; otherwise its implementer is its
+  effective author: its `--on-behalf-of` subject when one was named, else its
+  recorder. Its planner is the plan's recorded planners, else an asserted
+  `Planned-by`, else the brief's recorder; its orchestrator is the invoker
+  recorded beside an `--on-behalf-of` subject, and its integrator the actor of
+  `arc integrate`, never the subject that command was invoked on behalf of.
+  Planning, orchestrating and integrating somebody else's work are not
+  authorship. A rebase or snapshot that replays the same changed lines onto a
+  different base keeps that patchset's author coordinate, model included, even
+  when context or hunk positions moved; changing the author's own lines, or a
+  content fact such as a submodule revision, is new work and inherits nothing.
 
   An approval is refused when its effective author matches the ledger's
   authorship, or when arc assumed the reviewing identity from git config or the
@@ -2308,7 +2311,8 @@ REVIEW COVERAGE AND DEBT
   Production names who set the contract, who implemented it, and the
   orchestrator and integrator when the ledger records them. The planner is the
   plan the work was opened from, else an asserted `Planned-by`, else the
-  brief's recorder. The implementer is the patchset's effective author; the
+  brief's recorder. The implementer is the identity of the patchset's declared
+  contributor set when one was recorded, else its effective author; the
   orchestrator is the invoker recorded beside an `--on-behalf-of` subject, and
   the integrator is the actor of `arc integrate`.
 
@@ -2386,10 +2390,13 @@ REVIEW COVERAGE AND DEBT
   the merge or `arc audit` after. The debt records that no verdict existed,
   not that one command must supply it. What the verdict concluded lives in
   the verdict and its findings; discharging the debt does not mean approval.
-  A debt that carries no production record has no ledger authorship to compare
-  against: a read is recorded, and declared trailers alone neither discharge
-  nor refuse it. The `ineligible-review` kind is the exception stated above:
-  only an audit with an eligible assessment clears it.
+  A debt that carries no production record still has its shipped patchset's
+  recorded authorship to compare against, so a legacy obligation discharges as
+  it did before production summaries existed. Only a range with no ledger
+  record at all has nothing to compare: its read is recorded, and declared
+  trailers alone neither discharge nor refuse it. The `ineligible-review` kind
+  is the exception stated above: only an audit with an eligible assessment
+  clears it.
 
   An audit is a separate event from the verdict that shipped, so attaching one
   never rewrites what shipped with what review. An approving audit must come
@@ -2422,9 +2429,11 @@ REVIEW COVERAGE AND DEBT
   declaring it. Such a
   verdict is a review that happened, not an independent one, and it leaves an
   independent-review debt owed. A read under a model the ledger credits as
-  implementer — or, where the ledger records no model, a declared
-  `Implemented-by` line kept with the production record — leaves the debt owed
-  at any effort, regardless of `forbid_self_approval`. That policy governs approval authority, not independent coverage.
+  implementer leaves the debt owed at any effort, regardless of
+  `forbid_self_approval`. Where the ledger records no model for the implementer,
+  the read is judged by the actor, session and harness it records; commit
+  trailers are declared text and never supply the missing model.
+  That policy governs approval authority, not independent coverage.
 
 REVIEW ASSURANCE
   Every integrated change carries a dated assurance record: the reads it

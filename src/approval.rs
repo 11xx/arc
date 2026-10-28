@@ -31,7 +31,8 @@ pub const UNDECLARED_APPROVAL_REASON: &str =
 pub struct ApprovalFacts<'a> {
     /// The newest patchset: the one an approval must name to count.
     pub latest_patchset: Option<&'a Patchset>,
-    /// The `Implemented-by` values of the newest patchset's commits.
+    /// The authoring model coordinates the ledger records for the newest
+    /// patchset.
     pub implementers: &'a [String],
     /// The branch head, when the branch resolves.
     pub current_head: Option<&'a str>,
@@ -109,9 +110,9 @@ pub struct ApprovalOutcome {
 /// discharged on the same terms: the surfaces before and after integration
 /// answer independence identically.
 ///
-/// A reviewer whose model, at any effort, is the model of an `Implemented-by`
-/// line in the patchset's range is the author reading its own work, whatever
-/// identity it is recorded under.
+/// A reviewer whose model, at any effort, is a model the ledger records for
+/// an implementer of the patchset's range is the author reading its own work,
+/// whatever identity it is recorded under.
 ///
 /// Provenance recorded before arc kept it is *unknown*, not assumed, and is
 /// compared by name as it always was — otherwise upgrading arc would strand
@@ -134,7 +135,7 @@ pub(crate) fn self_approval_rejection(
         crate::trailers::naming_model(implementers, model).map(|value| (model, value))
     }) {
         return Some(format!(
-            "{SELF_APPROVAL_REASON}: reviewer's model {model} matches `Implemented-by: {value}`"
+            "{SELF_APPROVAL_REASON}: reviewer's model {model} matches the ledger implementer's model {value}"
         ));
     }
     verdict_assumed.then(|| UNDECLARED_APPROVAL_REASON.to_string())
@@ -521,6 +522,7 @@ mod tests {
             author: None,
             committer: None,
             contributors: vec!["author".into()],
+            inherited_author: None,
             claim_id: None,
             claim_actor: None,
             journal_refs: Vec::new(),
@@ -623,7 +625,7 @@ mod tests {
         assert!(!outcome.approval_valid);
         let reason = outcome.approval_rejection_reason.unwrap();
         assert!(
-            reason.contains("Implemented-by: codex:gpt-6.1-sol#medium"),
+            reason.contains("matches the ledger implementer's model codex:gpt-6.1-sol#medium"),
             "{reason}"
         );
 

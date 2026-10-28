@@ -22,6 +22,10 @@ pub struct Patchset {
     pub actor_source: Option<ActorSource>,
     /// Subject the snapshot was taken for, when a lead ran delegated ceremony.
     pub on_behalf_of: Option<String>,
+    /// The full author coordinate a replay inherited from the patchset it
+    /// replayed unchanged, model included.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited_author: Option<crate::model::DebtIdentity>,
     pub base: String,
     pub head: String,
     /// The commit an approval of this patchset still stands on: `head` as
@@ -1244,7 +1248,7 @@ fn integrated_closure(
         external_reference: None,
         integrator: Some(crate::model::DebtIdentity::new(
             ev.actor.clone(),
-            ev.on_behalf_of.clone(),
+            None,
             ev.harness.clone(),
             ev.model.clone(),
             ev.session.clone(),
@@ -2290,6 +2294,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 journal_refs,
                 thread,
                 candidate,
+                inherited_author,
             } => {
                 if let Some(claim_id) = claim_id {
                     crate::ids::validate_id_component(claim_id)?;
@@ -2340,6 +2345,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     session_link: ev.session_link.clone(),
                     actor_source: ev.actor_source,
                     on_behalf_of: ev.on_behalf_of.clone(),
+                    inherited_author: inherited_author.clone(),
                     base: base.clone(),
                     head: head.clone(),
                     approved_head: head.clone(),
@@ -4045,9 +4051,23 @@ impl ChangeState {
         }
     }
 
-    /// The identity a patchset's implementer is credited with: its subject
-    /// when one was named, else the session that recorded it.
-    fn implementer_identity(&self, subject: &Patchset) -> DebtIdentity {
+    /// The identity a patchset's implementer is credited with: the coordinate
+    /// a replay inherited, its recorded contributor set when one was declared,
+    /// its subject when one was named, else the session that recorded it.
+    pub(crate) fn implementer_identity(&self, subject: &Patchset) -> DebtIdentity {
+        if let Some(inherited) = &subject.inherited_author {
+            return inherited.clone();
+        }
+        if !subject.contributors.is_empty() {
+            let contributor = subject
+                .on_behalf_of
+                .as_deref()
+                .filter(|named| subject.contributors.iter().any(|value| value == named))
+                .unwrap_or(&subject.contributors[0]);
+            return self
+                .recorded_identity(contributor)
+                .unwrap_or_else(|| identity_from_role_value(contributor));
+        }
         let Some(named) = subject.on_behalf_of.as_deref() else {
             return DebtIdentity::new(
                 subject.actor.clone(),
@@ -4135,9 +4155,10 @@ impl ChangeState {
 
     /// Every identity the ledger credits with authoring `patchset`: its
     /// recorded contributor set or effective author, and the production
-    /// record's implementer. A production record supplies the only
-    /// authorship a debt can compare against; without one the patchset's own
-    /// identity is the ledger's whole answer.
+    /// record's implementer when that identity is not excluded by an explicit
+    /// contributor set. A production record supplies the only authorship a
+    /// debt can compare against; without one the patchset's own identity is
+    /// the ledger's whole answer.
     pub fn authoring_identities(
         &self,
         patchset: &Patchset,
@@ -4145,21 +4166,23 @@ impl ChangeState {
     ) -> Vec<DebtIdentity> {
         let mut identities = Vec::new();
         if let Some(production) = production {
-            identities.push(production.implementer.clone());
+            let implementer = &production.implementer;
+            let declared = patchset.contributors.is_empty()
+                || patchset.contributors.iter().any(|contributor| {
+                    contributor == &implementer.actor
+                        || contributor == implementer.effective_actor()
+                });
+            if declared {
+                identities.push(implementer.clone());
+            }
         }
-        let subjects: Vec<String> = if patchset.contributors.is_empty() {
-            vec![patchset.effective_author().to_string()]
+        if patchset.contributors.is_empty() {
+            identities.push(self.implementer_identity(patchset));
         } else {
-            patchset.contributors.clone()
-        };
-        for subject in subjects {
-            let identity = if subject == patchset.effective_author() {
-                self.implementer_identity(patchset)
-            } else {
-                self.recorded_identity(&subject)
-                    .unwrap_or_else(|| identity_from_role_value(&subject))
-            };
-            identities.push(identity);
+            identities.extend(patchset.contributors.iter().map(|contributor| {
+                self.recorded_identity(contributor)
+                    .unwrap_or_else(|| identity_from_role_value(contributor))
+            }));
         }
         identities.dedup();
         identities
@@ -4169,11 +4192,9 @@ impl ChangeState {
     /// `patchset`, when it is. Authorship refuses; planning, orchestrating
     /// and integrating somebody else's work do not.
     ///
-    /// A production record with no model for its implementer falls back to
-    /// the declared `Implemented-by` lines it kept, because those are then
-    /// the only authorship evidence there is; a range with no production
-    /// record never makes that fallback, so trailers alone neither refuse
-    /// nor discharge.
+    /// Only ledger identities decide this. A model the ledger did not record
+    /// for an author is not established by commit text, so a read is judged
+    /// by the actor, session, harness and model the ledger holds.
     pub fn authorship_match(
         &self,
         patchset: &Patchset,
@@ -4189,18 +4210,11 @@ impl ChangeState {
                 return Some(identity.effective_actor().to_string());
             }
         }
-        let production = production?;
-        if production.implementer.model.is_some() {
-            return None;
-        }
-        let model = model?;
-        let named = production.trailer_implementers.as_ref()?;
-        crate::trailers::naming_model(named, model).map(str::to_string)
+        None
     }
 
-    /// The authoring model coordinates an independence warning can name, for
-    /// the ledger's authors and the declared trailers that stand in when the
-    /// ledger records no model.
+    /// The authoring model coordinates an independence warning can name, as
+    /// the ledger records them. Declared commit text is not among them.
     pub fn authoring_model_values(
         &self,
         patchset: &Patchset,
@@ -4211,16 +4225,11 @@ impl ChangeState {
             if let Some(model) = identity.model.as_deref() {
                 let value = match identity.harness.as_deref() {
                     Some(harness) => format!("{harness}:{model}"),
-                    None => format!("trailer:{model}"),
+                    None => model.to_string(),
                 };
                 if !values.contains(&value) {
                     values.push(value);
                 }
-            }
-        }
-        if values.is_empty() {
-            if let Some(named) = production.and_then(|p| p.trailer_implementers.as_ref()) {
-                values.extend(named.iter().cloned());
             }
         }
         values
@@ -4348,9 +4357,10 @@ impl ChangeState {
         let ineligible_review = debt.missing == Some(DebtMissing::IneligibleReview);
         // A debt that names an independent review as the thing missing is
         // settled only by somebody the ledger does not credit with the work.
-        // The production record names that authorship; a range without one
-        // has only declared trailers, and those neither discharge nor refuse.
-        let production = debt.production.as_ref()?;
+        // Its production record names that authorship when it has one; a
+        // debt recorded before production existed still has the shipped
+        // patchset's recorded authorship. Only a range with no ledger record
+        // at all has nothing to compare.
         let shipped_patchset = self
             .closure
             .as_ref()
@@ -4360,8 +4370,9 @@ impl ChangeState {
                     .iter()
                     .find(|patchset| patchset.id == shipped)
             })?;
+        let production = debt.production.as_ref();
         let authored = |actor: &str, model: Option<&str>| {
-            self.authorship_match(shipped_patchset, Some(production), actor, model)
+            self.authorship_match(shipped_patchset, production, actor, model)
                 .is_some()
         };
         if let Some(audit) = self.audit_verdicts.iter().find(|audit| {

@@ -1108,6 +1108,7 @@ mod tests {
                     committer_name: None,
                     committer_email: None,
                     contributors: Vec::new(),
+                    inherited_author: None,
                     claim_id: None,
                     claim_actor: None,
                     journal_refs: Vec::new(),

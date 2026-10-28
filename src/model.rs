@@ -1213,6 +1213,10 @@ pub enum Payload {
         committer_email: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         contributors: Vec<String>,
+        /// The full author coordinate a replay inherited from the patchset it
+        /// replayed unchanged, model included. Absent on new work.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        inherited_author: Option<DebtIdentity>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         claim_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

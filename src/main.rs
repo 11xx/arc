@@ -1620,7 +1620,9 @@ enum Cmd {
     /// even when the latest patchset's mapped head already matches the branch.
     /// Re-approval requires a verdict on that fresh patchset.
     /// A snapshot after a rebase that leaves the patch unchanged keeps the
-    /// original effective author.
+    /// original effective author coordinate, model included, even when context
+    /// or hunk positions moved. A replay that changes the author's lines, or
+    /// any content fact such as a submodule revision, inherits nothing.
     /// At unchanged content, an explicit --on-behalf-of (also supplied by
     /// ARC_ON_BEHALF_OF) differing from the latest effective author records a
     /// fresh patchset. An equal or omitted subject preserves that patchset
@@ -1791,8 +1793,9 @@ enum Cmd {
     /// that patchset's review head and may be stale for the branch head.
     ///
     /// Authorship is read from the ledger, not from commit trailers: the
-    /// patchset's effective contributors and its production record's
-    /// implementer. An approval recorded under that implementer's model, at
+    /// patchset's declared contributors, else its effective author, and its
+    /// production record's implementer. An approval recorded under that
+    /// implementer's model, at
     /// any effort, warns that it shows a review happened and not that it was
     /// independent of whoever wrote the work. Where `forbid_self_approval`
     /// applies, the gate rejects it as a self-approval, exactly as it rejects
@@ -2338,7 +2341,9 @@ enum Cmd {
     /// queue replay or gate preparation, including invoking-store and destination
     /// declared-actor requirements. Each member opens the landing store afresh,
     /// so earlier landings govern its append policy. Review refusals name the
-    /// required local or external reviewer's next decision.
+    /// required local or external reviewer's next decision. The integrating
+    /// role is this command's actor; `--on-behalf-of` records a ceremony
+    /// subject beside it and never becomes the displayed integrator.
     /// Destination names select local branch
     /// refs even when a tag has the same name.
     /// Ready-to-send reuse requires matching patchset, destination branch and
@@ -2609,8 +2614,9 @@ enum Cmd {
     /// Record a review performed after integration (never a late verdict)
     ///
     /// An audit discharges a debt when its auditor is independent of the
-    /// work's ledger authorship: the patchset's effective contributors and its
-    /// production record's implementer. Planning and orchestrating never
+    /// work's ledger authorship: the patchset's declared contributors, else its
+    /// effective author, and its production record's implementer. Planning and
+    /// orchestrating never
     /// refuse; the audit records those roles beside the verdict. A debt of
     /// kind `ineligible-review` also needs
     /// routing's word that the auditor is eligible: `--assessment <file>`
@@ -2634,6 +2640,10 @@ enum Cmd {
     /// An approving audit recorded under the model of the ledger's implementer
     /// of the audited range, at any effort, warns that it shows a review
     /// happened and not that it was independent of whoever wrote the work.
+    /// Where the ledger records no implementer model, the audit says so and is
+    /// judged by the actor, session and harness; `Implemented-by` trailers are
+    /// reported as declared text only. A debt recorded before production
+    /// summaries existed still reads the shipped patchset's ledger authorship.
     /// Where `forbid_self_approval` is on it is refused, with the remedy a
     /// contributor match gets. Such a read never discharges review debt, regardless of self-approval policy: permission to approve does not
     /// establish independent coverage. `--verdict changes-requested` is

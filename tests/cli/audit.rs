@@ -3533,24 +3533,27 @@ fn a_legacy_debt_event_still_discharge_and_render_without_typed_fields() {
         .assert()
         .success();
 
-    // A legacy event keeps no production record, so its range has no ledger
-    // authorship to compare against: the audit is recorded, and declared
-    // trailers alone neither discharge nor refuse it.
+    // A legacy event keeps no production record, but its shipped patchset
+    // still records the ledger authorship: an independent auditor discharges
+    // it exactly as before production summaries existed.
     let after = json_stdout(
         repo.arc(&repo.root)
             .args(["status", "legacy-debt", "--json"]),
     );
-    assert_eq!(after["debt_outstanding"], true, "{after}");
+    assert_eq!(after["debt_outstanding"], false, "{after}");
     assert!(after["debt"].get("missing").is_none(), "{after}");
     assert!(after["debt"].get("coverage").is_none(), "{after}");
-    assert!(after["debt"].get("discharged_by").is_none(), "{after}");
+    assert_eq!(
+        after["debt"]["discharged_by"]["reviewer"], "Reviewer",
+        "{after}"
+    );
     assert_eq!(
         after["audit_verdicts"][0]["model"], "gpt-5.6-legacy-auditor",
         "{after}"
     );
     let human_after = stdout(repo.arc(&repo.root).args(["show", "legacy-debt"]));
     assert!(human_after.contains("Record: legacy"), "{human_after}");
-    assert!(!human_after.contains("Discharged by:"), "{human_after}");
+    assert!(human_after.contains("Discharged by:"), "{human_after}");
 }
 
 /// A snapshotted change whose file is its own, so successive integrations into

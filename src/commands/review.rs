@@ -589,16 +589,18 @@ pub(super) fn snapshot_holding(
                 (Ok(previous_patch), Ok(current_patch)) => previous_patch == current_patch,
                 _ => false,
             }
-        });
-    let inherits_attribution = requested_contributors.is_none() && ctx.on_behalf_of.is_none();
+        })
+        .filter(|_| requested_contributors.is_none() && ctx.on_behalf_of.is_none());
+    // A replay carries the whole author coordinate, not just a name: the
+    // model is a second identity, and an unchanged actor at a new model is
+    // still the same author.
+    let inherited_author = carried.map(|previous| st.implementer_identity(previous));
     let inherited_subject = carried
-        .filter(|_| inherits_attribution)
+        .filter(|previous| previous.contributors.is_empty())
         .map(|previous| previous.effective_author().to_string())
         .filter(|subject| subject != &ctx.actor);
-    let inherited_contributors = requested_contributors
-        .is_none()
-        .then(|| carried.map(|previous| previous.contributors.clone()))
-        .flatten()
+    let inherited_contributors = carried
+        .map(|previous| previous.contributors.clone())
         .unwrap_or_default();
     let brief = match brief_version {
         Some(0) => bail!("brief version 0 not found"),
@@ -673,6 +675,7 @@ pub(super) fn snapshot_holding(
         committer_name: Some(identity.committer_name),
         committer_email: Some(identity.committer_email),
         contributors,
+        inherited_author,
         claim_id: snapshot_claim.map(|claim| claim.claim_id.clone()),
         claim_actor: snapshot_claim.map(|claim| claim.owner.actor.clone()),
         journal_refs,
@@ -1444,10 +1447,7 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
     // another.
     if let Some(patchset) = st.patchsets.iter().find(|p| p.id == patchset_id) {
         let production = st.debt.as_ref().and_then(|debt| debt.production.as_ref());
-        let mut implementers = st.authoring_model_values(patchset, production);
-        if implementers.is_empty() {
-            implementers = super::audit::range_implementers(ctx, patchset).unwrap_or_default();
-        }
+        let implementers = st.authoring_model_values(patchset, production);
         ctx.warn_model_not_independent(&implementers, verdict);
     }
     Ok(())

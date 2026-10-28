@@ -2177,9 +2177,9 @@ fn workspace_backlog_distinguishes_recorded_debt_from_legacy_default() {
         text
     );
     assert!(text.contains("legacy event, no kind recorded"), "{}", text);
-    // The legacy row keeps no production record, so its audit is recorded
-    // and the obligation stays owed: trailers alone neither discharge nor
-    // refuse.
+    // The legacy row keeps no production record, but its shipped patchset
+    // still records the ledger authorship, so an independent audit discharges
+    // it without consulting commit text.
     repo.arc(&repo.root)
         .env("ARC_ACTOR", "Reviewer")
         .args(["audit", "legacy-untyped", "--verdict", "approved"])
@@ -2189,7 +2189,7 @@ fn workspace_backlog_distinguishes_recorded_debt_from_legacy_default() {
         repo.arc(&repo.root)
             .args(["status", "legacy-untyped", "--json"]),
     );
-    assert_eq!(status["debt_outstanding"], true, "{status}");
+    assert_eq!(status["debt_outstanding"], false, "{status}");
 }
 
 /// Questions and project journal paths: every reachable project names its

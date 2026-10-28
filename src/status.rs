@@ -1335,7 +1335,7 @@ fn build_report(
         })
         .cloned()
         .collect();
-    let implementers = reviewed_patchset_implementers(state, policy, cwd);
+    let implementers = reviewed_patchset_implementers(state, policy);
     let mut approval = approval::decide(&ApprovalFacts {
         latest_patchset: latest_patchset.as_ref(),
         implementers: latest_patchset
@@ -2324,17 +2324,17 @@ pub fn missing_changelog_advisory(state: &ChangeState, cwd: Option<&Path>) -> Op
     })
 }
 
-/// The `Implemented-by` values of each patchset a verdict names, where policy
-/// asks for an independent reviewer and the repository can be read. A range
-/// that cannot be read names nobody here; `role_trailer_advisories` says so.
+/// The authoring model coordinates the ledger records for each patchset a
+/// verdict names, where policy asks for an independent reviewer. Commit text
+/// is not consulted: a range whose ledger records no model names nobody here,
+/// and the read is judged by the identities the ledger does hold.
 fn reviewed_patchset_implementers(
     state: &ChangeState,
     policy: &PolicyFile,
-    cwd: Option<&Path>,
 ) -> BTreeMap<String, Vec<String>> {
-    let Some(cwd) = cwd.filter(|_| policy.policy.forbid_self_approval) else {
+    if !policy.policy.forbid_self_approval {
         return BTreeMap::new();
-    };
+    }
     let mut read = BTreeMap::new();
     for patchset in state.patchsets.iter().filter(|patchset| {
         state
@@ -2349,11 +2349,6 @@ fn reviewed_patchset_implementers(
         let ledger = state.authoring_model_values(patchset, production);
         if !ledger.is_empty() {
             read.insert(patchset.id.clone(), ledger);
-            continue;
-        }
-        if let Ok(values) = crate::trailers::range_implementers(cwd, &patchset.base, &patchset.head)
-        {
-            read.insert(patchset.id.clone(), values);
         }
     }
     read

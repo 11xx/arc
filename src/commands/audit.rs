@@ -514,16 +514,35 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
         .map(|assessed| assessed.uncovered_authors.clone())
         .unwrap_or_default();
 
-    let declared_only = st
-        .debt
-        .as_ref()
-        .is_none_or(|debt| debt.production.is_none());
-    if declared_only {
+    let shipped = st.debt_subject_patchset();
+    let production = st.debt.as_ref().and_then(|debt| debt.production.as_ref());
+    // A production summary is not the only ledger authorship a debt can have:
+    // a debt recorded before the summary existed still names the patchset its
+    // work shipped as. Only a debt whose range has no ledger record at all
+    // reads as declared evidence.
+    if production.is_none() && shipped.is_none() {
         eprintln!(
-            "warning: the audited range has no ledger production record; its \
+            "warning: the audited range has no ledger authorship record; its \
              `Implemented-by` trailers are declared evidence, and on their own they neither \
              discharge nor refuse a review."
         );
+    }
+    if args.verdict == Verdict::Approved {
+        let implementer = production
+            .map(|production| &production.implementer)
+            .cloned()
+            .or_else(|| shipped.map(|patchset| st.implementer_identity(patchset)));
+        if let Some(implementer) = implementer.filter(|identity| identity.model.is_none()) {
+            eprintln!(
+                "warning: the implementer's model is not recorded by the ledger for {} of the \
+                 audited range; independence is judged by the actor, session and harness it \
+                 records.",
+                implementer.effective_actor()
+            );
+            if let Some(note) = production.and_then(|production| production.trailer_note()) {
+                eprintln!("warning: {note} is declared text, not ledger authorship.");
+            }
+        }
     }
     let auditor = ctx.on_behalf_of.as_deref().unwrap_or(&ctx.actor);
     let auditor_model = ctx.resolve_model().model;
@@ -698,7 +717,7 @@ anyone independent looked at {}.\n\
         crate::trailers::naming_model(&authoring_models, &model).map(|value| (model, value))
     }) {
         bail!(
-            "model {model:?} matches `Implemented-by: {value}` on the audited work; {policy_source}, so this audit \
+            "model {model:?} matches the ledger implementer's model {value} on the audited work; {policy_source}, so this audit \
              would discharge its own obligation.\n\
   If another reviewer did the pass, record it as theirs:\n\
     arc audit {} --verdict approved --actor '<reviewer>' --harness '<harness>' --model '<model>'\n\

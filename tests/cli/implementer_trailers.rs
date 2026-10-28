@@ -36,7 +36,12 @@ fn trailed_change(repo: &Repo, slug: &str, commits: &[&[&str]]) -> String {
             &message,
         );
     }
-    stdout(repo.arc(&worktree).args(["snapshot", slug]));
+    stdout(
+        repo.arc(&worktree)
+            .env("ARC_HARNESS", "codex")
+            .env("ARC_MODEL", "gpt-6.1-sol#medium")
+            .args(["snapshot", slug]),
+    );
     change_id
 }
 
@@ -173,7 +178,7 @@ fn an_audit_by_the_implementers_model_at_another_effort_warns() {
 
     audit_as(&repo, "warned", "gpt-6.1-sol#xhigh", "approved")
         .success()
-        .stderr(predicates::str::contains("Implemented-by"))
+        .stderr(predicates::str::contains("ledger"))
         .stderr(predicates::str::contains("gpt-6.1-sol"));
     let debt = debt_of(&repo, "warned");
     assert_eq!(debt["standing"], "owed", "{debt}");
@@ -234,7 +239,7 @@ fn a_same_model_verdict_may_authorize_integration_but_leaves_review_debt_owed() 
         ])
         .assert()
         .success()
-        .stderr(predicates::str::contains("Implemented-by"));
+        .stderr(predicates::str::contains("ledger"));
     let status = json_stdout(repo.arc(&repo.root).args(["status", "verdict", "--json"]));
     assert_eq!(status["has_valid_approval"], true, "{status}");
     assert_ne!(status["approval_waived_by_debt"], true, "{status}");
@@ -276,7 +281,7 @@ fn an_audit_by_another_model_does_not_warn() {
 
     audit_as(&repo, "other", "fixture-opus#medium", "approved")
         .success()
-        .stderr(predicates::str::contains("Implemented-by").not());
+        .stderr(predicates::str::contains("ledger").not());
 }
 
 #[test]
@@ -287,7 +292,7 @@ fn an_audit_by_the_implementers_model_is_refused_under_the_refusing_policy() {
 
     audit_as(&repo, "refused", "gpt-6.1-sol#xhigh", "approved")
         .failure()
-        .stderr(predicates::str::contains("Implemented-by"))
+        .stderr(predicates::str::contains("ledger"))
         .stderr(predicates::str::contains("--model '<model>'"));
     assert_eq!(
         debt_of(&repo, "refused")["discharged_by"],
@@ -310,7 +315,7 @@ fn a_review_by_the_implementers_model_warns_and_cannot_gate_under_the_policy() {
         .args(["review", "reviewed", "--verdict", "approved"])
         .assert()
         .success()
-        .stderr(predicates::str::contains("Implemented-by"))
+        .stderr(predicates::str::contains("ledger"))
         .get_output()
         .clone();
     let out = String::from_utf8_lossy(&output.stdout);
@@ -327,7 +332,7 @@ fn a_review_by_the_implementers_model_warns_and_cannot_gate_under_the_policy() {
         .args(["review", "reviewed", "--verdict", "approved"])
         .assert()
         .success()
-        .stderr(predicates::str::contains("Implemented-by").not());
+        .stderr(predicates::str::contains("ledger").not());
     repo.arc(&repo.root)
         .args(["integrate", "reviewed"])
         .assert()
@@ -344,7 +349,7 @@ fn a_review_by_the_implementers_model_warns_where_policy_permits_it() {
         .args(["review", "lenient", "--verdict", "approved"])
         .assert()
         .success()
-        .stderr(predicates::str::contains("Implemented-by"));
+        .stderr(predicates::str::contains("ledger"));
     repo.arc(&repo.root)
         .args(["integrate", "lenient"])
         .assert()
