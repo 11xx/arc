@@ -9,7 +9,7 @@ fn workspace_json_schemas_take_one_bump_per_release() {
     });
     assert_eq!(
         schemas,
-        ["arc-workspace-report/3", "arc-workspace-backlog/19"]
+        ["arc-workspace-report/3", "arc-workspace-backlog/20"]
     );
 }
 
@@ -178,7 +178,7 @@ fn workspace_backlog_reports_ledger_and_journal_together() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/19");
+    assert_eq!(value["schema"], "arc-workspace-backlog/20");
     assert_eq!(value["scope"]["mode"], "global");
     assert_backlog_summary_matches_rows(&value);
     let project = value["projects"]
@@ -805,7 +805,7 @@ fn workspace_backlog_scopes_reachable_and_missing_anchors_by_path() {
     let mut scoped = repo.arc(&workspace);
     scoped.args(["workspace", "backlog", "--here", "--json"]);
     let value = json_stdout_any_status(&mut scoped);
-    assert_eq!(value["schema"], "arc-workspace-backlog/19");
+    assert_eq!(value["schema"], "arc-workspace-backlog/20");
     assert_eq!(value["scope"]["mode"], "under");
     assert_eq!(
         value["scope"]["under"],
@@ -1058,7 +1058,7 @@ fn workspace_backlog_items() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--items", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/19");
+    assert_eq!(value["schema"], "arc-workspace-backlog/20");
     let project = value["projects"].as_array().unwrap().first().unwrap();
     let items = &project["items"];
     let assert_tier = |actual: &serde_json::Value, expected: &[(&str, &str)]| {
@@ -1623,7 +1623,8 @@ fn workspace_backlog_debt_rows_carry_the_kind_and_its_coordinates() {
     assert!(
         text.contains(
             "debt: independent-review; planned by Planner@high (brief v1), \
-implemented by tester@max (no Implemented-by trailers); coverage: Reviewer@low [route 2026.09]"
+implemented by tester@max (no Implemented-by trailers), integrated by test (model not recorded); \
+coverage: Reviewer@low [route 2026.09]"
         ),
         "{text}"
     );
@@ -1896,7 +1897,7 @@ fn workspace_backlog_timestamp_interpretation_is_explicit() {
         "20260601T000000Z",
     ]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/19");
+    assert_eq!(value["schema"], "arc-workspace-backlog/20");
     let selection = &value["selection"];
     assert_eq!(selection["since"], "2026-06-01T00:00:00Z", "{}", selection);
     assert_eq!(selection["journal_counts"], "arrivals");
@@ -2175,7 +2176,9 @@ fn workspace_backlog_distinguishes_recorded_debt_from_legacy_default() {
         text
     );
     assert!(text.contains("legacy event, no kind recorded"), "{}", text);
-    // Discharge still works on the legacy row: the audit path is unchanged.
+    // The legacy row keeps no production record, so its audit is recorded
+    // and the obligation stays owed: trailers alone neither discharge nor
+    // refuse.
     repo.arc(&repo.root)
         .env("ARC_ACTOR", "Reviewer")
         .args(["audit", "legacy-untyped", "--verdict", "approved"])
@@ -2185,7 +2188,7 @@ fn workspace_backlog_distinguishes_recorded_debt_from_legacy_default() {
         repo.arc(&repo.root)
             .args(["status", "legacy-untyped", "--json"]),
     );
-    assert_eq!(status["debt_outstanding"], false, "{status}");
+    assert_eq!(status["debt_outstanding"], true, "{status}");
 }
 
 /// Questions and project journal paths: every reachable project names its
@@ -2540,7 +2543,7 @@ fn workspace_backlog_ranks_by_a_declared_fact_and_keeps_them_separate() {
     };
 
     let value = report(&[]);
-    assert_eq!(value["schema"], "arc-workspace-backlog/19");
+    assert_eq!(value["schema"], "arc-workspace-backlog/20");
     assert_eq!(value["ordering"]["basis"], "blocking", "{value}");
     assert_eq!(value["ordering"]["direction"], "descending");
 
@@ -2600,7 +2603,7 @@ fn workspace_backlog_keeps_held_only_and_deferred_only_projects() {
         held.arc(&held.root)
             .args(["workspace", "backlog", "--json"]),
     );
-    assert_eq!(value["schema"], "arc-workspace-backlog/19");
+    assert_eq!(value["schema"], "arc-workspace-backlog/20");
     let projects = value["projects"].as_array().unwrap();
     assert_eq!(projects.len(), 1, "{value}");
     let held_rows = projects[0]["changes"]["held"].as_array().unwrap();
@@ -3465,7 +3468,7 @@ fn workspace_report_debt_rows_carry_the_declaration() {
         repo.arc(&repo.root)
             .args(["workspace", "backlog", "--json"]),
     );
-    assert_eq!(backlog["schema"], "arc-workspace-backlog/19");
+    assert_eq!(backlog["schema"], "arc-workspace-backlog/20");
     let backlog_debt = backlog["projects"]
         .as_array()
         .unwrap()

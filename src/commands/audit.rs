@@ -469,12 +469,7 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
 
     let revision = integrated_revision(&st)?;
     let implementers = audited_implementers(ctx, &st);
-    refuse_self_audit(
-        ctx,
-        &st,
-        args.verdict,
-        implementers.as_deref().unwrap_or_default(),
-    )?;
+    refuse_self_audit(ctx, &st, args.verdict)?;
     let inline = super::review::parse_inline_findings(args.findings_json.as_deref())?;
     if args.verdict == Verdict::Approved && inline.iter().any(|f| f.blocking) {
         bail!("cannot approve while recording blocking findings in the same audit");
@@ -519,6 +514,24 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
         .map(|assessed| assessed.uncovered_authors.clone())
         .unwrap_or_default();
 
+    let declared_only = st
+        .debt
+        .as_ref()
+        .is_none_or(|debt| debt.production.is_none());
+    if declared_only {
+        eprintln!(
+            "warning: the audited range has no ledger production record; its \
+             `Implemented-by` trailers are declared evidence, and on their own they neither \
+             discharge nor refuse a review."
+        );
+    }
+    let auditor = ctx.on_behalf_of.as_deref().unwrap_or(&ctx.actor);
+    let auditor_model = ctx.resolve_model().model;
+    let held_roles = st
+        .debt_subject_patchset()
+        .or_else(|| st.latest_patchset())
+        .map(|patchset| st.held_review_roles(patchset, auditor, auditor_model.as_deref()))
+        .unwrap_or_default();
     let payload = Payload::AuditVerdictRecorded {
         revision: revision.clone(),
         verdict: args.verdict,
@@ -526,6 +539,7 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
         findings: inline,
         route_version: args.route_version,
         assessment,
+        held_roles,
     };
     ensure_append_allowed(&st, &payload)?;
     let mut event = ctx.event(&store, &change_id, payload)?;
@@ -547,9 +561,20 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
         .latest_patchset()
         .is_some_and(|patchset| ctx.warn_verdict_not_independent(patchset, args.verdict));
     // The model is a second identity: another actor name does not make an
-    // audit independent of the model that wrote the work.
-    let named_model =
-        ctx.warn_model_not_independent(implementers.as_deref().unwrap_or_default(), args.verdict);
+    // audit independent of the model the ledger credits with the work. A
+    // production record with no model for its implementer falls back to the
+    // declared `Implemented-by` lines it kept.
+    let authoring_models = st
+        .debt_subject_patchset()
+        .or_else(|| st.latest_patchset())
+        .map(|patchset| {
+            st.authoring_model_values(
+                patchset,
+                st.debt.as_ref().and_then(|debt| debt.production.as_ref()),
+            )
+        })
+        .unwrap_or_default();
+    let named_model = ctx.warn_model_not_independent(&authoring_models, args.verdict);
     let named_auditor = named_auditor || named_model;
     // The auditor's own identity is the stronger fact and subsumes this one.
     // An audit by a declared reviewer of work whose author arc invented is
@@ -594,12 +619,7 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
 ///
 /// Only approval is restricted. Raising problems needs no independence, so an
 /// author auditing its own work into `changes-requested` is useful and allowed.
-fn refuse_self_audit(
-    ctx: &Ctx,
-    state: &ChangeState,
-    verdict: Verdict,
-    implementers: &[String],
-) -> Result<()> {
+fn refuse_self_audit(ctx: &Ctx, state: &ChangeState, verdict: Verdict) -> Result<()> {
     if verdict != Verdict::Approved {
         return Ok(());
     }
@@ -619,6 +639,10 @@ fn refuse_self_audit(
         return Ok(());
     };
     let auditor = ctx.on_behalf_of.as_deref().unwrap_or(&ctx.actor);
+    let production = state
+        .debt
+        .as_ref()
+        .and_then(|debt| debt.production.as_ref());
     // An identity arc invented names nobody in particular, so two of them that
     // happen to differ do not show that two people acted. The same rule the
     // pre-integration guard applies, applied to the review that discharges the
@@ -655,8 +679,23 @@ anyone independent looked at {}.\n\
             state.change_id
         );
     }
+    if state
+        .authorship_match(patchset, production, auditor, None)
+        .is_some()
+    {
+        bail!(
+            "{auditor} matches the ledger implementer of the audited work; {policy_source}, so this audit \
+             would discharge its own obligation.\n\
+  If another reviewer did the pass, record it as theirs:\n\
+    arc audit {} --verdict approved --actor '<reviewer>' --harness '<harness>' --model '<model>'\n\
+  If you are reporting problems rather than clearing the change, \
+--verdict changes-requested is open to anyone.",
+            state.change_id
+        );
+    }
+    let authoring_models = state.authoring_model_values(patchset, production);
     if let Some((model, value)) = ctx.resolve_model().model.and_then(|model| {
-        crate::trailers::naming_model(implementers, &model).map(|value| (model, value))
+        crate::trailers::naming_model(&authoring_models, &model).map(|value| (model, value))
     }) {
         bail!(
             "model {model:?} matches `Implemented-by: {value}` on the audited work; {policy_source}, so this audit \

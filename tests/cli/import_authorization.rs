@@ -1516,6 +1516,16 @@ fn explain_uses_the_exact_eligible_debt_discharge_witness() {
     debt["reason"] = serde_json::json!("review owed");
     debt["missing"] = serde_json::json!("independent-review");
     debt["patchset_id"] = patchset["patchset_id"].clone();
+    debt["production"] = serde_json::json!({
+        "implementer": {
+            "actor": "implementer",
+            "harness": "fixture",
+            "model": "implementer#high",
+            "session": "fixture-implementer"
+        },
+        "trailer_implementers": [],
+        "following_brief": false
+    });
     let mut closure = bundle["events"][0].clone();
     closure["event_id"] = serde_json::json!("ZZZZ-002-integrated");
     closure["event_type"] = serde_json::json!("change-integrated");

@@ -658,7 +658,7 @@ enum Cmd {
         /// event not on the change is refused
         #[arg(long)]
         at: Option<String>,
-        /// Emit `arc-explain/2` JSON instead of text
+        /// Emit `arc-explain/3` JSON instead of text
         #[arg(long)]
         json: bool,
     },
@@ -1011,7 +1011,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Lead-facing queue rollup: open changes, active claims, and outstanding debt (arc-inbox/11 schema)
+    /// Lead-facing queue rollup: open changes, active claims, and outstanding debt (arc-inbox/12 schema)
     /// Aggregate reads name unreadable changes with their errors on stderr
     /// and retain readable changes; a selected unreadable change fails
     /// Recorded producer models that are missing, placeholders or session ids
@@ -1088,7 +1088,7 @@ enum Cmd {
         #[arg(long)]
         off: bool,
     },
-    /// Machine-readable status report (the versioned arc-status/27 schema).
+    /// Machine-readable status report (the versioned arc-status/28 schema).
     /// `debt_standing` is `declared` before the change integrates, `owed`
     /// after, and `discharged` once a review answers the debt;
     /// `debt_outstanding` is true only for `owed`.
@@ -1619,6 +1619,8 @@ enum Cmd {
     /// A head whose rewrite invalidated approval requires a fresh patchset,
     /// even when the latest patchset's mapped head already matches the branch.
     /// Re-approval requires a verdict on that fresh patchset.
+    /// A snapshot after a rebase that leaves the patch unchanged keeps the
+    /// original effective author.
     /// At unchanged content, an explicit --on-behalf-of (also supplied by
     /// ARC_ON_BEHALF_OF) differing from the latest effective author records a
     /// fresh patchset. An equal or omitted subject preserves that patchset
@@ -1788,14 +1790,16 @@ enum Cmd {
     /// Explicit `--patchset` judgments may name historical work; they retain
     /// that patchset's review head and may be stale for the branch head.
     ///
-    /// An approval recorded under the model of an `Implemented-by` line in the
-    /// patchset's range, at any effort, warns that it shows a review happened
-    /// and not that it was independent of whoever wrote the work. Where
-    /// `forbid_self_approval` applies, the gate rejects it as a self-approval,
-    /// exactly as it rejects a reviewer matching a contributor, and says so
-    /// when the verdict is recorded. Such a read never discharges review debt,
-    /// regardless of self-approval policy: permission to approve does not
-    /// establish independent coverage.
+    /// Authorship is read from the ledger, not from commit trailers: the
+    /// patchset's effective contributors and its production record's
+    /// implementer. An approval recorded under that implementer's model, at
+    /// any effort, warns that it shows a review happened and not that it was
+    /// independent of whoever wrote the work. Where `forbid_self_approval`
+    /// applies, the gate rejects it as a self-approval, exactly as it rejects
+    /// a reviewer matching a contributor, and says so when the verdict is
+    /// recorded. Such a read never discharges review debt, regardless of
+    /// self-approval policy: permission to approve does not establish
+    /// independent coverage. Planning and orchestrating never refuse.
     #[command(group(clap::ArgGroup::new("snapshot_attribution").args(["contributors", "solo"]).requires("snapshot")))]
     /// Verdicts retain observed publication authority. A verified authority refusal
     /// on a provisional delivery remains applicable across authority transfer.
@@ -2094,6 +2098,8 @@ enum Cmd {
         links: LinkOpts,
     },
     /// Replay a change's branch onto its target, then snapshot the new head.
+    /// A replay that leaves the patch unchanged keeps the original effective
+    /// author; the replaying session is not its implementer.
     /// The snapshot links the artifact the change was opened from (`via: begin`)
     /// and the plan its brief names (`via: brief`), one link per file; a file
     /// named by both is linked once as `begin`. An unavailable artifact is
@@ -2492,10 +2498,11 @@ enum Cmd {
         /// The waiver binds to the patchset's review head, following only
         /// signature-only rewrites; a message or content rewrite requires a
         /// fresh snapshot and declaration.
-        /// The debt's production record names the `Implemented-by` values of
-        /// the commits in the patchset's range beside the identity that
-        /// recorded the patchset, verbatim; a range naming none records an
-        /// empty list.
+        /// The debt's production record names the ledger's planner,
+        /// implementer, orchestrator and integrator. It also keeps the
+        /// `Implemented-by` values of the commits in the range verbatim as a
+        /// projection for comparison; a range naming none records an empty
+        /// list. Trailers never decide a role.
         /// It never overrules a reviewer who read this patchset and asked for
         /// changes: that is a verdict, not a missing one. The obligation
         /// survives closure and `arc query --debt` finds it; discharge it
@@ -2553,9 +2560,10 @@ enum Cmd {
     /// A waiver binds to the patchset's review head, following only
     /// signature-only rewrites. A message or content rewrite requires a fresh
     /// snapshot and declaration before debt can waive review of that head.
-    /// The production record names the `Implemented-by` values of the commits
-    /// in the patchset's range beside the identity that recorded the
-    /// patchset, verbatim; a range naming none records an empty list.
+    /// The production record names the ledger's planner, implementer,
+    /// orchestrator and integrator. It also keeps the `Implemented-by` values
+    /// of the commits in the range verbatim as a projection for comparison; a
+    /// range naming none records an empty list. Trailers never decide a role.
     Debt {
         /// Change that owes the review
         change: String,
@@ -2601,7 +2609,10 @@ enum Cmd {
     /// Record a review performed after integration (never a late verdict)
     ///
     /// An audit discharges a debt when its auditor is independent of the
-    /// work's contributors. A debt of kind `ineligible-review` also needs
+    /// work's ledger authorship: the patchset's effective contributors and its
+    /// production record's implementer. Planning and orchestrating never
+    /// refuse; the audit records those roles beside the verdict. A debt of
+    /// kind `ineligible-review` also needs
     /// routing's word that the auditor is eligible: `--assessment <file>`
     /// with `independence: eligible`. Without one, or with an `ineligible`
     /// assessment, the audit is recorded and listed beside the obligation,
@@ -2620,12 +2631,11 @@ enum Cmd {
     /// (the production record kept none and the range does not read) the
     /// binding is `authors-unread` and the debt stays open too.
     ///
-    /// An approving audit recorded under the model of an `Implemented-by`
-    /// line in the audited range, at any effort, warns that it shows a review
+    /// An approving audit recorded under the model of the ledger's implementer
+    /// of the audited range, at any effort, warns that it shows a review
     /// happened and not that it was independent of whoever wrote the work.
     /// Where `forbid_self_approval` is on it is refused, with the remedy a
-    /// contributor match gets. Such a read never discharges review debt,
-    /// regardless of self-approval policy: permission to approve does not
+    /// contributor match gets. Such a read never discharges review debt, regardless of self-approval policy: permission to approve does not
     /// establish independent coverage. `--verdict changes-requested` is
     /// open to anyone.
     Audit {
@@ -2660,7 +2670,7 @@ enum Cmd {
         /// discharged only by an audit whose assessment says `eligible` and
         /// is `bound`; otherwise the audit is recorded and listed beside the
         /// obligation, which stays open. The auditor must also be independent
-        /// of the contributors, as for any audit. Other kinds ignore it
+        /// of the ledger's authorship, as for any audit. Other kinds ignore it
         #[arg(long = "assessment", value_name = "FILE")]
         assessment: Option<PathBuf>,
     },

@@ -950,6 +950,34 @@ impl DebtIdentity {
     }
 }
 
+/// A contribution role a reviewer can hold without thereby authoring the
+/// work. Only these roles turn a read into a dirty-context read: authorship
+/// is a refusal, not a deduction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReviewRole {
+    Planner,
+    Orchestrator,
+}
+
+impl ReviewRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReviewRole::Planner => "planner",
+            ReviewRole::Orchestrator => "orchestrator",
+        }
+    }
+
+    /// A role list as a record keeps it: deduplicated, in set order.
+    pub fn normalized(roles: impl IntoIterator<Item = ReviewRole>) -> Vec<Self> {
+        roles
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+}
+
 /// How the work a debt covers was produced: who set the contract and who
 /// answered it.
 ///
@@ -957,8 +985,9 @@ impl DebtIdentity {
 /// either model outranks the other, is a judgment arc does not make.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DebtProduction {
-    /// Who recorded the brief version the shipped work answered. Absent when
-    /// the change carries no brief.
+    /// Who set the contract the shipped work answered: a planner the plan
+    /// records when the brief names one, else an asserted `Planned-by`, else
+    /// the brief's recorder. Absent when the change carries no brief or plan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planner: Option<DebtIdentity>,
     /// The brief version current at the shipped patchset.
@@ -966,6 +995,14 @@ pub struct DebtProduction {
     pub brief_version: Option<usize>,
     /// Who recorded the shipped patchset.
     pub implementer: DebtIdentity,
+    /// The invoker that recorded the work for its implementer, when the
+    /// patchset was taken on somebody's behalf.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orchestrator: Option<DebtIdentity>,
+    /// The actor that integrated the change. Absent until it integrated, and
+    /// on work that did not integrate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrator: Option<DebtIdentity>,
     /// The `Implemented-by` values of the commits in the patchset's range,
     /// verbatim and without repeats. Empty records that the range names no
     /// implementer; absent records that the range was not read.
@@ -1414,6 +1451,10 @@ pub enum Payload {
         /// by an audit whose assessment is eligible.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         assessment: Option<AuditAssessment>,
+        /// The non-authoring roles the auditor held on the audited work: a
+        /// dirty-context fact for routing to score, never a refusal here.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        held_roles: Vec<ReviewRole>,
     },
     /// A finding raised by a post-integration audit. An audit that could only
     /// say approved-or-not would be a rubber stamp.

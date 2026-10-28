@@ -92,6 +92,7 @@ mod review4_fixes_cost;
 mod review_fixes_cost;
 mod review_fixes_native_child;
 mod review_fixes_span_split;
+mod review_roles;
 mod rewrite;
 mod roles;
 mod run;

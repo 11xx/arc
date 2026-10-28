@@ -5,7 +5,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CHANGE_STATE_SCHEMA: &str = "arc-state/3";
+pub const CHANGE_STATE_SCHEMA: &str = "arc-state/4";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Patchset {
@@ -541,6 +541,63 @@ fn author_assumed(on_behalf_of: Option<&str>, source: Option<ActorSource>) -> bo
     on_behalf_of.is_none() && source.is_some_and(|source| !source.declared())
 }
 
+/// A role assertion as an identity. A human value is its own actor, and an
+/// agent coordinate keeps its harness and model beside the value as the
+/// actor it was declared as.
+fn identity_from_role_value(value: &str) -> DebtIdentity {
+    let value = value.trim();
+    if !value.contains('<') {
+        if let Some((harness, rest)) = value.split_once(':') {
+            if !harness.trim().is_empty() && !rest.trim().is_empty() {
+                return DebtIdentity::new(
+                    value.to_string(),
+                    None,
+                    Some(harness.trim().to_string()),
+                    Some(rest.trim().to_string()),
+                    None,
+                );
+            }
+        }
+    }
+    DebtIdentity::new(value.to_string(), None, None, None, None)
+}
+
+/// A plan header's planner as an identity, with a session or model standing
+/// for an actor the header did not name.
+fn identity_from_planner(planner: &PlannerIdentity) -> DebtIdentity {
+    let actor = planner
+        .actor
+        .clone()
+        .or_else(|| planner.session.clone())
+        .or_else(|| planner.model.clone())
+        .unwrap_or_default();
+    DebtIdentity::new(
+        actor,
+        None,
+        planner.harness.clone(),
+        planner.model.clone(),
+        planner.session.clone(),
+    )
+}
+
+/// Whether an identity is the reviewer `actor` at `model`, compared the way
+/// independence compares identities: the actor whole, or the model without
+/// its effort.
+fn identity_names(identity: &DebtIdentity, actor: &str, model: Option<&str>) -> bool {
+    if identity.effective_actor() == actor {
+        return true;
+    }
+    let Some(recorded) = identity.model.as_deref() else {
+        return false;
+    };
+    let Some(model) = model else {
+        return false;
+    };
+    let recorded = recorded.split('#').next().unwrap_or(recorded).trim();
+    let model = model.split('#').next().unwrap_or(model).trim();
+    !recorded.is_empty() && recorded == model
+}
+
 /// Where a declared review obligation stands.
 ///
 /// Distinct from readiness: `ChangeState::debt_outstanding` is true only for
@@ -748,7 +805,7 @@ pub struct KeptContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence: Option<String>,
     /// Events on this change the fact cites as its grounds. Additive in
-    /// `arc-state/3` and `arc-status/27`.
+    /// `arc-state/4` and `arc-status/28`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub cites: Vec<String>,
     pub actor: String,
@@ -775,6 +832,9 @@ pub struct AuditVerdictEntry {
     /// Routing's assessment of the auditor, when the caller supplied one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment: Option<AuditAssessment>,
+    /// The non-authoring roles the auditor held on the audited work.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held_roles: Vec<crate::model::ReviewRole>,
     pub actor: String,
     pub on_behalf_of: Option<String>,
     /// Where `actor` came from. `None` on audits recorded before arc kept the
@@ -1148,6 +1208,10 @@ pub struct ClosureState {
     /// External reference associated with a recorded receiver outcome.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_reference: Option<String>,
+    /// The session that performed the integration. Integrating somebody
+    /// else's work is its own role, never a contribution to the work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrator: Option<crate::model::DebtIdentity>,
     pub event_id: String,
     #[serde(skip)]
     pub created_at: DateTime<Utc>,
@@ -1178,6 +1242,13 @@ fn integrated_closure(
         target_before,
         authorization: None,
         external_reference: None,
+        integrator: Some(crate::model::DebtIdentity::new(
+            ev.actor.clone(),
+            ev.on_behalf_of.clone(),
+            ev.harness.clone(),
+            ev.model.clone(),
+            ev.session.clone(),
+        )),
         event_id: ev.event_id.clone(),
         created_at: ev.created_at,
     }
@@ -2682,6 +2753,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                         target_before: None,
                         authorization: None,
                         external_reference: Some(reference.clone()),
+                        integrator: None,
                         event_id: ev.event_id.clone(),
                         created_at: ev.created_at,
                     });
@@ -2767,6 +2839,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 findings,
                 route_version,
                 assessment,
+                held_roles,
             } => {
                 for inline in findings {
                     state.audit_findings.insert(
@@ -2800,6 +2873,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     session: ev.session.clone(),
                     route_version: route_version.clone(),
                     assessment: assessment.clone(),
+                    held_roles: held_roles.clone(),
                     actor: ev.actor.clone(),
                     on_behalf_of: ev.on_behalf_of.clone(),
                     actor_source: ev.actor_source,
@@ -3185,6 +3259,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     source_patchset_id: None,
                     source_head: None,
                     target_branch: None,
+                    integrator: None,
                     target_before: None,
                     authorization: None,
                     external_reference: None,
@@ -3907,31 +3982,143 @@ impl ChangeState {
             .collect()
     }
 
-    /// Who set the contract one patchset answered, and who answered it.
+    /// The ledger identity recorded for `actor`, when its records name one
+    /// coordinate for it. A session id is an actor, not a model, so a record
+    /// that carries only an actor supplies no model here.
+    fn recorded_identity(&self, actor: &str) -> Option<DebtIdentity> {
+        let opening = (
+            self.opened_by.as_str(),
+            self.opened_harness.as_deref(),
+            self.opened_model.as_deref(),
+            self.opened_session.as_deref(),
+            self.opened_on_behalf_of.as_deref(),
+        );
+        let patchsets = self.patchsets.iter().map(|patchset| {
+            (
+                patchset.actor.as_str(),
+                patchset.harness.as_deref(),
+                patchset.model.as_deref(),
+                patchset.session.as_deref(),
+                patchset.on_behalf_of.as_deref(),
+            )
+        });
+        let briefs = self.briefs.iter().map(|brief| {
+            (
+                brief.actor.as_str(),
+                brief.harness.as_deref(),
+                brief.model.as_deref(),
+                brief.session.as_deref(),
+                brief.on_behalf_of.as_deref(),
+            )
+        });
+        let mut seen = std::collections::BTreeSet::new();
+        for (recorded, harness, model, session, _on_behalf_of) in
+            std::iter::once(opening).chain(patchsets).chain(briefs)
+        {
+            // The model beside an `on-behalf-of` subject is the invoker's,
+            // not the subject's. Only a record the actor made for itself
+            // names its own model.
+            if recorded != actor {
+                continue;
+            }
+            let Some(model) = model else {
+                continue;
+            };
+            seen.insert((
+                harness.map(str::to_string),
+                model.to_string(),
+                session.map(str::to_string),
+            ));
+        }
+        match seen.len() {
+            1 => {
+                let (harness, model, session) = seen.into_iter().next().expect("one identity");
+                Some(DebtIdentity::new(
+                    actor.to_string(),
+                    None,
+                    harness,
+                    Some(model),
+                    session,
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// The identity a patchset's implementer is credited with: its subject
+    /// when one was named, else the session that recorded it.
+    fn implementer_identity(&self, subject: &Patchset) -> DebtIdentity {
+        let Some(named) = subject.on_behalf_of.as_deref() else {
+            return DebtIdentity::new(
+                subject.actor.clone(),
+                None,
+                subject.harness.clone(),
+                subject.model.clone(),
+                subject.session.clone(),
+            );
+        };
+        let parsed = identity_from_role_value(named);
+        let mut identity = self.recorded_identity(named).unwrap_or(parsed);
+        if identity.model.is_none() {
+            if let Some(parsed) = identity_from_role_value(named).model {
+                identity.model = Some(parsed);
+            }
+        }
+        identity
+    }
+
+    /// Who set the contract one patchset answered, who answered it, who
+    /// recorded it for its implementer, and who integrated it.
     ///
     /// `trailer_implementers` is what the range's commits name, or `None`
-    /// when no one read them.
+    /// when no one read them. It is a projection kept for comparison, never
+    /// the source of a role.
     pub fn debt_production_for(
         &self,
         subject: &Patchset,
         trailer_implementers: Option<Vec<String>>,
     ) -> DebtProduction {
-        let planner = self.brief_for(subject).map(|brief| {
-            DebtIdentity::new(
-                brief.actor.clone(),
-                brief.on_behalf_of.clone(),
-                brief.harness.clone(),
-                brief.model.clone(),
-                brief.session.clone(),
-            )
-        });
-        let implementer = DebtIdentity::new(
-            subject.actor.clone(),
-            subject.on_behalf_of.clone(),
-            subject.harness.clone(),
-            subject.model.clone(),
-            subject.session.clone(),
-        );
+        let brief = self.brief_for(subject);
+        let planner = brief
+            .and_then(|brief| brief.plan_source.as_ref())
+            .and_then(|source| source.planners.first())
+            .map(identity_from_planner)
+            .or_else(|| {
+                self.contribution_roles
+                    .get("Planned-by")
+                    .and_then(|values| values.first())
+                    .map(|value| identity_from_role_value(value))
+            })
+            .or_else(|| {
+                brief.map(|brief| {
+                    DebtIdentity::new(
+                        brief.actor.clone(),
+                        brief.on_behalf_of.clone(),
+                        brief.harness.clone(),
+                        brief.model.clone(),
+                        brief.session.clone(),
+                    )
+                })
+            });
+        let implementer = self.implementer_identity(subject);
+        let orchestrator = if subject.on_behalf_of.is_some() {
+            Some(DebtIdentity::new(
+                subject.actor.clone(),
+                None,
+                subject.harness.clone(),
+                subject.model.clone(),
+                subject.session.clone(),
+            ))
+        } else {
+            self.contribution_roles
+                .get("Orchestrated-by")
+                .and_then(|values| values.first())
+                .map(|value| identity_from_role_value(value))
+        };
+        let integrator = self
+            .closure
+            .as_ref()
+            .and_then(|closure| closure.integrator.clone());
         let following_brief = planner
             .as_ref()
             .is_some_and(|planner| planner.effective_actor() != implementer.effective_actor());
@@ -3939,9 +4126,142 @@ impl ChangeState {
             planner,
             brief_version: subject.brief_version,
             implementer,
+            orchestrator,
+            integrator,
             trailer_implementers,
             following_brief,
         }
+    }
+
+    /// Every identity the ledger credits with authoring `patchset`: its
+    /// recorded contributor set or effective author, and the production
+    /// record's implementer. A production record supplies the only
+    /// authorship a debt can compare against; without one the patchset's own
+    /// identity is the ledger's whole answer.
+    pub fn authoring_identities(
+        &self,
+        patchset: &Patchset,
+        production: Option<&DebtProduction>,
+    ) -> Vec<DebtIdentity> {
+        let mut identities = Vec::new();
+        if let Some(production) = production {
+            identities.push(production.implementer.clone());
+        }
+        let subjects: Vec<String> = if patchset.contributors.is_empty() {
+            vec![patchset.effective_author().to_string()]
+        } else {
+            patchset.contributors.clone()
+        };
+        for subject in subjects {
+            let identity = if subject == patchset.effective_author() {
+                self.implementer_identity(patchset)
+            } else {
+                self.recorded_identity(&subject)
+                    .unwrap_or_else(|| identity_from_role_value(&subject))
+            };
+            identities.push(identity);
+        }
+        identities.dedup();
+        identities
+    }
+
+    /// How an approving read under `actor` at `model` is authorship of
+    /// `patchset`, when it is. Authorship refuses; planning, orchestrating
+    /// and integrating somebody else's work do not.
+    ///
+    /// A production record with no model for its implementer falls back to
+    /// the declared `Implemented-by` lines it kept, because those are then
+    /// the only authorship evidence there is; a range with no production
+    /// record never makes that fallback, so trailers alone neither refuse
+    /// nor discharge.
+    pub fn authorship_match(
+        &self,
+        patchset: &Patchset,
+        production: Option<&DebtProduction>,
+        actor: &str,
+        model: Option<&str>,
+    ) -> Option<String> {
+        for identity in self.authoring_identities(patchset, production) {
+            if identity.effective_actor() == actor {
+                return Some(identity.effective_actor().to_string());
+            }
+            if model.is_some() && identity_names(&identity, actor, model) {
+                return Some(identity.effective_actor().to_string());
+            }
+        }
+        let production = production?;
+        if production.implementer.model.is_some() {
+            return None;
+        }
+        let model = model?;
+        let named = production.trailer_implementers.as_ref()?;
+        crate::trailers::naming_model(named, model).map(str::to_string)
+    }
+
+    /// The authoring model coordinates an independence warning can name, for
+    /// the ledger's authors and the declared trailers that stand in when the
+    /// ledger records no model.
+    pub fn authoring_model_values(
+        &self,
+        patchset: &Patchset,
+        production: Option<&DebtProduction>,
+    ) -> Vec<String> {
+        let mut values = Vec::new();
+        for identity in self.authoring_identities(patchset, production) {
+            if let Some(model) = identity.model.as_deref() {
+                let value = match identity.harness.as_deref() {
+                    Some(harness) => format!("{harness}:{model}"),
+                    None => format!("trailer:{model}"),
+                };
+                if !values.contains(&value) {
+                    values.push(value);
+                }
+            }
+        }
+        if values.is_empty() {
+            if let Some(named) = production.and_then(|p| p.trailer_implementers.as_ref()) {
+                values.extend(named.iter().cloned());
+            }
+        }
+        values
+    }
+
+    /// The non-authoring roles `actor` held on `subject`, as the ledger names
+    /// them. Authorship is answered separately and refuses; these roles only
+    /// make the read dirty context.
+    pub fn held_review_roles(
+        &self,
+        subject: &Patchset,
+        actor: &str,
+        model: Option<&str>,
+    ) -> Vec<crate::model::ReviewRole> {
+        let mut roles = std::collections::BTreeSet::new();
+        let names = |identity: &DebtIdentity| identity_names(identity, actor, model);
+        let mut planners: Vec<DebtIdentity> = Vec::new();
+        if let Some(source) = self
+            .brief_for(subject)
+            .and_then(|brief| brief.plan_source.as_ref())
+        {
+            planners.extend(source.planners.iter().map(identity_from_planner));
+        }
+        if let Some(values) = self.contribution_roles.get("Planned-by") {
+            planners.extend(values.iter().map(|value| identity_from_role_value(value)));
+        }
+        if let Some(planner) = self.debt_production_for(subject, None).planner {
+            planners.push(planner);
+        }
+        if planners.iter().any(names) {
+            roles.insert(crate::model::ReviewRole::Planner);
+        }
+        let production = self.debt_production_for(subject, None);
+        let mut orchestrators: Vec<DebtIdentity> = production.orchestrator.into_iter().collect();
+        if let Some(values) = self.contribution_roles.get("Orchestrated-by") {
+            orchestrators.extend(values.iter().map(|value| identity_from_role_value(value)));
+        }
+        if orchestrators.iter().any(names) {
+            roles.insert(crate::model::ReviewRole::Orchestrator);
+        }
+        crate::model::ReviewRole::normalized(roles)
     }
 
     /// Any independent verdict on the revision that shipped, recorded after
@@ -4008,7 +4328,14 @@ impl ChangeState {
                     .collect(),
             }
         });
+        let integrator = self
+            .closure
+            .as_ref()
+            .and_then(|closure| closure.integrator.clone());
         let current = self.debt.as_mut().expect("held debt");
+        if let (Some(production), Some(integrator)) = (current.production.as_mut(), integrator) {
+            production.integrator = Some(integrator);
+        }
         current.discharged_by_event_id = discharged_by.as_ref().map(|(id, _)| id.clone());
         current.discharged_by = discharged_by.map(|(_, coverage)| coverage);
         current.ineligible = read;
@@ -4019,15 +4346,11 @@ impl ChangeState {
     /// The returned model is copied from that event and is never inferred.
     fn debt_discharge(&self, debt: &Debt) -> Option<(String, DebtCoverage)> {
         let ineligible_review = debt.missing == Some(DebtMissing::IneligibleReview);
-        // A debt that names an independent review as the thing missing cannot
-        // be settled by the people who wrote the patchset, nor by an identity
-        // arc invented. A name taken from `git config` is not a claim anybody
-        // made: it cannot be compared against the contributor set with any
-        // meaning, so it fails the independence question rather than passing
-        // it by not matching. The shipped
-        // patchset's contributor set is the same one the pre-merge gate reads,
-        // so both paths answer independence the same way; where no set was
-        // recorded, membership falls back to the patchset's author.
+        // A debt that names an independent review as the thing missing is
+        // settled only by somebody the ledger does not credit with the work.
+        // The production record names that authorship; a range without one
+        // has only declared trailers, and those neither discharge nor refuse.
+        let production = debt.production.as_ref()?;
         let shipped_patchset = self
             .closure
             .as_ref()
@@ -4036,26 +4359,17 @@ impl ChangeState {
                 self.patchsets
                     .iter()
                     .find(|patchset| patchset.id == shipped)
-            });
-        let implementers = debt
-            .production
-            .as_ref()
-            .and_then(|production| production.trailer_implementers.as_deref())
-            .unwrap_or_default();
-        let independent_model = |model: Option<&str>| {
-            model.is_none_or(|model| crate::trailers::naming_model(implementers, model).is_none())
+            })?;
+        let authored = |actor: &str, model: Option<&str>| {
+            self.authorship_match(shipped_patchset, Some(production), actor, model)
+                .is_some()
         };
         if let Some(audit) = self.audit_verdicts.iter().find(|audit| {
             self.review_eligible(&audit.event_id, &audit.origin_replica_id)
                 && audit.created_at >= debt.declared_at
                 && (!ineligible_review || audit.clears_ineligible_review())
                 && !audit.author_assumed()
-                && independent_model(audit.model.as_deref())
-                && shipped_patchset.is_none_or(|patchset| {
-                    patchset
-                        .contributor_match(audit.effective_author())
-                        .is_none()
-                })
+                && !authored(audit.effective_author(), audit.model.as_deref())
         }) {
             return Some((
                 audit.event_id.clone(),
@@ -4076,8 +4390,7 @@ impl ChangeState {
         }
         // Only a verdict on the revision that actually shipped counts; a
         // verdict on an earlier draft judged something else.
-        let patchset = shipped_patchset?;
-        let shipped = patchset.id.as_str();
+        let shipped = shipped_patchset.id.as_str();
         self.verdicts
             .iter()
             .find(|verdict| {
@@ -4085,10 +4398,7 @@ impl ChangeState {
                     && verdict.created_at >= debt.declared_at
                     && verdict.patchset_id == shipped
                     && !verdict.author_assumed()
-                    && independent_model(verdict.model.as_deref())
-                    && patchset
-                        .contributor_match(verdict.effective_author())
-                        .is_none()
+                    && !authored(verdict.effective_author(), verdict.model.as_deref())
             })
             .map(|verdict| {
                 (
@@ -4120,9 +4430,13 @@ mod tests {
         );
         let debt = ev(
             "fix",
-            Payload::AuditDebtDeclared {
+            Payload::DebtDeclared {
                 reason: "review owed".into(),
                 patchset_id: Some("ps-01".into()),
+                missing: DebtMissing::IndependentReview,
+                coverage: Vec::new(),
+                production: Some(test_production()),
+                ineligible: None,
             },
         );
         for audit in [false, true] {
@@ -4136,6 +4450,7 @@ mod tests {
                         findings: vec![],
                         route_version: None,
                         assessment: None,
+                        held_roles: Vec::new(),
                     },
                 )
             } else {
@@ -5013,10 +5328,43 @@ mod tests {
                 findings: vec![],
                 route_version: None,
                 assessment,
+                held_roles: Vec::new(),
             },
         );
         audit.actor = "reader".into();
         audit
+    }
+
+    fn test_production() -> DebtProduction {
+        DebtProduction {
+            planner: None,
+            brief_version: None,
+            implementer: DebtIdentity::new(
+                "author".into(),
+                None,
+                Some("fixture".into()),
+                Some("author#high".into()),
+                None,
+            ),
+            orchestrator: None,
+            integrator: None,
+            trailer_implementers: Some(Vec::new()),
+            following_brief: false,
+        }
+    }
+
+    fn versioned_debt() -> Event {
+        ev(
+            "fix",
+            Payload::DebtDeclared {
+                reason: "review owed".into(),
+                patchset_id: Some("ps-01".into()),
+                missing: DebtMissing::IndependentReview,
+                coverage: Vec::new(),
+                production: Some(test_production()),
+                ineligible: None,
+            },
+        )
     }
 
     fn legacy_debt() -> Event {
@@ -5035,7 +5383,7 @@ mod tests {
 
     #[test]
     fn a_debt_is_declared_until_the_change_integrates_then_owed_until_discharged() {
-        let open = change_with_debt(legacy_debt(), false, vec![]);
+        let open = change_with_debt(versioned_debt(), false, vec![]);
         assert_eq!(standing_of(&open), Some(DebtStanding::Declared));
         assert!(!open.debt_outstanding());
         assert_eq!(
@@ -5043,11 +5391,11 @@ mod tests {
             Some(DebtStanding::Declared)
         );
 
-        let owed = change_with_debt(legacy_debt(), true, vec![]);
+        let owed = change_with_debt(versioned_debt(), true, vec![]);
         assert_eq!(standing_of(&owed), Some(DebtStanding::Owed));
         assert!(owed.debt_outstanding());
 
-        let discharged = change_with_debt(legacy_debt(), true, vec![independent_audit(None)]);
+        let discharged = change_with_debt(versioned_debt(), true, vec![independent_audit(None)]);
         assert_eq!(standing_of(&discharged), Some(DebtStanding::Discharged));
         assert!(!discharged.debt_outstanding());
         assert_eq!(

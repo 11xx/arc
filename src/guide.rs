@@ -790,7 +790,9 @@ RUN A CHANGE
                                      A rewrite that invalidated approval
                                      requires a fresh patchset even when the
                                      mapped head already matches the branch.
-                                     A snapshot grants no approval.
+                                     A snapshot grants no approval. A rebase
+                                     that leaves the patch unchanged keeps the
+                                     original effective author.
     --verify [--gate <name>...]      Run required gates, reusing the newest
                                      green evidence at the same tree. Selected
                                      --gate names rerun explicitly and must be unique and declared;
@@ -2099,26 +2101,39 @@ REVIEW COVERAGE AND DEBT
   against whatever is newest. Otherwise a later snapshot by somebody else
   would retroactively turn a self-review into an independent one.
 
-  It is also a relation between declared identities. An approval is refused
-  when its effective author matches a contributor on the patchset it approves,
-  or when arc assumed the reviewing identity from git config or the harness
-  session, which is nobody's claim and so cannot be the second party. An assumed authoring identity
-  refuses nothing on its own: a reviewer that declared a different name is
-  independent of it, before the merge and in an audit after it alike. Two
-  assumed identities are refused, since neither side claimed anything. The
-  reviewing model is a second identity: a verdict or audit recorded under the
-  model, at any effort, of an `Implemented-by` line in the range it judges
-  warns that it shows a review happened and not that it was independent of
-  whoever wrote the work. Where self-approval is forbidden the gate rejects
-  the approval as it rejects a contributor match, and `arc audit` refuses to
-  record it; `--verdict changes-requested` is open to anyone. Models compare
-  as strings once the effort is dropped: arc holds no alias table, so a model
-  the trailers spell another way is not matched. A range that cannot be read
-  names nobody for this comparison: arc says it could not read the trailers,
-  and neither the gate nor `arc audit` refuses on what it could not see. A
-  reviewer arc cannot place that way is reported as unknown attribution
-  rather than counted as independent or as self-review, whether it cast a
-  verdict or only filed findings.
+  It is also a relation between declared identities. The ledger, never commit
+  trailers, says who held which role. A patchset's implementer is its effective
+  author: its `--on-behalf-of` subject when one was named, else its recorder;
+  its recorded contributor set names every hand that wrote it. Its planner is
+  the plan's recorded planners, else an asserted `Planned-by`, else the
+  brief's recorder; its orchestrator is the invoker recorded beside an
+  `--on-behalf-of` subject, and its integrator the actor of `arc integrate`. A
+  rebase or snapshot that replays an unchanged patch keeps that patchset's
+  author. Planning, orchestrating and integrating somebody else's work are not
+  authorship.
+
+  An approval is refused when its effective author matches the ledger's
+  authorship, or when arc assumed the reviewing identity from git config or the
+  harness session, which is nobody's claim and so cannot be the second party.
+  An assumed authoring identity refuses nothing on its own: a reviewer that
+  declared a different name is independent of it, before the merge and in an
+  audit after it alike. Two assumed identities are refused, since neither side
+  claimed anything. Authorship is also a model identity: a read under the model,
+  at any effort, of the ledger's implementer is a self-review. Where
+  self-approval is forbidden the gate rejects the approval as it rejects a
+  contributor match, and `arc audit` refuses to record it;
+  `--verdict changes-requested` is open to anyone. Models compare as strings
+  once the effort is dropped: arc holds no alias table. `Planned-by` and
+  `Orchestrated-by` never refuse a read; an audit records which of those roles
+  its auditor held as dirty context for routing, and computes no score.
+
+  Commit trailers are a projection arc writes from the ledger. A range whose
+  trailers disagree with the ledger is reported. For commits with no ledger
+  record, such as imported ones, trailers are declared, unverified evidence:
+  alone they neither discharge nor refuse, and the read says so. A reviewer arc
+  cannot place is reported as unknown attribution rather than counted as
+  independent or as self-review, whether it cast a verdict or only filed
+  findings.
 
   Which changes need one is declared in `[danger] paths` in
   `.arc/policy.toml` or the operator policy at
@@ -2290,25 +2305,31 @@ REVIEW COVERAGE AND DEBT
   was assessed or declared, the route version, and the later reads that
   left it open.
 
+  Production names who set the contract, who implemented it, and the
+  orchestrator and integrator when the ledger records them. The planner is the
+  plan the work was opened from, else an asserted `Planned-by`, else the
+  brief's recorder. The implementer is the patchset's effective author; the
+  orchestrator is the invoker recorded beside an `--on-behalf-of` subject, and
+  the integrator is the actor of `arc integrate`.
+
   Production also names the `Implemented-by` values of the commits in the
   patchset's range, read when the debt is declared and kept verbatim, without
-  repeats, as `trailer_implementers`: a lead who snapshots and integrates an
-  executor's commits is the recorded implementer, and the trailers say who
-  did the work. A range whose commits carry none records an empty list,
+  repeats, as `trailer_implementers`: a projection kept for comparison, never
+  the source of a role. A range whose commits carry none records an empty list,
   which readers show as "no Implemented-by trailers"; a record kept before
   the range was read, or whose range could not be read then, has no list and
   says nothing of it: the two read alike, and an audit reads the range again.
   `arc catchup`, the
   workspace backlog, `arc explain` and `arc show` show the list wherever it
-  is empty or names a harness and model other than the recorder's.
+  is empty or disagrees with the ledger's implementer.
 
   Coverage names each verdict's reviewer, the model string it was cast under
   kept whole, the effort that string's trailing `#suffix` names, and the
   routing version `arc review --route-version` or `arc audit --route-version`
-  declared. Production names who recorded the brief version the shipped work
-  answered and who recorded the patchset. Arc records coordinates and holds
-  no opinion: no score, no roster to join them against, and no ordering
-  between two models.
+  declared. Production names who set the contract, who implemented it, and
+  the orchestrator and integrator the ledger records. Arc records coordinates
+  and holds no opinion: no score, no roster to join them against, and no
+  ordering between two models.
 
   A verdict can also be owed corroboration rather than absent. `arc review
   --verdict approved --provisional "<why>"` records one that gates like any
@@ -2365,14 +2386,18 @@ REVIEW COVERAGE AND DEBT
   the merge or `arc audit` after. The debt records that no verdict existed,
   not that one command must supply it. What the verdict concluded lives in
   the verdict and its findings; discharging the debt does not mean approval.
-  The `ineligible-review` kind is the exception stated above: only an audit
-  with an eligible assessment clears it.
+  A debt that carries no production record has no ledger authorship to compare
+  against: a read is recorded, and declared trailers alone neither discharge
+  nor refuse it. The `ineligible-review` kind is the exception stated above:
+  only an audit with an eligible assessment clears it.
 
   An audit is a separate event from the verdict that shipped, so attaching one
   never rewrites what shipped with what review. An approving audit must come
-  from an identity other than the author — otherwise the obligation would
-  discharge itself — though anyone may audit into `changes-requested`, since
-  raising problems needs no independence.
+  from an identity the ledger does not credit with authorship — otherwise the
+  obligation would discharge itself — though anyone may audit into
+  `changes-requested`, since raising problems needs no independence. Planning
+  and orchestrating are recorded as the auditor's held roles and never refuse;
+  integrating somebody else's work is not contributing to it.
 
   A review finding the change shipped unresolved, whether open, still-open,
   disputed, or contested, stays that way in what shipped. `arc resolve` on
@@ -2396,10 +2421,10 @@ REVIEW COVERAGE AND DEBT
   identity wrote, and whether arc assumed the identity rather than anyone
   declaring it. Such a
   verdict is a review that happened, not an independent one, and it leaves an
-  independent-review debt owed. A read under a model named by an
-  `Implemented-by` trailer in the debt's production record, at any effort,
-  also leaves the debt owed, regardless of `forbid_self_approval`. That
-  policy governs approval authority, not independent coverage.
+  independent-review debt owed. A read under a model the ledger credits as
+  implementer — or, where the ledger records no model, a declared
+  `Implemented-by` line kept with the production record — leaves the debt owed
+  at any effort, regardless of `forbid_self_approval`. That policy governs approval authority, not independent coverage.
 
 REVIEW ASSURANCE
   Every integrated change carries a dated assurance record: the reads it
@@ -4355,16 +4380,16 @@ SCHEMAS
 
   Commitments, derived views:
     `arc-forge-view/1`               arc forge show --json; forge reconstruction
-    `arc-state/3`                    arc show --json
+    `arc-state/4`                    arc show --json
     `arc-trailers/1`                 arc trailers --json
-    `arc-status/27`                  arc status
+    `arc-status/28`                  arc status
     `arc-assurance/1`                arc query --assurance --json
     `arc-check/4`                    arc check --json
-    `arc-inbox/11`                   arc inbox --json
-    `arc-catchup/12`                 arc catchup --json
+    `arc-inbox/12`                   arc inbox --json
+    `arc-catchup/13`                 arc catchup --json
     `arc-journal-catchup/9`          arc journal catchup --json
     `arc-resume/8`                   arc resume --json
-    `arc-explain/2`                  arc explain --json
+    `arc-explain/3`                  arc explain --json
     `arc-watch/1`                    arc watch --json, stdin of arc watch --exec
     `arc-config/1`                   arc config
     `arc-accept/1`                   arc accept --json
@@ -4396,7 +4421,7 @@ SCHEMAS
     `arc-run-list/1`                 arc run list --json
     `arc-doctor/6`                   arc doctor --json
     `arc-workspace/2`                arc workspace list|inbox --json
-    `arc-workspace-backlog/19`       arc workspace backlog --json
+    `arc-workspace-backlog/20`       arc workspace backlog --json
     `arc-workspace-report/3`         arc workspace report --json
     `arc-workspace-inventory/2`      arc workspace inventory --json
     `arc-workspace-retirement/1`     arc workspace retire|restore --json

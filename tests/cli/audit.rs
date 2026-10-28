@@ -799,7 +799,7 @@ fn outstanding_debt_appears_in_the_inbox_and_catchup_after_closure() {
         .success();
 
     let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
-    assert_eq!(inbox["schema"], "arc-inbox/11");
+    assert_eq!(inbox["schema"], "arc-inbox/12");
     let owed = inbox["debt-owed"].as_array().unwrap();
     assert_eq!(owed.len(), 1, "{owed:?}");
     assert_eq!(owed[0]["next_actor"], "reviewer");
@@ -3533,23 +3533,24 @@ fn a_legacy_debt_event_still_discharge_and_render_without_typed_fields() {
         .assert()
         .success();
 
+    // A legacy event keeps no production record, so its range has no ledger
+    // authorship to compare against: the audit is recorded, and declared
+    // trailers alone neither discharge nor refuse it.
     let after = json_stdout(
         repo.arc(&repo.root)
             .args(["status", "legacy-debt", "--json"]),
     );
-    assert_eq!(after["debt_outstanding"], false, "{after}");
+    assert_eq!(after["debt_outstanding"], true, "{after}");
     assert!(after["debt"].get("missing").is_none(), "{after}");
     assert!(after["debt"].get("coverage").is_none(), "{after}");
+    assert!(after["debt"].get("discharged_by").is_none(), "{after}");
     assert_eq!(
-        after["debt"]["discharged_by"]["model"], "gpt-5.6-legacy-auditor",
+        after["audit_verdicts"][0]["model"], "gpt-5.6-legacy-auditor",
         "{after}"
     );
     let human_after = stdout(repo.arc(&repo.root).args(["show", "legacy-debt"]));
     assert!(human_after.contains("Record: legacy"), "{human_after}");
-    assert!(
-        human_after.contains("Discharged by: Reviewer (gpt-5.6-legacy-auditor)"),
-        "{human_after}"
-    );
+    assert!(!human_after.contains("Discharged by:"), "{human_after}");
 }
 
 /// A snapshotted change whose file is its own, so successive integrations into
@@ -4590,12 +4591,12 @@ fn historical_producer_models_are_flagged_and_never_displayed_as_placeholders() 
             }
         };
         let catchup = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
-        assert_eq!(catchup["schema"], "arc-catchup/12");
+        assert_eq!(catchup["schema"], "arc-catchup/13");
         let production = &catchup["ledger"]["debt-owed"][0]["debt_production"];
         check_identity(&production["implementer"]);
         check_identity(&production["planner"]);
         let explain = json_stdout(repo.arc(&repo.root).args(["explain", &change, "--json"]));
-        assert_eq!(explain["schema"], "arc-explain/2");
+        assert_eq!(explain["schema"], "arc-explain/3");
         let debt = explain["coverage_at_acceptance"]["rows"]
             .as_array()
             .unwrap()

@@ -1493,6 +1493,7 @@ mod tests {
                 target_before: None,
                 authorization: None,
                 external_reference: None,
+                integrator: None,
                 integrated_commit: None,
                 superseded_by: None,
                 event_id: "event".into(),

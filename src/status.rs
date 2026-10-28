@@ -17,7 +17,7 @@ use std::path::Path;
 
 pub use crate::blockers::Blocker;
 
-pub const STATUS_SCHEMA: &str = "arc-status/27";
+pub const STATUS_SCHEMA: &str = "arc-status/28";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 
 #[derive(Debug, Clone, Serialize)]
@@ -120,7 +120,7 @@ pub struct GateStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_tail: Option<String>,
     /// Private diagnostic capture of an executed gate, passing or failing.
-    /// Additive in `arc-status/27`.
+    /// Additive in `arc-status/28`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_artifact: Option<crate::verification_output::OutputArtifact>,
     #[serde(skip_serializing_if = "is_false")]
@@ -686,7 +686,7 @@ pub struct StatusReport {
     /// Where the declared review obligation stands: `declared` before the
     /// change integrates, `owed` after it until a review answers it,
     /// `discharged` once one has. Absent when no debt was declared.
-    /// `debt_outstanding` is true only for `owed`. Additive in `arc-status/27`.
+    /// `debt_outstanding` is true only for `owed`. Additive in `arc-status/28`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub debt_standing: Option<crate::state::DebtStanding>,
     /// The change's gating approval was recorded as owed corroboration, and
@@ -2342,6 +2342,15 @@ fn reviewed_patchset_implementers(
             .iter()
             .any(|verdict| verdict.patchset_id == patchset.id)
     }) {
+        let production = state
+            .debt
+            .as_ref()
+            .and_then(|debt| debt.production.as_ref());
+        let ledger = state.authoring_model_values(patchset, production);
+        if !ledger.is_empty() {
+            read.insert(patchset.id.clone(), ledger);
+            continue;
+        }
         if let Ok(values) = crate::trailers::range_implementers(cwd, &patchset.base, &patchset.head)
         {
             read.insert(patchset.id.clone(), values);

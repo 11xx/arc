@@ -365,7 +365,7 @@ fn fork_views_agree_about_retirement_and_catchup_json_carries_forks() {
         "{catchup_text}"
     );
     let catchup = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
-    assert_eq!(catchup["schema"], "arc-catchup/12");
+    assert_eq!(catchup["schema"], "arc-catchup/13");
     assert!(catchup["forks"].as_array().unwrap().is_empty(), "{catchup}");
 
     stdout(repo.arc(&repo.root).args(["fork", "begin", "open-now"]));
@@ -2259,7 +2259,7 @@ fn catchup_surfaces_branches_and_worktrees_no_owner_names() {
         .success();
 
     let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
-    assert_eq!(inbox["schema"], "arc-inbox/11");
+    assert_eq!(inbox["schema"], "arc-inbox/12");
     let names = |bucket: &str| -> Vec<String> {
         inbox[bucket]
             .as_array()

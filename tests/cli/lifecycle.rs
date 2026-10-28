@@ -1075,7 +1075,7 @@ fn conflicting_target_movement_requires_rebase_before_integration() {
         .code(11);
     let status: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&wt).args(["status", "conflict-r"]))).unwrap();
-    assert_eq!(status["schema"], "arc-status/27");
+    assert_eq!(status["schema"], "arc-status/28");
     assert_eq!(status["needs_rebase"], true);
     assert!(status["blockers"]
         .as_array()
@@ -2162,7 +2162,7 @@ fn status_projection_and_stage_note_file_read_stdin() {
         .args(["status", "projected", "--get", "schema"])
         .assert()
         .success()
-        .stdout("arc-status/27\n");
+        .stdout("arc-status/28\n");
 
     repo.arc(&wt)
         .args([
@@ -3196,7 +3196,7 @@ fn keep_records_citations_of_records_on_the_change() {
         repo.arc(&repo.root)
             .args(["show", "cite-records", "--json"]),
     );
-    assert_eq!(show["schema"], "arc-state/3");
+    assert_eq!(show["schema"], "arc-state/4");
     let kept = show["kept"].as_array().unwrap();
     assert_eq!(kept.len(), 2, "{show}");
     assert!(kept[0].get("cites").is_none(), "{show}");

@@ -22,7 +22,7 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-pub const EXPLAIN_SCHEMA: &str = "arc-explain/2";
+pub const EXPLAIN_SCHEMA: &str = "arc-explain/3";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -2127,6 +2127,8 @@ mod recorded_model_tests {
                     model.map(str::to_string),
                     Some("recording-key".into()),
                 ),
+                orchestrator: None,
+                integrator: None,
                 trailer_implementers: None,
                 following_brief: false,
             };

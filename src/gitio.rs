@@ -2695,6 +2695,28 @@ fn shared_object(cwd: &Path, name: &str) -> Option<Object> {
     answer
 }
 
+/// The content identity of the patch `base..head` carries, independent of
+/// the commits that carry it. A rebase that replays the same diff onto a
+/// different base keeps this identity, which is what lets a snapshot tell a
+/// re-recorded patch from new work.
+pub fn patch_identity(cwd: &Path, base: &str, head: &str) -> Result<String> {
+    let diff = git(
+        cwd,
+        &[
+            "diff",
+            "--binary",
+            "--full-index",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            base,
+            head,
+        ],
+    )?;
+    use sha2::{Digest, Sha256};
+    Ok(hex::encode(Sha256::digest(diff.as_bytes())))
+}
+
 /// The paths `git diff --name-only <base>...<head>` lists for each range,
 /// keyed by the range. One `cat-file --batch-check` resolves every revision,
 /// one `rev-list --parents` reads the history the heads reach, and one

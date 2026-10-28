@@ -322,7 +322,7 @@ fn begin_from_journal_records_the_opening_digest() {
     assert_eq!(event["journal_ref_digest"], digest_of(body), "{event}");
 
     let state = json_stdout(repo.arc(&repo.root).args(["show", &change_id, "--json"]));
-    assert_eq!(state["schema"], "arc-state/3", "{state}");
+    assert_eq!(state["schema"], "arc-state/4", "{state}");
     assert_eq!(state["journal_ref_digest"], digest_of(body), "{state}");
     let show = stdout(repo.arc(&repo.root).args(["show", &change_id]));
     assert!(

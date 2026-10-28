@@ -575,6 +575,31 @@ pub(super) fn snapshot_holding(
         Some(b) => gitio::rev_parse(&ctx.cwd, &b)?,
         None => default_base,
     };
+    // A rebase replays the same patch onto a different base. The session
+    // that recorded the replay is not thereby its author, so an unchanged
+    // patch keeps the attribution of the patchset it replays.
+    let carried = st
+        .latest_patchset()
+        .filter(|previous| previous.head != head)
+        .filter(|previous| {
+            match (
+                gitio::patch_identity(&ctx.cwd, &previous.base, &previous.head),
+                gitio::patch_identity(&ctx.cwd, &base_rev, &head),
+            ) {
+                (Ok(previous_patch), Ok(current_patch)) => previous_patch == current_patch,
+                _ => false,
+            }
+        });
+    let inherits_attribution = requested_contributors.is_none() && ctx.on_behalf_of.is_none();
+    let inherited_subject = carried
+        .filter(|_| inherits_attribution)
+        .map(|previous| previous.effective_author().to_string())
+        .filter(|subject| subject != &ctx.actor);
+    let inherited_contributors = requested_contributors
+        .is_none()
+        .then(|| carried.map(|previous| previous.contributors.clone()))
+        .flatten()
+        .unwrap_or_default();
     let brief = match brief_version {
         Some(0) => bail!("brief version 0 not found"),
         Some(version) => Some(
@@ -620,8 +645,11 @@ pub(super) fn snapshot_holding(
         .claim
         .as_ref()
         .filter(|claim| state::claim_timing_at(claim, now).active);
-    ensure_attribution_over_claim(ctx, &st, requested_contributors.is_some(), now)?;
-    let contributors = requested_contributors.clone().unwrap_or_default();
+    let attributed = requested_contributors.is_some() || inherited_subject.is_some();
+    ensure_attribution_over_claim(ctx, &st, attributed, now)?;
+    let contributors = requested_contributors
+        .clone()
+        .unwrap_or_else(|| inherited_contributors.clone());
     let patchset_id = format!("ps-{:02}", st.patchsets.len() + 1);
     let unchanged_patchset = unchanged_patchset.filter(|patchset_id| {
         requested_contributors.as_ref().is_none_or(|requested| {
@@ -661,6 +689,9 @@ pub(super) fn snapshot_holding(
         eprintln!("{skipped}");
     }
     let mut ev = ctx.event_at(store, change_id, now, payload)?;
+    if let Some(subject) = inherited_subject {
+        ev.on_behalf_of = Some(subject);
+    }
     store.append_local_event(&mut ev)?;
     // Pin this head with its own ref: reviewed heads must stay reachable
     // individually, even if the branch is rewound or deleted later.
@@ -1412,9 +1443,12 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
     // gate already named the reviewer: the gate's reason is one fact, this is
     // another.
     if let Some(patchset) = st.patchsets.iter().find(|p| p.id == patchset_id) {
-        if let Some(implementers) = super::audit::range_implementers(ctx, patchset) {
-            ctx.warn_model_not_independent(&implementers, verdict);
+        let production = st.debt.as_ref().and_then(|debt| debt.production.as_ref());
+        let mut implementers = st.authoring_model_values(patchset, production);
+        if implementers.is_empty() {
+            implementers = super::audit::range_implementers(ctx, patchset).unwrap_or_default();
         }
+        ctx.warn_model_not_independent(&implementers, verdict);
     }
     Ok(())
 }

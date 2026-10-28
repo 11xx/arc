@@ -15195,7 +15195,7 @@ fn catchup_merges_recorded_sessions_and_marks_unfiled_activity() {
             .env("PI_CODING_AGENT_SESSION_DIR", &pi_store)
             .args(["catchup", "--sessions", "10", "--json"]),
     );
-    assert_eq!(value["schema"], "arc-catchup/12");
+    assert_eq!(value["schema"], "arc-catchup/13");
     let sessions = value["recent_sessions"].as_array().unwrap();
     assert_eq!(sessions.len(), 4, "{value}");
     let recorded = sessions
