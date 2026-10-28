@@ -1298,6 +1298,129 @@ fn a_forged_reflog_entry_cannot_claim_a_hook_commit_as_the_replay() {
     );
 }
 
+/// A merge driver the repository configures is a program `git replay` can
+/// run. It must not be able to write the tip the replay records: arc runs the
+/// replay where the repository's configuration cannot reach it, so the driver
+/// never runs and the only result is the one Git computed.
+#[test]
+fn a_merge_driver_cannot_write_the_replay_result() {
+    let repo = policy(true);
+    fs::write(repo.root.join("file.txt"), numbered_file()).unwrap();
+    fs::write(repo.root.join(".gitattributes"), "file.txt merge=driver\n").unwrap();
+    git(&repo.root, &["add", "."]);
+    git(&repo.root, &["commit", "-m", "chore: base driver file"]);
+    stdout(repo.arc(&repo.root).args(["begin", "driver-forgery"]));
+    let worktree = repo.home.join(".worktrees/repo-driver-forgery");
+    repo.commit(
+        &worktree,
+        "file.txt",
+        &numbered_file().replace("line 2\n", "author edit\n"),
+        "feat: author change",
+    );
+    snapshot_as(
+        &repo,
+        &worktree,
+        "driver-forgery",
+        "Author-A",
+        "codex",
+        MODEL_A,
+    );
+    let original = repo.head(&worktree);
+
+    // The lead writes content under its own commit, then resets the branch so
+    // only a forged replay tip can carry that content.
+    repo.commit(
+        &worktree,
+        "injected.txt",
+        "lead-authored injected content\n",
+        "feat: lead writes injected content",
+    );
+    let injected_tree = git_out(&worktree, &["rev-parse", "HEAD^{tree}"]);
+    git(&worktree, &["reset", "--hard", &original]);
+
+    repo.commit(
+        &repo.root,
+        "file.txt",
+        &numbered_file().replace("line 28\n", "target edit\n"),
+        "chore: target change",
+    );
+    let target = repo.head(&repo.root);
+    let fake = git_out(
+        &repo.root,
+        &[
+            "commit-tree",
+            &injected_tree,
+            "-p",
+            &target,
+            "-m",
+            "lead content masquerades as executor replay",
+        ],
+    );
+
+    let marker = repo.home.join("merge-driver-ran");
+    let driver = repo.home.join("merge-driver.sh");
+    fs::write(
+        &driver,
+        format!(
+            "#!/bin/sh\n: > '{}'\nprintf 'update refs/heads/arc/driver-forgery {fake} {original}\\n'\nexit 0\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&driver, fs::Permissions::from_mode(0o755)).unwrap();
+    git(
+        &repo.root,
+        &[
+            "config",
+            "merge.driver.driver",
+            &format!("'{}' %O %A %B", driver.display()),
+        ],
+    );
+
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", REVIEWER_B)
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_MODEL", MODEL_B)
+        .args(["rebase", "driver-forgery"])
+        .assert()
+        .success();
+
+    let head = repo.head(&worktree);
+    assert_ne!(head, fake, "arc took the merge driver's printed update");
+    assert!(
+        !worktree.join("injected.txt").exists(),
+        "the lead's content reached the replayed branch"
+    );
+    let merged = numbered_file()
+        .replace("line 2\n", "author edit\n")
+        .replace("line 28\n", "target edit\n");
+    assert_eq!(
+        fs::read_to_string(worktree.join("file.txt")).unwrap(),
+        merged,
+        "the worktree is not Git's own merge"
+    );
+    assert!(
+        !marker.exists(),
+        "a merge driver the repository configures ran during arc's replay"
+    );
+    let replayed = status(&repo, "driver-forgery");
+    assert_eq!(
+        replayed["latest_patchset"]["head"].as_str(),
+        Some(head.as_str()),
+        "{replayed}"
+    );
+    assert_eq!(
+        replayed["latest_patchset"]["on_behalf_of"], "Author-A",
+        "{replayed}"
+    );
+    assert_eq!(
+        inherited_model(&replayed, "Author-A").as_deref(),
+        Some(MODEL_A),
+        "{replayed}"
+    );
+}
+
 #[test]
 fn an_inherited_reflog_action_does_not_hide_a_clean_replay() {
     let repo = policy(true);
