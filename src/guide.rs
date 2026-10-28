@@ -2142,11 +2142,14 @@ REVIEW COVERAGE AND DEBT
   that fell back to `git rebase` or stopped for a person to resolve, is
   ordinary work. Reflog text, hooks, merge drivers, and inherited
   `GIT_REFLOG_ACTION` are not evidence for this and do not enter it. The
-  replaying session is the replayer, never the author. An explicit
-  `--contributors` or `--solo` decides the replayed patchset's contributor
-  set; members the replay carries over keep their recorded coordinates. Any
-  other snapshot records the head as ordinary work: its recorder, or its
-  explicit `--on-behalf-of` or contributor declaration, is the author.
+  replaying session is the replayer, never the author. A record supplies an
+  actor's coordinate only when it credits that actor as an author; a session
+  that merely replays or records somebody else's work supplies none. An
+  explicit `--contributors` or `--solo` decides the replayed patchset's
+  contributor set; members the replay carries over keep their recorded
+  coordinates. Any other snapshot records the head as ordinary work: its
+  recorder, or its explicit `--on-behalf-of` or contributor declaration, is
+  the author.
 
   An approval is refused when its effective author matches the ledger's
   authorship, or when arc assumed the reviewing identity from git config or the
