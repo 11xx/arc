@@ -790,9 +790,9 @@ RUN A CHANGE
                                      A rewrite that invalidated approval
                                      requires a fresh patchset even when the
                                      mapped head already matches the branch.
-                                     A snapshot grants no approval. A rebase
-                                     that leaves the patch unchanged keeps the
-                                     original effective author.
+                                     A snapshot grants no approval. Only a
+                                     clean `arc rebase` keeps a replayed
+                                     patchset's recorded author coordinate.
     --verify [--gate <name>...]      Run required gates, reusing the newest
                                      green evidence at the same tree. Selected
                                      --gate names rerun explicitly and must be unique and declared;
@@ -1084,14 +1084,18 @@ RUN A CHANGE
   edge whitespace, is left as a placeholder the line names.
 
   `arc rebase` is what `check` names when the selected integration shape
-  requires replay onto the target. A conflict stops it and leaves the rebase in progress — the partial
-  resolution is yours, and aborting would throw it away — with the conflicting
-  files and the commands that finish the replay. Resolve, `git rebase
-  --continue`, then `arc snapshot --verify`. Over another actor's live claim
-  an unattributed rebase refuses before the branch moves, and the change stays
-  locked from that check until the replayed head is recorded. The gates the
-  replayed head owes are named after it is recorded; a failure to evaluate
-  them is a warning, and the rebase still succeeds.
+  requires replay onto the target. A replay Git completes without a stop is
+  recorded as a mechanical replay and keeps the replayed patchset's author
+  coordinate, model included; the replaying session is not its implementer. A
+  conflict stops it and leaves the rebase in progress — the partial resolution
+  is yours, and aborting would throw it away — with the conflicting files and
+  the commands that finish the replay. Resolve, `git rebase --continue`, then
+  `arc snapshot --verify`, which records the resolved head as the snapshot
+  taker's work. Over another actor's live claim an unattributed rebase refuses
+  before the branch moves, and the change stays locked from that check until
+  the replayed head is recorded. The gates the replayed head owes are named
+  after it is recorded; a failure to evaluate them is a warning, and the rebase
+  still succeeds.
 
   `integrate --shape ff-only|no-ff` selects the local integration shape.
   Without a flag, operator defaults, target project defaults, user config,
@@ -2110,10 +2114,13 @@ REVIEW COVERAGE AND DEBT
   recorded beside an `--on-behalf-of` subject, and its integrator the actor of
   `arc integrate`, never the subject that command was invoked on behalf of.
   Planning, orchestrating and integrating somebody else's work are not
-  authorship. A rebase or snapshot that replays the same changed lines onto a
-  different base keeps that patchset's author coordinate, model included, even
-  when context or hunk positions moved; changing the author's own lines, or a
-  content fact such as a submodule revision, is new work and inherits nothing.
+  authorship. A clean `arc rebase` that arc observes completing without a stop
+  records a mechanical replay of the patchset whose head it replayed, carrying
+  that patchset's author coordinate — subject, contributors and model — even
+  when context or hunk positions moved. The replaying session is the replayer,
+  never the author. A rebase that stopped for a person to resolve, and any
+  other snapshot, records the head as ordinary work: its recorder, or its
+  explicit `--on-behalf-of` or contributor declaration, is the author.
 
   An approval is refused when its effective author matches the ledger's
   authorship, or when arc assumed the reviewing identity from git config or the
@@ -2392,11 +2399,13 @@ REVIEW COVERAGE AND DEBT
   the verdict and its findings; discharging the debt does not mean approval.
   A debt that carries no production record still has its shipped patchset's
   recorded authorship to compare against, so a legacy obligation discharges as
-  it did before production summaries existed. Only a range with no ledger
-  record at all has nothing to compare: its read is recorded, and declared
-  trailers alone neither discharge nor refuse it. The `ineligible-review` kind
-  is the exception stated above: only an audit with an eligible assessment
-  clears it.
+  it did before production summaries existed. An integrated closure that
+  recorded no source patchset recovers it from the ledger: the patchset whose
+  head is its integrated commit, else the latest one recorded before the
+  closure. Only a range with no patchset at all has nothing to compare: its
+  read is recorded, and declared trailers alone neither discharge nor refuse
+  it. The `ineligible-review` kind is the exception stated above: only an audit
+  with an eligible assessment clears it.
 
   An audit is a separate event from the verdict that shipped, so attaching one
   never rewrites what shipped with what review. An approving audit must come

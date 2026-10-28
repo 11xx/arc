@@ -1619,10 +1619,12 @@ enum Cmd {
     /// A head whose rewrite invalidated approval requires a fresh patchset,
     /// even when the latest patchset's mapped head already matches the branch.
     /// Re-approval requires a verdict on that fresh patchset.
-    /// A snapshot after a rebase that leaves the patch unchanged keeps the
-    /// original effective author coordinate, model included, even when context
-    /// or hunk positions moved. A replay that changes the author's lines, or
-    /// any content fact such as a submodule revision, inherits nothing.
+    /// Only a clean `arc rebase` records an inherited author: it carries the
+    /// replayed patchset's author coordinate, model included, and the
+    /// replaying session is not its implementer. A snapshot, or the snapshot
+    /// after a rebase that stopped for resolution, records the head as its
+    /// recorder's work unless `--on-behalf-of` or `--contributors` declares
+    /// another author.
     /// At unchanged content, an explicit --on-behalf-of (also supplied by
     /// ARC_ON_BEHALF_OF) differing from the latest effective author records a
     /// fresh patchset. An equal or omitted subject preserves that patchset
@@ -2101,8 +2103,11 @@ enum Cmd {
         links: LinkOpts,
     },
     /// Replay a change's branch onto its target, then snapshot the new head.
-    /// A replay that leaves the patch unchanged keeps the original effective
-    /// author; the replaying session is not its implementer.
+    /// A replay Git completes without a stop is recorded as a mechanical
+    /// replay of the patchset whose head it replayed, carrying that patchset's
+    /// author coordinate, model included; the replaying session is not its
+    /// implementer. A replay that stopped for resolution is recorded by the
+    /// later snapshot as ordinary work.
     /// The snapshot links the artifact the change was opened from (`via: begin`)
     /// and the plan its brief names (`via: brief`), one link per file; a file
     /// named by both is linked once as `begin`. An unavailable artifact is
@@ -2643,7 +2648,9 @@ enum Cmd {
     /// Where the ledger records no implementer model, the audit says so and is
     /// judged by the actor, session and harness; `Implemented-by` trailers are
     /// reported as declared text only. A debt recorded before production
-    /// summaries existed still reads the shipped patchset's ledger authorship.
+    /// summaries existed still reads the shipped patchset's ledger authorship,
+    /// including a historical integrated closure that recorded only its
+    /// integrated commit.
     /// Where `forbid_self_approval` is on it is refused, with the remedy a
     /// contributor match gets. Such a read never discharges review debt, regardless of self-approval policy: permission to approve does not
     /// establish independent coverage. `--verdict changes-requested` is
