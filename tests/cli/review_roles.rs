@@ -316,6 +316,19 @@ fn a_debt_with_no_ledger_record_treats_trailers_as_declared_evidence() {
         event.as_object_mut().unwrap().remove("target_branch");
         event.as_object_mut().unwrap().remove("target_before");
     });
+    // No patchset at all is what leaves this range without ledger authorship:
+    // a ledger patchset is authorship even when the closure did not link it.
+    let mut events: Vec<PathBuf> = fs::read_dir(event_dir(&repo, &change_id))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    events.sort();
+    for path in events {
+        let event: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        if event["event_type"] == "patchset-added" {
+            fs::remove_file(path).unwrap();
+        }
+    }
 
     let output = repo
         .arc(&repo.root)
@@ -346,6 +359,16 @@ fn snapshot_as(repo: &Repo, cwd: &Path, slug: &str, actor: &str, harness: &str, 
             .env("ARC_HARNESS", harness)
             .env("ARC_MODEL", model)
             .args(["snapshot", slug]),
+    );
+}
+
+fn snapshot_solo_as(repo: &Repo, cwd: &Path, slug: &str, actor: &str, harness: &str, model: &str) {
+    stdout(
+        repo.arc(cwd)
+            .env("ARC_ACTOR", actor)
+            .env("ARC_HARNESS", harness)
+            .env("ARC_MODEL", model)
+            .args(["snapshot", slug, "--solo"]),
     );
 }
 
@@ -521,6 +544,355 @@ fn an_ignored_submodule_change_breaks_patch_inheritance() {
         .assert()
         .failure();
     assert_eq!(debt(&repo, "ignored-submodule")["standing"], "owed");
+}
+
+#[test]
+fn a_nearby_context_rebase_keeps_the_implementer_coordinate() {
+    let repo = policy(true);
+    repo.commit(
+        &repo.root,
+        "file.txt",
+        &numbered_file(),
+        "chore: numbered file",
+    );
+    stdout(repo.arc(&repo.root).args(["begin", "nearby-context"]));
+    let worktree = repo.home.join(".worktrees/repo-nearby-context");
+    let authored = numbered_file().replace("line 10\n", "author edit\n");
+    repo.commit(&worktree, "file.txt", &authored, "feat: author edit");
+    snapshot_as(
+        &repo,
+        &worktree,
+        "nearby-context",
+        "Author-A",
+        "codex",
+        MODEL_A,
+    );
+
+    let target = numbered_file().replace("line 12\n", "target edit\n");
+    repo.commit(&repo.root, "file.txt", &target, "chore: target edit");
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", REVIEWER_B)
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_MODEL", MODEL_B)
+        .args(["rebase", "nearby-context"])
+        .assert()
+        .success();
+
+    let rebased = status(&repo, "nearby-context");
+    assert_eq!(
+        rebased["latest_patchset"]["on_behalf_of"], "Author-A",
+        "{rebased}"
+    );
+    assert_eq!(
+        rebased["review_subject"]["effective_author"], "Author-A",
+        "{rebased}"
+    );
+    assert_eq!(
+        rebased["latest_patchset"]["inherited_author"]["model"], MODEL_A,
+        "{rebased}"
+    );
+    integrate_with_debt(&repo, "nearby-context", REVIEWER_B, MODEL_B);
+    let after = debt(&repo, "nearby-context");
+    assert_eq!(
+        after["production"]["implementer"]["actor"], "Author-A",
+        "{after}"
+    );
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Another-Actor")
+        .env("ARC_HARNESS", "codex")
+        .env("ARC_MODEL", MODEL_A)
+        .args(["audit", "nearby-context", "--verdict", "approved"])
+        .assert()
+        .failure();
+    assert_eq!(debt(&repo, "nearby-context")["standing"], "owed");
+}
+
+#[test]
+fn a_relocated_edit_at_an_unchanged_base_belongs_to_the_snapshot_recorder() {
+    let repo = policy(true);
+    let block: String = (1..=10).map(|line| format!("line {line}\n")).collect();
+    repo.commit(
+        &repo.root,
+        "file.txt",
+        &format!("{block}{block}"),
+        "chore: repeated blocks",
+    );
+    stdout(repo.arc(&repo.root).args(["begin", "relocated-edit"]));
+    let worktree = repo.home.join(".worktrees/repo-relocated-edit");
+    let first = format!("{}{}", block.replace("line 5\n", "changed\n"), block);
+    repo.commit(
+        &worktree,
+        "file.txt",
+        &first,
+        "feat: author edits first block",
+    );
+    snapshot_as(
+        &repo,
+        &worktree,
+        "relocated-edit",
+        "Author-A",
+        "codex",
+        MODEL_A,
+    );
+
+    let second = format!("{}{}", block, block.replace("line 5\n", "changed\n"));
+    repo.commit(
+        &worktree,
+        "file.txt",
+        &second,
+        "feat: lead reverts first edit and edits second block",
+    );
+    snapshot_as(
+        &repo,
+        &worktree,
+        "relocated-edit",
+        REVIEWER_B,
+        "claude",
+        MODEL_B,
+    );
+
+    let changed = status(&repo, "relocated-edit");
+    assert_eq!(changed["latest_patchset"]["actor"], REVIEWER_B, "{changed}");
+    assert!(
+        changed["latest_patchset"]["on_behalf_of"].is_null(),
+        "{changed}"
+    );
+    assert!(
+        changed["latest_patchset"]["inherited_author"].is_null(),
+        "{changed}"
+    );
+    integrate_with_debt(&repo, "relocated-edit", REVIEWER_B, MODEL_B);
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", REVIEWER_B)
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_MODEL", MODEL_B)
+        .args(["audit", "relocated-edit", "--verdict", "approved"])
+        .assert()
+        .failure();
+    assert_eq!(debt(&repo, "relocated-edit")["standing"], "owed");
+}
+
+#[test]
+fn a_submodule_change_under_diff_submodule_log_belongs_to_the_recorder() {
+    let repo = policy(true);
+    let sub_one = repo.head(&repo.root);
+    git(
+        &repo.root,
+        &["commit", "--allow-empty", "-m", "submodule one"],
+    );
+    let sub_two = repo.head(&repo.root);
+    fs::write(
+        repo.root.join(".gitmodules"),
+        "[submodule \"nested\"]\n\tpath = nested\n\turl = https://example.invalid/nested\n\tignore = all\n",
+    )
+    .unwrap();
+    fs::create_dir_all(repo.root.join("nested")).unwrap();
+    let cacheinfo = format!("160000,{sub_one},nested");
+    git(
+        &repo.root,
+        &["update-index", "--add", "--cacheinfo", &cacheinfo],
+    );
+    git(&repo.root, &["add", ".gitmodules"]);
+    git(&repo.root, &["commit", "-m", "chore: nested gitlink"]);
+    git(&repo.root, &["config", "diff.submodule", "log"]);
+
+    stdout(repo.arc(&repo.root).args(["begin", "submodule-log"]));
+    let worktree = repo.home.join(".worktrees/repo-submodule-log");
+    repo.commit(&worktree, "work.txt", "work\n", "feat: work");
+    snapshot_as(
+        &repo,
+        &worktree,
+        "submodule-log",
+        "Author-A",
+        "codex",
+        MODEL_A,
+    );
+
+    let cacheinfo = format!("160000,{sub_two},nested");
+    git(&worktree, &["update-index", "--cacheinfo", &cacheinfo]);
+    git(&worktree, &["commit", "-m", "feat: lead moves submodule"]);
+    snapshot_as(
+        &repo,
+        &worktree,
+        "submodule-log",
+        REVIEWER_B,
+        "claude",
+        MODEL_B,
+    );
+
+    let changed = status(&repo, "submodule-log");
+    assert_eq!(changed["latest_patchset"]["actor"], REVIEWER_B, "{changed}");
+    assert!(
+        changed["latest_patchset"]["on_behalf_of"].is_null(),
+        "{changed}"
+    );
+    integrate_with_debt(&repo, "submodule-log", REVIEWER_B, MODEL_B);
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", REVIEWER_B)
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_MODEL", MODEL_B)
+        .args(["audit", "submodule-log", "--verdict", "approved"])
+        .assert()
+        .failure();
+    assert_eq!(debt(&repo, "submodule-log")["standing"], "owed");
+}
+
+#[test]
+fn non_utf8_bytes_belong_to_the_session_that_changed_them() {
+    let repo = policy(true);
+    fs::write(repo.root.join("file.txt"), b"original\n").unwrap();
+    git(&repo.root, &["add", "file.txt"]);
+    git(&repo.root, &["commit", "-m", "chore: original text"]);
+    stdout(repo.arc(&repo.root).args(["begin", "non-utf8-text"]));
+    let worktree = repo.home.join(".worktrees/repo-non-utf8-text");
+
+    fs::write(worktree.join("file.txt"), [0xff, b'\n']).unwrap();
+    git(&worktree, &["add", "file.txt"]);
+    git(&worktree, &["commit", "-m", "feat: author edit"]);
+    snapshot_as(
+        &repo,
+        &worktree,
+        "non-utf8-text",
+        "Author-A",
+        "codex",
+        MODEL_A,
+    );
+
+    fs::write(worktree.join("file.txt"), [0xfe, b'\n']).unwrap();
+    git(&worktree, &["add", "file.txt"]);
+    git(&worktree, &["commit", "-m", "feat: lead edit"]);
+    snapshot_as(
+        &repo,
+        &worktree,
+        "non-utf8-text",
+        REVIEWER_B,
+        "claude",
+        MODEL_B,
+    );
+
+    let changed = status(&repo, "non-utf8-text");
+    assert_eq!(changed["latest_patchset"]["actor"], REVIEWER_B, "{changed}");
+    assert!(
+        changed["latest_patchset"]["on_behalf_of"].is_null(),
+        "{changed}"
+    );
+    integrate_with_debt(&repo, "non-utf8-text", REVIEWER_B, MODEL_B);
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", REVIEWER_B)
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_MODEL", MODEL_B)
+        .args(["audit", "non-utf8-text", "--verdict", "approved"])
+        .assert()
+        .failure();
+    assert_eq!(debt(&repo, "non-utf8-text")["standing"], "owed");
+}
+
+#[test]
+fn a_solo_contributors_model_survives_a_rebase_before_integration() {
+    let repo = policy(true);
+    stdout(repo.arc(&repo.root).args(["begin", "solo-model-switch"]));
+    let worktree = repo.home.join(".worktrees/repo-solo-model-switch");
+    repo.commit(&worktree, "work.txt", "work\n", "feat: work");
+    snapshot_solo_as(
+        &repo,
+        &worktree,
+        "solo-model-switch",
+        "Author-A",
+        "codex",
+        MODEL_A,
+    );
+
+    repo.commit(&repo.root, "target.txt", "target\n", "chore: target");
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Author-A")
+        .env("ARC_HARNESS", "codex")
+        .env("ARC_MODEL", MODEL_B)
+        .args(["rebase", "solo-model-switch"])
+        .assert()
+        .success();
+
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Another-Actor")
+        .env("ARC_HARNESS", "codex")
+        .env("ARC_MODEL", MODEL_A)
+        .args(["review", "solo-model-switch", "--verdict", "approved"])
+        .assert()
+        .success();
+    let pending = status(&repo, "solo-model-switch");
+    assert_eq!(
+        pending["latest_patchset"]["inherited_author"]["model"], MODEL_A,
+        "{pending}"
+    );
+    assert_eq!(
+        pending["latest_patchset"]["contributors"],
+        serde_json::json!(["Author-A"]),
+        "{pending}"
+    );
+    assert_eq!(pending["has_valid_approval"], false, "{pending}");
+    assert!(
+        pending["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blocker| blocker == "no-valid-approval"),
+        "{pending}"
+    );
+}
+
+#[test]
+fn a_legacy_integration_closure_recovers_the_shipped_patchsets_authorship() {
+    let repo = policy(true);
+    stdout(repo.arc(&repo.root).args(["begin", "legacy-closure"]));
+    let worktree = repo.home.join(".worktrees/repo-legacy-closure");
+    repo.commit(&worktree, "work.txt", "work\n", "feat: work");
+    snapshot_as(
+        &repo,
+        &worktree,
+        "legacy-closure",
+        "Author-A",
+        "codex",
+        MODEL_A,
+    );
+    integrate_with_debt(&repo, "legacy-closure", REVIEWER_B, MODEL_B);
+    let change_id = status(&repo, "legacy-closure")["change_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    rewrite_event(&repo, &change_id, "debt-declared", |event| {
+        event.as_object_mut().unwrap().remove("production");
+    });
+    rewrite_event(&repo, &change_id, "change-integrated", |event| {
+        event["event_type"] = serde_json::json!("change-closed");
+        event["outcome"] = serde_json::json!("integrated");
+        for key in [
+            "source_patchset_id",
+            "source_head",
+            "target_branch",
+            "target_before",
+            "provisional_resolutions",
+            "authority_grant_event_id",
+            "authorization",
+            "already_contained",
+            "shape",
+        ] {
+            event.as_object_mut().unwrap().remove(key);
+        }
+    });
+    let before = status(&repo, "legacy-closure");
+    assert_eq!(
+        before["closure"]["integrated_commit"], before["latest_patchset"]["head"],
+        "{before}"
+    );
+
+    let output = stdout(
+        repo.arc(&repo.root)
+            .env("ARC_ACTOR", "Auditor-B")
+            .env("ARC_HARNESS", "claude")
+            .env("ARC_MODEL", MODEL_B)
+            .args(["audit", "legacy-closure", "--verdict", "approved"]),
+    );
+    assert!(output.contains("debt discharged"), "{output}");
+    assert_eq!(debt(&repo, "legacy-closure")["standing"], "discharged");
 }
 
 #[test]
