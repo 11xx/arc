@@ -1615,6 +1615,13 @@ pub fn rebase(
 
     let target_head = gitio::branch_head(&ctx.cwd, &st.target_branch)?;
     let head = gitio::branch_head(&ctx.cwd, &st.branch)?;
+    // Only the recorded patchset's own head can be replayed mechanically. A
+    // branch carrying commits nobody recorded is new work, and the snapshot
+    // that records its replay belongs to whoever produced it.
+    let replay_of = st
+        .latest_patchset()
+        .filter(|patchset| patchset.head == head)
+        .map(|patchset| patchset.id.clone());
     if gitio::is_ancestor(&ctx.cwd, &target_head, &head)? {
         println!(
             "{} already carries {} at {target_head}; nothing to replay",
@@ -1669,6 +1676,10 @@ pub fn rebase(
                     st.target_branch
                 ),
             );
+            let request = match replay_of {
+                Some(patchset) => super::review::SnapshotRequest::replayed(patchset),
+                None => super::review::SnapshotRequest::attributed(requested_contributors),
+            };
             let patchset_id = super::review::snapshot_holding(
                 ctx,
                 &store,
@@ -1676,7 +1687,7 @@ pub fn rebase(
                 &transition,
                 None,
                 None,
-                super::review::SnapshotRequest::attributed(requested_contributors),
+                request,
             )?;
             // Verification takes the lock for each run it records.
             drop(transition);

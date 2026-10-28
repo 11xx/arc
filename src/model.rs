@@ -1213,8 +1213,10 @@ pub enum Payload {
         committer_email: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         contributors: Vec<String>,
-        /// The full author coordinate a replay inherited from the patchset it
-        /// replayed unchanged, model included. Absent on new work.
+        /// The full author coordinate a clean `arc rebase` carried from the
+        /// patchset whose recorded head it replayed, model included. Absent on
+        /// ordinary snapshots, including one after a rebase that stopped for
+        /// resolution.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         inherited_author: Option<DebtIdentity>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

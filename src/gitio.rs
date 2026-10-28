@@ -2695,36 +2695,6 @@ fn shared_object(cwd: &Path, name: &str) -> Option<Object> {
     answer
 }
 
-/// The content identity of the patch `base..head` carries, independent of
-/// the commits that carry it, their context, and the hunk positions a replay
-/// lands them at. A rebase that replays the same changed lines onto a
-/// different base keeps this identity; a replay that changes those lines does
-/// not. Every content fact is observed: a submodule's `.gitmodules` ignore
-/// setting, an external diff driver and a textconv filter cannot hide one.
-pub fn patch_identity(cwd: &Path, base: &str, head: &str) -> Result<String> {
-    let diff = git(
-        cwd,
-        &[
-            "diff",
-            "--binary",
-            "--full-index",
-            "--no-color",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--ignore-submodules=none",
-            base,
-            head,
-        ],
-    )?;
-    let output = git_piped(cwd, &["patch-id", "--verbatim"], diff.as_bytes())?;
-    let text = String::from_utf8_lossy(&output);
-    let identity = text.split_whitespace().next().unwrap_or_default();
-    if identity.is_empty() {
-        return Ok("empty".to_string());
-    }
-    Ok(identity.to_string())
-}
-
 /// The paths `git diff --name-only <base>...<head>` lists for each range,
 /// keyed by the range. One `cat-file --batch-check` resolves every revision,
 /// one `rev-list --parents` reads the history the heads reach, and one
