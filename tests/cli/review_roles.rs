@@ -1812,6 +1812,106 @@ fn a_later_authoring_snapshot_moves_the_next_patchsets_contributor_coordinate() 
 }
 
 #[test]
+fn a_non_authoring_record_does_not_replace_an_authors_coordinate() {
+    let mut failures = Vec::new();
+    for ceremony in ["clean-replay", "on-behalf", "excluded-recorder"] {
+        for attribution in ["contributors", "subject"] {
+            let slug = format!("authoring-record-{ceremony}-{attribution}");
+            let repo = policy(true);
+            stdout(repo.arc(&repo.root).args(["begin", slug.as_str()]));
+            let worktree = repo.home.join(format!(".worktrees/repo-{slug}"));
+            repo.commit(&worktree, "a.txt", "A work\n", "feat: A authors");
+            snapshot_as(&repo, &worktree, &slug, "Author-A", "codex", MODEL_A);
+
+            if ceremony == "clean-replay" {
+                repo.commit(&repo.root, "target.txt", "target\n", "chore: target");
+                repo.arc(&repo.root)
+                    .env("ARC_ACTOR", "Author-A")
+                    .env("ARC_HARNESS", "codex")
+                    .env("ARC_MODEL", MODEL_C)
+                    .args(["rebase", slug.as_str()])
+                    .assert()
+                    .success();
+            } else {
+                repo.commit(&worktree, "b.txt", "B work\n", "feat: B authors");
+                let mut snapshot = repo.arc(&worktree);
+                snapshot
+                    .env("ARC_ACTOR", "Author-A")
+                    .env("ARC_HARNESS", "codex")
+                    .env("ARC_MODEL", MODEL_C)
+                    .args(["snapshot", slug.as_str()]);
+                if ceremony == "on-behalf" {
+                    snapshot.args(["--on-behalf-of", "Author-B"]);
+                } else {
+                    snapshot.args(["--contributors", "Author-B"]);
+                }
+                snapshot.assert().success();
+            }
+
+            repo.commit(&worktree, "c.txt", "B more work\n", "feat: B authors more");
+            let mut snapshot = repo.arc(&worktree);
+            snapshot
+                .env("ARC_ACTOR", "Author-B")
+                .env("ARC_HARNESS", "claude")
+                .env("ARC_MODEL", MODEL_B)
+                .args(["snapshot", slug.as_str()]);
+            if attribution == "contributors" {
+                snapshot.args(["--contributors", "Author-A,Author-B"]);
+            } else {
+                snapshot.args(["--on-behalf-of", "Author-A"]);
+            }
+            snapshot.assert().success();
+
+            repo.arc(&repo.root)
+                .env("ARC_ACTOR", "Independent-C")
+                .env("ARC_HARNESS", "claude")
+                .env("ARC_MODEL", MODEL_C)
+                .args(["review", slug.as_str(), "--verdict", "approved"])
+                .assert()
+                .success();
+            let independent = status(&repo, &slug);
+            if independent["has_valid_approval"] != true {
+                failures.push(format!(
+                    "{slug}: model C only replayed or recorded ceremony, so its read is \
+                     independent: {independent}"
+                ));
+            }
+
+            repo.arc(&repo.root)
+                .env("ARC_ACTOR", "Another-Actor")
+                .env("ARC_HARNESS", "claude")
+                .env("ARC_MODEL", MODEL_A)
+                .args(["review", slug.as_str(), "--verdict", "approved"])
+                .assert()
+                .success();
+            let self_read = status(&repo, &slug);
+            if self_read["has_valid_approval"] != false {
+                failures.push(format!(
+                    "{slug}: a non-authoring record must not replace model A's authorship: \
+                     {self_read}"
+                ));
+            }
+
+            let integrated = repo
+                .arc(&repo.root)
+                .env("ARC_ACTOR", "Lander")
+                .env("ARC_HARNESS", "claude")
+                .env("ARC_MODEL", MODEL_A)
+                .args(["integrate", slug.as_str()])
+                .output()
+                .unwrap();
+            if integrated.status.success() {
+                failures.push(format!(
+                    "{slug}: a model A self-review integrated without debt: {}",
+                    String::from_utf8_lossy(&integrated.stdout)
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+#[test]
 fn an_explicit_contributor_declaration_on_rebase_is_authoritative() {
     let repo = policy(true);
     stdout(repo.arc(&repo.root).args(["begin", "declared-replay"]));
