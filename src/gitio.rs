@@ -2,6 +2,7 @@ use crate::commands::fork::is_fork_branch;
 use anyhow::{bail, Context, Result};
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -2462,11 +2463,13 @@ pub enum ReplayOutcome {
 
 /// Replay the worktree's branch onto `onto`.
 ///
-/// `git replay` is tried first. It writes the replayed commits, runs no hooks,
-/// leaves the worktree alone, and prints the ref update it would make; arc
-/// reads the tip from that output and applies the update itself. A replay is
-/// therefore mechanical only when arc produced it, never because something
-/// the repository keeps afterwards says one happened.
+/// `git replay` is tried first, in a temporary repository without the
+/// project's configuration so a merge driver or filter cannot run. It writes
+/// the replayed commits, runs no hooks, leaves the worktree alone, and updates
+/// a ref of its own; arc reads the tip from that ref and applies the update to
+/// the branch itself. A replay is therefore mechanical only when arc produced
+/// it, never because something the repository keeps afterwards says one
+/// happened.
 ///
 /// Where Git cannot replay, refuses, or conflicts, `git rebase` performs the
 /// replay and nothing about its result is observed. A rebase that stops on a
@@ -2480,10 +2483,14 @@ pub fn replay(cwd: &Path, branch: &str, onto: &str, head: &str) -> Result<Replay
     rebase_with_command(cwd, onto)
 }
 
-/// The tip `git replay` printed for `branch`, when arc could apply it.
+/// The tip `git replay` wrote to its own temporary ref, when arc could apply
+/// it.
 ///
-/// Nothing is applied unless the printed update names `head` as the value it
-/// replaces, and the branch and worktree move together: the ref by a
+/// The replay runs in a bare repository with no configuration and shares only
+/// the project's object database, so neither a merge driver nor a filter the
+/// project configures can run. Its result is read from the ref Git updated,
+/// not from command output anything in the repository can add to, and nothing
+/// is applied unless the branch and worktree can move together: the ref by a
 /// compare-and-swap, the worktree by a two-tree merge that refuses to
 /// overwrite a local change. Neither runs a hook.
 fn replay_with_plumbing(
@@ -2497,55 +2504,162 @@ fn replay_with_plumbing(
     if current_branch(cwd)?.as_deref() != Some(branch) {
         return Ok(None);
     }
-    let mut command = git_command();
-    // The range names the branch, not its commit: a replay prints the update
-    // for the refs its arguments name, and arc wants the one it moves.
-    let refname = format!("refs/heads/{branch}");
+    let Ok(onto) = rev_parse(cwd, onto) else {
+        return Ok(None);
+    };
+    let Ok(head) = rev_parse(cwd, head) else {
+        return Ok(None);
+    };
+    let Ok(replay) = ReplayRepository::create(cwd) else {
+        return Ok(None);
+    };
+    let replay_ref = "refs/heads/arc-replay";
+    if replay.git(&["update-ref", replay_ref, &head]).is_err() {
+        return Ok(None);
+    }
+    let mut command = replay.command();
+    // The range names the temporary ref, not a project branch: the isolated
+    // repository holds no project refs, and Git updates the ref it is given.
     command
         .args([
             "replay",
             "--onto",
-            onto,
-            "--ref-action=print",
-            &format!("{onto}..{refname}"),
+            &onto,
+            "--ref",
+            replay_ref,
+            "--ref-action=update",
+            &format!("{onto}..{replay_ref}"),
         ])
-        .current_dir(cwd);
+        .current_dir(&replay.dir);
     let out = command_output(&mut command)
-        .with_context(|| format!("failed to run git in {}", cwd.display()))?;
+        .with_context(|| format!("failed to run git in {}", replay.dir.display()))?;
     if !out.status.success() {
         return Ok(None);
     }
-    let Some(tip) = printed_replay_tip(&String::from_utf8_lossy(&out.stdout), &refname, head)
+    let Ok(tip) = replay.git(&["rev-parse", "--verify", &format!("{replay_ref}^{{commit}}")])
     else {
         return Ok(None);
     };
     // A worktree that cannot follow is Git rebase's refusal to report, not a
     // branch moved onto content the worktree does not hold.
-    if git(cwd, &["read-tree", "-n", "-m", "-u", head, &tip]).is_err() {
+    if git(cwd, &["read-tree", "-n", "-m", "-u", &head, &tip]).is_err() {
         return Ok(None);
     }
-    git(cwd, &["update-ref", &refname, &tip, head])?;
-    git(cwd, &["read-tree", "-m", "-u", head, &tip]).with_context(|| {
+    let refname = format!("refs/heads/{branch}");
+    git(cwd, &["update-ref", &refname, &tip, &head])?;
+    git(cwd, &["read-tree", "-m", "-u", &head, &tip]).with_context(|| {
         format!("{branch} is at {tip}, but its worktree could not follow; reconcile it before snapshotting")
     })?;
     Ok(Some(tip))
 }
 
-/// The new tip in a printed replay update for `refname` that replaces `head`.
+/// A temporary bare repository for one replay, sharing only the project's
+/// object database.
 ///
-/// The lines are the replay command's own output, which no repository state
-/// can add to: an update naming another ref, or another old value, is not
-/// this replay.
-fn printed_replay_tip(output: &str, refname: &str, head: &str) -> Option<String> {
-    output.lines().find_map(|line| {
-        let mut fields = line.split_whitespace();
-        let _verb = fields.next()?;
-        if fields.next()? != refname {
-            return None;
+/// A repository configures merge drivers and filters by name in its config,
+/// and `git replay` runs them while it merges. The replay therefore reads its
+/// configuration from a repository that has none: the project's attributes
+/// can name a driver, but there is no definition to find, and no filter is
+/// configured at all. The same isolation applies to system and user config and
+/// to an attributes source, so no inherited setting names a program either.
+struct ReplayRepository {
+    dir: PathBuf,
+    objects: PathBuf,
+    committer_name: String,
+    committer_email: String,
+}
+
+impl ReplayRepository {
+    fn create(cwd: &Path) -> Result<Self> {
+        let object_format = git(cwd, &["rev-parse", "--show-object-format"])?;
+        let objects = PathBuf::from(git(
+            cwd,
+            &[
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-path",
+                "objects",
+            ],
+        )?);
+        let dir =
+            crate::config::temp_dir()?.join(format!("arc-replay-{}", crate::ids::new_identifier()));
+        fs::create_dir_all(dir.join("objects"))
+            .with_context(|| format!("cannot create {}", dir.join("objects").display()))?;
+        fs::create_dir_all(dir.join("refs/heads"))
+            .with_context(|| format!("cannot create {}", dir.join("refs/heads").display()))?;
+        fs::write(dir.join("HEAD"), "ref: refs/heads/arc-replay\n")
+            .with_context(|| format!("cannot write {}", dir.join("HEAD").display()))?;
+        let version = if object_format == "sha1" { 0 } else { 1 };
+        let mut config = format!(
+            "[core]\n\trepositoryformatversion = {version}\n\tbare = true\n\tattributesFile = /dev/null\n"
+        );
+        if version != 0 {
+            config.push_str(&format!("[extensions]\n\tobjectformat = {object_format}\n"));
         }
-        let tip = fields.next()?;
-        (fields.next()? == head).then(|| tip.to_string())
-    })
+        fs::write(dir.join("config"), config)
+            .with_context(|| format!("cannot write {}", dir.join("config").display()))?;
+        Ok(Self {
+            dir,
+            objects,
+            committer_name: git_config_value(cwd, "user.name")
+                .unwrap_or_else(|| "arc replay".to_string()),
+            committer_email: git_config_value(cwd, "user.email")
+                .unwrap_or_else(|| "arc-replay@invalid".to_string()),
+        })
+    }
+
+    /// A Git command whose entire environment is this repository's, with no
+    /// inherited configuration, attributes source or object directory.
+    fn command(&self) -> Command {
+        let mut command = git_command();
+        command.env_clear();
+        for variable in ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE"] {
+            if let Some(value) = std::env::var_os(variable) {
+                command.env(variable, value);
+            }
+        }
+        command
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .env("GIT_EDITOR", "true")
+            .env("GIT_SEQUENCE_EDITOR", "true")
+            .env("GIT_DIR", &self.dir)
+            .env("GIT_OBJECT_DIRECTORY", &self.objects)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_ATTR_NOSYSTEM", "1")
+            .env("GIT_COMMITTER_NAME", &self.committer_name)
+            .env("GIT_COMMITTER_EMAIL", &self.committer_email);
+        command
+    }
+
+    fn git(&self, args: &[&str]) -> Result<String> {
+        let mut command = self.command();
+        command.args(args).current_dir(&self.dir);
+        let out = command_output(&mut command)
+            .with_context(|| format!("failed to run git in {}", self.dir.display()))?;
+        if !out.status.success() {
+            bail!(
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+    }
+}
+
+impl Drop for ReplayRepository {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn git_config_value(cwd: &Path, key: &str) -> Option<String> {
+    git(cwd, &["config", "--get", key])
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn rebase_with_command(cwd: &Path, onto: &str) -> Result<ReplayOutcome> {
@@ -3207,32 +3321,6 @@ mod tests {
         let signed = commit_object_text(&commit, Some(b"-----BEGIN PGP SIGNATURE-----\n\nabc\n"));
         assert!(String::from_utf8_lossy(&signed)
             .contains("gpgsig -----BEGIN PGP SIGNATURE-----\n \n abc\n\nthe message\n"));
-    }
-
-    #[test]
-    fn a_printed_replay_names_only_the_update_it_is() {
-        let branch = "refs/heads/arc/check";
-        let old = "1111111111111111111111111111111111111111";
-        let new = "2222222222222222222222222222222222222222";
-        assert_eq!(
-            printed_replay_tip(&format!("update {branch} {new} {old}\n"), branch, old),
-            Some(new.to_string())
-        );
-        // Another ref, or an update replacing a different old value, is not
-        // this replay's result.
-        assert_eq!(
-            printed_replay_tip(
-                &format!("update refs/heads/other {new} {old}\n"),
-                branch,
-                old
-            ),
-            None
-        );
-        assert_eq!(
-            printed_replay_tip(&format!("update {branch} {new} {new}\n"), branch, old),
-            None
-        );
-        assert_eq!(printed_replay_tip("", branch, old), None);
     }
 
     #[cfg(unix)]
