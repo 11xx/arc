@@ -339,14 +339,7 @@ fn numbered_file() -> String {
     (1..=30).map(|line| format!("line {line}\n")).collect()
 }
 
-fn snapshot_as(
-    repo: &Repo,
-    cwd: &Path,
-    slug: &str,
-    actor: &str,
-    harness: &str,
-    model: &str,
-) {
+fn snapshot_as(repo: &Repo, cwd: &Path, slug: &str, actor: &str, harness: &str, model: &str) {
     stdout(
         repo.arc(cwd)
             .env("ARC_ACTOR", actor)
@@ -470,7 +463,10 @@ fn a_rebase_that_rewrites_the_implementers_lines_breaks_inheritance() {
 fn an_ignored_submodule_change_breaks_patch_inheritance() {
     let repo = policy(true);
     let sub_one = repo.head(&repo.root);
-    git(&repo.root, &["commit", "--allow-empty", "-m", "submodule one"]);
+    git(
+        &repo.root,
+        &["commit", "--allow-empty", "-m", "submodule one"],
+    );
     let sub_two = repo.head(&repo.root);
     fs::write(
         repo.root.join(".gitmodules"),
@@ -487,9 +483,7 @@ fn an_ignored_submodule_change_breaks_patch_inheritance() {
     git(&repo.root, &["commit", "-m", "chore: nested gitlink"]);
 
     stdout(repo.arc(&repo.root).args(["begin", "ignored-submodule"]));
-    let worktree = repo
-        .home
-        .join(".worktrees/repo-ignored-submodule");
+    let worktree = repo.home.join(".worktrees/repo-ignored-submodule");
     repo.commit(&worktree, "work.txt", "work\n", "feat: work");
     snapshot_as(
         &repo,
@@ -501,10 +495,7 @@ fn an_ignored_submodule_change_breaks_patch_inheritance() {
     );
 
     let cacheinfo = format!("160000,{sub_two},nested");
-    git(
-        &worktree,
-        &["update-index", "--cacheinfo", &cacheinfo],
-    );
+    git(&worktree, &["update-index", "--cacheinfo", &cacheinfo]);
     git(&worktree, &["commit", "-m", "feat: lead moves submodule"]);
     snapshot_as(
         &repo,
@@ -516,10 +507,7 @@ fn an_ignored_submodule_change_breaks_patch_inheritance() {
     );
 
     let changed = status(&repo, "ignored-submodule");
-    assert_eq!(
-        changed["latest_patchset"]["actor"], REVIEWER_B,
-        "{changed}"
-    );
+    assert_eq!(changed["latest_patchset"]["actor"], REVIEWER_B, "{changed}");
     assert!(
         changed["latest_patchset"]["on_behalf_of"].is_null(),
         "{changed}"
@@ -541,7 +529,14 @@ fn a_same_actor_rebase_at_a_new_model_keeps_the_original_model() {
     stdout(repo.arc(&repo.root).args(["begin", "model-switch"]));
     let worktree = repo.home.join(".worktrees/repo-model-switch");
     repo.commit(&worktree, "work.txt", "work\n", "feat: work");
-    snapshot_as(&repo, &worktree, "model-switch", "Author-A", "codex", MODEL_A);
+    snapshot_as(
+        &repo,
+        &worktree,
+        "model-switch",
+        "Author-A",
+        "codex",
+        MODEL_A,
+    );
 
     repo.commit(&repo.root, "target.txt", "target\n", "chore: target");
     repo.arc(&repo.root)
@@ -626,7 +621,10 @@ fn a_declared_trailer_model_never_decides_independence_without_a_ledger_model() 
     );
     integrate_with_debt(&repo, "no-ledger-model", REVIEWER_B, MODEL_B);
     let before = debt(&repo, "no-ledger-model");
-    assert!(before["production"]["implementer"].get("model").is_none(), "{before}");
+    assert!(
+        before["production"]["implementer"].get("model").is_none(),
+        "{before}"
+    );
 
     let output = repo
         .arc(&repo.root)
@@ -651,7 +649,14 @@ fn a_debt_without_a_production_summary_uses_its_patchsets_authorship() {
     stdout(repo.arc(&repo.root).args(["begin", "legacy-author"]));
     let worktree = repo.home.join(".worktrees/repo-legacy-author");
     repo.commit(&worktree, "work.txt", "work\n", "feat: work");
-    snapshot_as(&repo, &worktree, "legacy-author", "Author-A", "codex", MODEL_A);
+    snapshot_as(
+        &repo,
+        &worktree,
+        "legacy-author",
+        "Author-A",
+        "codex",
+        MODEL_A,
+    );
     integrate_with_debt(&repo, "legacy-author", REVIEWER_B, MODEL_B);
     let change_id = status(&repo, "legacy-author")["change_id"]
         .as_str()
@@ -689,11 +694,19 @@ fn integration_on_behalf_of_another_subject_displays_the_invoking_integrator() {
         .success();
 
     let after = debt(&repo, "integrator");
-    assert_eq!(after["production"]["integrator"]["actor"], REVIEWER_B, "{after}");
+    assert_eq!(
+        after["production"]["integrator"]["actor"], REVIEWER_B,
+        "{after}"
+    );
     assert!(
-        after["production"]["integrator"].get("on_behalf_of").is_none(),
+        after["production"]["integrator"]
+            .get("on_behalf_of")
+            .is_none(),
         "{after}"
     );
     let show = stdout(repo.arc(&repo.root).args(["show", "integrator"]));
-    assert!(show.contains(&format!("integrated by {REVIEWER_B}")), "{show}");
+    assert!(
+        show.contains(&format!("integrated by {REVIEWER_B}")),
+        "{show}"
+    );
 }

@@ -125,8 +125,10 @@ fn model_provenance_versions_are_registered() {
         "EVENT_SCHEMA",
         "JOURNAL_SCHEMA",
     ] {
-        let found: Vec<&(String, String)> =
-            schemas.iter().filter(|(constant, _)| constant == name).collect();
+        let found: Vec<&(String, String)> = schemas
+            .iter()
+            .filter(|(constant, _)| constant == name)
+            .collect();
         assert!(!found.is_empty(), "{name} is not a schema constant");
         for (_, schema) in found {
             assert!(guide.contains(&format!("`{schema}`")), "{name}: {schema}");
@@ -179,13 +181,7 @@ fn no_schema_advances_more_than_once_past_the_last_release() {
 
 /// Every `arc-<name>/<n>` recorded in the tree, or in the tagged release.
 fn grep_schemas(root: &Path, tag: Option<&str>) -> Vec<(String, u32)> {
-    let mut args = vec![
-        "grep",
-        "-h",
-        "-o",
-        "-E",
-        "arc-[a-z0-9-]+/[0-9]+",
-    ];
+    let mut args = vec!["grep", "-h", "-o", "-E", "arc-[a-z0-9-]+/[0-9]+"];
     if let Some(tag) = tag {
         args.push(tag);
     }
