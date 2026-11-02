@@ -410,6 +410,7 @@ enum Cmd {
         iterating: bool,
     },
     /// Record explicit planning and orchestration assertions on an open change.
+    ///
     /// Values follow arc-contribution-trailers/2; ancestry grants no credit.
     Roles {
         /// Open change whose contribution assertions to record
@@ -435,15 +436,15 @@ enum Cmd {
         withdraw: Vec<String>,
     },
     /// Print a change's portable trailer block in convention order.
-    /// Planning and orchestration come from assertions, implementation from
-    /// declared patchset contributors, or the snapshot subject when none are listed.
-    /// A subject that is a fresh harness:model[#effort] or Name <email>
-    /// supplies itself. The recorder's harness and model apply only to the
-    /// recorder's own work on a snapshot that declared its attribution; a
-    /// derived or git-config recorder is not credited.
-    /// No line carries a placeholder or a session id: what cannot be
-    /// attributed is omitted and named in a note with its reason and remedy.
-    /// Review credit stays in the ledger; Reviewed-by is never projected.
+    ///
+    /// Planning and orchestration come from assertions, implementation from declared
+    /// patchset contributors, or the snapshot subject when none are listed. A subject that
+    /// is a fresh harness:model[#effort] or Name <email> supplies itself. The recorder's
+    /// harness and model apply only to the recorder's own work on a snapshot that declared
+    /// its attribution; a derived or git-config recorder is not credited. No line carries a
+    /// placeholder or a session id: what cannot be attributed is omitted and named in a
+    /// note with its reason and remedy. Review credit stays in the ledger; Reviewed-by is
+    /// never projected.
     Trailers {
         /// Change whose attributed contribution trailers to print
         change: String,
@@ -452,8 +453,9 @@ enum Cmd {
         json: bool,
     },
     /// List changes
-    /// Unreadable changes are named with their errors on stderr; readable
-    /// changes remain in the output
+    ///
+    /// Unreadable changes are named with their errors on stderr; readable changes remain in
+    /// the output
     List {
         /// List only changes that are still open
         #[arg(long)]
@@ -466,9 +468,10 @@ enum Cmd {
         format: ListFormat,
     },
     /// Filter changes and print matching IDs (or JSON)
-    /// Unreadable changes are named with their errors on stderr; readable
-    /// changes remain in the output. With --assurance the output is the
-    /// dated review assurance of each integrated change instead
+    ///
+    /// Unreadable changes are named with their errors on stderr; readable changes remain in
+    /// the output. With --assurance the output is the dated review assurance of each
+    /// integrated change instead
     Query {
         /// open | closed | integrated | abandoned | superseded
         #[arg(long)]
@@ -535,24 +538,23 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Render one change with offline forge reconstruction, freshness, custody
-    /// availability and review drift (Markdown, or full state with --json)
+    /// Render one change with offline forge reconstruction, freshness, custody availability
+    /// and review drift (Markdown, or full state with --json)
+    ///
     /// Forge views preserve provider-observed SHAs beside nullable local rewrite
-    /// successors; observed and resolved head matches compare with the
-    /// patchset's approval anchor, not a content or trailer rewrite successor.
-    /// Forge diagnostics retain conflicting or invalid observations and their
-    /// unresolved projections without blocking the change's state read.
-    /// Closed head drift compares with the closure's source patchset when
-    /// recorded, otherwise with the newest snapshot
-    /// Aggregate reads name unreadable changes with their errors on stderr
-    /// and retain readable changes; a selected unreadable change fails
-    /// A declared review debt reads `Declared, not yet integrated` until the
-    /// change integrates, then `Owed`, then `Owed (discharged)` with its
-    /// discharger; JSON carries the same as `debt.standing`
-    /// Recorded producer models that are missing, placeholders or session ids
-    /// print as model not recorded. JSON production identities and review coverage retain raw values
-    /// with model_recorded: false; valid models omit the flag.
-    /// Audit and verdict detail text validates models against their recorded sessions.
+    /// successors; observed and resolved head matches compare with the patchset's approval
+    /// anchor, not a content or trailer rewrite successor. Forge diagnostics retain
+    /// conflicting or invalid observations and their unresolved projections without
+    /// blocking the change's state read. Closed head drift compares with the closure's
+    /// source patchset when recorded, otherwise with the newest snapshot Aggregate reads
+    /// name unreadable changes with their errors on stderr and retain readable changes; a
+    /// selected unreadable change fails A declared review debt reads `Declared, not yet
+    /// integrated` until the change integrates, then `Owed`, then `Owed (discharged)` with
+    /// its discharger; JSON carries the same as `debt.standing` Recorded producer models
+    /// that are missing, placeholders or session ids print as model not recorded. JSON
+    /// production identities and review coverage retain raw values with model_recorded:
+    /// false; valid models omit the flag. Audit and verdict detail text validates models
+    /// against their recorded sessions.
     Show {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -567,9 +569,9 @@ enum Cmd {
         #[arg(long, conflicts_with = "tag")]
         at: Option<String>,
     },
-    /// What one change knew and what it was accepted on, from the ledger and
-    /// the journal. Writes nothing: no event, no ref, no journal entry, no
-    /// lock.
+    /// What one change knew and what it was accepted on, from the ledger and the journal.
+    ///
+    /// Writes nothing: no event, no ref, no journal entry, no lock.
     ///
     /// Eight slots, always all printed: contract (the brief in force, its
     /// planner credit, plan, base revision, and causes, and the selection
@@ -642,13 +644,14 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Print recorded facts and offline forge reconstruction with freshness,
-    /// custody availability and review drift. Events are in ledger order. A
-    /// review batch records several, so it renders as several lines. This is
-    /// the ledger, not Git history: for commits, use `git log`. Model sources,
-    /// observation coordinates, and declaration disagreements accompany each fact
-    /// Recorded producer models that are missing, placeholders or session ids
-    /// print as model not recorded, qualified by the harness when established.
+    /// Print recorded facts and offline forge reconstruction with freshness, custody
+    /// availability and review drift.
+    ///
+    /// Events are in ledger order. A review batch records several, so it renders as several
+    /// lines. This is the ledger, not Git history: for commits, use `git log`. Model
+    /// sources, observation coordinates, and declaration disagreements accompany each fact
+    /// Recorded producer models that are missing, placeholders or session ids print as
+    /// model not recorded, qualified by the harness when established.
     Log {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -661,11 +664,12 @@ enum Cmd {
         #[arg(long, hide = true)]
         oneline: bool,
     },
-    /// Derived ledger analytics: stage, review, and gate durations, and how
-    /// often provenance is recorded
-    /// Aggregate reads name unreadable changes with their errors on stderr
-    /// and retain readable changes; a selected unreadable change fails
-    /// Records no events; ledger reads do not require a parseable append policy.
+    /// Derived ledger analytics: stage, review, and gate durations, and how often
+    /// provenance is recorded
+    ///
+    /// Aggregate reads name unreadable changes with their errors on stderr and retain
+    /// readable changes; a selected unreadable change fails Records no events; ledger reads
+    /// do not require a parseable append policy.
     Stats {
         /// Report a single change
         #[arg(long, id = "change_flag", conflicts_with_all = ["tag", "all"])]
@@ -714,6 +718,7 @@ enum Cmd {
         json: bool,
     },
     /// Render a recorded patchset using Git's native diff output
+    ///
     /// Records no events; ledger reads do not require a parseable append policy.
     Diff {
         /// Change to act on. Omitted, it is inferred from the current branch,
@@ -972,8 +977,9 @@ enum Cmd {
         severity: MessageSeverity,
     },
     /// Scan messages across open and closed changes (newest first)
-    /// Aggregate reads name unreadable changes with their errors on stderr
-    /// and retain readable changes; a selected unreadable change fails
+    ///
+    /// Aggregate reads name unreadable changes with their errors on stderr and retain
+    /// readable changes; a selected unreadable change fails
     Messages {
         /// Only messages recorded against this change
         #[arg(long, id = "change_flag")]
@@ -993,12 +999,14 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Lead-facing queue rollup: open changes, active claims, and outstanding debt (arc-inbox/11 schema)
-    /// Aggregate reads name unreadable changes with their errors on stderr
-    /// and retain readable changes; a selected unreadable change fails
-    /// Recorded producer models that are missing, placeholders or session ids
-    /// print as model not recorded. JSON production identities and review coverage retain raw values
-    /// with model_recorded: false; valid models omit the flag.
+    /// Lead-facing queue rollup: open changes, active claims, and outstanding debt
+    /// (arc-inbox/11 schema)
+    ///
+    /// Aggregate reads name unreadable changes with their errors on stderr and retain
+    /// readable changes; a selected unreadable change fails Recorded producer models that
+    /// are missing, placeholders or session ids print as model not recorded. JSON
+    /// production identities and review coverage retain raw values with model_recorded:
+    /// false; valid models omit the flag.
     Inbox {
         /// Restrict to changes assigned to this harness
         #[arg(long = "assigned-to")]
@@ -1008,12 +1016,12 @@ enum Cmd {
         json: bool,
     },
     /// Show a tagged program in dependency order (arc-chain/5 schema)
-    /// With --review, each member's `debt_standing` is `declared` before it
-    /// integrates, `owed` after, and `discharged` once a review answers it;
-    /// `debt_outstanding` is true only for `owed`
-    /// Aggregate reads name unreadable changes with their errors on stderr
-    /// and retain readable changes; a selected unreadable change fails
-    /// Records no events; ledger reads do not require a parseable append policy.
+    ///
+    /// With --review, each member's `debt_standing` is `declared` before it integrates,
+    /// `owed` after, and `discharged` once a review answers it; `debt_outstanding` is true
+    /// only for `owed` Aggregate reads name unreadable changes with their errors on stderr
+    /// and retain readable changes; a selected unreadable change fails Records no events;
+    /// ledger reads do not require a parseable append policy.
     Chain {
         /// The tag naming the program to render
         tag: String,
@@ -1071,29 +1079,27 @@ enum Cmd {
         off: bool,
     },
     /// Machine-readable status report (the versioned arc-status/27 schema).
-    /// `debt_standing` is `declared` before the change integrates, `owed`
-    /// after, and `discharged` once a review answers the debt;
-    /// `debt_outstanding` is true only for `owed`.
-    /// Forge observed and resolved head matches are separate; hosted checks apply
-    /// only to their recorded PR identity and the patchset's approval anchor.
-    /// Content and trailer rewrite successors require a fresh snapshot.
-    /// Forge diagnostics expose conflicting or invalid observations; their
-    /// projections remain unresolved and cannot establish forge readiness.
-    /// Every verdict names its recorded origin, actor claims and admission
-    /// provenance. Content coverage is separate from receiver gating eligibility.
-    /// Readiness uses the integration shape resolved for the recorded target.
-    /// Use check --shape to evaluate an explicit alternative.
-    /// comparison_patchset names the closure's source patchset when recorded,
-    /// otherwise the newest snapshot; head_matches_comparison_patchset compares
-    /// its head. head_matches_latest_patchset always compares the newest snapshot.
-    /// An unreadable selected change fails; unreadable neighboring changes
-    /// are named with their errors on stderr and omitted from the dependency
-    /// observation. An unreadable prerequisite cannot count as integrated
-    /// Includes retained provisional deliveries, routing recipients, local merges and dispositions.
-    /// Unfinished transitions include observed refs, event state, retained intent and recovery command.
-    /// Recorded producer models that are missing, placeholders or session ids
-    /// print as model not recorded. JSON production identities and review coverage retain raw values
-    /// with model_recorded: false; valid models omit the flag.
+    ///
+    /// `debt_standing` is `declared` before the change integrates, `owed` after, and
+    /// `discharged` once a review answers the debt; `debt_outstanding` is true only for
+    /// `owed`. Forge observed and resolved head matches are separate; hosted checks apply
+    /// only to their recorded PR identity and the patchset's approval anchor. Content and
+    /// trailer rewrite successors require a fresh snapshot. Forge diagnostics expose
+    /// conflicting or invalid observations; their projections remain unresolved and cannot
+    /// establish forge readiness. Every verdict names its recorded origin, actor claims and
+    /// admission provenance. Content coverage is separate from receiver gating eligibility.
+    /// Readiness uses the integration shape resolved for the recorded target. Use check
+    /// --shape to evaluate an explicit alternative. comparison_patchset names the closure's
+    /// source patchset when recorded, otherwise the newest snapshot;
+    /// head_matches_comparison_patchset compares its head. head_matches_latest_patchset
+    /// always compares the newest snapshot. An unreadable selected change fails; unreadable
+    /// neighboring changes are named with their errors on stderr and omitted from the
+    /// dependency observation. An unreadable prerequisite cannot count as integrated
+    /// Includes retained provisional deliveries, routing recipients, local merges and
+    /// dispositions. Unfinished transitions include observed refs, event state, retained
+    /// intent and recovery command. Recorded producer models that are missing, placeholders
+    /// or session ids print as model not recorded. JSON production identities and review
+    /// coverage retain raw values with model_recorded: false; valid models omit the flag.
     Status {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1112,27 +1118,30 @@ enum Cmd {
         at: Option<String>,
     },
     /// Report whether declared prerequisite changes have integrated
-    /// Aggregate reads name unreadable changes with their errors on stderr
-    /// and retain readable changes; a selected unreadable change fails
+    ///
+    /// Aggregate reads name unreadable changes with their errors on stderr and retain
+    /// readable changes; a selected unreadable change fails
     BlockerStatus {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
         change: Option<String>,
     },
     /// Dependency probe: exit 0 ready, 1 blocked, 2 on lookup/ledger errors
-    /// Aggregate reads name unreadable changes with their errors on stderr
-    /// and retain readable changes; a selected unreadable change fails
+    ///
+    /// Aggregate reads name unreadable changes with their errors on stderr and retain
+    /// readable changes; a selected unreadable change fails
     IsBlocked {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
         change: Option<String>,
     },
     /// Replay raw ledger events as NDJSON, optionally following new events
-    /// Records no events and writes nothing to the ledger, so a read-only ledger
-    /// replays; ledger reads do not require a parseable append policy.
-    /// Local IDs are totally ordered by issuance across processes. ID cursors
-    /// wait below unresolved provisional reservations. Imported
-    /// events keep their origin IDs; follow emits unseen imports in each poll.
+    ///
+    /// Records no events and writes nothing to the ledger, so a read-only ledger replays;
+    /// ledger reads do not require a parseable append policy. Local IDs are totally ordered
+    /// by issuance across processes. ID cursors wait below unresolved provisional
+    /// reservations. Imported events keep their origin IDs; follow emits unseen imports in
+    /// each poll.
     Events {
         /// Continue emitting matching events appended after the replay
         #[arg(long)]
@@ -1165,9 +1174,10 @@ enum Cmd {
         exec_command: Option<String>,
     },
     /// Wait for a change, or a tagged series, to reach a ledger-derived condition
-    /// Aggregate reads name unreadable changes with their errors on stderr
-    /// and retain readable changes; a selected unreadable change fails
-    /// Records no events; ledger reads do not require a parseable append policy.
+    ///
+    /// Aggregate reads name unreadable changes with their errors on stderr and retain
+    /// readable changes; a selected unreadable change fails Records no events; ledger reads
+    /// do not require a parseable append policy.
     Watch {
         /// A bare `.md` filename held only by another known journal is refused,
         /// naming its owning journal and project.
@@ -1235,39 +1245,34 @@ enum Cmd {
         json: bool,
     },
     /// Export one change as a deterministic, versioned JSON bundle.
-    /// History checksums hash compact JSON with recursively sorted object keys
-    /// and a newline after each event, independent of stored field order.
-    /// Exporter/project metadata is distinct from the preserved event origins.
-    /// Includes a role-labelled Git object list derived from the exported
-    /// events, including a delta's suffix and repository events. The summary
-    /// counts objects by role; transports must deliver them before import.
-    /// The commits a recorded rewrite replaced and retained for this change
-    /// are listed with the role `retention-commit`. A commit a forge fact
-    /// records as the provider's own is listed with the role `observed-commit`
-    /// only where this repository holds it; an exporter that never fetched it
-    /// does not oblige the receiver to. The commits and trees the repository
-    /// events' received candidate evidence names are listed as `received-commit`
-    /// and `received-tree` on the same terms.
-    /// --custody-dir writes an optional arc-custody-bundle/1 sidecar: the
-    /// retained content the exported forge observations and the repository
-    /// events' received candidate evidence reference, which ledger custody
-    /// holds, copied once per digest beside a manifest.json.
-    /// Content absent or damaged here gets an explicit unavailable entry and
-    /// the manifest and summary say incomplete; no archive claims complete
-    /// custody it does not hold. The bundle binds the manifest's digest. The
-    /// sidecar is finished beside its directory. --output, --objects-json and
-    /// --custody-dir must name separate locations, none inside another, and
-    /// the two files must not be directories; an overlap is refused before
-    /// anything is written. The sidecar is published first, then the object
-    /// list and the bundle; a failure removes what was published and restores
-    /// what it replaced, so a previous file keeps its bytes, an empty
-    /// directory stays empty and no bundle names a missing sidecar.
-    /// Nonportable cost facts or bindings refuse transport; recording
-    /// locators and unclassified cost reasons are never emitted. Recorded
-    /// events are preserved.
-    /// Records no events, initializes no replica and writes nothing to the
-    /// ledger, so a read-only ledger exports; ledger reads do not
-    /// require a parseable append policy.
+    ///
+    /// History checksums hash compact JSON with recursively sorted object keys and a
+    /// newline after each event, independent of stored field order. Exporter/project
+    /// metadata is distinct from the preserved event origins. Includes a role-labelled Git
+    /// object list derived from the exported events, including a delta's suffix and
+    /// repository events. The summary counts objects by role; transports must deliver them
+    /// before import. The commits a recorded rewrite replaced and retained for this change
+    /// are listed with the role `retention-commit`. A commit a forge fact records as the
+    /// provider's own is listed with the role `observed-commit` only where this repository
+    /// holds it; an exporter that never fetched it does not oblige the receiver to. The
+    /// commits and trees the repository events' received candidate evidence names are
+    /// listed as `received-commit` and `received-tree` on the same terms. --custody-dir
+    /// writes an optional arc-custody-bundle/1 sidecar: the retained content the exported
+    /// forge observations and the repository events' received candidate evidence reference,
+    /// which ledger custody holds, copied once per digest beside a manifest.json. Content
+    /// absent or damaged here gets an explicit unavailable entry and the manifest and
+    /// summary say incomplete; no archive claims complete custody it does not hold. The
+    /// bundle binds the manifest's digest. The sidecar is finished beside its directory.
+    /// --output, --objects-json and --custody-dir must name separate locations, none inside
+    /// another, and the two files must not be directories; an overlap is refused before
+    /// anything is written. The sidecar is published first, then the object list and the
+    /// bundle; a failure removes what was published and restores what it replaced, so a
+    /// previous file keeps its bytes, an empty directory stays empty and no bundle names a
+    /// missing sidecar. Nonportable cost facts or bindings refuse transport; recording
+    /// locators and unclassified cost reasons are never emitted. Recorded events are
+    /// preserved. Records no events, initializes no replica and writes nothing to the
+    /// ledger, so a read-only ledger exports; ledger reads do not require a parseable
+    /// append policy.
     Export {
         /// Change to export as a versioned bundle
         change: String,
@@ -1294,65 +1299,56 @@ enum Cmd {
         json: bool,
     },
     /// Import arc-bundle/6 or /5 into this repository's local store.
-    /// Imported events retain their origin IDs, including IDs below a
-    /// previously observed cursor; subsequent local IDs follow the held floor.
-    /// Received-byte digest, object availability, and publishing authorization
-    /// are checked before publication; either refusal writes nothing.
-    /// Unless --provenance-only is selected, every listed Git object must
-    /// exist locally before any events or refs are written. Availability checks never fetch from a promisor remote.
-    /// Bundles without an objects field retain advisory commit checks.
-    /// Received source/tested/report heads that are held must be raw commits
-    /// with their claimed trees; absent heads remain external claims. Tags
-    /// are not peeled. These checks precede event, ref and custody publication.
-    /// Held received originals are pinned under `refs/arc/retained/`.
-    /// A candidate's optional original evidence-request digest binds its
-    /// received document and declarant. Records without that intent remain
-    /// readable and importable without establishing a registration retry.
-    /// A rewrite event's retention refs are held under `refs/arc/retained/`
-    /// for the imported change where the commit is here; a name that is no
-    /// retention ref is refused, and events naming none import unchanged.
-    /// A projected falsification revision requires an active, uncontradicted
-    /// rewrite admitted with rewrite authority. Legacy transport without an
-    /// authorization receipt supplies no such identity proof. Full and delta
-    /// histories replay with the same admitted proof before publication.
-    /// Paired stores and receivers with enrollments require a transport-asserted
-    /// publisher and exact received-byte SHA256. Operator enrollment authorizes
-    /// each introduced origin and capability; actor strings remain claims.
-    /// Admission and its private authorization receipt publish atomically.
-    /// Receipt permissions bind full canonical content and scope. Enrollment
-    /// is revalidated under the publication lock; unpublished failures leave
-    /// the format stamp unchanged.
-    /// --provenance-only permits missing objects; it never bypasses authorization.
-    /// --custody-dir installs an arc-custody-bundle/1 sidecar into the ledger's
-    /// custody. The bundle must bind the manifest's digest; the manifest, its
-    /// change, its entries against the references of the bundled change and
-    /// repository events, every
-    /// path, length and sha256, and the absence of symlinks are all checked
-    /// before any event, ref or file is written, and corrupt content or an
-    /// unsafe path refuses the whole import. Content already held is not
-    /// copied again, and installation is reported only after the events are
-    /// published; a failure there says so and repeating the import finishes
-    /// it. A ledger `custody/` or `custody/sha256` directory that is a symlink
-    /// refuses the import before any event is published. Unavailable entries stay unavailable and the summary says
-    /// incomplete. A bundle that binds a sidecar imported without one reports
-    /// how many references stay unavailable, the manifest it binds and the
-    /// flag that installs it. Import initializes no replica. A listed `observed-commit` held here is pinned under
-    /// `refs/arc/retained/` for the imported change.
-    /// Candidate events stamp store format 7, including evaluations,
-    /// selections, and promotions without a registration in the bundle.
-    /// Events without model provenance retain that absence. Repository map
-    /// withdrawals apply even to maps already held; invalid withdrawal
-    /// targets are refused before anything is written. So is a change history
-    /// no command could have written: work after the change closed, an audit
-    /// or post-integration disposition before it integrated, or a
-    /// post-integration disposition on a finding that was resolved,
-    /// accepted-risk, or obsolete when the change shipped. Nonportable cost
-    /// facts or bindings refuse transport: recording locators and
-    /// unclassified cost reasons are not admitted.
-    /// A newly admitted candidate evidence attachment requires its registration's
-    /// original requested-evidence digest and matching declarant. Already-held
-    /// attachments without an intent stay readable as unbound claims; their
-    /// presence never implies producer consent
+    ///
+    /// Imported events retain their origin IDs, including IDs below a previously observed
+    /// cursor; subsequent local IDs follow the held floor. Received-byte digest, object
+    /// availability, and publishing authorization are checked before publication; either
+    /// refusal writes nothing. Unless --provenance-only is selected, every listed Git
+    /// object must exist locally before any events or refs are written. Availability checks
+    /// never fetch from a promisor remote. Bundles without an objects field retain advisory
+    /// commit checks. Received source/tested/report heads that are held must be raw commits
+    /// with their claimed trees; absent heads remain external claims. Tags are not peeled.
+    /// These checks precede event, ref and custody publication. Held received originals are
+    /// pinned under `refs/arc/retained/`. A candidate's optional original evidence-request
+    /// digest binds its received document and declarant. Records without that intent remain
+    /// readable and importable without establishing a registration retry. A rewrite event's
+    /// retention refs are held under `refs/arc/retained/` for the imported change where the
+    /// commit is here; a name that is no retention ref is refused, and events naming none
+    /// import unchanged. A projected falsification revision requires an active,
+    /// uncontradicted rewrite admitted with rewrite authority. Legacy transport without an
+    /// authorization receipt supplies no such identity proof. Full and delta histories
+    /// replay with the same admitted proof before publication. Paired stores and receivers
+    /// with enrollments require a transport-asserted publisher and exact received-byte
+    /// SHA256. Operator enrollment authorizes each introduced origin and capability; actor
+    /// strings remain claims. Admission and its private authorization receipt publish
+    /// atomically. Receipt permissions bind full canonical content and scope. Enrollment is
+    /// revalidated under the publication lock; unpublished failures leave the format stamp
+    /// unchanged. --provenance-only permits missing objects; it never bypasses
+    /// authorization. --custody-dir installs an arc-custody-bundle/1 sidecar into the
+    /// ledger's custody. The bundle must bind the manifest's digest; the manifest, its
+    /// change, its entries against the references of the bundled change and repository
+    /// events, every path, length and sha256, and the absence of symlinks are all checked
+    /// before any event, ref or file is written, and corrupt content or an unsafe path
+    /// refuses the whole import. Content already held is not copied again, and installation
+    /// is reported only after the events are published; a failure there says so and
+    /// repeating the import finishes it. A ledger `custody/` or `custody/sha256` directory
+    /// that is a symlink refuses the import before any event is published. Unavailable
+    /// entries stay unavailable and the summary says incomplete. A bundle that binds a
+    /// sidecar imported without one reports how many references stay unavailable, the
+    /// manifest it binds and the flag that installs it. Import initializes no replica. A
+    /// listed `observed-commit` held here is pinned under `refs/arc/retained/` for the
+    /// imported change. Candidate events stamp store format 7, including evaluations,
+    /// selections, and promotions without a registration in the bundle. Events without
+    /// model provenance retain that absence. Repository map withdrawals apply even to maps
+    /// already held; invalid withdrawal targets are refused before anything is written. So
+    /// is a change history no command could have written: work after the change closed, an
+    /// audit or post-integration disposition before it integrated, or a post-integration
+    /// disposition on a finding that was resolved, accepted-risk, or obsolete when the
+    /// change shipped. Nonportable cost facts or bindings refuse transport: recording
+    /// locators and unclassified cost reasons are not admitted. A newly admitted candidate
+    /// evidence attachment requires its registration's original requested-evidence digest
+    /// and matching declarant. Already-held attachments without an intent stay readable as
+    /// unbound claims; their presence never implies producer consent
     Import {
         /// Input file ('-' for stdin)
         input: String,
@@ -1379,33 +1375,30 @@ enum Cmd {
         json: bool,
     },
     /// Prepare a delivered change on the paired integration authority (lead only).
-    /// Admission precedes local checkout binding, exclusive scoped signing,
-    /// snapshotting at the delivered base and bound brief, local gates, and
-    /// baseline/final probes. Execution or observation errors remain distinct
-    /// from failed gates and probe discrimination. Preparation records evidence
-    /// and returns readiness;
-    /// it records no judgment. A local review still owed normally exits 3.
-    /// JSON includes structured custody counts from the latest import step,
-    /// with phase planned, installed or not-supplied.
-    /// Moved authoritative history requires explicit rebase, snapshot, and review.
-    /// Stops at the first failure and reports refs, objects, events and pending
-    /// rewrite recovery state, including effects preceding event publication.
-    /// Unpublished bindings report administrative ownership and allocation proof;
-    /// retry can finish a locally owned, empty, index-free checkout after guarded
-    /// identity checks. Unrelated contents or changed ownership refuse recovery.
-    /// Commands carry executable argv/cwd; internal bindings and signature checks
-    /// are identified separately. Local event IDs follow admitted history even
-    /// when the sender's clock is ahead. Retrying the same
+    ///
+    /// Admission precedes local checkout binding, exclusive scoped signing, snapshotting at
+    /// the delivered base and bound brief, local gates, and baseline/final probes.
+    /// Execution or observation errors remain distinct from failed gates and probe
+    /// discrimination. Preparation records evidence and returns readiness; it records no
+    /// judgment. A local review still owed normally exits 3. JSON includes structured
+    /// custody counts from the latest import step, with phase planned, installed or
+    /// not-supplied. Moved authoritative history requires explicit rebase, snapshot, and
+    /// review. Stops at the first failure and reports refs, objects, events and pending
+    /// rewrite recovery state, including effects preceding event publication. Unpublished
+    /// bindings report administrative ownership and allocation proof; retry can finish a
+    /// locally owned, empty, index-free checkout after guarded identity checks. Unrelated
+    /// contents or changed ownership refuse recovery. Commands carry executable argv/cwd;
+    /// internal bindings and signature checks are identified separately. Local event IDs
+    /// follow admitted history even when the sender's clock is ahead. Retrying the same
     /// delivery reuses admission, checkout binding, signature recovery, and snapshot.
-    /// Dry-run validates admission and local state without allocating, signing,
-    /// executing checks, creating objects, or recording evidence; future outcomes
-    /// are conditional. JSON emits one arc-accept/1 transcript.
-    /// A delivery whose bundle binds an arc-custody-bundle/1 sidecar installs it
-    /// with --custody-dir, judged as `arc import --custody-dir` judges it, in the
-    /// import preview and before any effect. Without the flag the transcript
-    /// says custody is unavailable, names the bound manifest digest and the flag.
-    /// Populated checkouts use .arc/worktrees.toml preparation. Path-stable
-    /// build storage remains outside checkout cleanup and is leased while used.
+    /// Dry-run validates admission and local state without allocating, signing, executing
+    /// checks, creating objects, or recording evidence; future outcomes are conditional.
+    /// JSON emits one arc-accept/1 transcript. A delivery whose bundle binds an
+    /// arc-custody-bundle/1 sidecar installs it with --custody-dir, judged as `arc import
+    /// --custody-dir` judges it, in the import preview and before any effect. Without the
+    /// flag the transcript says custody is unavailable, names the bound manifest digest and
+    /// the flag. Populated checkouts use .arc/worktrees.toml preparation. Path-stable build
+    /// storage remains outside checkout cleanup and is leased while used.
     Accept {
         /// Delivered arc-bundle/6 or /5 file ('-' for stdin)
         input: String,
@@ -1445,8 +1438,9 @@ enum Cmd {
         custody_dir: Option<String>,
     },
     /// Pair independent stores and move integration authority with files.
-    /// Checkout paths and ownership belong to the recording replica. Local
-    /// checkout bindings take precedence; relayed bindings grant no cleanup rights.
+    ///
+    /// Checkout paths and ownership belong to the recording replica. Local checkout
+    /// bindings take precedence; relayed bindings grant no cleanup rights.
     Replica {
         #[command(subcommand)]
         cmd: ReplicaCmd,
@@ -1505,10 +1499,10 @@ enum Cmd {
         #[arg(long, conflicts_with = "tag")]
         json: bool,
     },
-    /// Acquire or renew an advisory executor claim on a change or a journal
-    /// artifact. Journal artifact claims require a declared actor
-    /// (--actor/ARC_ACTOR), harness (--harness/ARC_HARNESS), and session
-    /// (--session/ARC_SESSION).
+    /// Acquire or renew an advisory executor claim on a change or a journal artifact.
+    ///
+    /// Journal artifact claims require a declared actor (--actor/ARC_ACTOR), harness
+    /// (--harness/ARC_HARNESS), and session (--session/ARC_SESSION).
     Claim {
         /// A bare `.md` filename held only by another known journal is refused,
         /// naming its owning journal and project.
@@ -1577,17 +1571,17 @@ enum Cmd {
         #[arg(long)]
         blocker: Option<String>,
     },
-    /// Rewrite a change as one commit on its base, with the same tree, and
-    /// record it as a new patchset. Evidence and verdicts on the earlier
-    /// heads stay with those heads; the single commit is gated and reviewed
-    /// like any other patchset. A failed commit or hook-modified tree restores
-    /// the original head, index, and tracked files; untracked files are retained.
+    /// Rewrite a change as one commit on its base, with the same tree, and record it as a
+    /// new patchset.
+    ///
+    /// Evidence and verdicts on the earlier heads stay with those heads; the single commit
+    /// is gated and reviewed like any other patchset. A failed commit or hook-modified tree
+    /// restores the original head, index, and tracked files; untracked files are retained.
     /// Obstructing paths are moved to a reported recovery directory under
-    /// <git-common-dir>/arc/squash-recovery/. Over another actor's live
-    /// claim, a squash without --contributors or --solo refuses before the
-    /// branch moves. The change stays locked from that check until the
-    /// patchset is recorded, so a command acting on the change while the
-    /// commit is made reports the lock busy
+    /// <git-common-dir>/arc/squash-recovery/. Over another actor's live claim, a squash
+    /// without --contributors or --solo refuses before the branch moves. The change stays
+    /// locked from that check until the patchset is recorded, so a command acting on the
+    /// change while the commit is made reports the lock busy
     Squash {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1599,25 +1593,23 @@ enum Cmd {
         attribution: AttributionOpts,
     },
     /// Record the current branch head as a patchset with explicit base and brief binding.
+    ///
     /// Accept preserves the delivered binding and contributor declaration through
-    /// signature-only preparation; snapshots record evidence, never a judgment.
-    /// A head whose rewrite invalidated approval requires a fresh patchset,
-    /// even when the latest patchset's mapped head already matches the branch.
-    /// Re-approval requires a verdict on that fresh patchset.
-    /// Only the replay `arc rebase` performs itself records an inherited
-    /// author: it carries the author coordinates of the patchset whose head it
-    /// replayed, every contributor at its recorded model, and the replaying
-    /// session is not its implementer. That replay runs where the project's
-    /// configuration cannot define a merge driver or filter, and arc reads its
-    /// result from the ref Git updated, not from command output. A snapshot,
-    /// or the snapshot after a rebase that fell back to `git rebase` or
-    /// stopped for resolution, records the head as its recorder's work unless
-    /// `--on-behalf-of` or `--contributors` declares another author.
-    /// At unchanged content, an explicit --on-behalf-of (also supplied by
-    /// ARC_ON_BEHALF_OF) differing from the latest effective author records a
-    /// fresh patchset. An equal or omitted subject preserves that patchset
-    /// and its attribution; the unchanged output names the effective subject.
-    /// Earlier verdicts remain bound to their original patchsets.
+    /// signature-only preparation; snapshots record evidence, never a judgment. A head
+    /// whose rewrite invalidated approval requires a fresh patchset, even when the latest
+    /// patchset's mapped head already matches the branch. Re-approval requires a verdict on
+    /// that fresh patchset. Only the replay `arc rebase` performs itself records an
+    /// inherited author: it carries the author coordinates of the patchset whose head it
+    /// replayed, every contributor at its recorded model, and the replaying session is not
+    /// its implementer. That replay runs where the project's configuration cannot define a
+    /// merge driver or filter, and arc reads its result from the ref Git updated, not from
+    /// command output. A snapshot, or the snapshot after a rebase that fell back to `git
+    /// rebase` or stopped for resolution, records the head as its recorder's work unless
+    /// `--on-behalf-of` or `--contributors` declares another author. At unchanged content,
+    /// an explicit --on-behalf-of (also supplied by ARC_ON_BEHALF_OF) differing from the
+    /// latest effective author records a fresh patchset. An equal or omitted subject
+    /// preserves that patchset and its attribution; the unchanged output names the
+    /// effective subject. Earlier verdicts remain bound to their original patchsets.
     Snapshot {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1795,11 +1787,12 @@ enum Cmd {
     /// self-approval policy: permission to approve does not establish
     /// independent coverage. Planning and orchestrating never refuse.
     #[command(group(clap::ArgGroup::new("snapshot_attribution").args(["contributors", "solo"]).requires("snapshot")))]
-    /// Verdicts retain observed publication authority. A verified authority refusal
-    /// on a provisional delivery remains applicable across authority transfer.
-    /// Clearing it requires applicable explicit supersession; event-ID order and
-    /// wall clock cannot make an earlier approval supersede an unobserved refusal.
-    /// Scoped admission, trust and independence determine review eligibility.
+    /// Verdicts retain observed publication authority.
+    ///
+    /// A verified authority refusal on a provisional delivery remains applicable across
+    /// authority transfer. Clearing it requires applicable explicit supersession; event-ID
+    /// order and wall clock cannot make an earlier approval supersede an unobserved
+    /// refusal. Scoped admission, trust and independence determine review eligibility.
     Review {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1892,9 +1885,10 @@ enum Cmd {
         cmd: ExternalCmd,
     },
     /// Require publication gates at a local target branch's current head.
+    ///
     /// Use this guard from push and release tooling before publishing that revision.
-    /// Scratch checkout preparation and build leases follow .arc/worktrees.toml;
-    /// stable storage never substitutes for complete publication evidence.
+    /// Scratch checkout preparation and build leases follow .arc/worktrees.toml; stable
+    /// storage never substitutes for complete publication evidence.
     Publication {
         /// Local target branch whose committed gate declarations apply
         #[arg(long)]
@@ -1909,25 +1903,24 @@ enum Cmd {
         #[arg(long)]
         skip_green: bool,
     },
-    /// Run a declared gate (or ad hoc command) and record the evidence. Gate
-    /// evidence only counts at the change's own head, so the command runs in
-    /// the change's recorded worktree whichever checkout it was typed in;
-    /// `--attest` records evidence arc did not run. Acceptance executes local
-    /// head gates even when imported evidence passed, and selects probes from
-    /// the delivered patchset's bound brief. Baselines run in scratch checkouts.
-    /// Declared timeouts also bound output-pipe cleanup after the shell exits.
-    /// Arc kills the process group and does not wait for escaped descendants;
-    /// unfinished readers supply no output tail, diagnostic artifact or environment identity.
-    /// Executed gates capture combined stdout and stderr as private local
-    /// artifacts: the first 16 MiB per run, retaining 16 completed captures.
-    /// Events and status carry the producing store, relative path, retained
-    /// and observed SHA-256 digests and sizes, and truncation or capture errors.
-    /// Exports carry metadata only; expired files are unavailable diagnostics.
-    /// Attested evidence carries no output capture.
-    /// Configured path-stable build storage is leased through preparation,
-    /// environment probes and gates. Probes never prepare or compile;
-    /// unavailable storage supplies no environment identity. Storage reuse
-    /// never supplies a passing gate result.
+    /// Run a declared gate (or ad hoc command) and record the evidence.
+    ///
+    /// Gate evidence only counts at the change's own head, so the command runs in the
+    /// change's recorded worktree whichever checkout it was typed in; `--attest` records
+    /// evidence arc did not run. Acceptance executes local head gates even when imported
+    /// evidence passed, and selects probes from the delivered patchset's bound brief.
+    /// Baselines run in scratch checkouts. Declared timeouts also bound output-pipe cleanup
+    /// after the shell exits. Arc kills the process group and does not wait for escaped
+    /// descendants; unfinished readers supply no output tail, diagnostic artifact or
+    /// environment identity. Executed gates capture combined stdout and stderr as private
+    /// local artifacts: the first 16 MiB per run, retaining 16 completed captures. Events
+    /// and status carry the producing store, relative path, retained and observed SHA-256
+    /// digests and sizes, and truncation or capture errors. Exports carry metadata only;
+    /// expired files are unavailable diagnostics. Attested evidence carries no output
+    /// capture. Configured path-stable build storage is leased through preparation,
+    /// environment probes and gates. Probes never prepare or compile; unavailable storage
+    /// supplies no environment identity. Storage reuse never supplies a passing gate
+    /// result.
     Verify {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -2074,9 +2067,10 @@ enum Cmd {
         #[arg(long, value_name = "BRANCH")]
         against: Option<String>,
     },
-    /// Finish implementation: snapshot, verify all gates, then print check
-    /// state. A profile with no declared gate records no evidence and prints
-    /// that no gate is declared instead of a pass.
+    /// Finish implementation: snapshot, verify all gates, then print check state.
+    ///
+    /// A profile with no declared gate records no evidence and prints that no gate is
+    /// declared instead of a pass.
     ///
     /// The caller's live claim moves to `verifying` before the snapshot, and
     /// only after every snapshot input is accepted: the attribution,
@@ -2092,33 +2086,29 @@ enum Cmd {
         links: LinkOpts,
     },
     /// Replay a change's branch onto its target, then snapshot the new head.
-    /// Where Git can, arc replays with `git replay`: it runs no hooks, leaves
-    /// the worktree alone, and writes the new tip to a ref arc reads. The
-    /// replay runs in a temporary repository with no project configuration,
-    /// sharing only the object store, so a merge driver or filter the project
-    /// configures cannot run. The commits it creates carry no signature,
-    /// whatever the repository configures for commits it makes; `arc rewrite
-    /// sign` signs a replayed range. Such a replay is recorded as a mechanical
-    /// replay of the patchset whose head it replayed, carrying every
-    /// contributor's recorded coordinate, model included; the replaying
-    /// session is not its implementer, and the patchset names exactly the tip
-    /// that replay wrote. A `post-rewrite` hook, a reflog entry, a merge
-    /// driver, or an inherited `GIT_REFLOG_ACTION` cannot make ordinary work
-    /// look replayed. A Git that cannot replay, a refusal, or a conflict falls
-    /// back to `git rebase`, whose result is recorded as ordinary work; a
-    /// stopped rebase leaves its partial resolution in progress.
-    /// `--contributors` and `--solo` decide the replayed patchset's
-    /// contributor set; a declared member the replay carries over keeps its
-    /// recorded coordinate, and one it does not carry is credited as declared.
-    /// The snapshot links the artifact the change was opened from (`via: begin`)
-    /// and the plan its brief names (`via: brief`), one link per file; a file
-    /// named by both is linked once as `begin`. An unavailable artifact is
-    /// omitted with a warning on stderr.
-    /// Over another actor's live claim, a rebase without --contributors or
-    /// --solo refuses before the branch moves. The change stays locked from
-    /// that check until the replayed head is recorded, so a command acting on
-    /// the change during the replay reports the lock busy. The gates the
-    /// replayed head owes are named after it is recorded; a failure to
+    ///
+    /// Where Git can, arc replays with `git replay`: it runs no hooks, leaves the worktree
+    /// alone, and writes the new tip to a ref arc reads. The replay runs in a temporary
+    /// repository with no project configuration, sharing only the object store, so a merge
+    /// driver or filter the project configures cannot run. The commits it creates carry no
+    /// signature, whatever the repository configures for commits it makes; `arc rewrite
+    /// sign` signs a replayed range. Such a replay is recorded as a mechanical replay of
+    /// the patchset whose head it replayed, carrying every contributor's recorded
+    /// coordinate, model included; the replaying session is not its implementer, and the
+    /// patchset names exactly the tip that replay wrote. A `post-rewrite` hook, a reflog
+    /// entry, a merge driver, or an inherited `GIT_REFLOG_ACTION` cannot make ordinary work
+    /// look replayed. A Git that cannot replay, a refusal, or a conflict falls back to `git
+    /// rebase`, whose result is recorded as ordinary work; a stopped rebase leaves its
+    /// partial resolution in progress. `--contributors` and `--solo` decide the replayed
+    /// patchset's contributor set; a declared member the replay carries over keeps its
+    /// recorded coordinate, and one it does not carry is credited as declared. The snapshot
+    /// links the artifact the change was opened from (`via: begin`) and the plan its brief
+    /// names (`via: brief`), one link per file; a file named by both is linked once as
+    /// `begin`. An unavailable artifact is omitted with a warning on stderr. Over another
+    /// actor's live claim, a rebase without --contributors or --solo refuses before the
+    /// branch moves. The change stays locked from that check until the replayed head is
+    /// recorded, so a command acting on the change during the replay reports the lock busy.
+    /// The gates the replayed head owes are named after it is recorded; a failure to
     /// evaluate them is a warning, and the rebase still succeeds
     Rebase {
         /// Change to act on. Omitted, it is inferred from the current branch,
@@ -2221,6 +2211,7 @@ enum Cmd {
     /// builds outside Git report unknown.
     Env,
     /// Print a shell completion script to stdout
+    ///
     /// Records no events; ledger reads do not require a parseable append policy.
     Completions {
         /// Target shell
@@ -2228,16 +2219,18 @@ enum Cmd {
         shell: clap_complete::Shell,
     },
     /// Render the man page (arc.1) into a directory
+    ///
     /// Records no events; ledger reads do not require a parseable append policy.
     Mangen {
         /// Output directory (created if absent)
         out_dir: std::path::PathBuf,
     },
     /// Resume one change with its brief, live state, and journal context
-    /// Records no events; ledger reads do not require a parseable append policy.
-    /// Recorded producer models that are missing, placeholders or session ids
-    /// print as model not recorded. JSON production identities and review coverage retain raw values
-    /// with model_recorded: false; valid models omit the flag.
+    ///
+    /// Records no events; ledger reads do not require a parseable append policy. Recorded
+    /// producer models that are missing, placeholders or session ids print as model not
+    /// recorded. JSON production identities and review coverage retain raw values with
+    /// model_recorded: false; valid models omit the flag.
     Resume {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -2275,15 +2268,17 @@ enum Cmd {
         take: bool,
     },
     /// Print one stable statusline summary for the current change
+    ///
     /// Records no events; ledger reads do not require a parseable append policy.
     Prompt {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
         change: Option<String>,
     },
-    /// Fork this repository: a worktree on a fork/<slug> branch, outside
-    /// the change lifecycle. Unintegrated by intent; the operator decides
-    /// what to merge, rebase, or discard
+    /// Fork this repository: a worktree on a fork/<slug> branch, outside the change
+    /// lifecycle.
+    ///
+    /// Unintegrated by intent; the operator decides what to merge, rebase, or discard
     Fork {
         #[command(subcommand)]
         command: ForkCmd,
@@ -2774,24 +2769,26 @@ enum Cmd {
         #[command(subcommand)]
         cmd: PolicyCmd,
     },
-    /// Record local forge facts without contacting providers. Typed observation
-    /// admission preserves coverage, acquisition time and generation references;
-    /// legacy flag forms assert unretained facts with unknown acquisition time.
-    /// Recorded PR bindings survive import; provider/native identity separates
-    /// replacement PRs, and ambiguous unbound history stays unknown.
-    /// Stored conflicts and invalid facts remain readable as forge diagnostics;
-    /// projections naming unusable observations remain unresolved.
+    /// Record local forge facts without contacting providers.
+    ///
+    /// Typed observation admission preserves coverage, acquisition time and generation
+    /// references; legacy flag forms assert unretained facts with unknown acquisition time.
+    /// Recorded PR bindings survive import; provider/native identity separates replacement
+    /// PRs, and ambiguous unbound history stays unknown. Stored conflicts and invalid facts
+    /// remain readable as forge diagnostics; projections naming unusable observations
+    /// remain unresolved.
     Forge {
         #[command(subcommand)]
         cmd: ForgeCmd,
     },
     /// Show resolved paths and style values with sources as arc-config/1 JSON
+    ///
     /// Style precedence: flag, operator defaults, HEAD project defaults, user, builtin.
-    /// Style inspection parses user configuration and repository policy;
-    /// malformed style or constraint tables and known keys refuse with file and key.
-    /// A missing user configuration selects built-in settings; filesystem
-    /// access errors refuse with the path and cause.
-    /// Records no events; ledger reads do not require a parseable append policy.
+    /// Style inspection parses user configuration and repository policy; malformed style or
+    /// constraint tables and known keys refuse with file and key. A missing user
+    /// configuration selects built-in settings; filesystem access errors refuse with the
+    /// path and cause. Records no events; ledger reads do not require a parseable append
+    /// policy.
     Config {
         /// Probe every local path required to write the ledger
         #[arg(long)]
@@ -2807,27 +2804,25 @@ enum Cmd {
         cmd: SandboxCmd,
     },
     /// Check the append-only ledger for malformed or stale state (read-only)
-    /// Reports the build commit and tracked-tree clean/dirty state in text
-    /// and arc-doctor/6 JSON; builds outside Git report unknown.
-    /// An unreadable or malformed project or operator policy is the problem
-    /// `policy-unreadable`, naming the file and error.
-    /// Unfinished provisional transitions report their merge, refs, event state,
-    /// retained intent and exact recovery command as problems.
-    /// A `refs/arc/retained` ref whose object is gone is the problem
-    /// `retained-object-missing`; a commit the ledger cites as a patchset head
-    /// or a verdict's revision, or that a forge fact records as the provider's
-    /// own, that no ref reaches is the advice `unretained-commit`, with the
-    /// `git update-ref` that holds it. A custody file whose bytes do not hash
-    /// to its name is the advice `custody-content-mismatch`, and a temporary
-    /// file an interrupted custody write left over an hour ago is the advice
-    /// `custody-temp-orphaned`; neither is removed. An unreadable custody
-    /// directory, or one that is a symlink, is the problem `custody-unreadable`.
-    /// A failed reachability walk is the problem `retention-reachability-failed`;
-    /// the report retains all findings collected before that failure.
-    /// A change whose events fail to reduce is the problem `unreplayable-change`,
-    /// naming the change with the reduction error. Admitted active rewrites
-    /// prove falsification identity without advancing recorded revisions;
-    /// dangling revision diagnostics still inspect the recorded objects.
+    ///
+    /// Reports the build commit and tracked-tree clean/dirty state in text and arc-doctor/6
+    /// JSON; builds outside Git report unknown. An unreadable or malformed project or
+    /// operator policy is the problem `policy-unreadable`, naming the file and error.
+    /// Unfinished provisional transitions report their merge, refs, event state, retained
+    /// intent and exact recovery command as problems. A `refs/arc/retained` ref whose
+    /// object is gone is the problem `retained-object-missing`; a commit the ledger cites
+    /// as a patchset head or a verdict's revision, or that a forge fact records as the
+    /// provider's own, that no ref reaches is the advice `unretained-commit`, with the `git
+    /// update-ref` that holds it. A custody file whose bytes do not hash to its name is the
+    /// advice `custody-content-mismatch`, and a temporary file an interrupted custody write
+    /// left over an hour ago is the advice `custody-temp-orphaned`; neither is removed. An
+    /// unreadable custody directory, or one that is a symlink, is the problem
+    /// `custody-unreadable`. A failed reachability walk is the problem
+    /// `retention-reachability-failed`; the report retains all findings collected before
+    /// that failure. A change whose events fail to reduce is the problem
+    /// `unreplayable-change`, naming the change with the reduction error. Admitted active
+    /// rewrites prove falsification identity without advancing recorded revisions; dangling
+    /// revision diagnostics still inspect the recorded objects.
     ///
     /// Exits 0 when the ledger is clean or carries only advice, and 1 when it
     /// reports a problem. A ledger that cannot be read at all also exits 1,
@@ -2858,9 +2853,10 @@ enum Cmd {
         cmd: WorkspaceCmd,
     },
     /// Advise (never execute) rebases for open dependents of a change
-    /// Aggregate reads name unreadable changes with their errors on stderr
-    /// and retain readable changes; a selected unreadable change fails
-    /// Records no events; ledger reads do not require a parseable append policy.
+    ///
+    /// Aggregate reads name unreadable changes with their errors on stderr and retain
+    /// readable changes; a selected unreadable change fails Records no events; ledger reads
+    /// do not require a parseable append policy.
     Restack {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -2878,35 +2874,33 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Orient a session: ledger queue, journal backlog, live lanes, and recent
-    /// sessions across harnesses. Recent activity without filed artifacts or a
-    /// naming handoff/conclusion is marked unfiled. Filing counts include direct
-    /// writes and published transition successors, with import and spool provenance.
-    /// Stale filings name the `journal filed` query; plain reads record no activity.
-    /// Project memories precede global memory titles with their ages in days;
-    /// bodies are read on demand with journal show --global. An unavailable
-    /// journal carries its own warning, including global_memory_error or
-    /// project_journal_error in JSON; readable sources remain in the output.
-    /// Each recording backend is queried once with an unrestricted candidate window.
-    /// Backend scan bounds and failures appear in session_discovery_errors; readable
-    /// rows remain ranked by recorded activity. Pending transitions carry a diagnostic
-    /// and do not count as filings or naming handoffs/conclusions.
-    /// Publication requires the supersedes link and a complete staged body match
-    /// or the source's recorded retirement; a readable successor prefix is insufficient.
-    /// Text warns when the running build differs from HEAD in an arc-ledger
-    /// checkout: older for an ancestor, differs otherwise, with dirty builds
-    /// identified. Other projects and unknown build revisions have no warning.
-    /// Unreadable changes are named with their errors on stderr; readable
-    /// changes remain in the output
-    /// The worktree filesystem is measured at the configured worktree root; a
-    /// configuration that cannot be loaded measures the current checkout and
-    /// warns on stderr
-    /// Provisional integration obligations have a separate section and do not count as review debt.
-    /// Recorded producer models that are missing, placeholders or session ids
-    /// print as model not recorded. JSON production identities and review coverage retain raw values
-    /// with model_recorded: false; valid models omit the flag.
-    /// JSON recent sessions retain raw models with model_recorded: false when
-    /// the model is missing, a placeholder or a session id; valid models omit it.
+    /// Orient a session: ledger queue, journal backlog, live lanes, and recent sessions
+    /// across harnesses.
+    ///
+    /// Recent activity without filed artifacts or a naming handoff/conclusion is marked
+    /// unfiled. Filing counts include direct writes and published transition successors,
+    /// with import and spool provenance. Stale filings name the `journal filed` query;
+    /// plain reads record no activity. Project memories precede global memory titles with
+    /// their ages in days; bodies are read on demand with journal show --global. An
+    /// unavailable journal carries its own warning, including global_memory_error or
+    /// project_journal_error in JSON; readable sources remain in the output. Each recording
+    /// backend is queried once with an unrestricted candidate window. Backend scan bounds
+    /// and failures appear in session_discovery_errors; readable rows remain ranked by
+    /// recorded activity. Pending transitions carry a diagnostic and do not count as
+    /// filings or naming handoffs/conclusions. Publication requires the supersedes link and
+    /// a complete staged body match or the source's recorded retirement; a readable
+    /// successor prefix is insufficient. Text warns when the running build differs from
+    /// HEAD in an arc-ledger checkout: older for an ancestor, differs otherwise, with dirty
+    /// builds identified. Other projects and unknown build revisions have no warning.
+    /// Unreadable changes are named with their errors on stderr; readable changes remain in
+    /// the output The worktree filesystem is measured at the configured worktree root; a
+    /// configuration that cannot be loaded measures the current checkout and warns on
+    /// stderr Provisional integration obligations have a separate section and do not count
+    /// as review debt. Recorded producer models that are missing, placeholders or session
+    /// ids print as model not recorded. JSON production identities and review coverage
+    /// retain raw values with model_recorded: false; valid models omit the flag. JSON
+    /// recent sessions retain raw models with model_recorded: false when the model is
+    /// missing, a placeholder or a session id; valid models omit it.
     ///
     /// Human ledger sections name guide topics for the blockers already observed.
     Catchup {
@@ -2923,9 +2917,11 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// File a feature request in the project journal: the discoverable alias
-    /// for `arc journal note --kind feature-request`. Read the queue back with
-    /// `arc journal open` or `arc journal list --kind feature-request`
+    /// File a feature request in the project journal: the discoverable alias for `arc
+    /// journal note --kind feature-request`.
+    ///
+    /// Read the queue back with `arc journal open` or `arc journal list --kind
+    /// feature-request`
     Fr {
         /// The alias mounts the kind verb's own arguments rather than
         /// restating them, so the two cannot drift apart.
@@ -2933,9 +2929,10 @@ enum Cmd {
         write: journal::KindWrite,
     },
     /// Cross-harness project and operator journals over plain Markdown.
-    /// Events replay in append order; timestamps record observation time.
-    /// Project reads also resolve from their journal directory; project writes
-    /// name the checkout they need. --global works from any directory.
+    ///
+    /// Events replay in append order; timestamps record observation time. Project reads
+    /// also resolve from their journal directory; project writes name the checkout they
+    /// need. --global works from any directory.
     Journal {
         /// Target the operator journal at <ai-home>/arc/journals/global, from
         /// any directory. All journal kinds share this scope. With promote,
@@ -2955,6 +2952,7 @@ enum ReplicaCmd {
         cmd: ReplicaProvisionalCmd,
     },
     /// Print this store's repository ID for an explicit pairing record
+    ///
     /// Records no events; ledger reads do not require a parseable append policy.
     Id {
         /// Emit the machine-readable JSON view
@@ -2974,8 +2972,9 @@ enum ReplicaCmd {
         #[arg(long = "repository-id")]
         repository_id: String,
     },
-    /// Export this replica's known identity and authority events.
-    /// source_replica_id identifies the exporter; event origins remain intact.
+    /// Export this replica's known identity and authority events. source_replica_id
+    /// identifies the exporter; event origins remain intact.
+    ///
     /// Records no events; ledger reads do not require a parseable append policy.
     Export {
         /// Output file ('-' for stdout)
@@ -2983,11 +2982,11 @@ enum ReplicaCmd {
         output: String,
     },
     /// Import a pairing record or authority exchange from another replica.
-    /// Imported IDs stay intact; local replica issuance shares the ledger's
-    /// ID order across processes.
-    /// Paired stores and enrolled receivers require --publisher and
-    /// --received-sha256. Pairing grants membership, never publishing permission.
-    /// Accepts arc-replica-bundle/3 and /2; absent model provenance stays absent
+    ///
+    /// Imported IDs stay intact; local replica issuance shares the ledger's ID order across
+    /// processes. Paired stores and enrolled receivers require --publisher and
+    /// --received-sha256. Pairing grants membership, never publishing permission. Accepts
+    /// arc-replica-bundle/3 and /2; absent model provenance stays absent
     Import {
         /// Input file ('-' for stdin)
         input: String,
@@ -3002,6 +3001,7 @@ enum ReplicaCmd {
         dry_run: bool,
     },
     /// Show this store's replica, peers, and current authority
+    ///
     /// Records no events; ledger reads do not require a parseable append policy.
     Status {
         /// Emit the machine-readable JSON view
@@ -3017,8 +3017,10 @@ enum ReplicaCmd {
 
 #[derive(Subcommand)]
 enum ReplicaProvisionalCmd {
-    /// Resolve late delivery against this change's accepting integration. Requires current authority.
-    /// Forge obligations require asserted integration with the exact external reference.
+    /// Resolve late delivery against this change's accepting integration.
+    ///
+    /// Requires current authority. Forge obligations require asserted integration with the
+    /// exact external reference.
     Resolve {
         /// Change whose provisional delivery is being reconciled.
         change: String,
@@ -3099,10 +3101,10 @@ enum ForkCmd {
         force: bool,
     },
     /// List every fork this repository knows about
-    /// Unreadable change promotions are named with their errors on stderr;
-    /// readable promotions remain in the output. JSON uses arc-forks/3;
-    /// base_branch is null when no integration branch can be established.
-    /// Text renders that missing base as unknown
+    ///
+    /// Unreadable change promotions are named with their errors on stderr; readable
+    /// promotions remain in the output. JSON uses arc-forks/3; base_branch is null when no
+    /// integration branch can be established. Text renders that missing base as unknown
     /// Records no events; ledger reads do not require a parseable append policy.
     List {
         /// Emit the machine-readable JSON view instead of text
@@ -3124,6 +3126,7 @@ enum ForkCmd {
 #[derive(Subcommand)]
 enum InstructionsCmd {
     /// Git contribution trailers and commit provenance, with no arc state
+    ///
     /// Records no events; ledger reads do not require a parseable append policy.
     Git {
         /// Report malformed role values, placeholder role values (a
@@ -3139,20 +3142,24 @@ enum InstructionsCmd {
 
 #[derive(Subcommand)]
 enum PolicyCmd {
-    /// Show effective policy, publishing enrollments, review trust, gate
-    /// environment probes, and each declaring file. Replica grants are operator-only.
-    /// Records no events; ledger reads do not require a parseable append policy.
+    /// Show effective policy, publishing enrollments, review trust, gate environment
+    /// probes, and each declaring file.
+    ///
+    /// Replica grants are operator-only. Records no events; ledger reads do not require a
+    /// parseable append policy.
     Show,
     /// Print the operator policy file path for this repository
+    ///
     /// Records no events; ledger reads do not require a parseable append policy.
     Path,
     /// Replace the operator policy file with TOML from a file or stdin.
-    /// Replacement shares the admission publication lock.
-    /// Publishing principals and trusted review origins in [replica] are operator-only.
-    /// Provisional preparation settings may also be declared by canonical project policy. Privileged roles require explicit actor allowlists.
-    /// Style uses [defaults.change] and [defaults.integration]; constraints use
-    /// [integration] shapes and history. Malformed tables and invalid known keys
-    /// refuse with file and key before writing.
+    ///
+    /// Replacement shares the admission publication lock. Publishing principals and trusted
+    /// review origins in [replica] are operator-only. Provisional preparation settings may
+    /// also be declared by canonical project policy. Privileged roles require explicit
+    /// actor allowlists. Style uses [defaults.change] and [defaults.integration];
+    /// constraints use [integration] shapes and history. Malformed tables and invalid known
+    /// keys refuse with file and key before writing.
     Write {
         /// Read TOML from a file ('-' for stdin)
         #[arg(long, required = true, value_name = "FILE")]
@@ -3162,9 +3169,10 @@ enum PolicyCmd {
 
 #[derive(Subcommand)]
 enum ExternalCmd {
-    /// Record an external verdict at the revision its decision covered. A
-    /// rejection of the latest patchset closes the change as abandoned.
-    /// An external approval never supersedes a local refusal
+    /// Record an external verdict at the revision its decision covered.
+    ///
+    /// A rejection of the latest patchset closes the change as abandoned. An external
+    /// approval never supersedes a local refusal
     Verdict {
         /// Change that received the external decision
         change: String,
@@ -3192,23 +3200,23 @@ enum ExternalCmd {
 #[derive(Subcommand)]
 enum WorkspaceCmd {
     /// Per-repo open-change rows across the data_root
-    /// Unreadable changes are named with their errors on stderr; readable
-    /// changes remain in the output
-    /// Records no events; ledger reads do not require a parseable append policy.
+    ///
+    /// Unreadable changes are named with their errors on stderr; readable changes remain in
+    /// the output Records no events; ledger reads do not require a parseable append policy.
     List {
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
     },
-    /// The inbox rollup for every registered project, including the count of
-    /// open actionable filings untouched for more than 14 days. Plain reads
-    /// record no activity; active claims suppress staleness.
-    /// Unreadable changes are named with their errors on stderr; readable
-    /// changes remain in the output
-    /// Records no events; ledger reads do not require a parseable append policy.
-    /// Recorded producer models that are missing, placeholders or session ids
-    /// print as model not recorded. JSON production identities and review coverage retain raw values
-    /// with model_recorded: false; valid models omit the flag.
+    /// The inbox rollup for every registered project, including the count of open
+    /// actionable filings untouched for more than 14 days.
+    ///
+    /// Plain reads record no activity; active claims suppress staleness. Unreadable changes
+    /// are named with their errors on stderr; readable changes remain in the output Records
+    /// no events; ledger reads do not require a parseable append policy. Recorded producer
+    /// models that are missing, placeholders or session ids print as model not recorded.
+    /// JSON production identities and review coverage retain raw values with
+    /// model_recorded: false; valid models omit the flag.
     Inbox {
         /// Report only projects whose canonical anchor is beneath this path
         #[arg(long, value_name = "PATH", conflicts_with_all = ["here", "global"])]
@@ -3223,13 +3231,14 @@ enum WorkspaceCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Every artifact across the selected stores, each with why it is where
-    /// it is: present, terminal, archived, or superseded. It accepts the same
-    /// `--under`/`--here`/`--global` scope, reports the same collection
+    /// Every artifact across the selected stores, each with why it is where it is: present,
+    /// terminal, archived, or superseded.
+    ///
+    /// It accepts the same `--under`/`--here`/`--global` scope, reports the same collection
     /// manifest, exits 16 on a partial collection, and is versioned
     /// `arc-workspace-inventory/2`. A retired registration is counted as
-    /// `collection.retired`, never observed or failed.
-    /// Records no events; ledger reads do not require a parseable append policy.
+    /// `collection.retired`, never observed or failed. Records no events; ledger reads do
+    /// not require a parseable append policy.
     Inventory {
         /// Read the hot journal directory, the cold archive, or both
         #[arg(long, value_enum, default_value_t = commands::StorageSelection::Hot)]
@@ -3251,20 +3260,19 @@ enum WorkspaceCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Ledger and journal backlog across every project, ranked by what is
-    /// blocked on a decision rather than on work. Debt rows carry their
-    /// verbatim `reason` and optional `patchset_id`, and list only debt that
-    /// is owed: one declared on a change that has not integrated, or already
-    /// discharged, is not backlog. A partial collection keeps
-    /// the projects it did read, names each failure, and exits 16.
-    /// A retired registration is counted as `collection.retired`, never
-    /// observed, failed, or unreachable
-    /// Change observations name unreadable changes with their errors on
-    /// stderr and retain readable changes
-    /// Records no events; ledger reads do not require a parseable append policy.
-    /// Recorded producer models that are missing, placeholders or session ids
-    /// print as model not recorded. JSON production identities and review coverage retain raw values
-    /// with model_recorded: false; valid models omit the flag.
+    /// Ledger and journal backlog across every project, ranked by what is blocked on a
+    /// decision rather than on work.
+    ///
+    /// Debt rows carry their verbatim `reason` and optional `patchset_id`, and list only
+    /// debt that is owed: one declared on a change that has not integrated, or already
+    /// discharged, is not backlog. A partial collection keeps the projects it did read,
+    /// names each failure, and exits 16. A retired registration is counted as
+    /// `collection.retired`, never observed, failed, or unreachable Change observations
+    /// name unreadable changes with their errors on stderr and retain readable changes
+    /// Records no events; ledger reads do not require a parseable append policy. Recorded
+    /// producer models that are missing, placeholders or session ids print as model not
+    /// recorded. JSON production identities and review coverage retain raw values with
+    /// model_recorded: false; valid models omit the flag.
     Backlog {
         /// Count only journal items filed at or after this journal stamp
         /// (20260101T000000Z) or RFC 3339 timestamp, so the tiers read as
@@ -3318,14 +3326,15 @@ enum WorkspaceCmd {
     /// listed below by rule, never change the exit code. The report writes
     /// nothing.
     #[command(after_help = commands::report_rules_help())]
-    /// Change observations name unreadable changes with their errors on
-    /// stderr and retain readable changes
-    /// Records no events; ledger reads do not require a parseable append policy.
-    /// A separate provisional integration section carries recipient, age, refusal and reconciliation evidence.
-    /// Unfinished transitions have a separate section with refs, event publication and recovery commands.
-    /// Debt implementers print as model not recorded when their model is absent,
-    /// a placeholder or a session id. JSON retains the raw implementer beside
-    /// model_recorded: false; valid models omit the flag.
+    /// Change observations name unreadable changes with their errors on stderr and retain
+    /// readable changes
+    ///
+    /// Records no events; ledger reads do not require a parseable append policy. A separate
+    /// provisional integration section carries recipient, age, refusal and reconciliation
+    /// evidence. Unfinished transitions have a separate section with refs, event
+    /// publication and recovery commands. Debt implementers print as model not recorded
+    /// when their model is absent, a placeholder or a session id. JSON retains the raw
+    /// implementer beside model_recorded: false; valid models omit the flag.
     Report {
         /// Report only projects whose canonical anchor is beneath this path
         #[arg(long, value_name = "PATH", conflicts_with_all = ["here", "global"])]
@@ -3399,12 +3408,12 @@ enum WorkspaceCmd {
         #[arg(long)]
         json: bool,
     },
-    /// End a registration's retirement, recording why. The registration is
-    /// observed again, and counts as unreachable while its anchor is missing.
-    /// Artifacts archived with the retirement stay archived;
-    /// `arc journal unarchive <file>` in the project's checkout brings each
-    /// back. A registration that is not retired refuses and exits 1.
-    /// Versioned `arc-workspace-retirement/1`.
+    /// End a registration's retirement, recording why.
+    ///
+    /// The registration is observed again, and counts as unreachable while its anchor is
+    /// missing. Artifacts archived with the retirement stay archived; `arc journal
+    /// unarchive <file>` in the project's checkout brings each back. A registration that is
+    /// not retired refuses and exits 1. Versioned `arc-workspace-retirement/1`.
     Restore {
         /// The registration: its journal directory, slug, or anchor
         project: String,
@@ -3429,8 +3438,9 @@ enum SandboxCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Report what a sandbox's ledger events, journal events, and Git refs
-    /// differ by from the project it was cloned from
+    /// Report what a sandbox's ledger events, journal events, and Git refs differ by from
+    /// the project it was cloned from
+    ///
     /// Records no events; ledger reads do not require a parseable append policy.
     Diff {
         /// Prefix holding the sandbox
@@ -3463,19 +3473,21 @@ enum HooksCmd {
     /// Remove arc-authored hook scripts (leaves foreign hooks untouched)
     Uninstall,
     /// Report which hooks are installed and whether arc manages them
+    ///
     /// Records no events; ledger reads do not require a parseable append policy.
     Status,
 }
 
 #[derive(Subcommand)]
 enum ForgeCmd {
-    /// Reconstruct recorded forge content offline. Observation selection freezes
-    /// forge content; local rewrite resolution and custody availability are current
-    /// reads. Includes typed deliveries, disclosure selections, exact source/byte
-    /// availability and candidate/manual acceptance relationships. Local integration
-    /// and provider lifecycle are independent; closed means closed-unmerged.
-    /// Coalesced event aliases remain exact sources; conflicting reads are labelled.
-    /// This command records nothing and never contacts a provider.
+    /// Reconstruct recorded forge content offline.
+    ///
+    /// Observation selection freezes forge content; local rewrite resolution and custody
+    /// availability are current reads. Includes typed deliveries, disclosure selections,
+    /// exact source/byte availability and candidate/manual acceptance relationships. Local
+    /// integration and provider lifecycle are independent; closed means closed-unmerged.
+    /// Coalesced event aliases remain exact sources; conflicting reads are labelled. This
+    /// command records nothing and never contacts a provider.
     Show {
         /// Change whose recorded forge content is reconstructed
         #[arg(conflicts_with_all = ["provider", "host", "repo", "pr"])]
@@ -3508,30 +3520,27 @@ enum ForgeCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Admit an adapter arc-forge-observation/1 file, including failed or
-    /// truncated reads. Records references only, never fetches bytes or
-    /// changes readiness. Retries of identical read IDs return the receipt.
-    /// Generations use stable provider/PR/item identity across retargeting;
-    /// repository/ref and URL snapshots retain the values from each read.
-    /// Admission refuses invalid input. Import judges a received read against
-    /// the reads before it and a received projection against the read, link
-    /// and declaration it was recorded with, never against the state merged
-    /// history makes current. Replay coalesces identical replica reads,
-    /// retains conflicts and invalid facts with diagnostics, and quarantines
-    /// their projections; it never refuses a stored fact on validation alone.
-    /// --custody-dir copies adapter-materialized bytes into the ledger's
-    /// custody: for each reference the document names, the file at
-    /// DIR/sha256/<digest> (digest in lowercase hex), if the adapter supplied
-    /// one. Each file must be a regular file inside DIR with exactly the
-    /// reference's length and sha256; a symlink leaving DIR, a non-regular
-    /// file or a mismatch refuses before any event or file is written. Files
-    /// the document does not reference are never read, and a reference with no
-    /// file stays unavailable. Arc resolves no provider handle. The receipt
-    /// reads each reference as available, unavailable (no bytes held) or
-    /// corrupt (held bytes fail length or sha256), and says which generation
-    /// or response it supports; absent bytes are never read as empty. A retry
-    /// of an already recorded read with --custody-dir publishes bytes that
-    /// are missing or damaged. Custody never follows a symlink: a ledger
+    /// Admit an adapter arc-forge-observation/1 file, including failed or truncated reads.
+    ///
+    /// Records references only, never fetches bytes or changes readiness. Retries of
+    /// identical read IDs return the receipt. Generations use stable provider/PR/item
+    /// identity across retargeting; repository/ref and URL snapshots retain the values from
+    /// each read. Admission refuses invalid input. Import judges a received read against
+    /// the reads before it and a received projection against the read, link and declaration
+    /// it was recorded with, never against the state merged history makes current. Replay
+    /// coalesces identical replica reads, retains conflicts and invalid facts with
+    /// diagnostics, and quarantines their projections; it never refuses a stored fact on
+    /// validation alone. --custody-dir copies adapter-materialized bytes into the ledger's
+    /// custody: for each reference the document names, the file at DIR/sha256/<digest>
+    /// (digest in lowercase hex), if the adapter supplied one. Each file must be a regular
+    /// file inside DIR with exactly the reference's length and sha256; a symlink leaving
+    /// DIR, a non-regular file or a mismatch refuses before any event or file is written.
+    /// Files the document does not reference are never read, and a reference with no file
+    /// stays unavailable. Arc resolves no provider handle. The receipt reads each reference
+    /// as available, unavailable (no bytes held) or corrupt (held bytes fail length or
+    /// sha256), and says which generation or response it supports; absent bytes are never
+    /// read as empty. A retry of an already recorded read with --custody-dir publishes
+    /// bytes that are missing or damaged. Custody never follows a symlink: a ledger
     /// `custody/` or `custody/sha256` that is one refuses the write.
     Observe {
         /// Change whose append-only ledger receives the read
@@ -3547,6 +3556,7 @@ enum ForgeCmd {
         json: bool,
     },
     /// Declare the explicit projection tuple and policy for a change.
+    ///
     /// Reads no provider and records no acquisition or retained content.
     Declare {
         /// Change the projection is declared for
@@ -3571,9 +3581,10 @@ enum ForgeCmd {
         policy: String,
     },
     /// Record the provider-observed PR tuple (validated, fail-closed).
-    /// Observed SHAs are preserved; local rewrite successors are separate views.
-    /// The source observation's provider/native PR identity is retained so a
-    /// replacement native PR cannot inherit checks or lifecycle by URL or number.
+    ///
+    /// Observed SHAs are preserved; local rewrite successors are separate views. The source
+    /// observation's provider/native PR identity is retained so a replacement native PR
+    /// cannot inherit checks or lifecycle by URL or number.
     Link {
         /// Usable recorded observation event or read ID; explicit flags must agree.
         /// Conflicting and invalid observations are refused as projection sources.
@@ -3608,12 +3619,12 @@ enum ForgeCmd {
         head_sha: Option<String>,
     },
     /// Record the provider-observed hosted-check rollup at an exact PR head.
+    ///
     /// The rollup binds to the current link, which retains its observation's
-    /// provider/native PR identity; matching numbers or URLs do not bind a
-    /// replacement native PR. Import order never rebinds it; ambiguous legacy
-    /// bindings remain unknown. Applicability compares the raw head to the
-    /// patchset's approval anchor. Content and trailer rewrite successors
-    /// require a fresh snapshot.
+    /// provider/native PR identity; matching numbers or URLs do not bind a replacement
+    /// native PR. Import order never rebinds it; ambiguous legacy bindings remain unknown.
+    /// Applicability compares the raw head to the patchset's approval anchor. Content and
+    /// trailer rewrite successors require a fresh snapshot.
     Checks {
         /// Usable recorded observation event or read ID; explicit flags must agree.
         /// Conflicting and invalid observations are refused as projection sources.
@@ -3640,14 +3651,14 @@ enum ForgeCmd {
         detail: Option<String>,
     },
     /// Record the provider-observed PR lifecycle state.
-    /// Local integration is independent of provider closure: closed means
-    /// closed-unmerged; merged requires an observed merge SHA. Neither grants
-    /// a local verdict or approval.
+    ///
+    /// Local integration is independent of provider closure: closed means closed-unmerged;
+    /// merged requires an observed merge SHA. Neither grants a local verdict or approval.
     /// The head is the current link's observed head, never its local successor.
-    /// Applicability requires its stable provider/native PR identity; matching
-    /// display URLs, numbers or refs do not identify a replacement native PR.
-    /// Unbound older facts need a prior link from their recording repository
-    /// and an unambiguous link history to describe the current PR.
+    /// Applicability requires its stable provider/native PR identity; matching display
+    /// URLs, numbers or refs do not identify a replacement native PR. Unbound older facts
+    /// need a prior link from their recording repository and an unambiguous link history to
+    /// describe the current PR.
     PrState {
         /// Usable recorded observation event or read ID; explicit flags must agree.
         /// Conflicting and invalid observations are refused as projection sources.
@@ -3674,14 +3685,14 @@ enum ForgeCmd {
 
 #[derive(Subcommand)]
 enum HistoryCmd {
-    /// Withdraw a recorded history-rewritten map by event ID; other event
-    /// types are refused. Ref moves are not undone and retention refs are
-    /// kept; output names recorded moves and retention refs, or says when the
-    /// map has no ref-move information. Withdrawals
-    /// travel with maps in bundles and are honoured by importing replicas.
-    /// A falsification reference storing a rewritten failure revision needs
-    /// an active map to replay; re-record the actual map with history rewrite
-    /// when that proof is required
+    /// Withdraw a recorded history-rewritten map by event ID; other event types are
+    /// refused.
+    ///
+    /// Ref moves are not undone and retention refs are kept; output names recorded moves
+    /// and retention refs, or says when the map has no ref-move information. Withdrawals
+    /// travel with maps in bundles and are honoured by importing replicas. A falsification
+    /// reference storing a rewritten failure revision needs an active map to replay;
+    /// re-record the actual map with history rewrite when that proof is required
     Withdraw {
         /// Exact repository event ID of the history-rewritten map
         event_id: String,
@@ -3689,17 +3700,17 @@ enum HistoryCmd {
         #[arg(long)]
         reason: String,
     },
-    /// Record a rewrite performed elsewhere, with its commit map. Active
-    /// maps must agree; a withdrawn map does not constrain its replacement.
-    /// Re-recording the actual map restores proof for falsification references
-    /// that store a rewritten failure revision, without editing ledger events.
-    /// Moves no refs, but holds each commit the ledger cites as a patchset
-    /// head or a verdict's revision that the map replaces and this repository
-    /// still has under `refs/arc/retained/<change>/<subject>/<commit>`, named
-    /// by the event's `retained` map; a cited commit already gone is named
-    /// and cannot be held. An append error withdraws retention refs created
-    /// by that attempt only when publication is confirmed absent; a published
-    /// or uncertain event keeps them, and the error reports that state
+    /// Record a rewrite performed elsewhere, with its commit map.
+    ///
+    /// Active maps must agree; a withdrawn map does not constrain its replacement.
+    /// Re-recording the actual map restores proof for falsification references that store a
+    /// rewritten failure revision, without editing ledger events. Moves no refs, but holds
+    /// each commit the ledger cites as a patchset head or a verdict's revision that the map
+    /// replaces and this repository still has under
+    /// `refs/arc/retained/<change>/<subject>/<commit>`, named by the event's `retained`
+    /// map; a cited commit already gone is named and cannot be held. An append error
+    /// withdraws retention refs created by that attempt only when publication is confirmed
+    /// absent; a published or uncertain event keeps them, and the error reports that state
     Rewrite {
         /// Commit map (`<old> <new>` per line, as git filter-repo writes), or
         /// '-' for stdin. An old revision may abbreviate a cited SHA-1 or
@@ -3716,8 +3727,9 @@ enum HistoryCmd {
         tool: Option<String>,
     },
     /// Show where a recorded revision ended up through active maps.
-    /// Withdrawn maps are ignored; exits 2 when no recorded rewrite moved it
-    /// Records no events; ledger reads do not require a parseable append policy.
+    ///
+    /// Withdrawn maps are ignored; exits 2 when no recorded rewrite moved it Records no
+    /// events; ledger reads do not require a parseable append policy.
     Resolve {
         /// A revision a rewrite may have moved; the surviving one is printed
         revision: String,
@@ -4000,21 +4012,21 @@ enum CandidateCmd {
         #[arg(long = "custody-dir", value_name = "DIR", requires = "evidence_file")]
         custody_dir: Option<String>,
     },
-    /// Show one candidate: tree, contract, producers, parents, adoptions,
-    /// episodes, judgements, retirement, whether its pin holds the tree,
-    /// evaluations, selections naming it (promoted, superseded, or not
-    /// promoted), promotion refs no `candidate-promoted` event records, and
-    /// every registration sharing its tree. Evidence received from an external
-    /// execution is `received_evidence` with `origin: external`: each head as
-    /// reported beside `resolved_commit`, the commit's resolution through
-    /// recorded rewrites (itself, its successor, or null when dropped);
-    /// `tested_tree_is_registered_tree`; provenance by role; each receipt with
-    /// its custody availability (available, unavailable or corrupt); commands,
-    /// environment, applicability and omissions; and `diagnostics`, the heads
-    /// whose commit is held here with another tree or as another kind of
-    /// object (code, role, commit, detail). It is null without evidence,
-    /// and none of it is an evaluation. `--json` emits `arc-candidate/1`
-    /// Records no events; ledger reads do not require a parseable append policy.
+    /// Show one candidate: tree, contract, producers, parents, adoptions, episodes,
+    /// judgements, retirement, whether its pin holds the tree, evaluations, selections
+    /// naming it (promoted, superseded, or not promoted), promotion refs no
+    /// `candidate-promoted` event records, and every registration sharing its tree.
+    ///
+    /// Evidence received from an external execution is `received_evidence` with `origin:
+    /// external`: each head as reported beside `resolved_commit`, the commit's resolution
+    /// through recorded rewrites (itself, its successor, or null when dropped);
+    /// `tested_tree_is_registered_tree`; provenance by role; each receipt with its custody
+    /// availability (available, unavailable or corrupt); commands, environment,
+    /// applicability and omissions; and `diagnostics`, the heads whose commit is held here
+    /// with another tree or as another kind of object (code, role, commit, detail). It is
+    /// null without evidence, and none of it is an evaluation. `--json` emits
+    /// `arc-candidate/1` Records no events; ledger reads do not require a parseable append
+    /// policy.
     Show {
         /// Candidate id
         id: String,
@@ -4022,10 +4034,11 @@ enum CandidateCmd {
         #[arg(long)]
         json: bool,
     },
-    /// List registrations as `show` renders them, received evidence included
-    /// and labelled external, grouping every tree more than one registration
-    /// names under `shared_trees`. `--json` emits `arc-candidate/1`
-    /// Records no events; ledger reads do not require a parseable append policy.
+    /// List registrations as `show` renders them, received evidence included and labelled
+    /// external, grouping every tree more than one registration names under `shared_trees`.
+    ///
+    /// `--json` emits `arc-candidate/1` Records no events; ledger reads do not require a
+    /// parseable append policy.
     List {
         /// Only candidates answering this change's brief
         #[arg(long)]
@@ -4034,10 +4047,11 @@ enum CandidateCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Record a judgement of a candidate by its declarant: rejected, or
-    /// superseded by another registration. A judgement changes no
-    /// registration and selects nothing; `unknown-candidate` refuses an id
-    /// not registered
+    /// Record a judgement of a candidate by its declarant: rejected, or superseded by
+    /// another registration.
+    ///
+    /// A judgement changes no registration and selects nothing; `unknown-candidate` refuses
+    /// an id not registered
     #[command(group(clap::ArgGroup::new("judgement").required(true).args(["rejected", "superseded_by"])))]
     Judge {
         /// Candidate id
@@ -4052,16 +4066,16 @@ enum CandidateCmd {
         #[arg(long, required = true)]
         reason: String,
     },
-    /// Delete `refs/arc/candidate/<id>` and record `candidate-retired`, only
-    /// when no root reaches the candidate. Roots are selections and
-    /// promotions, and a root reaches what its candidate's parents and
-    /// adoptions carry; when one does, exit 1 naming it, writing nothing.
-    /// The registration stands. Retiring a retired candidate says so and
-    /// exits 0. arc never retires a candidate on its own
-    /// Reusing its evaluation supplies no pin root: an otherwise-unrooted
-    /// supplier may retire while its registration, evaluation and basis
-    /// remain evidence. Its evaluation can still answer later selections
-    /// under the reuse policy; the chosen registration pins the evaluated tree.
+    /// Delete `refs/arc/candidate/<id>` and record `candidate-retired`, only when no root
+    /// reaches the candidate.
+    ///
+    /// Roots are selections and promotions, and a root reaches what its candidate's parents
+    /// and adoptions carry; when one does, exit 1 naming it, writing nothing. The
+    /// registration stands. Retiring a retired candidate says so and exits 0. arc never
+    /// retires a candidate on its own Reusing its evaluation supplies no pin root: an
+    /// otherwise-unrooted supplier may retire while its registration, evaluation and basis
+    /// remain evidence. Its evaluation can still answer later selections under the reuse
+    /// policy; the chosen registration pins the evaluated tree.
     Retire {
         /// Candidate id
         id: String,
@@ -4382,6 +4396,7 @@ enum PassCmd {
         reason: String,
     },
     /// List every recorded review pass, newest first
+    ///
     /// Records no events; ledger reads do not require a parseable append policy.
     List {
         /// Emit the machine-readable JSON view instead of text
@@ -4393,11 +4408,11 @@ enum PassCmd {
 #[derive(Subcommand)]
 enum RunCmd {
     /// Record that a caller dispatched a run through a resolved route.
-    /// Exactly one subject is named among --change, --fork, --range, and
-    /// --journal: rounds are numbered within it, so a run against nothing
-    /// belongs to no sequence. Prints the round and `event: <id>`, the id
-    /// `run bind` and `run end` take. A follow-up or resume is its own
-    /// dispatch with its own binding
+    ///
+    /// Exactly one subject is named among --change, --fork, --range, and --journal: rounds
+    /// are numbered within it, so a run against nothing belongs to no sequence. Prints the
+    /// round and `event: <id>`, the id `run bind` and `run end` take. A follow-up or resume
+    /// is its own dispatch with its own binding
     Dispatch {
         /// Resolved route used for dispatch
         #[arg(long)]
@@ -4429,22 +4444,20 @@ enum RunCmd {
         #[arg(long)]
         note: Option<String>,
     },
-    /// Record which backend session executed a dispatched run. Written any
-    /// time after the dispatch, its ending included; prints `event: <id>`.
-    /// A dispatch has one binding: the same values again record nothing and
-    /// print the binding already held, and different values refuse. An empty
-    /// value, a placeholder (unknown, none, n/a, ...), whitespace, a harness
-    /// carrying ':' and a session id given as the harness refuse. Imported
-    /// distinct tuples remain a binding conflict; rebinding a conflicted
-    /// dispatch refuses even when the supplied tuple matches one observation.
-    /// Binding values carry no '/', '\\' or '~'; refusals never echo values
-    /// A held binding with a locator refuses reads and retries with a fixed
-    /// diagnostic; the ledger fact is preserved. With --parent-session the
-    /// executor is a native child of that session, a Claude subagent or a
-    /// Codex `thread_spawn` thread, and the pinned tapes reader must find
-    /// exactly one recording naming both, or the binding refuses with a fixed
-    /// reason. A delegated-agents mirror row refuses and names the
-    /// agent-delegate run it mirrors
+    /// Record which backend session executed a dispatched run.
+    ///
+    /// Written any time after the dispatch, its ending included; prints `event: <id>`. A
+    /// dispatch has one binding: the same values again record nothing and print the binding
+    /// already held, and different values refuse. An empty value, a placeholder (unknown,
+    /// none, n/a, ...), whitespace, a harness carrying ':' and a session id given as the
+    /// harness refuse. Imported distinct tuples remain a binding conflict; rebinding a
+    /// conflicted dispatch refuses even when the supplied tuple matches one observation.
+    /// Binding values carry no '/', '\\' or '~'; refusals never echo values A held binding
+    /// with a locator refuses reads and retries with a fixed diagnostic; the ledger fact is
+    /// preserved. With --parent-session the executor is a native child of that session, a
+    /// Claude subagent or a Codex `thread_spawn` thread, and the pinned tapes reader must
+    /// find exactly one recording naming both, or the binding refuses with a fixed reason.
+    /// A delegated-agents mirror row refuses and names the agent-delegate run it mirrors
     Bind {
         /// RunDispatched event ID being bound
         dispatch_event_id: String,
@@ -4499,20 +4512,18 @@ enum RunCmd {
         #[arg(long)]
         note: Option<String>,
     },
-    /// List every dispatched run grouped by subject, with rounds numbered,
-    /// each run's backend binding (`unbound` until one is recorded), and
-    /// deferrals still open. A journal subject carries its digest and, when
-    /// its journal resolves, `journal_lineage`: its names across kind
-    /// transitions, oldest first; text names the newest as `(now <file>)`.
-    /// JSON is an `arc-run-list/1` object carrying `schema` and a `runs`
-    /// array. Rows carry `binding` as null or {event_id, executor_harness,
-    /// executor_session, handle, forked_from, parent_session, role,
-    /// bound_at}, with `conflicts` listing other
-    /// distinct tuples when imports disagree. Equal tuples are harmless
-    /// duplicate observations; a conflict names every distinct tuple,
-    /// including fork origins. A held locator refuses the view without
-    /// echoing it
-    /// Records no events; ledger reads do not require a parseable append policy.
+    /// List every dispatched run grouped by subject, with rounds numbered, each run's
+    /// backend binding (`unbound` until one is recorded), and deferrals still open.
+    ///
+    /// A journal subject carries its digest and, when its journal resolves,
+    /// `journal_lineage`: its names across kind transitions, oldest first; text names the
+    /// newest as `(now <file>)`. JSON is an `arc-run-list/1` object carrying `schema` and a
+    /// `runs` array. Rows carry `binding` as null or {event_id, executor_harness,
+    /// executor_session, handle, forked_from, parent_session, role, bound_at}, with
+    /// `conflicts` listing other distinct tuples when imports disagree. Equal tuples are
+    /// harmless duplicate observations; a conflict names every distinct tuple, including
+    /// fork origins. A held locator refuses the view without echoing it Records no events;
+    /// ledger reads do not require a parseable append policy.
     List {
         /// Emit an `arc-run-list/1` JSON object with `schema` and `runs`
         #[arg(long)]
@@ -4524,17 +4535,17 @@ enum RunCmd {
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum CostCmd {
-    /// Report the work cost of a change, or of a journal artifact with its
-    /// `supersedes` lineage and the changes begun from any name in it.
-    /// Journal membership uses resolved journal and artifact identity: bare,
-    /// qualified and equivalent directory spellings select the same work.
-    /// References retain their original spelling as provenance. References
-    /// outside a readable artifact's lineage need no resolution. Unavailable
-    /// membership qualifies selection and withholds only dependent work
-    /// totals; readable session figures remain available. Unreadable ledger
-    /// records and published imports are coverage gaps beside readable peers.
-    /// A query refuses only when neither target metadata nor any relevant
-    /// dispatch or session can be read
+    /// Report the work cost of a change, or of a journal artifact with its `supersedes`
+    /// lineage and the changes begun from any name in it.
+    ///
+    /// Journal membership uses resolved journal and artifact identity: bare, qualified and
+    /// equivalent directory spellings select the same work. References retain their
+    /// original spelling as provenance. References outside a readable artifact's lineage
+    /// need no resolution. Unavailable membership qualifies selection and withholds only
+    /// dependent work totals; readable session figures remain available. Unreadable ledger
+    /// records and published imports are coverage gaps beside readable peers. A query
+    /// refuses only when neither target metadata nor any relevant dispatch or session can
+    /// be read
     ///
     /// Each executor session bound to a selected run, and each participant, is
     /// measured through the pinned tapes reader over its whole recording, or,
@@ -4995,36 +5006,30 @@ enum CostCmd {
         #[arg(long, value_name = "DIR")]
         output_dir: Option<std::path::PathBuf>,
     },
-    /// Retain the normalized facts a fresh read of each bound or participating
-    /// session gives:
-    /// the reader and calculation versions, the source frontier, digest and
-    /// opening boundary, the counters by tapes' categories with their basis,
-    /// coverage and category-specific gaps (each a fixed reason, one of them
-    /// that records carrying usage were not read), the disjoint categories with
-    /// their own gaps, the consumption events with their coverage, the Claude residual, and
-    /// any harness-written dollar figure with its pricing coverage, plus
-    /// lineage relations, read failures as fixed categories, the one model the
-    /// recording says served the session when it names one, whether the
-    /// recording leaves its attribution uncertain, each model's disjoint
-    /// categories, its efforts added together and its cache writes by TTL,
-    /// where the figure is priced share by share, the segments a session
-    /// with several spans was read in (bounds, covering work items and runs,
-    /// request count and facts, with the remainder and the whole in the
-    /// segments' basis), and the liveness
-    /// `agent-status` answered for the session then (`live`, `ended` or
-    /// `unknown`, as `cost show` reads it). Relatives are plain session ids; no
-    /// recording locator or raw error text is retained. Binding fork origins
-    /// remain in the run records. Unavailable journal membership, unreadable
-    /// ledger peers and nonportable bindings are coverage gaps; readable
-    /// session identities still permit independent retention. A query refuses
-    /// only when no target metadata or relevant dispatch or session is readable.
-    /// The source
-    /// bytes stay in the harness store. A list-price estimate is never
-    /// retained. Facts identical to ones already retained for a session
-    /// record nothing and print the held event; a session whose source does
-    /// not answer is reported and skipped. A fresh read whose segments match
-    /// retained ones at the same frontier and disagrees with them shows the
-    /// conflict
+    /// Retain the normalized facts a fresh read of each bound or participating session
+    /// gives: the reader and calculation versions, the source frontier, digest and opening
+    /// boundary, the counters by tapes' categories with their basis, coverage and
+    /// category-specific gaps (each a fixed reason, one of them that records carrying usage
+    /// were not read), the disjoint categories with their own gaps, the consumption events
+    /// with their coverage, the Claude residual, and any harness-written dollar figure with
+    /// its pricing coverage, plus lineage relations, read failures as fixed categories, the
+    /// one model the recording says served the session when it names one, whether the
+    /// recording leaves its attribution uncertain, each model's disjoint categories, its
+    /// efforts added together and its cache writes by TTL, where the figure is priced share
+    /// by share, the segments a session with several spans was read in (bounds, covering
+    /// work items and runs, request count and facts, with the remainder and the whole in
+    /// the segments' basis), and the liveness `agent-status` answered for the session then
+    /// (`live`, `ended` or `unknown`, as `cost show` reads it).
+    ///
+    /// Relatives are plain session ids; no recording locator or raw error text is retained.
+    /// Binding fork origins remain in the run records. Unavailable journal membership,
+    /// unreadable ledger peers and nonportable bindings are coverage gaps; readable session
+    /// identities still permit independent retention. A query refuses only when no target
+    /// metadata or relevant dispatch or session is readable. The source bytes stay in the
+    /// harness store. A list-price estimate is never retained. Facts identical to ones
+    /// already retained for a session record nothing and print the held event; a session
+    /// whose source does not answer is reported and skipped. A fresh read whose segments
+    /// match retained ones at the same frontier and disagrees with them shows the conflict
     Retain {
         /// Change ID or unique prefix, or a journal artifact, as `cost show`
         /// takes it
