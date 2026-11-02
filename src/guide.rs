@@ -4656,48 +4656,67 @@ const JOURNAL_RESOLUTION: &str = r#"JOURNAL DIRECTORY RESOLUTION
   content. Read `arc journal rebind --help` for its input contract.
 "#;
 
-pub const MAP: &str = r#"arc — persistent context and guarded workflow state over plain Git.
-Git owns content and history. Arc owns the journal, changes, patchsets,
-findings, review evidence and guarded integration.
+pub const MAP: &str = r#"arc keeps the shared account of agentic work over plain Git: what is in progress,
+what was decided, what remains, and what is safe to integrate.
 
-Before writing: eval "$(arc env)"; omit every value nobody established.
-Read shared identity, attribution and execution boundaries: arc guide identity.
+Git owns content, branches and history. Arc owns changes, patchsets, the journal,
+findings, verdicts, gate evidence and guarded integration.
 
-Orient: arc workspace backlog --here outside a project; arc catchup inside.
-Read project memories named there; arc journal open lists separate work.
-Known artifact: arc journal show <file.md> (hot, then cold); add --global
-for operator records. Use arc journal dir only when a path is required.
+SAY WHO YOU ARE
+  eval "$(arc env)"              before writing, in every shell
+  Leave out any value nobody established. Details: arc guide identity
 
-Work: arc begin → edit and commit → arc snapshot → arc verify → arc check.
-A patchset is recorded by arc snapshot; preflight is arc check.
-For ordinary work, read the diff and record your verdict with arc review,
-or arc debt when you contributed or policy refuses approval; then arc integrate.
-Request independent review only when policy or someone requires it.
-Approval binds the patchset; gates must cover the tree that will ship.
+FIND YOUR BEARINGS
+  arc catchup                    inside a project; then read the memories it names
+  arc workspace backlog --here   above several projects
+  arc journal open               work waiting for a session
+  arc journal show <file.md>     a known artifact, live then archived; --global for
+                                 operator records
+  arc journal dir                only when a path itself is needed
 
-Concurrency: arc claim takes work; each writer uses its own branch/worktree.
-Declare contributors and represented subjects; arc roles records contributions.
-ARC_ROLE bounds delegated actions; integration belongs to the lead.
-Keep checked premises and rejected approaches with arc keep as they arise.
-File separate work through arc journal todo or arc fr; do not lose it at close.
-Review owed: arc debt / arc audit / arc query --debt.
-Read findings: arc findings <change>; add --audit after integration.
+RUN A CHANGE
+  arc begin <slug>               open it, then edit and commit
+  arc snapshot                   record the patchset
+  arc verify --all               run the gates and record the evidence
+  arc check                      preflight integration
+  arc integrate                  land it once review is settled
 
-End: arc journal handoff <topic> --derive for unfinished work; a completed
-outcome earns arc journal conclusion. Project facts: arc journal memory;
-operator practices: arc journal memory --global. Release claims when stopping.
+REVIEW
+  Read the diff and record your verdict with arc review. If you contributed, or
+  policy refuses your approval, record arc debt instead. Ask for an independent
+  reviewer only when policy or someone requires one.
+  An approval binds its exact patchset. Gates must cover the tree that will ship.
+  Owed review: arc debt, arc audit, arc query --debt.
+  Findings: arc findings <change>; add --audit after integration.
 
-Depth: arc guide; arc guide <topic> reads one topic from its index.
-arc guide --search TEXT finds literal, case-insensitive instruction matches.
-arc guide --all prints full workflow depth. arc <command> --help is the full
-operation contract; -h is its short form. arc --help lists every root command.
-Canonical Git contribution rules: arc instructions git.
+WORK BESIDE OTHERS
+  arc claim takes work. Each writer uses its own branch or worktree.
+  Declare contributors and the subjects you represent; arc roles records them.
+  ARC_ROLE bounds a delegated run. Integration belongs to the lead.
 
-Topic families (each reached with arc guide <name>):
-  overview identity workspace orient sandbox questions change delivery replicas
-  journal ending profiles forge debt assurance repair contributions rewrites
-  history candidates context rules cost probes cleanup exit-codes files schemas
-  boundaries
+KEEP WHAT YOU LEARN
+  arc keep                       a checked premise or rejected approach, as it arises
+  arc journal todo, arc fr       separate work, filed when you notice it
+  arc journal memory             project facts; --global for operator practices
+
+END A SESSION
+  arc journal handoff <topic> --derive   for unfinished work
+  arc journal conclusion <topic>         for a completed outcome
+  Release your claims when you stop.
+
+GO DEEPER
+  arc guide                      every topic and command contract
+  arc guide <topic>              one topic
+  arc guide --search TEXT        literal, case-insensitive search
+  arc guide --all                the full workflow depth
+  arc <command> --help           the full contract; -h is its summary
+  arc --help                     every root command
+  arc instructions git           contribution rules for Git
+
+  Topics: overview identity workspace orient sandbox questions change delivery
+  replicas journal ending profiles forge debt assurance repair contributions
+  rewrites history candidates context rules cost probes cleanup exit-codes files
+  schemas boundaries
 "#;
 
 pub fn print() {
@@ -4875,10 +4894,24 @@ fn families(topics: &[Topic<'_>]) -> Vec<&'static str> {
     families
 }
 
+fn family_title(name: &str) -> &'static str {
+    match name {
+        "identity" => "Identity, attribution and sessions",
+        "journal" => "Journal lookup, records and resolution",
+        "change" => "Running a change, from gates to retention",
+        "forge" => "Forge delivery and observations",
+        "debt" => "Review authority, debt and recovery",
+        "rewrites" => "History rewrites and their evidence",
+        "rules" => "Claims, evidence, journal, run and round rules",
+        "cost" => "Work cost measurement and accounting",
+        _ => "Topics",
+    }
+}
+
 fn family_text(name: &str, topics: &[Topic<'_>]) -> String {
-    let mut text = format!("{} topics:\n", name);
+    let mut text = format!("{}\n", family_title(name));
     for topic in topics.iter().filter(|topic| topic.family == name) {
-        text.push_str(&format!("  arc guide {} — {}\n", topic.name, topic.title));
+        text.push_str(&format!("  arc guide {:<30} {}\n", topic.name, topic.title));
     }
     text
 }
@@ -4990,21 +5023,41 @@ pub fn show(
         }
         anyhow::bail!("unknown guide topic {name:?}; use `arc guide` for the index");
     }
-    println!("Workflow topics (read with the exact route):");
+    println!("Workflow topics:");
+    let width = topics
+        .iter()
+        .map(|topic| topic.name.len())
+        .max()
+        .unwrap_or(0)
+        + 2;
     for family in families(&topics) {
-        if !topics.iter().any(|topic| topic.name == family) {
-            println!("  arc guide {family} — topic family");
+        let standalone = topics.iter().any(|topic| topic.name == family);
+        if !standalone {
+            println!("  arc guide {family:<width$}  {}", family_title(family));
         }
         for topic in topics.iter().filter(|topic| topic.family == family) {
-            println!("  arc guide {} — {}", topic.name, topic.title);
+            if standalone {
+                println!("  arc guide {:<width$}  {}", topic.name, topic.title);
+            } else {
+                println!(
+                    "    arc guide {:<child$}  {}",
+                    topic.name,
+                    topic.title,
+                    child = width - 2
+                );
+            }
         }
     }
-    println!("\nTasks: patchset → arc snapshot --help; preflight → arc check --help");
-    println!("Claim work → arc claim --help; project records → arc journal --help");
-    println!("Review owed → arc debt --help / arc audit --help / arc query --help");
-    println!("Read findings → arc findings <change> --help (after integration: --audit)");
-    println!("Canonical contribution rules: arc instructions git");
-    println!("Full depth: arc guide --all\nLiteral search: arc guide --search TEXT");
+    println!("\nBy task:");
+    println!("  Record a patchset       arc snapshot --help");
+    println!("  Preflight integration   arc check --help");
+    println!("  Claim work              arc claim --help");
+    println!("  Project records         arc journal --help");
+    println!("  Review owed             arc debt --help, arc audit --help, arc query --help");
+    println!("  Read findings           arc findings --help");
+    println!("  Contribution rules      arc instructions git");
+    println!("\nEverything at once: arc guide --all");
+    println!("Literal search:     arc guide --search TEXT");
     println!("\nCommand contracts:");
     let mut routes = Vec::new();
     instruction_commands(command, "arc", &mut routes);
@@ -5180,6 +5233,10 @@ mod route_tests {
                     }
                 }
                 for tail in body.split("arc guide ").skip(1) {
+                    // A gap of further spaces ends a route and starts its description.
+                    if tail.starts_with(' ') {
+                        continue;
+                    }
                     let name = tail
                         .split_whitespace()
                         .next()
