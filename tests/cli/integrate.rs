@@ -3021,6 +3021,7 @@ fn audit_fix_guarded_shape_revalidates_operator_snapshot() {
 }
 
 #[test]
+#[cfg(debug_assertions)]
 fn audit_fix_shape_revalidates_after_waiting_for_target_lock() {
     for policy in [
         "[integration]\nshapes=['no-ff']\n",
@@ -3032,12 +3033,13 @@ fn audit_fix_shape_revalidates_after_waiting_for_target_lock() {
         let before = repo.head(&repo.root);
         let lock = hold_target_lock(&repo, "master");
         let mut child =
-            spawn_arc_keeping_stderr(&repo, &repo.root, &["integrate", &id], "session-a");
-        assert_waiting_on_transition_lock(&mut [&mut child]);
+            spawn_arc_paused_on_target_lock(&repo, &repo.root, &["integrate", &id], "master");
         fs::write(repo.root.join(".git/arc/operator-policy.toml"), policy).unwrap();
         lock.unlock().unwrap();
+        release_lock_wait(&mut child);
         assert_eq!(wait_for_exit(&mut child).code(), Some(1));
-        assert!(child_stderr(&mut child).contains("configuration changed"));
+        let refusal = child_stderr(&mut child);
+        assert!(refusal.contains("configuration changed"), "{refusal}");
         assert_eq!(repo.head(&repo.root), before);
         assert_eq!(events(&repo, &id), recorded);
     }

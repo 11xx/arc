@@ -522,9 +522,46 @@ pub(crate) fn hold_graph_lock(repo: &Repo) -> fs::File {
     hold_named_lock(repo, "graph.lock")
 }
 
+fn target_lock_stem(target: &str) -> String {
+    format!("target-{}", hex::encode(Sha256::digest(target.as_bytes())))
+}
+
 pub(crate) fn hold_target_lock(repo: &Repo, target: &str) -> fs::File {
-    let digest = Sha256::digest(target.as_bytes());
-    hold_named_lock(repo, &format!("target-{}.lock", hex::encode(digest)))
+    hold_named_lock(repo, &format!("{}.lock", target_lock_stem(target)))
+}
+
+/// An arc paused where it first finds `target`'s lock held, so everything it
+/// reads before taking the lock has been read. `release_lock_wait` resumes it.
+#[cfg(debug_assertions)]
+pub(crate) fn spawn_arc_paused_on_target_lock(
+    repo: &Repo,
+    cwd: &Path,
+    args: &[&str],
+    target: &str,
+) -> Child {
+    let phase = format!("{}-contended", target_lock_stem(target));
+    let mut child = arc_command(repo, cwd, args, "session-a", Stdio::piped())
+        .env("ARC_TEST_IMPORT_RENDEZVOUS", &phase)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let marker = format!("arc test: import {phase}\n");
+    let mut stderr = BufReader::new(child.stderr.as_mut().unwrap());
+    let mut seen = String::new();
+    while !seen.ends_with(&marker) {
+        assert_ne!(
+            stderr.read_line(&mut seen).unwrap(),
+            0,
+            "arc exited before reaching the target lock: {seen}"
+        );
+    }
+    child
+}
+
+#[cfg(debug_assertions)]
+pub(crate) fn release_lock_wait(child: &mut Child) {
+    use std::io::Write;
+    child.stdin.take().unwrap().write_all(b"+").unwrap();
 }
 
 pub(crate) fn hold_named_lock(repo: &Repo, name: &str) -> fs::File {
@@ -541,6 +578,9 @@ pub(crate) fn hold_named_lock(repo: &Repo, name: &str) -> fs::File {
     file
 }
 
+/// Still running after a pause. A loaded machine may not have reached the lock
+/// yet, so a test that depends on what the child already read pauses it with
+/// `spawn_arc_paused_on_target_lock` instead.
 pub(crate) fn assert_waiting_on_transition_lock(children: &mut [&mut Child]) {
     thread::sleep(Duration::from_millis(250));
     for child in children {
