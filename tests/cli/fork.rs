@@ -2500,3 +2500,27 @@ fn sentinel_fork_json_uses_null_when_no_base_branch_is_known() {
     let text = stdout(repo.arc(&repo.root).args(["fork", "list"]));
     assert!(text.contains("over unknown"), "{text}");
 }
+
+/// Claim: the inbox never offers to delete the branch work integrates into.
+/// Rejects listing `master` as a merged branch with no owner while the primary
+/// checkout sits on a change's branch, whether that change is open or closed.
+#[test]
+fn inbox_cleanup_keeps_the_branch_work_integrates_into() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["begin", "in-place", "--no-worktree"])
+        .assert()
+        .success();
+    repo.commit(&repo.root, "work.txt", "work\n", "feat: work");
+    let merged_names = || {
+        let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
+        inbox["merged_branches"].to_string()
+    };
+    assert!(!merged_names().contains("master"), "{}", merged_names());
+
+    repo.arc(&repo.root)
+        .args(["close", "in-place", "--abandoned"])
+        .assert()
+        .success();
+    assert!(!merged_names().contains("master"), "{}", merged_names());
+}

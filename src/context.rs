@@ -18,7 +18,7 @@ use crate::status::BriefBaseDrift;
 use crate::store::Store;
 use anyhow::{bail, Result};
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Environment variables recognized for opt-in identity detection, in the
@@ -976,6 +976,18 @@ fn cwd_is_in_recorded_worktree(state: &ChangeState, cwd: &Path) -> bool {
 /// data only. No tree is walked and no file content is read, because this
 /// runs on every catchup and a check that reads trees is a check somebody
 /// turns off.
+/// Branches work integrates into: every open change's target, and a closed
+/// change's unless that target is itself a change's work branch.
+fn integration_branches(states: &BTreeMap<String, ChangeState>) -> BTreeSet<String> {
+    let work_branches: BTreeSet<&str> =
+        states.values().map(|state| state.branch.as_str()).collect();
+    states
+        .values()
+        .filter(|state| !state.is_closed() || !work_branches.contains(state.target_branch.as_str()))
+        .map(|state| state.target_branch.clone())
+        .collect()
+}
+
 pub(crate) fn unowned_surface(ctx: &Ctx) -> Result<crate::inbox::Unowned> {
     let store = ctx.store()?;
     let states = store.readable_states()?;
@@ -999,6 +1011,8 @@ pub(crate) fn unowned_surface(ctx: &Ctx) -> Result<crate::inbox::Unowned> {
         }
     }
     owned_branches.insert(target.clone());
+    owned_branches.extend(integration_branches(&states));
+    owned_branches.extend(gitio::default_branch(&ctx.cwd));
 
     let now = chrono::Utc::now();
     let mut unowned = crate::inbox::Unowned::default();

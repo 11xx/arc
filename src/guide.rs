@@ -462,6 +462,10 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          writes nothing.
   arc inbox              Lead-facing queue across open changes, unowned
                          branches and worktrees, and the journal backlog.
+                         The branches work integrates into are never unowned:
+                         the default branch, every open change's target, and
+                         a closed change's target that is not itself a work
+                         branch.
   arc workspace backlog  The same question asked of every registered project.
     --here | --under <path>  Restrict it to one workspace directory tree.
     --rank-by blocking|availability|coverage
