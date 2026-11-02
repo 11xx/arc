@@ -36,7 +36,7 @@ class SelectionClaims(unittest.TestCase):
             [""],
         ):
             with self.subTest(paths=paths):
-                self.assertEqual(selection.select(paths), selection.FULL)
+                self.assertEqual(selection.select(paths), ("full", [], False))
 
     def test_only_nonempty_markdown_deltas_select_nothing(self):
         self.assertEqual(
@@ -61,15 +61,19 @@ class SelectionClaims(unittest.TestCase):
 
     def test_deleted_or_unregistered_modules_require_the_full_suite(self):
         with patch.object(selection.Path, "is_file", return_value=False):
-            self.assertEqual(selection.select(["tests/cli/diff.rs"]), selection.FULL)
+            self.assertEqual(
+                selection.select(["tests/cli/diff.rs"]), ("full", [], False)
+            )
         with patch.object(selection.Path, "read_text", return_value=""):
-            self.assertEqual(selection.select(["tests/cli/diff.rs"]), selection.FULL)
+            self.assertEqual(
+                selection.select(["tests/cli/diff.rs"]), ("full", [], False)
+            )
 
     def test_diff_failure_requires_the_full_suite(self):
         with patch.object(
             selection, "git", side_effect=subprocess.CalledProcessError(1, "git")
         ):
-            self.assertEqual(selection.select(selection.delta()), selection.FULL)
+            self.assertEqual(selection.select(selection.delta()), ("full", [], False))
 
     def test_diff_names_both_rename_paths_and_uses_the_resolved_target(self):
         with patch.object(
