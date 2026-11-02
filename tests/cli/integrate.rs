@@ -1139,7 +1139,7 @@ fn every_read_only_command_reads_past_a_broken_policy() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 
-    let guide = stdout(&mut repo.arc(&repo.root));
+    let guide = crate::common::instruction_topics(&repo, &["identity-events"]);
     let listed: std::collections::BTreeSet<String> = guide
         .lines()
         .skip_while(|line| !line.ends_with("These commands record nothing, in any form or flag:"))

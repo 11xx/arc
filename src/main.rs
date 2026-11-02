@@ -79,58 +79,37 @@ use std::path::{Path, PathBuf};
     name = "arc",
     version,
     about,
-    after_help = "Run `arc` with no arguments for the workflow guide, or `arc catchup` for live project state."
+    after_help = "Run `arc` with no arguments for the capability map; `arc guide` for indexed depth, or `arc catchup` for live project state."
 )]
 struct Cli {
-    /// Acting identity, from ARC_ACTOR when the flag is absent. Falls back to
-    /// <harness>:<session> when both are known, else git user.name; arc
-    /// records either as an identity nobody declared. A write refuses when
-    /// none of these names one, and refuses a declared placeholder (unknown,
-    /// none, n/a, ...) or a harness:model form carrying one; a
-    /// harness:session form is an actor. A read proceeds without one
+    /// Acting identity; see `arc guide identity`
     #[arg(long, global = true)]
     actor: Option<String>,
-    /// Harness label, e.g. claude, codex, opencode. A write refuses a
-    /// placeholder such as unknown; omit a harness nobody established
+    /// Acting harness; see `arc guide identity`
     #[arg(long, global = true, env = "ARC_HARNESS")]
     harness: Option<String>,
-    /// Native session ID of the acting harness thread. A write refuses a
-    /// placeholder such as unknown; omit a session nobody established
+    /// Native acting session; see `arc guide identity`
     #[arg(long, global = true, env = "ARC_SESSION")]
     session: Option<String>,
-    /// Private web link for the acting session; recorded only in arc events
+    /// Private acting-session link; see `arc guide identity`
     #[arg(long, global = true, env = "ARC_SESSION_LINK")]
     session_link: Option<String>,
-    /// Declare a model slug with optional #effort. Without this flag or
-    /// ARC_MODEL, each invocation resolves the acting session store once when
-    /// it writes. A corroborated Claude recording without a model selection
-    /// is re-read every 50 ms for up to 1 second; other store answers return
-    /// immediately. Declarations retain any observed disagreement and its
-    /// coordinate. Model and supplied effort segments must be nonempty.
-    /// A write refuses a placeholder model or effort (unknown,
-    /// none, n/a, ...) and a session id as the model, whether flagged or in
-    /// ARC_MODEL: drop the declaration and arc records the observed model
+    /// Declared model and effort; see `arc guide identity`
     #[arg(long, global = true)]
     model: Option<String>,
-    /// Subject a lead runs delegated ceremony for; recorded beside the
-    /// invoker. A write refuses a placeholder or a harness:model form carrying
-    /// one
+    /// Represented subject; see `arc guide identity`
     #[arg(long = "on-behalf-of", global = true, env = "ARC_ON_BEHALF_OF")]
     on_behalf_of: Option<String>,
-    /// Execution boundary: implementer | reviewer | lead
+    /// Execution boundary; see `arc guide identity`
     #[arg(long, global = true, env = "ARC_ROLE")]
     role: Option<String>,
-    /// Change to act on, wherever the positional is optional
+    /// Change selection; see `arc guide identity`
     #[arg(long = "change", id = "change_flag", global = true)]
     change: Option<String>,
-    /// Absolute prefix that stands in for the home directory: every root arc
-    /// writes by default (ledger under a data root, journal, registry,
-    /// configuration, worktrees, temp) lives beneath it
+    /// Home-directory prefix; see `arc guide identity`
     #[arg(long, global = true, env = config::SANDBOX_VAR)]
     sandbox: Option<String>,
-    /// Absent prints the workflow guide: what arc owns, the command
-    /// lifecycle, profile selection, and the rules that change what a
-    /// session should do.
+    /// Absent prints the bounded capability map.
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -502,10 +481,10 @@ enum Cmd {
         /// Only changes whose latest verdict is this
         #[arg(long, value_enum)]
         verdict: Option<Verdict>,
-        /// Only changes opened by this actor
+        /// Only changes opened by this actor; filters only when explicitly typed
         #[arg(long)]
         actor: Option<String>,
-        /// Only changes opened from this harness
+        /// Only changes opened from this harness; filters only when explicitly typed
         #[arg(long)]
         harness: Option<String>,
         /// Report changes whose patchset, integration, or closure commit
@@ -4844,7 +4823,7 @@ enum CostCmd {
             conflicts_with = "commit"
         )]
         targets: Vec<String>,
-        /// Every change carrying this tag, as `begin --tag` and `arc meta --tag`
+        /// Every change carrying this tag, as `begin --tag` and `arc metadata --tag`
         /// record it; repeat to require several
         #[arg(long, conflicts_with = "commit")]
         tag: Vec<String>,
@@ -4980,7 +4959,7 @@ enum CostCmd {
         /// their union
         #[arg(required_unless_present_any = ["tag", "footprint", "since", "until", "all"])]
         targets: Vec<String>,
-        /// Every change carrying this tag, as `begin --tag` and `arc meta --tag`
+        /// Every change carrying this tag, as `begin --tag` and `arc metadata --tag`
         /// record it; repeat to require several
         #[arg(long)]
         tag: Vec<String>,
@@ -5168,11 +5147,30 @@ fn command_path(matches: &clap::ArgMatches) -> String {
 /// The command tree. `--version` prints the release and, on a second line,
 /// the build; `-V` prints the release alone.
 fn cli_command() -> clap::Command {
-    Cli::command().long_version(format!(
+    instruction_help(Cli::command()).long_version(format!(
         "{}\nbuild: {}",
         env!("CARGO_PKG_VERSION"),
         context::build_revision().label()
     ))
+}
+
+/// Summaries belong to listings; long help retains the complete contract.
+fn instruction_help(mut command: clap::Command) -> clap::Command {
+    if let Some(about) = command.get_about().cloned() {
+        if command.get_long_about().is_none() {
+            command = command.long_about(about.clone());
+        }
+        let text = about.to_string();
+        let summary = text
+            .split(". ")
+            .next()
+            .unwrap_or(&text)
+            .trim_end_matches('.');
+        command = command.about(summary.to_string());
+    }
+    command = command.mut_args(|arg| arg.hide_env_values(true));
+    command = command.mut_subcommands(instruction_help);
+    command
 }
 
 /// A positive whole number of seconds, minutes or hours, `90s`, `45m` or
@@ -5275,7 +5273,7 @@ fn attach_hyphenated_value_tip(error: &mut clap::Error) {
     else {
         return;
     };
-    let mut command = Cli::command();
+    let mut command = cli_command();
     command.build();
     for arg in before {
         if let Some(subcommand) = command.find_subcommand(arg).cloned() {
@@ -6579,7 +6577,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
         Cmd::Env => Ok(context::print_env()),
         Cmd::Guide { .. } => unreachable!("guide reads precede identity resolution"),
         Cmd::Completions { shell } => {
-            let mut command = Cli::command();
+            let mut command = cli_command();
             clap_complete::generate(shell, &mut command, "arc", &mut std::io::stdout());
             Ok(0)
         }
@@ -6587,7 +6585,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             std::fs::create_dir_all(&out_dir)
                 .with_context(|| format!("cannot create {}", out_dir.display()))?;
             let mut buffer = Vec::new();
-            clap_mangen::Man::new(Cli::command()).render(&mut buffer)?;
+            clap_mangen::Man::new(cli_command()).render(&mut buffer)?;
             let path = out_dir.join("arc.1");
             std::fs::write(&path, buffer)
                 .with_context(|| format!("cannot write {}", path.display()))?;

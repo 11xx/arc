@@ -701,7 +701,7 @@ fn export_carries_understood_records_that_question_replay_rejects() {
 fn journal_bundle_guide_and_help_describe_artifact_admission() {
     let repo = Repo::new();
     let normalize = |text: String| text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let guide = normalize(stdout(&mut repo.arc(&repo.root)));
+    let guide = normalize(crate::common::instruction_topics(&repo, &["replicas"]));
     let schemas = guide.split("SCHEMAS").last().unwrap();
     assert!(!schemas.contains("an import refuses a bundle carrying one"));
     assert!(schemas.contains("journal import holds back each artifact carrying an unsupported event and its dependents"), "{schemas}");

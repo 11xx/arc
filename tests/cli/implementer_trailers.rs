@@ -255,7 +255,7 @@ fn a_same_model_verdict_may_authorize_integration_but_leaves_review_debt_owed() 
 #[test]
 fn guide_and_review_help_distinguish_approval_authority_from_independent_coverage() {
     let repo = Repo::new();
-    let guide = stdout(&mut repo.arc(&repo.root));
+    let guide = crate::common::instruction_topics(&repo, &["debt-recovery"]);
     assert!(
         guide.contains("policy governs approval authority, not independent coverage"),
         "{guide}"

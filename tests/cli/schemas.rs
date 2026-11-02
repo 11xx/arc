@@ -25,7 +25,7 @@ fn staleness_inbox_help_matches_schema_constant() {
 #[test]
 fn staleness_guide_names_rebase_snapshot_journal_defaults() {
     let repo = Repo::new();
-    let guide = stdout(&mut repo.arc(&repo.root));
+    let guide = crate::common::instruction_topics(&repo, &["rules-evidence"]);
     let flat = guide.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
         flat.contains("snapshot (`snapshot`, `done`, `rebase`,"),
@@ -41,7 +41,10 @@ const MINIMUM_SCHEMAS: usize = 10;
 /// guide verbatim.
 #[test]
 fn every_schema_constant_is_registered_in_the_guide() {
-    let output = Command::new(env!("CARGO_BIN_EXE_arc")).output().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_arc"))
+        .args(["guide", "schemas"])
+        .output()
+        .unwrap();
     let guide = String::from_utf8_lossy(&output.stdout);
 
     let schemas = schema_constants();
@@ -116,7 +119,10 @@ fn collect_sources(at: &Path, sources: &mut Vec<PathBuf>) {
 
 #[test]
 fn model_provenance_versions_are_registered() {
-    let output = Command::new(env!("CARGO_BIN_EXE_arc")).output().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_arc"))
+        .args(["guide", "schemas"])
+        .output()
+        .unwrap();
     let guide = String::from_utf8_lossy(&output.stdout);
     let schemas = schema_constants();
     for name in [

@@ -768,3 +768,11 @@ pub(crate) fn spawn_arc_with_open_stdin(repo: &Repo, cwd: &Path, args: &[&str]) 
         .spawn()
         .unwrap()
 }
+
+/// Read the topics owning the asserted contracts, without expanding the bootstrap.
+pub fn instruction_topics(repo: &Repo, topics: &[&str]) -> String {
+    topics
+        .iter()
+        .map(|topic| stdout(repo.arc(&repo.root).args(["guide", topic])))
+        .collect()
+}

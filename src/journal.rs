@@ -538,12 +538,7 @@ pub enum JournalCmd {
     /// filename is known, `arc journal show <file.md>` needs no path, and
     /// searching the filesystem for the name is never the way to find it.
     ///
-    /// Resolution takes the first source that answers: ARC_JOURNAL_DIR; the
-    /// longest `[journals] dirs` prefix of the repository root, or of the
-    /// directory outside a repository; `<ai-home>/journals/<repo-path-slug>`
-    /// for a Git repository; then a default-root journal whose
-    /// `bindings.jsonl` records this directory, or the one this directory's
-    /// slug names. A prefix covering repositories shadows their Git journals
+    /// Directory precedence and stable anchors: `arc guide journal-resolution`.
     /// Records no events; ledger reads do not require a parseable append policy.
     Dir {
         /// Print the cold sibling archive directory
@@ -731,7 +726,7 @@ pub enum JournalCmd {
     /// JSON sessions retain raw models with model_recorded: false when no model
     /// is recorded; valid models omit the flag.
     Filed {
-        /// Filter by an exact writing or source session id
+        /// Filter by an exact writing or source session id, only when explicitly typed
         #[arg(long)]
         session: Option<String>,
         /// Mark open actionable items stale beyond this many days

@@ -2905,7 +2905,16 @@ fn a_redirect_suppresses_the_similarity_guess_but_leaves_it_otherwise() {
 #[test]
 fn the_guide_teaches_identity_and_how_a_session_ends() {
     let repo = Repo::new();
-    let guide = stdout(&mut repo.arc(&repo.root));
+    let guide = crate::common::instruction_topics(
+        &repo,
+        &[
+            "identity-basics",
+            "identity-events",
+            "orient",
+            "ending",
+            "profiles",
+        ],
+    );
 
     assert!(guide.contains("SAY WHO YOU ARE"), "{guide}");
     assert!(guide.contains("arc env"), "{guide}");
@@ -2934,7 +2943,7 @@ fn the_guide_teaches_identity_and_how_a_session_ends() {
 #[test]
 fn the_guide_teaches_what_a_finding_carries_before_a_repair() {
     let repo = Repo::new();
-    let guide = stdout(&mut repo.arc(&repo.root));
+    let guide = crate::common::instruction_topics(&repo, &["repair"]);
 
     assert!(guide.contains("REVIEW AND REPAIR"), "{guide}");
     // The guide is hard-wrapped, so the requirement is asserted over its text

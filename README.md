@@ -101,8 +101,9 @@ before promoting it into an ordinary patchset reviewed like any other.
 
 ## Where the rest is
 
-`arc` with no arguments prints the workflow guide, and `arc <verb> --help` is
-each command's full contract.
+`arc` with no arguments prints a bounded capability map. `arc guide` indexes
+workflow topics, `arc guide <topic>` reads one, and `arc guide --all` prints
+full workflow depth. `arc <verb> --help` is each command's full contract.
 
 ## License
 

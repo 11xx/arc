@@ -1,10 +1,5 @@
-//! The bare-`arc` guide: what an agent needs to drive a change end to end
-//! without reading anything else first.
-//!
-//! `--help` is the reference — every command, every flag. This is the
-//! orientation: what arc owns, which commands matter in what order, and the
-//! handful of rules that change what a session should do. Anything that
-//! belongs to one command's contract stays in that command's `--help`.
+//! Stateless capability map and semantically owned workflow topics.
+//! Operation-specific contracts live in command help.
 
 pub const GUIDE: &str = r#"arc — persistent context and guarded workflow state over plain Git for agentic coding arcs.
 
@@ -2979,7 +2974,8 @@ CANDIDATES
                            [--evidence-file <file> [--custody-dir <dir>]]
                        Record an alternative answer to one brief version and
                        pin its tree at `refs/arc/candidate/<id>`.
-    arc candidate show <id> | list [--brief <change>] [--json]
+    arc candidate show <id> [--json]
+    arc candidate list [--brief <change>] [--json]
     arc candidate judge <id> (--rejected | --superseded-by <id>) --reason <why>
     arc candidate retire <id>
     arc candidate verify <id> [--gate <gate>]
@@ -3584,9 +3580,9 @@ RULES THAT CHANGE WHAT YOU DO
     and is never retained. With no table it is absent with the
     reason `no price table is loaded`; an invalid default table is reported
     and leaves it absent, and a named or environment table that cannot be read
-    refuses. A harness's
+    refuses.
 
-    native counters add only within that harness: a raw input sum across
+    A harness's native counters add only within that harness: a raw input sum across
     harnesses is refused and other native sums across harnesses are
     withheld. Tapes' disjoint categories (uncached input, cache read, cache
     write by TTL, output, reasoning as a subset of output, and their total)
@@ -3830,7 +3826,7 @@ RULES THAT CHANGE WHAT YOU DO
   - `arc cost show` selects the union of its positional targets, change ids
     and journal artifacts mixed, and its range selectors, and the union
     counts each session once. `--tag <t>`, repeatable with every tag
-    required, selects each change carrying it as `begin --tag` and `arc meta
+    required, selects each change carrying it as `begin --tag` and `arc metadata
     --tag` record it. `--footprint <harness:id>` selects each change and
     journal item that session was bound to or dispatched, and each change
     with an event of any kind that names it, as its session or its
@@ -4591,15 +4587,121 @@ WHAT ARC WILL NOT DO
   arc <command> --help for any command's full contract. arc --help for all of them.
 "#;
 
+const IDENTITY_OPTIONS: &str = r#"GLOBAL OPTIONS
+  --actor
+    Acting identity, from ARC_ACTOR when the flag is absent. Falls back to
+    <harness>:<session> when both are known, else git user.name; arc
+    records either as an identity nobody declared. A write refuses when
+    none of these names one, and refuses a declared placeholder (unknown,
+    none, n/a, ...) or a harness:model form carrying one; a
+    harness:session form is an actor. A read proceeds without one
+
+  --harness
+    Harness label, e.g. claude, codex, opencode. A write refuses a
+    placeholder such as unknown; omit a harness nobody established
+
+  --session
+    Native session ID of the acting harness thread. A write refuses a
+    placeholder such as unknown; omit a session nobody established
+
+  --session-link
+    Private web link for the acting session; recorded only in arc events
+
+  --model
+    Declare a model slug with optional #effort. Without this flag or
+    ARC_MODEL, each invocation resolves the acting session store once when
+    it writes. A corroborated Claude recording without a model selection
+    is re-read every 50 ms for up to 1 second; other store answers return
+    immediately. Declarations retain any observed disagreement and its
+    coordinate. Model and supplied effort segments must be nonempty.
+    A write refuses a placeholder model or effort (unknown,
+    none, n/a, ...) and a session id as the model, whether flagged or in
+    ARC_MODEL: drop the declaration and arc records the observed model
+
+  --on-behalf-of
+    Subject a lead runs delegated ceremony for; recorded beside the
+    invoker. A write refuses a placeholder or a harness:model form carrying
+    one
+
+  --role
+    Execution boundary: implementer | reviewer | lead
+
+  --change
+    Change to act on, wherever the positional is optional
+
+  --sandbox
+    Absolute prefix that stands in for the home directory: every root arc
+    writes by default (ledger under a data root, journal, registry,
+    configuration, worktrees, temp) lives beneath it
+"#;
+
+const JOURNAL_RESOLUTION: &str = r#"JOURNAL DIRECTORY RESOLUTION
+  Read a known artifact with `arc journal show <file.md>`; use `arc journal
+  dir` only when a filesystem path is required. `arc journal dir --explain`
+  reports the source and stable anchor; `--archive` selects the cold sibling.
+
+  Resolution takes the first source that answers:
+  1. ARC_JOURNAL_DIR, an explicit directory override.
+  2. The longest [journals.dirs] path-prefix matching the repository root,
+     or the current directory outside a repository.
+  3. <ai-home>/journals/<repo-path-slug> for a Git repository.
+  4. A default-root journal whose bindings.jsonl records this directory,
+     or the journal named by this directory's slug.
+  A prefix covering repositories shadows their Git journals.
+
+  `arc journal rebind <journal-dir>` adopts an existing journal and records
+  the move to this project's anchor. It refuses when both journals hold
+  content. Read `arc journal rebind --help` for its input contract.
+"#;
+
+pub const MAP: &str = r#"arc — persistent context and guarded workflow state over plain Git.
+Git owns content and history. Arc owns the journal, changes, patchsets,
+findings, review evidence and guarded integration.
+
+Before writing: eval "$(arc env)"; omit every value nobody established.
+Read shared identity, attribution and execution boundaries: arc guide identity.
+
+Orient: arc workspace backlog --here outside a project; arc catchup inside.
+Read project memories named there; arc journal open lists separate work.
+Known artifact: arc journal show <file.md> (hot, then cold); add --global
+for operator records. Use arc journal dir only when a path is required.
+
+Work: arc begin → edit and commit → arc snapshot → arc verify → arc check.
+A patchset is recorded by arc snapshot; preflight is arc check.
+For ordinary work, record your verdict with arc review after reading the diff, or arc debt
+when you contributed or policy refuses approval; then arc integrate.
+Request independent review only when policy or someone requires it.
+Approval binds the patchset; gates must cover the tree that will ship.
+
+Concurrency: arc claim takes work; each writer uses its own branch/worktree.
+Declare contributors and represented subjects; arc roles records contributions.
+ARC_ROLE bounds delegated actions; integration belongs to the lead.
+Keep checked premises and rejected approaches with arc keep as they arise.
+File separate work through arc journal todo or arc fr; do not lose it at close.
+Review owed: arc debt / arc audit / arc query --debt.
+Read findings: arc findings <change>; add --audit after integration.
+
+End: arc journal handoff <topic> --derive for unfinished work; a completed
+outcome earns arc journal conclusion. Project facts: arc journal memory;
+operator practices: arc journal memory --global. Release claims when stopping.
+
+Depth: arc guide; arc guide <topic> reads one topic from its index.
+arc guide --search TEXT finds literal, case-insensitive instruction matches.
+arc guide --all prints full workflow depth. arc <command> --help is the full
+operation contract; -h is its short form. arc --help lists every root command.
+Canonical Git contribution rules: arc instructions git.
+
+Topic families (each reached with arc guide <name>):
+  overview identity workspace orient sandbox questions change delivery replicas
+  journal ending profiles forge debt assurance repair contributions rewrites
+  history candidates context rules cost probes cleanup exit-codes files schemas
+  boundaries
+"#;
+
 pub fn print() {
-    print!(
-        "{}",
-        GUIDE.replace("{READ_ONLY_COMMANDS}", &read_only_commands())
-    );
+    print!("{MAP}");
 }
 
-/// The read-only command table as indented guide lines, wrapped at the
-/// guide's width.
 fn read_only_commands() -> String {
     let mut lines: Vec<String> = Vec::new();
     for name in crate::commands::READ_ONLY_COMMANDS {
@@ -4615,135 +4717,146 @@ fn read_only_commands() -> String {
 }
 
 const TOPIC_LIMIT: usize = 16_384;
-const PAGE_LIMIT: usize = 16_000;
 
-const TOPICS: &[(&str, &str)] = &[
-    ("identity", "SAY WHO YOU ARE (before the first write)"),
-    ("workspace", "FROM A WORKSPACE ROOT (outside a project)"),
-    (
-        "orient",
-        "ORIENT INSIDE A PROJECT (start here, in this order)",
-    ),
-    ("sandbox", "SANDBOX (rehearse something destructive)"),
-    ("questions", "SETTLE A QUESTION (before it is work)"),
-    ("change", "RUN A CHANGE"),
-    ("delivery", "PREPARE A DELIVERED CHANGE"),
-    ("replicas", "PAIR REPLICA STORES"),
-    (
-        "journal",
-        "KEEP WHAT THE WORK DISCOVERS (mid-change, before it is lost)",
-    ),
-    ("ending", "END A SESSION (what the next one reads)"),
-    ("profiles", "PROFILES (--profile, default local)"),
-    ("forge", "FORGE"),
-    ("debt", "REVIEW COVERAGE AND DEBT"),
-    ("assurance", "REVIEW ASSURANCE"),
-    ("repair", "REVIEW AND REPAIR"),
-    ("contributions", "CONTRIBUTION TRAILERS"),
-    ("rewrites", "HISTORY REWRITES"),
-    ("history", "THE HISTORY MODEL"),
-    ("candidates", "CANDIDATES"),
-    ("context", "CONTEXT"),
-    ("rules", "RULES THAT CHANGE WHAT YOU DO"),
-    ("exit-codes", "EXIT CODES"),
-    ("files", "FILES"),
-    ("schemas", "SCHEMAS"),
-    ("boundaries", "WHAT ARC WILL NOT DO"),
+struct Section {
+    name: &'static str,
+    family: &'static str,
+    title: &'static str,
+    start: &'static str,
+}
+
+const SECTIONS: &[Section] = &[
+    Section { name: "overview", family: "overview", title: "Arc and Git ownership", start: "arc — persistent context and guarded workflow state over plain Git for agentic coding arcs." },
+    Section { name: "identity-basics", family: "identity", title: "Attribution and model evidence", start: "SAY WHO YOU ARE (before the first write)" },
+    Section { name: "identity-events", family: "identity", title: "Event ordering, cursors and read-only commands", start: "  Local change, repository and replica IDs are totally ordered by issuance" },
+    Section { name: "identity-sessions", family: "identity", title: "Harness and session detection", start: "  Claude Code's Remote Control supplies `CLAUDE_CODE_BRIDGE_SESSION_ID` to" },
+    Section { name: "workspace", family: "workspace", title: "Workspace orientation", start: "FROM A WORKSPACE ROOT (outside a project)" },
+    Section { name: "orient", family: "orient", title: "Project orientation and plans", start: "ORIENT INSIDE A PROJECT (start here, in this order)" },
+    Section { name: "journal-lookup", family: "journal", title: "Artifact lookup, archival and project queues", start: "  Shelve a discussion with journal archive FILE --unresolved --note REASON." },
+    Section { name: "sandbox", family: "sandbox", title: "Destructive rehearsals", start: "SANDBOX (rehearse something destructive)" },
+    Section { name: "questions", family: "questions", title: "Discussions, questions and decisions", start: "SETTLE A QUESTION (before it is work)" },
+    Section { name: "change-commands", family: "change", title: "Change lifecycle commands", start: "RUN A CHANGE" },
+    Section { name: "change-bundles", family: "change", title: "History export, objects and custody", start: "  Change history checksums hash compact JSON with recursively sorted object" },
+    Section { name: "change-gates", family: "change", title: "Gate execution and atomic review input", start: "  A gate runs where its change lives. `verify`, `snapshot --verify`, `done`," },
+    Section { name: "probes", family: "probes", title: "Acceptance probes and brief bases", start: "  Each acceptance probe declared on the patchset's brief blocks readiness" },
+    Section { name: "change-integration", family: "change", title: "Replay, integration shapes and shipped evidence", start: "  `arc rebase` is what `check` names when the selected integration shape" },
+    Section { name: "cleanup", family: "cleanup", title: "Integration cleanup and retained checkouts", start: "  `integration.cleanup` governs branch and worktree cleanup after integration" },
+    Section { name: "change-finalization", family: "change", title: "Retention, checkouts and release copy", start: "  Integration prints the integrated revision and closure event before" },
+    Section { name: "delivery", family: "delivery", title: "Preparing delivered changes", start: "PREPARE A DELIVERED CHANGE" },
+    Section { name: "replicas", family: "replicas", title: "Replica pairing, authority and publication", start: "PAIR REPLICA STORES" },
+    Section { name: "journal-records", family: "journal", title: "Keeping facts during work", start: "KEEP WHAT THE WORK DISCOVERS (mid-change, before it is lost)" },
+    Section { name: "ending", family: "ending", title: "Session endings and global memory", start: "END A SESSION (what the next one reads)" },
+    Section { name: "profiles", family: "profiles", title: "Change profiles", start: "PROFILES (--profile, default local)" },
+    Section { name: "forge-delivery", family: "forge", title: "Forge identity, delivery and disclosure", start: "FORGE" },
+    Section { name: "forge-observations", family: "forge", title: "Observations, custody and evidence origins", start: "  forge observe CHANGE --file frontier.json [--json] admits an adapter's" },
+    Section { name: "debt-review", family: "debt", title: "Review authority, independence and policy", start: "REVIEW COVERAGE AND DEBT" },
+    Section { name: "debt-obligations", family: "debt", title: "Debt declarations, coverage and corroboration", start: "  A debt is declared with `arc debt <change> --reason <why>`, or at the merge" },
+    Section { name: "debt-recovery", family: "debt", title: "Owed work, audits and findings after integration", start: "  Coming back to owed work:" },
+    Section { name: "assurance", family: "assurance", title: "Review assurance and staleness", start: "REVIEW ASSURANCE" },
+    Section { name: "repair", family: "repair", title: "Finding repair and bounded rounds", start: "REVIEW AND REPAIR" },
+    Section { name: "contributions", family: "contributions", title: "Contribution roles and canonical Git trailers", start: "CONTRIBUTION TRAILERS" },
+    Section { name: "rewrites-operations", family: "rewrites", title: "Signing, trailer edits and tags", start: "HISTORY REWRITES" },
+    Section { name: "rewrites-evidence", family: "rewrites", title: "Recorded revisions and atomic rewrite maps", start: "  A commit that any recorded verdict or audit read, that a patchset recorded" },
+    Section { name: "history", family: "history", title: "The history model", start: "THE HISTORY MODEL" },
+    Section { name: "candidates", family: "candidates", title: "Registration, received evidence, selection and promotion", start: "CANDIDATES" },
+    Section { name: "context", family: "context", title: "Reads, declarations and provenance", start: "CONTEXT" },
+    Section { name: "rules-claims", family: "rules", title: "Concurrent claims, lanes and recovery", start: "RULES THAT CHANGE WHAT YOU DO" },
+    Section { name: "rules-evidence", family: "rules", title: "Trees, attribution and acceptance evidence", start: "  - Gate evidence binds to a tree, not to a commit. A change sitting behind" },
+    Section { name: "rules-journal", family: "rules", title: "Journal ownership, events and spool safety", start: "  - The journal lives outside the repo, so worktrees stay clean. Cross-session" },
+    Section { name: "rules-runs", family: "rules", title: "Dispatches, executor bindings and native children", start: "  - `arc run dispatch` names exactly one subject: `--change <id>`, `--fork" },
+    Section { name: "cost-measurement", family: "cost", title: "Selection, measurement and pricing", start: "  - `arc cost show <change|journal-file>... [--json]` reports what the executor" },
+    Section { name: "cost-accounting", family: "cost", title: "Counters, coverage and accounting bases", start: "    A harness's native counters add only within that harness: a raw input sum across" },
+    Section { name: "cost-spans", family: "cost", title: "Session spans, allocation and estimates", start: "    A recording beginning before its session's first dispatch has" },
+    Section { name: "cost-identity", family: "cost", title: "Lineage, participants, liveness and child families", start: "    Lineage relatives are plain session ids. A non-id reference makes" },
+    Section { name: "cost-selection", family: "cost", title: "Range and footprint selection", start: "  - `arc cost show` selects the union of its positional targets, change ids" },
+    Section { name: "cost-retention", family: "cost", title: "Retained usage facts", start: "  - `arc cost retain <change|journal-file>` keeps, per bound or participating" },
+    Section { name: "cost-commits", family: "cost", title: "Commit accounting and Git notes", start: "  - `arc cost show --commit <rev> [--json]` answers for a commit, which has" },
+    Section { name: "cost-evidence", family: "cost", title: "Portable attribution evidence", start: "  - `arc cost evidence <change|journal-file>... | --all` writes the evidence" },
+    Section { name: "rules-rounds", family: "rules", title: "Round endings and execution roles", start: "  - A bounded round records what it deliberately left, so the next round" },
+    Section { name: "exit-codes", family: "exit-codes", title: "Exit codes and blocker precedence", start: "EXIT CODES" },
+    Section { name: "files", family: "files", title: "Configuration, gates, build storage and retention", start: "FILES" },
+    Section { name: "schemas", family: "schemas", title: "Versioned surfaces", start: "SCHEMAS" },
+    Section { name: "boundaries", family: "boundaries", title: "Authority and effect boundaries", start: "WHAT ARC WILL NOT DO" },
 ];
 
 struct Topic<'a> {
     name: &'static str,
+    family: &'static str,
     title: &'static str,
     text: &'a str,
 }
 
 fn topics(text: &str) -> Vec<Topic<'_>> {
-    let offsets: Vec<_> = TOPICS
+    let offsets: Vec<_> = SECTIONS
         .iter()
-        .map(|(_, heading)| {
-            text.find(&format!("\n{heading}\n"))
-                .expect("compiled topic heading exists")
-                + 1
+        .map(|section| {
+            text.lines()
+                .scan(0, |offset, line| {
+                    let at = *offset;
+                    *offset += line.len() + 1;
+                    Some((at, line))
+                })
+                .find(|(_, line)| *line == section.start)
+                .expect("compiled semantic section exists")
+                .0
         })
         .collect();
-    let mut topics = vec![Topic {
-        name: "overview",
-        title: "Arc and Git ownership",
-        text: &text[..offsets[0]],
-    }];
-    for (i, (name, title)) in TOPICS.iter().enumerate() {
-        topics.push(Topic {
-            name,
-            title,
+    let mut topics: Vec<_> = SECTIONS
+        .iter()
+        .enumerate()
+        .map(|(i, section)| Topic {
+            name: section.name,
+            family: section.family,
+            title: section.title,
             text: &text[offsets[i]..*offsets.get(i + 1).unwrap_or(&text.len())],
-        });
-    }
-    for (name, title, start, end) in [
-        (
-            "probes",
-            "Acceptance probes",
-            "  Each acceptance probe declared",
-            "\n  `arc rebase",
-        ),
-        (
-            "cleanup",
-            "Integration cleanup",
-            "  `integration.cleanup` governs",
-            "\n  Integration prints",
-        ),
-        (
-            "cost",
-            "Work cost accounting",
-            "  - `arc cost show <change|journal-file>",
-            "\nEXIT CODES",
-        ),
-    ] {
-        let start = text.find(start).expect("compiled topic start exists");
-        let end = text[start..].find(end).expect("compiled topic end exists") + start;
-        topics.push(Topic {
-            name,
-            title,
-            text: &text[start..end],
-        });
-    }
+        })
+        .collect();
+    topics.push(Topic {
+        name: "identity-options",
+        family: "identity",
+        title: "Global options",
+        text: IDENTITY_OPTIONS,
+    });
+    topics.push(Topic {
+        name: "journal-resolution",
+        family: "journal",
+        title: "Journal directory resolution and anchors",
+        text: JOURNAL_RESOLUTION,
+    });
     topics
 }
 
-/// Page boundaries preserve every byte and never divide a UTF-8 code point.
-fn pages(mut text: &str) -> Vec<&str> {
-    let mut result = Vec::new();
-    while text.len() > PAGE_LIMIT {
-        let mut boundary = PAGE_LIMIT;
-        while !text.is_char_boundary(boundary) {
-            boundary -= 1;
+fn families(topics: &[Topic<'_>]) -> Vec<&'static str> {
+    let mut families = Vec::new();
+    for topic in topics {
+        if !families.contains(&topic.family) {
+            families.push(topic.family);
         }
-        let prefix = &text[..boundary];
-        if let Some(paragraph) = prefix.rfind("\n\n").filter(|at| *at > 0) {
-            boundary = paragraph + 2;
-        } else if let Some(line) = prefix.rfind('\n').filter(|at| *at > 0) {
-            boundary = line + 1;
-        }
-        result.push(&text[..boundary]);
-        text = &text[boundary..];
     }
-    if !text.is_empty() {
-        result.push(text);
+    families
+}
+
+fn family_text(name: &str, topics: &[Topic<'_>]) -> String {
+    let mut text = format!("{} topics:\n", name);
+    for topic in topics.iter().filter(|topic| topic.family == name) {
+        text.push_str(&format!("  arc guide {} — {}\n", topic.name, topic.title));
     }
-    result
+    text
 }
 
 fn topic_routes(topics: &[Topic<'_>]) -> Vec<(String, String)> {
-    let mut routes = Vec::new();
-    for topic in topics {
-        if topic.text.len() <= TOPIC_LIMIT {
-            routes.push((format!("arc guide {}", topic.name), topic.text.to_string()));
-        } else {
-            for (i, page) in pages(topic.text).iter().enumerate() {
-                routes.push((
-                    format!("arc guide {}-{}", topic.name, i + 1),
-                    page.to_string(),
-                ));
-            }
+    let mut routes: Vec<_> = topics
+        .iter()
+        .map(|topic| {
+            (
+                format!("arc guide {}", topic.name),
+                format!("{}\n\n{}", topic.title, topic.text),
+            )
+        })
+        .collect();
+    for family in families(topics) {
+        if !topics.iter().any(|topic| topic.name == family) {
+            routes.push((format!("arc guide {family}"), family_text(family, topics)));
         }
     }
     routes
@@ -4759,7 +4872,10 @@ fn instruction_commands(mut command: clap::Command, path: &str, out: &mut Vec<(S
         format!("{path} --help"),
         command.clone().render_long_help().to_string(),
     ));
-    for child in command.get_subcommands() {
+    for child in command
+        .get_subcommands()
+        .filter(|child| child.get_name() != "help")
+    {
         instruction_commands(child.clone(), &format!("{path} {}", child.get_name()), out);
     }
 }
@@ -4793,18 +4909,21 @@ pub fn show(
     command: clap::Command,
 ) -> anyhow::Result<()> {
     let text = GUIDE.replace("{READ_ONLY_COMMANDS}", &read_only_commands());
+    let topics = topics(&text);
     if all {
-        print!("{text}");
+        for topic in &topics {
+            print!("{}", topic.text);
+        }
         return Ok(());
     }
-    let topics = topics(&text);
+    let routes = topic_routes(&topics);
     if let Some(search) = search {
         anyhow::ensure!(
             !search.is_empty(),
             "search text must not be empty; use `arc guide` for the index"
         );
         let needle = search.to_lowercase();
-        let mut routes = topic_routes(&topics);
+        let mut routes = routes;
         instruction_commands(command, "arc", &mut routes);
         let mut found = false;
         for (route, body) in routes {
@@ -4819,39 +4938,33 @@ pub fn show(
         return Ok(());
     }
     if let Some(name) = topic {
-        for topic in &topics {
-            if name == topic.name {
-                if topic.text.len() <= TOPIC_LIMIT {
-                    print!("{}", topic.text);
-                } else {
-                    println!("{}\nRead each section in order:", topic.title);
-                    for (i, _) in pages(topic.text).iter().enumerate() {
-                        println!("  arc guide {}-{}", topic.name, i + 1);
-                    }
-                }
-                return Ok(());
-            }
-            if topic.text.len() > TOPIC_LIMIT {
-                for (i, page) in pages(topic.text).iter().enumerate() {
-                    if name == format!("{}-{}", topic.name, i + 1) {
-                        print!("{page}");
-                        return Ok(());
-                    }
-                }
-            }
+        if let Some((_, body)) = routes
+            .iter()
+            .find(|(route, _)| route == &format!("arc guide {name}"))
+        {
+            anyhow::ensure!(
+                body.len() <= TOPIC_LIMIT,
+                "compiled topic exceeds its byte budget"
+            );
+            print!("{body}");
+            return Ok(());
         }
         anyhow::bail!("unknown guide topic {name:?}; use `arc guide` for the index");
     }
     println!("Workflow topics (read with the exact route):");
-    for topic in &topics {
-        println!("  arc guide {} — {}", topic.name, topic.title);
-        if topic.text.len() > TOPIC_LIMIT {
-            for (i, _) in pages(topic.text).iter().enumerate() {
-                println!("    arc guide {}-{}", topic.name, i + 1);
-            }
+    for family in families(&topics) {
+        if !topics.iter().any(|topic| topic.name == family) {
+            println!("  arc guide {family} — topic family");
+        }
+        for topic in topics.iter().filter(|topic| topic.family == family) {
+            println!("  arc guide {} — {}", topic.name, topic.title);
         }
     }
-    println!("\nCanonical contribution rules: arc instructions git");
+    println!("\nTasks: patchset → arc snapshot --help; preflight → arc check --help");
+    println!("Claim work → arc claim --help; project records → arc journal --help");
+    println!("Review owed → arc debt --help / arc audit --help / arc query --help");
+    println!("Read findings → arc findings <change> --help (after integration: --audit)");
+    println!("Canonical contribution rules: arc instructions git");
     println!("Full depth: arc guide --all\nLiteral search: arc guide --search TEXT");
     println!("\nCommand contracts:");
     let mut routes = Vec::new();
@@ -4866,23 +4979,282 @@ pub fn show(
 mod topic_tests {
     use super::*;
 
+    /// Each original byte has one semantic owner; an accidental gap or overlap loses or duplicates depth.
     #[test]
-    fn topic_pages_preserve_all_bytes_within_the_ceiling() {
+    fn semantic_sections_partition_full_depth_and_obey_the_topic_budget() {
         let text = GUIDE.replace("{READ_ONLY_COMMANDS}", &read_only_commands());
         let topics = topics(&text);
         assert_eq!(
-            topics[..=TOPICS.len()]
+            topics[..SECTIONS.len()]
                 .iter()
                 .map(|topic| topic.text)
                 .collect::<String>(),
             text
         );
-        for topic in topics {
-            let pages = pages(topic.text);
-            assert_eq!(pages.concat(), topic.text);
-            assert!(pages.iter().all(|page| page.len() <= TOPIC_LIMIT));
+        for (route, body) in topic_routes(&topics) {
+            assert!(body.len() <= TOPIC_LIMIT, "{route}: {} bytes", body.len());
         }
-        let unicode = "界".repeat(PAGE_LIMIT);
-        assert_eq!(pages(&unicode).concat(), unicode);
+        for family in families(&topics) {
+            assert!(
+                MAP.split_whitespace().any(|word| word == family),
+                "map omits {family}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+    use clap::error::ErrorKind;
+    use std::collections::BTreeSet;
+
+    fn instruction_stack(work: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .stack_size(16 << 20)
+            .spawn(work)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn command_routes(command: &clap::Command, path: &str, paths: &mut BTreeSet<String>) {
+        paths.insert(format!("{path} --help"));
+        for child in command
+            .get_subcommands()
+            .filter(|child| child.get_name() != "help")
+        {
+            command_routes(child, &format!("{path} {}", child.get_name()), paths);
+        }
+    }
+
+    /// Every operation has an indexed help route; parsing help proves reachability without executing it.
+    #[test]
+    fn command_index_reaches_every_leaf_without_dispatch() {
+        instruction_stack(|| {
+            let mut command = crate::cli_command();
+            command.build();
+            let mut expected = BTreeSet::new();
+            command_routes(&command, "arc", &mut expected);
+            let mut rendered = Vec::new();
+            instruction_commands(command.clone(), "arc", &mut rendered);
+            let actual: BTreeSet<_> = rendered.iter().map(|(route, _)| route.clone()).collect();
+            assert!(expected.len() > 200);
+            assert_eq!(actual, expected);
+            for (route, _) in rendered {
+                let error = command
+                    .clone()
+                    .try_get_matches_from(route.split_whitespace())
+                    .unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::DisplayHelp, "{route}: {error}");
+            }
+        });
+    }
+
+    /// A printed command or topic typo must fail in the command tree before any mutation can run.
+    #[test]
+    fn printed_instruction_routes_resolve_in_the_command_tree() {
+        instruction_stack(|| {
+            let mut command = crate::cli_command();
+            command.build();
+            let text = GUIDE.replace("{READ_ONLY_COMMANDS}", &read_only_commands());
+            let topics = topics(&text);
+            let mut surfaces = topic_routes(&topics);
+            surfaces.push(("map".into(), MAP.into()));
+            instruction_commands(command.clone(), "arc", &mut surfaces);
+            let topic_names: BTreeSet<_> = topic_routes(&topics)
+                .into_iter()
+                .map(|(route, _)| route.trim_start_matches("arc guide ").to_owned())
+                .collect();
+            fn flags(command: &clap::Command, names: &mut BTreeSet<String>) {
+                for arg in command.get_arguments() {
+                    if let Some(long) = arg.get_long() {
+                        names.insert(long.to_string());
+                    }
+                    if let Some(aliases) = arg.get_visible_aliases() {
+                        names.extend(aliases.iter().map(|name| name.to_string()));
+                    }
+                }
+                for child in command
+                    .get_subcommands()
+                    .filter(|child| child.get_name() != "help")
+                {
+                    flags(child, names);
+                }
+            }
+            let mut flag_names = BTreeSet::new();
+            flags(&command, &mut flag_names);
+            let mut checked = 0;
+            let mut gaps = Vec::new();
+            for (home, body) in &surfaces {
+                let spans = body
+                    .split('`')
+                    .skip(1)
+                    .step_by(2)
+                    .filter_map(|code| code.trim().strip_prefix("arc "));
+                let rows = body
+                    .lines()
+                    .filter_map(|line| line.trim().strip_prefix("arc "))
+                    .filter(|tail| {
+                        tail.split_whitespace().next().is_some_and(|word| {
+                            command.find_subcommand(word).is_some() || word.starts_with(['<', '-'])
+                        })
+                    })
+                    .map(|tail| tail.split("  ").next().unwrap_or(tail));
+                for tail in spans.chain(rows) {
+                    let compact = tail.split_whitespace().collect::<Vec<_>>().join(" ");
+                    if let Err(reason) = validate_command(&command, &compact, &topic_names) {
+                        gaps.push(format!("{home}: `arc {compact}`: {reason}"));
+                    }
+                    checked += 1;
+                }
+                for tail in body.split("--").skip(1) {
+                    let flag: String = tail
+                        .chars()
+                        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
+                        .collect();
+                    if !flag.is_empty()
+                        && flag
+                            .chars()
+                            .next()
+                            .is_some_and(|ch| ch.is_ascii_alphabetic())
+                        && !flag_names.contains(&flag)
+                        && ![
+                            "flag",
+                            "continue",
+                            "recurse-submodules",
+                            "no-checkout",
+                            "onto",
+                            "latest",
+                            "notes",
+                            "abort",
+                            "ff-only",
+                        ]
+                        .contains(&flag.as_str())
+                    {
+                        gaps.push(format!("{home}: unknown flag --{flag}"));
+                    }
+                }
+                for tail in body.split("arc guide ").skip(1) {
+                    let name = tail
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .trim_end_matches(['`', '.', ',', ';', ')', ':']);
+                    if name.starts_with(['<', '-', '(', '[']) || name.is_empty() {
+                        continue;
+                    }
+                    assert!(topic_names.contains(name), "{home}: unknown topic {name}");
+                }
+            }
+            assert!(checked > 300, "only {checked} command examples checked");
+            assert!(gaps.is_empty(), "{}", gaps.join("\n"));
+        });
+    }
+
+    fn validate_command(
+        command: &clap::Command,
+        tail: &str,
+        topics: &BTreeSet<String>,
+    ) -> Result<(), String> {
+        let mut current = command;
+        let mut words = tail.split_whitespace().peekable();
+        let mut path = vec!["arc"];
+        while let Some(word) = words.next() {
+            let word = word.trim_matches(['[', ']', ',', '`']);
+            if word == "--help" || word == "-h" {
+                return Ok(());
+            }
+            if word == "<kind>" && current.get_name() == "journal" {
+                current = current.find_subcommand("note").unwrap();
+                path.push("note");
+                continue;
+            }
+            if word.starts_with('<')
+                || word.starts_with('"')
+                || word.starts_with('\'')
+                || word == "..."
+            {
+                continue;
+            }
+            if let Some(child) = current.find_subcommand(word) {
+                current = child;
+                path.push(word);
+                if word == "guide" {
+                    if let Some(name) = words.peek().filter(|name| !name.starts_with(['<', '-'])) {
+                        if !topics.contains(*name) {
+                            return Err(format!("unknown topic {name}"));
+                        }
+                    }
+                }
+                continue;
+            }
+            if word.starts_with('-') {
+                for flag in word.split('|') {
+                    let flag = flag
+                        .split('=')
+                        .next()
+                        .unwrap_or(flag)
+                        .trim_end_matches(['.', ':', ')']);
+                    let found = current.get_arguments().find(|arg| {
+                        flag.strip_prefix("--").is_some_and(|name| {
+                            arg.get_long() == Some(name)
+                                || arg
+                                    .get_visible_aliases()
+                                    .is_some_and(|aliases| aliases.contains(&name))
+                        }) || flag.strip_prefix('-').is_some_and(|short| {
+                            short.len() == 1
+                                && arg.get_short().is_some_and(|ch| short.starts_with(ch))
+                        })
+                    });
+                    let Some(arg) = found else {
+                        return Err(format!("unknown flag {flag} on {}", path.join(" ")));
+                    };
+                    if arg.get_action().takes_values() && !word.contains('=') {
+                        words.next();
+                    }
+                }
+            } else if current.has_subcommands() && !word.contains('|') {
+                return Err(format!("unknown root command {word}"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Child listings are single rows and long contracts remain available on each operation.
+    #[test]
+    fn help_summaries_and_inherited_environment_entries_are_concise() {
+        instruction_stack(|| {
+            fn walk(command: &clap::Command) {
+                for arg in command
+                    .get_arguments()
+                    .filter(|arg| arg.get_env().is_some())
+                {
+                    assert!(
+                        arg.is_hide_env_values_set(),
+                        "{}: {}",
+                        command.get_name(),
+                        arg.get_id()
+                    );
+                }
+                for child in command.get_subcommands() {
+                    if let Some(about) = child.get_about() {
+                        assert!(!about.to_string().contains('\n'), "{}", child.get_name());
+                        if child.get_long_about().is_some_and(|long| long != about) {
+                            assert!(
+                                child.clone().render_help().to_string().len()
+                                    < child.clone().render_long_help().to_string().len(),
+                                "{}",
+                                child.get_name()
+                            );
+                        }
+                    }
+                    walk(child);
+                }
+            }
+            let mut command = crate::cli_command();
+            command.build();
+            walk(&command);
+        });
     }
 }

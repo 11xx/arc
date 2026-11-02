@@ -1,13 +1,17 @@
 ## The reference is the binary
 
-`arc` with no arguments prints the guide and
-`arc <verb> --help` is each command's contract (clap doc comments). There is
-no other documentation tree, so a rule stated anywhere else is one no session
-reads.
+`arc` with no arguments prints a bounded capability map. `arc guide` indexes
+workflow topics; `arc guide <topic>` and `arc <verb> --help` hold the full
+contracts. The binary is the reference; no other documentation tree defines
+operating rules.
 
-- A behaviour change updates the guide and every affected `--help` in the
-  same change.
-- A shape change follows the SCHEMAS rule in the guide (`arc`): one new
+- Each unique rule has one canonical home: the map, a topic, or command help.
+  Other surfaces cross-reference it.
+- A behaviour change updates every affected contract in its canonical topic or
+  command help in the same change. Update the map when a required bootstrap
+  rule, entry route or capability family changes. Keep the fixed ceilings:
+  map 80 lines / 6,144 UTF-8 bytes, topic 16,384 bytes, root help 12,288 bytes.
+- A shape change follows the SCHEMAS rule in `arc guide schemas`: one new
   version per release, counted from the last release.
 
 ## Working on arc

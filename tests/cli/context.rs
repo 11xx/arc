@@ -1717,7 +1717,10 @@ fn guide_and_help_teach_current_debt_and_partial_opencode_identity() {
     assert!(integrate.contains("arc query --debt"), "{integrate}");
     assert!(!integrate.contains("audit-debt"), "{integrate}");
 
-    let guide = normalize(stdout(&mut repo.arc(&repo.root)));
+    let guide = normalize(crate::common::instruction_topics(
+        &repo,
+        &["identity-sessions"],
+    ));
     assert!(!guide.contains("audit-debt"), "{guide}");
     assert!(
         guide.contains("OpenCode v2 (`opencode2`) is recognized without one"),
@@ -1861,9 +1864,25 @@ fn differing_explicit_harness_suppresses_detected_session() {
 /// document, so the guide must carry the lifecycle, the profiles, and the
 /// rules that change what a session does — not just a command list.
 #[test]
-fn bare_arc_prints_the_workflow_guide() {
+fn topic_depth_carries_the_workflow_contracts() {
     let repo = Repo::new();
-    let guide = stdout(&mut repo.arc(&repo.root));
+    let guide = crate::common::instruction_topics(
+        &repo,
+        &[
+            "debt-review",
+            "change-gates",
+            "probes",
+            "change-integration",
+            "rules-evidence",
+            "rules-claims",
+            "rules-rounds",
+            "orient",
+            "questions",
+            "profiles",
+            "change-commands",
+            "journal-lookup",
+        ],
+    );
     let flat = guide.split_whitespace().collect::<Vec<_>>().join(" ");
     for expected in [
         "An event's effective author is its `--on-behalf-of` subject when set, otherwise its actor.",
@@ -1924,7 +1943,7 @@ fn help_points_at_the_guide_and_at_live_state() {
     let repo = Repo::new();
     let help = stdout(repo.arc(&repo.root).arg("--help"));
     assert!(
-        help.contains("no arguments for the workflow guide"),
+        help.contains("no arguments for the capability map"),
         "{help}"
     );
     assert!(help.contains("arc catchup"), "{help}");

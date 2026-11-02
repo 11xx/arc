@@ -17185,7 +17185,7 @@ fn committed_promotion_cleanup_refuses_changed_bodies_and_relation_identity() {
 #[test]
 fn the_guide_and_help_teach_reading_a_known_artifact_without_a_filesystem_search() {
     let repo = Repo::new();
-    let guide = stdout(&mut repo.arc(&repo.root));
+    let guide = crate::common::instruction_topics(&repo, &["journal-lookup"]);
     let flat = guide.split_whitespace().collect::<Vec<_>>().join(" ");
     for expected in [
         "never by searching the filesystem",
@@ -17584,7 +17584,7 @@ fn journal_evidence_archived_limit_is_documented_and_refused() {
         help.contains("cold storage") && help.contains("unarchive"),
         "{help}"
     );
-    let guide = stdout(&mut repo.arc(&repo.root));
+    let guide = crate::common::instruction_topics(&repo, &["journal-lookup"]);
     assert!(
         guide.contains("Evidence cannot be appended in cold storage"),
         "missing evidence limit"
@@ -17691,14 +17691,14 @@ fn sentinel_reattribute_omits_legacy_unknown_coordinates_from_sibling_references
         help.contains("Legacy placeholder harnesses and sessions"),
         "{help}"
     );
-    let guide = stdout(&mut repo.arc(&repo.root));
+    let guide = crate::common::instruction_topics(&repo, &["journal-lookup"]);
     assert!(guide.contains("Legacy placeholder harnesses and sessions"));
 }
 
 #[test]
 fn sentinel_hostname_fallback_is_a_documented_host_fact() {
     let repo = Repo::new();
-    let guide = stdout(&mut repo.arc(&repo.root));
+    let guide = crate::common::instruction_topics(&repo, &["rules-evidence"]);
     assert!(guide.contains("A hostname arc could not read is recorded as `unknown`"));
     let help = stdout(repo.arc(&repo.root).args(["verify", "--help"]));
     assert!(help.contains("hostname") && help.contains("unknown"));

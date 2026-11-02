@@ -8,6 +8,8 @@ fn guide_navigation_is_stateless_with_broken_configuration_and_every_role() {
     fs::write(&config, broken).unwrap();
     for role in ["implementer", "reviewer", "lead"] {
         for args in [
+            vec![],
+            vec!["--help"],
             vec!["guide"],
             vec!["guide", "identity"],
             vec!["guide", "--all"],
@@ -41,6 +43,15 @@ fn guide_index_routes_are_bounded_and_full_depth_preserves_the_manual() {
             continue;
         }
         assert!(
+            !name
+                .rsplit('-')
+                .next()
+                .unwrap()
+                .chars()
+                .all(|ch| ch.is_ascii_digit()),
+            "size-cut page {name}"
+        );
+        assert!(
             seen.insert(name.to_string()),
             "duplicate topic route: {name}"
         );
@@ -70,7 +81,9 @@ fn guide_index_routes_are_bounded_and_full_depth_preserves_the_manual() {
     }
     let all = stdout(repo.arc(&repo.home).args(["guide", "--all"]));
     let bare = stdout(&mut repo.arc(&repo.home));
-    assert_eq!(all, bare);
+    assert!(all.len() > bare.len());
+    assert!(all.contains("RUN A CHANGE"));
+    assert!(all.contains("JOURNAL DIRECTORY RESOLUTION"));
     repo.arc(&repo.home)
         .args(["guide", "does-not-exist"])
         .assert()
@@ -105,4 +118,119 @@ fn guide_search_is_literal_case_insensitive_and_keeps_private_env_values_out() {
     assert!(!flags.contains("sensitive-link"), "{flags}");
     assert!(!flags.contains("private-session-marker"), "{flags}");
     assert!(search("^no.*such$regex").contains("No instruction matches"));
+}
+
+/// The bootstrap must fit an ordinary tool response; a full manual here hides routes.
+#[test]
+fn bare_map_fits_both_budgets_and_names_bootstrap_routes() {
+    let repo = Repo::new();
+    let map = stdout(&mut repo.arc(&repo.home));
+    assert!(map.lines().count() <= 80, "{} lines", map.lines().count());
+    assert!(map.len() <= 6_144, "{} bytes", map.len());
+    for route in [
+        "eval \"$(arc env)\"",
+        "arc catchup",
+        "arc workspace",
+        "arc journal show",
+        "arc snapshot",
+        "arc check",
+        "arc claim",
+        "arc debt",
+        "arc audit",
+        "arc findings",
+        "arc guide --all",
+        "arc guide --search",
+        "arc guide identity",
+    ] {
+        assert!(map.contains(route), "missing bootstrap route {route}");
+    }
+}
+
+/// Help budgets must be independent of private ambient provenance on root, group and leaf reads.
+#[test]
+fn help_is_bounded_and_env_values_never_change_instruction_bytes() {
+    let repo = Repo::new();
+    for path in [
+        vec![],
+        vec!["journal"],
+        vec!["journal", "filed"],
+        vec!["show"],
+        vec!["query"],
+    ] {
+        for flag in ["-h", "--help"] {
+            let render = |sentinel: &str| {
+                stdout(
+                    repo.arc(&repo.home)
+                        .env("ARC_HARNESS", sentinel)
+                        .env("ARC_SESSION", sentinel)
+                        .env("ARC_SESSION_LINK", sentinel)
+                        .env("ARC_ON_BEHALF_OF", sentinel)
+                        .args(&path)
+                        .arg(flag),
+                )
+            };
+            let first = render("private-marker");
+            assert_eq!(
+                first,
+                render("private-marker-with-a-much-longer-value"),
+                "{path:?} {flag}"
+            );
+            assert!(!first.contains("private-marker"));
+            for name in [
+                "ARC_HARNESS",
+                "ARC_SESSION",
+                "ARC_SESSION_LINK",
+                "ARC_ON_BEHALF_OF",
+            ] {
+                if !(path == ["query"] && name == "ARC_HARNESS")
+                    && !(path == ["journal", "filed"] && name == "ARC_SESSION")
+                {
+                    assert!(first.contains(name), "missing {name}: {path:?}");
+                }
+            }
+            if path.is_empty() {
+                assert!(first.len() <= 12_288, "root {flag}: {} bytes", first.len());
+            }
+        }
+    }
+    let short = stdout(repo.arc(&repo.home).args(["show", "-h"]));
+    let long = stdout(repo.arc(&repo.home).args(["show", "--help"]));
+    assert!(
+        short.len() < long.len(),
+        "show -h must leave depth to --help"
+    );
+}
+
+/// A journal family route must reach directory precedence, including non-Git anchors.
+#[test]
+fn journal_family_and_literal_search_reach_directory_resolution() {
+    let repo = Repo::new();
+    let family = stdout(repo.arc(&repo.home).args(["guide", "journal"]));
+    assert!(family.contains("arc guide journal-resolution"));
+    let resolution = stdout(repo.arc(&repo.home).args(["guide", "journal-resolution"]));
+    let terms = [
+        "ARC_JOURNAL_DIR",
+        "[journals.dirs]",
+        "<repo-path-slug>",
+        "bindings.jsonl",
+    ];
+    let mut prior = 0;
+    for term in terms {
+        let at = resolution.find(term).unwrap();
+        assert!(at >= prior, "resolution precedence: {term}");
+        prior = at;
+    }
+    assert!(resolution.contains("outside a repository"));
+    assert!(resolution.contains("arc journal rebind"));
+    for term in ["anchor", "slug", "prefix", "directory", "ARC_JOURNAL_DIR"] {
+        let matches = stdout(repo.arc(&repo.home).args(["guide", "--search", term]));
+        assert!(
+            matches.contains("arc guide journal-resolution:"),
+            "{term}: {matches}"
+        );
+    }
+    for args in [vec!["query", "--help"], vec!["journal", "filed", "--help"]] {
+        let help = stdout(repo.arc(&repo.home).args(args));
+        assert!(help.contains("only when explicitly typed"), "{help}");
+    }
 }

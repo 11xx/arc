@@ -111,7 +111,7 @@ fn a_behind_change_under_ff_only_lists_both_blockers_and_exits_on_the_rebase() {
         .code(11);
 
     // The guide and `check --help` state what the fixture shows.
-    let guide = stdout(&mut repo.arc(&repo.root));
+    let guide = crate::common::instruction_topics(&repo, &["rules-evidence"]);
     let flat = guide.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
         flat.contains("under `ff-only`, where no merge ships, a change behind its target still lists `merged-tree-unevaluated` beside `needs-rebase`"),

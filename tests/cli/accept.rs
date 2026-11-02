@@ -297,7 +297,7 @@ fn rebased_delivery_names_publishing_remedy(record_rewrite: bool) {
 #[test]
 fn accept_delivery_guide_and_help_name_rebase_patchset_remedy() {
     let repo = Repo::new();
-    let guide = stdout(&mut repo.arc(&repo.root));
+    let guide = crate::common::instruction_topics(&repo, &["replicas"]);
     let pairing = guide.split("PAIR REPLICA STORES").nth(1).unwrap();
     assert!(pairing.contains("rebase on the worker requires a patchset before export"));
     assert!(pairing.contains("arc snapshot <change> --contributors <the implementing actor>"));
