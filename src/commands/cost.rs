@@ -3698,20 +3698,11 @@ fn model_of(coordinate: &str) -> Option<String> {
 /// it: `harness:id:model[#effort]`, either form followed by a parenthesized
 /// label or not, names the session `id` served by `model`.
 fn subject_of(event: &Event) -> Option<((String, String), Option<String>)> {
-    let subject = event.on_behalf_of.as_deref()?.trim();
-    let subject = match subject.split_once(" (") {
-        Some((head, label)) if label.ends_with(')') => head,
-        _ => subject,
-    };
-    let (harness, rest) = subject.split_once(':')?;
-    let (id, model) = match rest.split_once(':') {
-        Some((id, model)) => (id, Some(model.to_string())),
-        None => (rest, None),
-    };
-    (plain_session_id(harness)
-        && plain_session_id(id)
-        && model.as_deref().is_none_or(portable_coordinate))
-    .then(|| ((harness.to_string(), id.to_string()), model))
+    let (harness, id, model) = crate::coordinate::session_subject(event.on_behalf_of.as_deref()?)?;
+    Some((
+        (harness.to_string(), id.to_string()),
+        model.map(str::to_string),
+    ))
 }
 
 /// Why a subject session nothing on this machine holds has no figure.

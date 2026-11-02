@@ -3749,7 +3749,9 @@ RULES THAT CHANGE WHAT YOU DO
     keeps its own roles for the event it ran. A subject
     `harness:<id>:<model>[#effort]`, followed by a parenthesized label or
     not, names the session `<id>` and declares `<model>` as that session's
-    model on the event. The subject names a session
+    model on the event. It counts as `--model` does, including for a verdict's
+    or audit's independence check; `--model` outranks it and it outranks
+    `ARC_MODEL`. The subject names a session
     when the tapes reader of its harness locates the id as one of that
     harness's recordings, each harness shaping its own ids (an OpenCode
     `ses_…`, a Pi id as its recording names it, a Claude or Codex UUID),

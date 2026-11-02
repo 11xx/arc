@@ -4626,3 +4626,67 @@ fn historical_producer_models_are_flagged_and_never_displayed_as_placeholders() 
         }
     }
 }
+
+/// Claim: a model the `--on-behalf-of` subject declares reaches the verdict and
+/// its independence check, for a verdict and an audit alike, over `ARC_MODEL`.
+/// Rejects recording another model and staying silent about a contributor on
+/// that model, which let this spelling evade the warning `--model` draws.
+#[test]
+fn a_subject_declared_model_reaches_the_independence_check() {
+    for audit in [false, true] {
+        let repo = Repo::new();
+        let worktree = snapshotted_change(&repo, "subject-model");
+        repo.arc(&worktree)
+            .args([
+                "snapshot",
+                "subject-model",
+                "--amend",
+                "ps-01",
+                "--contributors",
+                "codex:gpt-6.1-sol#xhigh",
+            ])
+            .assert()
+            .success();
+        if audit {
+            repo.arc(&repo.root)
+                .args(["integrate", "subject-model", "--debt", "owed"])
+                .assert()
+                .success();
+        }
+        let verb = if audit { "audit" } else { "review" };
+        let output = repo
+            .arc(&worktree)
+            .env("ARC_MODEL", "claude-opus-5-5#high")
+            .args(["--on-behalf-of", "codex:rev1:gpt-6.1-sol#high"])
+            .args([verb, "subject-model", "--verdict", "approved"])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("recorded under model \"gpt-6.1-sol#high\""),
+            "{verb}: {stderr}"
+        );
+        let events = stdout(
+            repo.arc(&repo.root)
+                .args(["events", "--change", "subject-model"]),
+        );
+        assert!(
+            events.contains("\"model\":\"gpt-6.1-sol#high\""),
+            "{verb}: {events}"
+        );
+    }
+}
+
+/// Claim: a subject's declared model meets the rule a declared `--model` does.
+/// Rejects recording a placeholder through the subject spelling.
+#[test]
+fn a_subject_declared_model_cannot_be_a_placeholder() {
+    let repo = Repo::new();
+    let worktree = snapshotted_change(&repo, "subject-placeholder");
+    repo.arc(&worktree)
+        .args(["--on-behalf-of", "codex:rev1:unknown"])
+        .args(["review", "subject-placeholder", "--verdict", "approved"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("unknown"));
+}

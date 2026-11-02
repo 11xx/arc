@@ -26,6 +26,26 @@ const PLACEHOLDERS: [&str; 12] = [
     "synthetic",
 ];
 
+/// The harness, id and declared model of an `--on-behalf-of` subject shaped
+/// `harness:id[:model[#effort]]`, a trailing parenthesized label ignored. It
+/// says nothing about whether the id names a session.
+pub(crate) fn session_subject(subject: &str) -> Option<(&str, &str, Option<&str>)> {
+    let subject = subject.trim();
+    let subject = match subject.split_once(" (") {
+        Some((head, label)) if label.ends_with(')') => head,
+        _ => subject,
+    };
+    let (harness, rest) = subject.split_once(':')?;
+    let (id, model) = match rest.split_once(':') {
+        Some((id, model)) => (id, Some(model)),
+        None => (rest, None),
+    };
+    (crate::model::plain_session_id(harness)
+        && crate::model::plain_session_id(id)
+        && model.is_none_or(crate::model::portable_coordinate))
+    .then_some((harness, id, model))
+}
+
 /// Why a value is not something a write may record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Defect {

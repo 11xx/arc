@@ -411,14 +411,30 @@ impl Ctx {
     pub(crate) fn resolve_model(&self) -> ModelAttribution {
         self.model_attribution
             .get_or_init(|| {
+                let (declared, source) = self.declared_model();
                 crate::context::resolve_model(
-                    self.model.as_deref(),
-                    self.model_source,
+                    declared,
+                    source,
                     self.harness.as_deref(),
                     self.session.as_deref(),
                 )
             })
             .clone()
+    }
+
+    /// The model this event declares: `--model`, else the one its subject
+    /// names, else `ARC_MODEL`. The subject outranks the environment because
+    /// the environment describes the invoker.
+    fn declared_model(&self) -> (Option<&str>, Option<ModelSource>) {
+        match (self.model_source, self.subject_model()) {
+            (Some(ModelSource::Flag), _) | (_, None) => (self.model.as_deref(), self.model_source),
+            (_, Some(model)) => (Some(model), Some(ModelSource::Flag)),
+        }
+    }
+
+    fn subject_model(&self) -> Option<&str> {
+        let subject = self.on_behalf_of.as_deref()?;
+        crate::coordinate::session_subject(subject)?.2
     }
 
     /// Refuse an identity no write may record: a placeholder harness,
@@ -432,6 +448,14 @@ impl Ctx {
     /// which records no identity; a read is never refused.
     pub(crate) fn ensure_fresh_identity(&self) -> Result<()> {
         use crate::coordinate::{actor_defect, is_placeholder, model_defect};
+        if let Some(model) = self.subject_model() {
+            if let Some(defect) = model_defect(model, self.session.as_deref()) {
+                bail!(
+                    "--on-behalf-of/ARC_ON_BEHALF_OF declares model {model:?}: {}",
+                    defect.reason()
+                );
+            }
+        }
         if let Some(model) = self.model.as_deref() {
             if let Some(defect) = model_defect(model, self.session.as_deref()) {
                 let remedy = match self.model_source {
