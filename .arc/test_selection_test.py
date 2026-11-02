@@ -1,10 +1,11 @@
-"""Claims: unknown deltas run the full suite; only Markdown may select nothing."""
+"""Claims: unknown or dangerous deltas run the full suite; only Markdown skips work."""
 
 import contextlib
 import importlib.util
 import io
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import unittest
@@ -53,12 +54,12 @@ class SelectionClaims(unittest.TestCase):
     def test_matching_sources_include_units_and_union_modules(self):
         paths = [
             "src/commands/diff.rs",
-            "src/journal.rs",
+            "src/commands/stats.rs",
             "tests/cli/diff.rs",
             "README.md",
         ]
         self.assertEqual(
-            selection.select(paths), ("modules", ["diff", "journal"], True)
+            selection.select(paths), ("modules", ["diff", "stats"], True)
         )
 
     def test_deleted_or_unregistered_modules_require_the_full_suite(self):
@@ -90,18 +91,19 @@ class SelectionClaims(unittest.TestCase):
                 ("diff", "--no-renames", "--name-only", "-z", "base", "HEAD", "--"),
             )
 
-    def test_selector_excludes_only_the_test_gate_on_markdown(self):
-        for paths, excluded in (
-            (["README.md"], True),
-            ([], False),
-            (["unknown"], False),
+    def test_selector_excludes_every_gate_only_on_markdown(self):
+        gates = ["build", "lint", "test-integration"]
+        for paths, affected in (
+            (["README.md"], []),
+            ([], gates),
+            (["unknown"], gates),
         ):
             request = {
                 "schema": "arc-gate-delta/1",
                 "source_tree": "before",
                 "target_tree": "after",
                 "paths": paths,
-                "gates": ["build", "lint", selection.GATE],
+                "gates": gates,
             }
             output = io.StringIO()
             with patch(
@@ -111,9 +113,25 @@ class SelectionClaims(unittest.TestCase):
             answer = json.loads(output.getvalue())
             self.assertEqual(answer["schema"], "arc-gate-selection/1")
             self.assertTrue(answer["complete"])
-            self.assertEqual(selection.GATE not in answer["gates"], excluded)
-            self.assertIn("build", answer["gates"])
-            self.assertIn("lint", answer["gates"])
+            self.assertEqual(answer["gates"], affected)
+
+    def test_a_dangerous_path_runs_the_full_suite_beside_a_matching_module(self):
+        self.assertIn("journal", re.findall(r"^mod (\w+);$", Path("tests/cli/main.rs").read_text(), re.M))
+        self.assertEqual(selection.select(["src/journal.rs"]), ("full", [], False))
+        self.assertEqual(
+            selection.select(["src/journal.rs", "tests/cli/diff.rs"]), ("full", [], False)
+        )
+
+    def test_unreadable_danger_declarations_run_the_full_suite(self):
+        with patch.object(selection, "danger_paths", return_value=None):
+            self.assertEqual(selection.select(["tests/cli/diff.rs"]), ("full", [], False))
+
+    def test_only_a_markdown_delta_skips_a_gate_command(self):
+        for paths, runs in ((["README.md"], False), (["tests/cli/diff.rs"], True), (None, True)):
+            with patch.object(selection, "delta", return_value=paths), patch.object(
+                sys, "argv", ["selection", "--unless-markdown", "false"]
+            ), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(selection.main(), 1 if runs else 0)
 
     def test_malformed_selector_input_proves_no_exclusion(self):
         for raw in ("{}", "null", "[]", "broken"):

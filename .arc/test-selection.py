@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Select integration tests from the committed master-to-HEAD change.
 
-Only nonempty Markdown-only deltas skip tests. Uncertainty runs cargo test.
+Only nonempty Markdown-only deltas skip the build, lint and tests. A path the
+policy declares dangerous, or any uncertainty, runs cargo test.
 The environment probe binds narrow evidence to master's exact head and tools.
 """
 
@@ -11,9 +12,9 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tomllib
 
 TARGET = "refs/heads/master"
-GATE = "test-integration"
 FULL = ("full", [], False)
 
 
@@ -36,11 +37,21 @@ def delta():
         return None
 
 
+def danger_paths():
+    try:
+        return set(tomllib.loads(Path(".arc/policy.toml").read_text())["danger"]["paths"])
+    except (OSError, UnicodeError, KeyError, TypeError, tomllib.TOMLDecodeError):
+        return None
+
+
 def select(paths):
     if not paths or any(not isinstance(path, str) or not path for path in paths):
         return FULL
     if all(path.endswith(".md") for path in paths):
         return ("markdown", [], False)
+    danger = danger_paths()
+    if danger is None or danger.intersection(paths):
+        return FULL
     try:
         modules = set(
             re.findall(r"^mod (\w+);$", Path("tests/cli/main.rs").read_text(), re.M)
@@ -83,10 +94,8 @@ def selector():
             or not all(isinstance(gate, str) for gate in request["gates"])
         ):
             raise ValueError("invalid gate delta")
-        affected = request["gates"]
-        if select(request["paths"])[0] == "markdown":
-            affected = [gate for gate in affected if gate != GATE]
-        answer = {"complete": True, "gates": affected}
+        markdown = select(request["paths"])[0] == "markdown"
+        answer = {"complete": True, "gates": [] if markdown else request["gates"]}
     except (KeyError, TypeError, ValueError):
         answer = {"complete": False, "gates": []}
     print(json.dumps({"schema": "arc-gate-selection/1", **answer}, sort_keys=True))
@@ -171,7 +180,17 @@ def main():
     modes.add_argument(
         "--plan", action="store_true", help="print selection without running tests"
     )
+    modes.add_argument(
+        "--unless-markdown",
+        metavar="COMMAND",
+        help="run this shell command unless the delta is Markdown only",
+    )
     args = parser.parse_args()
+    if args.unless_markdown:
+        if select(delta())[0] == "markdown":
+            print(f"Markdown-only delta: skipped {args.unless_markdown}", flush=True)
+            return 0
+        return subprocess.run(args.unless_markdown, shell=True).returncode
     if args.selector:
         selector()
     elif args.environment:
