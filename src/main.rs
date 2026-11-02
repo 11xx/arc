@@ -461,6 +461,7 @@ enum Cmd {
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
+        /// Layout of the listed changes
         #[arg(long, value_enum, default_value = "default")]
         format: ListFormat,
     },
@@ -977,8 +978,10 @@ enum Cmd {
         /// Only messages recorded against this change
         #[arg(long, id = "change_flag")]
         change: Option<String>,
+        /// Only announcements of this class
         #[arg(long = "type", value_enum)]
         message_type: Option<MessageType>,
+        /// Only announcements with this severity
         #[arg(long, value_enum)]
         severity: Option<MessageSeverity>,
         /// Only messages created at or after this ISO 8601 instant. Imports
@@ -1558,6 +1561,7 @@ enum Cmd {
         /// Omitted, the change is inferred from the current branch, then from
         /// the worktree the command runs in
         change: Option<String>,
+        /// Progress stage recorded on the owned claim
         #[arg(value_enum)]
         stage: commands::StageArg,
         /// Acquire a default claim first when this session has no live claim
@@ -1708,6 +1712,7 @@ enum Cmd {
         /// releases it: resolved, accepted-risk, or obsolete
         #[arg(long)]
         blocking: bool,
+        /// Severity of the recorded finding
         #[arg(long, value_enum, default_value = "major")]
         severity: Severity,
         /// Patchset the finding is against (defaults to the latest)

@@ -47,7 +47,7 @@ fn implementer_role_refuses_lead_owned_commands_without_appending_events() {
             .assert()
             .code(9)
             .stderr(format!(
-                "role refusal: implementer may not {name} (requires {required})\n"
+                "role refusal: implementer may not {name} (requires {required})\nRead: arc guide identity\n"
             ));
         assert_eq!(
             event_count(&repo, &change_id),
@@ -100,7 +100,7 @@ fn reviewer_role_can_review_and_resolve_but_cannot_close_or_integrate() {
             .assert()
             .code(9)
             .stderr(format!(
-                "role refusal: reviewer may not {name} (requires lead)\n"
+                "role refusal: reviewer may not {name} (requires lead)\nRead: arc guide identity\n"
             ));
         assert_eq!(event_count(&repo, &change_id), allowed_events);
     }
@@ -153,7 +153,7 @@ fn role_flag_and_environment_binding_are_equivalent() {
     assert_eq!(from_env.stderr, from_flag.stderr);
     assert_eq!(
         String::from_utf8_lossy(&from_env.stderr),
-        "role refusal: implementer may not hold (requires reviewer or lead)\n"
+        "role refusal: implementer may not hold (requires reviewer or lead)\nRead: arc guide identity\n"
     );
     assert_eq!(event_count(&repo, &change_id), initial_events);
 }

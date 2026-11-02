@@ -240,7 +240,7 @@ fn journal_family_and_literal_search_reach_directory_resolution() {
 fn check_and_catchup_point_to_topics_without_changing_refusal_outcomes() {
     let repo = Repo::new();
     begin_without_checkout(&repo, "topic-pointers", &[]);
-    let before = git(&repo.root, &["show-ref"]);
+    let before = git_out(&repo.root, &["show-ref"]);
     let check = repo
         .arc(&repo.root)
         .args(["check", "topic-pointers"])
@@ -253,7 +253,7 @@ fn check_and_catchup_point_to_topics_without_changing_refusal_outcomes() {
     let catchup = stdout(repo.arc(&repo.root).args(["catchup", "--sessions", "0"]));
     assert!(catchup.contains("arc guide debt"), "{catchup}");
     assert_eq!(catchup.matches("arc guide debt").count(), 1);
-    assert_eq!(git(&repo.root, &["show-ref"]), before);
+    assert_eq!(git_out(&repo.root, &["show-ref"]), before);
     repo.arc(&repo.root)
         .env("ARC_ROLE", "implementer")
         .args(["debt", "topic-pointers", "--reason", "fixture"])

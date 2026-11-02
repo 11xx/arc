@@ -3420,12 +3420,13 @@ fn journal_help_prints_complete_question_workflow_commands() {
         help.contains("current anchor revision"),
         "help missing verification description:\n{help}"
     );
-    for command in [
-        "arc journal question <file> --placement opening|closing --option A --option B --body-file -",
-        "arc journal position <file> --body-file - --question <id> --option <opt>",
-        "arc journal answer <file> --question <id> --option <chosen> --body-file -",
+    for (verb, command) in [
+        ("question", "arc journal question <file> --placement opening|closing --option A --option B --body-file -"),
+        ("position", "arc journal position <file> --body-file - --question <id> --option <opt>"),
+        ("answer", "arc journal answer <file> --question <id> --option <chosen> --body-file -"),
     ] {
-        assert!(help.contains(command), "help missing {command:?}:\n{help}");
+        let contract = stdout(repo.arc(&repo.root).args(["journal", verb, "--help"]));
+        assert!(contract.contains(command), "help missing {command:?}:\n{contract}");
     }
     let position_help = stdout(repo.arc(&repo.root).args(["journal", "position", "--help"]));
     assert!(
@@ -17691,7 +17692,7 @@ fn sentinel_reattribute_omits_legacy_unknown_coordinates_from_sibling_references
         help.contains("Legacy placeholder harnesses and sessions"),
         "{help}"
     );
-    let guide = crate::common::instruction_topics(&repo, &["journal-lookup"]);
+    let guide = crate::common::instruction_topics(&repo, &["questions"]);
     assert!(guide.contains("Legacy placeholder harnesses and sessions"));
 }
 
