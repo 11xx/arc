@@ -44,9 +44,10 @@ Before tagging a release:
    signed on the machine that holds it.
 2. `arc catchup` shows no outstanding review debt, or each remaining one is
    waived with a recorded reason.
-3. The guide, `--help`, and SCHEMAS agree with the behaviour being released.
-4. `[Unreleased]` is cut into a section headed with the version and date.
-5. The release head is tagged; the changelog projection measures from it.
-6. The manifest names the repository URL.
-7. A crates.io release first removes `publish = false`, and
+3. `arc publication --target master` passes at the release head before tagging.
+4. The guide, `--help`, and SCHEMAS agree with the behaviour being released.
+5. `[Unreleased]` is cut into a section headed with the version and date.
+6. The release head is tagged; the changelog projection measures from it.
+7. The manifest names the repository URL.
+8. A crates.io release first removes `publish = false`, and
    `cargo publish --dry-run` is clean.
