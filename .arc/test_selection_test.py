@@ -6,9 +6,11 @@ import io
 import json
 from pathlib import Path
 import subprocess
+import sys
 import unittest
 from unittest.mock import patch
 
+sys.dont_write_bytecode = True
 SPEC = importlib.util.spec_from_file_location(
     "selection", Path(__file__).with_name("test-selection.py")
 )
