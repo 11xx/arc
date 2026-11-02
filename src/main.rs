@@ -1472,6 +1472,8 @@ enum Cmd {
     /// Unreadable neighboring changes are named with their errors on stderr;
     /// an unreadable selected change fails and an unreadable prerequisite
     /// cannot authorize integration
+    ///
+    /// Human blocker reports name the guide topics owning their recovery rules.
     #[command(after_help = blockers::exit_status_help())]
     Check {
         /// Evaluate explicit unsigned staging preparation and local provisional prerequisites.
@@ -2900,6 +2902,8 @@ enum Cmd {
     /// with model_recorded: false; valid models omit the flag.
     /// JSON recent sessions retain raw models with model_recorded: false when
     /// the model is missing, a placeholder or a session id; valid models omit it.
+    ///
+    /// Human ledger sections name guide topics for the blockers already observed.
     Catchup {
         /// Number of recent sessions, selected after ranking every discovered
         /// candidate by its last recorded activity rather than file modification time.
@@ -5411,6 +5415,9 @@ fn main() {
                     error.print().ok();
                 }
             }
+            if kind == clap::error::ErrorKind::InvalidSubcommand {
+                eprintln!("Read: arc guide");
+            }
             std::process::exit(error.exit_code());
         }
     };
@@ -5420,6 +5427,9 @@ fn main() {
         Ok(code) => std::process::exit(code),
         Err(e) => {
             eprintln!("error: {e:#}");
+            if e.downcast_ref::<import_authorization::Refusal>().is_some() {
+                eprintln!("Read: arc guide replicas");
+            }
             std::process::exit(
                 if e.downcast_ref::<import_authorization::Refusal>().is_some() {
                     18
@@ -5469,6 +5479,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             "role refusal: {} may not {command} (requires {required})",
             role.as_str()
         );
+        eprintln!("Read: arc guide identity");
         return Ok(9);
     }
 

@@ -4093,6 +4093,7 @@ EXIT CODES
     Arc exits 17 when a paired replica does not hold integration authority;
       the refusal names the holder or an offer in flight.
 
+  Human blocker reports add exact topic routes beside their existing facts.
   A refusal lists its blockers, then `Next step:`: the command that does
   what comes next, with the change filled in and the `next_action` code in
   parentheses, as in `arc verify <change> --gate test (run_gate:test)`.
@@ -4584,7 +4585,8 @@ WHAT ARC WILL NOT DO
     arc never infers an identity from a branch or a directory name.
     arc never claims a recipient read anything.
 
-  arc <command> --help for any command's full contract. arc --help for all of them.
+  `arc <command> --help` prints that command's full contract.
+  `arc --help` indexes root commands.
 "#;
 
 const IDENTITY_OPTIONS: &str = r#"GLOBAL OPTIONS
@@ -4668,8 +4670,8 @@ for operator records. Use arc journal dir only when a path is required.
 
 Work: arc begin → edit and commit → arc snapshot → arc verify → arc check.
 A patchset is recorded by arc snapshot; preflight is arc check.
-For ordinary work, record your verdict with arc review after reading the diff, or arc debt
-when you contributed or policy refuses approval; then arc integrate.
+For ordinary work, read the diff and record your verdict with arc review,
+or arc debt when you contributed or policy refuses approval; then arc integrate.
 Request independent review only when policy or someone requires it.
 Approval binds the patchset; gates must cover the tree that will ship.
 
@@ -4700,6 +4702,43 @@ Topic families (each reached with arc guide <name>):
 
 pub fn print() {
     print!("{MAP}");
+}
+
+/// Instruction routes follow already-established blockers and never affect readiness.
+pub(crate) fn blocker_pointers(blockers: &[crate::blockers::Blocker]) -> String {
+    use crate::blockers::Blocker;
+    let mut topics = Vec::new();
+    for blocker in blockers {
+        let topic = match blocker {
+            Blocker::IntegrationMode => "replicas",
+            Blocker::NeedsRebase => "change-integration",
+            Blocker::MergedTreeUnevaluated | Blocker::GatesNotGreen => "rules-evidence",
+            Blocker::BlockingFindings => "repair",
+            Blocker::NoValidApproval => "debt",
+            Blocker::AcceptanceProbesNotGreen => "probes",
+            Blocker::Closed
+            | Blocker::BranchMissing
+            | Blocker::TargetUnreadable
+            | Blocker::ForkBranch
+            | Blocker::Iterating
+            | Blocker::BlockedByChanges
+            | Blocker::HoldActive => "change",
+        };
+        if !topics.contains(&topic) {
+            topics.push(topic);
+        }
+    }
+    if topics.is_empty() {
+        return String::new();
+    }
+    format!(
+        "Read: {}\n",
+        topics
+            .iter()
+            .map(|topic| format!("arc guide {topic}"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    )
 }
 
 fn read_only_commands() -> String {
@@ -5061,6 +5100,10 @@ mod route_tests {
             let topics = topics(&text);
             let mut surfaces = topic_routes(&topics);
             surfaces.push(("map".into(), MAP.into()));
+            surfaces.push((
+                "blocker pointers".into(),
+                blocker_pointers(&crate::blockers::PRIORITY),
+            ));
             instruction_commands(command.clone(), "arc", &mut surfaces);
             let topic_names: BTreeSet<_> = topic_routes(&topics)
                 .into_iter()
@@ -5119,6 +5162,7 @@ mod route_tests {
                             .next()
                             .is_some_and(|ch| ch.is_ascii_alphabetic())
                         && !flag_names.contains(&flag)
+                        // Git and tapes options, and the schematic --flag placeholder, are separate namespaces.
                         && ![
                             "flag",
                             "continue",

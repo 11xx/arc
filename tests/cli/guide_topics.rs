@@ -234,3 +234,31 @@ fn journal_family_and_literal_search_reach_directory_resolution() {
         assert!(help.contains("only when explicitly typed"), "{help}");
     }
 }
+
+/// Refusal outcomes and executable remedies stay intact while facts gain bounded topic routes.
+#[test]
+fn check_and_catchup_point_to_topics_without_changing_refusal_outcomes() {
+    let repo = Repo::new();
+    begin_without_checkout(&repo, "topic-pointers", &[]);
+    let before = git(&repo.root, &["show-ref"]);
+    let check = repo
+        .arc(&repo.root)
+        .args(["check", "topic-pointers"])
+        .output()
+        .unwrap();
+    assert_eq!(check.status.code(), Some(3));
+    let check = String::from_utf8(check.stdout).unwrap();
+    assert!(check.contains("Next step:"), "{check}");
+    assert!(check.contains("Read: arc guide debt"), "{check}");
+    let catchup = stdout(repo.arc(&repo.root).args(["catchup", "--sessions", "0"]));
+    assert!(catchup.contains("arc guide debt"), "{catchup}");
+    assert_eq!(catchup.matches("arc guide debt").count(), 1);
+    assert_eq!(git(&repo.root, &["show-ref"]), before);
+    repo.arc(&repo.root)
+        .env("ARC_ROLE", "implementer")
+        .args(["debt", "topic-pointers", "--reason", "fixture"])
+        .assert()
+        .code(9)
+        .stderr(predicates::str::contains("role refusal:"))
+        .stderr(predicates::str::contains("arc guide identity"));
+}

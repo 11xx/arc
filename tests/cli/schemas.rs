@@ -41,11 +41,9 @@ const MINIMUM_SCHEMAS: usize = 10;
 /// guide verbatim.
 #[test]
 fn every_schema_constant_is_registered_in_the_guide() {
-    let output = Command::new(env!("CARGO_BIN_EXE_arc"))
-        .args(["guide", "schemas"])
-        .output()
-        .unwrap();
-    let guide = String::from_utf8_lossy(&output.stdout);
+    let repo = Repo::new();
+    let guide =
+        crate::common::instruction_topics(&repo, &["schemas", "assurance", "debt-obligations"]);
 
     let schemas = schema_constants();
     assert!(

@@ -1209,6 +1209,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
     }
     crate::replica::render_status(&replica);
     let mut any = false;
+    let mut instruction_blockers = Vec::new();
     let mut rendered_debt_details = BTreeSet::new();
     debts.prefetch_touched(
         ctx,
@@ -1232,6 +1233,9 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
         println!("{name} ({}):", rows.len());
         for row in rows.iter().take(limit) {
             println!("  {}  {} → {}", row.change_id, row.title, row.next_actor);
+            if let Some(report) = reports.get(&row.change_id) {
+                instruction_blockers.extend_from_slice(report.blockers());
+            }
             if let Some(line) = reports
                 .get(&row.change_id)
                 .and_then(crate::render::review_subject_line)
@@ -1248,6 +1252,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
     if !any {
         println!("  no open changes");
     }
+    print!("{}", crate::guide::blocker_pointers(&instruction_blockers));
     println!("recent sessions ({}):", recent_sessions.len());
     for row in &recent_sessions {
         let id: String = row.session.chars().take(8).collect();

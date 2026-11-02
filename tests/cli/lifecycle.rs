@@ -2926,8 +2926,8 @@ fn the_guide_teaches_identity_and_how_a_session_ends() {
     for verb in ["journal handoff", "journal conclusion", "journal memory"] {
         assert!(guide.contains(verb), "missing {verb}:\n{guide}");
     }
-    // Ordering: identity comes before the orient verbs that write, and the
-    // session-end stanza sits before profiles rather than after the guide.
+    // Full depth introduces identity before writing and endings before profiles.
+    let guide = stdout(repo.arc(&repo.root).args(["guide", "--all"]));
     let identity = guide.find("SAY WHO YOU ARE").unwrap();
     let orient = guide.find("ORIENT").unwrap();
     let ending = guide.find("END A SESSION").unwrap();

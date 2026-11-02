@@ -1719,7 +1719,7 @@ fn guide_and_help_teach_current_debt_and_partial_opencode_identity() {
 
     let guide = normalize(crate::common::instruction_topics(
         &repo,
-        &["identity-sessions"],
+        &["identity-sessions", "exit-codes"],
     ));
     assert!(!guide.contains("audit-debt"), "{guide}");
     assert!(
@@ -1860,9 +1860,8 @@ fn differing_explicit_harness_suppresses_detected_session() {
     assert!(event["session"].is_null());
 }
 
-/// Bare `arc` is the orientation surface: it replaces a separate workflow
-/// document, so the guide must carry the lifecycle, the profiles, and the
-/// rules that change what a session does — not just a command list.
+/// Workflow topics carry lifecycle, profiles, evidence and role boundaries
+/// as complete contracts reachable from the capability map.
 #[test]
 fn topic_depth_carries_the_workflow_contracts() {
     let repo = Repo::new();

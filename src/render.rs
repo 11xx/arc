@@ -1507,6 +1507,7 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
         let _ = writeln!(out, "{notes}");
     }
     let _ = writeln!(out, "Next step: {}", next_step(report));
+    out.push_str(&crate::guide::blocker_pointers(report.blockers()));
     out
 }
 
@@ -3016,6 +3017,7 @@ pub fn check_explanation(state: &ChangeState, report: &StatusReport) -> String {
             .unwrap_or("blocked");
         let _ = writeln!(out, "Exit code: {code} ({first})");
     }
+    out.push_str(&crate::guide::blocker_pointers(report.blockers()));
     out
 }
 

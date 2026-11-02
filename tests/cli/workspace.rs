@@ -3,7 +3,7 @@ use crate::common::*;
 #[test]
 fn workspace_json_schemas_are_registered_in_the_guide() {
     let repo = Repo::new();
-    let guide = crate::common::instruction_topics(&repo, &["workspace"]);
+    let guide = crate::common::instruction_topics(&repo, &["schemas"]);
     for command in ["report", "backlog"] {
         let value = json_stdout(repo.arc(&repo.root).args(["workspace", command, "--json"]));
         let schema = value["schema"].as_str().unwrap();
