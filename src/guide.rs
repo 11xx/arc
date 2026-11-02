@@ -599,6 +599,7 @@ SETTLE A QUESTION (before it is work)
                          Unnamed model fields otherwise keep their historical values.
                          Legacy placeholder harnesses and sessions read as absent
                          and do not identify sibling references during repair.
+  arc journal decision <topic> --body-file -        Write the verdict first.
   arc journal consume <file> --outcome done --decision <decision>
   arc journal transition <file> --to discussion [--dry-run]
     Change a live artifact's kind as one guarded operation: a typed successor
@@ -855,7 +856,11 @@ RUN A CHANGE
     --relation corroborates          Support the standing verdict, not replace it.
   arc resolve                        Dispose of a finding; after integration,
                                      one left open when the change shipped.
+                                     `arc findings` lists findings, and no
+                                     command reads a single one.
     --evidence-event <id>            Cite the verification run that justifies it.
+  Nothing submits or marks a change ready: `arc snapshot` records a patchset
+  and `arc check` computes readiness. `arc close <change> --abandoned` abandons.
   arc check                          Integration preflight; exit code names the blocker.
   arc integrate <c>...               Guarded integration once the gates are green.
     --shape ff-only|no-ff            Resolved style; built-in ff-only.
@@ -1451,6 +1456,11 @@ PREPARE A DELIVERED CHANGE
   verification outcomes remain conditional.
 
 PAIR REPLICA STORES
+  A change built on a paired worker moves in four steps: `arc snapshot` then
+  `arc export` on the worker; carry the bundle and its Git objects with your own
+  transport; `arc accept` on the authority (`arc guide delivery`); then review
+  and `arc integrate` there.
+
   A rebase on the worker requires a patchset before export. On the publishing
   replica, record the branch head with
   `arc snapshot <change> --contributors <the implementing actor>` when the
@@ -2175,7 +2185,9 @@ REVIEW COVERAGE AND DEBT
   path declared dangerous by either file is dangerous. Integration reads
   `.arc/policy.toml` from the change's target branch, wherever it is run. A change touching a declared
   path needs a verdict from somebody other than its author; elsewhere a
-  self-recorded verdict satisfies the gate. Declare no danger paths and the
+  self-recorded verdict satisfies the gate. `forbid_self_approval` refuses a
+  self-approval on those paths. `arc integrate --debt` still lands such a
+  change and leaves its review owed. Declare no danger paths and the
   gate stays uniform. `arc begin --dangerous` raises a single change
   whatever it turns out to touch, and nothing lowers it afterwards — a project
   decides its own gate in advance, rather than a change deciding it under
@@ -2968,6 +2980,10 @@ THE HISTORY MODEL
   been.
 
 CANDIDATES
+  To choose between answers to one brief: register each, `arc candidate verify`
+  each, then `arc candidate select`, which validates your choice and promotes
+  it. `arc candidate judge` records why another lost.
+
     arc candidate register --tree <tree-or-commit> --brief <change>[@<event>]
                            --producer <actor>... [--parent <id>]...
                            [--adopts <id>]... [--episode <claim>]... [--id <id>]
@@ -3374,6 +3390,9 @@ RULES THAT CHANGE WHAT YOU DO
     identity is a digest of the probe's stdout, and only a successful run
     that prints something yields one; a failed, empty, or overrunning probe
     yields none, so two environments in which it fails do not share one.
+    `check` and `integrate` run the probe in the integrating checkout; a
+    different identity leaves the gate not green until `arc verify --all`
+    records evidence there.
     `status` runs the probe where it is evaluating and counts the evidence
     only when the two identities agree; a receipt from another environment is
     reported inapplicable, naming both identities, and a receipt with no
@@ -4623,7 +4642,8 @@ const IDENTITY_OPTIONS: &str = r#"GLOBAL OPTIONS
   --on-behalf-of
     Subject a lead runs delegated ceremony for; recorded beside the
     invoker. A write refuses a placeholder or a harness:model form carrying
-    one
+    one. Recording another session's review, add --model with that session's
+    model: the event's model is what arc judges independence from
 
   --role
     Execution boundary: implementer | reviewer | lead
@@ -4670,28 +4690,39 @@ FIND YOUR BEARINGS
   arc catchup                    inside a project; then read the memories it names
   arc workspace backlog --here   above several projects
   arc journal open               work waiting for a session
+  arc resume <change>            one change's brief, state and journal context
+  arc rescue <change>            where another session stopped; --take to take it over
   arc journal show <file.md>     a known artifact, live then archived; --global for
                                  operator records
   arc journal dir                only when a path itself is needed
 
 RUN A CHANGE
-  arc begin <slug>               open it, then edit and commit
+  arc begin <slug>               open it
+  arc brief <change>             record what it must do, then edit and commit
   arc snapshot                   record the patchset
   arc verify --all               run the gates and record the evidence
   arc check                      preflight integration
   arc integrate                  land it once review is settled
+  arc close <change> --abandoned   stop without landing
+  Readiness is computed, not declared: nothing marks a change ready.
 
 REVIEW
   Read the diff and record your verdict with arc review. If you contributed, or
   policy refuses your approval, record arc debt instead. Ask for an independent
   reviewer only when policy or someone requires one.
-  An approval binds its exact patchset. Gates must cover the tree that will ship.
-  Owed review: arc debt, arc audit, arc query --debt.
-  Findings: arc findings <change>; add --audit after integration.
+  A path policy declares dangerous needs somebody else's verdict, or a debt that
+  stays owed.
+  An approval binds its exact patchset, so a new commit needs a new snapshot and a
+  fresh verdict. Gates must cover the tree that will ship.
+  What is owed: arc inbox, arc query --debt. Discharge it with arc audit.
+  Findings: arc findings <change>, with --audit after integration; arc resolve
+  disposes of one.
 
 WORK BESIDE OTHERS
   arc claim takes work. Each writer uses its own branch or worktree.
-  Declare contributors and the subjects you represent; arc roles records them.
+  Name contributors with arc snapshot --contributors, and a subject you act for
+  with --on-behalf-of plus --model for its model. arc roles records planners and
+  orchestrators.
   ARC_ROLE bounds a delegated run. Integration belongs to the lead.
 
 KEEP WHAT YOU LEARN
@@ -4707,7 +4738,7 @@ END A SESSION
 GO DEEPER
   arc guide                      every topic and command contract
   arc guide <topic>              one topic
-  arc guide --search TEXT        literal, case-insensitive search
+  arc guide --search "TEXT"      literal, case-insensitive search
   arc guide --all                the full workflow depth
   arc <command> --help           the full contract; -h is its summary
   arc --help                     every root command
@@ -4952,6 +4983,9 @@ fn instruction_commands(mut command: clap::Command, path: &str, out: &mut Vec<(S
     }
 }
 
+/// Every command repeats the shared options, so their rows are not search results.
+const SHARED_OPTION_POINTER: &str = "see `arc guide identity-options`";
+
 fn context(text: &str, needle: &str) -> Option<String> {
     let folded = text.to_lowercase();
     let offset = folded.find(needle)?;
@@ -4999,6 +5033,10 @@ pub fn show(
         instruction_commands(command, "arc", &mut routes);
         let mut found = false;
         for (route, body) in routes {
+            let body: String = body
+                .lines()
+                .filter(|line| !line.contains(SHARED_OPTION_POINTER))
+                .fold(String::new(), |text, line| text + line + "\n");
             if let Some(context) = context(&body, &needle) {
                 println!("{route}: {context}");
                 found = true;

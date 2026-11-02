@@ -118,6 +118,8 @@ fn guide_search_is_literal_case_insensitive_and_keeps_private_env_values_out() {
     assert!(!flags.contains("sensitive-link"), "{flags}");
     assert!(!flags.contains("private-session-marker"), "{flags}");
     assert!(search("^no.*such$regex").contains("No instruction matches"));
+    // Shared option rows repeat on every command and would bury real matches.
+    assert!(search("see `arc guide identity-options`").contains("No instruction matches"));
 }
 
 /// The bootstrap must fit an ordinary tool response; a full manual here hides routes.

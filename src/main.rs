@@ -82,31 +82,31 @@ use std::path::{Path, PathBuf};
     after_help = "Run `arc` with no arguments for the capability map; `arc guide` for indexed depth, or `arc catchup` for live project state."
 )]
 struct Cli {
-    /// Acting identity; see `arc guide identity`
+    /// Acting identity; see `arc guide identity-options`
     #[arg(long, global = true)]
     actor: Option<String>,
-    /// Acting harness; see `arc guide identity`
+    /// Acting harness; see `arc guide identity-options`
     #[arg(long, global = true, env = "ARC_HARNESS")]
     harness: Option<String>,
-    /// Native acting session; see `arc guide identity`
+    /// Native acting session; see `arc guide identity-options`
     #[arg(long, global = true, env = "ARC_SESSION")]
     session: Option<String>,
-    /// Private acting-session link; see `arc guide identity`
+    /// Private acting-session link; see `arc guide identity-options`
     #[arg(long, global = true, env = "ARC_SESSION_LINK")]
     session_link: Option<String>,
-    /// Declared model and effort; see `arc guide identity`
+    /// Declared model and effort; see `arc guide identity-options`
     #[arg(long, global = true)]
     model: Option<String>,
-    /// Represented subject; see `arc guide identity`
+    /// Represented subject; see `arc guide identity-options`
     #[arg(long = "on-behalf-of", global = true, env = "ARC_ON_BEHALF_OF")]
     on_behalf_of: Option<String>,
-    /// Execution boundary; see `arc guide identity`
+    /// Execution boundary; see `arc guide identity-options`
     #[arg(long, global = true, env = "ARC_ROLE")]
     role: Option<String>,
-    /// Change selection; see `arc guide identity`
+    /// Change selection; see `arc guide identity-options`
     #[arg(long = "change", id = "change_flag", global = true)]
     change: Option<String>,
-    /// Home-directory prefix; see `arc guide identity`
+    /// Home-directory prefix; see `arc guide identity-options`
     #[arg(long, global = true, env = config::SANDBOX_VAR)]
     sandbox: Option<String>,
     /// Absent prints the bounded capability map.
