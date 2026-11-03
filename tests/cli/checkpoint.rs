@@ -245,3 +245,74 @@ fn a_handoff_names_a_recorded_checkpoint_and_its_revision() {
     assert_eq!(written.matches(&line).count(), 1, "{written}");
     assert!(written.contains("Waiting on the operator's findings."));
 }
+
+/// Claim: when this repository no longer holds the checkpoint's revision,
+/// `show` says ancestry cannot be judged against it and classifies nothing
+/// by it. Rejects: a change integrated before the checkpoint listed as
+/// landed since, and a change open at the checkpoint read as integrated
+/// outside it, because a failed ancestry check was taken for "not an
+/// ancestor".
+#[test]
+fn a_missing_checkpoint_revision_reports_the_gap_instead_of_landed_since() {
+    let repo = Repo::new();
+    let early = open(&repo, "early");
+    complete_change(&repo, "early");
+    let (flight, flight_worktree, _) = change_with_patchset(&repo, "flight");
+    let tree = git_out(&repo.root, &["rev-parse", "master^{tree}"]);
+    let parent = git_out(&repo.root, &["rev-parse", "master"]);
+    let tested = git_out(
+        &repo.root,
+        &["commit-tree", &tree, "-p", &parent, "-m", "operator build"],
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["checkpoint", "record", "lost", "--rev", &tested]),
+    );
+    repo.arc(&flight_worktree)
+        .args(["review", "flight", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", "flight"])
+        .assert()
+        .success();
+    let object = git_out(
+        &repo.root,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            &format!("objects/{}/{}", &tested[..2], &tested[2..]),
+        ],
+    );
+    std::fs::remove_file(&object).unwrap();
+
+    let view = show(&repo, "lost");
+    let landed: Vec<&str> = view["landed_since"]
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| entry["change_id"].as_str().unwrap())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        !landed.contains(&early.as_str()),
+        "a change inside the checkpoint read as landed since: {view}"
+    );
+    assert!(view["landed_since"].is_null(), "{view}");
+    let gap = view["ancestry_unknown"].as_str().unwrap_or_default();
+    assert!(gap.contains(&tested), "{view}");
+    assert_eq!(view["changes"][0]["change_id"], flight.as_str());
+    assert_eq!(view["changes"][0]["status"], "integrated");
+    assert!(view["changes"][0]["in_checkpoint"].is_null(), "{view}");
+    assert!(
+        view["changes"][0]["in_checkpoint_unknown"].is_string(),
+        "{view}"
+    );
+
+    let text = stdout(repo.arc(&repo.root).args(["checkpoint", "show", "lost"]));
+    assert!(text.contains("landed since: unknown"), "{text}");
+    assert!(text.contains("inside the checkpoint unknown"), "{text}");
+}

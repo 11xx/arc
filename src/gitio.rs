@@ -2434,6 +2434,49 @@ pub fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> Result<bool>
     Ok(out.status.success())
 }
 
+/// What Git answers about whether one commit is reachable from another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ancestry {
+    Ancestor,
+    NotAncestor,
+    /// Git could not answer, with the reason: a commit missing from this
+    /// repository, or a walk that failed.
+    Unanswered(String),
+}
+
+/// Whether `ancestor` is reachable from `descendant`, telling a negative
+/// answer apart from one Git could not give.
+pub fn ancestry(cwd: &Path, ancestor: &str, descendant: &str) -> Result<Ancestry> {
+    for commit in [ancestor, descendant] {
+        if !commit_exists(cwd, commit)? {
+            return Ok(Ancestry::Unanswered(format!(
+                "commit {commit} is not in this repository"
+            )));
+        }
+    }
+    if let Some(answer) = listing::is_ancestor(cwd, ancestor, descendant) {
+        return Ok(if answer {
+            Ancestry::Ancestor
+        } else {
+            Ancestry::NotAncestor
+        });
+    }
+    let out = git_command()
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .current_dir(cwd)
+        .counted_output()
+        .context("failed to spawn git merge-base")?;
+    // `--is-ancestor` exits 1 for "no"; any other failure is an error.
+    Ok(match out.status.code() {
+        Some(0) => Ancestry::Ancestor,
+        Some(1) => Ancestry::NotAncestor,
+        _ => Ancestry::Unanswered(format!(
+            "git merge-base --is-ancestor {ancestor} {descendant} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    })
+}
+
 /// Whether a rebase is stopped part-way in this worktree, waiting for a person.
 ///
 /// Git records that state as a directory beside the index, and `--git-path`
@@ -3162,6 +3205,45 @@ mod tests {
         )
         .unwrap();
         root
+    }
+
+    /// Claim: `ancestry` answers yes and no for held commits and reports a
+    /// commit missing from the repository as unanswered, naming it. Rejects:
+    /// a missing object read as "not an ancestor", which `is_ancestor`
+    /// returns for every failed walk.
+    #[test]
+    fn ancestry_tells_a_missing_commit_from_a_negative_answer() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = fixture(&tmp, &[]);
+        let base = head(&root).unwrap();
+        std::fs::write(root.join("two.txt"), "two\n").unwrap();
+        git(&root, &["add", "."]).unwrap();
+        git(&root, &["commit", "-m", "two"]).unwrap();
+        let tip = head(&root).unwrap();
+        assert_eq!(ancestry(&root, &base, &tip).unwrap(), Ancestry::Ancestor);
+        assert_eq!(ancestry(&root, &tip, &base).unwrap(), Ancestry::NotAncestor);
+        let tree = git(&root, &["rev-parse", "HEAD^{tree}"]).unwrap();
+        let loose = git(
+            &root,
+            &["commit-tree", tree.trim(), "-p", &tip, "-m", "loose"],
+        )
+        .unwrap();
+        let loose = loose.trim().to_string();
+        let object = root
+            .join(".git/objects")
+            .join(&loose[..2])
+            .join(&loose[2..]);
+        std::fs::remove_file(object).unwrap();
+        assert!(!is_ancestor(&root, &tip, &loose).unwrap());
+        for (ancestor, descendant) in [
+            (tip.as_str(), loose.as_str()),
+            (loose.as_str(), tip.as_str()),
+        ] {
+            match ancestry(&root, ancestor, descendant).unwrap() {
+                Ancestry::Unanswered(reason) => assert!(reason.contains(&loose), "{reason}"),
+                answer => panic!("a missing commit answered {answer:?}"),
+            }
+        }
     }
 
     #[test]

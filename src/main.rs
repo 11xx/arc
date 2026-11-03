@@ -4894,7 +4894,11 @@ enum CheckpointCmd {
     /// otherwise, or still open with the head then and now. Landed since:
     /// every integrated change whose integrated commit the checkpoint
     /// revision does not reach and its target branch does, by Git ancestry,
-    /// whether or not it was open at the checkpoint. Todos open at the
+    /// whether or not it was open at the checkpoint. Ancestry Git cannot
+    /// answer, for a commit this repository does not hold, is reported as
+    /// unknown with its reason and never classified: a missing checkpoint
+    /// revision leaves landed since unknown, and a missing integrated
+    /// commit lists its change as landing unknown. Todos open at the
     /// checkpoint: consumed since (outcome and time), or still open. Filed
     /// since: todos filed after the checkpoint, which are not part of it.
     /// `--json` emits `arc-checkpoint/1`. Records no events.

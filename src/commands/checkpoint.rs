@@ -2,7 +2,7 @@
 //! journal todos open when it was named, read back against what has happened
 //! since.
 
-use crate::gitio;
+use crate::gitio::{self, Ancestry};
 use crate::journal::{self, TodoRecord};
 use crate::model::{CheckpointChange, CheckpointTodo, Closure, Event, Payload};
 use crate::render::short_sha;
@@ -268,8 +268,11 @@ struct ChangeView {
     outcome: Option<&'static str>,
     integrated_commit: Option<String>,
     /// Whether the integrated commit is reachable from the checkpoint
-    /// revision.
+    /// revision; null when there is no integrated commit or Git could not
+    /// answer.
     in_checkpoint: Option<bool>,
+    /// Why Git could not answer `in_checkpoint` for an integrated commit.
+    in_checkpoint_unknown: Option<String>,
     patchset_id_now: Option<String>,
     head_now: Option<String>,
 }
@@ -281,6 +284,18 @@ struct LandedView {
     integrated_commit: String,
     target_branch: String,
     open_at_checkpoint: bool,
+}
+
+/// An integrated change whose place relative to its target branch or the
+/// checkpoint Git could not establish.
+#[derive(Serialize)]
+struct LandingUnknownView {
+    change_id: String,
+    slug: String,
+    integrated_commit: String,
+    target_branch: String,
+    open_at_checkpoint: bool,
+    reason: String,
 }
 
 #[derive(Serialize)]
@@ -312,7 +327,11 @@ struct ShowView {
     tag: Option<String>,
     note: Option<String>,
     changes: Vec<ChangeView>,
-    landed_since: Vec<LandedView>,
+    /// Why ancestry cannot be judged against the checkpoint at all: its
+    /// revision is not in this repository. `landed_since` is then null.
+    ancestry_unknown: Option<String>,
+    landed_since: Option<Vec<LandedView>>,
+    landed_unknown: Vec<LandingUnknownView>,
     todos: Vec<TodoView>,
     filed_since: Vec<TodoView>,
 }
@@ -361,7 +380,14 @@ fn show_view(ctx: &Ctx, store: &Store, checkpoint: Recorded) -> Result<ShowView>
             .with_context(|| format!("cannot read change {change_id}"))?;
         states.insert(change_id, state);
     }
-    let in_checkpoint = |commit: &str| gitio::is_ancestor(cwd, commit, &current_revision);
+    let ancestry_unknown = (!gitio::commit_exists(cwd, &current_revision)?)
+        .then(|| format!("checkpoint revision {current_revision} is not in this repository"));
+    let in_checkpoint = |commit: &str| -> Result<Ancestry> {
+        match &ancestry_unknown {
+            Some(reason) => Ok(Ancestry::Unanswered(reason.clone())),
+            None => gitio::ancestry(cwd, commit, &current_revision),
+        }
+    };
 
     let mut changes = Vec::new();
     for recorded in &checkpoint.changes {
@@ -380,6 +406,12 @@ fn show_view(ctx: &Ctx, store: &Store, checkpoint: Recorded) -> Result<ShowView>
             (Some(_), None) => "open",
         };
         let integrated = state.and_then(integrated_commit).map(str::to_string);
+        let (inside, inside_unknown) = match integrated.as_deref().map(in_checkpoint).transpose()? {
+            None => (None, None),
+            Some(Ancestry::Ancestor) => (Some(true), None),
+            Some(Ancestry::NotAncestor) => (Some(false), None),
+            Some(Ancestry::Unanswered(reason)) => (None, Some(reason)),
+        };
         let latest = state.and_then(ChangeState::latest_patchset);
         changes.push(ChangeView {
             change_id: recorded.change_id.clone(),
@@ -389,7 +421,8 @@ fn show_view(ctx: &Ctx, store: &Store, checkpoint: Recorded) -> Result<ShowView>
             head: recorded.head.clone(),
             status,
             outcome,
-            in_checkpoint: integrated.as_deref().map(in_checkpoint).transpose()?,
+            in_checkpoint: inside,
+            in_checkpoint_unknown: inside_unknown,
             integrated_commit: integrated,
             patchset_id_now: latest.map(|patchset| patchset.id.clone()),
             head_now: latest.map(|patchset| patchset.head.clone()),
@@ -402,8 +435,14 @@ fn show_view(ctx: &Ctx, store: &Store, checkpoint: Recorded) -> Result<ShowView>
         .map(|change| change.change_id.as_str())
         .collect();
     let mut landed_since = Vec::new();
+    let mut landed_unknown = Vec::new();
     let mut tips: BTreeMap<String, Option<String>> = BTreeMap::new();
-    for state in states.values() {
+    let judged = if ancestry_unknown.is_some() {
+        Vec::new()
+    } else {
+        states.values().collect()
+    };
+    for state in judged {
         let Some(commit) = integrated_commit(state) else {
             continue;
         };
@@ -423,16 +462,34 @@ fn show_view(ctx: &Ctx, store: &Store, checkpoint: Recorded) -> Result<ShowView>
         let Some(tip) = tip else {
             continue;
         };
-        if !gitio::is_ancestor(cwd, commit, &tip)? || in_checkpoint(commit)? {
-            continue;
-        }
-        landed_since.push(LandedView {
+        let open_at_checkpoint = open_then.contains(state.change_id.as_str());
+        let unknown = |reason: String| LandingUnknownView {
             change_id: state.change_id.clone(),
             slug: state.slug.clone(),
             integrated_commit: commit.to_string(),
-            target_branch: target,
-            open_at_checkpoint: open_then.contains(state.change_id.as_str()),
-        });
+            target_branch: target.clone(),
+            open_at_checkpoint,
+            reason,
+        };
+        match gitio::ancestry(cwd, commit, &tip)? {
+            Ancestry::NotAncestor => continue,
+            Ancestry::Unanswered(reason) => {
+                landed_unknown.push(unknown(reason));
+                continue;
+            }
+            Ancestry::Ancestor => {}
+        }
+        match in_checkpoint(commit)? {
+            Ancestry::Ancestor => {}
+            Ancestry::Unanswered(reason) => landed_unknown.push(unknown(reason)),
+            Ancestry::NotAncestor => landed_since.push(LandedView {
+                change_id: state.change_id.clone(),
+                slug: state.slug.clone(),
+                integrated_commit: commit.to_string(),
+                target_branch: target,
+                open_at_checkpoint,
+            }),
+        }
     }
 
     let records: BTreeMap<String, TodoRecord> = journal::todo_records(cwd)?
@@ -472,7 +529,9 @@ fn show_view(ctx: &Ctx, store: &Store, checkpoint: Recorded) -> Result<ShowView>
         tag: checkpoint.tag,
         note: checkpoint.note,
         changes,
-        landed_since,
+        landed_since: ancestry_unknown.is_none().then_some(landed_since),
+        ancestry_unknown,
+        landed_unknown,
         todos,
         filed_since,
     })
@@ -523,10 +582,10 @@ pub fn show_checkpoint(ctx: &Ctx, name: String, json: bool) -> Result<()> {
                     .as_deref()
                     .map(short_sha)
                     .unwrap_or_else(|| "?".into()),
-                if change.in_checkpoint == Some(true) {
-                    " (inside the checkpoint)"
-                } else {
-                    ""
+                match (change.in_checkpoint, &change.in_checkpoint_unknown) {
+                    (Some(true), _) => " (inside the checkpoint)".to_string(),
+                    (_, Some(reason)) => format!(" (inside the checkpoint unknown: {reason})"),
+                    _ => String::new(),
                 }
             ),
             "closed" => format!("closed {}", change.outcome.unwrap_or("?")),
@@ -547,11 +606,39 @@ pub fn show_checkpoint(ctx: &Ctx, name: String, json: bool) -> Result<()> {
         };
         println!("  {} {}: {since}", change.change_id, change.slug);
     }
+    match &view.landed_since {
+        None => println!(
+            "landed since: unknown: {}",
+            view.ancestry_unknown.as_deref().unwrap_or("?")
+        ),
+        Some(landed_since) => render_landed(landed_since),
+    }
+    if !view.landed_unknown.is_empty() {
+        println!("landing unknown:");
+    }
+    for unknown in &view.landed_unknown {
+        println!(
+            "  {} {} at {} into {}: {}",
+            unknown.change_id,
+            unknown.slug,
+            short_sha(&unknown.integrated_commit),
+            unknown.target_branch,
+            unknown.reason
+        );
+    }
+    println!("todos open at the checkpoint:");
+    render_todos(&view.todos);
+    println!("filed since (not part of the checkpoint):");
+    render_todos(&view.filed_since);
+    Ok(())
+}
+
+fn render_landed(landed_since: &[LandedView]) {
     println!("landed since:");
-    if view.landed_since.is_empty() {
+    if landed_since.is_empty() {
         println!("  (none)");
     }
-    for landed in &view.landed_since {
+    for landed in landed_since {
         println!(
             "  {} {} at {} into {}{}",
             landed.change_id,
@@ -565,11 +652,6 @@ pub fn show_checkpoint(ctx: &Ctx, name: String, json: bool) -> Result<()> {
             }
         );
     }
-    println!("todos open at the checkpoint:");
-    render_todos(&view.todos);
-    println!("filed since (not part of the checkpoint):");
-    render_todos(&view.filed_since);
-    Ok(())
 }
 
 fn render_todos(todos: &[TodoView]) {

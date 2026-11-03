@@ -2008,9 +2008,13 @@ CHECKPOINTS (a revision handed over for testing)
   the checkpoint revision is stated), closed otherwise, or still open with
   its head then and now. Landed since lists every integrated change whose
   integrated commit its target branch reaches and the checkpoint revision
-  does not, by Git ancestry, open at the checkpoint or not. Each todo open
-  at it is consumed since, with outcome and time, or still open. Filed since
-  lists todos filed after the checkpoint; they are not part of it. A
+  does not, by Git ancestry, open at the checkpoint or not. Ancestry Git
+  cannot answer because a commit is not in this repository is reported as
+  unknown with its reason, never as not reached: a missing checkpoint
+  revision leaves landed since unknown, and a missing integrated commit
+  lists its change as landing unknown. Each todo open at it is consumed
+  since, with outcome and time, or still open. Filed since lists todos
+  filed after the checkpoint; they are not part of it. A
   finding about a change landed since is fixed since, one matching a todo
   is already filed, and the rest are new. `arc journal checkpoint` is a
   different record: progress on a claimed journal artifact.
