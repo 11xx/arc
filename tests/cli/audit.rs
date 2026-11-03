@@ -1690,6 +1690,64 @@ fn a_finding_released_at_ship_takes_no_disposition_after_integration() {
         .stderr(predicates::str::contains("was accepted-risk when change"));
 }
 
+/// Claim: `explain` lists a disposition recorded after integration as later
+/// knowledge, as `findings` and `show` display it, and the basis read at the
+/// integration is unchanged by it. Rejects a later-knowledge slot that omits
+/// it.
+#[test]
+fn explain_lists_a_post_integration_disposition_as_later_knowledge() {
+    let repo = repo_forbidding_self_approval();
+    let finding_id = finding_left_open_at_ship(&repo, "shipped-finding");
+    let explain = |extra: &[&str]| {
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["explain", "shipped-finding", "--json"])
+                .args(extra),
+        )
+    };
+    let before = explain(&[]);
+    let integration = before["integration_event_id"].as_str().unwrap().to_string();
+    let at_before = explain(&["--at", &integration]);
+
+    repo.arc(&repo.root)
+        .args([
+            "resolve",
+            "shipped-finding",
+            &finding_id,
+            "--status",
+            "obsolete",
+        ])
+        .assert()
+        .success();
+
+    let now = explain(&[]);
+    for slot in ["contract", "evaluation", "coverage_at_acceptance"] {
+        assert_eq!(now[slot], before[slot], "{slot}");
+    }
+    let later = now["later_knowledge"]["rows"].as_array().unwrap();
+    assert!(
+        later
+            .iter()
+            .any(|row| row["item"] == "post-integration-disposition"
+                && row["finding_id"] == finding_id.as_str()
+                && row["status"] == "obsolete"
+                && row["standing"] == "recorded"),
+        "{later:?}"
+    );
+    let text = stdout(repo.arc(&repo.root).args(["explain", "shipped-finding"]));
+    assert!(
+        text.contains(&format!(
+            "post-integration disposition obsolete on {finding_id}"
+        )),
+        "{text}"
+    );
+    assert_eq!(
+        explain(&["--at", &integration]),
+        at_before,
+        "the read at the integration is unchanged"
+    );
+}
+
 /// A minor finding raised before integration and still open when the change
 /// shipped on a declared debt.
 fn finding_left_open_at_ship(repo: &Repo, slug: &str) -> String {

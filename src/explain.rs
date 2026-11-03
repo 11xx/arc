@@ -374,6 +374,15 @@ pub enum Detail {
         finding_id: String,
         status: String,
     },
+    /// A finding's disposition recorded after integration, beside the state
+    /// it shipped in.
+    PostIntegrationDisposition {
+        event_id: String,
+        finding_id: String,
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        commit: Option<String>,
+    },
     /// A check observed after integration. It sits here rather than in
     /// evaluation, which holds only what the integration counted.
     PostIntegrationVerification {
@@ -1555,6 +1564,20 @@ fn later_knowledge(events: &[Event], discharge: Option<&Discharge>, at: Option<&
                     status: kebab(status),
                 },
             )),
+            Payload::PostIntegrationDispositionRecorded {
+                finding_id,
+                status,
+                commit,
+                ..
+            } => rows.push(row(
+                Standing::recorded(),
+                Detail::PostIntegrationDisposition {
+                    event_id: event.event_id.clone(),
+                    finding_id: finding_id.clone(),
+                    status: kebab(status),
+                    commit: commit.clone(),
+                },
+            )),
             Payload::PostIntegrationVerificationRecorded {
                 gate,
                 command,
@@ -2046,6 +2069,17 @@ fn describe(detail: &Detail) -> String {
             finding_id,
             status,
         } => format!("audit disposition {status} on {finding_id} `{event_id}`"),
+        Detail::PostIntegrationDisposition {
+            event_id,
+            finding_id,
+            status,
+            commit,
+        } => match commit {
+            Some(commit) => format!(
+                "post-integration disposition {status} on {finding_id} at {commit} `{event_id}`"
+            ),
+            None => format!("post-integration disposition {status} on {finding_id} `{event_id}`"),
+        },
         Detail::PostIntegrationVerification {
             event_id,
             gate,

@@ -2540,11 +2540,12 @@ REVIEW COVERAGE AND DEBT
   disputed, or contested, stays that way in what shipped. `arc resolve` on
   the integrated change records its later disposition, such as `resolved
   --commit <fix>`, `obsolete`, or `accepted-risk`, beside that state, and
-  readers show both: how it shipped, and how it stood after integration. A
-  finding resolved, accepted-risk, or obsolete in the receiver's eligible
-  disposition graph at integration takes none. Replay preserves recorded
-  dispositions and references regardless of receiver trust; release permission
-  is assessed in the receiver's projection.
+  readers show both: how it shipped, and how it stood after integration;
+  `explain` lists the disposition as later knowledge. A finding resolved,
+  accepted-risk, or obsolete in the receiver's eligible disposition graph at
+  integration takes none. Replay preserves recorded dispositions and
+  references regardless of receiver trust; release permission is assessed in
+  the receiver's projection.
   Such a disposition is not a verdict and discharges no debt.
 
   `arc findings --format sarif` reports every unresolved finding, review or
