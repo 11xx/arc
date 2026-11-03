@@ -110,6 +110,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     }
 
     let mut states = BTreeMap::new();
+    let mut readable = BTreeMap::new();
     let mut known_patchsets = BTreeMap::<String, Vec<String>>::new();
     let store = ctx.store()?;
     match store.privilege_scope() {
@@ -137,8 +138,11 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
                 &root,
                 &mut problems,
                 &mut advice,
-                &mut states,
-                &mut known_patchsets,
+                Inspected {
+                    states: &mut states,
+                    readable: &mut readable,
+                    patchsets: &mut known_patchsets,
+                },
             )?;
         }
         Err(error) => problems.push(Finding {
@@ -192,7 +196,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     }
     inspect_closed_worktrees(&ctx.cwd, &states, &mut advice)?;
     inspect_debt(ctx, &states, &mut advice)?;
-    inspect_hold_releases(&store, &states, &mut advice);
+    inspect_hold_releases(&readable, &mut advice);
     let replica = match crate::replica::status(&store) {
         Ok(status) => Some(status),
         Err(error) => {
@@ -353,13 +357,21 @@ fn inspect_dangling_revisions(
     Ok(())
 }
 
+/// What inspecting the changes keeps for the diagnostics after it: each
+/// replayable change's state and patchsets, and the events of each change
+/// that produced no problem.
+struct Inspected<'a> {
+    states: &'a mut BTreeMap<String, ChangeState>,
+    readable: &'a mut BTreeMap<String, Vec<Event>>,
+    patchsets: &'a mut BTreeMap<String, Vec<String>>,
+}
+
 fn inspect_changes(
     inspection: ChangeInspection<'_>,
     root: &Path,
     problems: &mut Vec<Finding>,
     advice: &mut Vec<Finding>,
-    states: &mut BTreeMap<String, ChangeState>,
-    patchsets: &mut BTreeMap<String, Vec<String>>,
+    mut inspected_changes: Inspected<'_>,
 ) -> Result<()> {
     let changes = root.join("changes");
     let entries = match fs::read_dir(&changes) {
@@ -369,14 +381,14 @@ fn inspect_changes(
             return Err(error).with_context(|| format!("cannot read {}", changes.display()))
         }
     };
-    let batches = match crate::store::import_batches(root) {
-        Ok(batches) => batches,
+    let (batches, batches_readable) = match crate::store::import_batches(root) {
+        Ok(batches) => (batches, true),
         Err(error) => {
             problems.push(Finding {
                 code: "malformed-import-batch",
                 detail: format!("{error:#}"),
             });
-            Vec::new()
+            (Vec::new(), false)
         }
     };
     let mut imported = BTreeMap::<String, Vec<serde_json::Value>>::new();
@@ -411,8 +423,7 @@ fn inspect_changes(
                 .unwrap_or_default(),
             problems,
             advice,
-            states,
-            patchsets,
+            &mut inspected_changes,
         )?;
     }
     for (change_id, events) in imported {
@@ -424,10 +435,13 @@ fn inspect_changes(
                 &events,
                 problems,
                 advice,
-                states,
-                patchsets,
+                &mut inspected_changes,
             )?;
         }
+    }
+    // Without the import batches no change's events are complete.
+    if !batches_readable {
+        inspected_changes.readable.clear();
     }
     Ok(())
 }
@@ -440,9 +454,11 @@ fn inspect_change(
     imported: &[serde_json::Value],
     problems: &mut Vec<Finding>,
     advice: &mut Vec<Finding>,
-    states: &mut BTreeMap<String, ChangeState>,
-    patchsets: &mut BTreeMap<String, Vec<String>>,
+    inspected: &mut Inspected<'_>,
 ) -> Result<()> {
+    let problems_before = problems.len();
+    // Events a change read would refuse, without a problem of their own here.
+    let mut misfiled = false;
     let events_dir = change_dir.join("events");
     let entries = match fs::read_dir(&events_dir) {
         Ok(entries) => Some(entries),
@@ -505,6 +521,7 @@ fn inspect_change(
             });
             continue;
         }
+        misfiled |= event.event_id != event_id || event.change_id != change_id;
         has_open |= matches!(event.payload, Payload::ChangeOpened { .. });
         events.push(event);
     }
@@ -585,7 +602,7 @@ fn inspect_change(
             }
         }
     }
-    patchsets.insert(
+    inspected.patchsets.insert(
         change_id.to_string(),
         state
             .patchsets
@@ -593,7 +610,10 @@ fn inspect_change(
             .map(|patchset| patchset.id.clone())
             .collect(),
     );
-    states.insert(change_id.to_string(), state);
+    inspected.states.insert(change_id.to_string(), state);
+    if !misfiled && problems.len() == problems_before {
+        inspected.readable.insert(change_id.to_string(), events);
+    }
     Ok(())
 }
 
@@ -1021,14 +1041,13 @@ fn inspect_debt(
 /// A release that names no active hold. Replay ignores it so the ledger stays
 /// readable; this is where it becomes visible, because it means either a hold
 /// was released twice or the events do not say what somebody thought.
-fn inspect_hold_releases(
-    store: &Store,
-    states: &BTreeMap<String, ChangeState>,
-    advice: &mut Vec<Finding>,
-) {
-    for change_id in states.keys() {
+///
+/// It reads the events the change inspection already read. A change whose
+/// inspection reported a problem is not checked: its problem is the finding.
+fn inspect_hold_releases(readable: &BTreeMap<String, Vec<Event>>, advice: &mut Vec<Finding>) {
+    for (change_id, events) in readable {
         let mut active: BTreeSet<String> = BTreeSet::new();
-        for event in store.load_events(change_id).unwrap_or_default() {
+        for event in events {
             match &event.payload {
                 Payload::HoldSet { .. } => {
                     active.insert(event.event_id.clone());

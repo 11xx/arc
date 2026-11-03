@@ -1039,3 +1039,92 @@ fn doctor_reports_unparseable_project_and_operator_policies() {
             .stdout(predicates::str::contains("policy-unreadable"));
     }
 }
+
+/// The import batch reads one traced `arc doctor` makes, and its report.
+fn doctor_import_reads(repo: &Repo) -> (u64, serde_json::Value) {
+    let output = repo
+        .arc(&repo.root)
+        .env("ARC_TRACE", "1")
+        .args(["doctor", "--json"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let record: serde_json::Value = stderr
+        .lines()
+        .find(|line| line.contains("\"arc-perf/1\""))
+        .map(|line| serde_json::from_str(line).unwrap())
+        .unwrap_or_else(|| panic!("doctor writes a trace record: {stderr}"));
+    let report = serde_json::from_slice(&output.stdout).unwrap();
+    (
+        record["ledger"]["import"]["opens"].as_u64().unwrap_or(0),
+        report,
+    )
+}
+
+/// Claim: doctor reads the import batches a fixed number of times however
+/// many changes the ledger holds, and still reports a hold release that
+/// names no active hold. Rejects a hold-release check that reloads every
+/// change, its import batches included, once per change.
+#[test]
+fn doctor_reads_import_batches_a_fixed_number_of_times_however_many_changes() {
+    let source = Repo::new();
+    let (imported, _, _) = change_with_patchset(&source, "received");
+    let bundle = source.home.join("received.json");
+    source
+        .arc(&source.root)
+        .args(["export", &imported, "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    let repo = Repo::new();
+    deliver_git_objects(&source, &repo);
+    repo.arc(&repo.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let held = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "held",
+        "--no-worktree",
+    ])));
+    stdout(
+        repo.arc(&repo.root)
+            .args(["hold", &held, "--reason", "waiting on a fixture"]),
+    );
+    let hold = fs::read_dir(event_dir(&repo, &held))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find_map(|path| {
+            let event: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            (event["event_type"] == "hold-set")
+                .then(|| event["event_id"].as_str().unwrap().to_string())
+        })
+        .expect("the hold is an event");
+    stdout(repo.arc(&repo.root).args(["release-hold", &held, &hold]));
+    rewrite_event(&repo, &held, "hold-released", |event| {
+        event["hold_event_id"] = serde_json::json!("01J00000000000000000000000");
+    });
+
+    let (few, report) = doctor_import_reads(&repo);
+    assert!(few > 0, "doctor reads the import batch");
+    let advice = report["advice"].as_array().unwrap();
+    assert!(
+        advice
+            .iter()
+            .any(|finding| finding["code"] == "hold-release-names-no-hold"),
+        "{report}"
+    );
+    for index in 0..4 {
+        stdout(
+            repo.arc(&repo.root)
+                .args(["begin", &format!("more-{index}"), "--no-worktree"])
+                .args(["--target", "master"]),
+        );
+    }
+    let (many, _) = doctor_import_reads(&repo);
+    assert_eq!(
+        many, few,
+        "import batch reads grew from {few} to {many} with four more changes"
+    );
+}

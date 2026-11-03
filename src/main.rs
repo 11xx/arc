@@ -2847,7 +2847,9 @@ enum Cmd {
     /// that failure. A change whose events fail to reduce is the problem
     /// `unreplayable-change`, naming the change with the reduction error. Admitted active
     /// rewrites prove falsification identity without advancing recorded revisions; dangling
-    /// revision diagnostics still inspect the recorded objects.
+    /// revision diagnostics still inspect the recorded objects. A hold release that names no
+    /// active hold is the advice `hold-release-names-no-hold`; a change already reported with
+    /// a problem is not checked for one.
     ///
     /// Exits 0 when the ledger is clean or carries only advice, and 1 when it
     /// reports a problem. A ledger that cannot be read at all also exits 1,
