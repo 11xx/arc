@@ -194,6 +194,9 @@ paths = [
   # `checkpoint record` appends a repository event and writes, or on a failed
   # append deletes, a `checkpoint/<name>` tag in the shared ref namespace.
   "src/commands/checkpoint.rs",
+  # Decides whether a read covers a debt's extent, so whether the debt is
+  # discharged.
+  "src/extent.rs",
 ]
 
 # Roots inside which classification is closed: every tracked file under one of
