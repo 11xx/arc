@@ -362,3 +362,47 @@ fn a_todo_consumed_before_the_checkpoint_is_not_filed_since() {
     assert_eq!(view["filed_since_exact"], true, "{view}");
     assert!(view["todos"].as_array().unwrap().is_empty(), "{view}");
 }
+
+/// Claim: a `checkpoint/<name>` tag that no checkpoint records, which an
+/// interrupted `record --tag` leaves between writing the tag and its event,
+/// refuses a retry naming the recovery, and once the tag is deleted with
+/// `git tag -d` the retry records the checkpoint with a fresh tag. Rejects:
+/// a refusal that names no way forward, and a record that adopts a tag it
+/// did not write.
+#[test]
+fn an_unrecorded_checkpoint_tag_refuses_with_its_recovery() {
+    let repo = Repo::new();
+    let revision = git_out(&repo.root, &["rev-parse", "HEAD"]);
+    git(
+        &repo.root,
+        &[
+            "tag",
+            "-a",
+            "-m",
+            "Checkpoint rc",
+            "checkpoint/rc",
+            &revision,
+        ],
+    );
+    let refused = repo
+        .arc(&repo.root)
+        .args(["checkpoint", "record", "rc", "--tag"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("no checkpoint records it"), "{stderr}");
+    assert!(stderr.contains("git tag -d checkpoint/rc"), "{stderr}");
+    assert!(list(&repo)["checkpoints"].as_array().unwrap().is_empty());
+
+    git(&repo.root, &["tag", "-d", "checkpoint/rc"]);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["checkpoint", "record", "rc", "--tag"]),
+    );
+    assert_eq!(show(&repo, "rc")["tag"], "checkpoint/rc");
+    assert_eq!(
+        git_out(&repo.root, &["rev-parse", "checkpoint/rc^{commit}"]),
+        revision
+    );
+}

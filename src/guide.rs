@@ -2000,10 +2000,13 @@ CHECKPOINTS (a revision handed over for testing)
   and the name of every todo filed by then, open or consumed. Names are
   unique in a repository. `--tag` also writes the annotated tag
   `checkpoint/<name>` with `git tag -a`, signed as Git's configuration
-  signs tags; an existing tag refuses with nothing recorded.
-  When the event append fails, the tag is deleted again only if the event
-  is known absent; an event published but not confirmed durable, or one
-  whose publication cannot be told, keeps its tag and the error says which.
+  signs tags; an existing tag refuses with nothing recorded and is never
+  adopted. The tag is written before its event, so an interruption between
+  them leaves a `checkpoint/<name>` tag no checkpoint records; delete it
+  with `git tag -d checkpoint/<name>` and record again. When the event
+  append fails, the tag is deleted again only if the event is known
+  absent; an event published but not confirmed durable, or one whose
+  publication cannot be told, keeps its tag and the error says which.
   The event is a plain fact: it grants and requires no authority.
 
   When findings come back, `show` sorts them against the checkpoint. A

@@ -139,8 +139,14 @@ pub fn record_checkpoint(
     let branch = recorded_branch(cwd, rev.as_deref(), &revision)?;
     let tag_name = tag.then(|| format!("{TAG_PREFIX}{name}"));
     if let Some(tag_name) = &tag_name {
+        // No checkpoint records `name` (checked above), so a standing tag is
+        // one arc did not finish recording, or one somebody else wrote.
         if gitio::ref_value(cwd, &format!("refs/tags/{tag_name}"))?.is_some() {
-            bail!("tag {tag_name} already exists; nothing was recorded");
+            bail!(
+                "tag {tag_name} already exists and no checkpoint records it; nothing was \
+                 recorded. If an interrupted `arc checkpoint record --tag` left it, delete \
+                 it with `git tag -d {tag_name}` and record again"
+            );
         }
     }
 

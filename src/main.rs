@@ -4880,7 +4880,10 @@ enum CheckpointCmd {
         rev: Option<String>,
         /// Also write the annotated tag `checkpoint/<name>` on the revision
         /// with `git tag -a`, signed when Git's configuration signs tags. An
-        /// existing tag refuses before anything is recorded. When the event
+        /// existing tag refuses before anything is recorded and is never
+        /// adopted. One no checkpoint records is what an interruption between
+        /// the tag and its event leaves: delete it with `git tag -d` and
+        /// record again. When the event
         /// append fails, the tag is deleted again only if the event is known
         /// absent; an event published but not confirmed durable, or one whose
         /// publication cannot be told, keeps its tag and the error says which
