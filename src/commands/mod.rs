@@ -35,6 +35,7 @@ pub use publication::publication;
 pub(crate) mod provisional;
 pub use provisional::{check_provisional, resolve as resolve_provisional};
 mod native_child;
+mod receipt;
 pub(crate) mod relations;
 mod replica;
 mod rescue;
@@ -105,6 +106,9 @@ pub use messaging::{catchup, inbox, message, messages};
 pub use observe::{events, watch, EventsArgs, WatchArgs, WatchQuorum};
 pub use pass::{abandon_pass, complete_pass, list_passes, open_pass};
 pub use policy_cmd::{path as policy_path, show as policy_show, write as policy_write};
+pub use receipt::{
+    ingest as ingest_receipt, template as receipt_template, ItemKind as ReceiptItemKind,
+};
 pub use replica::{
     confirm_return as replica_confirm_return, export as replica_export, id as replica_id,
     import as replica_import, init as replica_init, offer as replica_offer, pair as replica_pair,
@@ -202,6 +206,7 @@ pub(crate) const READ_ONLY_COMMANDS: &[&str] = &[
     "candidate show",
     "candidate list",
     "pass list",
+    "receipt template",
     "run list",
     "cost show",
     "cost evidence",

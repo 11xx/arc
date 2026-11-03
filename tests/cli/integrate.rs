@@ -1213,6 +1213,7 @@ fn every_read_only_command_reads_past_a_broken_policy() {
         vec!["candidate", "show", "missing", "--json"],
         vec!["candidate", "list", "--json"],
         vec!["pass", "list", "--json"],
+        vec!["receipt", "template", "--verdict", id],
         vec!["run", "list", "--json"],
         vec!["cost", "show", "missing", "--json"],
         vec!["cost", "show", "--commit", &merged, "--json"],

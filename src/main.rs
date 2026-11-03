@@ -1959,6 +1959,72 @@ enum Cmd {
         /// satisfies no integration gate, and it discharges no debt
         #[arg(long = "assessment", value_name = "FILE", requires = "verdict")]
         assessment: Option<PathBuf>,
+        /// Record every verdict item of an `arc-review-receipt/1` file from
+        /// `arc receipt template --verdict`, each on its own change, for the
+        /// reviewer the receipt names (`arc receipt --help` has the shape).
+        /// Each item is recorded as `--verdict` records one: the receipt's
+        /// reviewer is the represented subject and the invoker the writer,
+        /// under the same locks, independence, clearance and assessment
+        /// binding. A receipt holding audit items, or both kinds, is
+        /// refused. `--json` emits `arc-receipt-result/1`. Exits 1 when any
+        /// item was refused; the others still record
+        #[arg(long, value_name = "FILE", conflicts_with_all = [
+            "change", "verdict", "start", "snapshot", "patchset", "cause", "forge_source",
+            "findings_json", "provisional", "route_version", "assessment", "body", "body_file",
+        ])]
+        receipt: Option<PathBuf>,
+    },
+    /// Review receipts: what a delegated reader read and concluded, in one
+    /// file arc records.
+    ///
+    /// `arc-review-receipt/1` is a JSON object: `schema`, `issued_at` (kept
+    /// from the template), `reviewer` (`harness`, its full native `session`,
+    /// and `model` as `model#effort`), and `items`. Each item carries `key`,
+    /// `kind` (`verdict` or `audit`) and `subject`, copied unchanged from
+    /// the template, and what the reader fills in: `verdict` (approved,
+    /// changes-requested, comment-only), `causes` (with changes-requested on
+    /// a verdict item, refused elsewhere), `body`, `findings` (each with
+    /// `severity`, `blocking` and `summary` required, `body` optional, and on
+    /// a verdict item an optional `path` and `line` anchoring it to the
+    /// head), `dispositions` (each naming a `finding` by finding id or
+    /// finding event id, a `disposition` of `fixed`, `still-open` or
+    /// `not-a-defect`, and optional `evidence`), and `assessment`, an
+    /// embedded `agent-routing-assessment` object or a path relative to the
+    /// receipt. Unknown fields are refused; an `extent` is not yet accepted.
+    ///
+    /// `fixed` records `resolved`, `still-open` records `still-open`, and
+    /// `not-a-defect` records `disputed`, which releases no blocking
+    /// finding. A verdict item disposes the change's review findings, an
+    /// audit item its audit findings; dispositions are part of the read's
+    /// own event.
+    ///
+    /// Recording, by `arc review --receipt` or `arc audit --receipt`, keeps
+    /// the receipt's bytes in the ledger's custody under their sha256 and
+    /// refuses the whole receipt, writing nothing, for an unreadable file, a
+    /// wrong schema, a missing `issued_at`, mixed kinds, or a reviewer whose
+    /// session is not a full native id (claude, codex and pi ids are UUIDs,
+    /// opencode ids start `ses_`; a prefix, a delegate handle or another
+    /// harness is refused) or whose model names no effort. Each item is then
+    /// recorded or refused on its own, under the change's locks: an item
+    /// whose key an identical item already published prints that event and
+    /// writes nothing, and one published with different content is refused
+    /// (`key-conflict`) naming both digests; a subject that no longer
+    /// matches (`subject-mismatch`: store, change, patchset, head, base,
+    /// brief digest, or for an audit the closure, integrated revision,
+    /// source patchset and outstanding debts), a head two patchsets record
+    /// (`ambiguous-head`), a key that does not derive from the subject and
+    /// `issued_at` (`invalid`), a verdict, finding or disposition recorded
+    /// after the template (`stale-frontier`, naming them), and a
+    /// contradiction (`contradiction`: approved with a blocking finding,
+    /// changes-requested without causes, a disposition of a finding not on
+    /// the subject or of one finding twice) are refused, never normalised.
+    /// A recorded read that clears nothing is not refused; its bar is
+    /// reported. Where the reviewer's session store holds the session, the
+    /// model it observed is compared with the receipt's: a difference is
+    /// recorded on each read and the assessment binds the observed model
+    Receipt {
+        #[command(subcommand)]
+        cmd: ReceiptCmd,
     },
     /// Record a review decision made outside the local ledger
     External {
@@ -2887,10 +2953,11 @@ enum Cmd {
     /// open to anyone.
     Audit {
         /// Change whose integrated revision was reviewed
-        change: String,
+        #[arg(required_unless_present = "receipt")]
+        change: Option<String>,
         /// The auditor's verdict on the integrated revision
-        #[arg(long, value_enum)]
-        verdict: Verdict,
+        #[arg(long, value_enum, required_unless_present = "receipt")]
+        verdict: Option<Verdict>,
         /// Inline body text
         #[arg(long)]
         body: Option<String>,
@@ -2923,6 +2990,22 @@ enum Cmd {
         /// assessment
         #[arg(long = "assessment", value_name = "FILE")]
         assessment: Option<PathBuf>,
+        /// Record every audit item of an `arc-review-receipt/1` file from
+        /// `arc receipt template --audit`, each on its own integrated change,
+        /// for the reviewer the receipt names (`arc receipt --help` has the
+        /// shape). Each item is recorded as `--verdict` records one, and
+        /// discharges exactly what that audit would; a read that discharges
+        /// nothing is recorded and reports its bar. A receipt holding verdict
+        /// items, or both kinds, is refused. Exits 1 when any item was
+        /// refused; the others still record
+        #[arg(long, value_name = "FILE", conflicts_with_all = [
+            "change", "verdict", "body", "body_file", "findings_json", "route_version",
+            "assessment",
+        ])]
+        receipt: Option<PathBuf>,
+        /// With --receipt, emit `arc-receipt-result/1`
+        #[arg(long, requires = "receipt")]
+        json: bool,
     },
     /// Close a change without arc performing the merge
     ///
@@ -3468,6 +3551,31 @@ enum PolicyCmd {
         /// Read TOML from a file ('-' for stdin)
         #[arg(long, required = true, value_name = "FILE")]
         body_file: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReceiptCmd {
+    /// Print an `arc-review-receipt/1` template with one item per change.
+    ///
+    /// Each item's `subject` pins what the reader is to read and what it had
+    /// seen. A verdict item names the store, change, latest patchset, base,
+    /// head and the `sha256:` digest of the patchset's brief; an audit item
+    /// the store, change, integration closure event, integrated revision,
+    /// source patchset and outstanding debts. Both carry the frontier: the
+    /// change's verdict tips and every audit and external verdict, its open
+    /// findings, and the tips of every finding's dispositions. The item's
+    /// `key` hashes its kind, subject and the template's `issued_at`, so it
+    /// is stable for this template. Reviewer fields and the verdict are left
+    /// null for the reader to fill; `arc receipt --help` has the shape
+    #[command(group(clap::ArgGroup::new("receipt_kind").args(["verdict", "audit"]).required(true)))]
+    Template {
+        /// Changes whose latest patchset a verdict item reads
+        #[arg(long, num_args = 1.., value_name = "CHANGE")]
+        verdict: Vec<String>,
+        /// Integrated changes whose integrated revision an audit item reads
+        #[arg(long, num_args = 1.., value_name = "CHANGE")]
+        audit: Vec<String>,
     },
 }
 
@@ -5405,6 +5513,9 @@ fn role_refusal(role: ExecutionRole, command: &Cmd) -> Option<(&'static str, &'s
                 verdict: Some(_), ..
             } => Some(("review", "reviewer or lead")),
             Cmd::Review { start: true, .. } => Some(("review start", "reviewer or lead")),
+            Cmd::Review {
+                receipt: Some(_), ..
+            } => Some(("review --receipt", "reviewer or lead")),
             Cmd::External { .. } => Some(("external verdict", "reviewer or lead")),
             Cmd::Resolve { .. } => Some(("resolve", "reviewer or lead")),
             Cmd::Hold { .. } => Some(("hold", "reviewer or lead")),
@@ -6814,7 +6925,16 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             provisional,
             route_version,
             assessment,
+            receipt,
         } => {
+            if let Some(receipt) = receipt {
+                return commands::ingest_receipt(
+                    &ctx,
+                    commands::ReceiptItemKind::Verdict,
+                    &receipt,
+                    json,
+                );
+            }
             let change = infer(change.as_deref())?;
             if start {
                 commands::review_start(&ctx, &change, patchset)?;
@@ -6840,6 +6960,8 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                         provisional,
                         route_version,
                         assessment,
+                        assessed: None,
+                        findings: Vec::new(),
                     },
                 )?;
             } else {
@@ -6854,6 +6976,16 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     anyhow::bail!("--verdict is required for the review write path");
                 }
                 commands::read_review(&ctx, &change, json)?;
+            }
+            Ok(0)
+        }
+        Cmd::Receipt {
+            cmd: ReceiptCmd::Template { verdict, audit },
+        } => {
+            if verdict.is_empty() {
+                commands::receipt_template(&ctx, commands::ReceiptItemKind::Audit, &audit)?;
+            } else {
+                commands::receipt_template(&ctx, commands::ReceiptItemKind::Verdict, &verdict)?;
             }
             Ok(0)
         }
@@ -7194,7 +7326,20 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             findings_json,
             route_version,
             assessment,
+            receipt,
+            json,
         } => {
+            if let Some(receipt) = receipt {
+                return commands::ingest_receipt(
+                    &ctx,
+                    commands::ReceiptItemKind::Audit,
+                    &receipt,
+                    json,
+                );
+            }
+            let (Some(change), Some(verdict)) = (change, verdict) else {
+                anyhow::bail!("an audit names a change and --verdict");
+            };
             // An audit body is optional; read_body refuses an absent one.
             let body = match (&body, &body_file) {
                 (None, None) => None,
@@ -7209,6 +7354,8 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     findings_json,
                     route_version,
                     assessment,
+                    assessed: None,
+                    findings: Vec::new(),
                 },
             )?;
             Ok(0)

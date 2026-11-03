@@ -2823,6 +2823,30 @@ REVIEW AND REPAIR
   weaker of two options — neither reachable by a reader who has not written
   the diff.
 
+RECEIPTS
+  A delegated reader that cannot write to the ledger returns its reading as
+  an `arc-review-receipt/1` file. `arc receipt template --verdict <change>...`
+  or `--audit <change>...` pins each item's subject and frontier before
+  dispatch; the reader fills in its identity, verdict, findings and
+  dispositions and copies each `key` and `subject` unchanged. `arc review
+  --receipt` records verdict items and `arc audit --receipt` audit items, each
+  as the read `--verdict` records: the reader is the represented subject, the
+  invoker the writer, and the event names the receipt item, whose file the
+  ledger keeps in custody. Independence, clearance and assessment binding
+  judge an item exactly as they judge a hand-recorded read.
+
+  A receipt-wide error refuses everything and writes nothing. An item error
+  refuses that item alone, and the exit is 1 when any item was refused. An
+  item is refused when its subject no longer matches, when a verdict, finding
+  or disposition was recorded after the template, or when it contradicts
+  itself; a contradiction is refused, never repaired by editing the report.
+  A read that clears nothing is recorded and reports its bar. Dispositions
+  publish inside the read's own event, which stamps store format 8. Rerunning
+  a receipt prints the event of each item an identical item already
+  published and writes nothing for it, so an interrupted batch resumes; a
+  changed item under a published key is refused. `arc receipt --help` holds
+  the shape and the refusal codes.
+
 CONTRIBUTION TRAILERS
     arc roles <change> --planned-by [<value>] --orchestrated-by [<value>]
                        Assert roles on an open change. Both flags repeat;
@@ -4893,6 +4917,7 @@ SCHEMAS
     `arc-journal-inventory/6`        arc journal inventory --json
     `arc-rescue/5`                   arc rescue --json
     `arc-review/5`                   arc review --json
+    `arc-receipt-result/1`           arc review|audit --receipt --json
     `arc-findings/3`                 arc findings --format json
     `arc-blocker-status/1`           arc blocker-status --json
     `arc-metadata/1`                 arc metadata --json
@@ -4936,6 +4961,7 @@ SCHEMAS
     `arc-disclosure/1`               arc context declare --disclosure-file
     `arc-forge-observation/1`        arc forge observe --file
     `arc-forge-receipt/1`            arc forge observe|link|checks|pr-state --json
+    `arc-review-receipt/1`           arc receipt template; arc review|audit --receipt
     `arc-received-evidence/1`        arc candidate register --evidence-file
     `arc-replica-bundle/3`           arc replica export / import
     `arc-replica-event/3`            one event inside an arc-replica-bundle
@@ -5190,6 +5216,7 @@ REVIEW
   What is owed: arc inbox, arc query --debt. Discharge it with arc audit.
   Findings: arc findings <change>, with --audit after integration; arc resolve
   disposes of one.
+  A read-only reviewer's reading: arc receipt template, then --receipt.
 
 WORK BESIDE OTHERS
   arc claim takes work. Each writer uses its own branch or worktree.

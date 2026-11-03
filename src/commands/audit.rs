@@ -6,6 +6,7 @@
 //! available, which is what keeps the third one from being chosen.
 
 use super::*;
+use crate::operation_println as println;
 use crate::state::{ChangeState, Debt, Patchset};
 
 /// What an `ineligible-review` debt is declared with: which read it names,
@@ -186,7 +187,17 @@ pub(super) fn bind_assessment(
     assessed: crate::assessment::Assessment,
     implementers: Option<&[String]>,
 ) -> AuditAssessment {
-    let mut binding = assessed.bind(ctx.resolve_model().model.as_deref());
+    bind_assessment_to(ctx.resolve_model().model.as_deref(), assessed, implementers)
+}
+
+/// `assessed` bound to the reader's `model` and to every author coordinate
+/// of `implementers`; see [`bind_assessment`].
+pub(super) fn bind_assessment_to(
+    model: Option<&str>,
+    assessed: crate::assessment::Assessment,
+    implementers: Option<&[String]>,
+) -> AuditAssessment {
+    let mut binding = assessed.bind(model);
     let mut uncovered_authors = Vec::new();
     if binding == AuditorBinding::Bound {
         // A list nobody could read is not an empty list: with no authors
@@ -557,28 +568,67 @@ pub struct AuditArgs {
     /// `ineligible-review` debt is discharged only by an audit whose
     /// assessment is eligible.
     pub assessment: Option<PathBuf>,
+    /// An assessment already read, bound as `assessment` would be.
+    pub assessed: Option<crate::assessment::Assessment>,
+    /// Findings already read, recorded when `findings_json` names none.
+    pub findings: Vec<InlineFinding>,
 }
 
 /// Record a review performed after integration, discharging any debt.
 pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
+    record_audit(ctx, reference, args, None).map(drop)
+}
+
+/// Record an audit. A receipt item's audit passes its guard under the
+/// transition lock, once the change's state is read, as
+/// [`super::review::record_verdict`] describes.
+pub(super) fn record_audit(
+    ctx: &Ctx,
+    reference: &str,
+    args: AuditArgs,
+    receipt: Option<&super::receipt::ItemGuard>,
+) -> Result<super::review::Recorded> {
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
     let st = store.state(&change_id)?;
+    let admitted = match receipt {
+        None => None,
+        Some(guard) => {
+            let events = store.load_events(&change_id)?;
+            match guard.admit(&store, &events, &st)? {
+                super::receipt::Admission::Published(event_id) => {
+                    println!("event: {event_id} (already recorded from this item)");
+                    return Ok(super::review::Recorded {
+                        event_id,
+                        existing: true,
+                    });
+                }
+                super::receipt::Admission::Fresh(admitted) => Some(admitted),
+            }
+        }
+    };
 
     let revision = integrated_revision(&st)?;
     let implementers = audited_implementers(ctx, &st);
     refuse_self_audit(ctx, &st, args.verdict)?;
-    let inline = super::review::parse_inline_findings(args.findings_json.as_deref())?;
+    let inline = match args.findings_json.as_deref() {
+        Some(src) => super::review::parse_inline_findings(Some(src))?,
+        None => args.findings,
+    };
     if args.verdict == Verdict::Approved && inline.iter().any(|f| f.blocking) {
         bail!("cannot approve while recording blocking findings in the same audit");
     }
     let finding_ids: Vec<String> = inline.iter().map(|f| f.finding_id.clone()).collect();
-    let assessment = args
-        .assessment
-        .as_deref()
-        .map(|path| read_assessment(ctx, path, implementers.as_deref()))
-        .transpose()?;
+    let assessment = match (args.assessment.as_deref(), args.assessed) {
+        (Some(path), _) => Some(read_assessment(ctx, path, implementers.as_deref())?),
+        (None, Some(assessed)) => Some(bind_assessment_to(
+            super::receipt::binding_model(ctx, receipt.is_some()).as_deref(),
+            assessed,
+            implementers.as_deref(),
+        )),
+        (None, None) => None,
+    };
     let binding = assessment.as_ref().and_then(|assessed| assessed.binding);
     let uncovered_authors = assessment
         .as_ref()
@@ -630,8 +680,11 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
         route_version: args.route_version,
         assessment,
         held_roles,
-        dispositions: Vec::new(),
-        receipt: None,
+        dispositions: admitted
+            .as_ref()
+            .map(|admitted| admitted.dispositions.clone())
+            .unwrap_or_default(),
+        receipt: admitted.map(|admitted| admitted.reference),
     };
     ensure_append_allowed(&st, &payload)?;
     let mut event = ctx.event(&store, &change_id, payload)?;
@@ -716,7 +769,10 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
             println!("debt already discharged by {discharger}");
         }
     }
-    Ok(())
+    Ok(super::review::Recorded {
+        event_id: event.event_id.clone(),
+        existing: false,
+    })
 }
 
 /// Refuse an approving audit from the identity that wrote the work.

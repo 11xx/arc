@@ -87,6 +87,7 @@ mod provenance;
 mod provisional;
 mod queue;
 mod rebase;
+mod receipts;
 mod received_evidence;
 mod registration_races;
 mod registration_retirement;

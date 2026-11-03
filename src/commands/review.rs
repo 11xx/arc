@@ -1315,9 +1315,34 @@ pub struct ReviewArgs {
     /// An `agent-routing assess --json` file for the reviewer, bound as
     /// `arc audit --assessment` binds one.
     pub assessment: Option<PathBuf>,
+    /// An assessment already read, bound as `assessment` would be.
+    pub assessed: Option<crate::assessment::Assessment>,
+    /// Findings already read, recorded when `findings_json` names none.
+    pub findings: Vec<FindingInput>,
+}
+
+/// A read a command recorded, or found already recorded.
+pub(super) struct Recorded {
+    pub event_id: String,
+    /// The read was published earlier, and nothing was written now.
+    pub existing: bool,
 }
 
 pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
+    record_verdict(ctx, reference, args, None).map(drop)
+}
+
+/// Record a verdict. A receipt item's verdict passes its guard, which is
+/// asked under the same locks, once the change's state is read: it returns
+/// the event an identical item already published, refuses a stale or
+/// mismatched item, or supplies the item's dispositions and receipt
+/// reference for the one event written.
+pub(super) fn record_verdict(
+    ctx: &Ctx,
+    reference: &str,
+    args: ReviewArgs,
+    receipt: Option<&super::receipt::ItemGuard>,
+) -> Result<Recorded> {
     let ReviewArgs {
         forge_source,
         verdict,
@@ -1332,6 +1357,8 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
         solo,
         route_version,
         assessment,
+        assessed,
+        findings,
     } = args;
     causes.sort_unstable();
     causes.dedup();
@@ -1362,7 +1389,7 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
     // The batch and the verdict it rides on are settled before `--snapshot`
     // records a patchset, so a review that refuses has written nothing.
     let finding_inputs = match findings_json {
-        None => Vec::new(),
+        None => findings,
         Some(src) => read_finding_inputs(&src)?,
     };
     if verdict == Verdict::Approved && finding_inputs.iter().any(|f| f.blocking) {
@@ -1371,10 +1398,10 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
     if snapshot_first && patchset.is_some() {
         bail!("--snapshot cannot be combined with --patchset");
     }
-    let assessed = assessment
-        .as_deref()
-        .map(crate::assessment::read)
-        .transpose()?;
+    let assessed = match assessment.as_deref() {
+        Some(path) => Some(crate::assessment::read(path)?),
+        None => assessed,
+    };
     let requested_contributors = if snapshot_first {
         contributor_declaration(ctx, contributors, solo)?
     } else {
@@ -1419,6 +1446,19 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
     let events = store.load_events(&change_id)?;
     let mut st = store.project_state(&events, &store.rewrites()?)?;
     crate::replica::localize_change(&store.repository_id, &events, &mut st);
+    let admitted = match receipt {
+        None => None,
+        Some(guard) => match guard.admit(&store, &events, &st)? {
+            super::receipt::Admission::Published(event_id) => {
+                println!("event: {event_id} (already recorded from this item)");
+                return Ok(Recorded {
+                    event_id,
+                    existing: true,
+                });
+            }
+            super::receipt::Admission::Fresh(admitted) => Some(admitted),
+        },
+    };
     if snapshot_patchset.is_none()
         && patchset.is_none()
         && st
@@ -1481,7 +1521,11 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
             .iter()
             .find(|candidate| candidate.id == patchset_id)
             .and_then(|reviewed| super::audit::range_implementers(ctx, reviewed));
-        super::audit::bind_assessment(ctx, assessed, implementers.as_deref())
+        super::audit::bind_assessment_to(
+            super::receipt::binding_model(ctx, receipt.is_some()).as_deref(),
+            assessed,
+            implementers.as_deref(),
+        )
     });
     let unbound = assessment.as_ref().and_then(|assessed| {
         assessed
@@ -1510,8 +1554,11 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
         provisional: provisional.clone(),
         route_version,
         assessment,
-        dispositions: Vec::new(),
-        receipt: None,
+        dispositions: admitted
+            .as_ref()
+            .map(|admitted| admitted.dispositions.clone())
+            .unwrap_or_default(),
+        receipt: admitted.map(|admitted| admitted.reference),
     };
     ensure_append_allowed(&st, &payload)?;
     let mut ev = ctx.event(&store, &change_id, payload)?;
@@ -1556,7 +1603,10 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
         let implementers = st.authoring_model_values(patchset, production);
         ctx.warn_model_not_independent(&implementers, verdict);
     }
-    Ok(())
+    Ok(Recorded {
+        event_id: ev.event_id.clone(),
+        existing: false,
+    })
 }
 
 /// Say so when the approval just recorded cannot gate.

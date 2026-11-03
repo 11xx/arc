@@ -43,6 +43,8 @@ paths = [
   "src/inbox.rs",
   "src/commands/review.rs",
   "src/commands/audit.rs",
+  # Records receipt items as verdicts and audits on a reviewer's behalf.
+  "src/commands/receipt.rs",
   "src/commands/external.rs",
   # `squash` moves a change's branch to a new commit and records the patchset.
   "src/commands/squash.rs",

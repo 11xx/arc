@@ -5329,6 +5329,21 @@ pub enum DischargeBar {
 }
 
 impl DischargeBar {
+    /// The bar's stable name.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NoReviewAuthority => "no-review-authority",
+            Self::BeforeDeclaration => "before-declaration",
+            Self::CommentOnly => "comment-only",
+            Self::AssessedIneligible(_) => "assessed-ineligible",
+            Self::NoEligibleAssessment => "no-eligible-assessment",
+            Self::AuthorAssumed => "author-assumed",
+            Self::Authored(_) => "authored",
+            Self::FindingsRead(_) => "findings-read",
+            Self::NoAuthorshipRecord => "no-authorship-record",
+        }
+    }
+
     /// Why the read does not discharge, phrased to follow "this read".
     pub fn reason(&self) -> String {
         match self {
