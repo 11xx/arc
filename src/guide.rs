@@ -1996,10 +1996,11 @@ CHECKPOINTS (a revision handed over for testing)
   A series that pauses so somebody can test an integrated build records a
   checkpoint at the revision handed over (`HEAD` unless `--rev` names one).
   It holds the revision, its tree and branch, every open change with its
-  patchset and head, and every live, unconsumed journal todo of the
-  project. Names are unique in a repository. `--tag` also writes the
-  annotated tag `checkpoint/<name>` with `git tag -a`, signed as Git's
-  configuration signs tags; an existing tag refuses with nothing recorded.
+  patchset and head, every live, unconsumed journal todo of the project,
+  and the name of every todo filed by then, open or consumed. Names are
+  unique in a repository. `--tag` also writes the annotated tag
+  `checkpoint/<name>` with `git tag -a`, signed as Git's configuration
+  signs tags; an existing tag refuses with nothing recorded.
   When the event append fails, the tag is deleted again only if the event
   is known absent; an event published but not confirmed durable, or one
   whose publication cannot be told, keeps its tag and the error says which.
@@ -2015,9 +2016,10 @@ CHECKPOINTS (a revision handed over for testing)
   unknown with its reason, never as not reached: a missing checkpoint
   revision leaves landed since unknown, and a missing integrated commit
   lists its change as landing unknown. Each todo open at it is consumed
-  since, with outcome and time, or still open. Filed since lists todos
-  filed after the checkpoint; they are not part of it. A
-  finding about a change landed since is fixed since, one matching a todo
+  since, with outcome and time, or still open. Filed since lists the todos
+  the checkpoint did not record as filed; they are not part of it. A
+  checkpoint recorded without that list compares filing times instead and
+  marks the answer approximate. A finding about a change landed since is fixed since, one matching a todo
   is already filed, and the rest are new. `arc journal checkpoint` is a
   different record: progress on a claimed journal artifact.
 

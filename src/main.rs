@@ -4865,8 +4865,9 @@ enum PassCmd {
 #[derive(Subcommand)]
 enum CheckpointCmd {
     /// Record a checkpoint: the revision and tree, the branch when there is
-    /// one, every open change with its current patchset and head, and every
-    /// live, unconsumed journal todo of this project.
+    /// one, every open change with its current patchset and head, every
+    /// live, unconsumed journal todo of this project, and the name of every
+    /// todo the journal has filed, open or consumed.
     ///
     /// Names are unique in this repository; a second record under a name
     /// refuses and names the first. The event grants and requires no
@@ -4902,8 +4903,10 @@ enum CheckpointCmd {
     /// revision leaves landed since unknown, and a missing integrated
     /// commit lists its change as landing unknown. Todos open at the
     /// checkpoint: consumed since (outcome and time), or still open. Filed
-    /// since: todos filed after the checkpoint, which are not part of it.
-    /// `--json` emits `arc-checkpoint/1`. Records no events.
+    /// since: todos the checkpoint did not record as filed, which are not
+    /// part of it. A checkpoint recorded without that list compares filing
+    /// times instead, marked approximate (`filed_since_exact: false`), and
+    /// can count a todo filed in its own second. `--json` emits `arc-checkpoint/1`. Records no events.
     Show {
         /// Checkpoint name
         name: String,

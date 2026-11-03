@@ -316,3 +316,49 @@ fn a_missing_checkpoint_revision_reports_the_gap_instead_of_landed_since() {
     assert!(text.contains("landed since: unknown"), "{text}");
     assert!(text.contains("inside the checkpoint unknown"), "{text}");
 }
+
+/// Claim: a todo filed and consumed before the checkpoint is not filed
+/// since, even when its journal events carry the checkpoint's own second.
+/// Rejects: classifying "filed since" by comparing journal and ledger
+/// clocks, which lists such a todo as filed after the checkpoint.
+#[test]
+fn a_todo_consumed_before_the_checkpoint_is_not_filed_since() {
+    let repo = Repo::new();
+    let (dir, done) = journal_artifact(&repo, "done-before", "todo", "# done-before\n");
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &done, "--outcome", "done"])
+        .assert()
+        .success();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["checkpoint", "record", "same-second"]),
+    );
+    let recorded_at = show(&repo, "same-second")["recorded_at"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let second = format!("{}Z", &recorded_at[..19]);
+    let log = dir.join("events.jsonl");
+    let rewritten: String = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let mut event: Value = serde_json::from_str(line).unwrap();
+            if event["file"] == done.as_str() {
+                event["ts"] = Value::String(second.clone());
+            }
+            format!("{event}\n")
+        })
+        .collect();
+    std::fs::write(&log, rewritten).unwrap();
+    let later = todo(&repo, "after-the-checkpoint");
+
+    let view = show(&repo, "same-second");
+    assert_eq!(
+        strings(&view["filed_since"], "file"),
+        [later.as_str()],
+        "{view}"
+    );
+    assert_eq!(view["filed_since_exact"], true, "{view}");
+    assert!(view["todos"].as_array().unwrap().is_empty(), "{view}");
+}

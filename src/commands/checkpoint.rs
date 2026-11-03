@@ -28,6 +28,7 @@ pub(crate) struct Recorded {
     pub(crate) tag: Option<String>,
     pub(crate) changes: Vec<CheckpointChange>,
     pub(crate) todos: Vec<CheckpointTodo>,
+    pub(crate) filed_todos: Option<BTreeSet<String>>,
     pub(crate) note: Option<String>,
 }
 
@@ -43,6 +44,7 @@ fn recorded(events: &[Event]) -> Vec<Recorded> {
                 tag,
                 changes,
                 todos,
+                filed_todos,
                 note,
             } => Some(Recorded {
                 event: event.clone(),
@@ -53,6 +55,9 @@ fn recorded(events: &[Event]) -> Vec<Recorded> {
                 tag: tag.clone(),
                 changes: changes.clone(),
                 todos: todos.clone(),
+                filed_todos: filed_todos
+                    .as_ref()
+                    .map(|files| files.iter().cloned().collect()),
                 note: note.clone(),
             }),
             _ => None,
@@ -157,7 +162,9 @@ pub fn record_checkpoint(
             head: patchset.map(|patchset| patchset.head.clone()),
         });
     }
-    let todos: Vec<CheckpointTodo> = journal::todo_records(cwd)?
+    let records = journal::todo_records(cwd)?;
+    let filed_todos: Vec<String> = records.iter().map(|todo| todo.file.clone()).collect();
+    let todos: Vec<CheckpointTodo> = records
         .into_iter()
         .filter(TodoRecord::is_open)
         .map(|todo| CheckpointTodo {
@@ -179,6 +186,7 @@ pub fn record_checkpoint(
             tag: tag_name.clone(),
             changes,
             todos,
+            filed_todos: Some(filed_todos),
             note: note.clone(),
         },
     )?;
@@ -360,6 +368,10 @@ struct ShowView {
     landed_unknown: Vec<LandingUnknownView>,
     todos: Vec<TodoView>,
     filed_since: Vec<TodoView>,
+    /// Whether `filed_since` is judged against the todos the checkpoint
+    /// recorded as filed. False on a checkpoint recorded without them, whose
+    /// `filed_since` compares filing times and is approximate.
+    filed_since_exact: bool,
 }
 
 fn todo_view(file: &str, recorded: Option<&CheckpointTodo>, now: Option<&TodoRecord>) -> TodoView {
@@ -527,18 +539,9 @@ fn show_view(ctx: &Ctx, store: &Store, checkpoint: Recorded) -> Result<ShowView>
         .iter()
         .map(|todo| todo_view(&todo.file, Some(todo), records.get(&todo.file)))
         .collect();
-    let part_of: BTreeSet<&str> = checkpoint
-        .todos
-        .iter()
-        .map(|todo| todo.file.as_str())
-        .collect();
-    // Journal times are whole seconds; a todo filed in the checkpoint's own
-    // second and absent from it was filed after it.
-    let since = checkpoint.event.created_at.trunc_subsecs(0);
     let filed_since = records
         .values()
-        .filter(|record| !part_of.contains(record.file.as_str()))
-        .filter(|record| record.created_at.is_some_and(|created| created >= since))
+        .filter(|record| filed_after(&checkpoint, record))
         .map(|record| todo_view(&record.file, None, Some(record)))
         .collect();
 
@@ -560,7 +563,21 @@ fn show_view(ctx: &Ctx, store: &Store, checkpoint: Recorded) -> Result<ShowView>
         landed_unknown,
         todos,
         filed_since,
+        filed_since_exact: checkpoint.filed_todos.is_some(),
     })
+}
+
+/// Whether a todo was filed after the checkpoint. A checkpoint that recorded
+/// the todos filed by then answers exactly; an older one compares the
+/// todo's filing time, in whole seconds, with its own, which can count a
+/// todo filed in the checkpoint's second as filed after it.
+fn filed_after(checkpoint: &Recorded, record: &TodoRecord) -> bool {
+    if let Some(filed) = &checkpoint.filed_todos {
+        return !filed.contains(&record.file);
+    }
+    let since = checkpoint.event.created_at.trunc_subsecs(0);
+    !checkpoint.todos.iter().any(|todo| todo.file == record.file)
+        && record.created_at.is_some_and(|created| created >= since)
 }
 
 pub fn show_checkpoint(ctx: &Ctx, name: String, json: bool) -> Result<()> {
@@ -654,7 +671,11 @@ pub fn show_checkpoint(ctx: &Ctx, name: String, json: bool) -> Result<()> {
     }
     println!("todos open at the checkpoint:");
     render_todos(&view.todos);
-    println!("filed since (not part of the checkpoint):");
+    if view.filed_since_exact {
+        println!("filed since (not part of the checkpoint):");
+    } else {
+        println!("filed since (not part of the checkpoint; approximate, by filing time):");
+    }
     render_todos(&view.filed_since);
     Ok(())
 }
@@ -872,5 +893,47 @@ mod tests {
             format!("{error:#}").contains("nothing was recorded"),
             "{error:#}"
         );
+    }
+
+    /// Claim: a checkpoint that recorded the todos filed by then counts as
+    /// filed since exactly the todos it did not record, whatever their
+    /// filing times; one recorded without them judges by filing time, so a
+    /// todo filed an hour before it is not filed since. Rejects: an older
+    /// checkpoint read as if it had recorded no todo filed, which lists
+    /// every todo the journal ever held as filed since.
+    #[test]
+    fn filed_since_uses_the_recorded_boundary_and_else_filing_time() {
+        let event = draft("rc", "revision", "checkpoint/rc").into_event();
+        let at = event.created_at;
+        let record = |file: &str, created_at: DateTime<Utc>| TodoRecord {
+            file: file.into(),
+            title: None,
+            item_key: None,
+            created_at: Some(created_at),
+            hot: true,
+            consumed: None,
+        };
+        let earlier = record("earlier", at - chrono::Duration::hours(1));
+        let same_second = record("same-second", at.trunc_subsecs(0));
+        let later = record("later", at + chrono::Duration::hours(1));
+        let mut checkpoint = Recorded {
+            event,
+            name: "rc".into(),
+            revision: "revision".into(),
+            tree: "tree".into(),
+            branch: None,
+            tag: None,
+            changes: Vec::new(),
+            todos: Vec::new(),
+            filed_todos: Some(["earlier", "same-second"].map(String::from).into()),
+            note: None,
+        };
+        assert!(!filed_after(&checkpoint, &earlier));
+        assert!(!filed_after(&checkpoint, &same_second));
+        assert!(filed_after(&checkpoint, &later));
+
+        checkpoint.filed_todos = None;
+        assert!(!filed_after(&checkpoint, &earlier));
+        assert!(filed_after(&checkpoint, &later));
     }
 }

@@ -2100,6 +2100,12 @@ pub enum Payload {
         tag: Option<String>,
         changes: Vec<CheckpointChange>,
         todos: Vec<CheckpointTodo>,
+        /// Every todo the journal had filed when the checkpoint was
+        /// recorded, open or consumed, live or archived, by file name: the
+        /// boundary "filed since" is judged against. Absent on checkpoints
+        /// recorded before arc kept it, which judge by filing time.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filed_todos: Option<Vec<String>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
     },
