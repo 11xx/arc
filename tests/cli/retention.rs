@@ -202,11 +202,15 @@ fn a_rolled_back_rewrite_leaves_no_retention_ref() {
     let release = repo.home.join("release-rewrite");
     let out = thread::scope(|scope| {
         let blocker = scope.spawn(|| {
+            // Git's files backend commits a ref transaction one file at a
+            // time, so the branch can be seen moved before the retention ref
+            // it carries. The rewrite pauses only once the whole transaction
+            // is in; wait for both refs rather than the first.
             let deadline = Instant::now() + Duration::from_secs(30);
-            while repo.head(&worktree) == old {
+            while repo.head(&worktree) == old || retained(&repo).is_empty() {
                 assert!(
                     Instant::now() < deadline,
-                    "the rewrite never moved its refs"
+                    "the rewrite never moved its refs together with the retention ref"
                 );
                 thread::sleep(Duration::from_millis(10));
             }
