@@ -62,11 +62,16 @@ class SelectionClaims(unittest.TestCase):
             selection.select(paths), ("modules", ["diff", "stats"], True)
         )
 
-    def test_guide_source_selects_the_modules_that_read_it(self):
-        self.assertEqual(
-            selection.select(["src/guide.rs"]),
-            ("modules", ["guide_topics", "schemas"], True),
+    def test_guide_source_selects_every_module_that_reads_guide_text(self):
+        readers = sorted(
+            path.stem
+            for path in Path("tests/cli").glob("*.rs")
+            if path.stem not in ("main", "common")
+            and re.search(r'instruction_topics|"guide"', path.read_text())
         )
+        mode, modules, units = selection.select(["src/guide.rs"])
+        self.assertEqual((mode, units), ("modules", True))
+        self.assertEqual(sorted(set(readers) - set(modules)), [])
 
     def test_deleted_or_unregistered_modules_require_the_full_suite(self):
         with patch.object(selection.Path, "is_file", return_value=False):

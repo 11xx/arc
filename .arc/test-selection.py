@@ -16,8 +16,18 @@ import tomllib
 
 TARGET = "refs/heads/master"
 FULL = ("full", [], False)
-# Sources whose tests live in modules not named after them.
-SOURCE_MODULES = {"src/guide.rs": ("guide_topics", "schemas")}
+# Sources whose tests live in modules not named after them, found by what a
+# module's text reads: guide text is pinned by every module that reads
+# `arc guide` or the map.
+SOURCE_READERS = {"src/guide.rs": r'instruction_topics|"guide"'}
+
+
+def readers(pattern):
+    return {
+        path.stem
+        for path in Path("tests/cli").glob("*.rs")
+        if path.stem not in ("main", "common") and re.search(pattern, path.read_text())
+    }
 
 
 def git(*args):
@@ -65,8 +75,14 @@ def select(paths):
     for path in paths:
         if path.endswith(".md"):
             continue
-        if path in SOURCE_MODULES:
-            selected.update(SOURCE_MODULES[path])
+        if path in SOURCE_READERS:
+            try:
+                found = readers(SOURCE_READERS[path])
+            except (OSError, UnicodeError):
+                return FULL
+            if not found:
+                return FULL
+            selected.update(found)
             units = True
             continue
         name = Path(path).stem
