@@ -803,6 +803,7 @@ fn verify_args() -> VerifyArgs {
         brief_version: None,
         probe_phase: None,
         attest: false,
+        after_integration: false,
         result: None,
         tested_revision: None,
         execution_host: None,

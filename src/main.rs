@@ -1913,7 +1913,8 @@ enum Cmd {
     ///
     /// Gate evidence only counts at the change's own head, so the command runs in the
     /// change's recorded worktree whichever checkout it was typed in; `--attest` records
-    /// evidence arc did not run. Acceptance executes local head gates even when imported
+    /// evidence arc did not run, and `--after-integration` keeps an integrated change's
+    /// later check as a receipt that is never gate evidence. Acceptance executes local head gates even when imported
     /// evidence passed, and selects probes from the delivered patchset's bound brief.
     /// Baselines run in scratch checkouts. Declared timeouts also bound output-pipe cleanup
     /// after the shell exits. Arc kills the process group and does not wait for escaped
@@ -1987,6 +1988,20 @@ enum Cmd {
         /// (e.g. a sandboxed executor or another host ran the gate)
         #[arg(long)]
         attest: bool,
+        /// Record the attestation as a check observed after the change
+        /// integrated, retained beside its gate evidence and never among it.
+        ///
+        /// Requires --attest and an integrated change, and names one --gate or
+        /// --command. The tested revision's tree must equal the integrated
+        /// commit's tree; a receipt for other content is refused, so it never
+        /// reads as verification of what shipped. The receipt records the
+        /// producer, the execution host and runner, the command, the gate's
+        /// declared timeout, the result, the tested revision and tree, and
+        /// when it was recorded. It changes no authorization basis, discharges
+        /// no review debt, and satisfies no gate. An open change takes the
+        /// ordinary attestation instead
+        #[arg(long = "after-integration", requires = "attest")]
+        after_integration: bool,
         /// The attested result; required with --attest, rejected without it
         #[arg(long, value_enum)]
         result: Option<VerifyResult>,
@@ -6582,6 +6597,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             brief_version,
             probe_phase,
             attest,
+            after_integration,
             result,
             tested_revision,
             execution_host,
@@ -6608,6 +6624,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     brief_version,
                     probe_phase,
                     attest,
+                    after_integration,
                     result,
                     tested_revision,
                     execution_host,

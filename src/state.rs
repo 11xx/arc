@@ -880,6 +880,51 @@ impl AuditVerdictEntry {
     }
 }
 
+/// A check run against the integrated tree after the change integrated.
+///
+/// Kept apart from `verifications`, which hold the gate evidence a decision
+/// can count, so a receipt never reads as evidence the integration had.
+#[derive(Debug, Clone, Serialize)]
+pub struct PostIntegrationVerificationEntry {
+    pub event_id: String,
+    /// Always true: every reader that labels evidence by when it was observed
+    /// finds it here without knowing which list it came from.
+    pub after_integration: bool,
+    pub gate: Option<String>,
+    pub command: String,
+    /// The revision the producer tested.
+    pub revision: String,
+    /// That revision's tree, which equalled the integrated commit's tree.
+    pub tree: String,
+    pub integrated_commit: String,
+    pub result: VerifyResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
+    pub hostname: String,
+    pub runner: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<crate::model::EnvironmentEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub actor: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_behalf_of: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    /// When the receipt was recorded, which is when arc observed it.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl PostIntegrationVerificationEntry {
+    pub fn effective_producer(&self) -> &str {
+        self.on_behalf_of.as_deref().unwrap_or(&self.actor)
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct VerificationEntry {
     pub event_id: String,
@@ -1441,6 +1486,9 @@ pub struct ChangeState {
     /// block that caused it without rescanning the event log.
     pub blocked_on_stages: Vec<String>,
     pub verifications: Vec<VerificationEntry>,
+    /// Checks observed after integration, never counted as gate evidence.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub post_integration_verifications: Vec<PostIntegrationVerificationEntry>,
     pub verification_runs: Vec<VerificationRunEntry>,
     pub claim: Option<ClaimState>,
     #[serde(skip)]
@@ -1503,6 +1551,12 @@ impl ChangeState {
         }
         for run in &self.verification_runs {
             note(&run.revision, "verification run".to_string());
+        }
+        for receipt in &self.post_integration_verifications {
+            note(
+                &receipt.revision,
+                "verification after integration".to_string(),
+            );
         }
         for audit in &self.audit_verdicts {
             note(&audit.revision, "audit".to_string());
@@ -1635,6 +1689,10 @@ impl ChangeState {
         }
         for run in &mut self.verification_runs {
             rewrites.advance(&mut run.revision)?;
+        }
+        for receipt in &mut self.post_integration_verifications {
+            rewrites.advance(&mut receipt.revision)?;
+            rewrites.advance(&mut receipt.integrated_commit)?;
         }
         if let Some(closure) = &mut self.closure {
             rewrites.advance_opt(&mut closure.integrated_commit)?;
@@ -2061,6 +2119,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     debt: None,
                     blocked_on_stages: Vec::new(),
                     verifications: Vec::new(),
+                    post_integration_verifications: Vec::new(),
                     verification_runs: Vec::new(),
                     claim: None,
                     retired_claim_ids: BTreeSet::new(),
@@ -2987,6 +3046,69 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     actor: ev.actor.clone(),
                     supersedes: supersedes.clone(),
                 });
+            }
+            Payload::PostIntegrationVerificationRecorded {
+                gate,
+                command,
+                revision,
+                tree,
+                integrated_commit,
+                result,
+                timeout_seconds,
+                hostname,
+                runner,
+                environment,
+                note,
+            } => {
+                let shipped = state
+                    .closure
+                    .as_ref()
+                    .filter(|closure| closure.outcome == Closure::Integrated)
+                    .and_then(|closure| closure.integrated_commit.as_deref());
+                match shipped {
+                    None => bail!(
+                        "post-integration verification {} comes before change {} integrated",
+                        ev.event_id,
+                        state.change_id
+                    ),
+                    // Recorded after a rewrite, the receipt names the
+                    // integrated commit's successor.
+                    Some(shipped)
+                        if shipped != integrated_commit
+                            && !rewrites.rewrites_to(shipped, integrated_commit)? =>
+                    {
+                        bail!(
+                        "post-integration verification {} names {integrated_commit}, but change \
+                         {} integrated {shipped}",
+                        ev.event_id,
+                        state.change_id
+                    )
+                    }
+                    Some(_) => {}
+                }
+                state
+                    .post_integration_verifications
+                    .push(PostIntegrationVerificationEntry {
+                        event_id: ev.event_id.clone(),
+                        after_integration: true,
+                        gate: gate.clone(),
+                        command: command.clone(),
+                        revision: revision.clone(),
+                        tree: tree.clone(),
+                        integrated_commit: integrated_commit.clone(),
+                        result: *result,
+                        timeout_seconds: *timeout_seconds,
+                        hostname: hostname.clone(),
+                        runner: runner.clone(),
+                        environment: environment.clone(),
+                        note: note.clone(),
+                        actor: ev.actor.clone(),
+                        on_behalf_of: ev.on_behalf_of.clone(),
+                        harness: ev.harness.clone(),
+                        model: ev.model.clone(),
+                        session: ev.session.clone(),
+                        created_at: ev.created_at,
+                    });
             }
             Payload::VerificationRunStarted {
                 event,
@@ -4996,6 +5118,76 @@ mod tests {
             assert_eq!(closure.integration, Some(IntegrationKind::Guarded));
             assert_eq!(closure.integrated_commit, closure.source_head);
         }
+    }
+
+    fn post_integration_receipt(integrated_commit: &str) -> Event {
+        ev(
+            "fix",
+            Payload::PostIntegrationVerificationRecorded {
+                gate: Some("unit".into()),
+                command: "true".into(),
+                revision: integrated_commit.into(),
+                tree: "t1".into(),
+                integrated_commit: integrated_commit.into(),
+                result: VerifyResult::Pass,
+                timeout_seconds: None,
+                hostname: "ci".into(),
+                runner: "job".into(),
+                environment: None,
+                note: None,
+            },
+        )
+    }
+
+    fn integrated_at(commit: &str) -> Event {
+        ev(
+            "fix",
+            Payload::ChangeIntegrated {
+                authority_grant_event_id: None,
+                provisional_resolutions: Vec::new(),
+                integrated_commit: commit.into(),
+                source_patchset_id: "ps-01".into(),
+                source_head: commit.into(),
+                target_branch: "master".into(),
+                target_before: "base".into(),
+                authorization: None,
+                already_contained: false,
+                shape: None,
+            },
+        )
+    }
+
+    /// Claim: replay keeps a receipt to the integrated change it verifies.
+    /// Rejects: an imported receipt recorded before integration, or naming a
+    /// commit the change did not integrate, reading as verification of what
+    /// shipped. It is also never gate evidence.
+    #[test]
+    fn a_post_integration_receipt_replays_only_against_what_shipped() {
+        let state = reduce(&[
+            opened("fix"),
+            integrated_at("head"),
+            post_integration_receipt("head"),
+        ])
+        .unwrap();
+        assert_eq!(state.post_integration_verifications.len(), 1);
+        assert!(state.post_integration_verifications[0].after_integration);
+        assert!(state.verifications.is_empty());
+
+        let early = reduce(&[opened("fix"), post_integration_receipt("head")]).unwrap_err();
+        assert!(
+            format!("{early:#}").contains("comes before change fix integrated"),
+            "{early:#}"
+        );
+        let elsewhere = reduce(&[
+            opened("fix"),
+            integrated_at("head"),
+            post_integration_receipt("other"),
+        ])
+        .unwrap_err();
+        assert!(
+            format!("{elsewhere:#}").contains("names other, but change fix integrated head"),
+            "{elsewhere:#}"
+        );
     }
 
     fn verdict(change: &str, patchset: &str, relation: Option<VerdictRelation>) -> Event {

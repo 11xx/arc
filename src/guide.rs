@@ -825,6 +825,9 @@ RUN A CHANGE
                                      matching revisions.
     --attest --environment <id>      Record a run arc did not perform, naming
                                      the environment it applies to.
+    --attest --after-integration     Retain a check run on an integrated
+                                     change's shipped tree as a receipt,
+                                     never gate evidence.
     --falsified-by <id> --predicted <why>
                                      Name the failure this pass answers,
                                      storing its original event revision.
@@ -1253,6 +1256,20 @@ RUN A CHANGE
   fast-forward given no `--target-before`) reads the target's current
   declarations instead. The operator's own gate and policy files are read as
   they stand now.
+
+  Gate evidence is open-only, so a check that finishes after its change
+  integrated is no gate evidence. `verify <c> --attest --after-integration`
+  with `--gate` or `--command`, `--result`, `--tested-revision`,
+  `--execution-host`, and `--runner` retains it as a receipt instead. The
+  tested revision's tree must equal the integrated commit's; a receipt for
+  other content is refused, so none reads as verification of what shipped.
+  It records the tested revision and tree, the integrated commit, the command
+  and the gate's declared timeout, the result, host, runner, producer, and
+  when it was recorded. `show` lists it under `Verification after
+  integration`; `show --json` and `status --json` carry it in
+  `post_integration_verifications` with `after_integration: true`. It
+  changes no authorization basis, discharges no debt, and satisfies no gate.
+  On an open change the form is refused, naming the ordinary attestation.
 
   The decision is one function of facts observed under the target and change
   locks: a plan naming the target revision, the approved head, the tree the

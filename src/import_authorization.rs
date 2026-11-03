@@ -182,6 +182,7 @@ pub fn required_roles(payload: &Payload) -> Option<Vec<Vec<Role>>> {
         | PublicationVerified { .. }
         | VerificationRunStarted { .. }
         | VerificationRecorded { .. }
+        | PostIntegrationVerificationRecorded { .. }
         | VerificationReused { .. }
         | HoldSet { .. }
         | IterationScopeSet { .. }

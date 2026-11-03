@@ -789,6 +789,10 @@ pub struct StatusReport {
     /// Reviews recorded after integration, never mixed into `verdict`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub audit_verdicts: Vec<crate::state::AuditVerdictEntry>,
+    /// Checks observed after integration, never mixed into `gates`.
+    /// Additive in `arc-status/27`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub post_integration_verifications: Vec<crate::state::PostIntegrationVerificationEntry>,
     /// Observed forge (hosted-PR) facts. Absent for changes with no forge
     /// events that are not on the `forge` profile. Additive in arc-status/5.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2111,6 +2115,7 @@ fn build_report(
         debt: state.debt.clone(),
         dirty_tree_waiver: dirty_tree_waiver_in_force,
         audit_verdicts: state.audit_verdicts.clone(),
+        post_integration_verifications: state.post_integration_verifications.clone(),
         forge,
         forge_view: None,
         provenance_check_enabled,

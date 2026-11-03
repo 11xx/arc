@@ -1510,6 +1510,39 @@ pub enum Payload {
         #[serde(default)]
         supersedes: Vec<String>,
     },
+    /// A check somebody ran against the integrated tree after the change
+    /// integrated, as its producer reports it; arc ran nothing.
+    ///
+    /// Deliberately not a late `VerificationRecorded`. Gate evidence,
+    /// readiness, reuse and the authorization basis read only that event, so
+    /// a receipt kept apart from it cannot be counted toward a decision
+    /// already made, discharge review debt, or satisfy a gate after the fact.
+    PostIntegrationVerificationRecorded {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gate: Option<String>,
+        command: String,
+        /// The revision the producer tested.
+        revision: String,
+        /// The tree of `revision`, equal to the integrated commit's tree when
+        /// the receipt was recorded.
+        tree: String,
+        /// The integrated commit whose content this receipt verifies.
+        integrated_commit: String,
+        result: VerifyResult,
+        /// The timeout the gate declared when the receipt was recorded.
+        /// Absent for an ad hoc command or a gate declaring none: unknown, not
+        /// unlimited.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_seconds: Option<u64>,
+        /// The host or environment that executed the command.
+        hostname: String,
+        /// Stable identity of the runner or job that executed it.
+        runner: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        environment: Option<EnvironmentEvidence>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
     PublicationVerified {
         retention_ref: String,
         target: String,
@@ -2569,7 +2602,8 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         Payload::AuditVerdictRecorded { .. }
         | Payload::AuditFindingAdded { .. }
         | Payload::AuditDispositionRecorded { .. }
-        | Payload::PostIntegrationDispositionRecorded { .. } => {
+        | Payload::PostIntegrationDispositionRecorded { .. }
+        | Payload::PostIntegrationVerificationRecorded { .. } => {
             AppendPermission::IntegratedOnlyFact
         }
         Payload::ChangeOpened { .. }

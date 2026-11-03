@@ -801,7 +801,10 @@ fn collect_payload_objects(
                     "tree" | "tested_tree"
                         if matches!(
                             event_type,
-                            "verification-recorded" | "verification-reused" | "candidate-verified"
+                            "verification-recorded"
+                                | "verification-reused"
+                                | "candidate-verified"
+                                | "post-integration-verification-recorded"
                         ) =>
                     {
                         Some("evaluated-tree")

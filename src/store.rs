@@ -1740,6 +1740,9 @@ impl Store {
             // An older reader skips a post-integration disposition and reports
             // the finding with no disposition after it shipped.
             Payload::PostIntegrationDispositionRecorded { .. } => Some(7),
+            // An older reader skips a post-integration verification and reports
+            // the integrated change with nothing observed after it shipped.
+            Payload::PostIntegrationVerificationRecorded { .. } => Some(7),
             // An older reader lists a journal-subject dispatch as unattributed
             // and skips a binding, reporting a bound run as unbound.
             Payload::RunDispatched {
@@ -1790,7 +1793,8 @@ impl Store {
             Some("history-rewrite-withdrawn")
             | Some("change-roles-asserted")
             | Some("change-checkout-bound") => Some(7),
-            Some("post-integration-disposition-recorded") => Some(7),
+            Some("post-integration-disposition-recorded")
+            | Some("post-integration-verification-recorded") => Some(7),
             Some("run-bound") | Some("cost-facts-retained") => Some(7),
             Some("run-dispatched")
                 if value
@@ -3162,6 +3166,42 @@ mod tests {
         assert!(store.append_raw_repository_event(event_id, bytes).is_err());
         assert!(!dir.path().join("changes").exists());
         assert!(!dir.path().join("repository").exists());
+    }
+
+    /// Claim: an older reader cannot open a ledger holding a receipt, since it
+    /// would report the integrated change with nothing observed after it.
+    #[test]
+    fn a_post_integration_receipt_stamps_seven_through_typed_and_both_raw_paths() {
+        let value = serde_json::json!({"event_type": "post-integration-verification-recorded", "command": "true", "revision": "head", "tree": "tree", "integrated_commit": "head", "result": "pass", "hostname": "host", "runner": "job"});
+        let payload: Payload = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&payload).unwrap(), value);
+        for path in ["typed", "raw-change", "raw-repository"] {
+            let dir = tempfile::tempdir().unwrap();
+            let config = StoreConfig {
+                schema_version: 1,
+                repository_id: "repo".into(),
+                created_at: chrono::Utc::now(),
+            };
+            fs::write(
+                dir.path().join("config.json"),
+                serde_json::to_vec(&config).unwrap(),
+            )
+            .unwrap();
+            let store = test_store(dir.path());
+            let bytes = serde_json::to_vec(&value).unwrap();
+            match path {
+                "typed" => store.stamp_format_for(&payload).unwrap(),
+                "raw-change" => {
+                    store.append_raw_event("change", "event", &bytes).unwrap();
+                }
+                _ => {
+                    store.append_raw_repository_event("event", &bytes).unwrap();
+                }
+            }
+            let stored: StoreConfig =
+                serde_json::from_slice(&fs::read(dir.path().join("config.json")).unwrap()).unwrap();
+            assert_eq!(stored.schema_version, 7, "{path}");
+        }
     }
 
     #[test]

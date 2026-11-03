@@ -925,6 +925,8 @@ pub fn markdown(
         }
     }
 
+    post_integration_verifications(w, &state.post_integration_verifications);
+
     if !state.messages.is_empty() {
         let _ = writeln!(w, "\n## Messages\n");
         for m in &state.messages {
@@ -2478,6 +2480,21 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
                 format!("{result:?}").to_lowercase()
             ),
         ),
+        Payload::PostIntegrationVerificationRecorded {
+            gate,
+            command,
+            revision,
+            result,
+            ..
+        } => (
+            "post-integration-verification-recorded",
+            format!(
+                "{} {} at {} (after integration)",
+                gate.as_deref().unwrap_or(command),
+                format!("{result:?}").to_lowercase(),
+                short_sha(revision)
+            ),
+        ),
         Payload::VerificationReused {
             gate,
             evidence_event_id,
@@ -3033,6 +3050,49 @@ pub fn verdict_assessments(assessments: &[crate::status::VerdictAssessment]) {
             verdict.event_id, verdict.origin_replica_id, verdict.origin_name.as_deref().unwrap_or("unnamed"), verdict.actor,
             verdict.on_behalf_of, verdict.admission_provenance, verdict.covers_current_head, verdict.gating_eligible,
             verdict.rejection_reason.as_ref().map(|reason| format!(", {reason}")).unwrap_or_default());
+    }
+}
+
+/// Checks observed after integration, under their own heading so none reads
+/// as evidence the integration had.
+fn post_integration_verifications(
+    w: &mut String,
+    receipts: &[crate::state::PostIntegrationVerificationEntry],
+) {
+    if receipts.is_empty() {
+        return;
+    }
+    let _ = writeln!(w, "\n## Verification after integration\n");
+    for receipt in receipts {
+        let label = receipt.gate.as_deref().unwrap_or("(ad hoc)");
+        let _ = writeln!(
+            w,
+            "- {label} `{}` at `{}` (tree `{}`) → {:?} (attested, observed after integration)",
+            receipt.command, receipt.revision, receipt.tree, receipt.result
+        );
+        let _ = writeln!(
+            w,
+            "  - integrated commit `{}`; ran on {} by {}{}",
+            receipt.integrated_commit,
+            receipt.hostname,
+            receipt.runner,
+            receipt
+                .timeout_seconds
+                .map(|seconds| format!(" under a {seconds}s timeout"))
+                .unwrap_or_default()
+        );
+        let _ = writeln!(
+            w,
+            "  - recorded {} by {} (`{}`)",
+            receipt
+                .created_at
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            receipt.effective_producer(),
+            receipt.event_id
+        );
+        if let Some(note) = &receipt.note {
+            let _ = writeln!(w, "  - note: {note}");
+        }
     }
 }
 

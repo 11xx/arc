@@ -67,6 +67,9 @@ pub struct VerifyArgs {
     pub brief_version: Option<usize>,
     pub probe_phase: Option<ProbePhase>,
     pub attest: bool,
+    /// Record the attestation as a receipt for an integrated change's
+    /// shipped tree rather than as gate evidence.
+    pub after_integration: bool,
     pub result: Option<VerifyResult>,
     pub tested_revision: Option<String>,
     pub execution_host: Option<String>,
@@ -140,6 +143,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         brief_version,
         probe_phase,
         attest,
+        after_integration,
         result,
         tested_revision,
         execution_host,
@@ -151,6 +155,23 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         predicted,
         against,
     } = args;
+    // A receipt is a check somebody else ran against what shipped. Arc has
+    // nothing left to run it in, and the flags that select gate sets, excuse
+    // dirt, or answer a failure all describe evidence a decision can count.
+    if after_integration {
+        if !attest {
+            bail!(
+                "--after-integration records a check arc did not run, so it requires --attest \
+                 with --result, --tested-revision, --execution-host, and --runner"
+            );
+        }
+        if probe.is_some() || waive_dirty.is_some() || falsified_by.is_some() {
+            bail!(
+                "--after-integration records one gate or command, so it cannot be combined \
+                 with --probe, --waive-dirty, or --falsified-by"
+            );
+        }
+    }
     if event.is_some() && !all && against.is_none() {
         bail!("--event requires --all or --against");
     }
@@ -286,6 +307,26 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     // refusal, so the identity question is settled before anything executes.
     ctx.ensure_declared_actor(&store)?;
     let (change_id, st) = ctx.load_state(&store, reference)?;
+    if after_integration {
+        return verify_after_integration(
+            ctx,
+            &store,
+            &change_id,
+            &st,
+            Receipt {
+                gate,
+                command,
+                result: attested_result.context("--after-integration requires --result")?,
+                tested_revision: tested_revision
+                    .context("--after-integration requires --tested-revision")?,
+                execution_host: execution_host
+                    .context("--after-integration requires --execution-host")?,
+                runner: runner.context("--after-integration requires --runner")?,
+                environment,
+                note,
+            },
+        );
+    }
     // Gates and final probes run where the change lives. Baseline probes
     // choose between the invoking checkout and a scratch checkout at the base.
     // Attestation and merge evidence have no recorded worktree to choose.
@@ -1360,6 +1401,7 @@ fn verify_recorded(
                 brief_version: None,
                 probe_phase: None,
                 attest: false,
+                after_integration: false,
                 result: None,
                 tested_revision: None,
                 execution_host: None,
@@ -1454,6 +1496,7 @@ fn verify_recorded(
                 brief_version: None,
                 probe_phase: None,
                 attest: false,
+                after_integration: false,
                 result: None,
                 tested_revision: None,
                 execution_host: None,
@@ -1529,6 +1572,7 @@ pub fn done(
                 brief_version: None,
                 probe_phase: None,
                 attest: false,
+                after_integration: false,
                 result: None,
                 tested_revision: None,
                 execution_host: None,
@@ -5438,6 +5482,127 @@ fn attested_environment(
         bail!("--environment applies only to a gate whose declaration has an environment probe");
     }
     Ok(None)
+}
+
+/// What the caller reports about a check run against an integrated change.
+struct Receipt {
+    gate: Option<String>,
+    command: Option<String>,
+    result: VerifyResult,
+    tested_revision: String,
+    execution_host: String,
+    runner: String,
+    environment: Option<String>,
+    note: Option<String>,
+}
+
+/// Retain a check observed after integration as a receipt for the content
+/// that shipped.
+///
+/// A receipt is bound to the tested revision and its tree, and that tree must
+/// be the integrated commit's: a receipt for other content would sit on this
+/// change reading as verification of what it shipped. It is a separate event
+/// from gate evidence, so it changes no authorization basis, discharges no
+/// debt, and satisfies no gate.
+fn verify_after_integration(
+    ctx: &Ctx,
+    store: &Store,
+    change_id: &str,
+    st: &state::ChangeState,
+    receipt: Receipt,
+) -> Result<i32> {
+    let integrated_commit = shipped_commit(st)?;
+    let (command, timeout_seconds, declared_environment) =
+        declared_check(ctx, st, receipt.gate.as_deref(), receipt.command)?;
+    let environment = attested_environment(
+        receipt.gate.as_deref(),
+        declared_environment.is_some(),
+        receipt.environment,
+    )?;
+    let integrated_tree = gitio::commit_tree(&ctx.cwd, &integrated_commit).with_context(|| {
+        format!(
+            "integrated commit {integrated_commit} does not resolve in this repository, so the \
+             tested tree cannot be compared with what shipped"
+        )
+    })?;
+    let tree = gitio::commit_tree(&ctx.cwd, &receipt.tested_revision)?;
+    if tree != integrated_tree {
+        bail!(
+            "tested revision {} has tree {tree}, but integrated commit {integrated_commit} has \
+             tree {integrated_tree}; a receipt after integration verifies only the content that \
+             shipped, so test {integrated_commit} or a revision with its tree",
+            receipt.tested_revision
+        );
+    }
+    let _transition = store.lock_transition(change_id)?;
+    let st = store.state(change_id)?;
+    if shipped_commit(&st)? != integrated_commit {
+        bail!("change {change_id} changed while the receipt was prepared; run it again");
+    }
+    let payload = Payload::PostIntegrationVerificationRecorded {
+        gate: receipt.gate.clone(),
+        command,
+        revision: receipt.tested_revision.clone(),
+        tree,
+        integrated_commit: integrated_commit.clone(),
+        result: receipt.result,
+        timeout_seconds,
+        hostname: receipt.execution_host,
+        runner: receipt.runner,
+        environment: environment.map(|identity| EnvironmentEvidence {
+            identity,
+            producing_store: store.repository_id.clone(),
+        }),
+        note: receipt.note,
+    };
+    ensure_append_allowed(&st, &payload)?;
+    let mut event = ctx.event(store, change_id, payload)?;
+    store.append_local_event(&mut event)?;
+    if let Some(gate) = &receipt.gate {
+        println!("gate: {gate}");
+    }
+    println!(
+        "verification after integration: {:?} (attested) at {} for integrated commit {}",
+        receipt.result, receipt.tested_revision, integrated_commit
+    );
+    println!("event: {}", event.event_id);
+    Ok(if receipt.result == VerifyResult::Pass {
+        0
+    } else {
+        1
+    })
+}
+
+/// The commit an integrated change shipped, or why a receipt has nothing to
+/// bind to.
+fn shipped_commit(st: &state::ChangeState) -> Result<String> {
+    let Some(closure) = &st.closure else {
+        bail!(
+            "change {} is open; --after-integration records a check observed after the change \
+             integrated. Record evidence for an open change with the ordinary attestation: \
+             `arc verify {} --attest --result <pass|fail> --tested-revision <rev> \
+             --execution-host <host> --runner <runner> --gate <name>`",
+            st.change_id,
+            st.slug
+        );
+    };
+    if closure.outcome != Closure::Integrated {
+        let outcome = match closure.outcome {
+            Closure::Abandoned => "abandoned",
+            _ => "superseded",
+        };
+        bail!(
+            "change {} is {outcome}; only an integrated change shipped content a receipt can \
+             verify",
+            st.change_id
+        );
+    }
+    closure.integrated_commit.clone().with_context(|| {
+        format!(
+            "change {} recorded no integrated commit, so nothing binds a receipt to what shipped",
+            st.change_id
+        )
+    })
 }
 
 #[cfg(test)]

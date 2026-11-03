@@ -79,6 +79,7 @@ mod perf;
 mod placeholders;
 mod planners;
 mod policy;
+mod post_integration_verification;
 mod provenance;
 mod provisional;
 mod queue;
