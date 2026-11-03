@@ -359,7 +359,7 @@ fn plan_acceptance(
                 .find(|patchset| patchset.id == delivered.patchset_id)
                 .context("delivered patchset is unavailable")?;
             let delivered_head = delivered.head.clone();
-            let expected = rewrites.approved_successor(&delivered_head)?;
+            let expected = rewrites.signature_successor(&delivered_head)?;
             let head = match gitio::branch_head(&ctx.cwd, &args.branch) {
             Ok(head) => head,
             Err(_) => return refuse(6, format!("required branch {:?} is unavailable; fetch that branch and its Git objects before accepting", args.branch)),
@@ -1199,7 +1199,7 @@ fn execute_acceptance(
         if plan
             .store
             .rewrites()?
-            .approved_successor(&plan.delivered_head)?
+            .signature_successor(&plan.delivered_head)?
             != prepared
         {
             return refuse(

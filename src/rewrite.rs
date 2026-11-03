@@ -337,6 +337,17 @@ impl RewriteMap {
     /// the commit onto a different tree, message or author would carry it to
     /// content nobody approved.
     pub fn approved_successor(&self, revision: &str) -> Result<String> {
+        self.follow(revision, |key| self.signature_only.contains(key))
+    }
+
+    /// The revision `revision` is re-signed as: followed through every
+    /// recorded rewrite that changed its signature and nothing else. This is
+    /// what admits a signing, whatever else an approval follows.
+    pub fn signature_successor(&self, revision: &str) -> Result<String> {
+        self.follow(revision, |key| self.signature_only.contains(key))
+    }
+
+    fn follow(&self, revision: &str, carries: impl Fn(&str) -> bool) -> Result<String> {
         let mut visited: Vec<String> = Vec::new();
         let mut current = revision.to_string();
         loop {
@@ -344,7 +355,7 @@ impl RewriteMap {
                 Step::Mapped {
                     key,
                     fate: Some(next),
-                } if self.signature_only.contains(&key) => {
+                } if carries(&key) => {
                     if visited.contains(&key) {
                         anyhow::bail!(
                             "recorded rewrites lead {revision} back to {key}; the chain names no \

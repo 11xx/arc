@@ -1583,11 +1583,11 @@ impl ChangeState {
             {
                 self.provisional_signature_successors.insert(
                     source_head.clone(),
-                    rewrites.approved_successor(source_head)?,
+                    rewrites.signature_successor(source_head)?,
                 );
                 self.provisional_signature_successors.insert(
                     provisional_commit.clone(),
-                    rewrites.approved_successor(provisional_commit)?,
+                    rewrites.signature_successor(provisional_commit)?,
                 );
             }
         }
