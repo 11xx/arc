@@ -198,6 +198,10 @@ source_roots = ["src/"]
 # responsibility without being reclassified. That limit is real and is not
 # approximated with a different spelling of the same manual assertion.
 acknowledged_safe = [
+  # The opt-in ARC_TRACE record: counters and timers written to stderr at
+  # exit. It decides nothing, and a child it counts still runs as the caller
+  # built it.
+  "src/perf.rs",
   # Read-only projections and rendering. They report state; they never decide
   # it, and a defect shows up as a wrong screen rather than a wrong merge.
   "src/commands/diff.rs",
