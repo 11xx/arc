@@ -4,3 +4,4 @@
 size = 4
 identity = "rustc -vV && cargo -V"
 retain = ["target"]
+warm = "cargo build --all-targets"
