@@ -191,6 +191,9 @@ paths = [
   # Decides which role values a write records as `Planned-by` and
   # `Orchestrated-by` attribution in an append-only event.
   "src/commands/roles.rs",
+  # `checkpoint record` appends a repository event and writes, or on a failed
+  # append deletes, a `checkpoint/<name>` tag in the shared ref namespace.
+  "src/commands/checkpoint.rs",
 ]
 
 # Roots inside which classification is closed: every tracked file under one of
