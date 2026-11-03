@@ -406,3 +406,67 @@ fn integrate_reads_prerequisites_through_one_read() {
         );
     }
 }
+
+/// The repository events the ledger holds: a file each, and each one an
+/// import batch carries, counted once by ID.
+fn repository_events_held(repo: &Repo) -> u64 {
+    let ledger = repo.root.join(".git/arc");
+    let mut ids: std::collections::BTreeSet<String> =
+        fs::read_dir(ledger.join("repository/events"))
+            .into_iter()
+            .flatten()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter_map(|name| name.strip_suffix(".json").map(str::to_string))
+            .collect();
+    for entry in fs::read_dir(ledger.join("imports")).into_iter().flatten() {
+        let batch: Value =
+            serde_json::from_slice(&fs::read(entry.unwrap().path()).unwrap()).unwrap();
+        for event in batch["repository_events"].as_array().unwrap() {
+            ids.insert(event["event_id"].as_str().unwrap().to_string());
+        }
+    }
+    ids.len() as u64
+}
+
+/// Claim: a command that shares its reads types each repository event at
+/// most once, however many changes and repository events the ledger holds:
+/// every read of the ledger it opens, and every reader of the repository
+/// events beside them, takes the events typed once. Rejects each read, or a
+/// reader such as recent sessions, typing the repository events again.
+#[test]
+fn shared_reads_type_each_repository_event_once() {
+    let repo = ledger_with_import();
+    let (open, _, _) = change_with_patchset(&repo, "open");
+    land(&repo, "landed");
+    for (round, extra) in [(0, 0), (1, 3)] {
+        add_changes(&repo, round * 10, extra);
+        for index in 0..extra {
+            stdout(repo.arc(&repo.root).args([
+                "run",
+                "dispatch",
+                "--route",
+                "fixture-route",
+                "--worktree",
+                &format!("/work/run-{index}"),
+                "--change",
+                &open,
+            ]));
+        }
+        let held = repository_events_held(&repo);
+        for args in [
+            &["catchup"][..],
+            &["catchup", "--json"][..],
+            &["check", &open][..],
+            &["check", "landed", "--json"][..],
+            &["journal", "open"][..],
+        ] {
+            let (record, _, code) = traced(&repo, &repo.root, args);
+            assert_ne!(code, Some(1), "arc {args:?} failed: {record}");
+            let typed = record["ledger"]["repository"]["typed"].as_u64().unwrap();
+            assert!(
+                typed <= held,
+                "arc {args:?} typed {typed} repository events of {held}: {record}"
+            );
+        }
+    }
+}

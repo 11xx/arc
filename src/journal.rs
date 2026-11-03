@@ -6469,7 +6469,7 @@ pub(crate) fn recent_sessions_from(
         target.observe(row.last_activity, row.model.as_deref());
     }
     let store = ctx.store()?;
-    let mut writers = match store.load_repository_events() {
+    let mut writers = match store.repository_events() {
         Ok(events) => crate::store::SessionWriter::of(&events),
         Err(error) => {
             unavailable.push(format!("repository events: {error:#}"));

@@ -164,7 +164,7 @@ pub struct RewriteMap {
 
 impl RewriteMap {
     pub fn load(store: &Store) -> Result<Self> {
-        Self::from_events(store.load_repository_events()?.iter())
+        Self::from_events(store.repository_events()?.iter())
     }
 
     /// The same map, built from a given sequence of events. Import uses it to

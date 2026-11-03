@@ -173,7 +173,7 @@ pub struct LedgerRead<'a> {
     batches: Vec<ImportBatch>,
     scope: std::cell::OnceCell<Arc<PrivilegeScope>>,
     rewrites: std::cell::OnceCell<crate::rewrite::RewriteMap>,
-    repository_events: std::cell::OnceCell<Vec<Event>>,
+    repository_events: std::cell::OnceCell<Arc<Vec<Event>>>,
 }
 
 impl LedgerRead<'_> {
@@ -198,7 +198,9 @@ impl LedgerRead<'_> {
         if let Some(held) = self.repository_events.get() {
             return Ok(held);
         }
-        let loaded = typed_repository_events(self.store.raw_repository_events_in(&self.batches)?)?;
+        let loaded = self
+            .store
+            .shared_repository_events(|| self.store.raw_repository_events_in(&self.batches))?;
         Ok(self.repository_events.get_or_init(|| loaded))
     }
 
@@ -347,9 +349,9 @@ pub struct ImportBatch {
 /// What one process reads from a ledger once and shares across every store
 /// handle it opens. A command that only reads, and never watches the ledger
 /// move, turns sharing on at start with `share_reads`. Each event file, the
-/// import batches, the privilege scope, each change's state and event
-/// writers, the readable states and the replica events are then read once
-/// per process. Any ledger write the process makes forgets everything
+/// import batches, the typed repository events, the privilege scope, each
+/// change's state and event writers, the readable states and the replica
+/// events are then read once per process. Any ledger write the process makes forgets everything
 /// shared, so a later read sees it, and a failed read is never held.
 mod shared {
     use super::{ImportBatch, PrivilegeScope};
@@ -433,6 +435,8 @@ mod shared {
     #[derive(Default)]
     pub(super) struct Memo {
         pub repository_files: Option<RawEvents>,
+        /// The repository events typed, from the files and the import batches.
+        pub repository_events: Option<Arc<Vec<crate::model::Event>>>,
         pub change_files: HashMap<String, (RawEvents, bool)>,
         pub import_batches: Option<Vec<ImportBatch>>,
         pub scope: Option<Arc<PrivilegeScope>>,
@@ -882,7 +886,27 @@ impl Store {
     /// Repository-scoped events in ID order. A repository that has never had
     /// one has no directory, which is not an error.
     pub fn load_repository_events(&self) -> Result<Vec<Event>> {
-        typed_repository_events(self.raw_repository_events_unseen(&BTreeSet::new())?)
+        Ok(self.repository_events()?.to_vec())
+    }
+
+    /// `load_repository_events`, typed once while this handle shares reads.
+    pub(crate) fn repository_events(&self) -> Result<Arc<Vec<Event>>> {
+        self.shared_repository_events(|| self.raw_repository_events_unseen(&BTreeSet::new()))
+    }
+
+    /// The repository events `read` gives, typed once when this handle shares
+    /// reads. Every reader passes the repository event files merged with the
+    /// import batches, which a sharing process reads once, so one typing
+    /// answers them all.
+    fn shared_repository_events(
+        &self,
+        read: impl FnOnce() -> Result<Vec<(String, serde_json::Value)>>,
+    ) -> Result<Arc<Vec<Event>>> {
+        self.shared_or(
+            "repository_events",
+            |memo| &mut memo.repository_events,
+            || Ok(Arc::new(typed_repository_events(read()?)?)),
+        )
     }
 
     /// One exact staging transition is retained per change until its event is durable.
@@ -2060,7 +2084,7 @@ impl Store {
         events: &[Event],
         rewrites: &crate::rewrite::RewriteMap,
     ) -> Result<crate::state::ChangeState> {
-        self.project_state_with_repository(scope, events, rewrites, &self.load_repository_events()?)
+        self.project_state_with_repository(scope, events, rewrites, &self.repository_events()?)
     }
 
     fn project_state_with_repository(
