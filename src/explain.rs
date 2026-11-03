@@ -409,8 +409,7 @@ pub enum Detail {
         by_event_id: String,
         verdict: String,
         reviewer: String,
-        /// `approved`, or `fulfilled, not approved` when the discharging
-        /// review did not approve.
+        /// Always `approved`: only an approving read discharges a debt.
         outcome: &'static str,
     },
 }
@@ -1572,11 +1571,7 @@ fn discharge_row(discharge: &Discharge) -> Row {
             by_event_id: discharge.by_event_id.clone(),
             verdict: kebab(&discharge.verdict),
             reviewer: discharge.reviewer.clone(),
-            outcome: if discharge.verdict == crate::model::Verdict::Approved {
-                "approved"
-            } else {
-                "fulfilled, not approved"
-            },
+            outcome: "approved",
         },
     )
 }

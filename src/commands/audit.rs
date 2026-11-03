@@ -613,17 +613,29 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
     // review, and saying otherwise would be the one claim a reader acts on.
     if st.debt.is_some() {
         let (_, after) = ctx.load_state(&store, &change_id)?;
+        let discharger = after
+            .debt
+            .as_ref()
+            .and_then(|debt| debt.discharged_by_event_id.as_deref());
         if after.debt_outstanding() {
             let owed = match after.debt.as_ref().and_then(|debt| debt.missing) {
                 Some(DebtMissing::IneligibleReview) => {
-                    "an eligible read: an audit with --assessment <file> saying the \
-                     auditor is eligible and describing the model it recorded"
+                    "an eligible read: an approving audit with --assessment <file> \
+                     saying the auditor is eligible and describing the model it recorded"
                 }
                 _ => "an independent review",
             };
-            println!("audit recorded; the debt still owes {owed}");
-        } else {
+            match after.audit_discharge_bar(&event.event_id) {
+                Some(bar) => println!(
+                    "audit recorded; the debt still owes {owed}; this read {}",
+                    bar.reason()
+                ),
+                None => println!("audit recorded; the debt still owes {owed}"),
+            }
+        } else if discharger == Some(event.event_id.as_str()) {
             println!("debt discharged");
+        } else if let Some(discharger) = discharger {
+            println!("debt already discharged by {discharger}");
         }
     }
     Ok(())

@@ -679,8 +679,7 @@ pub struct Debt {
     /// it. Absent on every other kind.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ineligible: Option<DebtRead>,
-    /// The first verdict or audit that satisfies the existing discharge
-    /// predicate, when one exists.
+    /// The first verdict or audit no [`DischargeBar`] bars, when one exists.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discharged_by: Option<DebtCoverage>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -870,16 +869,6 @@ pub struct AuditVerdictEntry {
 }
 
 impl AuditVerdictEntry {
-    /// Whether this audit carries routing's assessment that its auditor is
-    /// independent of the authors, and that assessment describes the model
-    /// the audit recorded.
-    pub fn clears_ineligible_review(&self) -> bool {
-        self.assessment.as_ref().is_some_and(|assessment| {
-            assessment.independence == Independence::Eligible
-                && assessment.binding == Some(AuditorBinding::Bound)
-        })
-    }
-
     pub fn effective_author(&self) -> &str {
         self.on_behalf_of.as_deref().unwrap_or(&self.actor)
     }
@@ -4454,28 +4443,17 @@ impl ChangeState {
         current.standing = standing;
     }
 
-    /// The verdict or audit that satisfies the existing discharge predicate.
-    /// The returned model is copied from that event and is never inferred.
+    /// The verdict or audit that discharges `debt`: the first audit, else the
+    /// first verdict on the shipped patchset, that [`DischargeBar`] does not
+    /// bar. The returned model is copied from that event and is never
+    /// inferred.
     fn debt_discharge(&self, debt: &Debt) -> Option<(String, DebtCoverage)> {
-        let ineligible_review = debt.missing == Some(DebtMissing::IneligibleReview);
-        // A debt that names an independent review as the thing missing is
-        // settled only by somebody the ledger does not credit with the work.
-        // Its production record names that authorship when it has one; a
-        // debt recorded before production existed still has the shipped
-        // patchset's recorded authorship. Only a range with no ledger record
-        // at all has nothing to compare.
-        let shipped_patchset = self.closure_shipped_patchset()?;
-        let production = debt.production.as_ref();
-        let authored = |actor: &str, model: Option<&str>| {
-            self.authorship_match(shipped_patchset, production, actor, model)
-                .is_some()
-        };
+        // Only a range with no ledger record at all has no authorship to
+        // compare a reader against, and nothing discharges its debt.
+        let shipped = self.closure_shipped_patchset()?;
         if let Some(audit) = self.audit_verdicts.iter().find(|audit| {
-            self.review_eligible(&audit.event_id, &audit.origin_replica_id)
-                && audit.created_at >= debt.declared_at
-                && (!ineligible_review || audit.clears_ineligible_review())
-                && !audit.author_assumed()
-                && !authored(audit.effective_author(), audit.model.as_deref())
+            self.discharge_bar(debt, shipped, &Read::audit(audit))
+                .is_none()
         }) {
             return Some((
                 audit.event_id.clone(),
@@ -4487,24 +4465,13 @@ impl ChangeState {
                 ),
             ));
         }
-        // A verdict carries no routing assessment, so none can show that its
-        // reviewer is independent of the author in the way an
-        // `ineligible-review` debt is owed: only an audit that carries one
-        // clears that kind.
-        if ineligible_review {
-            return None;
-        }
-        // Only a verdict on the revision that actually shipped counts; a
-        // verdict on an earlier draft judged something else.
-        let shipped = shipped_patchset.id.as_str();
+        // A verdict on an earlier draft judged something else.
         self.verdicts
             .iter()
+            .filter(|verdict| verdict.patchset_id == shipped.id)
             .find(|verdict| {
-                self.review_eligible(&verdict.event_id, &verdict.origin_replica_id)
-                    && verdict.created_at >= debt.declared_at
-                    && verdict.patchset_id == shipped
-                    && !verdict.author_assumed()
-                    && !authored(verdict.effective_author(), verdict.model.as_deref())
+                self.discharge_bar(debt, shipped, &Read::verdict(verdict))
+                    .is_none()
             })
             .map(|verdict| {
                 (
@@ -4517,6 +4484,166 @@ impl ChangeState {
                     ),
                 )
             })
+    }
+
+    /// Why the audit `event_id` leaves the held debt owed, or `None` when it
+    /// discharges it or there is no such audit or debt.
+    pub fn audit_discharge_bar(&self, event_id: &str) -> Option<DischargeBar> {
+        let debt = self.debt.as_ref()?;
+        let audit = self
+            .audit_verdicts
+            .iter()
+            .find(|audit| audit.event_id == event_id)?;
+        let Some(shipped) = self.closure_shipped_patchset() else {
+            return Some(DischargeBar::NoAuthorshipRecord);
+        };
+        self.discharge_bar(debt, shipped, &Read::audit(audit))
+    }
+
+    /// Why `read` does not discharge `debt` on the work `shipped` carries.
+    /// The first bar that applies is the one named.
+    fn discharge_bar(
+        &self,
+        debt: &Debt,
+        shipped: &Patchset,
+        read: &Read<'_>,
+    ) -> Option<DischargeBar> {
+        if !self.review_eligible(read.event_id, read.origin) {
+            return Some(DischargeBar::NoReviewAuthority);
+        }
+        if read.created_at < debt.declared_at {
+            return Some(DischargeBar::BeforeDeclaration);
+        }
+        if read.verdict != Verdict::Approved {
+            return Some(DischargeBar::NotApproval(read.verdict));
+        }
+        if let Some(assessment) = read
+            .assessment
+            .filter(|assessment| assessment.independence == Independence::Ineligible)
+        {
+            return Some(DischargeBar::AssessedIneligible(
+                assessment.qualifiers.clone(),
+            ));
+        }
+        // Routing's word that the auditor is independent of the authors, in
+        // an assessment that describes the model the audit recorded.
+        let cleared = read.assessment.is_some_and(|assessment| {
+            assessment.independence == Independence::Eligible
+                && assessment.binding == Some(AuditorBinding::Bound)
+        });
+        if debt.missing == Some(DebtMissing::IneligibleReview) && !cleared {
+            return Some(DischargeBar::NoEligibleAssessment);
+        }
+        if read.author_assumed {
+            return Some(DischargeBar::AuthorAssumed);
+        }
+        self.authorship_match(shipped, debt.production.as_ref(), read.author, read.model)
+            .map(DischargeBar::Authored)
+    }
+}
+
+/// A recorded verdict or audit, as the discharge rule reads it.
+struct Read<'a> {
+    event_id: &'a str,
+    origin: &'a str,
+    created_at: chrono::DateTime<chrono::Utc>,
+    verdict: Verdict,
+    /// Only an audit carries one.
+    assessment: Option<&'a AuditAssessment>,
+    author_assumed: bool,
+    author: &'a str,
+    model: Option<&'a str>,
+}
+
+impl<'a> Read<'a> {
+    fn audit(audit: &'a AuditVerdictEntry) -> Self {
+        Self {
+            event_id: &audit.event_id,
+            origin: &audit.origin_replica_id,
+            created_at: audit.created_at,
+            verdict: audit.verdict,
+            assessment: audit.assessment.as_ref(),
+            author_assumed: audit.author_assumed(),
+            author: audit.effective_author(),
+            model: audit.model.as_deref(),
+        }
+    }
+
+    fn verdict(verdict: &'a VerdictEntry) -> Self {
+        Self {
+            event_id: &verdict.event_id,
+            origin: &verdict.origin_replica_id,
+            created_at: verdict.created_at,
+            verdict: verdict.verdict,
+            assessment: None,
+            author_assumed: verdict.author_assumed(),
+            author: verdict.effective_author(),
+            model: verdict.model.as_deref(),
+        }
+    }
+}
+
+/// Why a recorded read leaves review debt owed. A debt is discharged by an
+/// approving read, recorded after it was declared, by an identity the ledger
+/// does not credit with the work, that routing did not assess `ineligible`;
+/// an `ineligible-review` debt also needs routing's eligible, bound
+/// assessment, which only an audit carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DischargeBar {
+    /// The read came from a replica this ledger grants no review authority.
+    NoReviewAuthority,
+    /// The read predates the debt it would answer.
+    BeforeDeclaration,
+    /// The read did not approve the work.
+    NotApproval(Verdict),
+    /// Routing assessed the reader ineligible, for these reasons.
+    AssessedIneligible(Vec<ReviewQualifier>),
+    /// The debt is `ineligible-review` and the read carries no eligible,
+    /// bound assessment.
+    NoEligibleAssessment,
+    /// arc assumed the reader's identity; nobody declared it.
+    AuthorAssumed,
+    /// The reader is this identity the ledger credits with the work.
+    Authored(String),
+    /// The shipped range has no ledger authorship to compare against.
+    NoAuthorshipRecord,
+}
+
+impl DischargeBar {
+    /// Why the read does not discharge, phrased to follow "this read".
+    pub fn reason(&self) -> String {
+        match self {
+            Self::NoReviewAuthority => {
+                "comes from a replica this ledger grants no review authority".into()
+            }
+            Self::BeforeDeclaration => "was recorded before the debt was declared".into(),
+            Self::NotApproval(verdict) => format!(
+                "is {}: a {} read discharges no debt, only an approval does",
+                verdict.as_str(),
+                verdict.as_str()
+            ),
+            Self::AssessedIneligible(qualifiers) if qualifiers.is_empty() => {
+                "is not independent: routing assessed this auditor ineligible".into()
+            }
+            Self::AssessedIneligible(qualifiers) => format!(
+                "is not independent: routing assessed this auditor ineligible ({})",
+                qualifiers
+                    .iter()
+                    .map(|qualifier| qualifier.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::NoEligibleAssessment => {
+                "carries no eligible assessment bound to the model it recorded".into()
+            }
+            Self::AuthorAssumed => "is by an identity arc assumed rather than one declared".into(),
+            Self::Authored(identity) => {
+                format!("is by {identity}, whom the ledger credits with the work")
+            }
+            Self::NoAuthorshipRecord => {
+                "cannot be compared with authorship: the shipped range has no ledger record".into()
+            }
+        }
     }
 }
 
@@ -5567,5 +5694,92 @@ mod tests {
 
         let open = change_with_debt(declared, false, vec![]);
         assert_eq!(standing_of(&open), Some(DebtStanding::Declared));
+    }
+
+    fn with_verdict(mut event: Event, outcome: Verdict) -> Event {
+        match &mut event.payload {
+            Payload::AuditVerdictRecorded { verdict, .. }
+            | Payload::VerdictRecorded { verdict, .. } => *verdict = outcome,
+            _ => unreachable!("not a read"),
+        }
+        event
+    }
+
+    fn independent_verdict(outcome: Verdict) -> Event {
+        let mut review = with_verdict(verdict("fix", "ps-01", None), outcome);
+        review.actor = "reader".into();
+        review
+    }
+
+    /// Rejects a read that refused the work, or only commented on it,
+    /// settling the debt it was supposed to answer: such a read is kept as a
+    /// read and the debt stays owed, from an audit and from a verdict alike.
+    #[test]
+    fn only_an_approving_read_discharges_review_debt() {
+        for outcome in [Verdict::CommentOnly, Verdict::ChangesRequested] {
+            let audit = with_verdict(independent_audit(None), outcome);
+            let state = change_with_debt(versioned_debt(), true, vec![audit]);
+            assert_eq!(standing_of(&state), Some(DebtStanding::Owed), "{outcome:?}");
+            assert_eq!(state.audit_verdicts.len(), 1, "the read stays recorded");
+            let state =
+                change_with_debt(versioned_debt(), true, vec![independent_verdict(outcome)]);
+            assert_eq!(standing_of(&state), Some(DebtStanding::Owed), "{outcome:?}");
+        }
+        let audited = change_with_debt(versioned_debt(), true, vec![independent_audit(None)]);
+        assert_eq!(standing_of(&audited), Some(DebtStanding::Discharged));
+        let reviewed = change_with_debt(
+            versioned_debt(),
+            true,
+            vec![independent_verdict(Verdict::Approved)],
+        );
+        assert_eq!(standing_of(&reviewed), Some(DebtStanding::Discharged));
+    }
+
+    /// Rejects an audit routing assessed `ineligible` discharging any kind of
+    /// debt because its declared actor differs from the author's; the same
+    /// audit without an assessment is judged by authorship alone.
+    #[test]
+    fn an_ineligible_assessment_discharges_no_kind_of_debt() {
+        let ineligible = AuditAssessment {
+            independence: Independence::Ineligible,
+            qualifiers: vec![ReviewQualifier::SameModel, ReviewQualifier::SameFamily],
+            route_version: None,
+            binding: Some(AuditorBinding::Bound),
+            uncovered_authors: Vec::new(),
+        };
+        for missing in DebtMissing::ALL
+            .into_iter()
+            .filter(|missing| *missing != DebtMissing::IneligibleReview)
+        {
+            let debt = || {
+                ev(
+                    "fix",
+                    Payload::DebtDeclared {
+                        reason: "review owed".into(),
+                        patchset_id: Some("ps-01".into()),
+                        missing,
+                        coverage: Vec::new(),
+                        production: Some(test_production()),
+                        ineligible: None,
+                    },
+                )
+            };
+            let assessed = change_with_debt(
+                debt(),
+                true,
+                vec![independent_audit(Some(ineligible.clone()))],
+            );
+            assert_eq!(
+                standing_of(&assessed),
+                Some(DebtStanding::Owed),
+                "{missing:?}"
+            );
+            let unassessed = change_with_debt(debt(), true, vec![independent_audit(None)]);
+            assert_eq!(
+                standing_of(&unassessed),
+                Some(DebtStanding::Discharged),
+                "{missing:?}"
+            );
+        }
     }
 }

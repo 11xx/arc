@@ -3,6 +3,7 @@ mod absent_identity;
 mod accept;
 mod assurance;
 mod audit;
+mod audit_discharge;
 mod briefs;
 mod bundle;
 mod candidate;

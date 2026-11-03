@@ -174,21 +174,18 @@ fn integrated_under_waiver() -> Fixture {
     }
 }
 
-/// A changes-requested audit by somebody who did not write the change.
-fn audit_changes_requested(repo: &Repo, reason: &str) -> String {
+/// An audit by somebody who did not write the change.
+fn audit_with(repo: &Repo, verdict: &str, reason: &str) -> String {
     repo.arc(&repo.root)
         .env("ARC_ACTOR", "Auditor")
-        .args([
-            "audit",
-            WORK,
-            "--verdict",
-            "changes-requested",
-            "--body",
-            reason,
-        ])
+        .args(["audit", WORK, "--verdict", verdict, "--body", reason])
         .assert()
         .success();
     event_ids(repo, "audit-verdict-recorded").pop().unwrap()
+}
+
+fn audit_changes_requested(repo: &Repo, reason: &str) -> String {
+    audit_with(repo, "changes-requested", reason)
 }
 
 fn explain_json(repo: &Repo, extra: &[&str]) -> serde_json::Value {
@@ -240,6 +237,7 @@ fn integrated_change_renders_every_slot() {
     let fixture = integrated_under_waiver();
     let repo = &fixture.repo;
     let audit = audit_changes_requested(repo, "the marker is not the behaviour");
+    let approval = audit_with(repo, "approved", "the behaviour holds after all");
     let integration = event_ids(repo, "change-integrated").pop().unwrap();
     let debt = event_ids(repo, "debt-declared").pop().unwrap();
 
@@ -372,14 +370,14 @@ fn integrated_change_renders_every_slot() {
         waiver[0].get("discharged_by").is_none(),
         "the acceptance row keeps its as-of-integration values: {coverage}"
     );
-    assert_eq!(waiver[0]["discharged_later_by"], audit.as_str());
+    assert_eq!(waiver[0]["discharged_later_by"], approval.as_str());
 
-    // Later knowledge: the audit, and the discharge it produced, which did
-    // not approve.
+    // Later knowledge: both audits, and the discharge only the approving one
+    // produced.
     let later = rows(&explanation, "later_knowledge");
     let audit_row = later
         .iter()
-        .find(|row| row["item"] == "audit-verdict")
+        .find(|row| row["item"] == "audit-verdict" && row["event_id"] == audit.as_str())
         .unwrap();
     assert_eq!(audit_row["event_id"], audit.as_str());
     assert_eq!(audit_row["verdict"], "changes-requested");
@@ -388,8 +386,8 @@ fn integrated_change_renders_every_slot() {
         .iter()
         .find(|row| row["item"] == "debt-discharge")
         .unwrap();
-    assert_eq!(discharge["outcome"], "fulfilled, not approved");
-    assert_eq!(discharge["by_event_id"], audit.as_str());
+    assert_eq!(discharge["outcome"], "approved");
+    assert_eq!(discharge["by_event_id"], approval.as_str());
     assert_eq!(discharge["debt_event_id"], debt.as_str());
     assert_eq!(
         discharge["standing"], "inferred",
@@ -411,7 +409,10 @@ fn integrated_change_renders_every_slot() {
     );
     assert!(text.contains("waiver used"), "{text}");
     assert!(text.contains("see later knowledge"), "{text}");
-    assert!(text.contains("fulfilled, not approved"), "{text}");
+    assert!(
+        text.contains(&format!("approved: discharged by approved `{approval}`")),
+        "{text}"
+    );
     assert!(
         text.contains(&format!("audit changes-requested `{audit}`")),
         "{text}"

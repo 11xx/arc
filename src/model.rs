@@ -2795,6 +2795,16 @@ pub enum Verdict {
     CommentOnly,
 }
 
+impl Verdict {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Approved => "approved",
+            Self::ChangesRequested => "changes-requested",
+            Self::CommentOnly => "comment-only",
+        }
+    }
+}
+
 /// A decision supplied by a receiver outside the local review ledger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "kebab-case")]

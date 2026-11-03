@@ -2335,7 +2335,7 @@ REVIEW COVERAGE AND DEBT
   `arc query --debt`, the inbox, catchup and the workspace backlog put a
   `below-floor` read first.
 
-  Only an audit clears it: `arc audit --assessment <file>` with
+  Only an approving audit clears it: `arc audit --assessment <file>` with
   `independence: eligible`, by an auditor who is also independent of the
   contributors and whom the assessment describes, and whose assessment
   covers the work: the `authors` it lists answer, through their `identities`,
@@ -2443,11 +2443,17 @@ REVIEW COVERAGE AND DEBT
   only for `owed`, which is why a declared debt is absent from `arc inbox`,
   `arc query --debt` and the workspace backlog.
 
-  Any independent verdict on the revision that shipped, recorded after the
-  debt was declared, discharges it — whether it came from `arc review` before
-  the merge or `arc audit` after. The debt records that no verdict existed,
-  not that one command must supply it. What the verdict concluded lives in
-  the verdict and its findings; discharging the debt does not mean approval.
+  An independent approving read of the revision that shipped, recorded after
+  the debt was declared, discharges it — whether it came from `arc review`
+  before the merge or `arc audit` after. The debt records that no such read
+  existed, not that one command must supply it. A `comment-only` or
+  `changes-requested` read is kept as a read, with its findings, and the debt
+  stays owed: a read that refused the work cannot be the review that settles
+  it. An audit whose `--assessment` says `ineligible` discharges no debt of
+  any kind, whatever actor recorded it; a read with no assessment is judged
+  by the actor and model authorship rule alone. `arc audit` prints `debt
+  discharged` only when its own read discharged the debt, and otherwise what
+  the debt still owes and why this read leaves it owed.
   A debt that carries no production record still has its shipped patchset's
   recorded authorship to compare against, so a legacy obligation discharges as
   it did before production summaries existed. An integrated closure that
@@ -2455,8 +2461,8 @@ REVIEW COVERAGE AND DEBT
   head is its integrated commit, else the latest one recorded before the
   closure. Only a range with no patchset at all has nothing to compare: its
   read is recorded, and declared trailers alone neither discharge nor refuse
-  it. The `ineligible-review` kind is the exception stated above: only an audit
-  with an eligible assessment clears it.
+  it. The `ineligible-review` kind is the exception stated above: only an
+  approving audit with an eligible, bound assessment clears it.
 
   An audit is a separate event from the verdict that shipped, so attaching one
   never rewrites what shipped with what review. An approving audit must come
@@ -2985,9 +2991,8 @@ THE HISTORY MODEL
 
   A debt is a record of review that did not happen, carried with the
   coverage the work did have, its coordinates, and who produced it. A later
-  independent verdict on the shipped revision discharges it; a discharge is
-  fulfilment, never approval, and never rewrites the basis the integration
-  was accepted on. See REVIEW COVERAGE AND DEBT.
+  independent approving read of the shipped revision discharges it; a
+  discharge never rewrites the basis the integration was accepted on. See REVIEW COVERAGE AND DEBT.
 
   `arc explain <change>` reads a change's history through these, `arc
   candidate` and `arc context` write them, and `arc stats --provenance`

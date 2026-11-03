@@ -619,8 +619,8 @@ enum Cmd {
     /// standing is `owed` or `discharged`, and a discharge after the
     /// integration also names `discharged_later_by`.
     ///
-    /// A discharge of a debt by a later review that is not an approval reads
-    /// `fulfilled, not approved`. Coverage at acceptance never takes later
+    /// Only an approving review discharges a debt, so a discharge row's
+    /// outcome reads `approved`. Coverage at acceptance never takes later
     /// knowledge into its values; it only points at the discharge.
     /// Recorded producer models that are missing, placeholders or session ids
     /// print as model not recorded. JSON production identities and review coverage retain raw values
@@ -2628,21 +2628,28 @@ enum Cmd {
     },
     /// Record a review performed after integration (never a late verdict)
     ///
-    /// An audit discharges a debt when its auditor is independent of the
-    /// work's ledger authorship: the patchset's declared contributors, else its
-    /// effective author, and its production record's implementer. Planning and
-    /// orchestrating never
-    /// refuse; the audit records those roles beside the verdict. A debt of
-    /// kind `ineligible-review` also needs
-    /// routing's word that the auditor is eligible: `--assessment <file>`
-    /// with `independence: eligible`. Without one, or with an `ineligible`
-    /// assessment, the audit is recorded and listed beside the obligation,
-    /// which stays open. The assessment must also describe the auditor that
-    /// records the audit: the audit's recorded model, and its effort where
-    /// both name one, must match the reviewer's `identities` and `effort`.
-    /// Otherwise the audit is recorded, says why, and is listed beside the
-    /// obligation, which stays open. Every other kind needs an independent
-    /// read without a routing assessment.
+    /// An audit discharges a debt when it approves and its auditor is
+    /// independent of the work's ledger authorship: the patchset's declared
+    /// contributors, else its effective author, and its production record's
+    /// implementer. Planning and orchestrating never refuse; the audit
+    /// records those roles beside the verdict. A `comment-only` or
+    /// `changes-requested` audit is recorded with its findings and listed as
+    /// a read, and the debt stays owed. An audit whose `--assessment` says
+    /// `ineligible` discharges no debt of any kind, whatever actor records
+    /// it. A debt of kind `ineligible-review` also needs routing's word that
+    /// the auditor is eligible: `--assessment <file>` with `independence:
+    /// eligible`. Without one, the audit is recorded and listed beside the
+    /// obligation, which stays open. The assessment must also describe the
+    /// auditor that records the audit: the audit's recorded model, and its
+    /// effort where both name one, must match the reviewer's `identities` and
+    /// `effort`. Otherwise the audit is recorded, says why, and is listed
+    /// beside the obligation, which stays open. Every other kind, read
+    /// without an assessment, is judged by that authorship rule alone.
+    ///
+    /// After writing, the audit prints `debt discharged` when it discharged
+    /// the debt, `debt already discharged by <event>` when an earlier read
+    /// had, and otherwise what the debt still owes and why this read leaves
+    /// it owed.
     ///
     /// An `ineligible-review` debt is also cleared only when the assessment's
     /// authors answer to the model of every `Implemented-by` line in the
@@ -2697,7 +2704,9 @@ enum Cmd {
         /// discharged only by an audit whose assessment says `eligible` and
         /// is `bound`; otherwise the audit is recorded and listed beside the
         /// obligation, which stays open. The auditor must also be independent
-        /// of the ledger's authorship, as for any audit. Other kinds ignore it
+        /// of the ledger's authorship, as for any audit. An `ineligible`
+        /// assessment leaves a debt of every kind owed; other kinds need no
+        /// assessment
         #[arg(long = "assessment", value_name = "FILE")]
         assessment: Option<PathBuf>,
     },
