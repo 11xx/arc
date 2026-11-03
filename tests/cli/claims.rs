@@ -369,6 +369,8 @@ fn concurrent_claims_have_one_winner_and_stage_release_replay_stays_readable() {
     }
 }
 
+/// A transition lock held past the ledger's 15-second budget refuses,
+/// naming the lock and asking for a retry, rather than waiting forever.
 #[test]
 fn transition_lock_acquisition_is_bounded() {
     let repo = Repo::new();
@@ -379,9 +381,15 @@ fn transition_lock_acquisition_is_bounded() {
     let change_id = opened_change_id(&opened);
     let transition_lock = hold_transition_lock(&repo, &change_id);
     let started = Instant::now();
-    let mut claim = spawn_arc(&repo, &repo.root, &["claim", "bounded-lock"]);
+    let mut claim =
+        spawn_arc_keeping_stderr(&repo, &repo.root, &["claim", "bounded-lock"], "session-a");
     assert_eq!(wait_for_exit(&mut claim).code(), Some(1));
-    assert!(started.elapsed() < Duration::from_secs(3));
+    assert!(started.elapsed() < Duration::from_secs(45));
+    let stderr = child_stderr(&mut claim);
+    assert!(
+        stderr.contains("change transition lock") && stderr.contains("retry the command"),
+        "{stderr}"
+    );
     transition_lock.unlock().unwrap();
 }
 

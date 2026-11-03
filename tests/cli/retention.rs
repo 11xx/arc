@@ -879,6 +879,7 @@ fn external_map_publication_failure_withdraws_only_confirmed_absent_retention() 
             .write_stdin(format!("{old} {new}\n"))
             .env("LD_PRELOAD", library)
             .env("HISTORY_PUBLICATION_FAULT", mode)
+            .env("ARC_TEST_LOCK_BUDGET_MS", "200")
             .output()
             .unwrap();
         assert!(!failed.status.success(), "{mode}: {failed:?}");

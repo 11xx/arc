@@ -32,11 +32,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::thread;
-use std::time::{Duration, Instant};
 
-const JOURNAL_LOCK_TIMEOUT: Duration = Duration::from_secs(1);
-const JOURNAL_LOCK_RETRY: Duration = Duration::from_millis(10);
 const JOURNAL_LOCK_DIR: &str = ".locks";
 const JOURNAL_TRANSITION_LOCK: &str = "transition.lock";
 const JOURNAL_EVENTS_LOCK: &str = "events.lock";
@@ -99,25 +95,14 @@ fn lock_journal_file_for_exchange(
         .truncate(false)
         .open(&path)
         .with_context(|| format!("cannot open journal {purpose} lock {}", path.display()))?;
-    let deadline = Instant::now() + JOURNAL_LOCK_TIMEOUT;
-    loop {
-        match file.try_lock() {
-            Ok(()) => return Ok(JournalTransitionLock(file)),
-            Err(std::fs::TryLockError::WouldBlock) => {
-                if Instant::now() >= deadline {
-                    bail!(
-                        "journal {purpose} lock {} is busy; retry the command",
-                        path.display()
-                    );
-                }
-                thread::sleep(JOURNAL_LOCK_RETRY);
-            }
-            Err(std::fs::TryLockError::Error(error)) => {
-                return Err(error)
-                    .with_context(|| format!("cannot lock journal {purpose} {}", path.display()));
-            }
-        }
-    }
+    crate::store::wait_for_lock(
+        &file,
+        &path,
+        &format!("journal {purpose}"),
+        crate::store::LOCK_TIMEOUT,
+        crate::store::LockMode::Exclusive,
+    )?;
+    Ok(JournalTransitionLock(file))
 }
 
 /// The transition lock of the journal a reference names, which is another

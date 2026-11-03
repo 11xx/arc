@@ -48,13 +48,88 @@ candidate_format_barrier! {
     CandidatePromoted => "candidate-promoted",
 }
 
-const LOCK_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long a ledger, journal or publication lock is waited for. Worktrees
+/// share one ledger, so a sibling's short critical section is routine, and on
+/// a loaded machine it can outlast a second. A holder past this budget is
+/// stuck or is an arc re-entered beneath its own lock, and is refused.
+pub(crate) const LOCK_TIMEOUT: Duration = Duration::from_secs(15);
 // The target lock is legitimately held across a real merge, so waiters get a
 // budget sized to an integration rather than to a state append.
 const TARGET_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+/// A wait longer than this is announced on stderr, naming the lock.
+const LOCK_NOTICE_AFTER: Duration = Duration::from_secs(1);
 /// The lock a writer holds to issue and publish an event ID.
 const EVENT_IDS_LOCK: &str = "event-ids.lock";
 const LOCK_RETRY: Duration = Duration::from_millis(10);
+
+#[derive(Clone, Copy)]
+pub(crate) enum LockMode {
+    Exclusive,
+    Shared,
+}
+
+/// Wait up to `timeout` for `file`, the lock at `path`, announcing a wait
+/// that outlasts `LOCK_NOTICE_AFTER` and refusing past the budget with the
+/// lock's name and a request to retry.
+pub(crate) fn wait_for_lock(
+    file: &File,
+    path: &Path,
+    description: &str,
+    timeout: Duration,
+    mode: LockMode,
+) -> Result<()> {
+    #[cfg(debug_assertions)]
+    let timeout = std::env::var("ARC_TEST_LOCK_BUDGET_MS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .map_or(timeout, Duration::from_millis);
+    // Only the debug-build test pause moves the start.
+    #[cfg_attr(not(debug_assertions), allow(unused_mut))]
+    let mut started = Instant::now();
+    #[cfg(debug_assertions)]
+    let mut contended = false;
+    let mut announced = false;
+    loop {
+        let attempt = match mode {
+            LockMode::Exclusive => file.try_lock(),
+            LockMode::Shared => file.try_lock_shared(),
+        };
+        match attempt {
+            Ok(()) => return Ok(()),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                // A test pauses here, once the lock is known to be held,
+                // and the pause does not count against the timeout.
+                #[cfg(debug_assertions)]
+                if !std::mem::replace(&mut contended, true) {
+                    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+                    crate::import_authorization::test_rendezvous(&format!("{stem}-contended"))?;
+                    started = Instant::now();
+                }
+                let waited = started.elapsed();
+                if waited >= timeout {
+                    bail!(
+                        "{description} lock {} is busy after {}s; another process holds it; \
+                         retry the command",
+                        path.display(),
+                        timeout.as_secs_f32()
+                    );
+                }
+                if waited >= LOCK_NOTICE_AFTER && !std::mem::replace(&mut announced, true) {
+                    eprintln!(
+                        "waiting for {description} lock {}, held by another process (up to {}s)",
+                        path.display(),
+                        timeout.as_secs_f32()
+                    );
+                }
+                thread::sleep(LOCK_RETRY);
+            }
+            Err(std::fs::TryLockError::Error(error)) => {
+                return Err(error)
+                    .with_context(|| format!("cannot lock {description} {}", path.display()));
+            }
+        }
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct StoreConfig {
@@ -943,26 +1018,13 @@ impl Store {
                     });
                 }
             };
-            let deadline = Instant::now() + LOCK_TIMEOUT;
-            loop {
-                match file.try_lock_shared() {
-                    Ok(()) => break,
-                    Err(std::fs::TryLockError::WouldBlock) => {
-                        if Instant::now() >= deadline {
-                            bail!(
-                                "ledger event IDs lock {} is busy; retry the command",
-                                path.display()
-                            );
-                        }
-                        thread::sleep(LOCK_RETRY);
-                    }
-                    Err(std::fs::TryLockError::Error(error)) => {
-                        return Err(error).with_context(|| {
-                            format!("cannot lock ledger event IDs {}", path.display())
-                        });
-                    }
-                }
-            }
+            wait_for_lock(
+                &file,
+                &path,
+                "ledger event IDs",
+                LOCK_TIMEOUT,
+                LockMode::Shared,
+            )?;
             let _held = TransitionLock(file);
             return read();
         }
@@ -1206,37 +1268,8 @@ impl Store {
             .truncate(false)
             .open(&path)
             .with_context(|| format!("cannot open {description} lock {}", path.display()))?;
-        // Only the debug-build test pause moves the deadline.
-        #[cfg_attr(not(debug_assertions), allow(unused_mut))]
-        let mut deadline = Instant::now() + timeout;
-        #[cfg(debug_assertions)]
-        let mut contended = false;
-        loop {
-            match file.try_lock() {
-                Ok(()) => return Ok(TransitionLock(file)),
-                Err(std::fs::TryLockError::WouldBlock) => {
-                    // A test pauses here, once the lock is known to be held,
-                    // and the pause does not count against the timeout.
-                    #[cfg(debug_assertions)]
-                    if !std::mem::replace(&mut contended, true) {
-                        let phase = format!("{}-contended", name.trim_end_matches(".lock"));
-                        crate::import_authorization::test_rendezvous(&phase)?;
-                        deadline = Instant::now() + timeout;
-                    }
-                    if Instant::now() >= deadline {
-                        bail!(
-                            "{description} lock {} is busy; retry the command",
-                            path.display()
-                        );
-                    }
-                    thread::sleep(LOCK_RETRY);
-                }
-                Err(std::fs::TryLockError::Error(error)) => {
-                    return Err(error)
-                        .with_context(|| format!("cannot lock {description} {}", path.display()));
-                }
-            }
-        }
+        wait_for_lock(&file, &path, description, timeout, LockMode::Exclusive)?;
+        Ok(TransitionLock(file))
     }
 
     /// Every change in the ledger. A ledger with no changes directory has no
@@ -2814,10 +2847,16 @@ mod tests {
             .unwrap();
         assert_eq!(nested, 7);
         let held = store.lock_event_ids().unwrap();
-        let error = store.read_event_cursor(|| Ok(())).unwrap_err();
-        assert!(error.to_string().contains("is busy"), "{error:#}");
+        let (read, received) = std::sync::mpsc::channel();
+        let reader = test_store(dir.path());
+        let waiting = thread::spawn(move || {
+            reader.read_event_cursor(|| Ok(())).unwrap();
+            read.send(()).unwrap();
+        });
+        assert!(received.recv_timeout(Duration::from_millis(50)).is_err());
         drop(held);
-        store.read_event_cursor(|| Ok(())).unwrap();
+        received.recv_timeout(Duration::from_secs(5)).unwrap();
+        waiting.join().unwrap();
     }
 
     #[test]

@@ -3284,6 +3284,12 @@ RULES THAT CHANGE WHAT YOU DO
     every worktree of a repository shares `refs/stash`, so a concurrent
     writer never runs `git stash` — another worktree's pop applies it there.
     It commits work in progress and amends it, or copies files aside.
+  - Worktrees of a repository share one ledger, so a write can find a lock
+    another worktree's command holds. Ledger, journal and operator policy
+    publication locks are waited for up to 15 seconds, and a wait past one
+    second prints a stderr line naming the lock. A lock still held after that
+    refuses the command, naming the lock and asking for a retry; an integration
+    target lock waits up to 30 seconds.
   - An executor's first act is `arc config --check-writable`; a nonzero exit
     means stop, not work around. Only writability decides that exit: the
     `commit` line says whether a commit can be made at all, while the

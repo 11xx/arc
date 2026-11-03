@@ -642,15 +642,27 @@ pub fn lock_publication(path: &Path) -> Result<PublicationLock> {
         .recursive(true)
         .mode(0o700)
         .create(parent)?;
+    let lock_path = parent.join("import-publication.lock");
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .mode(0o600)
-        .open(parent.join("import-publication.lock"))?;
-    file.lock()
-        .with_context(|| format!("cannot lock policy publication {}", path.display()))?;
+        .open(&lock_path)
+        .with_context(|| {
+            format!(
+                "cannot open operator policy publication lock {}",
+                lock_path.display()
+            )
+        })?;
+    crate::store::wait_for_lock(
+        &file,
+        &lock_path,
+        "operator policy publication",
+        crate::store::LOCK_TIMEOUT,
+        crate::store::LockMode::Exclusive,
+    )?;
     Ok(PublicationLock(file))
 }
 

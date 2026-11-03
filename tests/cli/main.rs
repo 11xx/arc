@@ -60,6 +60,7 @@ mod journal;
 mod journal_exchange;
 mod journal_staging;
 mod lifecycle;
+mod lock_waits;
 mod lookup_reasons;
 mod messaging;
 mod metadata;

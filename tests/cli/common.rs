@@ -416,6 +416,19 @@ pub(crate) fn spawn_arc_with_env(
         .unwrap()
 }
 
+/// `spawn_arc_keeping_stderr` with extra environment.
+pub(crate) fn spawn_arc_keeping_stderr_with_env(
+    repo: &Repo,
+    cwd: &Path,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> Child {
+    arc_command(repo, cwd, args, "session-a", Stdio::piped())
+        .envs(envs.iter().copied())
+        .spawn()
+        .unwrap()
+}
+
 pub(crate) fn spawn_arc_without_actor(repo: &Repo, cwd: &Path, args: &[&str]) -> Child {
     arc_command(repo, cwd, args, "session-a", Stdio::piped())
         .env_remove("ARC_ACTOR")
@@ -539,8 +552,22 @@ pub(crate) fn spawn_arc_paused_on_target_lock(
     args: &[&str],
     target: &str,
 ) -> Child {
-    let phase = format!("{}-contended", target_lock_stem(target));
+    spawn_arc_paused_on_lock(repo, cwd, args, &target_lock_stem(target), &[])
+}
+
+/// An arc paused where it first finds the lock file `<stem>.lock` held, with
+/// extra environment. `release_lock_wait` resumes it.
+#[cfg(debug_assertions)]
+pub(crate) fn spawn_arc_paused_on_lock(
+    repo: &Repo,
+    cwd: &Path,
+    args: &[&str],
+    stem: &str,
+    envs: &[(&str, &str)],
+) -> Child {
+    let phase = format!("{stem}-contended");
     let mut child = arc_command(repo, cwd, args, "session-a", Stdio::piped())
+        .envs(envs.iter().copied())
         .env("ARC_TEST_IMPORT_RENDEZVOUS", &phase)
         .stdin(Stdio::piped())
         .spawn()
@@ -552,7 +579,7 @@ pub(crate) fn spawn_arc_paused_on_target_lock(
         assert_ne!(
             stderr.read_line(&mut seen).unwrap(),
             0,
-            "arc exited before reaching the target lock: {seen}"
+            "arc exited before reaching the {stem} lock: {seen}"
         );
     }
     child
