@@ -306,8 +306,8 @@ pub struct ImportBatch {
 /// What one process reads from a ledger once and shares across every store
 /// handle it opens. A command that only reads, and never watches the ledger
 /// move, turns sharing on at start with `share_reads`. Each event file, the
-/// import batches, the privilege scope, each change's state and the readable
-/// states are then read once per process. Any ledger write the process makes forgets everything
+/// import batches, the privilege scope, each change's state, the readable
+/// states and the replica events are then read once per process. Any ledger write the process makes forgets everything
 /// shared, so a later read sees it, and a failed read is never held.
 mod shared {
     use super::{ImportBatch, PrivilegeScope};
@@ -398,6 +398,7 @@ mod shared {
         pub change_states: HashMap<String, crate::state::ChangeState>,
         /// The readable states, and the warning naming each unreadable one.
         pub states: Option<(BTreeMap<String, crate::state::ChangeState>, Vec<String>)>,
+        pub replica_events: Option<Vec<crate::replica::ReplicaEvent>>,
     }
 
     static ENABLED: AtomicBool = AtomicBool::new(false);
@@ -507,6 +508,7 @@ pub(crate) fn shares_reads() -> bool {
 /// Forget the process's shared ledger reads after a ledger write.
 pub(crate) fn forget_shared_reads() {
     shared::forget();
+    crate::replica::forget_held_events();
     crate::journal::forget_projections();
 }
 
@@ -2126,6 +2128,14 @@ impl Store {
         // A read that ran while the memo was unlocked holds the same files.
         shared::with(&self.root, |memo| *held(memo) = Some(value.clone()));
         Ok(value)
+    }
+
+    /// The replica events `read` gives, read once when this handle shares reads.
+    pub(crate) fn shared_replica_events(
+        &self,
+        read: impl FnOnce() -> Result<Vec<crate::replica::ReplicaEvent>>,
+    ) -> Result<Vec<crate::replica::ReplicaEvent>> {
+        self.shared_or("replica_events", |memo| &mut memo.replica_events, read)
     }
 
     /// The published import batches, read once when this handle shares reads.

@@ -170,12 +170,75 @@ struct ReplicaSnapshot {
 }
 
 /// The lock that serializes authority checks and transitions in one store.
-pub struct ReplicaLock(File);
+/// Every replica write takes it, so while a process holds it the store's
+/// replica state moves only by that process's own writes.
+pub struct ReplicaLock {
+    file: File,
+    root: PathBuf,
+}
 
 impl Drop for ReplicaLock {
     fn drop(&mut self) {
-        let _ = self.0.unlock();
+        held::release(&self.root);
+        let _ = self.file.unlock();
     }
+}
+
+/// The replica events of each store whose replica-state lock this process
+/// holds, read at most once under the lock. A ledger write the process makes
+/// forgets them, and releasing the lock drops them.
+mod held {
+    use super::ReplicaEvent;
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, PoisonError};
+
+    /// A held store maps to its events once they are read.
+    static HELD: Mutex<BTreeMap<PathBuf, Option<Vec<ReplicaEvent>>>> = Mutex::new(BTreeMap::new());
+
+    fn with<T>(use_held: impl FnOnce(&mut BTreeMap<PathBuf, Option<Vec<ReplicaEvent>>>) -> T) -> T {
+        use_held(&mut HELD.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    pub(super) fn acquire(root: &Path) {
+        with(|held| held.insert(root.to_path_buf(), None));
+    }
+
+    pub(super) fn release(root: &Path) {
+        with(|held| held.remove(root));
+    }
+
+    pub(super) fn forget() {
+        with(|held| held.values_mut().for_each(|events| *events = None));
+    }
+
+    /// The events `read` gives, held while the lock is: `None` when this
+    /// process does not hold the store's lock.
+    pub(super) fn events(
+        root: &Path,
+        read: impl FnOnce() -> anyhow::Result<Vec<ReplicaEvent>>,
+    ) -> Option<anyhow::Result<Vec<ReplicaEvent>>> {
+        let known = with(|held| held.get(root).cloned())?;
+        crate::perf::cache("replica_events", known.is_some());
+        if let Some(events) = known {
+            return Some(Ok(events));
+        }
+        let events = match read() {
+            Ok(events) => events,
+            Err(error) => return Some(Err(error)),
+        };
+        with(|held| {
+            if let Some(slot) = held.get_mut(root) {
+                *slot = Some(events.clone());
+            }
+        });
+        Some(Ok(events))
+    }
+}
+
+/// Forget the replica events read under a held lock: the process wrote.
+pub(crate) fn forget_held_events() {
+    held::forget();
 }
 
 /// Serialize every operation whose result depends on local replica state.
@@ -193,7 +256,13 @@ pub fn lock(store: &Store) -> Result<ReplicaLock> {
     let deadline = Instant::now() + STATE_LOCK_TIMEOUT;
     loop {
         match file.try_lock() {
-            Ok(()) => return Ok(ReplicaLock(file)),
+            Ok(()) => {
+                held::acquire(&store.root);
+                return Ok(ReplicaLock {
+                    file,
+                    root: store.root.clone(),
+                });
+            }
             Err(std::fs::TryLockError::WouldBlock) => {
                 if Instant::now() >= deadline {
                     bail!(
@@ -1565,7 +1634,18 @@ fn bundle_digest(bundle: &ReplicaBundle) -> Result<String> {
     Ok(hex::encode(Sha256::digest(serde_json::to_vec(bundle)?)))
 }
 
+/// The store's replica events. They are read once while this process holds
+/// the store's replica-state lock, since no other process can then change
+/// them, or while it shares its ledger reads; otherwise each call reads them
+/// afresh.
 pub(crate) fn load_events(store: &Store) -> Result<Vec<ReplicaEvent>> {
+    if let Some(events) = held::events(&store.root, || read_events(store)) {
+        return events;
+    }
+    store.shared_replica_events(|| read_events(store))
+}
+
+fn read_events(store: &Store) -> Result<Vec<ReplicaEvent>> {
     crate::perf::count("replica_materializations", 1);
     let root = replica_root(store);
     let mut events = BTreeMap::<String, ReplicaEvent>::new();
@@ -1769,6 +1849,49 @@ mod authority_tests {
             created_at: Utc::now(),
             payload,
         }
+    }
+
+    fn store_at(root: &Path) -> Store {
+        Store {
+            operator_policy_path: None,
+            root: root.to_path_buf(),
+            repository_id: "origin-id".into(),
+            require_declared_actor: false,
+            require_declared_actor_sources: Vec::new(),
+            read_only: false,
+        }
+    }
+
+    /// Claim: under the held replica-state lock the replica events are read
+    /// once, a replica write this process makes under it is seen by the next
+    /// read, and releasing the lock ends the held read. Rejects a held read
+    /// that outlives the process's own write or the lock.
+    #[test]
+    fn a_read_under_the_held_lock_sees_this_process_write_and_ends_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path());
+        let origin = ReplicaIdentity {
+            name: "origin".into(),
+            repository_id: "origin-id".into(),
+        };
+        let initial = event("", &origin, ReplicaPayload::Initialized);
+        let lock = lock(&store).unwrap();
+        assert!(load_events(&store).unwrap().is_empty());
+        write_local_event(&store, &mut initial.clone()).unwrap();
+        assert_eq!(load_events(&store).unwrap().len(), 1, "the write is seen");
+        let events_dir = replica_root(&store).join("events");
+        let written = json_files(&events_dir).unwrap();
+        fs::remove_file(&written[0]).unwrap();
+        assert_eq!(
+            load_events(&store).unwrap().len(),
+            1,
+            "the read is held while the lock is"
+        );
+        drop(lock);
+        assert!(
+            load_events(&store).unwrap().is_empty(),
+            "releasing the lock ends the held read"
+        );
     }
 
     #[test]

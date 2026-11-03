@@ -108,6 +108,10 @@ fn fixed_reads(record: &Value, counts: &Value) -> Vec<(&'static str, Value)> {
             record["counts"]["scope_derivations"].clone(),
         ),
         (
+            "replica materializations",
+            record["counts"]["replica_materializations"].clone(),
+        ),
+        (
             "import enumerations",
             record["ledger"]["import"]["enumerations"].clone(),
         ),
@@ -127,8 +131,8 @@ fn fixed_reads(record: &Value, counts: &Value) -> Vec<(&'static str, Value)> {
 }
 
 /// Assert one read of everything `arc args` needs: one repository
-/// materialization, one scope, each ledger file read and each import batch
-/// decoded once, and no change reduced twice.
+/// materialization, one scope, one read of the replica state, each ledger
+/// file read and each import batch decoded once, and no change reduced twice.
 fn assert_read_once(repo: &Repo, args: &[&str]) {
     let (record, counts, _) = traced(repo, &repo.root, args);
     for (name, value) in fixed_reads(&record, &counts) {
@@ -147,10 +151,11 @@ fn assert_read_once(repo: &Repo, args: &[&str]) {
 }
 
 /// Claim: `arc check` of an open or an integrated change reads the ledger
-/// once: one repository materialization and one scope, every ledger file read
-/// once and no change reduced twice, however many changes the ledger holds.
-/// Rejects a check whose report, debt and review-queue reads each read and
-/// reduce the whole ledger again.
+/// once: one repository materialization, one scope and one read of the
+/// replica state, every ledger file read once and no change reduced twice,
+/// however many changes the ledger holds. Rejects a check whose report, debt
+/// and review-queue reads each read and reduce the whole ledger again, and a
+/// scope or an authority refusal that reads the replica state for itself.
 #[test]
 fn check_reads_the_ledger_once_however_many_changes() {
     let repo = ledger_with_import();
@@ -276,6 +281,62 @@ fn a_queued_landing_reads_its_change_once_before_the_locks() {
 /// The repository materializations a one-member queue makes.
 const QUEUED_MATERIALIZATIONS: u64 = 9;
 
+/// The trace record and the integration event of landing a fresh approved
+/// change in a store that holds integration authority as replica `authority`,
+/// in a ledger holding `extra` more changes, and the event that granted the
+/// authority.
+fn replica_integration_reads(extra: usize) -> (Value, Value, String) {
+    let repo = ledger_with_import();
+    repo.arc(&repo.root)
+        .args(["replica", "init", "authority"])
+        .assert()
+        .success();
+    add_changes(&repo, 0, extra);
+    let (landing, worktree, _) = change_with_patchset(&repo, "landing");
+    repo.arc(&worktree)
+        .args(["review", "landing", "--verdict", "approved"])
+        .assert()
+        .success();
+    let (record, _, code) = traced(&repo, &repo.root, &["integrate", "landing"]);
+    assert_eq!(code, Some(0), "{record}");
+    let integrated = stdout(repo.arc(&repo.root).args(["events", "--change", &landing]))
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|event| event["event_type"] == "change-integrated")
+        .expect("the landing records its integration");
+    let replica_events = repo.root.join(".git/arc/replicas/events");
+    let grants: Vec<String> = fs::read_dir(replica_events)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            path.file_stem().unwrap().to_string_lossy().into_owned()
+        })
+        .collect();
+    assert_eq!(grants.len(), 1, "one replica event: {grants:?}");
+    (record, integrated, grants[0].clone())
+}
+
+/// Claim: `arc integrate` reads the replica state once, whatever it derives
+/// from it and however many changes the ledger holds: the authority refusal,
+/// every scope derivation, the readiness reports' refusals and the authority
+/// the integration records all answer from the read made under the
+/// replica-state lock it holds throughout, which every replica write takes.
+/// The integration still records the grant that authorizes it. Rejects a
+/// scope derivation, refusal check or authority observation that reads the
+/// replica state for itself.
+#[test]
+fn integrate_reads_the_replica_state_once_however_many_changes() {
+    for extra in [1, 5] {
+        let (record, integrated, grant) = replica_integration_reads(extra);
+        assert_eq!(record["counts"]["replica_materializations"], 1, "{record}");
+        assert_eq!(integrated["authority_grant_event_id"], grant.as_str());
+    }
+    for extra in [1, 5] {
+        let (record, _, _) = integration_reads(extra);
+        assert_eq!(record["counts"]["replica_materializations"], 1, "{record}");
+    }
+}
+
 /// Open a change on `base` blocked by `blocked_by`, commit to it, snapshot
 /// and approve it.
 fn approved_on(repo: &Repo, slug: &str, base: &str, blocked_by: &[String]) {
@@ -332,6 +393,10 @@ fn integrate_reads_prerequisites_through_one_read() {
             "/counts/repository_materializations",
         ),
         ("scope derivations", "/counts/scope_derivations"),
+        (
+            "replica materializations",
+            "/counts/replica_materializations",
+        ),
         ("import enumerations", "/ledger/import/enumerations"),
     ] {
         assert_eq!(
