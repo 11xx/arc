@@ -612,41 +612,11 @@ fn a_gate_the_top_member_adds_fails_and_nothing_closes() {
         .any(|event| event["event_type"] == "landing-abandoned"));
 }
 
-/// Claim: a membership that does not form one chain on the target refuses
-/// before anything is written, naming the member that does not stand on its
-/// predecessor. Rejects a landing that replays, or that moves the target to
-/// the last member while skipping another.
-#[test]
-fn members_that_do_not_chain_refuse_naming_them() {
-    let repo = gated_repo();
-    let (first, _, _) = reviewed_change(&repo, "first", None);
-    let (second, _, _) = reviewed_change(&repo, "second", None);
-    let before = git_out(&repo.root, &["rev-parse", "master"]);
-    let refused = repo
-        .arc(&repo.root)
-        .args(["land", &first, &second])
-        .output()
-        .unwrap();
-    assert_eq!(refused.status.code(), Some(11), "{}", stderr_of(&refused));
-    assert!(
-        stderr_of(&refused).contains(&second),
-        "{}",
-        stderr_of(&refused)
-    );
-    assert!(
-        !stderr_of(&refused).contains(&format!("{first} stands")),
-        "{}",
-        stderr_of(&refused)
-    );
-    assert_eq!(git_out(&repo.root, &["rev-parse", "master"]), before);
-    assert!(!repository_events(&repo)
-        .iter()
-        .any(|event| event["event_type"] == "landing-prepared"));
-}
-
 /// Claim: a prerequisite that is an earlier member of the same landing is
-/// satisfied by it, and the authorization basis says so. Rejects reading the
-/// prerequisite as unintegrated, and a basis that names no landing.
+/// satisfied by it, and the authorization basis says so; members land in
+/// dependency order whatever order they are named in. Rejects reading the
+/// prerequisite as unintegrated, a basis that names no landing, and landing
+/// a member before its prerequisite.
 #[test]
 fn an_earlier_member_satisfies_a_prerequisite_inside_the_landing() {
     let repo = gated_repo();
@@ -667,17 +637,12 @@ fn an_earlier_member_satisfies_a_prerequisite_inside_the_landing() {
         .assert()
         .success();
 
-    let reversed = repo
-        .arc(&repo.root)
-        .args(["land", &upper, &lower])
-        .output()
-        .unwrap();
-    assert!(!reversed.status.success());
     repo.arc(&repo.root)
-        .args(["land", &lower, &upper])
+        .args(["land", &upper, &lower])
         .assert()
         .success();
     let report = status(&repo, &upper);
+    assert_eq!(report["closure"]["range_base"], lower_head.as_str());
     let prerequisite = &report["closure"]["authorization"]["prerequisites"][0];
     assert_eq!(prerequisite["change_id"], lower.as_str());
     assert_eq!(prerequisite["integrated_commit"], lower_head.as_str());
@@ -1223,8 +1188,7 @@ fn last_event_before_landing(repo: &Repo, change: &str) -> String {
     change_events(repo, change)
         .into_iter()
         .map(|event| event["event_id"].as_str().unwrap().to_string())
-        .filter(|id| *id < completion)
-        .last()
+        .rfind(|id| *id < completion)
         .expect("events before the landing")
 }
 
@@ -1397,4 +1361,338 @@ fn replayed_unread_is_never_declared() {
         );
     }
     assert!(status(&repo, &change)["debt"].is_null());
+}
+
+/// Two approved changes, each on the target as it is now, both touching
+/// their own file.
+fn independent(repo: &Repo) -> ((String, PathBuf, String), (String, PathBuf, String)) {
+    let first = reviewed_change(repo, "first", None);
+    let second = reviewed_change(repo, "second", None);
+    (first, second)
+}
+
+fn verdict_of(repo: &Repo, change: &str) -> String {
+    change_events(repo, change)
+        .into_iter()
+        .rev()
+        .find(|event| event["event_type"] == "verdict-recorded")
+        .expect("a verdict")["event_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// Claim: members that do not stack land composed: each is replayed in
+/// landing order onto the head the members before it left, and a member
+/// whose exact patchset was approved on another base lands only under
+/// `--debt`, carrying `replayed-unread` naming that approval, while a member
+/// that stands where it lands carries none. Each member's closure is its own
+/// range in the composed history. Rejects landing the replayed member on an
+/// approval that never read its new base, debt on a member that was not
+/// replayed, a rewrite map naming trial commits, and a member whose
+/// integrated diff shows another member's work.
+#[test]
+fn independent_approved_members_land_composed_and_the_replayed_one_owes_its_context() {
+    let repo = gated_repo();
+    let ((first, _, first_head), (second, _, second_head)) = independent(&repo);
+    let before = git_out(&repo.root, &["rev-parse", "master"]);
+
+    let refused = repo
+        .arc(&repo.root)
+        .args(["land", &first, &second])
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(3), "{}", stderr_of(&refused));
+    assert!(
+        stderr_of(&refused).contains(&second),
+        "{}",
+        stderr_of(&refused)
+    );
+    assert!(
+        stderr_of(&refused).contains("replayed-unread"),
+        "{}",
+        stderr_of(&refused)
+    );
+    assert!(!stderr_of(&refused).contains(&format!("{first}'s")));
+    assert_eq!(git_out(&repo.root, &["rev-parse", "master"]), before);
+    assert!(!repository_events(&repo)
+        .iter()
+        .any(|event| event["event_type"] == "landing-prepared"));
+
+    let plan = json_stdout(repo.arc(&repo.root).args([
+        "land",
+        &first,
+        &second,
+        "--debt",
+        "context unread",
+        "--dry-run",
+        "--json",
+    ]));
+    assert_eq!(plan["shape"], "composed", "{plan:#}");
+    assert_eq!(plan["members"][0]["replayed"], false);
+    assert_eq!(plan["members"][1]["replayed"], true);
+    assert!(plan["target_after"].is_null(), "{plan:#}");
+
+    let landed = repo
+        .arc(&repo.root)
+        .args(["land", &first, &second, "--debt", "context unread"])
+        .output()
+        .unwrap();
+    assert!(landed.status.success(), "{}", stderr_of(&landed));
+    let after = git_out(&repo.root, &["rev-parse", "master"]);
+    assert_ne!(after, second_head);
+    assert_eq!(git_out(&repo.root, &["rev-parse", "master^"]), first_head);
+    assert_eq!(git_out(&repo.root, &["rev-parse", "HEAD"]), after);
+
+    let first_report = status(&repo, &first);
+    assert_eq!(first_report["closure"]["outcome"], "integrated");
+    assert_eq!(first_report["closure"]["range_base"], before.as_str());
+    assert_eq!(
+        first_report["closure"]["integrated_commit"],
+        first_head.as_str()
+    );
+    assert!(first_report["debt"].is_null(), "{first_report}");
+
+    let second_report = status(&repo, &second);
+    let closure = &second_report["closure"];
+    assert_eq!(closure["outcome"], "integrated", "{second_report}");
+    assert_eq!(closure["target_before"], before.as_str());
+    assert_eq!(closure["range_base"], first_head.as_str());
+    assert_eq!(closure["integrated_commit"], after.as_str());
+    assert_eq!(closure["source_head"], second_head.as_str());
+    assert_eq!(
+        closure["landing"]["attempt"],
+        first_report["closure"]["landing"]["attempt"]
+    );
+    let debt = &second_report["debt"];
+    assert_eq!(debt["missing"], "replayed-unread", "{second_report}");
+    assert_eq!(
+        debt["replayed"]["approval"],
+        verdict_of(&repo, &second).as_str()
+    );
+    assert_eq!(debt["replayed"]["base"], before.as_str());
+    assert_eq!(debt["replayed"]["parent"], first_head.as_str());
+    assert_eq!(second_report["debt_standing"], "owed", "{second_report}");
+
+    let completion = repository_events(&repo)
+        .into_iter()
+        .find(|event| event["event_type"] == "landing-completed")
+        .unwrap();
+    assert_eq!(
+        completion["members"][1]["debt"]["replayed"]["approval"],
+        verdict_of(&repo, &second).as_str()
+    );
+    assert!(completion["members"][0]["debt"].is_null());
+    assert!(!repository_events(&repo)
+        .iter()
+        .any(|event| event["event_type"] == "history-rewritten"));
+    assert_eq!(
+        git_out(&repo.root, &["for-each-ref", "refs/arc/landing"]),
+        ""
+    );
+    let diff = stdout(
+        repo.arc(&repo.root)
+            .args(["diff", &second, "--integrated", "--stat"]),
+    );
+    assert!(
+        diff.contains("second.txt") && !diff.contains("first.txt"),
+        "{diff}"
+    );
+}
+
+/// Claim: a `replayed-unread` debt is discharged by a clearing audit of the
+/// revision that landed. Rejects an obligation an audit of what landed
+/// leaves owed.
+#[test]
+fn an_audit_of_the_landed_revision_discharges_replayed_unread() {
+    let repo = gated_repo();
+    let ((first, _, _), (second, _, _)) = independent(&repo);
+    repo.arc(&repo.root)
+        .args(["land", &first, &second, "--debt", "context unread"])
+        .assert()
+        .success();
+    assert_eq!(status(&repo, &second)["debt_standing"], "owed");
+    let audited = repo
+        .arc(&repo.root)
+        .env("ARC_ACTOR", "auditor")
+        .args([
+            "audit",
+            &second,
+            "--verdict",
+            "approved",
+            "--body",
+            "read it landed",
+        ])
+        .output()
+        .unwrap();
+    assert!(audited.status.success(), "{}", stderr_of(&audited));
+    let report = status(&repo, &second);
+    assert_eq!(report["debt_standing"], "discharged", "{report}");
+    assert_eq!(
+        report["debt"]["discharged_by_event_id"]
+            .as_str()
+            .map(|id| change_events(&repo, &second)
+                .iter()
+                .any(|event| event["event_id"] == id
+                    && event["event_type"] == "audit-verdict-recorded")),
+        Some(true),
+        "{report}"
+    );
+}
+
+/// Claim: a member that conflicts when replayed stops the attempt: nothing
+/// closes, the target does not move, and the refusal names the member with
+/// `arc rebase`. Rejects resolving a conflict inside a landing, and an
+/// attempt that closes the members before the conflict.
+#[test]
+fn a_member_that_conflicts_on_replay_closes_nothing_and_names_the_rebase() {
+    let repo = gated_repo();
+    let mut changes = Vec::new();
+    for slug in ["left", "right"] {
+        let change_id = opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", slug])));
+        let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+        repo.commit(
+            &worktree,
+            "shared.txt",
+            &format!("{slug}\n"),
+            &format!("feat: {slug}"),
+        );
+        stdout(repo.arc(&worktree).args(["snapshot", slug]));
+        repo.arc(&worktree)
+            .args(["review", slug, "--verdict", "approved"])
+            .assert()
+            .success();
+        changes.push(change_id);
+    }
+    let before = git_out(&repo.root, &["rev-parse", "master"]);
+    let refused = repo
+        .arc(&repo.root)
+        .args(["land", &changes[0], &changes[1], "--debt", "context unread"])
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(11), "{}", stderr_of(&refused));
+    assert!(
+        stderr_of(&refused).contains(&format!("arc rebase {}", changes[1])),
+        "{}",
+        stderr_of(&refused)
+    );
+    assert_eq!(git_out(&repo.root, &["rev-parse", "master"]), before);
+    for change in &changes {
+        let report = status(&repo, change);
+        assert!(report["closure"].is_null(), "{report}");
+        assert!(report["pending_landing"].is_null(), "{report}");
+    }
+    assert!(repository_events(&repo)
+        .iter()
+        .any(|event| event["event_type"] == "landing-abandoned"));
+    assert_eq!(
+        git_out(&repo.root, &["for-each-ref", "refs/arc/landing"]),
+        ""
+    );
+}
+
+/// Claim: a composed attempt whose gate fails at the composed head closes
+/// nothing and leaves no trace in revision resolution: each member's
+/// patchsets read as before, no rewrite map names a trial commit, and
+/// nothing pins the trial head. Rejects publishing the replay's
+/// correspondence as a rewrite, which would make every reader follow a
+/// member's head to commits that never landed.
+#[test]
+fn a_failed_composed_attempt_leaves_no_trial_commit_in_revision_resolution() {
+    let repo = Repo::new();
+    repo.redeclare_gates(
+        "[gates.alone]\ncommand = \"test ! -f first.txt || test ! -f second.txt\"\n",
+    );
+    let ((first, _, _), (second, _, _)) = independent(&repo);
+    let shown = |change: &str| {
+        json_stdout(repo.arc(&repo.root).args(["show", change, "--json"]))["patchsets"].clone()
+    };
+    let before = [shown(&first), shown(&second)];
+    let master = git_out(&repo.root, &["rev-parse", "master"]);
+    let failed = repo
+        .arc(&repo.root)
+        .args(["land", &first, &second, "--debt", "context unread"])
+        .output()
+        .unwrap();
+    assert_eq!(failed.status.code(), Some(5), "{}", stderr_of(&failed));
+    let trial = String::from_utf8_lossy(&failed.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("composed: ").map(str::to_string))
+        .expect("the attempt composed a head");
+    assert_eq!(git_out(&repo.root, &["rev-parse", "master"]), master);
+    assert_eq!([shown(&first), shown(&second)], before);
+    for change in [&first, &second] {
+        assert!(status(&repo, change)["closure"].is_null());
+    }
+    assert!(!repository_events(&repo)
+        .iter()
+        .any(|event| event["event_type"] == "history-rewritten"));
+    assert_eq!(
+        git_out(&repo.root, &["for-each-ref", "refs/arc/landing"]),
+        ""
+    );
+    assert!(
+        !git_out(&repo.root, &["for-each-ref", "--contains", &trial]).contains("refs/"),
+        "a ref still holds the trial head {trial}"
+    );
+}
+
+/// Claim: a composed attempt gates in a checkout it owns: a slot it leases
+/// when the repository declares `[slots]`, released once the gates ran,
+/// and otherwise a worktree of its own, removed afterwards. Rejects gating
+/// in a member's checkout, which holds no composed head, and an attempt
+/// that keeps its slot or leaves its worktree behind.
+#[test]
+fn a_composed_attempt_gates_in_a_checkout_it_owns_and_gives_it_back() {
+    let repo = gated_repo();
+    let ((first, _, _), (second, _, _)) = independent(&repo);
+    repo.arc(&repo.root)
+        .args(["land", &first, &second, "--debt", "context unread"])
+        .assert()
+        .success();
+    let leftovers: Vec<String> = fs::read_dir(repo.home.join(".worktrees"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains("landing-"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+
+    let repo = gated_repo();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/worktrees.toml"),
+        "[slots]\nsize = 1\nretain = [\"target\"]\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", "-A"]);
+    git(&repo.root, &["commit", "-m", "test: declare a slot pool"]);
+    let ((first, _, _), (second, _, _)) = independent(&repo);
+    let landed = repo
+        .arc(&repo.root)
+        .args(["land", &first, &second, "--debt", "context unread"])
+        .output()
+        .unwrap();
+    assert!(landed.status.success(), "{}", stderr_of(&landed));
+    let slot = repo.home.join(".worktrees/repo-slots/slot-01");
+    assert!(
+        String::from_utf8_lossy(&landed.stdout)
+            .contains(&format!("slot: slot-01 at {}", slot.display())),
+        "{}",
+        String::from_utf8_lossy(&landed.stdout)
+    );
+    let run = change_events(&repo, &second)
+        .into_iter()
+        .rev()
+        .find(|event| event["event_type"] == "verification-recorded")
+        .unwrap();
+    assert_eq!(
+        run["revision"],
+        git_out(&repo.root, &["rev-parse", "master"]).as_str()
+    );
+    let slots = json_stdout(repo.arc(&repo.root).args(["slots", "status", "--json"]));
+    assert!(slots["slots"][0]["lease"].is_null(), "{slots:#}");
+    assert_eq!(
+        git_out(&slot, &["rev-parse", "HEAD"]),
+        git_out(&repo.root, &["rev-parse", "master"])
+    );
 }

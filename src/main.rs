@@ -2789,29 +2789,41 @@ enum Cmd {
         #[arg(long = "route-version", value_name = "VERSION", requires = "debt")]
         route_version: Option<String>,
     },
-    /// Land a stack of changes on their target in one guarded transition
+    /// Land several changes on their target in one guarded transition
     ///
-    /// The members, in landing order, must already stack: the first's recorded
-    /// base is the target's current revision and each later member's base is
-    /// the previous member's head. Every open member of each must-land-together
+    /// The members land in dependency order: each after every member it is
+    /// `blocked_by`, ties in the order given; an earlier member satisfies a
+    /// prerequisite. A member whose recorded base is the revision before it
+    /// (the target for the first, the previous member's landed head after)
+    /// lands as it is; when every member does, the landing is a stack. Any
+    /// other member is replayed with `git replay` onto that revision, and the
+    /// landing is composed: its head is pinned by `refs/arc/landing/<attempt>`
+    /// and each member's original and landed commits are recorded in the
+    /// attempt's intent alone, never as a rewrite. A replay that conflicts
+    /// stops the attempt and names `arc rebase <member>`. A replayed member
+    /// whose own approval read its exact patchset lands only with `--debt`,
+    /// carrying `replayed-unread`. Every open member of each must-land-together
     /// component is named. Each member keeps its own approval and is judged
-    /// against the destination's policy at the revision the landing starts from;
-    /// a `blocked_by` prerequisite is satisfied by an earlier member. The gates
-    /// every member requires run once, at the top head, recording the attempt
-    /// on their evidence; a gate declared differently by two members, or one the
-    /// top head does not declare the same way, refuses. Under the commit guards
-    /// everything pinned is read again and any difference refuses naming the
-    /// field. The target and `refs/arc/landing-applied/<attempt>` move in one
-    /// ref transaction, the target checkout follows, and one `landing-completed`
+    /// against the destination's policy at the revision the landing starts
+    /// from. The gates every member requires run once: a stack's at its top
+    /// head, a composed landing's at its composed head in a checkout the
+    /// attempt owns (a leased slot when `[slots]` is declared, else a worktree
+    /// of its own), with the attempt on their evidence; a gate two members
+    /// declare differently refuses, and so, for a stack, does one the top head
+    /// does not declare the same way. Under the commit guards everything
+    /// pinned is read again and any difference refuses naming the field. The
+    /// target and `refs/arc/landing-applied/<attempt>` move in one ref
+    /// transaction, the target checkout follows, and one `landing-completed`
     /// event closes every member: each reads integrated via the landing, with
     /// its own range. Until then the members show `pending landing <attempt>`
     /// and refuse every other terminal transition. See `arc guide
     /// change-landing`
     #[command(
-        after_help = "Exit status: 0 when the landing completed, recovered, or was abandoned as asked; a refusal before anything moved exits with its blocker's `arc check` code (7 prerequisite, 19 lands-with, 20 a pending landing, 5 a gate failed at the top head); 1 for any other refusal, including a field that moved during the gate or an attempt recovery cannot finish; 17 when a paired replica does not hold integration authority."
+        after_help = "Exit status: 0 when the landing completed, recovered, or was abandoned as asked; a refusal before anything moved exits with its blocker's `arc check` code (3 an approval a replay would outrun without --debt, 7 prerequisite, 11 a replay that conflicts, 19 lands-with, 20 a pending landing, 5 a gate failed); 1 for any other refusal, including a field that moved during the gate or an attempt recovery cannot finish; 17 when a paired replica does not hold integration authority."
     )]
     Land {
-        /// The changes to land, in landing order
+        /// The changes to land; prerequisites among them come first, and the
+        /// order given breaks ties
         #[arg(required_unless_present_any = ["recover", "abandon"])]
         changes: Vec<String>,
         /// The branch to land on, for every member, as `integrate --into`
@@ -2819,7 +2831,9 @@ enum Cmd {
         #[arg(long)]
         target: Option<String>,
         /// Land members no approval covers, declaring for each the debt `arc
-        /// integrate --debt` would, carried inside the completion
+        /// integrate --debt` would, and replayed members whose approval read
+        /// another base, declaring `replayed-unread` naming that approval;
+        /// each debt is carried inside the completion
         #[arg(long, value_name = "REASON")]
         debt: Option<String>,
         /// Print the plan without writing anything

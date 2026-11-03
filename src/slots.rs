@@ -1287,6 +1287,94 @@ impl Leased {
         self.pool.free(&self.name, &self.token)
     }
 
+    /// Hold `commit` detached in the slot for a landing's gate run: create
+    /// the checkout when absent, else switch a clean, detached, owned
+    /// checkout holding no open change and no ignored path outside `retain`.
+    /// On a changed identity, discard the outputs built under the previous
+    /// one; then prepare the checkout. The exclusive use lock is let go, so
+    /// gates take it shared like any command run in a slot; the lease stays
+    /// until [`release_held`].
+    pub fn hold_detached(
+        self,
+        cwd: &Path,
+        declaration: &Declaration,
+        commit: &str,
+        open_change: Option<&str>,
+    ) -> Result<HeldSlot> {
+        let held = (|| -> Result<()> {
+            self.phase(Phase::Switching)?;
+            let path = &self.path;
+            let fresh = !path.exists();
+            if fresh {
+                gitio::git(
+                    cwd,
+                    &[
+                        "worktree",
+                        "add",
+                        "--no-checkout",
+                        "--detach",
+                        path.to_str().context("non-UTF8 worktree path")?,
+                        commit,
+                    ],
+                )?;
+                let admin = gitio::worktree_admin_dir(path)?;
+                let token = crate::ids::new_identifier();
+                gitio::write_worktree_owner_with_token(
+                    &admin,
+                    &self.pool.owner_id(&self.name),
+                    &token,
+                )?;
+                self.pool.update(&self.name, &self.token, |state| {
+                    state.owner = Some(Owner {
+                        admin: admin.display().to_string(),
+                        token,
+                    });
+                    state.identity = None;
+                    state.built = None;
+                })?;
+                gitio::populate_checkout(path)?;
+            } else {
+                let state = self.pool.read(&self.name)?;
+                self.pool.require_owned(cwd, &state)?;
+                if let Some(change) = open_change {
+                    bail!(
+                        "{} at {} still holds open change {change}",
+                        self.name,
+                        path.display()
+                    );
+                }
+                if let Some(branch) = gitio::current_branch(path)? {
+                    bail!(
+                        "{} at {} has branch {branch} checked out; a free slot is detached",
+                        self.name,
+                        path.display()
+                    );
+                }
+                require_reusable(path, &self.name, &declaration.retain)?;
+                gitio::git(path, &["switch", "--detach", commit])?;
+            }
+            let identity = identity(path, declaration)?;
+            let recorded = self.pool.read(&self.name)?.identity;
+            if recorded.as_deref() != Some(identity.as_str()) && !(fresh && recorded.is_none()) {
+                invalidate(path, declaration, cwd)?;
+            }
+            self.pool.update(&self.name, &self.token, |state| {
+                state.identity = Some(identity)
+            })?;
+            crate::warm_worktree::prepare(path)?;
+            self.phase(Phase::Recorded).map(|_| ())
+        })();
+        if let Err(error) = held {
+            return Err(error.context(self.kept()));
+        }
+        Ok(HeldSlot {
+            pool: self.pool,
+            name: self.name,
+            token: self.token,
+            path: self.path,
+        })
+    }
+
     /// Mark the lease recorded on its change.
     pub fn recorded(&self) -> Result<()> {
         self.phase(Phase::Recorded).map(|_| ())
@@ -1411,6 +1499,31 @@ fn invalidate(path: &Path, declaration: &Declaration, cwd: &Path) -> Result<()> 
         removed.len()
     );
     Ok(())
+}
+
+/// A slot leased with no change recorded on it, its checkout holding one
+/// commit detached.
+pub struct HeldSlot {
+    pub pool: Pool,
+    pub name: String,
+    pub token: String,
+    pub path: PathBuf,
+}
+
+/// Free a held slot, its checkout left detached where it is. A checkout a
+/// command still runs in, or one left dirty, keeps its lease, and the
+/// returned line names the release to run once it is resolved.
+pub fn release_held(held: &HeldSlot, cwd: &Path) -> Result<Option<String>> {
+    match detach(&held.pool, cwd, &held.name, &held.token, None, None)? {
+        Finished::Detached(_use) => {
+            held.pool.free(&held.name, &held.token)?;
+            Ok(None)
+        }
+        Finished::Kept(reason) => Ok(Some(format!(
+            "{reason}; {} keeps its lease: once resolved, run `arc slots release {} --token {}`",
+            held.name, held.name, held.token
+        ))),
+    }
 }
 
 /// What finishing a lease did with the checkout.

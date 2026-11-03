@@ -1095,6 +1095,146 @@ fn verify_against(
     Ok(if passed == total { 0 } else { 1 })
 }
 
+/// The gates a composed landing runs once, at the commit it composed.
+pub(crate) struct LandingGateRun<'a> {
+    /// The member the run is recorded on.
+    pub change_id: &'a str,
+    /// That member's state, read against the landing's target.
+    pub state: &'a ChangeState,
+    /// Every gate a member requires, each under the one declaration all of
+    /// them share.
+    pub gates: &'a [(String, gates::Gate)],
+    pub commit: &'a str,
+    pub tree: &'a str,
+    /// A checkout holding `commit`, where every gate runs.
+    pub checkout: &'a Path,
+    pub attempt: &'a str,
+}
+
+/// Run a composed landing's gates in its checkout, recording the evidence on
+/// one member with the landing named. A pass already recorded at the
+/// composed tree answers its gate under the rule every run follows: a
+/// tree-bound pass by tree, a commit-bound pass only at the composed commit.
+/// Returns the exit code and, per gate, the passing evidence that answers it
+/// at the composed commit.
+pub(crate) fn verify_landing_head(
+    ctx: &Ctx,
+    store: &Store,
+    run: LandingGateRun<'_>,
+) -> Result<(i32, BTreeMap<String, String>)> {
+    let event = GateEvent::Integration;
+    let required: Vec<(&String, &gates::Gate)> =
+        run.gates.iter().map(|(name, gate)| (name, gate)).collect();
+    let checkout_ctx = ctx.with_cwd(run.checkout.to_path_buf());
+    let run_id = start_verification_run_for_event(
+        ctx,
+        store,
+        run.change_id,
+        run.commit,
+        VerificationRunMode::Sequential,
+        true,
+        &required,
+        event,
+    )?;
+    let answering = || Answering {
+        tree: run.tree,
+        head: run.commit,
+        label: "green at the composed head",
+        against_target: None,
+    };
+    let environments = gate_environments(
+        run.checkout,
+        required.iter().map(|(name, gate)| (name.as_str(), *gate)),
+    )?;
+    let Partition {
+        reused,
+        delta_reuses,
+        to_run,
+    } = partition(
+        &checkout_ctx,
+        run.state,
+        required.clone(),
+        answering(),
+        &environments,
+        event,
+        true,
+    );
+    append_reuses(
+        ctx,
+        store,
+        run.change_id,
+        &run_id,
+        run.commit,
+        run.tree,
+        &reused,
+    )?;
+    append_delta_reuses(
+        ctx,
+        store,
+        run.change_id,
+        &run_id,
+        run.commit,
+        run.tree,
+        &delta_reuses,
+    )?;
+    let mut failed = 0;
+    for (name, gate) in to_run {
+        let code = record_verification(
+            &checkout_ctx,
+            store,
+            run.change_id,
+            VerificationInput {
+                run_id: Some(run_id.clone()),
+                probe: None,
+                gate: Some(name.clone()),
+                command: gate.command.clone(),
+                timeout_seconds: gate.timeout,
+                attested_result: None,
+                tested_revision: Some(run.commit.to_string()),
+                execution_host: None,
+                runner: None,
+                environment_identity: declared_environment(&environments, gate).map(str::to_owned),
+                note: None,
+                falsification: None,
+                against_target: None,
+                landing: Some(run.attempt.to_string()),
+            },
+        )?;
+        if code != 0 {
+            failed += 1;
+        }
+    }
+    let state = store.state(run.change_id)?;
+    let legacy_trees = status::legacy_evidence_trees(&state, &ctx.cwd);
+    let resolve_tree = |revision: &str| legacy_trees.get(revision).cloned();
+    let mut evidence = BTreeMap::new();
+    for (name, gate) in &required {
+        if let Some(found) = reusable_evidence_for_event(
+            &ctx.cwd,
+            &state,
+            name,
+            gate,
+            &answering(),
+            &resolve_tree,
+            declared_environment(&environments, gate),
+            event,
+        ) {
+            evidence.insert((*name).clone(), found.event_id.clone());
+        }
+    }
+    let total = required.len();
+    println!(
+        "gates: {}/{total} pass at the composed head",
+        total - failed.min(total)
+    );
+    let code = if failed == 0 && evidence.len() == total {
+        0
+    } else {
+        1
+    };
+    Ok((code, evidence))
+}
+
 /// The checkout a gate run belongs in, when it is not the invoking one.
 ///
 /// Gate evidence is counted at the change's head, so the tree a gate reads

@@ -237,6 +237,13 @@ struct MemberPin {
     patchset_id: String,
     base: String,
     head: String,
+    /// Whether the landing replays the member onto a base other than the
+    /// one its patchset records.
+    replayed: bool,
+    /// The approval of the exact patchset a replayed member carries, which
+    /// read its edit and not the base it lands on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replayed_approval: Option<String>,
     /// Where the change's branch stands now.
     branch_head: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -298,13 +305,39 @@ struct GateUnion {
 #[derive(Debug, Clone, Serialize)]
 struct Plan {
     schema: &'static str,
+    /// `stack` when every member stands on the one before it, the first on
+    /// the target; `composed` when arc replays a member onto another base.
+    shape: Shape,
     target_branch: String,
     target_before: String,
-    target_after: String,
-    tree: String,
+    /// The revision the landing installs: the top member's head for a
+    /// stack, the composed head once a composed landing has replayed.
+    target_after: Option<String>,
+    tree: Option<String>,
     members: Vec<MemberPin>,
     components: Vec<Vec<String>>,
     gates: BTreeMap<String, GateUnion>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum Shape {
+    Stack,
+    Composed,
+}
+
+impl Plan {
+    fn after(&self) -> &str {
+        self.target_after
+            .as_deref()
+            .expect("a landing about to move its target knows its head")
+    }
+
+    fn installed_tree(&self) -> &str {
+        self.tree
+            .as_deref()
+            .expect("a landing about to move its target knows its tree")
+    }
 }
 
 /// A plan with the readings authorization is built from.
@@ -313,6 +346,8 @@ struct Planned {
     states: Vec<ChangeState>,
     reports: Vec<crate::status::StatusReport>,
     declarations: Vec<crate::integration::Declarations>,
+    /// Every gate a member requires, under its one shared declaration.
+    gates: Vec<(String, crate::gates::Gate)>,
 }
 
 fn brief_digest(state: &ChangeState) -> Option<String> {
@@ -328,7 +363,7 @@ fn brief_digest(state: &ChangeState) -> Option<String> {
 /// Blockers a landing answers itself: gates run once at the top head, an
 /// earlier member satisfies a prerequisite, and the landing holds the whole
 /// component. Every other blocker refuses.
-fn landing_answers(blocker: crate::blockers::Blocker) -> bool {
+fn landing_answers(blocker: crate::blockers::Blocker, replayed: bool) -> bool {
     use crate::blockers::Blocker;
     matches!(
         blocker,
@@ -336,7 +371,27 @@ fn landing_answers(blocker: crate::blockers::Blocker) -> bool {
             | Blocker::MergedTreeUnevaluated
             | Blocker::BlockedByChanges
             | Blocker::LandsWith
-    )
+    ) || (replayed && blocker == Blocker::NeedsRebase)
+}
+
+/// The members in dependency order: each after every member it is
+/// `blocked_by`, ties kept in the order given. `None` when the prerequisites
+/// among them form a cycle.
+fn dependency_order(members: &[ChangeState]) -> Option<Vec<usize>> {
+    let ids: Vec<&str> = members.iter().map(|m| m.change_id.as_str()).collect();
+    let mut placed: Vec<usize> = Vec::new();
+    while placed.len() < members.len() {
+        let next = (0..members.len()).find(|index| {
+            !placed.contains(index)
+                && members[*index].blocked_by.iter().all(|prerequisite| {
+                    ids.iter()
+                        .position(|id| id == prerequisite)
+                        .is_none_or(|position| placed.contains(&position))
+                })
+        })?;
+        placed.push(next);
+    }
+    Some(placed)
 }
 
 /// Plan a stack landing of `references`. Reads only; a refusal carries the
@@ -370,6 +425,17 @@ fn plan(
             .with_context(|| format!("{id} cannot be read"))?;
         members.push(state);
     }
+    let Some(order) = dependency_order(&members) else {
+        return refuse(
+            Blocker::BlockedByChanges.exit_code(),
+            format!(
+                "the prerequisites among {} form a cycle, so no member can land first",
+                ids.join(", ")
+            ),
+        );
+    };
+    let members: Vec<ChangeState> = order.iter().map(|index| members[*index].clone()).collect();
+    let ids: Vec<String> = order.iter().map(|index| ids[*index].clone()).collect();
     let explicit_target = target;
     let target = match target {
         Some(target) => target.to_string(),
@@ -413,10 +479,13 @@ fn plan(
         );
     };
 
-    // The stack shape: each member stands on the one before it, the first on
-    // the target as it is now, and each branch holds its recorded patchset.
-    let mut unchained = Vec::new();
-    let mut expected_base = target_before.clone();
+    // A member stands where it lands when its recorded base is the revision
+    // before it: the target for the first, the previous member's landed head
+    // for the rest. Every other member is replayed onto that revision, and
+    // every member after a replayed one lands on a commit nobody recorded.
+    let mut replayed = Vec::new();
+    let mut tip = Some(target_before.clone());
+    let mut commits = 0usize;
     for member in &members {
         let Some(patchset) = member.latest_patchset() else {
             return refuse(
@@ -433,28 +502,40 @@ fn plan(
                 ),
             );
         }
-        if patchset.base != expected_base {
-            unchained.push(format!(
-                "{} stands on {}, not {}",
-                member.change_id,
-                crate::render::short_sha(&patchset.base),
-                crate::render::short_sha(&expected_base)
-            ));
+        let own: usize = gitio::git(
+            &ctx.cwd,
+            &[
+                "rev-list",
+                "--count",
+                &format!("{}..{}", patchset.base, patchset.head),
+            ],
+        )?
+        .trim()
+        .parse()?;
+        if own == 0 {
+            return refuse(
+                Blocker::NoValidApproval.exit_code(),
+                format!(
+                    "{}'s patchset {} has no commits to land",
+                    member.change_id, patchset.id
+                ),
+            );
         }
-        expected_base = patchset.head.clone();
+        commits += own;
+        let replays = tip.as_deref() != Some(patchset.base.as_str());
+        replayed.push(replays);
+        tip = (!replays).then(|| patchset.head.clone());
     }
-    if !unchained.is_empty() {
-        return refuse(
-            Blocker::NeedsRebase.exit_code(),
-            format!(
-                "the members do not stack on {target} at {} in the order given: {}",
-                crate::render::short_sha(&target_before),
-                unchained.join("; ")
-            ),
-        );
-    }
-    let target_after = expected_base;
-    let tree = gitio::commit_tree(&ctx.cwd, &target_after)?;
+    let shape = if replayed.contains(&true) {
+        Shape::Composed
+    } else {
+        Shape::Stack
+    };
+    let target_after = tip;
+    let tree = target_after
+        .as_deref()
+        .map(|after| gitio::commit_tree(&ctx.cwd, after))
+        .transpose()?;
 
     // Must-land-together components travel whole.
     let mut components: Vec<Vec<String>> = Vec::new();
@@ -513,22 +594,13 @@ fn plan(
         return refuse(
             1,
             format!(
-                "{target} integrates with a merge commit; a stack landing fast-forwards it, so \
+                "{target} integrates with a merge commit; a landing fast-forwards it, so \
                  integrate each member"
             ),
         );
     }
     if policy.integration_history == crate::policy::History::Squash {
-        let count: usize = gitio::git(
-            &ctx.cwd,
-            &[
-                "rev-list",
-                "--count",
-                &format!("{target_before}..{target_after}"),
-            ],
-        )?
-        .trim()
-        .parse()?;
+        let count = commits;
         if count > 1 {
             return refuse(
                 1,
@@ -546,6 +618,7 @@ fn plan(
     let mut projected_states = Vec::new();
     let mut declarations_used = Vec::new();
     let mut union: BTreeMap<String, GateUnion> = BTreeMap::new();
+    let mut gate_declarations: BTreeMap<String, crate::gates::Gate> = BTreeMap::new();
     let top_index = members.len() - 1;
     let mut top_gates: BTreeMap<String, String> = BTreeMap::new();
     for (index, member) in members.iter().enumerate() {
@@ -644,7 +717,7 @@ fn plan(
         let held_by_this_attempt =
             attempt.is_some() && member.pending_landing.as_deref() == attempt;
         if let Some(blocker) = report.blockers().iter().find(|blocker| {
-            !landing_answers(**blocker)
+            !landing_answers(**blocker, replayed[index])
                 && !(held_by_this_attempt && **blocker == Blocker::LandingPending)
         }) {
             let mut explanation = crate::render::blocker_explanation(&selected, &report);
@@ -658,8 +731,40 @@ fn plan(
             .context("a planned member has a patchset")?
             .clone();
         let approval = crate::integration::approval(&selected, &report, &patchset.id);
+        // An approval that read this exact patchset, standing on its own
+        // rather than through a waiver, read the edit at its recorded base.
+        // Replayed onto another base, the context it lands in went unread.
+        let replayed_approval =
+            (replayed[index] && planned_debt.is_none() && approval.audit_debt_event_id.is_none())
+                .then(|| {
+                    approval.verdict_event_id.clone().or_else(|| {
+                        approval
+                            .external_verdict
+                            .as_ref()
+                            .map(|external| external.event_id.clone())
+                    })
+                })
+                .flatten();
+        if let Some(read) = &replayed_approval {
+            let Some(reason) = debt else {
+                return refuse(
+                    Blocker::NoValidApproval.exit_code(),
+                    format!(
+                        "{}'s approval {read} read it on {}, and this landing replays it onto \
+                         another base its approval did not read (replayed-unread); land with \
+                         --debt <why>, or land it where it stands",
+                        member.change_id,
+                        crate::render::short_sha(&patchset.base)
+                    ),
+                );
+            };
+            planned_debt = Some(PlannedDebt {
+                kind: crate::model::DebtMissing::ReplayedUnread,
+                reason: reason.trim().to_string(),
+            });
+        }
         let declarations = ctx.declarations(&selected)?;
-        let required: Vec<(String, String, bool, String)> = declarations
+        let required: Vec<(String, String, bool, String, crate::gates::Gate)> = declarations
             .gates
             .required_for_event(&selected.profile, crate::model::GateEvent::Integration)
             .into_iter()
@@ -669,11 +774,12 @@ fn plan(
                     crate::gates::declaration_identity(gate),
                     gate.binds.is_tree(),
                     gate.command.clone(),
+                    (*gate).clone(),
                 )
             })
             .collect();
         let mut gates = BTreeMap::new();
-        for (name, identity, binds_tree, command) in required {
+        for (name, identity, binds_tree, command, declared) in required {
             let name = &name;
             match union.get_mut(name) {
                 Some(existing) if existing.identity != identity => {
@@ -689,6 +795,7 @@ fn plan(
                 }
                 Some(existing) => existing.required_by.push(member.change_id.clone()),
                 None => {
+                    gate_declarations.insert(name.clone(), declared);
                     union.insert(
                         name.clone(),
                         GateUnion {
@@ -712,6 +819,8 @@ fn plan(
             patchset_id: patchset.id.clone(),
             base: patchset.base.clone(),
             head: patchset.head.clone(),
+            replayed: replayed[index],
+            replayed_approval,
             branch_head: gitio::branch_head(&ctx.cwd, &member.branch).ok(),
             brief_digest: brief_digest(member),
             verdicts: member
@@ -751,9 +860,10 @@ fn plan(
         projected_states.push(selected);
         declarations_used.push(normalized);
     }
-    // One gate set runs, at the top head: every gate a member requires must
-    // be one the top head requires, under the same declaration.
-    for (name, gate) in &union {
+    // A stack runs one gate set at its top head: every gate a member
+    // requires must be one the top head requires, under the same
+    // declaration. A composed landing runs the union at its composed head.
+    for (name, gate) in union.iter().filter(|_| shape == Shape::Stack) {
         if top_gates.get(name) != Some(&gate.identity) {
             return refuse(
                 Blocker::GatesNotGreen.exit_code(),
@@ -761,7 +871,7 @@ fn plan(
                     "{} requires gate {name:?}, which the top head {} does not declare the \
                      same way; the landing runs one gate set at the top head",
                     gate.required_by.join(", "),
-                    crate::render::short_sha(&target_after)
+                    crate::render::short_sha(target_after.as_deref().unwrap_or_default())
                 ),
             );
         }
@@ -769,6 +879,7 @@ fn plan(
     Ok(Ok(Planned {
         plan: Plan {
             schema: PLAN_SCHEMA,
+            shape,
             target_branch: target,
             target_before,
             target_after,
@@ -780,6 +891,7 @@ fn plan(
         states: projected_states,
         reports,
         declarations: declarations_used,
+        gates: gate_declarations.into_iter().collect(),
     }))
 }
 
@@ -911,13 +1023,20 @@ fn print_plan(plan: &Plan, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(plan)?);
         return Ok(());
     }
-    println!(
-        "land onto {} at {} -> {} (tree {})",
-        plan.target_branch,
-        crate::render::short_sha(&plan.target_before),
-        crate::render::short_sha(&plan.target_after),
-        crate::render::short_sha(&plan.tree)
-    );
+    match (&plan.target_after, &plan.tree) {
+        (Some(after), Some(tree)) => println!(
+            "land onto {} at {} -> {} (tree {})",
+            plan.target_branch,
+            crate::render::short_sha(&plan.target_before),
+            crate::render::short_sha(after),
+            crate::render::short_sha(tree)
+        ),
+        _ => println!(
+            "land onto {} at {}, composed by replaying the members marked replayed",
+            plan.target_branch,
+            crate::render::short_sha(&plan.target_before),
+        ),
+    }
     for (index, member) in plan.members.iter().enumerate() {
         let basis = match (&member.approval, &member.planned_debt) {
             (_, Some(debt)) => format!("debt {} would be declared", debt.kind.as_str()),
@@ -940,13 +1059,14 @@ fn print_plan(plan: &Plan, json: bool) -> Result<()> {
                 .unwrap_or_else(|| "no approval".into()),
         };
         println!(
-            "  {}. {} ({}) {} {}..{}: {basis}",
+            "  {}. {} ({}) {} {}..{}{}: {basis}",
             index + 1,
             member.slug,
             member.change_id,
             member.patchset_id,
             crate::render::short_sha(&member.base),
             crate::render::short_sha(&member.head),
+            if member.replayed { ", replayed" } else { "" },
         );
     }
     for component in &plan.components {
@@ -1023,7 +1143,8 @@ pub fn land(ctx: &Ctx, args: LandArgs) -> Result<i32> {
         print_plan(&planned.plan, args.json)?;
         return Ok(0);
     }
-    let pinned = planned.plan;
+    let mut pinned = planned.plan;
+    let gate_declarations = planned.gates;
     let member_ids: Vec<String> = pinned
         .members
         .iter()
@@ -1044,7 +1165,7 @@ pub fn land(ctx: &Ctx, args: LandArgs) -> Result<i32> {
             brief_digest: member.brief_digest.clone(),
         })
         .collect();
-    let intent = landing::Intent {
+    let mut intent = landing::Intent {
         schema: landing::INTENT_SCHEMA.into(),
         attempt: attempt.clone(),
         phase: landing::Phase::Prepared,
@@ -1052,6 +1173,7 @@ pub fn land(ctx: &Ctx, args: LandArgs) -> Result<i32> {
         target_before: pinned.target_before.clone(),
         target_after: pinned.target_after.clone(),
         members: pins.clone(),
+        composed: Vec::new(),
         completion: None,
     };
     store.write_landing_intent(&intent)?;
@@ -1072,73 +1194,312 @@ pub fn land(ctx: &Ctx, args: LandArgs) -> Result<i32> {
     println!("landing: {attempt}");
     crash_point("prepared");
 
-    // One gate run at the top head, with no ledger or change lock held: a
-    // gate command may itself run arc.
     let top = pinned
         .members
         .last()
         .context("a plan has members")?
         .change_id
         .clone();
-    let gated = super::gatekeeping::verify(
-        ctx,
-        &top,
-        super::gatekeeping::VerifyArgs {
-            event: Some(crate::model::GateEvent::Integration),
-            all: true,
-            parallel: false,
-            rerun: false,
-            gate: None,
-            command: None,
-            probe: None,
-            brief_version: None,
-            probe_phase: None,
-            attest: false,
-            after_integration: false,
-            result: None,
-            tested_revision: None,
-            execution_host: None,
-            runner: None,
-            environment: None,
-            note: None,
-            waive_dirty: None,
-            falsified_by: None,
-            predicted: None,
-            against: None,
-            bypass: None,
-            landing: Some(attempt.clone()),
-        },
-    );
-    let gate_code = match gated {
-        Ok(code) => code,
-        Err(error) => {
+    // A composed attempt replays first: the head it gates is the one it
+    // installs.
+    let composed_evidence = if pinned.shape == Shape::Composed {
+        if let Err(refusal) = compose(ctx, &store, &mut pinned, &mut intent)? {
+            abandon(ctx, &store, &attempt, &refusal.message)?;
+            eprintln!("Cannot land: {}; nothing closed", refusal.message);
+            return Ok(refusal.code);
+        }
+        crash_point("composed");
+        // The gates every member requires run once at the composed head, in
+        // a checkout the attempt owns, with no ledger or change lock held.
+        let gated = gate_composed(ctx, &store, &pinned, &gate_declarations, &top, &attempt);
+        match gated {
+            Ok((0, evidence)) => Some(evidence),
+            Ok(_) => {
+                abandon(
+                    ctx,
+                    &store,
+                    &attempt,
+                    "a required gate failed at the composed head",
+                )?;
+                eprintln!(
+                    "Cannot land: a required gate failed at the composed head; nothing closed"
+                );
+                return Ok(crate::blockers::Blocker::GatesNotGreen.exit_code());
+            }
+            Err(error) => {
+                abandon(
+                    ctx,
+                    &store,
+                    &attempt,
+                    &format!("gates did not run: {error:#}"),
+                )?;
+                return Err(error);
+            }
+        }
+    } else {
+        // One gate run at the top head, with no ledger or change lock held:
+        // a gate command may itself run arc.
+        let gated = super::gatekeeping::verify(
+            ctx,
+            &top,
+            super::gatekeeping::VerifyArgs {
+                event: Some(crate::model::GateEvent::Integration),
+                all: true,
+                parallel: false,
+                rerun: false,
+                gate: None,
+                command: None,
+                probe: None,
+                brief_version: None,
+                probe_phase: None,
+                attest: false,
+                after_integration: false,
+                result: None,
+                tested_revision: None,
+                execution_host: None,
+                runner: None,
+                environment: None,
+                note: None,
+                waive_dirty: None,
+                falsified_by: None,
+                predicted: None,
+                against: None,
+                bypass: None,
+                landing: Some(attempt.clone()),
+            },
+        );
+        let gate_code = match gated {
+            Ok(code) => code,
+            Err(error) => {
+                abandon(
+                    ctx,
+                    &store,
+                    &attempt,
+                    &format!("gates did not run: {error:#}"),
+                )?;
+                return Err(error);
+            }
+        };
+        if gate_code != 0 {
             abandon(
                 ctx,
                 &store,
                 &attempt,
-                &format!("gates did not run: {error:#}"),
+                "a required gate failed at the top head",
             )?;
-            return Err(error);
+            eprintln!("Cannot land: a required gate failed at the top head; nothing closed");
+            return Ok(crate::blockers::Blocker::GatesNotGreen.exit_code());
         }
+        None
     };
-    if gate_code != 0 {
-        abandon(
-            ctx,
-            &store,
-            &attempt,
-            "a required gate failed at the top head",
-        )?;
-        eprintln!("Cannot land: a required gate failed at the top head; nothing closed");
-        return Ok(crate::blockers::Blocker::GatesNotGreen.exit_code());
-    }
     crash_point("gated");
     super::pause_until_released("ARC_LAND_PAUSE")?;
 
-    commit(ctx, &store, &args, pinned, &observed, intent, started_at)
+    commit(
+        ctx,
+        &store,
+        &args,
+        pinned,
+        &observed,
+        intent,
+        started_at,
+        composed_evidence,
+    )
+}
+
+/// Replay every member the plan marks replayed, in landing order, onto the
+/// head the members before it left, and pin the result. Each member's
+/// original commits and the commits they landed as are recorded in the
+/// intent alone, so nothing outside the attempt resolves a trial commit. A
+/// conflict stops the attempt, naming the member and the rebase that gives
+/// it a reviewable patchset on the target.
+fn compose(
+    ctx: &Ctx,
+    store: &Store,
+    plan: &mut Plan,
+    intent: &mut landing::Intent,
+) -> Result<std::result::Result<(), Refusal>> {
+    let mut tip = plan.target_before.clone();
+    let mut composed = Vec::new();
+    for member in &plan.members {
+        let landed = if member.replayed {
+            match gitio::replay_range(&ctx.cwd, &member.base, &member.head, &tip)? {
+                gitio::RangeReplay::Replayed { tip } => tip,
+                gitio::RangeReplay::Conflict { detail } => {
+                    return refuse(
+                        crate::blockers::Blocker::NeedsRebase.exit_code(),
+                        format!(
+                            "{} conflicts when replayed onto {}{}; give it a patchset on \
+                             the target with `arc rebase {}`, have it reviewed, and land again",
+                            member.change_id,
+                            crate::render::short_sha(&tip),
+                            if detail.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" ({})", detail.lines().next().unwrap_or_default())
+                            },
+                            member.change_id
+                        ),
+                    );
+                }
+            }
+        } else {
+            member.head.clone()
+        };
+        let original = gitio::git(
+            &ctx.cwd,
+            &[
+                "rev-list",
+                "--reverse",
+                &format!("{}..{}", member.base, member.head),
+            ],
+        )?;
+        let replayed = gitio::git(
+            &ctx.cwd,
+            &["rev-list", "--reverse", &format!("{tip}..{landed}")],
+        )?;
+        let original: Vec<&str> = original.lines().collect();
+        let replayed: Vec<&str> = replayed.lines().collect();
+        if original.len() != replayed.len() {
+            return refuse(
+                crate::blockers::Blocker::NeedsRebase.exit_code(),
+                format!(
+                    "{} replayed onto {} as {} commits from {}; give it a patchset on the \
+                     target with `arc rebase {}`",
+                    member.change_id,
+                    crate::render::short_sha(&tip),
+                    replayed.len(),
+                    original.len(),
+                    member.change_id
+                ),
+            );
+        }
+        composed.push(landing::ComposedMember {
+            change_id: member.change_id.clone(),
+            parent: tip.clone(),
+            tip: landed.clone(),
+            commits: original
+                .iter()
+                .zip(&replayed)
+                .map(|(from, to)| (from.to_string(), to.to_string()))
+                .collect(),
+        });
+        tip = landed;
+    }
+    gitio::update_ref(&ctx.cwd, &landing::pin_ref(&intent.attempt), &tip)?;
+    plan.tree = Some(gitio::commit_tree(&ctx.cwd, &tip)?);
+    plan.target_after = Some(tip.clone());
+    intent.target_after = Some(tip.clone());
+    intent.composed = composed;
+    store.write_landing_intent(intent)?;
+    println!("composed: {tip}");
+    Ok(Ok(()))
+}
+
+/// The checkout a composed attempt gates in: a leased slot when the
+/// repository declares `[slots]`, otherwise a worktree of its own under the
+/// worktrees directory. Either is released or removed when it drops.
+enum GateCheckout {
+    Slot(crate::slots::HeldSlot, std::path::PathBuf),
+    Scratch(super::gatekeeping::ScratchWorktree),
+}
+
+impl GateCheckout {
+    fn path(&self) -> &std::path::Path {
+        match self {
+            GateCheckout::Slot(held, _) => &held.path,
+            GateCheckout::Scratch(scratch) => &scratch.path,
+        }
+    }
+}
+
+impl Drop for GateCheckout {
+    fn drop(&mut self) {
+        if let GateCheckout::Slot(held, cwd) = self {
+            match crate::slots::release_held(held, cwd) {
+                Ok(None) => {}
+                Ok(Some(kept)) => eprintln!("warning: {kept}"),
+                Err(error) => eprintln!(
+                    "warning: {} keeps its lease ({error:#}); once resolved, run `arc slots \
+                     release {} --token {}`",
+                    held.name, held.name, held.token
+                ),
+            }
+        }
+    }
+}
+
+fn gate_checkout(ctx: &Ctx, store: &Store, attempt: &str, commit: &str) -> Result<GateCheckout> {
+    let toplevel = gitio::toplevel(&ctx.cwd)?;
+    if let Some(declaration) = crate::warm_worktree::slot_declaration(&toplevel, true)? {
+        let pool = crate::slots::Pool::declared(&ctx.cwd, &declaration)?;
+        let branch = format!("landing/{attempt}");
+        let leased = crate::slots::lease(
+            &ctx.cwd,
+            pool,
+            &declaration,
+            &crate::slots::LeaseRequest {
+                change_id: Some(attempt),
+                branch: Some(&branch),
+                target: commit,
+                actor: Some(&ctx.actor),
+                session: ctx.session.as_deref(),
+            },
+        )?;
+        let path = crate::config::resolved(&leased.path);
+        let states = store.readable_states()?;
+        let open_change = states
+            .values()
+            .filter(|state| state.closure.is_none())
+            .find(|state| {
+                state.worktree.as_deref().is_some_and(|worktree| {
+                    crate::config::resolved(std::path::Path::new(worktree)) == path
+                })
+            })
+            .map(|state| state.change_id.clone());
+        let held = leased.hold_detached(&ctx.cwd, &declaration, commit, open_change.as_deref())?;
+        println!("slot: {} at {}", held.name, held.path.display());
+        return Ok(GateCheckout::Slot(held, ctx.cwd.clone()));
+    }
+    let path = super::lifecycle::worktree_path_for(&ctx.cwd, &format!("landing-{attempt}"))?;
+    Ok(GateCheckout::Scratch(
+        super::gatekeeping::ScratchWorktree::create(&ctx.cwd, path, commit)?,
+    ))
+}
+
+/// Run the gates every member requires, once, at the composed head,
+/// recorded on the top member.
+fn gate_composed(
+    ctx: &Ctx,
+    store: &Store,
+    plan: &Plan,
+    gates: &[(String, crate::gates::Gate)],
+    top: &str,
+    attempt: &str,
+) -> Result<(i32, BTreeMap<String, String>)> {
+    let commit = plan.after().to_string();
+    let tree = plan.installed_tree().to_string();
+    let checkout = gate_checkout(ctx, store, attempt, &commit)?;
+    let mut state = store.state(top)?;
+    state.target_branch = plan.target_branch.clone();
+    super::gatekeeping::verify_landing_head(
+        ctx,
+        store,
+        super::gatekeeping::LandingGateRun {
+            change_id: top,
+            state: &state,
+            gates,
+            commit: &commit,
+            tree: &tree,
+            checkout: checkout.path(),
+            attempt,
+        },
+    )
 }
 
 /// Revalidate under the commit guards, authorize, move the target, and
 /// publish the completion.
+#[allow(clippy::too_many_arguments)]
 fn commit(
     ctx: &Ctx,
     store: &Store,
@@ -1147,6 +1508,7 @@ fn commit(
     observed: &serde_json::Value,
     mut intent: landing::Intent,
     started_at: chrono::DateTime<chrono::Utc>,
+    composed_evidence: Option<BTreeMap<String, String>>,
 ) -> Result<i32> {
     let attempt = intent.attempt.clone();
     let _authority = crate::replica::lock(store)?;
@@ -1184,7 +1546,7 @@ fn commit(
         abandon_locked(ctx, store, &attempt, &format!("stale-{field}"))?;
         bail!("{field} moved while landing {attempt} was gated; nothing closed, land again");
     }
-    let fresh = match plan(
+    let mut fresh = match plan(
         ctx,
         store,
         &references,
@@ -1199,6 +1561,11 @@ fn commit(
             return Ok(refusal.code);
         }
     };
+    // A plan does not replay; the head this attempt composed is its own.
+    if fresh.plan.shape == Shape::Composed && pinned.shape == Shape::Composed {
+        fresh.plan.target_after = pinned.target_after.clone();
+        fresh.plan.tree = pinned.tree.clone();
+    }
     if let Some(field) = moved_field(&pinned, &fresh.plan)? {
         abandon_locked(ctx, store, &attempt, &format!("stale-{field}"))?;
         bail!("{field} moved while landing {attempt} was gated; nothing closed, land again");
@@ -1206,8 +1573,12 @@ fn commit(
     let plan = fresh.plan;
     let top_index = plan.members.len() - 1;
     let top_report = &fresh.reports[top_index];
-    let mut gate_evidence = BTreeMap::new();
-    for gate in &top_report.gates {
+    let mut gate_evidence = composed_evidence.clone().unwrap_or_default();
+    for gate in top_report
+        .gates
+        .iter()
+        .filter(|_| composed_evidence.is_none())
+    {
         if !plan.gates.contains_key(&gate.name) {
             continue;
         }
@@ -1257,7 +1628,11 @@ fn commit(
                 bail!("{} is not at {}", path.display(), plan.target_before);
             }
             super::gatekeeping::checkout_tracked_dirt(path)?;
-            super::gatekeeping::checkout_writes(&checkout, &plan.target_before, Some(&plan.tree))
+            super::gatekeeping::checkout_writes(
+                &checkout,
+                &plan.target_before,
+                Some(plan.installed_tree()),
+            )
         })();
         if let Err(error) = refusal {
             abandon_locked(ctx, store, &attempt, &format!("target checkout: {error:#}"))?;
@@ -1284,14 +1659,34 @@ fn commit(
                 .map(|debt| {
                     let mut recorded = store.state(&member.change_id)?;
                     recorded.target_branch = plan.target_branch.clone();
-                    super::audit::plan_debt(
-                        ctx,
-                        store,
-                        &recorded,
-                        &debt.reason,
-                        None,
-                        &super::audit::IneligibleInputs::default(),
-                    )
+                    match (debt.kind, &member.replayed_approval) {
+                        (crate::model::DebtMissing::ReplayedUnread, Some(approval)) => {
+                            let landed = intent
+                                .composed
+                                .iter()
+                                .find(|composed| composed.change_id == member.change_id)
+                                .context("a replayed member has a composed record")?;
+                            super::audit::plan_replayed_debt(
+                                ctx,
+                                store,
+                                &recorded,
+                                &debt.reason,
+                                crate::model::ReplayedRead {
+                                    approval: approval.clone(),
+                                    base: member.base.clone(),
+                                    parent: landed.parent.clone(),
+                                },
+                            )
+                        }
+                        _ => super::audit::plan_debt(
+                            ctx,
+                            store,
+                            &recorded,
+                            &debt.reason,
+                            None,
+                            &super::audit::IneligibleInputs::default(),
+                        ),
+                    }
                 })
                 .transpose()
                 .map(|plan| plan.filter(|plan| plan.restated_event_id().is_none()))
@@ -1308,6 +1703,17 @@ fn commit(
             },
         )?
         .into_event();
+    // Each member's own landed range: where its first commit was placed and
+    // its last landed commit.
+    let landed_range = |index: usize| -> (String, String) {
+        let member = &plan.members[index];
+        intent
+            .composed
+            .iter()
+            .find(|composed| composed.change_id == member.change_id)
+            .map(|composed| (composed.parent.clone(), composed.tip.clone()))
+            .unwrap_or_else(|| (member.base.clone(), member.head.clone()))
+    };
     let built = |ids: Vec<String>| -> Result<landing::Intent> {
         let mut ids = ids.into_iter();
         let mut debt_ids = Vec::new();
@@ -1338,7 +1744,7 @@ fn commit(
                 prerequisites.push(crate::model::PrerequisiteClosure {
                     change_id: prerequisite.change_id.clone(),
                     closure_event_id: closure_ids[position].clone(),
-                    integrated_commit: Some(plan.members[position].head.clone()),
+                    integrated_commit: Some(landed_range(position).1),
                     landing: Some(attempt.clone()),
                 });
             }
@@ -1393,13 +1799,14 @@ fn commit(
                 _ => None,
             };
             let declarations = fresh.declarations[index].clone();
+            let (range_base, integrated_commit) = landed_range(index);
             landed.push(crate::model::LandedMember {
                 change_id: member.change_id.clone(),
                 closure_event_id: closure_ids[index].clone(),
                 source_patchset_id: member.patchset_id.clone(),
                 source_head: member.head.clone(),
-                range_base: member.base.clone(),
-                integrated_commit: member.head.clone(),
+                range_base,
+                integrated_commit,
                 authorization: crate::model::AuthorizationBasis {
                     selected_verdict_provenance,
                     verdict_event_id: approval.verdict_event_id,
@@ -1440,8 +1847,8 @@ fn commit(
             attempt: attempt.clone(),
             target_branch: plan.target_branch.clone(),
             target_before: plan.target_before.clone(),
-            target_after: plan.target_after.clone(),
-            tree: plan.tree.clone(),
+            target_after: plan.after().to_string(),
+            tree: plan.installed_tree().to_string(),
             gate_evidence: gate_evidence.clone(),
             members: landed,
             started_at: Some(started_at),
@@ -1463,12 +1870,12 @@ fn commit(
             gitio::RefUpdate {
                 name: target_ref.clone(),
                 old: plan.target_before.clone(),
-                new: plan.target_after.clone(),
+                new: plan.after().to_string(),
             },
             gitio::RefUpdate {
                 name: applied.clone(),
-                old: gitio::absent_oid(&plan.target_after),
-                new: plan.target_after.clone(),
+                old: gitio::absent_oid(plan.after()),
+                new: plan.after().to_string(),
             },
         ],
     ) {
@@ -1486,20 +1893,20 @@ fn commit(
         checkout.as_deref(),
         &plan.target_branch,
         &plan.target_before,
-        &plan.target_after,
+        plan.after(),
     ) {
         let rollback = gitio::update_refs(
             &ctx.cwd,
             &[
                 gitio::RefUpdate {
                     name: target_ref,
-                    old: plan.target_after.clone(),
+                    old: plan.after().to_string(),
                     new: plan.target_before.clone(),
                 },
                 gitio::RefUpdate {
                     name: applied,
-                    old: plan.target_after.clone(),
-                    new: gitio::absent_oid(&plan.target_after),
+                    old: plan.after().to_string(),
+                    new: gitio::absent_oid(plan.after()),
                 },
             ],
         );
@@ -1594,7 +2001,7 @@ fn finish(ctx: &Ctx, store: &Store, intent: &landing::Intent) -> Result<()> {
         .context("a published landing intent holds its completion")?;
     println!(
         "landed: {} into {} ({} members)",
-        crate::render::short_sha(&intent.target_after),
+        crate::render::short_sha(intent.target_after.as_deref().unwrap_or_default()),
         intent.target_branch,
         intent.members.len()
     );
@@ -1613,7 +2020,18 @@ fn finish(ctx: &Ctx, store: &Store, intent: &landing::Intent) -> Result<()> {
     if gitio::ref_value(&ctx.cwd, &applied)?.is_some() {
         gitio::delete_ref(&ctx.cwd, &applied)?;
     }
+    release_pin(&ctx.cwd, &intent.attempt)?;
     store.clear_landing_intent(&intent.attempt)
+}
+
+/// Drop the pin on a composed attempt's head: the target holds it once the
+/// attempt completed, and nothing should once it was abandoned.
+fn release_pin(cwd: &std::path::Path, attempt: &str) -> Result<()> {
+    let pin = landing::pin_ref(attempt);
+    if gitio::ref_value(cwd, &pin)?.is_some() {
+        gitio::delete_ref(cwd, &pin)?;
+    }
+    Ok(())
 }
 
 /// Record that the attempt closes nothing. The caller holds no
@@ -1638,6 +2056,7 @@ fn abandon_locked(ctx: &Ctx, store: &Store, attempt: &str, reason: &str) -> Resu
         store.append_local_repository_event(&mut event)?;
         println!("landing {attempt} abandoned: {reason}");
     }
+    release_pin(&ctx.cwd, attempt)?;
     store.clear_landing_intent(attempt)
 }
 
@@ -1647,7 +2066,7 @@ fn attempt_facts(store: &Store, attempt: &str) -> Result<(String, String, String
         return Ok((
             intent.target_branch,
             intent.target_before,
-            intent.target_after,
+            intent.target_after.unwrap_or_default(),
             intent
                 .members
                 .into_iter()
@@ -1713,6 +2132,7 @@ fn recover(ctx: &Ctx, attempt: &str) -> Result<i32> {
         if gitio::ref_value(&ctx.cwd, &applied)?.is_some() {
             gitio::delete_ref(&ctx.cwd, &applied)?;
         }
+        release_pin(&ctx.cwd, attempt)?;
         store.clear_landing_intent(attempt)?;
         return Ok(0);
     }
@@ -1720,6 +2140,7 @@ fn recover(ctx: &Ctx, attempt: &str) -> Result<i32> {
         if let Payload::LandingAbandoned { reason, .. } = &abandoned.payload {
             println!("landing {attempt} was abandoned: {reason}");
         }
+        release_pin(&ctx.cwd, attempt)?;
         store.clear_landing_intent(attempt)?;
         return Ok(0);
     }
@@ -1730,7 +2151,7 @@ fn recover(ctx: &Ctx, attempt: &str) -> Result<i32> {
         .as_ref()
         .filter(|intent| intent.phase >= landing::Phase::Authorized && intent.completion.is_some());
     match (authorized, applied.as_deref(), target_now.as_deref()) {
-        (Some(intent), Some(applied), _) if applied == intent.target_after => {
+        (Some(intent), Some(applied), _) if Some(applied) == intent.target_after.as_deref() => {
             let mut intent = intent.clone();
             let checkout = gitio::worktree_for_branch(&ctx.cwd, &target)?;
             if let Err(error) =

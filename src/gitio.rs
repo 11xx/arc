@@ -2568,6 +2568,57 @@ fn replay_with_plumbing(
     Ok(Some(tip))
 }
 
+/// How replaying a range onto another commit ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RangeReplay {
+    /// `git replay` wrote the range's commits onto the new parent; `tip` is
+    /// the last of them.
+    Replayed { tip: String },
+    /// A commit in the range conflicts with the new parent.
+    Conflict { detail: String },
+}
+
+/// Replay exactly the commits of `base..head` onto `onto` with `git replay`,
+/// in the same isolated repository [`replay`] uses, so no merge driver,
+/// filter or hook runs. Nothing in the project moves: the replayed commits
+/// are new objects in its database that no project ref names. A conflict is
+/// an outcome; any other failure is an error.
+pub fn replay_range(cwd: &Path, base: &str, head: &str, onto: &str) -> Result<RangeReplay> {
+    let base = rev_parse(cwd, base)?;
+    let head = rev_parse(cwd, head)?;
+    let onto = rev_parse(cwd, onto)?;
+    let replay = ReplayRepository::create(cwd)?;
+    let replay_ref = "refs/heads/arc-replay";
+    replay.git(&["update-ref", replay_ref, &head])?;
+    let mut command = replay.command();
+    command
+        .args([
+            "replay",
+            "--onto",
+            &onto,
+            "--ref",
+            replay_ref,
+            "--ref-action=update",
+            &format!("{base}..{replay_ref}"),
+        ])
+        .current_dir(&replay.dir);
+    let out = command_output(&mut command)
+        .with_context(|| format!("failed to run git in {}", replay.dir.display()))?;
+    if out.status.code() == Some(1) {
+        return Ok(RangeReplay::Conflict {
+            detail: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        });
+    }
+    if !out.status.success() {
+        bail!(
+            "git replay of {base}..{head} onto {onto} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let tip = replay.git(&["rev-parse", "--verify", &format!("{replay_ref}^{{commit}}")])?;
+    Ok(RangeReplay::Replayed { tip })
+}
+
 /// A temporary bare repository for one replay, sharing only the project's
 /// object database.
 ///

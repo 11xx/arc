@@ -39,7 +39,7 @@ pub struct GatesFile {
     pub conflicts: Vec<GateConflict>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Gate {
     pub command: String,
     /// A command whose output identifies the environment this gate's evidence

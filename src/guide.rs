@@ -1358,35 +1358,56 @@ RUN A CHANGE
   relation is withdrawn, and the remedy names that withdrawal.
 
   `arc land <change>... [--target T] [--debt <why>] [--dry-run [--json]]`
-  installs a stack in one guarded transition. The members, in landing
-  order, must already stack: the first's recorded base is the target's
-  current revision and each later member's base is the previous member's
-  head. Nothing is replayed, so a membership that does not chain refuses
-  naming the members. Every open member of each component is named, and a
-  `blocked_by` prerequisite is satisfied by an earlier member, which the
-  basis records as `landing <attempt>`. Each member keeps its own approval,
-  judged against the destination's policy at the revision the landing starts
-  from; with `--debt`, a member no approval covers carries the debt
-  `integrate --debt` would declare, inside the completion. A target that
+  installs several changes in one guarded transition. Members land in
+  dependency order: each after every member it is `blocked_by`, ties in the
+  order given; a cycle refuses. An earlier member satisfies a prerequisite,
+  which the basis records as `landing <attempt>`. A member whose recorded
+  base is the revision before it (the target for the first, the previous
+  member's landed head after) lands as it is. When every member does, the
+  landing is a stack and nothing is replayed. Otherwise it is composed:
+  every other member is replayed onto that revision with `git replay`, run
+  as `arc rebase` runs it, after the intent is written. The composed head is
+  pinned by `refs/arc/landing/<attempt>` until the target holds it or the
+  attempt ends. Each member's original commits and the commits they landed
+  as are recorded in the intent alone. No `history-rewritten` event is
+  written, so no revision resolution ever follows a member to a trial
+  commit. A replay that conflicts stops the attempt and closes nothing,
+  naming the member and `arc rebase <member>` (exit 11).
+
+  Every open member of each component is named. Each member keeps its own
+  approval, judged against the destination's policy at the revision the
+  landing starts from. A replayed member whose approval read its exact
+  patchset on its recorded base refuses (exit 3) unless `--debt`. With it,
+  the member carries `replayed-unread`, naming that approval, its base and
+  the parent it landed on (`arc guide debt-obligations`). With `--debt`, a
+  member no approval covers carries the debt `integrate --debt` would
+  declare. Each debt is carried inside the completion. A target that
   integrates with no-ff or receives contributions refuses, and
   `integration.history = squash` refuses more than one commit. `--dry-run`
-  prints the plan, as `arc-landing-plan/1` with `--json`: the members and
-  their pins (patchset, base, head, brief digest, approval or debt basis,
+  prints the plan, as `arc-landing-plan/1` with `--json`: the shape, the
+  members and their pins (patchset, base, head, whether it is replayed and
+  the approval a replay outruns, brief digest, approval or debt basis,
   holds, findings, component, prerequisites, gates, policy, danger scope),
   the components, and the gate union, each gate with its binding and the
-  members requiring it.
+  members requiring it. A composed plan names no head: the replay that
+  makes it runs only once the attempt is under way.
 
   The intent is written to `landing-intents/<attempt>.json` in the ledger
   directory, and a `landing-prepared` event names the attempt. Until it
   finishes, its members show `pending landing <attempt>` (blocker
   `landing-pending`, exit 20) and refuse every other terminal transition,
   naming `arc land --recover <attempt>`. The gates every member requires
-  run once, at the top head, with no ledger or change lock held; their
-  evidence carries `landing: <attempt>`. A gate two members declare
-  differently, `binds` included, or one the top head does not declare the
-  same way, refuses. Reuse follows each gate's binding: a tree-bound pass
-  by tree, a commit-bound pass only at the top head's own commit. A failed
-  gate abandons the attempt and closes nothing.
+  run once, with no ledger or change lock held, and their evidence carries
+  `landing: <attempt>`. A stack runs them at its top head; a gate two members
+  declare differently, `binds` included, or one the top head does not
+  declare the same way, refuses. A composed landing runs every member's
+  gates at the composed head, recorded on its last member. They run in a
+  checkout the attempt owns: a slot it leases when the repository declares
+  `[slots]`, else a worktree of its own under the worktrees directory. The
+  slot is released, or the worktree removed, once the gates have run. Reuse
+  follows each gate's binding: a tree-bound pass by tree, a commit-bound
+  pass only at the gated head's own commit. A failed gate abandons the
+  attempt, closes nothing and drops the pin.
 
   Commit takes replica authority, the target, the graph, each member's
   transition lock in change-ID order, then repository events, and reads
@@ -1399,7 +1420,8 @@ RUN A CHANGE
   closure derives from that event: integrated via the landing, with
   `target_before` the revision the landing started from, which every
   declaration and policy reader keeps reading, and `range_base` and
-  `integrated_commit` its own landed range, which `diff --integrated`,
+  `integrated_commit` its own landed range in the installed history (for a
+  replayed member, the commits it landed as), which `diff --integrated`,
   audits, `stats` and cost attribution read. The shared gate run is counted
   once, on the top member. Every reader of a closure sees a member closed
   by its landing: `doctor`, import admission, `accept` preflight, receipts
@@ -5251,7 +5273,7 @@ RUN A CHANGE
   arc verify --all               run the gates and record the evidence
   arc check                      preflight integration
   arc integrate                  land it once review is settled
-  arc land <change>...           land stacked changes in one transaction
+  arc land <change>...           land changes in one transaction
   arc close <change> --abandoned   stop without landing
   Readiness is computed, not declared: nothing marks a change ready.
 

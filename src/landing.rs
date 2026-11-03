@@ -267,9 +267,17 @@ pub struct Intent {
     pub target_branch: String,
     /// The target revision the attempt planned against.
     pub target_before: String,
-    /// The revision the attempt installs: its top member's head.
-    pub target_after: String,
+    /// The revision the attempt installs: a stack's top member's head, or
+    /// the head a composed attempt replayed, once it has. Absent until then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_after: Option<String>,
     pub members: Vec<LandingPin>,
+    /// What a composed attempt replayed, member by member in landing order.
+    /// These commits are the attempt's alone: no rewrite map names them,
+    /// and only `refs/arc/landing/<attempt>` holds them until the target
+    /// does.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub composed: Vec<ComposedMember>,
     /// The exact `landing-completed` event, saved when the attempt is
     /// authorized and published unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -287,6 +295,25 @@ impl Intent {
             Phase::Prepared | Phase::Published => None,
         }
     }
+}
+
+/// One member of a composed attempt: the commit it landed on and the
+/// commits it landed as.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComposedMember {
+    pub change_id: String,
+    /// The commit the member's first commit was placed on.
+    pub parent: String,
+    /// The member's last landed commit.
+    pub tip: String,
+    /// Each original commit with the commit it landed as, in order. A member
+    /// arc did not replay maps each commit to itself.
+    pub commits: Vec<(String, String)>,
+}
+
+/// The ref that pins a composed attempt's head until the target holds it.
+pub fn pin_ref(attempt: &str) -> String {
+    format!("refs/arc/landing/{attempt}")
 }
 
 /// The ref that moves with the target in one transaction and says the
