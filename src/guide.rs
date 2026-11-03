@@ -2320,8 +2320,8 @@ REVIEW COVERAGE AND DEBT
   reads. `arc status --json` and `arc check --json` give each verdict a
   `kind`, `clearing` or `findings`, and a `findings_reason`. Discharge is
   judged where the ledger is read, so declaring the key re-judges every debt
-  and `arc doctor` lists those it leaves owed; a recorded integration's
-  authorization is never rewritten. Absent, independence and authorship
+  and `arc doctor` lists those it leaves owed as `clearance-keeps-debt-owed`;
+  a recorded integration's authorization is never rewritten. Absent, independence and authorship
   decide, and an assessment's `clears` is kept unread.
 
   Work sent to a repository you do not own is decided by its receiver.

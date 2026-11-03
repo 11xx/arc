@@ -2995,7 +2995,10 @@ enum Cmd {
     /// because only a withdrawn rewrite map carried it is the advice `set-aside-reference`,
     /// naming the change, the event, both revisions and the recovery. A hold release that names no
     /// active hold is the advice `hold-release-names-no-hold`; a change already reported with
-    /// a problem is not checked for one.
+    /// a problem is not checked for one. Under `[policy] review_clearance = "assessed"`, a
+    /// debt it leaves owed that a read would discharge without it is the advice
+    /// `clearance-keeps-debt-owed`, naming the change, the debt, that read and the debt's
+    /// findings reads.
     ///
     /// Exits 0 when the ledger is clean or carries only advice, and 1 when it
     /// reports a problem. A ledger that cannot be read at all also exits 1,

@@ -414,3 +414,50 @@ fn review_keeps_and_validates_its_assessment() {
     assert_eq!(kept["kind"], "findings", "{status}");
     assert_eq!(kept["findings_reason"], "not-clearing", "{status}");
 }
+
+/// Claim: `arc doctor` lists, as advice, each debt the policy leaves owed
+/// that would be discharged without it, naming the read. Rejects a policy
+/// switch that silently reopens debt nobody is told about.
+#[test]
+fn doctor_lists_the_debts_the_policy_leaves_owed() {
+    let repo = assessed_repo();
+    owed(&repo, "reopened");
+    let output = audit(
+        &repo,
+        "reopened",
+        "Auditor",
+        Some("fixture-other#high"),
+        None,
+    );
+    let read = event_line(&output);
+    let doctor = json_stdout_any_status(repo.arc(&repo.root).args(["doctor", "--json"]));
+    let advice = doctor["advice"].as_array().unwrap();
+    let entry = advice
+        .iter()
+        .find(|finding| finding["code"] == "clearance-keeps-debt-owed")
+        .unwrap_or_else(|| panic!("no clearance advice in {doctor}"));
+    let detail = entry["detail"].as_str().unwrap();
+    assert!(detail.contains("reopened"), "{detail}");
+    assert!(detail.contains(&read), "{detail}");
+    assert!(
+        !doctor["problems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["code"] == "clearance-keeps-debt-owed"),
+        "advice, never a problem: {doctor}"
+    );
+
+    owed(&repo, "cleared");
+    let file = assessment_v2(&repo, "doctor.json", "eligible", true, &[]);
+    audit_v2(&repo, "cleared", &file);
+    let doctor = json_stdout_any_status(repo.arc(&repo.root).args(["doctor", "--json"]));
+    let named: Vec<_> = doctor["advice"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|finding| finding["code"] == "clearance-keeps-debt-owed")
+        .filter(|finding| finding["detail"].as_str().unwrap().contains("cleared-"))
+        .collect();
+    assert!(named.is_empty(), "a cleared debt is not reopened: {doctor}");
+}

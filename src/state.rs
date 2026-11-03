@@ -4901,6 +4901,21 @@ impl ChangeState {
             })
     }
 
+    /// The read that would discharge the held debt were `review_clearance`
+    /// absent, when the key is in force and the debt is owed under it.
+    pub fn discharged_without_clearance(&self) -> Option<String> {
+        if !self.review_clearance.is_assessed() {
+            return None;
+        }
+        let debt = self.debt.as_ref()?;
+        if debt.standing != DebtStanding::Owed {
+            return None;
+        }
+        let mut legacy = self.clone();
+        legacy.review_clearance = crate::policy::ReviewClearance::Legacy;
+        legacy.debt_discharge(debt).map(|(event_id, _)| event_id)
+    }
+
     /// The audits, then the verdicts on the shipped patchset, that `debt`
     /// bars only because they find without clearing.
     fn findings_reads(&self, debt: &Debt) -> Vec<FindingsRead> {

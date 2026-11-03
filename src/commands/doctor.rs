@@ -41,6 +41,8 @@ struct ChangeInspection<'a> {
     rewrites: crate::rewrite::RewriteMap,
     /// Every inspected change shares the receiver permissions of this read.
     scope: std::sync::Arc<crate::import_authorization::PrivilegeScope>,
+    /// The clearance rule the store projects every change under.
+    review_clearance: crate::policy::ReviewClearance,
 }
 
 /// Where this invocation reads and writes. Every other diagnostic here is a
@@ -134,6 +136,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
                     local_repository_id: &local_repository_id,
                     rewrites,
                     scope,
+                    review_clearance: store.review_clearance,
                 },
                 &root,
                 &mut problems,
@@ -196,6 +199,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     }
     inspect_closed_worktrees(&ctx.cwd, &states, &mut advice)?;
     inspect_debt(ctx, &states, &mut advice)?;
+    inspect_clearance(&states, &mut advice);
     inspect_hold_releases(&readable, &mut advice);
     let replica = match crate::replica::status(&store) {
         Ok(status) => Some(status),
@@ -580,6 +584,7 @@ fn inspect_change(
             return Ok(());
         }
     };
+    state.review_clearance = inspection.review_clearance;
     state.apply_privilege_scope(std::sync::Arc::clone(&inspection.scope), &events);
     crate::replica::localize_change(inspection.local_repository_id, &events, &mut state);
     for reference in &state.set_aside {
@@ -1046,6 +1051,37 @@ fn inspect_debt(
         });
     }
     Ok(())
+}
+
+/// Debts `review_clearance = "assessed"` leaves owed that a read would
+/// discharge without it. Advice, never a problem: the policy owes them on
+/// purpose, and enabling it re-judges standing without rewriting any event,
+/// so this is where the debts it reopened are named with their reads.
+fn inspect_clearance(states: &BTreeMap<String, ChangeState>, advice: &mut Vec<Finding>) {
+    for (change_id, state) in states {
+        let Some(read) = state.discharged_without_clearance() else {
+            continue;
+        };
+        let debt = state.debt.as_ref().expect("an owed debt");
+        let findings = debt
+            .findings_reads
+            .iter()
+            .map(|read| format!("{} ({})", read.event_id, read.reason))
+            .collect::<Vec<_>>();
+        advice.push(Finding {
+            code: "clearance-keeps-debt-owed",
+            detail: format!(
+                "{change_id}: debt {} stays owed under review_clearance = \"assessed\"; \
+                 without it read {read} would discharge it; findings reads: {}",
+                debt.event_id,
+                if findings.is_empty() {
+                    "none".to_string()
+                } else {
+                    findings.join(", ")
+                }
+            ),
+        });
+    }
 }
 
 /// A release that names no active hold. Replay ignores it so the ledger stays
