@@ -10,6 +10,7 @@
 //! reports nothing, or a harness agent-status does not report on. Raw output
 //! and error text never reach the view.
 
+use crate::perf::Counted;
 use std::collections::BTreeSet;
 use std::io::Read;
 use std::os::unix::process::CommandExt;
@@ -116,7 +117,7 @@ fn run(program: &std::ffi::OsStr) -> Result<String, &'static str> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0)
-        .spawn()
+        .counted_spawn()
         .map_err(|_| UNAVAILABLE)?;
     let stdout = child.stdout.take().ok_or(UNAVAILABLE)?;
     let reader = std::thread::spawn(move || {

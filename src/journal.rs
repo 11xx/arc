@@ -21,6 +21,7 @@ use crate::model::{
     BlockerRef, ClaimStage, DisplacedClaim, JournalArtifactRef, JournalRefVia, PlanSource,
     PlannerIdentity,
 };
+use crate::perf::Counted;
 use crate::replica::ReplicaIdentity;
 use crate::state::{self, ChangeState, ClaimIdentity, ClaimState, StageProgress};
 use crate::store::Store;
@@ -5348,7 +5349,7 @@ fn journal_queue_depth(ctx: &Ctx) -> Option<usize> {
 fn installed_label(cwd: &Path) -> String {
     let installed = std::process::Command::new("arc")
         .arg("--version")
-        .output()
+        .counted_output()
         .ok()
         .filter(|out| out.status.success())
         .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
@@ -10072,6 +10073,8 @@ pub(crate) fn projections() -> usize {
 
 /// Understood physical records include events that state replay rejects.
 fn read_understood_records(dir: &Path) -> Result<Vec<JournalEvent>> {
+    let _phase = crate::perf::phase("journal");
+    crate::perf::count("journal_projections", 1);
     *PROJECTIONS
         .get_or_init(Default::default)
         .lock()

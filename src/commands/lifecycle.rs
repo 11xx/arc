@@ -1,5 +1,6 @@
 use super::*;
 use crate::context::shell_quote;
+use crate::perf::Counted;
 use crate::policy;
 use crate::ExecutionRole;
 use std::process::Command;
@@ -328,7 +329,7 @@ pub fn begin(
         let output = Command::new("df")
             .arg("-kP")
             .arg(probe)
-            .output()
+            .counted_output()
             .ok()
             .filter(|output| output.status.success())?;
         let text = String::from_utf8_lossy(&output.stdout);

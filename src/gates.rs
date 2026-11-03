@@ -6,6 +6,7 @@
 
 use crate::commands::parse_duration;
 use crate::model::{DeltaSelection, GateEvent};
+use crate::perf::Counted;
 use crate::process_group::{
     join_before_deadline, kill_process_group, read_tail, OwnedGroup, STDERR_TAIL_BYTES,
 };
@@ -642,7 +643,7 @@ fn selector_output(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0)
-        .spawn()?;
+        .counted_spawn()?;
     let mut child = SelectorChild(child);
     let mut stdin = child
         .0

@@ -1,5 +1,6 @@
 //! Project-owned build preparation with isolated or persistent output directories.
 
+use crate::perf::Counted;
 use crate::{gitio, process_group};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
@@ -143,7 +144,7 @@ fn source_bytes(path: &Path, args: &[&str]) -> Result<Vec<u8>> {
         .args(args)
         .env("GIT_OPTIONAL_LOCKS", "0")
         .current_dir(path)
-        .output()?;
+        .counted_output()?;
     if !output.status.success() {
         bail!(
             "cannot observe worktree preparation source: {}",
@@ -580,7 +581,7 @@ fn run_hook(
         .process_group(0);
     lease.inherit(&mut command);
     let child = command
-        .spawn()
+        .counted_spawn()
         .context("cannot start worktree preparation")?;
     let mut child = PreparationChild(child);
     let stdout = child

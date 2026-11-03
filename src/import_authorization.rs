@@ -600,6 +600,8 @@ impl PrivilegeScope {
     pub fn for_store(store: &crate::store::Store) -> Result<Self> {
         #[cfg(test)]
         note_scope_derived();
+        let _phase = crate::perf::phase("scope");
+        crate::perf::count("scope_derivations", 1);
         let policy = match &store.operator_policy_path {
             Some(path) => crate::policy::replica_at(path)?,
             None => ReplicaPolicy::default(),

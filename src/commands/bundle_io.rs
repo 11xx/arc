@@ -1,5 +1,6 @@
 use super::*;
 use crate::operation_println as println;
+use crate::perf::Counted;
 
 #[allow(clippy::too_many_arguments)]
 pub fn export_bundle(
@@ -445,7 +446,7 @@ fn import_events(
             let status = gitio::git_command()
                 .args(["cat-file", "-e", "--", &object.oid])
                 .current_dir(&ctx.cwd)
-                .output()
+                .counted_output()
                 .context("failed to check bundled Git object")?;
             if !status.status.success() {
                 missing.push(format!("{} ({})", object.oid, object.role));

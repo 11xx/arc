@@ -72,6 +72,7 @@ mod orchestrate;
 mod pass;
 mod path_stable_builds;
 mod paths;
+mod perf;
 mod placeholders;
 mod planners;
 mod policy;

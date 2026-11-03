@@ -2,6 +2,7 @@
 //! polling watches that can wait for the first of several conditions.
 
 use super::*;
+use crate::perf::Counted;
 
 /// Replay raw ledger events as compact NDJSON, optionally continuing as new
 /// event files arrive. Local issuance order equals ID order across processes.
@@ -625,7 +626,7 @@ fn run_hook(command: &str, input: &[u8], value: &serde_json::Value) {
         .env("ARC_EVENT_TYPE", event_type)
         .env("ARC_CHANGE_ID", change_id)
         .stdin(std::process::Stdio::piped())
-        .spawn()
+        .counted_spawn()
         .and_then(|mut child| {
             child.stdin.take().unwrap().write_all(input)?;
             child.wait()

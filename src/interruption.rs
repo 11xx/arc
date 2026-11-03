@@ -91,6 +91,11 @@ impl Interrupted {
         }
     }
 
+    /// The status a shell reports for a process this signal ended.
+    pub(crate) fn exit_code(&self) -> i32 {
+        128 + self.signal
+    }
+
     /// End arc with the received signal, so its caller sees it interrupted
     /// rather than failed.
     pub(crate) fn end_process(&self) -> ! {
@@ -104,7 +109,7 @@ impl Interrupted {
             libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
             libc::raise(self.signal);
         }
-        std::process::exit(128 + self.signal)
+        std::process::exit(self.exit_code())
     }
 }
 

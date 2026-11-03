@@ -397,6 +397,7 @@ impl Drop for DiscoveryEnvironment {
 pub(crate) fn project_sessions(
     cwd: &std::path::Path,
 ) -> anyhow::Result<(Vec<RecentSession>, Vec<String>)> {
+    let _phase = crate::perf::phase("sessions");
     let _environment = DiscoveryEnvironment::sandboxed()?;
     // A scope that cannot be read fails discovery as a whole. Each backend
     // then scans its own store at once with a scope of its own, and their

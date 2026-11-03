@@ -32,6 +32,7 @@ mod journal;
 mod journal_exchange;
 mod model;
 mod operation_output;
+mod perf;
 mod policy;
 mod process_group;
 mod project;
@@ -80,7 +81,7 @@ use std::path::{Path, PathBuf};
     name = "arc",
     version,
     about,
-    after_help = "Run `arc` with no arguments for the capability map; `arc guide` for indexed depth, or `arc catchup` for live project state."
+    after_help = "Run `arc` with no arguments for the capability map; `arc guide` for indexed depth, or `arc catchup` for live project state.\n\nARC_TRACE=1 writes one arc-perf/1 record of the command's work to stderr at exit; see `arc guide identity-options`."
 )]
 struct Cli {
     /// Acting identity; see `arc guide identity-options`
@@ -5254,6 +5255,7 @@ fn parse_cli() -> Result<(Cli, bool), clap::Error> {
     };
     refuse_change_role_values(&matches)?;
     let path = command_path(&matches);
+    perf::command(&path);
     let reads_only = commands::READ_ONLY_COMMANDS.contains(&path.as_str());
     if reads_only && commands::SHARED_READ_COMMANDS.contains(&path.as_str()) {
         store::share_reads();
@@ -5416,6 +5418,7 @@ fn main() {
     unsafe {
         signal(SIGPIPE, SIG_DFL);
     }
+    perf::start();
 
     let (cli, reads_only) = match parse_cli() {
         Ok(parsed) => parsed,
@@ -5452,7 +5455,16 @@ fn main() {
             if kind == clap::error::ErrorKind::InvalidSubcommand {
                 eprintln!("Read: arc guide");
             }
-            std::process::exit(error.exit_code());
+            let code = error.exit_code();
+            perf::emit(
+                if code == 0 {
+                    perf::Outcome::Exited
+                } else {
+                    perf::Outcome::Usage
+                },
+                Some(code),
+            );
+            std::process::exit(code);
         }
     };
     let result = run(cli, reads_only);
@@ -5461,22 +5473,23 @@ fn main() {
     // others and gone on; the signal still ends arc.
     let result = result.and_then(|code| interruption::check().map(|()| code).map_err(Into::into));
     match result {
-        Ok(code) => std::process::exit(code),
+        Ok(code) => {
+            perf::emit(perf::Outcome::Exited, Some(code));
+            std::process::exit(code)
+        }
         Err(e) => {
             eprintln!("error: {e:#}");
             if let Some(interrupted) = e.downcast_ref::<interruption::Interrupted>() {
+                perf::emit(perf::Outcome::Interrupted, Some(interrupted.exit_code()));
                 interrupted.end_process();
             }
-            if e.downcast_ref::<import_authorization::Refusal>().is_some() {
+            let refused = e.downcast_ref::<import_authorization::Refusal>().is_some();
+            if refused {
                 eprintln!("Read: arc guide replicas");
             }
-            std::process::exit(
-                if e.downcast_ref::<import_authorization::Refusal>().is_some() {
-                    18
-                } else {
-                    1
-                },
-            );
+            let code = if refused { 18 } else { 1 };
+            perf::emit(perf::Outcome::Error, Some(code));
+            std::process::exit(code);
         }
     }
 }

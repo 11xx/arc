@@ -1,4 +1,5 @@
 use crate::commands::fork::is_fork_branch;
+use crate::perf::Counted;
 use anyhow::{bail, Context, Result};
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -84,7 +85,7 @@ pub fn git_inherit(cwd: &Path, args: &[String]) -> Result<()> {
     let output = git_command()
         .args(args)
         .current_dir(cwd)
-        .output()
+        .counted_output()
         .with_context(|| format!("failed to run git in {}", cwd.display()))?;
     std::io::stdout().write_all(&output.stdout)?;
     std::io::stderr().write_all(&output.stderr)?;
@@ -129,16 +130,16 @@ fn shared_git(cwd: &Path, args: &[&str]) -> Result<String> {
 }
 
 fn command_output(command: &mut Command) -> Result<Output> {
-    let deadline = COMMAND_DEADLINE.get();
-    let Some(deadline) = deadline else {
-        return Ok(command.output()?);
-    };
-
-    command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
-    wait_for_output(command.spawn()?, deadline)
+    crate::perf::child(command, |command| {
+        let Some(deadline) = COMMAND_DEADLINE.get() else {
+            return Ok(command.output()?);
+        };
+        command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        wait_for_output(command.spawn()?, deadline)
+    })
 }
 
 fn drain_output(
@@ -340,7 +341,7 @@ pub fn latest_tag(cwd: &Path) -> Result<Option<String>> {
     let output = git_command()
         .args(["describe", "--tags", "--abbrev=0"])
         .current_dir(cwd)
-        .output()
+        .counted_output()
         .with_context(|| format!("failed to run git in {}", cwd.display()))?;
     if output.status.success() {
         Ok(Some(
@@ -357,7 +358,7 @@ pub fn head_if_present(cwd: &Path) -> Result<Option<String>> {
     let out = git_command()
         .args(["rev-parse", "--verify", "-q", "HEAD"])
         .current_dir(cwd)
-        .output()
+        .counted_output()
         .with_context(|| format!("failed to run git in {}", cwd.display()))?;
     if out.status.success() {
         return Ok(Some(
@@ -388,7 +389,7 @@ pub fn current_branch(cwd: &Path) -> Result<Option<String>> {
     let out = git_command()
         .args(["symbolic-ref", "-q", "HEAD"])
         .current_dir(cwd)
-        .output()?;
+        .counted_output()?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout)
             .trim()
@@ -445,7 +446,7 @@ pub fn merge_outcome(cwd: &Path, target_rev: &str, head_rev: &str) -> Result<Mer
             head_rev,
         ])
         .current_dir(cwd)
-        .output()
+        .counted_output()
         .context("failed to spawn git merge-tree")?;
     match out.status.code() {
         // The tree id is the first line of stdout; anything after it describes
@@ -982,7 +983,9 @@ pub fn commit_tree_as(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = command.spawn().context("cannot run git commit-tree")?;
+    let mut child = command
+        .counted_spawn()
+        .context("cannot run git commit-tree")?;
     let mut stdin = child.stdin.take().context("git commit-tree has no stdin")?;
     let message = message.to_vec();
     // The message goes out on its own thread for the same reason every other
@@ -1215,7 +1218,7 @@ pub fn read_note(cwd: &Path, name: &str, commit: &str) -> Result<Option<String>>
     let output = git_command()
         .args(["notes", &notes, "show", commit])
         .current_dir(cwd)
-        .output()
+        .counted_output()
         .with_context(|| format!("failed to run git in {}", cwd.display()))?;
     Ok(output
         .status
@@ -1337,7 +1340,7 @@ fn piped_output_with(
         command.process_group(0);
     }
     let mut child = command
-        .spawn()
+        .counted_spawn()
         .with_context(|| format!("cannot run {program}"))?;
     let child_id = child.id();
     let mut stdin = child
@@ -1382,7 +1385,7 @@ pub fn file_at(cwd: &Path, rev: &str, path: &str) -> Result<Option<String>> {
     let out = git_command()
         .args(["rev-parse", "--verify", "-q", &object])
         .current_dir(cwd)
-        .output()
+        .counted_output()
         .with_context(|| format!("failed to run git in {}", cwd.display()))?;
     if out.status.code() == Some(1) {
         return Ok(None);
@@ -1553,7 +1556,7 @@ pub fn worktree_tree(cwd: &Path) -> Result<String> {
             .args(args)
             .current_dir(&top)
             .env("GIT_INDEX_FILE", &index)
-            .output()
+            .counted_output()
             .with_context(|| format!("cannot run git {}", args.join(" ")))?;
         if !output.status.success() {
             anyhow::bail!(
@@ -2362,7 +2365,7 @@ fn batch_check<'a>(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .counted_spawn()
         .context("cannot run git cat-file")?;
     let query = revisions.join("\n") + "\n";
     let mut stdin = child.stdin.take().context("git cat-file has no stdin")?;
@@ -2417,7 +2420,7 @@ pub fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> Result<bool>
     let out = git_command()
         .args(["merge-base", "--is-ancestor", ancestor, descendant])
         .current_dir(cwd)
-        .output()
+        .counted_output()
         .context("failed to spawn git merge-base")?;
     Ok(out.status.success())
 }
@@ -2792,7 +2795,7 @@ pub fn commit_exists(cwd: &Path, oid: &str) -> Result<bool> {
     let out = git_command()
         .args(["cat-file", "-e", "--", &object])
         .current_dir(cwd)
-        .output()
+        .counted_output()
         .context("failed to spawn git cat-file")?;
     Ok(out.status.success())
 }
@@ -2843,7 +2846,7 @@ impl ObjectReader {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .spawn()
+            .counted_spawn()
             .ok()?;
         let stdin = child.stdin.take()?;
         let stdout = std::io::BufReader::new(child.stdout.take()?);

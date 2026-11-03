@@ -16,6 +16,7 @@
 //! that persist.
 
 use crate::operation_println as println;
+use crate::perf::Counted;
 use crate::state::ChangeState;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -487,7 +488,7 @@ fn mount_facts(path: &Path) -> Option<MountFacts> {
         .arg("-T")
         .arg(path)
         .args(["-o", "TARGET,FSTYPE,OPTIONS"])
-        .output()
+        .counted_output()
         .ok()
         .filter(|output| output.status.success())?;
     let reply: FindmntReply = serde_json::from_slice(&output.stdout).ok()?;
@@ -516,7 +517,7 @@ fn df_facts(path: &Path) -> (Option<u64>, Option<String>) {
     let Some(output) = Command::new("df")
         .arg("-kP")
         .arg(path)
-        .output()
+        .counted_output()
         .ok()
         .filter(|output| output.status.success())
     else {
@@ -545,7 +546,7 @@ fn du_bytes(cwd: &Path, path: &Path) -> Option<u64> {
         .arg("-sk")
         .arg(path)
         .current_dir(cwd)
-        .output()
+        .counted_output()
         .ok()
         .filter(|output| output.status.success())?;
     let line = String::from_utf8_lossy(&output.stdout);

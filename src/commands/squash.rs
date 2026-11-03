@@ -7,6 +7,7 @@
 use crate::commands::Ctx;
 use crate::gitio;
 use crate::model::Payload;
+use crate::perf::Counted;
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeSet;
 use std::fs;
@@ -141,7 +142,7 @@ fn preserve_obstructions(worktree: &Path, head: &str) -> Result<()> {
     let output = gitio::git_command()
         .args(["ls-tree", "-r", "-z", head])
         .current_dir(worktree)
-        .output()
+        .counted_output()
         .context("cannot list the original squash tree")?;
     if !output.status.success() {
         bail!(

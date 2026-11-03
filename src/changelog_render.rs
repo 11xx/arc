@@ -9,6 +9,7 @@
 //! `MAX_OUTPUT_BYTES`, or it prints bytes that are not UTF-8 — is a refusal
 //! carrying the tail of its stderr, and the caller writes nothing.
 
+use crate::perf::Counted;
 use crate::process_group::{kill_process_group, read_tail, STDERR_TAIL_BYTES};
 use anyhow::{Context, Result};
 use std::fmt;
@@ -93,7 +94,7 @@ pub fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0)
-        .spawn()
+        .counted_spawn()
     {
         Ok(child) => child,
         Err(error) => {

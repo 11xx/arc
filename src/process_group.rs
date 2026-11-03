@@ -5,6 +5,7 @@
 //! a bounded tail so a child that prints without bound cannot exhaust memory.
 //! [`OwnedGroup`] keeps the group's identity reserved until it is stopped.
 
+use crate::perf::Counted;
 use std::io::Read;
 use std::process::{Child, Command, ExitStatus};
 
@@ -55,7 +56,7 @@ impl OwnedGroup {
     /// Spawn `command`, which must lead its own process group.
     pub(crate) fn spawn(command: &mut Command) -> std::io::Result<Self> {
         Ok(Self {
-            child: command.spawn()?,
+            child: command.counted_spawn()?,
             status: None,
         })
     }

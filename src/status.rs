@@ -1360,6 +1360,7 @@ fn build_report(
     fork: Option<String>,
 ) -> Result<StatusReport> {
     REPORTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    crate::perf::count("status_reports", 1);
     let provenance_mode = policy.provenance.git_identity;
     let provenance_check_enabled = provenance_mode == crate::config::GitIdentityMode::PerActor;
     let mut latest_patchset = state.latest_patchset().cloned();

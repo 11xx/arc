@@ -3,6 +3,7 @@
 //! scanning, and `restack` only prints commands — arc never rewrites branches.
 
 use super::*;
+use crate::perf::Counted;
 use anyhow::ensure;
 use serde::Serialize;
 
@@ -24,7 +25,7 @@ fn has_git_repository(anchor: &Path) -> Result<bool> {
         .args(["rev-parse", "--git-common-dir"])
         .env("LC_ALL", "C")
         .current_dir(anchor)
-        .output()
+        .counted_output()
         .with_context(|| format!("cannot inspect Git repository at {}", anchor.display()))?;
     if output.status.success() {
         return Ok(true);

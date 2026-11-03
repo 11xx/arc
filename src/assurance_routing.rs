@@ -8,6 +8,7 @@
 //! stay out of what arc prints.
 
 use crate::model::Independence;
+use crate::perf::Counted;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::Read;
@@ -208,7 +209,7 @@ fn exit_without_reaping(child: &Child) -> std::io::Result<Option<bool>> {
 }
 
 fn run_command(mut command: Command, timeout: Duration) -> Result<Output, Reason> {
-    let mut child = RoutingChild(command.spawn().map_err(|_| ROUTING_UNAVAILABLE)?);
+    let mut child = RoutingChild(command.counted_spawn().map_err(|_| ROUTING_UNAVAILABLE)?);
     let stdout = child.0.stdout.take().ok_or(ROUTING_UNAVAILABLE)?;
     let mut stderr = child.0.stderr.take().ok_or(ROUTING_UNAVAILABLE)?;
     let reader = std::thread::spawn(move || read_document(stdout));

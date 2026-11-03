@@ -4530,6 +4530,7 @@ SCHEMAS
     `arc-forks/3`                    arc fork list --json
     `arc-run-list/1`                 arc run list --json
     `arc-doctor/6`                   arc doctor --json
+    `arc-perf/1`                     ARC_TRACE=1, one line on stderr at exit
     `arc-workspace/2`                arc workspace list|inbox --json
     `arc-workspace-backlog/19`       arc workspace backlog --json
     `arc-workspace-report/3`         arc workspace report --json
@@ -4702,6 +4703,43 @@ const IDENTITY_OPTIONS: &str = r#"GLOBAL OPTIONS
     Absolute prefix that stands in for the home directory: every root arc
     writes by default (ledger under a data root, journal, registry,
     configuration, worktrees, temp) lives beneath it
+
+TRACING
+  ARC_TRACE=1 writes one `arc-perf/1` JSON line to stderr as arc exits,
+  whatever the outcome: a status the command chose, an error, refused
+  arguments, an interrupt or a panic. Stdout, the exit status and the
+  ledger are unchanged, and nothing is written anywhere else. Any other
+  value, or none, traces nothing.
+
+  The record names the subcommand path (`command`, null when arguments were
+  refused before one was selected), the build, `outcome` (exited, error,
+  usage, interrupted, panicked), `exit_code` and `elapsed_ms`. It carries no
+  path, session id or argument value.
+
+  Counters are logical, one per call arc makes, not syscalls:
+    ledger.<namespace>   for change, repository and import files: directory
+                         enumerations and entries listed, opens attempted and
+                         opened, bytes, files decoded, events typed, and
+                         shared_hits served by an earlier read in the process
+    counts               repository_materializations, changes_reduced,
+                         scope_derivations, receipt_validations,
+                         replica_materializations, status_reports,
+                         journal_projections
+    cache.<value>        hits and misses of a value read once per process
+    children             runs by kind: the program name, and Git's subcommand;
+                         `ms` is time spent waiting on a child arc ran to
+                         completion, and a child it only started has a run
+                         and no time
+  `phases` holds the calls and exclusive milliseconds of enumerate, read,
+  decode, reduce, scope, round_trip, journal, sessions and children. A phase
+  entered inside another is subtracted from the outer one; phases on
+  concurrent threads are summed, so they can total more than elapsed_ms;
+  time outside every phase is not attributed.
+
+  `coverage` names what the counters see. `ledger: store` counts ledger
+  files read through the store's readers, not a file a diagnostic opens on
+  its own; `children: arc` counts processes arc starts, not those a library
+  starts for it, such as session discovery's.
 "#;
 
 const JOURNAL_RESOLUTION: &str = r#"JOURNAL DIRECTORY RESOLUTION

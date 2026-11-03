@@ -321,6 +321,9 @@ mod shared {
     static DISK_READS: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
 
     fn read_from_disk(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+        let namespace = crate::perf::namespace_of(path);
+        crate::perf::ledger(namespace, "opens", 1);
+        let _phase = crate::perf::phase("read");
         if std::env::var_os(super::READ_COUNTS_VAR).is_some() {
             *DISK_READS
                 .get_or_init(Default::default)
@@ -329,7 +332,10 @@ mod shared {
                 .entry(path.to_path_buf())
                 .or_default() += 1;
         }
-        std::fs::read(path)
+        let bytes = std::fs::read(path)?;
+        crate::perf::ledger(namespace, "opened", 1);
+        crate::perf::ledger(namespace, "bytes", bytes.len() as u64);
+        Ok(bytes)
     }
 
     /// How often the most-read file under each directory kind was read from
@@ -369,6 +375,7 @@ mod shared {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(path)
         {
+            crate::perf::ledger(crate::perf::namespace_of(path), "shared_hits", 1);
             return Ok(Arc::clone(bytes));
         }
         let bytes = Arc::new(read_from_disk(path)?);
@@ -441,8 +448,17 @@ pub(crate) fn read_ledger_file(path: &Path) -> std::io::Result<Arc<Vec<u8>>> {
 /// A ledger event file's JSON: an unreadable file fails as its I/O error, an
 /// unparseable one as malformed.
 fn event_file_value(path: &Path) -> Result<serde_json::Value> {
-    serde_json::from_slice(&read_ledger_file(path)?)
+    let bytes = read_ledger_file(path)?;
+    let _phase = crate::perf::phase("decode");
+    crate::perf::ledger(crate::perf::namespace_of(path), "decoded", 1);
+    serde_json::from_slice(&bytes)
         .with_context(|| format!("malformed event file {}", path.display()))
+}
+
+/// Count one listing of a ledger directory and the entries it held.
+fn enumerated(namespace: &'static str, entries: usize) {
+    crate::perf::ledger(namespace, "enumerations", 1);
+    crate::perf::ledger(namespace, "entries", entries as u64);
 }
 
 /// Names a file a process writes its ledger read counts to as it exits, for
@@ -491,6 +507,7 @@ pub fn import_batches(root: &Path) -> Result<Vec<ImportBatch>> {
 }
 
 fn import_batches_with_paths(root: &Path) -> Result<Vec<(PathBuf, ImportBatch)>> {
+    let _phase = crate::perf::phase("enumerate");
     let dir = root.join("imports");
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -500,6 +517,7 @@ fn import_batches_with_paths(root: &Path) -> Result<Vec<(PathBuf, ImportBatch)>>
     let mut paths = entries
         .map(|entry| entry.map(|entry| entry.path()))
         .collect::<std::io::Result<Vec<_>>>()?;
+    enumerated("import", paths.len());
     paths.retain(|path| {
         path.extension()
             .is_some_and(|extension| extension == "json")
@@ -514,8 +532,13 @@ fn import_batches_with_paths(root: &Path) -> Result<Vec<(PathBuf, ImportBatch)>>
 }
 
 pub(crate) fn read_import_batch(path: &Path) -> Result<ImportBatch> {
-    let batch: ImportBatch = serde_json::from_slice(&read_ledger_file(path)?)
-        .with_context(|| format!("malformed import batch {}", path.display()))?;
+    let bytes = read_ledger_file(path)?;
+    let batch: ImportBatch = {
+        let _phase = crate::perf::phase("decode");
+        crate::perf::ledger("import", "decoded", 1);
+        serde_json::from_slice(&bytes)
+            .with_context(|| format!("malformed import batch {}", path.display()))?
+    };
     if batch.schema != "arc-import-batch/1" {
         bail!("unsupported import batch schema {}", batch.schema);
     }
@@ -542,28 +565,35 @@ pub(crate) fn read_import_batch(path: &Path) -> Result<ImportBatch> {
                     .map(|value| ("repository".into(), value)),
             )
             .collect();
+        crate::perf::count("receipt_validations", 1);
         crate::import_authorization::validate_receipt_events(receipt, &values)?;
     }
     Ok(batch)
 }
 
 fn event_file_stems(dir: &Path) -> Result<BTreeSet<String>> {
+    let _phase = crate::perf::phase("enumerate");
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
         Err(error) => return Err(error).with_context(|| format!("cannot read {}", dir.display())),
     };
     let mut stems = BTreeSet::new();
+    let mut visited = 0;
     for entry in entries {
+        visited += 1;
         let name = entry?.file_name().to_string_lossy().into_owned();
         if let Some(stem) = name.strip_suffix(".json") {
             stems.insert(stem.to_string());
         }
     }
+    enumerated(crate::perf::namespace_of(&dir.join("_")), visited);
     Ok(stems)
 }
 
 fn typed_repository_events(raw: Vec<(String, serde_json::Value)>) -> Result<Vec<Event>> {
+    let _phase = crate::perf::phase("decode");
+    crate::perf::ledger("repository", "typed", raw.len() as u64);
     raw.into_iter()
         .filter_map(|(_, value)| match serde_json::from_value::<Event>(value) {
             Ok(event) if matches!(event.payload, Payload::Unknown) => None,
@@ -573,6 +603,8 @@ fn typed_repository_events(raw: Vec<(String, serde_json::Value)>) -> Result<Vec<
 }
 
 fn typed_events(raw: Vec<(String, serde_json::Value)>) -> Result<Vec<Event>> {
+    let _phase = crate::perf::phase("decode");
+    crate::perf::ledger("change", "typed", raw.len() as u64);
     raw.into_iter()
         .filter_map(|(_, value)| match serde_json::from_value::<Event>(value) {
             Ok(event) if matches!(event.payload, Payload::Unknown) => None,
@@ -1293,15 +1325,19 @@ impl Store {
     }
 
     fn change_dir_ids(&self, dir: &Path) -> Result<BTreeSet<String>> {
+        let _phase = crate::perf::phase("enumerate");
         let mut ids_out = BTreeSet::new();
         if dir.is_dir() {
+            let mut visited = 0;
             for entry in fs::read_dir(dir)? {
+                visited += 1;
                 let entry = entry?;
                 let name = entry.file_name().to_string_lossy().into_owned();
                 if entry.file_type()?.is_dir() && ids::validate_id_component(&name).is_ok() {
                     ids_out.insert(name);
                 }
             }
+            enumerated("change", visited);
         }
         Ok(ids_out)
     }
@@ -1972,9 +2008,13 @@ impl Store {
         rewrites: &crate::rewrite::RewriteMap,
         repository_events: &[Event],
     ) -> Result<crate::state::ChangeState> {
+        let reduce = crate::perf::phase("reduce");
+        crate::perf::count("changes_reduced", 1);
         let mut state = crate::state::reduce_following(events, rewrites)?;
         state.apply_privilege_scope(Arc::clone(scope), events);
         crate::replica::localize_change(&self.repository_id, events, &mut state);
+        drop(reduce);
+        let _round_trip = crate::perf::phase("round_trip");
         let mut round_trip = std::mem::take(&mut state.round_trip);
         round_trip.join(
             &state,
@@ -2010,6 +2050,7 @@ impl Store {
     /// derives a fresh one for each.
     pub fn privilege_scope(&self) -> Result<Arc<PrivilegeScope>> {
         self.shared_or(
+            "scope",
             |memo| &mut memo.scope,
             || Ok(Arc::new(PrivilegeScope::for_store(self)?)),
         )
@@ -2024,6 +2065,7 @@ impl Store {
     /// value `read` gives, held for later reads when it succeeds.
     fn shared_or<T: Clone>(
         &self,
+        name: &'static str,
         held: impl Fn(&mut shared::Memo) -> &mut Option<T>,
         read: impl FnOnce() -> Result<T>,
     ) -> Result<T> {
@@ -2031,8 +2073,10 @@ impl Store {
             return read();
         }
         if let Some(value) = shared::with(&self.root, |memo| held(memo).clone()) {
+            crate::perf::cache(name, true);
             return Ok(value);
         }
+        crate::perf::cache(name, false);
         let value = read()?;
         // A read that ran while the memo was unlocked holds the same files.
         shared::with(&self.root, |memo| *held(memo) = Some(value.clone()));
@@ -2042,6 +2086,7 @@ impl Store {
     /// The published import batches, read once when this handle shares reads.
     fn import_batches(&self) -> Result<Vec<ImportBatch>> {
         self.shared_or(
+            "import_batches",
             |memo| &mut memo.import_batches,
             || import_batches(&self.root),
         )
@@ -2065,7 +2110,8 @@ impl Store {
     /// The scope is derived once for the whole view, so the cost of an
     /// aggregate read does not multiply by the number of changes.
     pub fn readable_states(&self) -> Result<BTreeMap<String, crate::state::ChangeState>> {
-        let (states, warnings) = self.shared_or(|memo| &mut memo.states, || self.read_states())?;
+        let (states, warnings) =
+            self.shared_or("states", |memo| &mut memo.states, || self.read_states())?;
         for warning in &warnings {
             eprintln!("{warning}");
         }
@@ -2162,8 +2208,10 @@ impl Store {
         if let Some(held) =
             shared::with(&self.root, |memo| memo.change_files.get(change_id).cloned())
         {
+            crate::perf::cache("change_files", true);
             return Ok(held);
         }
+        crate::perf::cache("change_files", false);
         let read = self.read_event_files(change_id, seen)?;
         shared::with(&self.root, |memo| {
             memo.change_files
@@ -2178,6 +2226,7 @@ impl Store {
         seen: &BTreeSet<String>,
     ) -> Result<(Vec<(String, serde_json::Value)>, bool)> {
         ids::validate_id_component(change_id)?;
+        let _phase = crate::perf::phase("enumerate");
         let dir = self.events_dir(change_id);
         let entries = match fs::read_dir(&dir) {
             Ok(entries) => Some(entries),
@@ -2186,8 +2235,12 @@ impl Store {
                 return Err(error).with_context(|| format!("cannot read {}", dir.display()))
             }
         };
+        if entries.is_some() {
+            crate::perf::ledger("change", "enumerations", 1);
+        }
         let mut events = Vec::new();
         for entry in entries.into_iter().flatten() {
+            crate::perf::ledger("change", "entries", 1);
             let entry = entry?;
             if !entry.file_type()?.is_file() {
                 continue;
@@ -2266,6 +2319,7 @@ impl Store {
     /// walks this rather than the parsed listing: one unreadable file must not
     /// hide the state of every other, which is the whole point of the report.
     pub fn repository_event_files(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let _phase = crate::perf::phase("enumerate");
         let dir = self.repository_events_dir();
         let entries = match fs::read_dir(&dir) {
             Ok(entries) => Some(entries),
@@ -2274,8 +2328,12 @@ impl Store {
                 return Err(error).with_context(|| format!("cannot read {}", dir.display()))
             }
         };
+        if entries.is_some() {
+            crate::perf::ledger("repository", "enumerations", 1);
+        }
         let mut files = Vec::new();
         for entry in entries.into_iter().flatten() {
+            crate::perf::ledger("repository", "entries", 1);
             let name = entry?.file_name().to_string_lossy().into_owned();
             let Some(event_id) = name.strip_suffix(".json") else {
                 continue;
@@ -2346,6 +2404,7 @@ impl Store {
     ) -> Result<Vec<(String, serde_json::Value)>> {
         if seen.is_empty() {
             return self.shared_or(
+                "repository_files",
                 |memo| &mut memo.repository_files,
                 || self.read_repository_event_files(seen),
             );
@@ -2357,6 +2416,7 @@ impl Store {
         &self,
         seen: &BTreeSet<String>,
     ) -> Result<Vec<(String, serde_json::Value)>> {
+        let _phase = crate::perf::phase("enumerate");
         let dir = self.repository_events_dir();
         let entries = match fs::read_dir(&dir) {
             Ok(entries) => Some(entries),
@@ -2365,8 +2425,13 @@ impl Store {
                 return Err(error).with_context(|| format!("cannot read {}", dir.display()))
             }
         };
+        crate::perf::count("repository_materializations", 1);
+        if entries.is_some() {
+            crate::perf::ledger("repository", "enumerations", 1);
+        }
         let mut events = Vec::new();
         for entry in entries.into_iter().flatten() {
+            crate::perf::ledger("repository", "entries", 1);
             let name = entry?.file_name().to_string_lossy().into_owned();
             let Some(event_id) = name.strip_suffix(".json") else {
                 continue;

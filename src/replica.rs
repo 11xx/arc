@@ -1566,6 +1566,7 @@ fn bundle_digest(bundle: &ReplicaBundle) -> Result<String> {
 }
 
 pub(crate) fn load_events(store: &Store) -> Result<Vec<ReplicaEvent>> {
+    crate::perf::count("replica_materializations", 1);
     let root = replica_root(store);
     let mut events = BTreeMap::<String, ReplicaEvent>::new();
     let event_dir = root.join("events");
