@@ -10,6 +10,7 @@
 
 use crate::assurance_live::{self as live, Survival};
 use crate::assurance_routing::{self as routing, Answer, Placement, Routing};
+use crate::extent::{covers, Coverage, Extent, Obligation};
 use crate::model::{model_effort, Closure, Verdict};
 use crate::policy::Danger;
 use crate::state::{ChangeState, DebtStanding, Patchset};
@@ -54,8 +55,8 @@ struct ReadView {
     #[serde(skip_serializing_if = "Option::is_none")]
     route_version: Option<String>,
     /// Whether the read can clear the change: an approval of the shipped
-    /// patchset, or an approving audit, that under `review_clearance =
-    /// "assessed"` also clears.
+    /// patchset, or an approving audit, whose `coverage` counts and that
+    /// under `review_clearance = "assessed"` also clears.
     counts: bool,
     /// Under `review_clearance = "assessed"`, `clearing` or `findings`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -63,6 +64,12 @@ struct ReadView {
     /// Why a `findings` read does not clear.
     #[serde(skip_serializing_if = "Option::is_none")]
     findings_reason: Option<&'static str>,
+    /// How much of the shipped subject the read covered: `whole`, a whole
+    /// read of it that also covers the debt's extent; `partial`, an extent
+    /// short of that; `not-established`, no extent. Only a `whole` read, or
+    /// a `not-established` one where the debt names no extent either,
+    /// counts.
+    coverage: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -210,6 +217,24 @@ fn clearance_of(
     }
 }
 
+/// How much of the change's subject (`ChangeState::extent_subject`) a read
+/// with `extent` covered, and whether that lets it count toward the
+/// change's assurance.
+fn coverage_of(state: &ChangeState, extent: Option<&Extent>) -> (&'static str, bool) {
+    let required = state.debt.as_ref().and_then(|debt| debt.extent.as_ref());
+    let Some(extent) = extent else {
+        return ("not-established", required.is_none());
+    };
+    let whole_subject = state.extent_subject().is_some_and(|(base, revision)| {
+        covers(Some(extent), Obligation::Unestablished { base, revision }) == Coverage::Covered
+    });
+    let whole = whole_subject
+        && required.is_none_or(|required| {
+            covers(Some(extent), Obligation::Extent(required)) == Coverage::Covered
+        });
+    (if whole { "whole" } else { "partial" }, whole)
+}
+
 fn reads_of(state: &ChangeState, shipped: Option<&Patchset>) -> Vec<ReadView> {
     let mut reads = Vec::new();
     for verdict in &state.verdicts {
@@ -219,6 +244,7 @@ fn reads_of(state: &ChangeState, shipped: Option<&Patchset>) -> Vec<ReadView> {
             verdict.model.as_deref(),
             verdict.assessment.as_ref(),
         );
+        let (coverage, covers_whole) = coverage_of(state, None);
         reads.push(ReadView {
             event: verdict.event_id.clone(),
             kind: ReadKind::Verdict,
@@ -233,9 +259,11 @@ fn reads_of(state: &ChangeState, shipped: Option<&Patchset>) -> Vec<ReadView> {
             route_version: verdict.route_version.clone(),
             counts: verdict.verdict == Verdict::Approved
                 && shipped.is_some_and(|patchset| patchset.id == verdict.patchset_id)
-                && findings_reason.is_none(),
+                && findings_reason.is_none()
+                && covers_whole,
             read_kind,
             findings_reason,
+            coverage,
         });
     }
     for audit in &state.audit_verdicts {
@@ -245,6 +273,7 @@ fn reads_of(state: &ChangeState, shipped: Option<&Patchset>) -> Vec<ReadView> {
             audit.model.as_deref(),
             audit.assessment.as_ref(),
         );
+        let (coverage, covers_whole) = coverage_of(state, audit.extent.as_ref());
         reads.push(ReadView {
             event: audit.event_id.clone(),
             kind: ReadKind::Audit,
@@ -257,9 +286,10 @@ fn reads_of(state: &ChangeState, shipped: Option<&Patchset>) -> Vec<ReadView> {
             model: audit.model.clone(),
             at: audit.created_at,
             route_version: audit.route_version.clone(),
-            counts: audit.verdict == Verdict::Approved && findings_reason.is_none(),
+            counts: audit.verdict == Verdict::Approved && findings_reason.is_none() && covers_whole,
             read_kind,
             findings_reason,
+            coverage,
         });
     }
     reads.sort_by(|a, b| (a.at, &a.event).cmp(&(b.at, &b.event)));

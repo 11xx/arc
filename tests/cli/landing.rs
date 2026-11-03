@@ -1886,4 +1886,26 @@ fn an_extent_of_a_replayed_member_is_the_range_it_landed_as() {
     assert_eq!(report["debt_standing"], "discharged", "{report}");
     assert_eq!(report["debt"]["discharged_by_event_id"], whole.as_str());
     assert_eq!(report["debt"]["discharge_extent"], "covered", "{report}");
+
+    let assurance = json_stdout(
+        repo.arc(&repo.root)
+            .args(["query", "--assurance", "--json"]),
+    );
+    let row = assurance["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["change_id"] == second.as_str())
+        .unwrap();
+    let coverage_of = |event: &str| {
+        row["reads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|read| read["event"] == event)
+            .unwrap()["coverage"]
+            .clone()
+    };
+    assert_eq!(coverage_of(&scoped), "partial", "{row}");
+    assert_eq!(coverage_of(&whole), "whole", "{row}");
 }

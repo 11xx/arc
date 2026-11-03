@@ -868,3 +868,69 @@ fn under_the_clearance_policy_a_non_clearing_audit_does_not_count() {
     assert_eq!(read["read_kind"], "findings", "{assessed}");
     assert_eq!(read["findings_reason"], "no-assessment", "{assessed}");
 }
+
+/// Claim: under `review_clearance = "assessed"` a clearing, bound audit of
+/// one file does not refresh whole-change assurance, and a whole clearing
+/// audit of the same subject does. Rejects a scoped read refreshing the
+/// whole change because its reader qualifies to clear.
+#[test]
+fn under_the_clearance_policy_only_a_whole_clearing_audit_refreshes_assurance() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nreview_clearance = \"assessed\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "policy"]);
+    let fake = FakeRouting::new(&repo);
+    fake.author("claude-sonnet-5-5#high", FRONTIER_TIER)
+        .read(ASTRA_READ, true, 3, "at");
+    let id = integrate(&repo, &change("scoped", &[]));
+    let assessment = repo.home.join("clears.json");
+    fs::write(
+        &assessment,
+        serde_json::json!({
+            "schema": "agent-routing-assessment/2",
+            "independence": "eligible",
+            "findings": "eligible",
+            "clears": true,
+            "qualifiers": [],
+            "route_version": "2026.11.3",
+            "reviewer": {"identities": ["gpt-6-astra"], "effort": "xhigh"},
+            "authors": [{"identities": ["claude-sonnet-5-5"], "effort": "high"}],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let audit = |extent: &[&str]| {
+        stdout(
+            repo.arc(&repo.root)
+                .env("ARC_ACTOR", "auditor")
+                .args(["--model", ASTRA_READ, "audit", "scoped"])
+                .args(["--verdict", "approved", "--assessment"])
+                .arg(&assessment)
+                .args(extent),
+        )
+    };
+
+    audit(&["--extent-paths", "scoped.txt"]);
+    let report = assurance(&fake, &repo, &["--stale"]);
+    assert_eq!(standing(&report, &id), "owed", "{report}");
+    let read = &row(&report, &id)["reads"][0];
+    assert_eq!(read["read_kind"], "clearing", "{report}");
+    assert_eq!(read["coverage"], "partial", "{report}");
+    assert_eq!(read["counts"], false, "{report}");
+
+    audit(&["--extent", "whole"]);
+    let report = assurance(&fake, &repo, &["--stale"]);
+    assert!(
+        ids(&report).is_empty(),
+        "a whole clearing read refreshes: {report}"
+    );
+    let report = assurance(&fake, &repo, &[]);
+    let reads = row(&report, &id)["reads"].as_array().unwrap();
+    assert_eq!(reads[1]["coverage"], "whole", "{report}");
+    assert_eq!(reads[1]["counts"], true, "{report}");
+}

@@ -2873,6 +2873,11 @@ REVIEW ASSURANCE
     `review_clearance = "assessed"` (`arc guide debt-review`) a read counts
     only when it also clears; every read carries `read_kind` `clearing` or
     `findings`, and a findings read its `findings_reason` and `counts: false`.
+    Under any policy a read counts only when its `coverage` is `whole`, a
+    whole read of the shipped subject that also covers the debt's extent
+    (`arc guide debt-obligations`), or `not-established`, an audit or verdict
+    naming no extent beside a debt naming none. A `partial` read is listed
+    and never refreshes the change.
     Standing compares tiers only, so a same-family read at the frontier tier
     still does not count: a change with no eligible read is `owed`, which its
     debt view already says, and is never `stale`.
