@@ -4842,7 +4842,8 @@ TRACING
                          journal_projections; session_candidates and
                          session_rows, the recordings session discovery's
                          backends scanned and the project's rows they kept
-    cache.<value>        hits and misses of a value read once per process
+    cache.<value>        hits and misses of a value read once and reused:
+                         for the process, or while it holds a lock
     children             runs by kind: the program name, and Git's subcommand;
                          `ms` is time spent waiting on a child arc ran to
                          completion, and a child it only started has a run
