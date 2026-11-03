@@ -7,7 +7,7 @@
 use crate::commands::parse_duration;
 use crate::model::{DeltaSelection, GateEvent};
 use crate::process_group::{
-    join_before_deadline, kill_process_group, read_tail, STDERR_TAIL_BYTES,
+    join_before_deadline, kill_process_group, read_tail, OwnedGroup, STDERR_TAIL_BYTES,
 };
 use anyhow::{bail, Context, Result};
 use serde::{de::Error as _, Deserialize, Deserializer};
@@ -183,9 +183,10 @@ impl ProbeFailure {
 /// the identity either.
 ///
 /// The bound is the gate's declared timeout when it has one, otherwise
-/// `DEFAULT_PROBE_TIMEOUT_SECONDS`. An overrunning probe is killed with its
-/// process group. The digest streams, so a probe that prints without bound
-/// cannot exhaust memory; the stderr kept for the failure is a bounded tail.
+/// `DEFAULT_PROBE_TIMEOUT_SECONDS`. Whether it finishes or overruns, its
+/// process group is killed before it returns, so nothing it started outlives
+/// it. The digest streams, so a probe that prints without bound cannot
+/// exhaust memory; the stderr kept for the failure is a bounded tail.
 pub fn environment_probe(cwd: &Path, probe: &str, timeout: Option<u64>) -> Result<ProbeRun> {
     let timeout = timeout.unwrap_or(DEFAULT_PROBE_TIMEOUT_SECONDS);
     let deadline = Instant::now()
@@ -212,7 +213,7 @@ pub fn environment_probe(cwd: &Path, probe: &str, timeout: Option<u64>) -> Resul
             });
         }
     };
-    let mut child = match command.spawn() {
+    let mut child = match OwnedGroup::spawn(&mut command) {
         Ok(child) => child,
         Err(error) => {
             return Ok(ProbeRun {
@@ -226,10 +227,12 @@ pub fn environment_probe(cwd: &Path, probe: &str, timeout: Option<u64>) -> Resul
         }
     };
     let stdout = child
+        .child()
         .stdout
         .take()
         .context("environment probe stdout pipe unavailable")?;
     let stderr = child
+        .child()
         .stderr
         .take()
         .context("environment probe stderr pipe unavailable")?;
@@ -255,32 +258,24 @@ pub fn environment_probe(cwd: &Path, probe: &str, timeout: Option<u64>) -> Resul
     });
     let stderr_reader = std::thread::spawn(move || read_tail(stderr, STDERR_TAIL_BYTES));
 
-    let mut status = None;
-    let mut timed_out = false;
-    loop {
-        if status.is_none() {
-            status = child
-                .try_wait()
+    let mut exited = false;
+    let timed_out = loop {
+        if !exited {
+            exited = child
+                .leader_exited()
                 .context("failed to wait for environment probe")?;
         }
-        if status.is_some() && stdout_reader.is_finished() && stderr_reader.is_finished() {
-            break;
+        if exited && stdout_reader.is_finished() && stderr_reader.is_finished() {
+            break false;
         }
         if Instant::now() >= deadline {
-            kill_process_group(child.id())
-                .context("failed to kill overrunning environment probe")?;
-            if status.is_none() {
-                status = Some(
-                    child
-                        .wait()
-                        .context("failed to reap overrunning environment probe")?,
-                );
-            }
-            timed_out = true;
-            break;
+            break true;
         }
         std::thread::sleep(Duration::from_millis(10));
-    }
+    };
+    let status = child
+        .stop()
+        .context("failed to stop the environment probe's process group")?;
     let (stdout_digest, printed) = join_before_deadline(
         stdout_reader,
         Some(deadline),
@@ -297,9 +292,8 @@ pub fn environment_probe(cwd: &Path, probe: &str, timeout: Option<u64>) -> Resul
     .transpose()
     .context("failed to read environment probe stderr")?
     .unwrap_or_default();
-    let exit_code = status.and_then(|status| status.code());
-    let succeeded = status.is_some_and(|status| status.success());
-    Ok(if timed_out || !succeeded || !printed {
+    let exit_code = status.code();
+    Ok(if timed_out || !status.success() || !printed {
         ProbeRun {
             identity: None,
             failure: Some(ProbeFailure {
@@ -764,5 +758,56 @@ mod pipe_deadline_tests {
             assert!(run.identity.is_none());
             assert!(run.failure.unwrap().timed_out);
         }
+    }
+
+    /// A probe that exits successfully must not leave a descendant running:
+    /// arc stops the whole group it started before it returns the identity.
+    /// Rejects returning as soon as the shell exits and its pipes close while
+    /// a redirected background process lives on.
+    #[test]
+    fn a_successful_probe_leaves_no_descendant_running() {
+        let cwd = tempfile::tempdir().unwrap();
+        let run = environment_probe(
+            cwd.path(),
+            "sleep 30 >/dev/null 2>&1 & echo $! > descendant.pid; printf identity",
+            Some(5),
+        )
+        .unwrap();
+        let descendant = crate::process_group::test_support::read_pid(cwd.path(), "descendant.pid");
+        let ended =
+            crate::process_group::test_support::ends_within(descendant, Duration::from_secs(2));
+        if !ended {
+            crate::process_group::test_support::kill(descendant);
+        }
+        assert!(run.identity.is_some());
+        assert!(ended, "probe descendant {descendant} outlived the probe");
+    }
+
+    /// The probe's group ID stays reserved by its unreaped leader until arc
+    /// has signalled the group. Rejects reaping the leader as soon as it
+    /// exits: with the group's only other member escaped into its own
+    /// session, the reaped ID is free for reuse, and the deadline's kill
+    /// would reach whatever process group next takes that number.
+    #[test]
+    fn the_probe_leader_stays_reserved_until_its_group_is_stopped() {
+        let cwd = tempfile::tempdir().unwrap();
+        let path = cwd.path().to_owned();
+        let probe = std::thread::spawn(move || {
+            environment_probe(
+                &path,
+                "echo $$ > leader.pid; \
+                 setsid sh -c 'echo $$ > escaped.pid; exec sleep 6' & printf identity",
+                Some(3),
+            )
+        });
+        let support = &crate::process_group::test_support::LeaderObservation::new(cwd.path());
+        let reserved = support.reserved_after_exit();
+        let run = probe.join().unwrap().unwrap();
+        support.kill_escaped();
+        assert!(
+            reserved,
+            "probe leader was reaped while its group could still be signalled"
+        );
+        assert!(run.failure.unwrap().timed_out);
     }
 }

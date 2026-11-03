@@ -3417,7 +3417,8 @@ RULES THAT CHANGE WHAT YOU DO
     environment identity satisfies only gates that declare no probe, and a
     gate that declares none takes evidence from any environment. A probe is
     bounded by the gate's declared timeout, or thirty seconds when the gate
-    declares none. The newest run at the evaluated tree under the declared
+    declares none, and its process group is stopped before arc uses its
+    answer, so nothing a probe starts outlives it. The newest run at the evaluated tree under the declared
     gate and applicable environment decides; other runs cannot hide it. An
     attested run happened where arc observes nothing, so `--attest` takes the
     identity with `--environment <IDENTITY>`.
