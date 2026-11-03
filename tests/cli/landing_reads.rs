@@ -235,3 +235,69 @@ fn integrate_reads_the_ledger_once_per_read_however_many_changes() {
         "{few} {many}"
     );
 }
+
+/// Open a change on `base` blocked by `blocked_by`, commit to it, snapshot
+/// and approve it.
+fn approved_on(repo: &Repo, slug: &str, base: &str, blocked_by: &[String]) {
+    let mut args = vec!["begin", slug, "--base", base];
+    for blocker in blocked_by {
+        args.extend(["--blocked-by", blocker]);
+    }
+    stdout(repo.arc(&repo.root).args(&args));
+    let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+    repo.commit(
+        &worktree,
+        &format!("{slug}.txt"),
+        &format!("{slug}\n"),
+        &format!("feat: {slug}"),
+    );
+    stdout(repo.arc(&worktree).args(["snapshot", slug]));
+    repo.arc(&worktree)
+        .args(["review", slug, "--verdict", "approved"])
+        .assert()
+        .success();
+}
+
+/// The trace record of integrating a change blocked by `count` integrated
+/// prerequisites, each stacked on the one before.
+fn integration_with_prerequisites(count: usize) -> Value {
+    let repo = ledger_with_import();
+    let mut base = "master".to_string();
+    let mut prerequisites = Vec::new();
+    for index in 0..count {
+        let slug = format!("prerequisite-{index}");
+        approved_on(&repo, &slug, &base, &[]);
+        stdout(repo.arc(&repo.root).args(["integrate", &slug]));
+        base = format!("arc/{slug}");
+        prerequisites.push(slug);
+    }
+    approved_on(&repo, "dependent", &base, &prerequisites);
+    let (record, _, code) = traced(&repo, &repo.root, &["integrate", "dependent"]);
+    assert_eq!(code, Some(0), "{record}");
+    record
+}
+
+/// Claim: the authorization basis reads every prerequisite through one read
+/// of the ledger, so integrating a change blocked by more prerequisites
+/// materializes the repository events, lists the import batches and derives
+/// the scope no more often. Rejects a basis that reads each prerequisite
+/// from a fresh store read of its own.
+#[test]
+fn integrate_reads_prerequisites_through_one_read() {
+    let one = integration_with_prerequisites(1);
+    let three = integration_with_prerequisites(3);
+    for (name, path) in [
+        (
+            "repository materializations",
+            "/counts/repository_materializations",
+        ),
+        ("scope derivations", "/counts/scope_derivations"),
+        ("import enumerations", "/ledger/import/enumerations"),
+    ] {
+        assert_eq!(
+            one.pointer(path),
+            three.pointer(path),
+            "{name} grew with prerequisites: {one} {three}"
+        );
+    }
+}

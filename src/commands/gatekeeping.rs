@@ -4174,6 +4174,59 @@ fn cleanup_local_content(
     Ok((Some(summary), artifacts))
 }
 
+/// The closure that satisfied each of the change's prerequisites, followed
+/// through supersession, read through one read of the ledger.
+fn prerequisite_closures(
+    store: &Store,
+    st: &ChangeState,
+) -> Result<Vec<crate::model::PrerequisiteClosure>> {
+    let mut prerequisites = Vec::new();
+    if st.blocked_by.is_empty() {
+        return Ok(prerequisites);
+    }
+    let read = store.read().context(
+        "the prerequisites cannot be read, so the authorization basis would be incomplete",
+    )?;
+    for blocker in &st.blocked_by {
+        // A basis missing a prerequisite is a basis that misstates what was
+        // checked, so an unreadable one refuses the merge rather than being
+        // quietly omitted.
+        let events = read.events(blocker).with_context(|| {
+            format!("prerequisite {blocker} cannot be read, so the authorization basis                      would be incomplete")
+        })?;
+        let mut blocker_id = blocker.clone();
+        let mut blocker_state = read.project(&events)?;
+        // Dependency readiness follows supersession, so the basis must record
+        // the closure that actually satisfied the dependency rather than the
+        // superseded one, whose integrated commit is null.
+        let mut seen = vec![blocker_id.clone()];
+        while let Some(successor) = blocker_state
+            .closure
+            .as_ref()
+            .filter(|closure| closure.outcome == Closure::Superseded)
+            .and_then(|closure| closure.superseded_by.clone())
+        {
+            if seen.contains(&successor) {
+                break;
+            }
+            let Ok(events) = read.events(&successor) else {
+                break;
+            };
+            seen.push(successor.clone());
+            blocker_id = successor;
+            blocker_state = read.project(&events)?;
+        }
+        if let Some(closure) = &blocker_state.closure {
+            prerequisites.push(crate::model::PrerequisiteClosure {
+                change_id: blocker_id,
+                closure_event_id: closure.event_id.clone(),
+                integrated_commit: closure.integrated_commit.clone(),
+            });
+        }
+    }
+    Ok(prerequisites)
+}
+
 /// Report what `integrate` would do without merging, closing, or writing
 /// anything: run the same readiness preflight, then simulate the merge with
 /// the needs-rebase machinery. Exit code mirrors `check`: 0 when the merge
@@ -4216,46 +4269,7 @@ fn authorization_basis(
         gate_evidence.insert(gate.name.clone(), evidence);
     }
 
-    let mut prerequisites = Vec::new();
-    for blocker in &st.blocked_by {
-        // A basis missing a prerequisite is a basis that misstates what was
-        // checked, so an unreadable one refuses the merge rather than being
-        // quietly omitted.
-        let events = store.load_events(blocker).with_context(|| {
-            format!("prerequisite {blocker} cannot be read, so the authorization basis                      would be incomplete")
-        })?;
-        let mut blocker_id = blocker.clone();
-        let mut blocker_state = store.project_state(&events, &store.rewrites()?)?;
-        crate::replica::localize_change(&store.repository_id, &events, &mut blocker_state);
-        // Dependency readiness follows supersession, so the basis must record
-        // the closure that actually satisfied the dependency rather than the
-        // superseded one, whose integrated commit is null.
-        let mut seen = vec![blocker_id.clone()];
-        while let Some(successor) = blocker_state
-            .closure
-            .as_ref()
-            .filter(|closure| closure.outcome == Closure::Superseded)
-            .and_then(|closure| closure.superseded_by.clone())
-        {
-            if seen.contains(&successor) {
-                break;
-            }
-            let Ok(events) = store.load_events(&successor) else {
-                break;
-            };
-            seen.push(successor.clone());
-            blocker_id = successor;
-            blocker_state = store.project_state(&events, &store.rewrites()?)?;
-            crate::replica::localize_change(&store.repository_id, &events, &mut blocker_state);
-        }
-        if let Some(closure) = &blocker_state.closure {
-            prerequisites.push(crate::model::PrerequisiteClosure {
-                change_id: blocker_id,
-                closure_event_id: closure.event_id.clone(),
-                integrated_commit: closure.integrated_commit.clone(),
-            });
-        }
-    }
+    let prerequisites = prerequisite_closures(store, st)?;
 
     let mut selected = st.clone();
     selected.target_branch = target.to_string();
