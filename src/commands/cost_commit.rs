@@ -725,6 +725,62 @@ fn beyond_opening(text: &str) -> &str {
         .trim_end()
 }
 
+/// What noting one commit did.
+enum Noted {
+    Written,
+    Unchanged,
+    /// The note's text is not portable; the reason.
+    Refused(String),
+}
+
+/// Note each change's commits from one read of its cost view, dropped before
+/// the next change's is read, recording what noting each commit did.
+fn note_changes<'a>(
+    ctx: &Ctx,
+    by_change: &BTreeMap<&str, Vec<&'a str>>,
+    jobs: &BTreeMap<String, (String, bool, bool)>,
+    states: &BTreeMap<String, ChangeState>,
+    changes: Option<&Changes>,
+    outcomes: &mut BTreeMap<&'a str, Noted>,
+) -> Result<()> {
+    for (change_id, commits) in by_change {
+        let cost = read_cost(ctx, change_id, None)?;
+        let state = &states[*change_id];
+        let patchset = patchset_commits(ctx, state);
+        for commit in commits {
+            let (_, refresh, looked_up) = &jobs[*commit];
+            let located = Located {
+                place: place_in(state, &patchset, commit),
+                state: state.clone(),
+                commits: patchset.clone(),
+            };
+            let mut view = view_of(ctx, commit, &located, &cost)?;
+            if let Some(lookup) = changes
+                .filter(|_| *looked_up)
+                .and_then(|changes| changes.lookup(true))
+            {
+                view["lookup"] = lookup;
+            }
+            let outcome = match note_text(&view) {
+                Ok(text) => {
+                    let unchanged = *refresh
+                        && gitio::read_note(&ctx.cwd, NOTES, commit)?
+                            .is_some_and(|held| beyond_opening(&held) == beyond_opening(&text));
+                    if unchanged {
+                        Noted::Unchanged
+                    } else {
+                        gitio::set_note(&ctx.cwd, NOTES, commit, &text)?;
+                        Noted::Written
+                    }
+                }
+                Err(error) => Noted::Refused(error.to_string()),
+            };
+            outcomes.insert(commit, outcome);
+        }
+    }
+    Ok(())
+}
+
 /// Write the note on each commit a change holds, or, with `all`, refresh every
 /// noted commit whose text a newer read changes.
 pub fn note_cost(ctx: &Ctx, target: Option<&str>, all: bool) -> Result<()> {
@@ -786,45 +842,28 @@ pub fn note_cost(ctx: &Ctx, target: Option<&str>, all: bool) -> Result<()> {
             }
         }
     }
-    let mut costs: BTreeMap<String, CostView> = BTreeMap::new();
+    // A change's view is read once and dropped once its commits are noted,
+    // so the batch holds one view at a time.
+    let mut by_change: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (commit, (change_id, _, _)) in &jobs {
+        by_change.entry(change_id).or_default().push(commit);
+    }
+    let mut outcomes = BTreeMap::new();
+    let noting = note_changes(ctx, &by_change, &jobs, &states, held.get(), &mut outcomes);
+    // Outcomes are reported in commit order, including those noted before
+    // a failure.
     let mut refused = 0usize;
-    for (commit, (change_id, refresh, looked_up)) in &jobs {
-        if !costs.contains_key(change_id) {
-            costs.insert(change_id.clone(), read_cost(ctx, change_id, None)?);
-        }
-        let state = &states[change_id];
-        let commits = patchset_commits(ctx, state);
-        let located = Located {
-            place: place_in(state, &commits, commit),
-            state: state.clone(),
-            commits,
-        };
-        let mut view = view_of(ctx, commit, &located, &costs[change_id])?;
-        if let Some(lookup) = held
-            .get()
-            .filter(|_| *looked_up)
-            .and_then(|changes| changes.lookup(true))
-        {
-            view["lookup"] = lookup;
-        }
-        let text = match note_text(&view) {
-            Ok(text) => text,
-            Err(error) => {
+    for (commit, outcome) in &outcomes {
+        match outcome {
+            Noted::Refused(error) => {
                 eprintln!("{}: {error}", short(commit));
                 refused += 1;
-                continue;
             }
-        };
-        let unchanged = *refresh
-            && gitio::read_note(&ctx.cwd, NOTES, commit)?
-                .is_some_and(|held| beyond_opening(&held) == beyond_opening(&text));
-        if unchanged {
-            println!("unchanged: {}", short(commit));
-        } else {
-            gitio::set_note(&ctx.cwd, NOTES, commit, &text)?;
-            println!("written: {}", short(commit));
+            Noted::Unchanged => println!("unchanged: {}", short(commit)),
+            Noted::Written => println!("written: {}", short(commit)),
         }
     }
+    noting?;
     if refused > 0 {
         bail!("{refused} notes refused: their text is not portable");
     }

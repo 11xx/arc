@@ -153,3 +153,67 @@ fn a_whole_ledger_report_is_written_one_entry_at_a_time() {
     assert_eq!(held(&counts), &json!(0), "table: {counts}");
     assert!(table.contains("shared-e"), "{table}");
 }
+
+/// Open `count` more changes, each with two commits in one snapshotted
+/// patchset, and note each one's commits.
+fn noted_changes(repo: &Repo, first: usize, count: usize) {
+    for index in first..first + count {
+        let slug = format!("noted-{index}");
+        let (_, worktree, _) = change_with_patchset(repo, &slug);
+        repo.commit(
+            &worktree,
+            &format!("{slug}-more.txt"),
+            "more\n",
+            &format!("test: extend {slug}"),
+        );
+        stdout(repo.arc(&worktree).args(["snapshot", &slug]));
+        stdout(repo.arc(&repo.root).args(["cost", "note", &slug]));
+    }
+}
+
+/// Run `arc cost note` with `args`; return its counts and output.
+fn noted(repo: &Repo, args: &[&str]) -> (Value, String) {
+    let counts = repo.home.join("ledger-reads.json");
+    let output = stdout(
+        repo.arc(&repo.root)
+            .env("ARC_TEST_LEDGER_READS", &counts)
+            .args(["cost", "note"])
+            .args(args),
+    );
+    let counts: Value = serde_json::from_slice(&fs::read(&counts).unwrap()).unwrap();
+    (counts, output)
+}
+
+/// Claim: `cost note --all` holds one change's cost view at a time, so the
+/// report entries it holds at once are those of one change's view however
+/// many noted changes it refreshes, and it still reports each commit in
+/// commit order. Rejects a refresh that keeps every change's view until the
+/// batch ends, and one that reports commits grouped by change.
+#[test]
+fn a_note_refresh_holds_one_change_view_at_a_time() {
+    let repo = Repo::new();
+    noted_changes(&repo, 0, 1);
+    let (counts, _) = noted(&repo, &["noted-0"]);
+    let one_view = held(&counts).clone();
+    for (first, count) in [(1, 1), (2, 3)] {
+        noted_changes(&repo, first, count);
+        let (counts, output) = noted(&repo, &["--all"]);
+        assert_eq!(
+            held(&counts),
+            &one_view,
+            "{} noted changes: {counts}",
+            first + count
+        );
+        let commits: Vec<&str> = output
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix("unchanged: ")
+                    .or_else(|| line.strip_prefix("written: "))
+            })
+            .collect();
+        assert_eq!(commits.len(), 2 * (first + count), "{output}");
+        let mut ordered = commits.clone();
+        ordered.sort_unstable();
+        assert_eq!(commits, ordered, "commits are reported in order: {output}");
+    }
+}
