@@ -363,6 +363,37 @@ fn an_open_change_refuses_the_receipt_and_names_the_ordinary_attestation() {
     );
 }
 
+/// Claim: an ordinary attestation reaching an integrated change is still
+/// refused, and the refusal names the receipt form.
+/// Rejects: a refusal that only says the event is open-only, which is where
+/// callers wrote their receipts outside the ledger.
+#[test]
+fn a_late_attestation_names_the_receipt_form() {
+    let fixture = integrated_owing_review();
+    let repo = &fixture.repo;
+    let before = event_count(repo, &fixture.change_id);
+    repo.arc(&repo.root)
+        .args([
+            "verify",
+            WORK,
+            "--gate",
+            "unit",
+            "--attest",
+            "--result",
+            "pass",
+            "--tested-revision",
+            &fixture.integrated,
+            "--execution-host",
+            "ci-host-1",
+            "--runner",
+            "job",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--attest --after-integration"));
+    assert_eq!(event_count(repo, &fixture.change_id), before);
+}
+
 /// Claim: the receipt form records only what a caller observed elsewhere, so
 /// it requires --attest.
 #[test]

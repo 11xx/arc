@@ -1270,7 +1270,8 @@ RUN A CHANGE
   `post_integration_verifications` with `after_integration: true`; `explain`
   lists it as later knowledge, `declared` because arc ran nothing. It changes
   no authorization basis, discharges no debt, and satisfies no gate. On an
-  open change the form is refused, naming the ordinary attestation.
+  open change the form is refused, naming the ordinary attestation; plain
+  `--attest` on an integrated change is refused, naming this form.
 
   The decision is one function of facts observed under the target and change
   locks: a plan naming the target revision, the approved head, the tree the

@@ -327,6 +327,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             },
         );
     }
+    refuse_late_attestation(&st, attest)?;
     // Gates and final probes run where the change lives. Baseline probes
     // choose between the invoking checkout and a scratch checkout at the base.
     // Attestation and merge evidence have no recorded worktree to choose.
@@ -5482,6 +5483,24 @@ fn attested_environment(
         bail!("--environment applies only to a gate whose declaration has an environment probe");
     }
     Ok(None)
+}
+
+/// Gate evidence is open-only, so an attestation reaching an integrated
+/// change is refused with the receipt form that does fit it.
+fn refuse_late_attestation(st: &state::ChangeState, attest: bool) -> Result<()> {
+    let integrated = st
+        .closure
+        .as_ref()
+        .is_some_and(|closure| closure.outcome == Closure::Integrated);
+    if attest && integrated {
+        bail!(
+            "change {} is integrated, and gate evidence is open-only; record a check observed \
+             after integration with `arc verify {} --attest --after-integration ...`",
+            st.change_id,
+            st.slug
+        );
+    }
+    Ok(())
 }
 
 /// What the caller reports about a check run against an integrated change.
