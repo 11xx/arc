@@ -188,21 +188,8 @@ pub fn record_checkpoint(
         None => None,
     };
     if let Err(error) = store.append_local_repository_event(&mut event) {
-        if let (Some(tag_name), Some(object)) = (&tag_name, &tag_object) {
-            let reference = format!("refs/tags/{tag_name}");
-            return Err(
-                match gitio::git(cwd, &["update-ref", "-d", &reference, object]) {
-                    Ok(_) => error.context(format!(
-                        "nothing was recorded; tag {tag_name} was deleted again"
-                    )),
-                    Err(cleanup) => error.context(format!(
-                        "nothing was recorded, and tag {tag_name} could not be deleted: \
-                         {cleanup:#}"
-                    )),
-                },
-            );
-        }
-        return Err(error);
+        let tag = tag_name.as_deref().zip(tag_object.as_deref());
+        return Err(failed_append(&store, cwd, &event, tag, error));
     }
     println!("checkpoint: {name}");
     println!("revision: {revision}");
@@ -217,6 +204,45 @@ pub fn record_checkpoint(
     println!("open todos: {todo_count}");
     println!("event: {}", event.event_id);
     Ok(())
+}
+
+/// The error for a checkpoint append that failed, after settling the tag
+/// written for it. The tag is deleted only when the event is known absent;
+/// a published event, or one whose publication cannot be told, keeps it.
+fn failed_append(
+    store: &Store,
+    cwd: &Path,
+    event: &Event,
+    tag: Option<(&str, &str)>,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let kept = tag
+        .map(|(tag_name, _)| format!("; tag {tag_name} is kept"))
+        .unwrap_or_default();
+    match store.repository_event_is_published(event) {
+        Ok(true) => error.context(format!(
+            "checkpoint event {} is published but not confirmed durable{kept}",
+            event.event_id
+        )),
+        Err(inspection) => error.context(format!(
+            "cannot tell whether checkpoint event {} was published ({inspection:#}){kept}",
+            event.event_id
+        )),
+        Ok(false) => {
+            let Some((tag_name, object)) = tag else {
+                return error.context("nothing was recorded");
+            };
+            let reference = format!("refs/tags/{tag_name}");
+            match gitio::git(cwd, &["update-ref", "-d", &reference, object]) {
+                Ok(_) => error.context(format!(
+                    "nothing was recorded; tag {tag_name} was deleted again"
+                )),
+                Err(cleanup) => error.context(format!(
+                    "nothing was recorded, and tag {tag_name} could not be deleted: {cleanup:#}"
+                )),
+            }
+        }
+    }
 }
 
 /// The branch a checkpoint is on: the one `--rev` names, or the one `HEAD`
@@ -742,4 +768,109 @@ pub(crate) fn handoff_line(cwd: &Path, name: &str) -> Result<String> {
         "Checkpoint: {} at {}\n",
         checkpoint.name, checkpoint.revision
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{fail_directory_sync, LocalEvent};
+
+    /// A repository holding one commit, and that commit.
+    fn repository(tmp: &tempfile::TempDir) -> (std::path::PathBuf, String) {
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        for args in [
+            &["init", "-q", "-b", "master"][..],
+            &["config", "user.name", "Tester"],
+            &["config", "user.email", "tester@example.invalid"],
+            &["config", "commit.gpgsign", "false"],
+            &["config", "tag.gpgsign", "false"],
+            &["commit", "-q", "--allow-empty", "-m", "base"],
+        ] {
+            gitio::git(&root, args).unwrap();
+        }
+        let head = gitio::head(&root).unwrap();
+        (root, head)
+    }
+
+    fn draft(name: &str, revision: &str, tag: &str) -> LocalEvent {
+        LocalEvent::draft(
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1, "event_id": "", "repository_id": "repo",
+                "change_id": Store::REPOSITORY_SCOPE, "actor": "tester",
+                "created_at": chrono::Utc::now(), "event_type": "checkpoint-recorded",
+                "name": name, "revision": revision, "tree": "tree", "tag": tag,
+                "changes": [], "todos": [],
+            }))
+            .unwrap(),
+        )
+    }
+
+    /// Claim: when the append publishes the checkpoint event and then fails
+    /// its directory sync, the tag the event names stays, and the error says
+    /// the event is published. Rejects: deleting the tag on every append
+    /// error, which leaves a readable checkpoint naming a tag that is gone.
+    #[test]
+    fn a_published_event_whose_sync_failed_keeps_its_tag() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (root, revision) = repository(&tmp);
+        let store = Store::for_tests(&tmp.path().join("store"));
+        store
+            .append_local_repository_event(&mut draft("warm", &revision, "checkpoint/warm"))
+            .unwrap();
+        let object = write_tag(&root, "checkpoint/rc", "rc", &revision, None).unwrap();
+        let mut event = draft("rc", &revision, "checkpoint/rc");
+        fail_directory_sync(true);
+        let appended = store.append_local_repository_event(&mut event);
+        fail_directory_sync(false);
+        let error = appended.unwrap_err();
+        assert!(store.repository_event_is_published(&event).unwrap());
+
+        let error = failed_append(
+            &store,
+            &root,
+            &event,
+            Some(("checkpoint/rc", &object)),
+            error,
+        );
+        assert_eq!(
+            gitio::ref_value(&root, "refs/tags/checkpoint/rc").unwrap(),
+            Some(object),
+            "the tag of a published checkpoint was deleted: {error:#}"
+        );
+        let message = format!("{error:#}");
+        assert!(message.contains("is published"), "{message}");
+        assert!(message.contains(&event.event_id), "{message}");
+    }
+
+    /// Claim: when the append publishes nothing, the tag written for it is
+    /// deleted and the error says nothing was recorded. Rejects: a tag left
+    /// behind by a checkpoint that does not exist.
+    #[test]
+    fn an_absent_event_deletes_its_tag() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (root, revision) = repository(&tmp);
+        let store = Store::for_tests(&tmp.path().join("store"));
+        let object = write_tag(&root, "checkpoint/rc", "rc", &revision, None).unwrap();
+        let mut event = draft("rc", &revision, "checkpoint/rc");
+        event.event_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV".into();
+        let error = store.append_local_repository_event(&mut event).unwrap_err();
+        assert!(!store.repository_event_is_published(&event).unwrap());
+
+        let error = failed_append(
+            &store,
+            &root,
+            &event,
+            Some(("checkpoint/rc", &object)),
+            error,
+        );
+        assert_eq!(
+            gitio::ref_value(&root, "refs/tags/checkpoint/rc").unwrap(),
+            None
+        );
+        assert!(
+            format!("{error:#}").contains("nothing was recorded"),
+            "{error:#}"
+        );
+    }
 }

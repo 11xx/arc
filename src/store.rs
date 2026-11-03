@@ -3099,6 +3099,29 @@ thread_local! {
     static FAIL_DIRECTORY_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Make the directory sync that completes a publication fail on this thread,
+/// after the published file is already visible.
+#[cfg(test)]
+pub(crate) fn fail_directory_sync(fail: bool) {
+    FAIL_DIRECTORY_SYNC.set(fail);
+}
+
+#[cfg(test)]
+impl Store {
+    /// A writable store at `root` for repository `repo`, with no policy.
+    pub(crate) fn for_tests(root: &Path) -> Store {
+        Store {
+            operator_policy_path: None,
+            root: root.to_path_buf(),
+            repository_id: "repo".into(),
+            require_declared_actor: false,
+            require_declared_actor_sources: Vec::new(),
+            review_clearance: Default::default(),
+            read_only: false,
+        }
+    }
+}
+
 /// Durably publishes a new file by fsyncing its contents, hard-linking it into
 /// place, and fsyncing the containing directory.
 fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -3149,15 +3172,7 @@ mod tests {
     use std::sync::mpsc;
 
     fn test_store(root: &Path) -> Store {
-        Store {
-            operator_policy_path: None,
-            root: root.to_path_buf(),
-            repository_id: "repo".into(),
-            require_declared_actor: false,
-            require_declared_actor_sources: Vec::new(),
-            review_clearance: Default::default(),
-            read_only: false,
-        }
+        Store::for_tests(root)
     }
 
     fn ordering_event(change: &str, id: ulid::Ulid) -> Event {

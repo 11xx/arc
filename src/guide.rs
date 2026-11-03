@@ -1999,9 +1999,11 @@ CHECKPOINTS (a revision handed over for testing)
   patchset and head, and every live, unconsumed journal todo of the
   project. Names are unique in a repository. `--tag` also writes the
   annotated tag `checkpoint/<name>` with `git tag -a`, signed as Git's
-  configuration signs tags; an existing tag refuses with nothing recorded,
-  and a tag whose event cannot be written is deleted again. The event is a
-  plain fact: it grants and requires no authority.
+  configuration signs tags; an existing tag refuses with nothing recorded.
+  When the event append fails, the tag is deleted again only if the event
+  is known absent; an event published but not confirmed durable, or one
+  whose publication cannot be told, keeps its tag and the error says which.
+  The event is a plain fact: it grants and requires no authority.
 
   When findings come back, `show` sorts them against the checkpoint. A
   change open at it is integrated (whether the integrated commit is inside
