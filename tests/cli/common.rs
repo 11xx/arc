@@ -268,13 +268,17 @@ fn copy_tree(source: &Path, destination: &Path) {
     }
 }
 
-/// This process's seed directory, on the build's disk scratch space rather
-/// than the system temporary directory. Statics are never dropped, so each
-/// process removes the directories its exited predecessors left.
+/// This process's seed directory, beside the fixtures in the system temporary
+/// directory. A seed is a Git repository, and one left inside the checkout's
+/// build directory is local content that keeps `arc integrate --cleanup` from
+/// removing the checkout. Statics are never dropped, so each process removes
+/// the directories its exited predecessors left.
 fn seed_scratch() -> &'static Path {
     static SCRATCH: OnceLock<PathBuf> = OnceLock::new();
     SCRATCH.get_or_init(|| {
-        let parent = Path::new(env!("CARGO_TARGET_TMPDIR")).join("fixture-seeds");
+        // SAFETY: getuid has no preconditions and cannot fail.
+        let user = unsafe { libc::getuid() };
+        let parent = std::env::temp_dir().join(format!("arc-fixture-seeds-{user}"));
         fs::create_dir_all(&parent).unwrap();
         for entry in fs::read_dir(&parent).unwrap().flatten() {
             let owner = entry
