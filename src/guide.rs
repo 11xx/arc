@@ -2443,13 +2443,13 @@ REVIEW COVERAGE AND DEBT
   only for `owed`, which is why a declared debt is absent from `arc inbox`,
   `arc query --debt` and the workspace backlog.
 
-  An independent approving read of the revision that shipped, recorded after
-  the debt was declared, discharges it — whether it came from `arc review`
-  before the merge or `arc audit` after. The debt records that no such read
-  existed, not that one command must supply it. A `comment-only` or
-  `changes-requested` read is kept as a read, with its findings, and the debt
-  stays owed: a read that refused the work cannot be the review that settles
-  it. An audit whose `--assessment` says `ineligible` discharges no debt of
+  An independent read of the revision that shipped, recorded after the debt
+  was declared, that approves it or requests changes discharges it — whether
+  it came from `arc review` before the merge or `arc audit` after. The debt
+  records that no such read existed, not that one command must supply it. A
+  `changes-requested` read is that review; its findings carry what remains.
+  A `comment-only` read judged nothing: it is kept as a read and the debt
+  stays owed. An audit whose `--assessment` says `ineligible` discharges no debt of
   any kind, whatever actor recorded it; a read with no assessment is judged
   by the actor and model authorship rule alone. `arc audit` prints `debt
   discharged` only when its own read discharged the debt, and otherwise what
@@ -2991,7 +2991,8 @@ THE HISTORY MODEL
 
   A debt is a record of review that did not happen, carried with the
   coverage the work did have, its coordinates, and who produced it. A later
-  independent approving read of the shipped revision discharges it; a
+  independent read of the shipped revision that approves it or requests
+  changes discharges it; a
   discharge never rewrites the basis the integration was accepted on. See REVIEW COVERAGE AND DEBT.
 
   `arc explain <change>` reads a change's history through these, `arc

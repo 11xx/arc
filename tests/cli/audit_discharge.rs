@@ -59,32 +59,28 @@ fn assert_owed(repo: &Repo, slug: &str, read: &str) {
     );
 }
 
-/// Claim: only an approving audit discharges review debt, and `arc audit`
-/// says so. Rejects a `comment-only` or `changes-requested` audit by an
-/// independent reader printing `debt discharged` and settling the debt.
+/// Claim: a `comment-only` audit discharges no review debt and `arc audit`
+/// says why, while a `changes-requested` audit is the review the debt owed.
+/// Rejects a read that judged nothing settling the debt, and a review that
+/// found defects leaving it owed for good.
 #[test]
-fn a_read_that_does_not_approve_leaves_the_debt_owed_and_says_why() {
-    for verdict in ["comment-only", "changes-requested"] {
-        let repo = repo_forbidding_self_approval();
-        integrated_owing(&repo, "unread", &[]);
-        let output = audit(&repo, "unread", "Auditor", verdict, &[]);
-        assert!(!output.contains("debt discharged"), "{verdict}: {output}");
-        assert!(
-            output.contains("the debt still owes"),
-            "{verdict}: {output}"
-        );
-        assert!(
-            output.contains(&format!("a {verdict} read discharges no debt")),
-            "{verdict}: {output}"
-        );
-        assert_owed(&repo, "unread", &event_of(&output));
+fn a_comment_only_read_leaves_the_debt_owed_and_a_refusing_read_discharges_it() {
+    let repo = repo_forbidding_self_approval();
+    integrated_owing(&repo, "unread", &[]);
+    let output = audit(&repo, "unread", "Auditor", "comment-only", &[]);
+    assert!(!output.contains("debt discharged"), "{output}");
+    assert!(output.contains("the debt still owes"), "{output}");
+    assert!(
+        output.contains("neither approves nor requests changes"),
+        "{output}"
+    );
+    assert_owed(&repo, "unread", &event_of(&output));
 
-        let output = audit(&repo, "unread", "Auditor", "approved", &[]);
-        assert!(output.contains("debt discharged"), "{output}");
-        let debt = debt_of(&repo, "unread");
-        assert_eq!(debt["standing"], "discharged", "{debt}");
-        assert_eq!(debt["discharged_by_event_id"], event_of(&output), "{debt}");
-    }
+    let output = audit(&repo, "unread", "Auditor", "changes-requested", &[]);
+    assert!(output.contains("debt discharged"), "{output}");
+    let debt = debt_of(&repo, "unread");
+    assert_eq!(debt["standing"], "discharged", "{debt}");
+    assert_eq!(debt["discharged_by_event_id"], event_of(&output), "{debt}");
 }
 
 /// Claim: an audit routing assessed `ineligible` discharges no kind of debt,

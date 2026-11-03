@@ -4521,8 +4521,8 @@ impl ChangeState {
         if read.created_at < debt.declared_at {
             return Some(DischargeBar::BeforeDeclaration);
         }
-        if read.verdict != Verdict::Approved {
-            return Some(DischargeBar::NotApproval(read.verdict));
+        if read.verdict == Verdict::CommentOnly {
+            return Some(DischargeBar::CommentOnly);
         }
         if let Some(assessment) = read
             .assessment
@@ -4590,8 +4590,8 @@ impl<'a> Read<'a> {
     }
 }
 
-/// Why a recorded read leaves review debt owed. A debt is discharged by an
-/// approving read, recorded after it was declared, by an identity the ledger
+/// Why a recorded read leaves review debt owed. A debt is discharged by a
+/// read that approves or requests changes, recorded after it was declared, by an identity the ledger
 /// does not credit with the work, that routing did not assess `ineligible`;
 /// an `ineligible-review` debt also needs routing's eligible, bound
 /// assessment, which only an audit carries.
@@ -4601,8 +4601,8 @@ pub enum DischargeBar {
     NoReviewAuthority,
     /// The read predates the debt it would answer.
     BeforeDeclaration,
-    /// The read did not approve the work.
-    NotApproval(Verdict),
+    /// The read judged nothing: `comment-only`.
+    CommentOnly,
     /// Routing assessed the reader ineligible, for these reasons.
     AssessedIneligible(Vec<ReviewQualifier>),
     /// The debt is `ineligible-review` and the read carries no eligible,
@@ -4624,11 +4624,9 @@ impl DischargeBar {
                 "comes from a replica this ledger grants no review authority".into()
             }
             Self::BeforeDeclaration => "was recorded before the debt was declared".into(),
-            Self::NotApproval(verdict) => format!(
-                "is {}: a {} read discharges no debt, only an approval does",
-                verdict.as_str(),
-                verdict.as_str()
-            ),
+            Self::CommentOnly => "is comment-only: a read that neither approves nor requests \
+                                  changes discharges no debt"
+                .into(),
             Self::AssessedIneligible(qualifiers) if qualifiers.is_empty() => {
                 "is not independent: routing assessed this auditor ineligible".into()
             }
@@ -5718,28 +5716,40 @@ mod tests {
         review
     }
 
-    /// Rejects a read that refused the work, or only commented on it,
-    /// settling the debt it was supposed to answer: such a read is kept as a
-    /// read and the debt stays owed, from an audit and from a verdict alike.
+    /// Rejects a `comment-only` read, which judged nothing, settling the debt
+    /// it was supposed to answer, and a review that requested changes leaving
+    /// it owed: from an audit and from a verdict alike.
     #[test]
-    fn only_an_approving_read_discharges_review_debt() {
-        for outcome in [Verdict::CommentOnly, Verdict::ChangesRequested] {
-            let audit = with_verdict(independent_audit(None), outcome);
-            let state = change_with_debt(versioned_debt(), true, vec![audit]);
-            assert_eq!(standing_of(&state), Some(DebtStanding::Owed), "{outcome:?}");
-            assert_eq!(state.audit_verdicts.len(), 1, "the read stays recorded");
-            let state =
-                change_with_debt(versioned_debt(), true, vec![independent_verdict(outcome)]);
-            assert_eq!(standing_of(&state), Some(DebtStanding::Owed), "{outcome:?}");
-        }
-        let audited = change_with_debt(versioned_debt(), true, vec![independent_audit(None)]);
-        assert_eq!(standing_of(&audited), Some(DebtStanding::Discharged));
-        let reviewed = change_with_debt(
+    fn a_read_that_judges_the_work_discharges_review_debt() {
+        let audit = with_verdict(independent_audit(None), Verdict::CommentOnly);
+        let state = change_with_debt(versioned_debt(), true, vec![audit]);
+        assert_eq!(standing_of(&state), Some(DebtStanding::Owed));
+        assert_eq!(state.audit_verdicts.len(), 1, "the read stays recorded");
+        let state = change_with_debt(
             versioned_debt(),
             true,
-            vec![independent_verdict(Verdict::Approved)],
+            vec![independent_verdict(Verdict::CommentOnly)],
         );
-        assert_eq!(standing_of(&reviewed), Some(DebtStanding::Discharged));
+        assert_eq!(standing_of(&state), Some(DebtStanding::Owed));
+        for outcome in [Verdict::Approved, Verdict::ChangesRequested] {
+            let audited = change_with_debt(
+                versioned_debt(),
+                true,
+                vec![with_verdict(independent_audit(None), outcome)],
+            );
+            assert_eq!(
+                standing_of(&audited),
+                Some(DebtStanding::Discharged),
+                "{outcome:?}"
+            );
+            let reviewed =
+                change_with_debt(versioned_debt(), true, vec![independent_verdict(outcome)]);
+            assert_eq!(
+                standing_of(&reviewed),
+                Some(DebtStanding::Discharged),
+                "{outcome:?}"
+            );
+        }
     }
 
     /// Rejects an audit routing assessed `ineligible` discharging any kind of

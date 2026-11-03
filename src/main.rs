@@ -619,8 +619,8 @@ enum Cmd {
     /// standing is `owed` or `discharged`, and a discharge after the
     /// integration also names `discharged_later_by`.
     ///
-    /// Only an approving review discharges a debt, so a discharge row's
-    /// outcome reads `approved`. Coverage at acceptance never takes later
+    /// A discharge by a later review that requests changes reads
+    /// `fulfilled, not approved`. Coverage at acceptance never takes later
     /// knowledge into its values; it only points at the discharge.
     /// Recorded producer models that are missing, placeholders or session ids
     /// print as model not recorded. JSON production identities and review coverage retain raw values
@@ -2629,13 +2629,14 @@ enum Cmd {
     },
     /// Record a review performed after integration (never a late verdict)
     ///
-    /// An audit discharges a debt when it approves and its auditor is
-    /// independent of the work's ledger authorship: the patchset's declared
+    /// An audit discharges a debt when it approves or requests changes and its
+    /// auditor is independent of the work's ledger authorship: the patchset's declared
     /// contributors, else its effective author, and its production record's
     /// implementer. Planning and orchestrating never refuse; the audit
-    /// records those roles beside the verdict. A `comment-only` or
-    /// `changes-requested` audit is recorded with its findings and listed as
-    /// a read, and the debt stays owed. An audit whose `--assessment` says
+    /// records those roles beside the verdict. A `changes-requested` audit is
+    /// the review the debt owed; its findings carry what remains. A
+    /// `comment-only` audit judged nothing: it is listed as a read and the
+    /// debt stays owed. An audit whose `--assessment` says
     /// `ineligible` discharges no debt of any kind, whatever actor records
     /// it. A debt of kind `ineligible-review` also needs routing's word that
     /// the auditor is eligible: `--assessment <file>` with `independence:
