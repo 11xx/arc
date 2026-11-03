@@ -1932,7 +1932,9 @@ enum Cmd {
         /// Gate profile required for publication
         #[arg(long, default_value = "local")]
         profile: String,
-        /// Reuse a complete publication pass at the same tree and environment
+        /// Reuse a complete publication pass at the same tree and environment;
+        /// a gate declaring `binds = "commit"` also needs the same target
+        /// revision
         #[arg(long)]
         skip_green: bool,
     },

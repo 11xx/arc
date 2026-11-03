@@ -3459,9 +3459,12 @@ RULES THAT CHANGE WHAT YOU DO
     messages or history declares `binds = "commit"`, which no other
     declaration of that gate withdraws: only a run at the
     head's own commit, or at the merge of that commit, answers for it, and a
-    recorded rewrite never carries its evidence to the successor. A rewrite
-    that changed only messages, such as an appended role entry, keeps every
-    other gate's pass and leaves that one to run again. A single `integrate` runs no
+    recorded rewrite never carries its evidence to the successor;
+    `publication --skip-green` reuses its pass only at the target revision
+    it ran on. An arc that predates the key ignores it and treats the gate
+    as tree-bound. A rewrite that changed only messages, such as an appended
+    role entry, keeps every other gate's pass and leaves that one to run
+    again. A single `integrate` runs no
     gate; it checks that the merge it made carries the tree that was
     evaluated, and undoes it otherwise. A queue runs the ones with no answer
     at that tree, because it moves the target itself and every member behind
@@ -4470,7 +4473,8 @@ FILES
     bypass = "<what qualifies>"         omitted: the gate cannot be bypassed;
                                         every declaration of it must name one
     binds = "commit"                    a pass answers for its commit, not
-                                        its tree; omitted: "tree"
+                                        its tree; omitted: "tree", as an
+                                        older arc reads it
 
   A gate command exits 75 (`EX_TEMPFAIL`) to say it did not run, which arc
   records as `not-admitted`. Both are described in `arc guide change-gates`.

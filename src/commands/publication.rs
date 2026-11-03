@@ -52,6 +52,7 @@ pub fn publication(
         .find_map(|event| match &event.payload {
             Payload::PublicationVerified {
                 target: previous_target,
+                revision: previous_revision,
                 tree: previous_tree,
                 profile: previous_profile,
                 gates,
@@ -63,7 +64,7 @@ pub fn publication(
                 && previous_profile == profile
                 && previous_declarations == &declarations =>
             {
-                Some((gates, result))
+                Some((gates, result, previous_revision == &revision))
             }
             _ => None,
         });
@@ -92,8 +93,9 @@ pub fn publication(
         }
         let reused = skip_green
             && environment_known
-            && reusable.is_some_and(|(receipts, result)| {
+            && reusable.is_some_and(|(receipts, result, same_commit)| {
                 *result == VerifyResult::Pass
+                    && (same_commit || gate.binds == gates::Binding::Tree)
                     && receipts.get(name).is_some_and(|receipt| {
                         receipt.command == gate.command
                             && receipt.timeout_seconds == gate.timeout

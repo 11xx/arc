@@ -181,6 +181,49 @@ fn publication_guard_checks_the_target_and_reuses_only_its_own_full_pass() {
         .stdout(predicates::str::contains(id));
 }
 
+/// Claim: `publication --skip-green` reuses a commit-bound gate's pass only at
+/// the target revision it ran on, while a tree-bound gate's pass is reused at
+/// any revision with the same tree.
+/// Rejects: reusing a `binds = "commit"` pass for another commit that shares
+/// the tree, which answers for a commit message or history nobody checked.
+#[test]
+fn publication_reuses_a_commit_bound_pass_only_at_its_own_revision() {
+    let repo = declaring(
+        "[gates.content]\ncommand='true'\nevents=['publication']\n\
+         [gates.history]\ncommand='true'\nevents=['publication']\nbinds='commit'\n",
+    );
+    let publish = || {
+        let output = arc(&repo, &repo.root)
+            .args(["publication", "--target", "master", "--skip-green"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    publish();
+    let same_commit = publish();
+    for gate in ["content", "history"] {
+        assert!(
+            same_commit.contains(&format!("gate {gate}: skipped")),
+            "{gate} reran at its own revision: {same_commit}"
+        );
+    }
+
+    git(
+        &repo.root,
+        &["commit", "--allow-empty", "-q", "-m", "chore: same tree"],
+    );
+    let same_tree = publish();
+    assert!(
+        same_tree.contains("gate content: skipped"),
+        "a tree-bound pass was not reused at the same tree: {same_tree}"
+    );
+    assert!(
+        !same_tree.contains("gate history: skipped"),
+        "a commit-bound pass answered for another commit: {same_tree}"
+    );
+}
+
 /// Replaying a change onto a moved target evaluates the merge delta, rather
 /// than paying a full gate when the project maps that delta to no checks.
 #[test]
