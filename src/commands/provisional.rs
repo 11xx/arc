@@ -275,6 +275,7 @@ fn report(
         None,
     )?;
     report.blocker_status = canonical_dependencies;
+    report.require_lands_with(super::land::lands_with_report(state, &states));
     report.require_replay_snapshot(crate::provisional::needs_replay_snapshot(
         &ctx.cwd, store, state,
     )?);
@@ -317,6 +318,7 @@ fn basis(
                     change_id: prior.change_id.clone(),
                     closure_event_id: closure.event_id.clone(),
                     integrated_commit: closure.integrated_commit.clone(),
+                    landing: None,
                 });
                 break;
             }
@@ -861,6 +863,7 @@ fn integrate_provisionally_inner(
             bail!("provisional intent has the wrong event kind");
         };
         let _target = store.lock_target(staging_branch)?;
+        let _graph = store.lock_graph()?;
         let _transition = store.lock_transition(&initial.change_id)?;
         let intent = store
             .provisional_intent(&initial.change_id)?
@@ -979,6 +982,7 @@ fn integrate_provisionally_inner(
         }
     };
     let _target = store.lock_target(&selection.branch)?;
+    let _graph = store.lock_graph()?;
     let _transition = store.lock_transition(&initial.change_id)?;
     let mut state = store.state(&initial.change_id)?;
     if state.is_closed() {

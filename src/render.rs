@@ -342,6 +342,26 @@ pub fn markdown(
             hold.hold_event_id, hold.held_by, hold.reason
         );
     }
+    if let Some(attempt) = &report.pending_landing {
+        let _ = writeln!(
+            w,
+            "- **Pending landing** `{attempt}`: finish it with `arc land --recover {attempt}`"
+        );
+    }
+    if let Some(lands_with) = &report.lands_with {
+        let members = lands_with
+            .members
+            .iter()
+            .map(|member| {
+                format!(
+                    "{} (`{}`, {})",
+                    member.slug, member.change_id, member.status
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(w, "- Lands with: {members}");
+    }
     if let Some(c) = &state.closure {
         // How an integration happened is the distinction the ledger exists to
         // hold; a human view that renders all three identically hides it from
@@ -368,6 +388,15 @@ pub fn markdown(
                 w,
                 "  - into `{branch}`, which stood at `{}`",
                 &before[..before.len().min(8)]
+            );
+        }
+        if let Some(landing) = &c.landing {
+            let _ = writeln!(
+                w,
+                "  - via landing `{}` (completion `{}`); its own range starts at `{}`",
+                landing.attempt,
+                landing.completion_event_id,
+                c.range_base().map(short_sha).unwrap_or_default()
             );
         }
         if let Some(reference) = &c.external_reference {
@@ -1369,6 +1398,23 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
             Blocker::Closed => {
                 let _ = writeln!(out, "  - Change is already closed");
             }
+            Blocker::LandingPending => {
+                let attempt = report.pending_landing.as_deref().unwrap_or("?");
+                let _ = writeln!(
+                    out,
+                    "  - landing {attempt} holds this change; finish it with `arc land --recover \
+                     {attempt}`"
+                );
+            }
+            Blocker::LandsWith => {
+                if let Some(lands_with) = &report.lands_with {
+                    let _ = writeln!(
+                        out,
+                        "  - {}",
+                        crate::commands::land::describe_block(&state.change_id, lands_with)
+                    );
+                }
+            }
             Blocker::BranchMissing => {
                 let _ = writeln!(out, "  - Branch `{}` is missing", state.branch);
             }
@@ -1586,6 +1632,12 @@ pub fn next_step(report: &StatusReport) -> String {
         ("restore_target", target) => format!(
             "restore target branch {target}; the change is judged by the declarations on it"
         ),
+        ("recover_landing", attempt) => format!("arc land --recover {attempt}"),
+        ("land_together", _) | ("withdraw_lands_with", _) => report
+            .lands_with
+            .as_ref()
+            .map(|lands_with| lands_with.remedy(change))
+            .unwrap_or_else(|| format!("arc land {change}")),
         ("repair_blockers", _) => {
             let withdrawals: String = dependencies_with_status(report, "wedged")
                 .map(|dependency| format!(" --remove-blocked-by {dependency}"))
@@ -1834,6 +1886,8 @@ fn blocker_title(blocker: Blocker) -> &'static str {
         Blocker::ForkBranch => "change sits on fork work",
         Blocker::Iterating => "change is iterating",
         Blocker::BlockedByChanges => "prerequisite changes unresolved",
+        Blocker::LandingPending => "a landing attempt is pending",
+        Blocker::LandsWith => "must land together",
         Blocker::NeedsRebase => {
             "target branch requires rebase under the selected integration shape"
         }
@@ -2651,6 +2705,45 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
         Payload::ReviewPassAbandoned { pass_id, reason } => (
             "review-pass-abandoned",
             format!("{pass_id}: {}", one_line(reason)),
+        ),
+        Payload::LandsWithDeclared { changes } => ("lands-with-declared", changes.join(" + ")),
+        Payload::LandsWithWithdrawn { changes, reason } => (
+            "lands-with-withdrawn",
+            format!("{}: {}", changes.join(" + "), one_line(reason)),
+        ),
+        Payload::LandingPrepared {
+            attempt,
+            target_branch,
+            members,
+            ..
+        } => (
+            "landing-prepared",
+            format!(
+                "{attempt} into {target_branch}: {}",
+                members
+                    .iter()
+                    .map(|member| member.change_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ),
+        Payload::LandingCompleted {
+            attempt,
+            target_branch,
+            target_after,
+            members,
+            ..
+        } => (
+            "landing-completed",
+            format!(
+                "{attempt}: {} into {target_branch} ({} members)",
+                short_sha(target_after),
+                members.len()
+            ),
+        ),
+        Payload::LandingAbandoned { attempt, reason } => (
+            "landing-abandoned",
+            format!("{attempt}: {}", one_line(reason)),
         ),
         Payload::RunDispatched {
             route,

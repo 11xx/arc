@@ -3790,9 +3790,12 @@ fn integrate_one(
     let mut selected = initial.clone();
     selected.target_branch = target.clone();
     ctx.ensure_target_declares_actor(&selected)?;
-    // Cross-change order is always target, then change. This serializes the
-    // target worktree without allowing an integration/metadata lock cycle.
+    // Cross-change order is always target, then graph, then change. This
+    // serializes the target worktree, and holds the must-land-together
+    // frontier still from the readiness reading through the closure, without
+    // allowing an integration/metadata lock cycle.
     let target_lock = store.lock_target(&target)?;
+    let graph = store.lock_graph()?;
     let transition = store.lock_transition(&change_id)?;
     let mut st = store.state(&change_id)?;
     let recorded_target = st.target_branch.clone();
@@ -3944,6 +3947,7 @@ fn integrate_one(
             already_contained,
             shape: Some(actual_shape),
             started_at: Some(started_at),
+            landing: None,
         },
     )?;
     let merged = (|| -> Result<String> {
@@ -4095,6 +4099,7 @@ fn integrate_one(
     // Retention and worktree cleanup are post-closure maintenance and may
     // invoke Git hooks or other arc commands, so no state lock spans them.
     drop(transition);
+    drop(graph);
     drop(target_lock);
     if already_contained {
         println!("integrated: {merged} (already contained {approved_head}; no merge created)");
@@ -4490,6 +4495,7 @@ fn prerequisite_closures(
                 change_id: blocker_id,
                 closure_event_id: closure.event_id.clone(),
                 integrated_commit: closure.integrated_commit.clone(),
+                landing: None,
             });
         }
     }
@@ -5323,10 +5329,21 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
     } = args;
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
+    // Graph before change, as every graph writer orders them: an asserted
+    // integration reads the must-land-together frontier and must not race
+    // a relation written beside it.
+    let _graph = assert_integrated
+        .is_some()
+        .then(|| store.lock_graph())
+        .transpose()?;
     let transition = store.lock_transition(&change_id)?;
     let st = store.state(&change_id)?;
     if st.is_closed() {
         bail!("change {change_id} is already closed");
+    }
+    super::land::refuse_pending(&st)?;
+    if assert_integrated.is_some() {
+        super::land::refuse_alone(&st, &store.readable_states()?)?;
     }
     if patchset.is_some() && assert_integrated.is_none() {
         bail!("--patchset describes an asserted integration; pass --assert-integrated <REV>");

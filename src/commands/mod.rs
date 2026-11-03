@@ -24,6 +24,7 @@ pub(crate) mod fork;
 mod gatekeeping;
 mod history;
 mod hooks;
+pub(crate) mod land;
 mod lifecycle;
 pub(crate) mod messaging;
 mod observe;
@@ -912,6 +913,7 @@ impl Ctx {
         report.require_provisional_replay(crate::provisional::obsolete_ancestry(
             &self.cwd, state, &states,
         )?);
+        report.require_lands_with(land::lands_with_report(state, &states));
         report.require_replay_snapshot(crate::provisional::needs_replay_snapshot(
             &self.cwd, store, state,
         )?);
@@ -941,6 +943,7 @@ impl Ctx {
         report.require_provisional_replay(crate::provisional::obsolete_ancestry(
             &self.cwd, state, states,
         )?);
+        report.require_lands_with(land::lands_with_report(state, states));
         report.require_replay_snapshot(crate::provisional::needs_replay_snapshot(
             &self.cwd,
             &self.store()?,
@@ -993,6 +996,7 @@ impl Ctx {
         report.require_provisional_replay(crate::provisional::obsolete_ancestry(
             &self.cwd, state, &states,
         )?);
+        report.require_lands_with(land::lands_with_report(state, &states));
         report.require_replay_snapshot(crate::provisional::needs_replay_snapshot(
             &self.cwd, store, state,
         )?);
@@ -1554,6 +1558,8 @@ mod tests {
             post_integration_verifications: Vec::new(),
             set_aside: Vec::new(),
             verification_runs: Vec::new(),
+            lands_with: Vec::new(),
+            pending_landing: None,
             claim: None,
             retired_claim_ids: BTreeSet::new(),
             holds: BTreeMap::new(),
@@ -1573,6 +1579,8 @@ mod tests {
                 integrator: None,
                 integrated_commit: None,
                 superseded_by: None,
+                range_base: None,
+                landing: None,
                 event_id: "event".into(),
                 created_at: Utc::now(),
             }),

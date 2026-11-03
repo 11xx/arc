@@ -30,6 +30,7 @@ mod integration;
 mod interruption;
 mod journal;
 mod journal_exchange;
+mod landing;
 mod model;
 mod operation_output;
 mod perf;
@@ -1100,6 +1101,16 @@ enum Cmd {
         /// Withdraw a declared prerequisite (repeatable)
         #[arg(long = "remove-blocked-by")]
         remove_blocked_by: Vec<String>,
+        /// Require this change and another to land together (repeatable). The
+        /// relation is symmetric and transitive; see `arc guide change-landing`
+        #[arg(long = "lands-with")]
+        lands_with: Vec<String>,
+        /// Withdraw a must-land-together relation; needs --reason (repeatable)
+        #[arg(long = "remove-lands-with")]
+        remove_lands_with: Vec<String>,
+        /// Why a withdrawn must-land-together relation no longer holds
+        #[arg(long)]
+        reason: Option<String>,
         /// Add a batch/query tag (repeatable)
         #[arg(long)]
         tag: Vec<String>,
@@ -6211,12 +6222,32 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             change,
             blocked_by,
             remove_blocked_by,
+            lands_with,
+            remove_lands_with,
+            reason,
             tag,
             remove_tag,
             assign,
             priority,
             json,
         } => {
+            if !lands_with.is_empty() || !remove_lands_with.is_empty() || reason.is_some() {
+                if json
+                    || !blocked_by.is_empty()
+                    || !remove_blocked_by.is_empty()
+                    || !tag.is_empty()
+                    || !remove_tag.is_empty()
+                    || assign.is_some()
+                    || priority.is_some()
+                {
+                    anyhow::bail!(
+                        "--lands-with and --remove-lands-with record a repository relation and \
+                         combine with no other metadata flag"
+                    );
+                }
+                commands::land::lands_with(&ctx, &change, lands_with, remove_lands_with, reason)?;
+                return Ok(0);
+            }
             let has_mutation = !blocked_by.is_empty()
                 || !remove_blocked_by.is_empty()
                 || !tag.is_empty()

@@ -1341,6 +1341,22 @@ RUN A CHANGE
   merges, and leaves the checkout on the target. The dry run says it would.
   Any other shape keeps the refusal naming the missing target checkout.
 
+  Some changes must reach their target together or not at all. `arc metadata
+  <a> --lands-with <b>` records that two open changes with one target land
+  together; `--remove-lands-with <b> --reason <why>` withdraws it. Each is one
+  repository event, written under the graph lock, so both ends see it at once.
+  The relation is symmetric, and a component is every change it joins
+  transitively. `status`, `show` and `check` list a change's component with
+  each member's state.
+
+  No integration path takes a member alone. `integrate`, a queue of `integrate
+  a b` (its members are gated and moved one at a time), provisional
+  integration, and `close --assert-integrated` refuse while another member is
+  open, with blocker `lands-with` (exit 19), naming every open member to land
+  with it. An integrated member satisfies its part. A member
+  abandoned or superseded wedges the rest with the same blocker until the
+  relation is withdrawn, and the remedy names that withdrawal.
+
   `integration.cleanup` governs branch and worktree cleanup after integration
   (built-in false). A slot checkout is never removed; its release detaches it
   and deletes the merged branch (arc guide slots). `integrate --cleanup` enables it; `--no-cleanup` overrides
@@ -4302,6 +4318,9 @@ EXIT CODES
     `arc check` exits 6 for a closed change, a missing branch, or a target
       branch that cannot be resolved.
     `arc check` exits 7 while a prerequisite change is unresolved.
+    `arc check` exits 19 while a must-land-together partner is open or
+      closed without integrating.
+    `arc check` exits 20 while a pending landing attempt holds the change.
     `arc check` exits 11 when the target conflicts or ff-only ancestry
       requires rebasing; it shadows 14 when both are present.
     `arc check` exits 12 when a declared acceptance probe is not
@@ -4857,7 +4876,7 @@ SCHEMAS
   are recovery evidence, separate from versioned journal events.
 
   Internal:
-    store format 7                   .git/arc/config.json and the change ledger
+    store format 8                   .git/arc/config.json and the change ledger
     `arc-accept-checkout/1`           local administrative allocation recovery
     `arc-import-batch/1`             local atomic change import and authorization
     `arc-replica-import/3`           receipt of an imported replica bundle
@@ -5119,6 +5138,7 @@ pub(crate) fn blocker_pointers(blockers: &[crate::blockers::Blocker]) -> String 
         let topic = match blocker {
             Blocker::IntegrationMode => "replicas",
             Blocker::NeedsRebase => "change-integration",
+            Blocker::LandingPending | Blocker::LandsWith => "change-landing",
             Blocker::MergedTreeUnevaluated | Blocker::GatesNotGreen => "rules-evidence",
             Blocker::BlockingFindings => "repair",
             Blocker::NoValidApproval => "debt",
@@ -5186,6 +5206,7 @@ const SECTIONS: &[Section] = &[
     Section { name: "change-gates", family: "change", title: "Gate execution and atomic review input", start: "  A gate runs where its change lives. `verify`, `snapshot --verify`, `done`," },
     Section { name: "probes", family: "probes", title: "Acceptance probes and brief bases", start: "  Each acceptance probe declared on the patchset's brief blocks readiness" },
     Section { name: "change-integration", family: "change", title: "Replay, integration shapes and shipped evidence", start: "  `arc rebase` is what `check` names when the selected integration shape" },
+    Section { name: "change-landing", family: "change", title: "Landings and must-land-together relations", start: "  Some changes must reach their target together or not at all. `arc metadata" },
     Section { name: "cleanup", family: "cleanup", title: "Integration cleanup and retained checkouts", start: "  `integration.cleanup` governs branch and worktree cleanup after integration" },
     Section { name: "change-finalization", family: "change", title: "Retention, checkouts and release copy", start: "  Integration prints the integrated revision and closure event before" },
     Section { name: "delivery", family: "delivery", title: "Preparing delivered changes", start: "PREPARE A DELIVERED CHANGE" },

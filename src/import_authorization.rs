@@ -160,6 +160,21 @@ pub fn required_roles(payload: &Payload) -> Option<Vec<Vec<Role>>> {
         HistoryRewritten { .. } | HistoryRewriteWithdrawn { .. } => vec![vec![Rewrite]],
         ChangeProvisionallyIntegrated { .. } => vec![vec![ProvisionalIntegration]],
         ProvisionalIntegrationResolved { .. } => vec![vec![Integration]],
+        // A relation decides what may integrate alone, so declaring or
+        // withdrawing one is an integration decision.
+        LandsWithDeclared { .. }
+        | LandsWithWithdrawn { .. }
+        | LandingPrepared { .. }
+        | LandingAbandoned { .. } => vec![vec![Integration]],
+        // A completion that carries debt publishes obligations as well as
+        // closures, and needs the authority each requires.
+        LandingCompleted { members, .. } => {
+            let mut roles = vec![vec![Integration]];
+            if members.iter().any(|member| member.debt.is_some()) {
+                roles.push(vec![DebtInput, Waiver]);
+            }
+            roles
+        }
         ChangeIntegrated { .. }
         | IntegrationAsserted { .. }
         | ChangeClosed { .. }

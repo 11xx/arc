@@ -698,6 +698,12 @@ pub struct StatusReport {
     pub blocks: Vec<String>,
     /// Canonical closures; local provisional prerequisite references are separate.
     pub blocker_status: BlockerStatus,
+    /// The change's must-land-together component, when it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lands_with: Option<crate::commands::land::LandsWithReport>,
+    /// The prepared, unfinished landing attempt holding the change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_landing: Option<String>,
     pub claim: Option<ClaimStatus>,
     pub current_head: Option<String>,
     pub needs_rebase: bool,
@@ -1888,6 +1894,8 @@ fn build_report(
         on_fork: fork.is_some(),
         iterating: state.iterating,
         blocked_by_changes: dependency_status.blocked,
+        landing_pending: state.pending_landing.is_some() && !state.is_closed(),
+        lands_with: false,
         needs_rebase,
         merged_tree_evaluated: evaluated_tree.is_some(),
         gates: gate_statuses
@@ -1955,6 +1963,8 @@ fn build_report(
     let next_action =
         if state.is_closed() {
             "none:closed".into()
+        } else if let Some(attempt) = &state.pending_landing {
+            format!("recover_landing:{attempt}")
         } else if current_head.is_none() {
             "restore_branch".into()
         } else if target_unreadable {
@@ -2149,6 +2159,8 @@ fn build_report(
         messages: state.messages.iter().map(MessageStatus::from).collect(),
         blocks,
         blocker_status: dependency_status,
+        lands_with: None,
+        pending_landing: state.pending_landing.clone(),
         claim: claim_status_at(state, now, provenance_mode),
         current_head,
         needs_rebase,
@@ -2260,6 +2272,46 @@ pub fn claim_status_at(
 }
 
 impl StatusReport {
+    /// Attach the change's must-land-together component and raise its
+    /// blocker when another member is open or closed without integrating.
+    pub fn require_lands_with(&mut self, report: Option<crate::commands::land::LandsWithReport>) {
+        let blocks = report
+            .as_ref()
+            .is_some_and(crate::commands::land::LandsWithReport::blocks)
+            && !self.readiness.blockers.contains(&Blocker::Closed);
+        self.lands_with = report;
+        self.readiness
+            .blockers
+            .retain(|blocker| *blocker != Blocker::LandsWith);
+        if !blocks {
+            return;
+        }
+        self.readiness.blockers.push(Blocker::LandsWith);
+        self.readiness.blockers.sort_by_key(|blocker| {
+            blockers::PRIORITY
+                .iter()
+                .position(|candidate| candidate == blocker)
+        });
+        if self.readiness.blockers.first() == Some(&Blocker::LandsWith) {
+            let wedged = self
+                .lands_with
+                .as_ref()
+                .is_some_and(|report| !report.wedged_members.is_empty());
+            self.next_action = if wedged {
+                "withdraw_lands_with".into()
+            } else {
+                "land_together".into()
+            };
+        }
+        self.ready_reason = self
+            .readiness
+            .blockers
+            .iter()
+            .map(|blocker| blocker.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+    }
+
     pub fn require_replay_snapshot(&mut self, required: bool) {
         self.replay_snapshot_required = required;
         if required {
@@ -2734,6 +2786,8 @@ mod tests {
             Blocker::TargetUnreadable,
             Blocker::Iterating,
             Blocker::BlockedByChanges,
+            Blocker::LandingPending,
+            Blocker::LandsWith,
             Blocker::NeedsRebase,
             Blocker::BlockingFindings,
             Blocker::NoValidApproval,

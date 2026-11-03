@@ -40,7 +40,7 @@ impl std::error::Error for OperationFailure {}
 /// store stamped newer than this, because the alternative is what silently
 /// went wrong before: an older binary skipping event types it does not know,
 /// concluding the change is still open, and closing it a second way.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DisplacedClaim {
@@ -1833,6 +1833,11 @@ pub enum Payload {
         /// change. Absent on events written before arc recorded it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         started_at: Option<DateTime<Utc>>,
+        /// The landing this closure derives from. Present only on a closure
+        /// a `landing-completed` repository event derives; never written to
+        /// a change's own ledger.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        landing: Option<LandingMembership>,
     },
     /// An integration somebody performed elsewhere and asserted afterwards.
     /// Deliberately carries no authorization: arc did not guard this merge and
@@ -1997,6 +2002,55 @@ pub enum Payload {
     /// A caller-declared abandoned ending for a review pass.
     ReviewPassAbandoned {
         pass_id: String,
+        reason: String,
+    },
+    /// Two changes that must reach their target in one landing. The relation
+    /// is symmetric; its components are the transitive closure of every
+    /// declaration not withdrawn since.
+    LandsWithDeclared {
+        /// The two changes, in sorted order.
+        changes: Vec<String>,
+    },
+    /// Withdraw one must-land-together relation.
+    LandsWithWithdrawn {
+        /// The two changes, in sorted order.
+        changes: Vec<String>,
+        reason: String,
+    },
+    /// A landing attempt was planned and pinned, and its intent is durable.
+    /// Until a completion or an abandonment names the attempt, its members
+    /// read as pending and refuse every other terminal transition.
+    LandingPrepared {
+        attempt: String,
+        target_branch: String,
+        /// The target revision the attempt was planned against.
+        target_before: String,
+        /// The members in landing order, each pinned as planned.
+        members: Vec<LandingPin>,
+    },
+    /// A landing arc performed under its own guard. Each member's integrated
+    /// closure, and the debt a `--debt` landing declared for it, derive from
+    /// this one fact, so no member closes without the others.
+    LandingCompleted {
+        attempt: String,
+        target_branch: String,
+        /// The target revision before the landing: the destination revision
+        /// whose declarations and policy governed every member.
+        target_before: String,
+        /// The target revision the landing installed.
+        target_after: String,
+        /// The tree the gates answered for, which is the installed tree.
+        tree: String,
+        /// One passing verification per required gate, run once at the top
+        /// head, by gate name.
+        gate_evidence: std::collections::BTreeMap<String, String>,
+        members: Vec<LandedMember>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at: Option<DateTime<Utc>>,
+    },
+    /// A landing attempt that installed nothing and closes nothing.
+    LandingAbandoned {
+        attempt: String,
         reason: String,
     },
     /// A caller told arc that a delegated run was dispatched through a
@@ -2571,6 +2625,69 @@ pub struct PrerequisiteClosure {
     pub closure_event_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub integrated_commit: Option<String>,
+    /// The landing whose earlier member satisfied this prerequisite inside
+    /// the same completion. `closure_event_id` then names that member's
+    /// derived closure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landing: Option<String>,
+}
+
+/// One landing member as its attempt pinned it at plan time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LandingPin {
+    pub change_id: String,
+    pub patchset_id: String,
+    pub base: String,
+    pub head: String,
+    /// `sha256:` over the latest brief body, when the change has a brief.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief_digest: Option<String>,
+}
+
+/// One member of a completed landing: its own landed range and what
+/// authorized it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LandedMember {
+    pub change_id: String,
+    /// The ID the member's derived closure carries.
+    pub closure_event_id: String,
+    pub source_patchset_id: String,
+    pub source_head: String,
+    /// The parent of the member's first landed commit: the start of its own
+    /// range, distinct from the landing's `target_before`.
+    pub range_base: String,
+    /// The member's last landed commit.
+    pub integrated_commit: String,
+    pub authorization: AuthorizationBasis,
+    /// The debt a `--debt` landing declared for a member no approval
+    /// covered, as the `debt-declared` payload its derived event carries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debt: Option<LandedDebt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LandedDebt {
+    /// The ID the member's derived debt event carries.
+    pub event_id: String,
+    pub reason: String,
+    pub patchset_id: String,
+    pub missing: DebtMissing,
+    #[serde(default)]
+    pub coverage: Vec<DebtCoverage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub production: Option<DebtProduction>,
+}
+
+/// The landing a member's derived closure came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LandingMembership {
+    pub attempt: String,
+    /// The `landing-completed` repository event.
+    pub completion_event_id: String,
+    /// The parent of the member's first landed commit.
+    pub range_base: String,
+    /// Where the landing left the target.
+    pub target_after: String,
 }
 
 /// Whether a change touches a surface the project declared dangerous, and
@@ -2712,7 +2829,12 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         | Payload::HistoryRewriteWithdrawn { .. }
         | Payload::ReviewPassOpened { .. }
         | Payload::ReviewPassCompleted { .. }
-        | Payload::ReviewPassAbandoned { .. } => AppendPermission::AnyPhaseFact,
+        | Payload::ReviewPassAbandoned { .. }
+        | Payload::LandsWithDeclared { .. }
+        | Payload::LandsWithWithdrawn { .. }
+        | Payload::LandingPrepared { .. }
+        | Payload::LandingCompleted { .. }
+        | Payload::LandingAbandoned { .. } => AppendPermission::AnyPhaseFact,
         | Payload::RunDispatched { .. }
         | Payload::RunBound { .. }
         | Payload::RunEnded { .. }

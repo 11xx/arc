@@ -1851,6 +1851,13 @@ impl Store {
                 no_entry_reason: Some(_),
                 ..
             } => Some(7),
+            // An older reader skips a relation and integrates one member
+            // alone, and skips a landing and reads its members as open.
+            Payload::LandsWithDeclared { .. }
+            | Payload::LandsWithWithdrawn { .. }
+            | Payload::LandingPrepared { .. }
+            | Payload::LandingCompleted { .. }
+            | Payload::LandingAbandoned { .. } => Some(8),
             Payload::ChangeIntegrated { .. } | Payload::IntegrationAsserted { .. } => Some(2),
             _ => None,
         };
@@ -1930,6 +1937,13 @@ impl Store {
                 Some(3)
             }
             Some("change-provisionally-integrated" | "provisional-integration-resolved") => Some(7),
+            Some(
+                "lands-with-declared"
+                | "lands-with-withdrawn"
+                | "landing-prepared"
+                | "landing-completed"
+                | "landing-abandoned",
+            ) => Some(8),
             Some("change-integrated") | Some("integration-asserted") => Some(2),
             _ => None,
         };
@@ -2117,8 +2131,25 @@ impl Store {
     ) -> Result<crate::state::ChangeState> {
         let reduce = crate::perf::phase("reduce");
         crate::perf::count("changes_reduced", 1);
+        let landings = crate::landing::Landings::from_events(repository_events);
+        let change_id = events.first().map(|event| event.change_id.clone());
+        let derived = change_id
+            .as_deref()
+            .map(|change_id| landings.derived_events(change_id))
+            .unwrap_or_default();
+        let joined;
+        let events = if derived.is_empty() {
+            events
+        } else {
+            joined = crate::landing::with_derived(events, derived);
+            joined.as_slice()
+        };
         let mut state = crate::state::reduce_following(events, rewrites)?;
         state.review_clearance = self.review_clearance;
+        if let Some(change_id) = change_id.as_deref() {
+            state.lands_with = landings.partners(change_id);
+            state.pending_landing = landings.pending(change_id).map(str::to_string);
+        }
         state.apply_privilege_scope(Arc::clone(scope), events);
         crate::replica::localize_change(&self.repository_id, events, &mut state);
         drop(reduce);
@@ -3392,6 +3423,53 @@ mod tests {
             }
         }
         assert!(mismatches.is_empty(), "{}", mismatches.join("; "));
+    }
+
+    /// An older build skipping a relation would integrate one member alone,
+    /// and skipping a landing would read its members as open; every landing
+    /// payload therefore raises the store to a format such a build refuses.
+    #[test]
+    fn landing_payloads_stamp_eight_through_typed_and_both_raw_paths() {
+        let fixtures = [
+            serde_json::json!({"event_type": "lands-with-declared", "changes": ["a", "b"]}),
+            serde_json::json!({"event_type": "lands-with-withdrawn", "changes": ["a", "b"], "reason": "r"}),
+            serde_json::json!({"event_type": "landing-prepared", "attempt": "x", "target_branch": "main", "target_before": "o", "members": []}),
+            serde_json::json!({"event_type": "landing-completed", "attempt": "x", "target_branch": "main", "target_before": "o", "target_after": "n", "tree": "t", "gate_evidence": {}, "members": []}),
+            serde_json::json!({"event_type": "landing-abandoned", "attempt": "x", "reason": "r"}),
+        ];
+        for value in fixtures {
+            let payload: Payload = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(
+                serde_json::to_value(&payload).unwrap()["event_type"],
+                value["event_type"]
+            );
+            for path in ["typed", "raw-change", "raw-repository"] {
+                let dir = tempfile::tempdir().unwrap();
+                let config = StoreConfig {
+                    schema_version: 7,
+                    repository_id: "repo".into(),
+                    created_at: chrono::Utc::now(),
+                };
+                fs::write(
+                    dir.path().join("config.json"),
+                    serde_json::to_vec(&config).unwrap(),
+                )
+                .unwrap();
+                let store = test_store(dir.path());
+                let bytes = serde_json::to_vec(&value).unwrap();
+                match path {
+                    "typed" => store.stamp_format_for(&payload).unwrap(),
+                    "raw-change" => store.append_raw_event("change", "event", &bytes).unwrap(),
+                    _ => {
+                        store.append_raw_repository_event("event", &bytes).unwrap();
+                    }
+                }
+                let stored: StoreConfig =
+                    serde_json::from_slice(&fs::read(dir.path().join("config.json")).unwrap())
+                        .unwrap();
+                assert_eq!(stored.schema_version, 8, "{} {path}", value["event_type"]);
+            }
+        }
     }
 
     /// A binding, a journal-subject dispatch, and retained cost facts stamp

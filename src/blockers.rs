@@ -18,9 +18,11 @@ pub enum Blocker {
     Closed,
     BranchMissing,
     TargetUnreadable,
+    LandingPending,
     ForkBranch,
     Iterating,
     BlockedByChanges,
+    LandsWith,
     NeedsRebase,
     MergedTreeUnevaluated,
     BlockingFindings,
@@ -31,14 +33,16 @@ pub enum Blocker {
 }
 
 /// Every blocker, highest precedence first.
-pub const PRIORITY: [Blocker; 14] = [
+pub const PRIORITY: [Blocker; 16] = [
     Blocker::IntegrationMode,
     Blocker::Closed,
     Blocker::BranchMissing,
     Blocker::TargetUnreadable,
+    Blocker::LandingPending,
     Blocker::ForkBranch,
     Blocker::Iterating,
     Blocker::BlockedByChanges,
+    Blocker::LandsWith,
     Blocker::NeedsRebase,
     Blocker::MergedTreeUnevaluated,
     Blocker::BlockingFindings,
@@ -56,6 +60,8 @@ impl Blocker {
             Blocker::ForkBranch => 15,
             Blocker::Iterating => 13,
             Blocker::BlockedByChanges => 7,
+            Blocker::LandingPending => 20,
+            Blocker::LandsWith => 19,
             Blocker::NeedsRebase => 11,
             Blocker::MergedTreeUnevaluated => 14,
             Blocker::BlockingFindings => 2,
@@ -75,6 +81,8 @@ impl Blocker {
             Blocker::ForkBranch => "fork-branch",
             Blocker::Iterating => "iterating",
             Blocker::BlockedByChanges => "blocked-by-changes",
+            Blocker::LandingPending => "landing-pending",
+            Blocker::LandsWith => "lands-with",
             Blocker::NeedsRebase => "needs-rebase",
             Blocker::MergedTreeUnevaluated => "merged-tree-unevaluated",
             Blocker::BlockingFindings => "blocking-findings",
@@ -108,6 +116,12 @@ pub struct BlockerFacts {
     pub on_fork: bool,
     pub iterating: bool,
     pub blocked_by_changes: bool,
+    /// A landing attempt holds the change until it completes or is
+    /// abandoned.
+    pub landing_pending: bool,
+    /// Its must-land-together component has another open member, or one that
+    /// closed without integrating.
+    pub lands_with: bool,
     pub needs_rebase: bool,
     /// The gates answer for a merged tree rather than the head's own.
     pub merged_tree_evaluated: bool,
@@ -130,6 +144,8 @@ impl BlockerFacts {
             Blocker::ForkBranch => self.on_fork,
             Blocker::Iterating => self.iterating,
             Blocker::BlockedByChanges => self.blocked_by_changes,
+            Blocker::LandingPending => self.landing_pending,
+            Blocker::LandsWith => self.lands_with,
             Blocker::NeedsRebase => self.needs_rebase,
             // Nothing has been run against the content that would ship. A
             // tree some gates have answered for and others have not is an
@@ -206,6 +222,8 @@ mod tests {
             on_fork: false,
             iterating: false,
             blocked_by_changes: false,
+            landing_pending: false,
+            lands_with: false,
             needs_rebase: false,
             merged_tree_evaluated: false,
             gates: Vec::new(),
@@ -231,14 +249,16 @@ mod tests {
 
     #[test]
     fn each_fact_alone_raises_its_blocker() {
-        let cases: [(Raise, Blocker); 14] = [
+        let cases: [(Raise, Blocker); 16] = [
             (|f| f.mode_refused = true, Blocker::IntegrationMode),
             (|f| f.closed = true, Blocker::Closed),
             (|f| f.branch_missing = true, Blocker::BranchMissing),
             (|f| f.target_unreadable = true, Blocker::TargetUnreadable),
             (|f| f.on_fork = true, Blocker::ForkBranch),
             (|f| f.iterating = true, Blocker::Iterating),
+            (|f| f.landing_pending = true, Blocker::LandingPending),
             (|f| f.blocked_by_changes = true, Blocker::BlockedByChanges),
+            (|f| f.lands_with = true, Blocker::LandsWith),
             (|f| f.needs_rebase = true, Blocker::NeedsRebase),
             (
                 |f| {
@@ -290,6 +310,8 @@ mod tests {
             on_fork: true,
             iterating: false,
             blocked_by_changes: true,
+            landing_pending: true,
+            lands_with: true,
             needs_rebase: true,
             merged_tree_evaluated: true,
             gates: vec![GateFact {
@@ -327,7 +349,7 @@ mod tests {
         seen.sort_by_key(|blocker| blocker.as_str());
         seen.dedup();
         assert_eq!(seen.len(), PRIORITY.len());
-        assert_eq!(PRIORITY.len(), 14);
+        assert_eq!(PRIORITY.len(), 16);
     }
 
     #[test]

@@ -869,9 +869,11 @@ fn help_states_each_exit_status() {
     for row in [
         "  0   ready to integrate",
         "  6   closed, branch-missing, target-unreadable",
+        "  20  landing-pending",
         "  15  fork-branch",
         "  13  iterating",
         "  7   blocked-by-changes",
+        "  19  lands-with",
         "  11  needs-rebase",
         "  14  merged-tree-unevaluated",
         "  2   blocking-findings",

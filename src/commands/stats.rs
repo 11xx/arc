@@ -1672,6 +1672,7 @@ mod tests {
                 already_contained: false,
                 shape: None,
                 started_at: integrate_started.map(at),
+                landing: None,
             },
         )
     }

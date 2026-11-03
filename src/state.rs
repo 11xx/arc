@@ -1346,9 +1346,34 @@ pub struct ClosureState {
     /// else's work is its own role, never a contribution to the work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integrator: Option<crate::model::DebtIdentity>,
+    /// The start of this change's own landed range, when a landing closed
+    /// it: the parent of its first landed commit. `target_before` stays the
+    /// destination revision that governed the landing, which every
+    /// declaration and policy reader keeps reading.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range_base: Option<String>,
+    /// The landing this closure derives from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub landing: Option<ClosureLanding>,
     pub event_id: String,
     #[serde(skip)]
     pub created_at: DateTime<Utc>,
+}
+
+/// The landing an integrated closure derives from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ClosureLanding {
+    pub attempt: String,
+    pub completion_event_id: String,
+    pub target_after: String,
+}
+
+impl ClosureState {
+    /// Where this change's own integrated range starts: its landed range's
+    /// base, else where the target stood before.
+    pub fn range_base(&self) -> Option<&str> {
+        self.range_base.as_deref().or(self.target_before.as_deref())
+    }
 }
 
 /// The closure an integration event reduces to. Both kinds record the same
@@ -1383,6 +1408,8 @@ fn integrated_closure(
             ev.model.clone(),
             ev.session.clone(),
         )),
+        range_base: None,
+        landing: None,
         event_id: ev.event_id.clone(),
         created_at: ev.created_at,
     }
@@ -1585,6 +1612,12 @@ pub struct ChangeState {
     /// Event IDs of every `blocked-on` stage, so a later brief can name the
     /// block that caused it without rescanning the event log.
     pub blocked_on_stages: Vec<String>,
+    /// The other members of this change's must-land-together component.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub lands_with: Vec<String>,
+    /// The prepared, unfinished landing attempt this change is a member of.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_landing: Option<String>,
     pub verifications: Vec<VerificationEntry>,
     /// Checks observed after integration, never counted as gate evidence.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -2227,6 +2260,8 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     audit_findings: BTreeMap::new(),
                     debt: None,
                     blocked_on_stages: Vec::new(),
+                    lands_with: Vec::new(),
+                    pending_landing: None,
                     verifications: Vec::new(),
                     post_integration_verifications: Vec::new(),
                     set_aside: Vec::new(),
@@ -2965,6 +3000,8 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                         authorization: None,
                         external_reference: Some(reference.clone()),
                         integrator: None,
+                        range_base: None,
+                        landing: None,
                         event_id: ev.event_id.clone(),
                         created_at: ev.created_at,
                     });
@@ -3619,6 +3656,8 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     target_before: None,
                     authorization: None,
                     external_reference: None,
+                    range_base: None,
+                    landing: None,
                     event_id: ev.event_id.clone(),
                     created_at: ev.created_at,
                 });
@@ -3641,6 +3680,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 already_contained,
                 shape,
                 started_at: _,
+                landing,
             } => {
                 let mut closure = integrated_closure(
                     ev,
@@ -3658,6 +3698,12 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     state.provisional_resolutions.push(ev.clone());
                 }
                 closure.authorization = authorization.clone();
+                closure.range_base = landing.as_ref().map(|landing| landing.range_base.clone());
+                closure.landing = landing.as_ref().map(|landing| ClosureLanding {
+                    attempt: landing.attempt.clone(),
+                    completion_event_id: landing.completion_event_id.clone(),
+                    target_after: landing.target_after.clone(),
+                });
                 closure.external_reference = authorization
                     .as_ref()
                     .and_then(|basis| basis.external_verdict.as_ref())
@@ -3853,6 +3899,11 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
             | Payload::ReviewPassOpened { .. }
             | Payload::ReviewPassCompleted { .. }
             | Payload::ReviewPassAbandoned { .. }
+            | Payload::LandsWithDeclared { .. }
+            | Payload::LandsWithWithdrawn { .. }
+            | Payload::LandingPrepared { .. }
+            | Payload::LandingCompleted { .. }
+            | Payload::LandingAbandoned { .. }
             | Payload::RunDispatched { .. }
             | Payload::RunBound { .. }
             | Payload::RunEnded { .. }
@@ -5311,6 +5362,7 @@ mod tests {
                     already_contained: false,
                     shape: None,
                     started_at: None,
+                    landing: None,
                 },
             );
             let state = reduce(&[
@@ -5585,6 +5637,7 @@ mod tests {
                     already_contained: contained,
                     shape,
                     started_at: None,
+                    landing: None,
                 },
             );
             let json = serde_json::to_value(&integrated).unwrap();
@@ -5634,6 +5687,7 @@ mod tests {
                 already_contained: false,
                 shape: None,
                 started_at: None,
+                landing: None,
             },
         )
     }
@@ -6224,6 +6278,7 @@ mod tests {
                     already_contained: false,
                     shape: None,
                     started_at: None,
+                    landing: None,
                 },
             ));
         }
