@@ -2754,7 +2754,9 @@ enum Cmd {
         /// resolution from a repair. `ineligible-review` records that a read
         /// happened by a reviewer routing does not count as independent of
         /// the author: arc never derives it, and it takes why from
-        /// `--assessment` or `--qualifier`, and the read from `--read`
+        /// `--assessment` or `--qualifier`, and the read from `--read`.
+        /// `replayed-unread` is the reverse: only `arc land` derives it, and
+        /// declaring it is refused
         #[arg(long = "kind", value_enum, requires = "debt")]
         debt_kind: Option<DebtMissing>,
         /// The verdict event of the read an `ineligible-review` debt names.
@@ -2863,7 +2865,9 @@ enum Cmd {
         /// resolution from a repair. `ineligible-review` records that a read
         /// happened by a reviewer routing does not count as independent of
         /// the author: arc never derives it, and it takes why from
-        /// `--assessment` or `--qualifier`, and the read from `--read`
+        /// `--assessment` or `--qualifier`, and the read from `--read`.
+        /// `replayed-unread` is the reverse: only `arc land` derives it, and
+        /// declaring it is refused
         #[arg(long, value_enum)]
         kind: Option<DebtMissing>,
         /// The verdict or audit event of the read an `ineligible-review` debt

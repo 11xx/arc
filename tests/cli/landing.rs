@@ -1362,3 +1362,39 @@ fn an_audited_landed_member_imports_with_its_audit() {
     let report = json_stdout_any_status(recipient.arc(&recipient.root).args(["status", &lower]));
     assert_eq!(report["closure"]["outcome"], "integrated", "{report}");
 }
+
+/// Claim: `replayed-unread` is derived by a landing and never declared.
+/// Rejects a caller asserting the kind by hand, which would name a replay
+/// arc never performed.
+#[test]
+fn replayed_unread_is_never_declared() {
+    let repo = gated_repo();
+    let (change, _, _) = reviewed_change(&repo, "solo", None);
+    for args in [
+        vec![
+            "debt",
+            change.as_str(),
+            "--reason",
+            "r",
+            "--kind",
+            "replayed-unread",
+        ],
+        vec![
+            "integrate",
+            change.as_str(),
+            "--debt",
+            "r",
+            "--kind",
+            "replayed-unread",
+        ],
+    ] {
+        let refused = repo.arc(&repo.root).args(&args).output().unwrap();
+        assert!(!refused.status.success(), "{args:?}");
+        assert!(
+            stderr_of(&refused).contains("replayed-unread is derived, never declared"),
+            "{args:?}: {}",
+            stderr_of(&refused)
+        );
+    }
+    assert!(status(&repo, &change)["debt"].is_null());
+}

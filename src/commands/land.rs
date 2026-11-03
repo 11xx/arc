@@ -1375,6 +1375,7 @@ fn commit(
                         missing,
                         coverage,
                         production,
+                        replayed,
                         ..
                     } => Some(crate::model::LandedDebt {
                         event_id: event_id.clone(),
@@ -1385,6 +1386,7 @@ fn commit(
                         missing: *missing,
                         coverage: coverage.clone(),
                         production: production.clone(),
+                        replayed: replayed.clone(),
                     }),
                     _ => None,
                 },

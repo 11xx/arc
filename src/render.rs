@@ -2441,10 +2441,11 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             coverage,
             production,
             ineligible,
+            replayed,
         } => (
             "debt-declared",
             format!(
-                "{}; missing {}; coverage: {}{}{}",
+                "{}; missing {}; coverage: {}{}{}{}",
                 match patchset_id {
                     Some(id) => format!("{id}: {reason}"),
                     None => reason.clone(),
@@ -2470,6 +2471,15 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
                         read.read,
                         read.reasons(),
                         read.assessment.as_str()
+                    ))
+                    .unwrap_or_default(),
+                replayed
+                    .as_ref()
+                    .map(|replayed| format!(
+                        "; approval {} read on {}, replayed onto {}",
+                        replayed.approval,
+                        short_sha(&replayed.base),
+                        short_sha(&replayed.parent)
                     ))
                     .unwrap_or_default()
             ),

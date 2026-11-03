@@ -338,6 +338,44 @@ pub(super) fn plan_debt(
     kind: Option<DebtMissing>,
     inputs: &IneligibleInputs,
 ) -> Result<DebtPlan> {
+    if kind == Some(DebtMissing::ReplayedUnread) {
+        bail!(
+            "replayed-unread is derived, never declared: `arc land --debt` records it for an \
+             approved member it replayed onto a base the approval did not read"
+        );
+    }
+    plan_debt_of(ctx, store, st, reason, kind, inputs, None)
+}
+
+/// The `replayed-unread` debt a landing derives for a member whose exact
+/// approved patchset it replayed without conflict onto another base.
+pub(super) fn plan_replayed_debt(
+    ctx: &Ctx,
+    store: &Store,
+    st: &ChangeState,
+    reason: &str,
+    replayed: crate::model::ReplayedRead,
+) -> Result<DebtPlan> {
+    plan_debt_of(
+        ctx,
+        store,
+        st,
+        reason,
+        Some(DebtMissing::ReplayedUnread),
+        &IneligibleInputs::default(),
+        Some(replayed),
+    )
+}
+
+fn plan_debt_of(
+    ctx: &Ctx,
+    store: &Store,
+    st: &ChangeState,
+    reason: &str,
+    kind: Option<DebtMissing>,
+    inputs: &IneligibleInputs,
+    replayed: Option<crate::model::ReplayedRead>,
+) -> Result<DebtPlan> {
     let reason = reason.trim();
     if reason.is_empty() {
         bail!("--reason must say what review is owed and why it could not run");
@@ -392,6 +430,7 @@ pub(super) fn plan_debt(
         coverage,
         production,
         ineligible: ineligible.clone(),
+        replayed,
     };
     ensure_append_allowed(st, &payload)?;
     let event = ctx.event(store, change_id, payload)?;

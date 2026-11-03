@@ -568,6 +568,10 @@ pub enum DebtMissing {
     MergeResolutionUnread,
     /// An approved patchset, then authored work nobody read.
     RepairUnread,
+    /// An approved patchset that `arc land` replayed without conflict onto a
+    /// base it was not reviewed on: the edit was read, the context it landed
+    /// in was not. Derived, never declared.
+    ReplayedUnread,
     /// Verdicts on the shipped patchset, all of them from its contributors.
     ContributorOnly,
     /// A read happened, by a reviewer routing does not count as independent
@@ -581,10 +585,11 @@ pub enum DebtMissing {
 impl DebtMissing {
     /// Every kind, in severity order. A count split over this covers every
     /// obligation exactly once, so a split and a total cannot disagree.
-    pub const ALL: [DebtMissing; 6] = [
+    pub const ALL: [DebtMissing; 7] = [
         DebtMissing::NothingRead,
         DebtMissing::MergeResolutionUnread,
         DebtMissing::RepairUnread,
+        DebtMissing::ReplayedUnread,
         DebtMissing::ContributorOnly,
         DebtMissing::IneligibleReview,
         DebtMissing::IndependentReview,
@@ -595,6 +600,7 @@ impl DebtMissing {
             Self::NothingRead => "nothing-read",
             Self::MergeResolutionUnread => "merge-resolution-unread",
             Self::RepairUnread => "repair-unread",
+            Self::ReplayedUnread => "replayed-unread",
             Self::ContributorOnly => "contributor-only",
             Self::IneligibleReview => "ineligible-review",
             Self::IndependentReview => "independent-review",
@@ -1491,6 +1497,11 @@ pub enum Payload {
         /// `missing` is that kind and the debt was declared with its read.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ineligible: Option<IneligibleRead>,
+        /// The approval and the two bases a `replayed-unread` debt names.
+        /// Present exactly when `missing` is that kind, which only a landing
+        /// completion derives.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replayed: Option<ReplayedRead>,
     },
     /// Dirty-tree evidence allowed to count, for one revision.
     ///
@@ -2740,6 +2751,22 @@ pub struct LandedDebt {
     pub coverage: Vec<DebtCoverage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub production: Option<DebtProduction>,
+    /// Present exactly when `missing` is `replayed-unread`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replayed: Option<ReplayedRead>,
+}
+
+/// What a `replayed-unread` debt names: the approval that read the member's
+/// exact original patchset, the base it was read on, and the composed parent
+/// arc replayed it onto without conflict.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayedRead {
+    /// The verdict or external verdict event of the approval.
+    pub approval: String,
+    /// The base the approved patchset was recorded on.
+    pub base: String,
+    /// The commit the member was replayed onto.
+    pub parent: String,
 }
 
 /// The landing a member's derived closure came from.
@@ -4419,7 +4446,7 @@ mod tests {
     }
 
     #[test]
-    fn the_new_kind_sits_between_contributor_only_and_independent_review() {
+    fn every_kind_sits_in_severity_order() {
         let order: Vec<_> = DebtMissing::ALL.iter().map(|kind| kind.as_str()).collect();
         assert_eq!(
             order,
@@ -4427,6 +4454,7 @@ mod tests {
                 "nothing-read",
                 "merge-resolution-unread",
                 "repair-unread",
+                "replayed-unread",
                 "contributor-only",
                 "ineligible-review",
                 "independent-review"

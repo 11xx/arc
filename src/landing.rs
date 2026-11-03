@@ -187,6 +187,7 @@ impl Landings {
                     coverage: debt.coverage.clone(),
                     production: debt.production.clone(),
                     ineligible: None,
+                    replayed: debt.replayed.clone(),
                 };
                 derived.push(event);
             }

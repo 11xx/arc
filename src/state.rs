@@ -725,6 +725,10 @@ pub struct Debt {
     /// it. Absent on every other kind.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ineligible: Option<DebtRead>,
+    /// The approval and bases a `replayed-unread` obligation names. Absent on
+    /// every other kind.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replayed: Option<crate::model::ReplayedRead>,
     /// Under `review_clearance = "assessed"`, the reads since the
     /// declaration that find without clearing, listed beside the obligation
     /// and never counted against it.
@@ -866,6 +870,7 @@ impl Debt {
             coverage,
             production,
             ineligible,
+            replayed,
         } = &event.payload
         else {
             return false;
@@ -877,6 +882,7 @@ impl Debt {
             && self.coverage.as_ref() == Some(coverage)
             && self.production == *production
             && self.ineligible.as_ref().map(|read| &read.record) == ineligible.as_ref()
+            && self.replayed == *replayed
             && self.actor == event.actor
             && self.on_behalf_of == event.on_behalf_of
     }
@@ -3094,6 +3100,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     coverage: None,
                     production: None,
                     ineligible: None,
+                    replayed: None,
                     findings_reads: Vec::new(),
                     discharged_by: None,
                     discharged_by_event_id: None,
@@ -3107,6 +3114,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 coverage,
                 production,
                 ineligible,
+                replayed,
             } => {
                 state.debt = Some(Debt {
                     origin_replica_id: ev.repository_id.clone(),
@@ -3133,6 +3141,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                         reviewer_model: None,
                         later_reads: Vec::new(),
                     }),
+                    replayed: replayed.clone(),
                     findings_reads: Vec::new(),
                     discharged_by: None,
                     discharged_by_event_id: None,
@@ -4978,8 +4987,10 @@ impl ChangeState {
 
     /// The verdict or audit that discharges `debt`: the first audit, else the
     /// first verdict on the shipped patchset, that [`DischargeBar`] does not
-    /// bar. The returned model is copied from that event and is never
-    /// inferred.
+    /// bar. A `replayed-unread` debt owes a read of the context its patchset
+    /// landed in, which only an audit of the integrated revision gives; a
+    /// verdict on the patchset read the edit alone. The returned model is
+    /// copied from that event and is never inferred.
     fn debt_discharge(&self, debt: &Debt) -> Option<(String, DebtCoverage)> {
         // Only a range with no ledger record at all has no authorship to
         // compare a reader against, and nothing discharges its debt.
@@ -4997,6 +5008,9 @@ impl ChangeState {
                     audit.route_version.clone(),
                 ),
             ));
+        }
+        if debt.missing == Some(DebtMissing::ReplayedUnread) {
+            return None;
         }
         // A verdict on an earlier draft judged something else.
         self.verdicts
@@ -5048,6 +5062,7 @@ impl ChangeState {
             .verdicts
             .iter()
             .filter(|verdict| verdict.patchset_id == shipped.id)
+            .filter(|_| debt.missing != Some(DebtMissing::ReplayedUnread))
             .map(|verdict| ("verdict", Read::verdict(verdict)));
         audits
             .chain(verdicts)
@@ -5408,6 +5423,7 @@ mod tests {
                 coverage: Vec::new(),
                 production: Some(test_production()),
                 ineligible: None,
+                replayed: None,
             },
         );
         for audit in [false, true] {
@@ -6420,6 +6436,7 @@ mod tests {
                 coverage: Vec::new(),
                 production: Some(test_production()),
                 ineligible: None,
+                replayed: None,
             },
         )
     }
@@ -6506,6 +6523,7 @@ mod tests {
                     route_version: None,
                     assessment: AssessmentBasis::Declared,
                 }),
+                replayed: None,
             },
         );
         let mut review = verdict("fix", "ps-01", None);
@@ -6519,6 +6537,49 @@ mod tests {
 
         let open = change_with_debt(declared, false, vec![]);
         assert_eq!(standing_of(&open), Some(DebtStanding::Declared));
+    }
+
+    /// Rejects a verdict on the replayed patchset discharging a
+    /// `replayed-unread` debt: it read the edit, and the debt owes a read of
+    /// the context the edit landed in, which an audit of the integrated
+    /// revision gives.
+    #[test]
+    fn only_an_audit_of_what_landed_clears_a_replayed_unread_debt() {
+        let declared = ev(
+            "fix",
+            Payload::DebtDeclared {
+                reason: "replayed onto a later base".into(),
+                patchset_id: Some("ps-01".into()),
+                missing: DebtMissing::ReplayedUnread,
+                coverage: Vec::new(),
+                production: Some(test_production()),
+                ineligible: None,
+                replayed: Some(crate::model::ReplayedRead {
+                    approval: "01APPROVAL".into(),
+                    base: "b0".into(),
+                    parent: "p1".into(),
+                }),
+            },
+        );
+        let mut review = verdict("fix", "ps-01", None);
+        review.actor = "reader".into();
+        let reviewed = change_with_debt(declared.clone(), true, vec![review]);
+        assert_eq!(standing_of(&reviewed), Some(DebtStanding::Owed));
+        assert!(reviewed.debt.as_ref().unwrap().findings_reads.is_empty());
+
+        let audited = change_with_debt(declared, true, vec![independent_audit(None)]);
+        assert_eq!(standing_of(&audited), Some(DebtStanding::Discharged));
+        assert_eq!(
+            audited
+                .debt
+                .as_ref()
+                .unwrap()
+                .replayed
+                .as_ref()
+                .unwrap()
+                .approval,
+            "01APPROVAL"
+        );
     }
 
     fn with_verdict(mut event: Event, outcome: Verdict) -> Event {
@@ -6600,6 +6661,7 @@ mod tests {
                         coverage: Vec::new(),
                         production: Some(test_production()),
                         ineligible: None,
+                        replayed: None,
                     },
                 )
             };

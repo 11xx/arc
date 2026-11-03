@@ -2500,6 +2500,8 @@ REVIEW COVERAGE AND DEBT
     nothing-read             no verdict on any patchset of the change
     merge-resolution-unread  approved, then a resolution nobody read
     repair-unread            approved, then authored work nobody read
+    replayed-unread          approved, then replayed by `arc land` onto a
+                             base the approval did not read
     contributor-only         verdicts on the shipped patchset, all its own
     ineligible-review        a read happened, by a reviewer routing does not
                              count as independent of the author
@@ -2508,7 +2510,17 @@ REVIEW COVERAGE AND DEBT
   arc derives the kind from the ledger; `--kind <k>` on `arc debt` and on
   `arc integrate --debt` declares one instead, and a declared kind wins. Only
   the caller can say a resolution was what went unread, because the ledger
-  sees a repair and a merge resolution the same way. The kind is the weight,
+  sees a repair and a merge resolution the same way.
+
+  `replayed-unread` is derived, never declared. `arc land --debt` records it
+  for a member when all three hold: an eligible approval read its exact
+  original patchset, arc replayed that patchset without conflict, and the
+  base it was recorded on differs from the composed parent it landed on.
+  The record names the approval, the recorded base and the parent
+  (`replayed` beside the debt). The edit was read and the context it landed
+  in was not, so only an audit of the integrated revision discharges it; a
+  verdict on the original patchset never does. A member no approval covers
+  carries the kind the ledger gives instead. The kind is the weight,
   carried as a label rather than a number: `arc query --debt` works through
   the list above in order, then by age, and every summary row splits its
   count by kind rather than reporting one total.
