@@ -764,6 +764,9 @@ enum Cmd {
         /// single resolved, accepted-risk, or obsolete tip
         #[arg(long, value_enum, default_value = "text")]
         format: commands::FindingsFormat,
+        /// Shorthand for `--format json`
+        #[arg(long, conflicts_with = "format")]
+        json: bool,
     },
     /// Record or read a change-scoped implementation contract
     ///
@@ -5844,9 +5847,15 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
         Cmd::Findings {
             change,
             format,
+            json,
             audit,
         } => {
             let change = infer(change.as_deref())?;
+            let format = if json {
+                commands::FindingsFormat::Json
+            } else {
+                format
+            };
             commands::findings(&ctx, &change, format, audit)?;
             Ok(0)
         }
