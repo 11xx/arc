@@ -599,6 +599,11 @@ pub enum JournalCmd {
         /// installed build. Refused outside a Git repository
         #[arg(long)]
         derive: bool,
+        /// Name the checkpoint this handoff stops at: a line naming it and
+        /// its revision is added to the body. Refused when this repository
+        /// records no checkpoint by that name, and with `--global`
+        #[arg(long, value_name = "NAME")]
+        checkpoint: Option<String>,
     },
     /// Record a plan before it becomes work
     Plan {
@@ -1597,6 +1602,17 @@ fn read_scope(ctx: &Ctx, cmd: &JournalCmd) -> Result<Option<PathBuf>> {
 }
 
 pub fn run(ctx: &Ctx, cmd: JournalCmd, global: bool) -> Result<i32> {
+    if global
+        && matches!(
+            &cmd,
+            JournalCmd::Handoff {
+                checkpoint: Some(_),
+                ..
+            }
+        )
+    {
+        bail!("--checkpoint names a checkpoint in a repository; a --global handoff has none");
+    }
     if let JournalCmd::Promote { filename } = &cmd {
         if !global {
             bail!("journal promote requires --global");
@@ -1668,7 +1684,11 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd, global: bool) -> Result<i32> {
         JournalCmd::Note { write, kind } => write_kind(ctx, kind, write),
         JournalCmd::FeatureRequest { write } => write_kind(ctx, JournalKind::FeatureRequest, write),
         JournalCmd::Todo { write } => write_kind(ctx, JournalKind::Todo, write),
-        JournalCmd::Handoff { write, derive } => handoff(ctx, write, derive),
+        JournalCmd::Handoff {
+            write,
+            derive,
+            checkpoint,
+        } => handoff(ctx, write, derive, checkpoint.as_deref()),
         JournalCmd::Plan { write } => write_kind(ctx, JournalKind::Plan, write),
         JournalCmd::Conclusion { write } => write_kind(ctx, JournalKind::Conclusion, write),
         JournalCmd::Decision { write } => write_kind(ctx, JournalKind::Decision, write),
@@ -5210,12 +5230,22 @@ pub(crate) fn write_kind(ctx: &Ctx, kind: JournalKind, write: KindWrite) -> Resu
 /// transcribed. The derivation runs before the body is read: with
 /// `--body-file -` a caller standing outside a repository would otherwise
 /// wait on stdin for a write that cannot happen.
-fn handoff(ctx: &Ctx, write: KindWrite, derive: bool) -> Result<i32> {
+///
+/// A named checkpoint is resolved first too, so a name this repository does
+/// not record refuses before anything is written.
+fn handoff(ctx: &Ctx, write: KindWrite, derive: bool, checkpoint: Option<&str>) -> Result<i32> {
+    let checkpoint = checkpoint
+        .map(|name| crate::commands::checkpoint_handoff_line(&ctx.cwd, name))
+        .transpose()?;
     let state = match derive {
         true => Some(derived_state(ctx, Utc::now())?),
         false => None,
     };
-    note(ctx, JournalKind::Handoff, &write, state.as_deref())
+    let prelude = match (state, checkpoint) {
+        (Some(state), Some(line)) => Some(format!("{state}\n{line}")),
+        (state, line) => state.or(line),
+    };
+    note(ctx, JournalKind::Handoff, &write, prelude.as_deref())
 }
 
 /// The mechanical half of a handoff, read from the repository at the moment

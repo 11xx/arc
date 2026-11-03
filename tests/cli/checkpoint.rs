@@ -186,3 +186,62 @@ fn tags_and_names_are_unique_and_a_standing_tag_records_nothing() {
     assert_eq!(strings(&listed["checkpoints"], "name"), ["rc"]);
     assert_eq!(listed["checkpoints"][0]["tag"], "checkpoint/rc");
 }
+
+/// Claim: a handoff naming a checkpoint carries one line naming it and its
+/// revision, and a name this repository does not record refuses with
+/// nothing written. Rejects: a dangling checkpoint reference in a handoff.
+#[test]
+fn a_handoff_names_a_recorded_checkpoint_and_its_revision() {
+    let repo = Repo::new();
+    let revision = git_out(&repo.root, &["rev-parse", "HEAD"]);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["checkpoint", "record", "beta-2"]),
+    );
+    let body = repo.home.join("handoff-body.md");
+    std::fs::write(&body, "Waiting on the operator's findings.\n").unwrap();
+
+    let missing = repo
+        .arc(&repo.root)
+        .args([
+            "journal",
+            "handoff",
+            "testing",
+            "--body-file",
+            body.to_str().unwrap(),
+            "--checkpoint",
+            "beta-3",
+        ])
+        .output()
+        .unwrap();
+    assert!(!missing.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("no checkpoint named"),
+        "{}",
+        String::from_utf8_lossy(&missing.stderr)
+    );
+    let dir =
+        std::path::PathBuf::from(stdout(repo.arc(&repo.root).args(["journal", "dir"])).trim());
+    assert!(
+        !std::fs::read_dir(&dir)
+            .map(|entries| entries
+                .flatten()
+                .any(|entry| entry.file_name().to_string_lossy().ends_with("-handoff.md")))
+            .unwrap_or(false),
+        "a refused handoff wrote an artifact"
+    );
+
+    let path = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "handoff",
+        "testing",
+        "--body-file",
+        body.to_str().unwrap(),
+        "--checkpoint",
+        "beta-2",
+    ]));
+    let written = std::fs::read_to_string(path.trim()).unwrap();
+    let line = format!("Checkpoint: beta-2 at {revision}");
+    assert_eq!(written.matches(&line).count(), 1, "{written}");
+    assert!(written.contains("Waiting on the operator's findings."));
+}

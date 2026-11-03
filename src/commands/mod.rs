@@ -73,6 +73,7 @@ pub use bundle_io::{export_bundle, import_bundle};
 pub use chain::chain;
 pub(crate) use changelog::advisory_changelog_none;
 pub use changelog::changelog;
+pub(crate) use checkpoint::handoff_line as checkpoint_handoff_line;
 pub use checkpoint::{list_checkpoints, record_checkpoint, show_checkpoint};
 pub use claims::{claim, release_claim, stage, take};
 use clap::ValueEnum;

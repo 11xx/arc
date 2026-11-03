@@ -650,3 +650,14 @@ pub fn list_checkpoints(ctx: &Ctx, json: bool) -> Result<()> {
     }
     Ok(())
 }
+
+/// The line a handoff carries for the checkpoint it names.
+pub(crate) fn handoff_line(cwd: &Path, name: &str) -> Result<String> {
+    let store = Store::discover_for_reading(cwd)
+        .context("--checkpoint names a checkpoint in this repository's ledger")?;
+    let checkpoint = find(&store, name)?;
+    Ok(format!(
+        "Checkpoint: {} at {}\n",
+        checkpoint.name, checkpoint.revision
+    ))
+}

@@ -1949,6 +1949,7 @@ CHECKPOINTS (a revision handed over for testing)
   arc checkpoint record <name> [--rev REV] [--tag] [--note TEXT]
   arc checkpoint show <name> [--json]
   arc checkpoint list [--json]
+  arc journal handoff <topic> --checkpoint <name>
 
   A series that pauses so somebody can test an integrated build records a
   checkpoint at the revision handed over (`HEAD` unless `--rev` names one).
@@ -1971,6 +1972,10 @@ CHECKPOINTS (a revision handed over for testing)
   finding about a change landed since is fixed since, one matching a todo
   is already filed, and the rest are new. `arc journal checkpoint` is a
   different record: progress on a claimed journal artifact.
+
+  A handoff stopping at the checkpoint names it with `--checkpoint`, which
+  adds one line naming the checkpoint and its revision and refuses a name
+  the repository does not record.
 
 PROFILES (--profile, default local)
   direct   Bounded, reversible, one session and checkout. Checkout follows
