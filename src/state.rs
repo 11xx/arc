@@ -880,6 +880,24 @@ impl AuditVerdictEntry {
     }
 }
 
+/// A recorded reference replay could not follow because the only map that
+/// carried it to the revision it names was withdrawn. The event stays in the
+/// ledger and the change stays readable; the reference counts for nothing
+/// until a map carrying it is recorded again.
+#[derive(Debug, Clone, Serialize)]
+pub struct SetAsideReference {
+    /// The event whose reference is set aside.
+    pub event_id: String,
+    /// `post-integration-verification` sets the whole receipt aside;
+    /// `falsification` sets aside only the passing run's falsification claim.
+    pub reference: &'static str,
+    /// The revision the reference names.
+    pub revision: String,
+    /// The revision it has to follow from: the integrated commit, or the
+    /// failure's recorded revision.
+    pub follows: String,
+}
+
 /// A check run against the integrated tree after the change integrated.
 ///
 /// Kept apart from `verifications`, which hold the gate evidence a decision
@@ -1511,6 +1529,10 @@ pub struct ChangeState {
     /// Checks observed after integration, never counted as gate evidence.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub post_integration_verifications: Vec<PostIntegrationVerificationEntry>,
+    /// References a withdrawn rewrite map stranded, reported rather than
+    /// replayed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub set_aside: Vec<SetAsideReference>,
     pub verification_runs: Vec<VerificationRunEntry>,
     pub claim: Option<ClaimState>,
     #[serde(skip)]
@@ -2142,6 +2164,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     blocked_on_stages: Vec::new(),
                     verifications: Vec::new(),
                     post_integration_verifications: Vec::new(),
+                    set_aside: Vec::new(),
                     verification_runs: Vec::new(),
                     claim: None,
                     retired_claim_ids: BTreeSet::new(),
@@ -3099,12 +3122,21 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                         if shipped != integrated_commit
                             && !rewrites.rewrites_to(shipped, integrated_commit)? =>
                     {
-                        bail!(
-                        "post-integration verification {} names {integrated_commit}, but change \
-                         {} integrated {shipped}",
-                        ev.event_id,
-                        state.change_id
-                    )
+                        if !rewrites.withdrawn_rewrites_to(shipped, integrated_commit) {
+                            bail!(
+                                "post-integration verification {} names {integrated_commit}, \
+                                 but change {} integrated {shipped}",
+                                ev.event_id,
+                                state.change_id
+                            );
+                        }
+                        state.set_aside.push(SetAsideReference {
+                            event_id: ev.event_id.clone(),
+                            reference: "post-integration-verification",
+                            revision: integrated_commit.clone(),
+                            follows: shipped.to_string(),
+                        });
+                        continue;
                     }
                     Some(_) => {}
                 }
@@ -3189,6 +3221,26 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 ..
             } => {
                 let mut falsification = falsification.clone();
+                if let Some(claimed) = &falsification {
+                    if let Some(failure) = state
+                        .verifications
+                        .iter()
+                        .find(|entry| entry.event_id == claimed.event_id)
+                    {
+                        if claimed.revision != failure.revision
+                            && !rewrites.rewrites_to(&failure.revision, &claimed.revision)?
+                            && rewrites.withdrawn_rewrites_to(&failure.revision, &claimed.revision)
+                        {
+                            state.set_aside.push(SetAsideReference {
+                                event_id: ev.event_id.clone(),
+                                reference: "falsification",
+                                revision: claimed.revision.clone(),
+                                follows: failure.revision.clone(),
+                            });
+                            falsification = None;
+                        }
+                    }
+                }
                 if let Some(falsification) = &mut falsification {
                     if let Some(failure) = state
                         .verifications

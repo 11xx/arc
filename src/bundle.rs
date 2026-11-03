@@ -850,12 +850,8 @@ impl ValidatedBundle {
                 .iter()
                 .filter_map(|event| event.typed.clone())
                 .collect::<Vec<_>>();
-            let replay = if rewrites.is_empty() {
-                state::reduce(&events)
-            } else {
-                state::reduce_with_rewrites(&events, rewrites)
-            };
-            replay.context("bundled known events are not replayable")?;
+            state::reduce_with_rewrites(&events, rewrites)
+                .context("bundled known events are not replayable")?;
         }
         Ok(())
     }

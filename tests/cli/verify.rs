@@ -2838,18 +2838,36 @@ fn rewrite_safe_falsification_records_the_original_failure_revision() {
         .success();
 }
 
+/// Claim: a falsification reference storing the failure's rewritten revision
+/// is recovered through an active map, set aside and reported while that map
+/// is withdrawn, and recovered again once the map is re-recorded; the ledger
+/// is never edited. Rejects: the withdrawal making the change unreadable, or
+/// the stranded reference still answering the failure.
 #[test]
-fn rewrite_safe_falsification_recovers_projected_revision_only_with_active_map() {
+fn rewrite_safe_falsification_sets_aside_a_projected_revision_while_its_map_is_withdrawn() {
     let repo = Repo::new();
     let (change, failure, old, new, map) = rewritten_failure(&repo, "projected-failure");
     answer_rewritten_failure(&repo, "projected-failure", &failure);
     rewrite_event(&repo, &change, "verification-recorded", |event| {
         event["falsification"]["revision"] = serde_json::json!(new);
     });
-    repo.arc(&repo.root)
-        .args(["status", "projected-failure"])
-        .assert()
-        .success();
+    let falsification = |repo: &Repo| {
+        let shown = json_stdout(
+            repo.arc(&repo.root)
+                .args(["show", "projected-failure", "--json"]),
+        );
+        let passing = shown["verifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["result"] == "pass")
+            .cloned()
+            .unwrap();
+        (passing["falsification"].clone(), shown["set_aside"].clone())
+    };
+    let (recovered, set_aside) = falsification(&repo);
+    assert_eq!(recovered["event_id"], failure.as_str(), "{recovered}");
+    assert!(set_aside.is_null(), "{set_aside}");
     let before = raw_events(&repo, &change);
     repo.arc(&repo.root)
         .args(["history", "withdraw", &map, "--reason", "withdraw mapping"])
@@ -2858,14 +2876,20 @@ fn rewrite_safe_falsification_recovers_projected_revision_only_with_active_map()
     repo.arc(&repo.root)
         .args(["status", "projected-failure"])
         .assert()
-        .failure()
-        .stderr(predicates::str::contains("was recorded at"));
+        .success();
+    let (stranded, set_aside) = falsification(&repo);
+    assert!(
+        stranded.is_null(),
+        "a stranded reference still answers: {stranded}"
+    );
+    assert_eq!(set_aside[0]["reference"], "falsification", "{set_aside}");
+    assert_eq!(set_aside[0]["revision"], new.as_str(), "{set_aside}");
+    assert_eq!(set_aside[0]["follows"], old.as_str(), "{set_aside}");
     record_failure_rewrite(&repo, &old, &new);
     assert_eq!(raw_events(&repo, &change), before);
-    repo.arc(&repo.root)
-        .args(["status", "projected-failure"])
-        .assert()
-        .success();
+    let (restored, set_aside) = falsification(&repo);
+    assert_eq!(restored["event_id"], failure.as_str(), "{restored}");
+    assert!(set_aside.is_null(), "{set_aside}");
     repo.arc(&repo.root)
         .args(["verify", "projected-failure", "--all"])
         .assert()

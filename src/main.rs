@@ -2087,8 +2087,9 @@ enum Cmd {
         /// original revision even when a recorded rewrite projects it elsewhere.
         /// Replay accepts a rewritten reference only along an active recorded
         /// rewrite chain from that original revision. A withdrawn map supplies
-        /// no proof; restore the actual map with `arc history rewrite` to recover
-        /// such a reference. The candidate event is replayed before append;
+        /// no proof: a reference only it carried is set aside and reported by
+        /// `show`; restore the actual map with `arc history rewrite` to recover
+        /// it. The candidate event is replayed before append;
         /// unreadable evidence is refused before recording or pinning its tree.
         /// Requires --predicted, and is advisory: it changes no gate result,
         /// readiness decision, or exit code.
@@ -3787,8 +3788,11 @@ enum HistoryCmd {
     /// Ref moves are not undone and retention refs are kept; output names recorded moves
     /// and retention refs, or says when the map has no ref-move information. Withdrawals
     /// travel with maps in bundles and are honoured by importing replicas. A falsification
-    /// reference storing a rewritten failure revision needs an active map to replay;
-    /// re-record the actual map with history rewrite when that proof is required
+    /// reference storing a rewritten failure revision, or a receipt after integration naming
+    /// the integrated commit's successor, that only a withdrawn map carried is set aside:
+    /// the change stays readable, `show` reports it under `Set aside` (`set_aside` in
+    /// `--json`), and it counts for nothing. Re-record the actual map with history rewrite
+    /// to restore it
     Withdraw {
         /// Exact repository event ID of the history-rewritten map
         event_id: String,
@@ -3799,10 +3803,11 @@ enum HistoryCmd {
     /// Record a rewrite performed elsewhere, with its commit map.
     ///
     /// Active maps must agree; a withdrawn map does not constrain its replacement.
-    /// Re-recording the actual map restores proof for falsification references that store a
-    /// rewritten failure revision, without editing ledger events. Moves no refs, but holds
-    /// each commit the ledger cites as a patchset head or a verdict's revision that the map
-    /// replaces and this repository still has under
+    /// Re-recording the actual map restores what a withdrawal set aside: falsification
+    /// references that store a rewritten failure revision, and receipts after integration
+    /// naming the integrated commit's successor, without editing ledger events. Moves no
+    /// refs, but holds each commit the ledger cites as a patchset head or a verdict's
+    /// revision that the map replaces and this repository still has under
     /// `refs/arc/retained/<change>/<subject>/<commit>`, named by the event's `retained`
     /// map; a cited commit already gone is named and cannot be held. An append error
     /// withdraws retention refs created by that attempt only when publication is confirmed

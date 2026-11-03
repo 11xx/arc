@@ -185,13 +185,7 @@ fn projected_falsification_full_and_delta_transport_preserves_events() {
 fn projected_falsification_transport_refuses_invalid_proof() {
     let f = fixture();
     for delta in [false, true] {
-        for kind in [
-            "absent",
-            "withdrawn",
-            "contradictory",
-            "unrelated",
-            "convergent",
-        ] {
+        for kind in ["absent", "contradictory", "unrelated", "convergent"] {
             let receiver = receiver(&f, delta);
             let mut bundle = read(if delta { &f.delta } else { &f.full });
             let rewrite = bundle["repository_events"][0].clone();
@@ -200,15 +194,6 @@ fn projected_falsification_transport_refuses_invalid_proof() {
             let third = "3333333333333333333333333333333333333333";
             match kind {
                 "absent" => bundle["repository_events"] = serde_json::json!([]),
-                "withdrawn" => {
-                    other["event_type"] = "history-rewrite-withdrawn".into();
-                    other["rewrite_event_id"] = rewrite["event_id"].clone();
-                    other["reason"] = "withdraw proof".into();
-                    bundle["repository_events"]
-                        .as_array_mut()
-                        .unwrap()
-                        .push(other);
-                }
                 "contradictory" => {
                     other["mapping"] = serde_json::json!({f.old.clone(): third});
                     bundle["repository_events"]
@@ -246,6 +231,64 @@ fn projected_falsification_transport_refuses_invalid_proof() {
                 usize::from(delta)
             );
         }
+    }
+}
+
+/// Claim: a projected falsification reference whose only proof is a map the
+/// bundle also withdraws imports as the sender reads it: the change is
+/// readable, the reference is set aside and reported, and it answers no
+/// failure. Rejects: an import refusing a history its sender can read, or the
+/// withdrawn map proving the reference.
+#[test]
+fn projected_falsification_under_a_withdrawn_map_imports_set_aside() {
+    let f = fixture();
+    for delta in [false, true] {
+        let receiver = receiver(&f, delta);
+        let mut bundle = read(if delta { &f.delta } else { &f.full });
+        let rewrite = bundle["repository_events"][0].clone();
+        let mut withdrawal = rewrite.clone();
+        withdrawal["event_id"] = "ZZZZ-proof".into();
+        withdrawal["event_type"] = "history-rewrite-withdrawn".into();
+        withdrawal["rewrite_event_id"] = rewrite["event_id"].clone();
+        withdrawal["reason"] = "withdraw proof".into();
+        for field in [
+            "mapping",
+            "tool",
+            "signature_only",
+            "role_additions",
+            "refs",
+            "retained",
+        ] {
+            withdrawal.as_object_mut().unwrap().remove(field);
+        }
+        bundle["repository_events"]
+            .as_array_mut()
+            .unwrap()
+            .push(withdrawal);
+        bundle["objects"] = serde_json::json!([]);
+        let path = f.source.home.join(format!("withdrawn-{delta}.json"));
+        fs::write(&path, json_file_bytes(&bundle)).unwrap();
+        for dry_run in [true, false] {
+            receive(&receiver, &path, dry_run).assert().success();
+        }
+        let shown = json_stdout(
+            receiver
+                .arc(&receiver.root)
+                .args(["show", &f.change, "--json"]),
+        );
+        let set_aside = shown["set_aside"].as_array().expect("a set-aside list");
+        assert_eq!(set_aside.len(), 1, "{set_aside:?}");
+        assert_eq!(set_aside[0]["reference"], "falsification");
+        assert_eq!(set_aside[0]["revision"], f.new.as_str());
+        assert_eq!(set_aside[0]["follows"], f.old.as_str());
+        assert!(
+            shown["verifications"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|entry| entry["falsification"].is_null()),
+            "{shown}"
+        );
     }
 }
 

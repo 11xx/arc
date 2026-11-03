@@ -955,6 +955,7 @@ pub fn markdown(
     }
 
     post_integration_verifications(w, &state.post_integration_verifications);
+    set_aside(w, &state.set_aside);
 
     if !state.messages.is_empty() {
         let _ = writeln!(w, "\n## Messages\n");
@@ -3143,6 +3144,22 @@ fn post_integration_verifications(
         if let Some(note) = &receipt.note {
             let _ = writeln!(w, "  - note: {note}");
         }
+    }
+}
+
+/// References replay set aside, each with the recovery that restores it.
+fn set_aside(w: &mut String, references: &[crate::state::SetAsideReference]) {
+    if references.is_empty() {
+        return;
+    }
+    let _ = writeln!(w, "\n## Set aside\n");
+    for reference in references {
+        let _ = writeln!(
+            w,
+            "- {} `{}` names `{}`, which only a withdrawn rewrite map carried `{}` to; it counts \
+             for nothing until `arc history rewrite` records a map that does",
+            reference.reference, reference.event_id, reference.revision, reference.follows
+        );
     }
 }
 

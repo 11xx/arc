@@ -407,3 +407,118 @@ fn the_receipt_form_requires_attestation() {
         .failure()
         .stderr(predicates::str::contains("--attest"));
 }
+
+/// Reword the integrated commit on the target, record the map, and answer the
+/// successor and the map's event.
+fn reword_integrated(fixture: &Fixture) -> (String, String) {
+    let repo = &fixture.repo;
+    git(
+        &repo.root,
+        &["commit", "--amend", "-q", "-m", "feat: work, reworded"],
+    );
+    let successor = git_out(&repo.root, &["rev-parse", "master"]);
+    let recorded = stdout(
+        repo.arc(&repo.root)
+            .args(["history", "rewrite", "--map", "-", "--reason", "reworded"])
+            .write_stdin(format!("{} {successor}\n", fixture.integrated)),
+    );
+    let map = recorded
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap()
+        .to_string();
+    (successor, map)
+}
+
+/// Claim: a receipt recorded against the integrated commit's successor, whose
+/// rewrite map is later withdrawn, is set aside and reported, and the change
+/// stays readable; re-recording the map restores it.
+/// Rejects: the withdrawal making the whole change unreadable, or the
+/// stranded receipt still reading as verification of what shipped.
+#[test]
+fn a_receipt_stranded_by_a_withdrawn_map_is_set_aside_and_reported() {
+    let fixture = integrated_owing_review();
+    let repo = &fixture.repo;
+    let (successor, map) = reword_integrated(&fixture);
+    let recorded = stdout(&mut receipt(repo, "unit", "pass", &successor));
+    let receipt_event = recorded
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        show(repo)["post_integration_verifications"][0]["integrated_commit"],
+        successor.as_str()
+    );
+
+    repo.arc(&repo.root)
+        .args(["history", "withdraw", &map, "--reason", "wrong map"])
+        .assert()
+        .success();
+
+    let shown = show(repo);
+    assert!(
+        shown.get("post_integration_verifications").is_none(),
+        "a stranded receipt still reads as verification: {shown}"
+    );
+    let set_aside = shown["set_aside"].as_array().expect("a set-aside list");
+    assert_eq!(set_aside.len(), 1, "{set_aside:?}");
+    assert_eq!(set_aside[0]["event_id"], receipt_event.as_str());
+    assert_eq!(set_aside[0]["reference"], "post-integration-verification");
+    assert_eq!(set_aside[0]["revision"], successor.as_str());
+    assert_eq!(set_aside[0]["follows"], fixture.integrated.as_str());
+    let text = stdout(repo.arc(&repo.root).args(["show", WORK]));
+    let section = text
+        .split("## Set aside")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no set-aside section: {text}"));
+    assert!(section.contains(&receipt_event), "{section}");
+    assert!(section.contains("withdrawn"), "{section}");
+    status(repo);
+
+    repo.arc(&repo.root)
+        .args(["history", "rewrite", "--map", "-", "--reason", "reworded"])
+        .write_stdin(format!("{} {successor}\n", fixture.integrated))
+        .assert()
+        .success();
+    let restored = show(repo);
+    assert!(restored.get("set_aside").is_none(), "{restored}");
+    assert_eq!(
+        restored["post_integration_verifications"][0]["event_id"],
+        receipt_event.as_str()
+    );
+}
+
+/// Claim: a receipt naming a commit that no recorded map, active or
+/// withdrawn, carries the integrated commit to stays refused at replay.
+/// Rejects: setting aside every receipt that does not resolve, which would
+/// let an import plant one for unrelated work.
+#[test]
+fn a_receipt_no_map_ever_resolved_still_refuses_replay() {
+    let fixture = integrated_owing_review();
+    let repo = &fixture.repo;
+    let (successor, map) = reword_integrated(&fixture);
+    stdout(&mut receipt(repo, "unit", "pass", &successor));
+    repo.arc(&repo.root)
+        .args(["history", "withdraw", &map, "--reason", "wrong map"])
+        .assert()
+        .success();
+    let unrelated = git_out(
+        &repo.root,
+        &["rev-parse", &format!("{}^1", fixture.integrated)],
+    );
+    rewrite_event(
+        repo,
+        &fixture.change_id,
+        "post-integration-verification-recorded",
+        |event| event["integrated_commit"] = serde_json::json!(unrelated),
+    );
+
+    repo.arc(&repo.root)
+        .args(["show", WORK, "--json"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(format!(
+            "names {unrelated}, but change"
+        )));
+}

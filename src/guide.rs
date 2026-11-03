@@ -973,7 +973,9 @@ RUN A CHANGE
   rewrite authority to prove a falsification's failure identity. A publisher
   lacking rewrite authority is refused; legacy transport without an
   authorization receipt supplies no such proof. Absent, withdrawn, unrelated
-  maps and revisions that merely converge on one successor prove nothing.
+  maps and revisions that merely converge on one successor prove nothing. A
+  reference only a withdrawn map carried imports set aside, as the replica
+  that withdrew the map reads it; the others refuse the import.
   Claim-contest replay uses the same admitted proof, or strict identity when
   there is none. Doctor uses the store's admitted proof while leaving recorded
   revisions unresolved for dangling-object diagnostics.
@@ -1311,8 +1313,11 @@ RUN A CHANGE
   when it was recorded. `show` lists it under `Verification after
   integration`; `show --json` and `status --json` carry it in
   `post_integration_verifications` with `after_integration: true`; `explain`
-  lists it as later knowledge, `declared` because arc ran nothing. It changes
-  no authorization basis, discharges no debt, and satisfies no gate. On an
+  lists it as later knowledge, `declared` because arc ran nothing. Recorded
+  after a rewrite, it names the integrated commit's successor; if that map is
+  withdrawn, the receipt is set aside and reported under `Set aside` until
+  the map is recorded again. It changes no authorization basis, discharges no
+  debt, and satisfies no gate. On an
   open change the form is refused, naming the ordinary attestation; plain
   `--attest` on an integrated change is refused, naming this form.
 
@@ -2879,10 +2884,13 @@ HISTORY REWRITES
                        change suffix. A correct map can be recorded for the
                        same revisions. Stored events remain intact.
                        A falsification reference storing a rewritten failure
-                       revision requires an active map proving that successor.
-                       After withdrawal, re-record the actual mapping with
+                       revision, or a receipt after integration naming the
+                       integrated commit's successor, that only the withdrawn
+                       map carried is set aside: the change stays readable,
+                       `show` reports it under `Set aside`, and it counts for
+                       nothing. Re-record the actual mapping with
                        `arc history rewrite --map <file> --reason <why>` to
-                       restore that proof without editing ledger events.
+                       restore it without editing ledger events.
 
   Only the signature and the commit ids change: tree, parents, author,
   committer, dates, encoding, message and any other header the commit carries
@@ -3575,9 +3583,10 @@ RULES THAT CHANGE WHAT YOU DO
     follow active recorded rewrites. A stored rewritten reference is accepted
     only when an active rewrite chain carries that same failure revision to
     the exact stored successor. Unrelated revisions, including ones sharing
-    an eventual successor, are refused. Withdrawn maps supply no proof;
-    re-record the actual map with `arc history rewrite` when recovery needs
-    it. Verification replays its candidate event before appending or pinning
+    an eventual successor, are refused. Withdrawn maps supply no proof: a
+    reference only a withdrawn map carried is set aside and reported, and
+    re-recording the actual map with `arc history rewrite` recovers it.
+    Verification replays its candidate event before appending or pinning
     its tree, refusing evidence that would make the change unreadable.
     A passing gate row is `discriminating` when any passing evidence for that
     gate at the counted tree (or revision when the tree is unresolved) names

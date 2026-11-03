@@ -156,6 +156,10 @@ pub struct RewriteMap {
     /// appended to its message, and perhaps its signature, as the event that
     /// recorded them judged.
     role_additions: BTreeSet<String>,
+    /// The links of permitted maps a withdrawal removed: each old revision
+    /// with every successor one of them named. They resolve nothing; they
+    /// tell a reference a withdrawal stranded from one no map supported.
+    withdrawn_steps: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl RewriteMap {
@@ -189,8 +193,24 @@ impl RewriteMap {
         let mut steps: BTreeMap<String, Option<String>> = BTreeMap::new();
         let mut signature_only: BTreeSet<String> = BTreeSet::new();
         let mut role_additions: BTreeSet<String> = BTreeSet::new();
+        let mut withdrawn_steps: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for event in events {
-            if !permits(event) || withdrawn.contains(event.event_id.as_str()) {
+            if !permits(event) {
+                continue;
+            }
+            if withdrawn.contains(event.event_id.as_str()) {
+                if let Payload::HistoryRewritten { mapping, .. } = &event.payload {
+                    if validate_mapping(mapping).is_ok() {
+                        for (old, new) in mapping {
+                            if let Some(new) = new {
+                                withdrawn_steps
+                                    .entry(canonical_revision(old))
+                                    .or_default()
+                                    .insert(canonical_revision(new));
+                            }
+                        }
+                    }
+                }
                 continue;
             }
             if let Payload::HistoryRewritten {
@@ -250,6 +270,7 @@ impl RewriteMap {
             steps,
             signature_only,
             role_additions,
+            withdrawn_steps,
         })
     }
 
@@ -338,6 +359,29 @@ impl RewriteMap {
                 }
             }
         }
+    }
+
+    /// Whether active and withdrawn maps together carry `revision` to
+    /// `successor`. For a reference the active maps do not resolve, this says
+    /// a withdrawal stranded it, rather than that no map ever supported it.
+    pub fn withdrawn_rewrites_to(&self, revision: &str, successor: &str) -> bool {
+        let successor = canonical_revision(successor);
+        let mut visited = BTreeSet::new();
+        let mut pending = vec![canonical_revision(revision)];
+        while let Some(current) = pending.pop() {
+            if !visited.insert(current.clone()) {
+                continue;
+            }
+            let active = self.steps.get(&current).cloned().flatten();
+            let withdrawn = self.withdrawn_steps.get(&current).into_iter().flatten();
+            for next in active.iter().chain(withdrawn) {
+                if *next == successor {
+                    return true;
+                }
+                pending.push(next.clone());
+            }
+        }
+        false
     }
 
     /// Follow a recorded revision forward in place.
@@ -1174,6 +1218,48 @@ mod tests {
         assert_eq!(map.current("aaaaaaaaaa").unwrap(), "cccccccccc");
         assert_eq!(map.approved_successor("aaaaaaaaaa").unwrap(), "aaaaaaaaaa");
         assert!(RewriteMap::from_events([withdrawal].iter()).is_err());
+    }
+
+    /// Claim: a withdrawn map's links answer only whether a reference was
+    /// stranded, along the direction the maps record, through active links as
+    /// well. Rejects: a withdrawn link resolving a revision, a shared
+    /// successor or a reversed link reading as a stranding, or a withdrawal
+    /// that contradicts an active map making the map unreadable.
+    #[test]
+    fn withdrawn_links_say_what_a_withdrawal_stranded_and_resolve_nothing() {
+        let wrong = rewrite_event("wrong", "aaaaaaaaaa", "bbbbbbbbbb", &[]);
+        let correct = rewrite_event("correct", "aaaaaaaaaa", "cccccccccc", &[]);
+        let onward = rewrite_event("onward", "bbbbbbbbbb", "dddddddddd", &[]);
+        let unrelated = rewrite_event("unrelated", "eeeeeeeeee", "bbbbbbbbbb", &[]);
+        let mut withdrawal = wrong.clone();
+        withdrawal.event_id = "withdrawal".into();
+        withdrawal.payload = Payload::HistoryRewriteWithdrawn {
+            rewrite_event_id: "wrong".into(),
+            reason: "wrong map".into(),
+        };
+        let mut unrelated_withdrawal = withdrawal.clone();
+        unrelated_withdrawal.event_id = "withdrawal-2".into();
+        unrelated_withdrawal.payload = Payload::HistoryRewriteWithdrawn {
+            rewrite_event_id: "unrelated".into(),
+            reason: "wrong map".into(),
+        };
+        let events = [
+            wrong,
+            correct,
+            onward,
+            unrelated,
+            withdrawal,
+            unrelated_withdrawal,
+        ];
+        let map = RewriteMap::from_events(events.iter()).unwrap();
+        assert_eq!(map.current("aaaaaaaaaa").unwrap(), "cccccccccc");
+        assert!(!map.rewrites_to("aaaaaaaaaa", "bbbbbbbbbb").unwrap());
+        assert!(map.withdrawn_rewrites_to("aaaaaaaaaa", "bbbbbbbbbb"));
+        assert!(map.withdrawn_rewrites_to("aaaaaaaaaa", "dddddddddd"));
+        assert!(map.withdrawn_rewrites_to("AAAAAAAAAA", "BBBBBBBBBB"));
+        assert!(!map.withdrawn_rewrites_to("bbbbbbbbbb", "aaaaaaaaaa"));
+        assert!(!map.withdrawn_rewrites_to("cccccccccc", "bbbbbbbbbb"));
+        assert!(!map.withdrawn_rewrites_to("eeeeeeeeee", "aaaaaaaaaa"));
     }
 
     /// The recording path spells a dropped commit as no successor. A payload

@@ -1548,6 +1548,7 @@ mod tests {
             blocked_on_stages: Vec::new(),
             verifications: Vec::new(),
             post_integration_verifications: Vec::new(),
+            set_aside: Vec::new(),
             verification_runs: Vec::new(),
             claim: None,
             retired_claim_ids: BTreeSet::new(),
