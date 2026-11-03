@@ -2212,6 +2212,173 @@ fn an_imported_declaration_of_replayed_unread_is_refused() {
     assert_eq!(arrived["replayed"], derived["replayed"], "{arrived}");
 }
 
+/// Claim: once a landing has read its frontier for the last time, a
+/// relation writer cannot extend the component until the completion is
+/// published: it waits on the graph lock and then finds the member closed.
+/// A graph-then-change metadata writer waiting beside it forms no lock
+/// cycle with the landing's commit. Rejects a must-land-together relation
+/// written between a landing's final check and its completion, which would
+/// leave an open partner behind a member that landed without it.
+#[test]
+fn a_relation_written_during_commit_follows_the_completion() {
+    let repo = gated_repo();
+    let ((lower, _, _), (upper, _, _)) = stack(&repo);
+    let (other, _, _) = reviewed_change(&repo, "other", None);
+    let mut landing = spawn_arc_at_rendezvous(
+        &repo,
+        &repo.root,
+        &["land", &lower, &upper],
+        "landing-revalidated",
+        &[],
+    );
+    let mut relation = spawn_arc_keeping_stderr(
+        &repo,
+        &repo.root,
+        &["metadata", &lower, "--lands-with", &other],
+        "session-a",
+    );
+    let mut ordering = spawn_arc_keeping_stderr(
+        &repo,
+        &repo.root,
+        &["metadata", &other, "--blocked-by", &lower],
+        "session-a",
+    );
+    assert_waiting_on_transition_lock(&mut [&mut relation, &mut ordering]);
+    assert!(!repository_events(&repo)
+        .iter()
+        .any(|event| event["event_type"] == "lands-with-declared"));
+
+    release_lock_wait(&mut landing);
+    assert!(wait_for_exit(&mut landing).success());
+    let relation_status = wait_for_exit(&mut relation);
+    let relation_stderr = child_stderr(&mut relation);
+    assert!(!relation_status.success(), "{relation_stderr}");
+    assert!(
+        wait_for_exit(&mut ordering).success(),
+        "{}",
+        child_stderr(&mut ordering)
+    );
+
+    let events = repository_events(&repo);
+    let completion = events
+        .iter()
+        .position(|event| event["event_type"] == "landing-completed")
+        .expect("the landing completed");
+    assert!(!events[..completion]
+        .iter()
+        .any(|event| event["event_type"] == "lands-with-declared"));
+    assert!(
+        status(&repo, &other)["lands_with"].is_null(),
+        "{relation_stderr}"
+    );
+    assert_eq!(status(&repo, &lower)["closure"]["outcome"], "integrated");
+}
+
+/// Claim: a composed attempt interrupted after its replay, before any gate
+/// ran, is abandoned by `--recover`, and a second run changes nothing: both
+/// members read open and not pending, the target never moved, and neither
+/// the composed head's pin nor the intent survives. Interrupted once its
+/// target moved, recovery publishes the composed head and releases the
+/// same pin. Rejects recovery that keeps a trial head pinned, publishes a
+/// replay the target never received, or acts again on a second run.
+#[test]
+fn recovery_at_the_composed_crash_point_runs_twice_to_the_same_end() {
+    for point in ["composed", "applied"] {
+        let repo = gated_repo();
+        let ((first, _, _), (second, _, _)) = independent(&repo);
+        let before = git_out(&repo.root, &["rev-parse", "master"]);
+        let crashed = repo
+            .arc(&repo.root)
+            .env("ARC_TEST_LANDING_CRASH", point)
+            .args(["land", &first, &second, "--debt", "context unread"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            crashed.status.code(),
+            Some(86),
+            "{point}: {}",
+            stderr_of(&crashed)
+        );
+        let composed = String::from_utf8_lossy(&crashed.stdout)
+            .lines()
+            .find_map(|line| line.strip_prefix("composed: ").map(str::to_string))
+            .expect("the attempt composed a head");
+        let attempt = prepared_attempt(&repo);
+        let intent = repo
+            .root
+            .join(format!(".git/arc/landing-intents/{attempt}.json"));
+        assert!(intent.exists(), "{point}");
+        assert_ne!(
+            git_out(&repo.root, &["for-each-ref", "refs/arc/landing/"]),
+            "",
+            "{point}: the composed head is pinned while the attempt is pending"
+        );
+        for change in [&first, &second] {
+            assert_eq!(status(&repo, change)["pending_landing"], attempt.as_str());
+        }
+
+        let mut after_first = None;
+        for run in 0..2 {
+            let recovered = repo
+                .arc(&repo.root)
+                .args(["land", "--recover", &attempt])
+                .output()
+                .unwrap();
+            assert!(
+                recovered.status.success(),
+                "{point} run {run}: {}",
+                stderr_of(&recovered)
+            );
+            let observed = (
+                repository_events(&repo).len(),
+                change_events(&repo, &first).len(),
+                change_events(&repo, &second).len(),
+                git_out(&repo.root, &["rev-parse", "master"]),
+            );
+            match &after_first {
+                None => after_first = Some(observed),
+                Some(previous) => assert_eq!(previous, &observed, "{point}: second run acted"),
+            }
+        }
+        let landed = point == "applied";
+        assert_eq!(
+            git_out(&repo.root, &["rev-parse", "master"]),
+            if landed {
+                composed.clone()
+            } else {
+                before.clone()
+            },
+            "{point}"
+        );
+        for change in [&first, &second] {
+            let report = status(&repo, change);
+            assert!(report.get("pending_landing").is_none(), "{point}: {report}");
+            assert_eq!(report["closure"].is_null(), !landed, "{point}: {report}");
+        }
+        assert_eq!(
+            git_out(
+                &repo.root,
+                &[
+                    "for-each-ref",
+                    "refs/arc/landing/",
+                    "refs/arc/landing-applied/"
+                ]
+            ),
+            "",
+            "{point}"
+        );
+        assert!(!intent.exists(), "{point}");
+        assert_eq!(
+            git_out(
+                &repo.root,
+                &["status", "--porcelain", "--untracked-files=no"]
+            ),
+            "",
+            "{point}"
+        );
+    }
+}
+
 /// Claim: an audit of a replayed member resolves its extent against the
 /// range the landing replayed it as, from the composed parent to the
 /// integrated revision, so a whole audit of that range discharges

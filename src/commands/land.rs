@@ -1846,6 +1846,8 @@ fn commit(
         abandon_locked(ctx, store, &attempt, &format!("stale-{field}"))?;
         bail!("{field} moved while landing {attempt} was gated; nothing closed, land again");
     }
+    #[cfg(debug_assertions)]
+    crate::import_authorization::test_rendezvous("landing-revalidated")?;
     let plan = fresh.plan;
     let top_index = plan.members.len() - 1;
     let top_report = &fresh.reports[top_index];
