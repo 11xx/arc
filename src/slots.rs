@@ -55,7 +55,7 @@ pub struct Declaration {
     pub invalidate: Option<String>,
     #[serde(default)]
     pub default: bool,
-    /// Parsed and reported; arc runs nothing with it here.
+    /// What `arc slots warm` runs in a stale free slot.
     pub warm: Option<String>,
 }
 
@@ -395,6 +395,7 @@ pub enum Phase {
     Leasing,
     Switching,
     Recorded,
+    Warming,
     Detaching,
     Releasing,
 }
@@ -406,17 +407,21 @@ impl Phase {
             Phase::Leasing => "leasing",
             Phase::Switching => "switching",
             Phase::Recorded => "recorded",
+            Phase::Warming => "warming",
             Phase::Detaching => "detaching",
             Phase::Releasing => "releasing",
         }
     }
 }
 
+/// A slot's lease: to a change and its branch, or, with neither, to a warm.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Lease {
     pub token: String,
-    pub change_id: String,
-    pub branch: String,
+    #[serde(default)]
+    pub change_id: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
     pub target: String,
     pub leased_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -918,16 +923,18 @@ pub fn rank(
     }
 }
 
-/// What a begin asks of the pool.
+/// What a lease asks of the pool: a change and its branch, or, with
+/// neither, a warm.
 pub struct LeaseRequest<'a> {
-    pub change_id: &'a str,
-    pub branch: &'a str,
+    pub change_id: Option<&'a str>,
+    pub branch: Option<&'a str>,
     pub target: &'a str,
     pub actor: Option<&'a str>,
     pub session: Option<&'a str>,
 }
 
-/// A slot leased for one change, held exclusively while begin prepares it.
+/// A slot leased for one change or one warm, held exclusively until it is
+/// dropped.
 pub struct Leased {
     pub pool: Pool,
     pub name: String,
@@ -937,7 +944,8 @@ pub struct Leased {
 }
 
 /// Lease the best-ranked free slot whose use lock is free. A slot whose
-/// state cannot be read is never handed out.
+/// state cannot be read is never handed out; an exhausted pool refuses with
+/// its table.
 pub fn lease(
     cwd: &Path,
     pool: Pool,
@@ -945,17 +953,68 @@ pub fn lease(
     request: &LeaseRequest<'_>,
 ) -> Result<Leased> {
     let identity = identity(&gitio::toplevel(cwd)?, declaration)?;
+    match select(cwd, pool, declaration, request, &identity, |_, _| true)? {
+        Selected::Leased(leased) => Ok(leased),
+        Selected::None { pool, table, .. } => bail!(
+            "no free slot in the pool at {} (size {}):\n  {}\n\
+             inspect it with `arc slots status`; free a lease whose holder is gone with \
+             `arc slots release <slot> --token <token>`, or begin with --worktree",
+            pool.root.display(),
+            pool.size,
+            table.join("\n  ")
+        ),
+    }
+}
+
+/// Whether a slot holds a build of `target` under `identity`: its checkout
+/// exists and its `built` record names both.
+pub fn current(pool: &Pool, state: &SlotState, target: &str, identity: &str) -> bool {
+    pool.checkout(&state.name).exists()
+        && state
+            .built
+            .as_ref()
+            .is_some_and(|built| built.revision == target && built.identity == identity)
+}
+
+/// What selecting a slot found.
+pub enum Selected {
+    Leased(Leased),
+    /// No eligible free slot: the table of the others, and how many free
+    /// slots the filter passed over.
+    None {
+        pool: Pool,
+        table: Vec<String>,
+        passed_over: usize,
+    },
+}
+
+/// Lease the best-ranked free slot `eligible` accepts and whose use lock is
+/// free, under the pool lock, then take its use lock exclusively.
+pub fn select(
+    cwd: &Path,
+    pool: Pool,
+    declaration: &Declaration,
+    request: &LeaseRequest<'_>,
+    identity: &str,
+    eligible: impl Fn(&Pool, &SlotState) -> bool,
+) -> Result<Selected> {
     let mut busy: Vec<String> = Vec::new();
     loop {
         let (name, token) = {
             let _lock = pool.lock()?;
             let mut candidates = Vec::new();
             let mut table = Vec::new();
+            let mut passed_over = 0;
             for name in pool.names() {
                 match pool.read(&name) {
                     Ok(state) if state.is_free() && !busy.contains(&name) => {
-                        let rank = rank(&pool, cwd, &state, request.target, declaration, &identity);
-                        candidates.push((rank, state));
+                        if eligible(&pool, &state) {
+                            let rank =
+                                rank(&pool, cwd, &state, request.target, declaration, identity);
+                            candidates.push((rank, state));
+                        } else {
+                            passed_over += 1;
+                        }
                     }
                     Ok(state) => table.push(describe(&state, busy.contains(&name))),
                     Err(error) => table.push(format!("{name}  unreadable: {error:#}")),
@@ -963,21 +1022,19 @@ pub fn lease(
             }
             candidates.sort_by_key(|(rank, _)| *rank);
             let Some((_, mut state)) = candidates.into_iter().next() else {
-                bail!(
-                    "no free slot in the pool at {} (size {}):\n  {}\n\
-                     inspect it with `arc slots status`; free a lease whose holder is gone with \
-                     `arc slots release <slot> --token <token>`, or begin with --worktree",
-                    pool.root.display(),
-                    pool.size,
-                    table.join("\n  ")
-                );
+                drop(_lock);
+                return Ok(Selected::None {
+                    pool,
+                    table,
+                    passed_over,
+                });
             };
             let token = crate::ids::new_identifier();
             state.phase = Phase::Leasing;
             state.lease = Some(Lease {
                 token: token.clone(),
-                change_id: request.change_id.into(),
-                branch: request.branch.into(),
+                change_id: request.change_id.map(Into::into),
+                branch: request.branch.map(Into::into),
                 target: request.target.into(),
                 leased_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                 actor: request.actor.map(Into::into),
@@ -988,13 +1045,13 @@ pub fn lease(
         };
         let path = pool.checkout(&name);
         if let Some(lease) = UseLease::exclusive(&path)? {
-            return Ok(Leased {
+            return Ok(Selected::Leased(Leased {
                 pool,
                 name,
                 token,
                 path,
                 _use: lease,
-            });
+            }));
         }
         pool.free(&name, &token)?;
         busy.push(name);
@@ -1003,12 +1060,22 @@ pub fn lease(
 
 fn describe(state: &SlotState, busy: bool) -> String {
     match &state.lease {
-        Some(lease) => format!(
-            "{}  {}  change {} on {} since {}",
+        Some(Lease {
+            change_id: Some(change_id),
+            branch,
+            leased_at,
+            ..
+        }) => format!(
+            "{}  {}  change {change_id} on {} since {leased_at}",
             state.name,
             state.phase.label(),
-            lease.change_id,
-            lease.branch,
+            branch.as_deref().unwrap_or("?"),
+        ),
+        Some(lease) => format!(
+            "{}  {}  warming {} since {}",
+            state.name,
+            state.phase.label(),
+            lease.target,
             lease.leased_at
         ),
         None if busy => format!("{}  free, in use by a running command", state.name),
@@ -1022,12 +1089,26 @@ impl Leased {
             .update(&self.name, &self.token, |state| state.phase = phase)
     }
 
-    /// Put the change's branch at `base` in the slot: create the checkout
-    /// when absent, else switch a clean, detached, owned checkout holding no
-    /// open change and no ignored path outside `retain`. On a changed
-    /// identity, discard the outputs built under the previous one; then
-    /// prepare the checkout.
+    /// Put the change's branch at `base` in the slot, then prepare the
+    /// checkout.
     pub fn switch(
+        &self,
+        cwd: &Path,
+        declaration: &Declaration,
+        base: &str,
+        open_change: Option<&str>,
+    ) -> Result<()> {
+        self.place(cwd, declaration, base, open_change)?;
+        crate::warm_worktree::prepare(&self.path)?;
+        Ok(())
+    }
+
+    /// Put the slot at `base`, on the lease's branch or, for a warm,
+    /// detached: create the checkout when absent, else switch a clean,
+    /// detached, owned checkout holding no open change and no ignored path
+    /// outside `retain`. On a changed identity, discard the outputs built
+    /// under the previous one.
+    fn place(
         &self,
         cwd: &Path,
         declaration: &Declaration,
@@ -1036,14 +1117,31 @@ impl Leased {
     ) -> Result<()> {
         let state = self.phase(Phase::Switching)?;
         let lease = state.lease.as_ref().context("slot lease vanished")?;
-        let branch = lease.branch.as_str();
+        let branch = lease.branch.as_deref();
         let path = &self.path;
         let fresh = !path.exists();
         if fresh {
-            if gitio::branch_exists(cwd, branch) {
-                bail!("branch {branch:?} already exists");
+            match branch {
+                Some(branch) => {
+                    if gitio::branch_exists(cwd, branch) {
+                        bail!("branch {branch:?} already exists");
+                    }
+                    gitio::add_worktree_new_branch(cwd, path, branch, base)?;
+                }
+                None => {
+                    gitio::git(
+                        cwd,
+                        &[
+                            "worktree",
+                            "add",
+                            "--no-checkout",
+                            "--detach",
+                            path.to_str().context("non-UTF8 slot path")?,
+                            base,
+                        ],
+                    )?;
+                }
             }
-            gitio::add_worktree_new_branch(cwd, path, branch, base)?;
             let admin = gitio::worktree_admin_dir(path)?;
             let token = crate::ids::new_identifier();
             gitio::write_worktree_owner_with_token(
@@ -1077,7 +1175,14 @@ impl Leased {
                 );
             }
             require_reusable(path, &self.name, &declaration.retain)?;
-            gitio::git(path, &["switch", "--no-guess", "-c", branch, base])?;
+            match branch {
+                Some(branch) => {
+                    gitio::git(path, &["switch", "--no-guess", "-c", branch, base])?;
+                }
+                None => {
+                    gitio::git(path, &["switch", "--detach", base])?;
+                }
+            }
         }
         let identity = identity(path, declaration)?;
         let recorded = self.pool.read(&self.name)?.identity;
@@ -1087,8 +1192,72 @@ impl Leased {
         self.pool.update(&self.name, &self.token, |state| {
             state.identity = Some(identity)
         })?;
-        crate::warm_worktree::prepare(path)?;
         Ok(())
+    }
+
+    /// Warm the slot at `target`: detach it there, then run `script` through
+    /// the preparation and environment gates use, under a holder that
+    /// shares this lease's exclusive use. A successful run that leaves the
+    /// checkout reusable records `built`, and the lease is freed.
+    pub fn warm(
+        &self,
+        cwd: &Path,
+        declaration: &Declaration,
+        script: &str,
+        open_change: Option<&str>,
+    ) -> Result<()> {
+        let target = self
+            .pool
+            .read(&self.name)?
+            .lease
+            .context("slot lease vanished")?
+            .target;
+        self.place(cwd, declaration, &target, open_change)?;
+        self.phase(Phase::Warming)?;
+        let mut shell = shell(&self.path)?;
+        shell
+            .command
+            .args(["-c", script])
+            .current_dir(&self.path)
+            .stdin(Stdio::null())
+            .process_group(0);
+        let _storage = crate::warm_worktree::prepare_command(&mut shell.command, &self.path)?;
+        let _watch =
+            crate::interruption::Watch::start().context("cannot watch for interruption")?;
+        crate::interruption::check()?;
+        let mut group = shell.spawn().context("cannot start the warm command")?;
+        loop {
+            if group.leader_exited()? {
+                break;
+            }
+            if let Err(error) = crate::interruption::check() {
+                group.stop()?;
+                return Err(error.into());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let status = group.stop()?;
+        if !status.success() {
+            bail!(
+                "slot warm command exited {}",
+                status.code().map_or_else(
+                    || format!(
+                        "on signal {}",
+                        std::os::unix::process::ExitStatusExt::signal(&status).unwrap_or(0)
+                    ),
+                    |code| code.to_string()
+                )
+            );
+        }
+        if gitio::head(&self.path)? != target || gitio::current_branch(&self.path)?.is_some() {
+            bail!(
+                "the warm command moved {} off {target}",
+                self.path.display()
+            );
+        }
+        require_reusable(&self.path, &self.name, &declaration.retain)?;
+        record_built(&self.path)?;
+        self.pool.free(&self.name, &self.token)
     }
 
     /// Mark the lease recorded on its change.
@@ -1096,7 +1265,7 @@ impl Leased {
         self.phase(Phase::Recorded).map(|_| ())
     }
 
-    /// The recovery a failed begin leaves to its operator.
+    /// The recovery a failed begin or warm leaves to its operator.
     pub fn kept(&self) -> String {
         format!(
             "{} at {} keeps its lease for inspection; once resolved, run \

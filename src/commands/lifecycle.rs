@@ -233,8 +233,8 @@ pub fn begin(
                 pool,
                 declaration,
                 &crate::slots::LeaseRequest {
-                    change_id: &change_id,
-                    branch: &branch_name,
+                    change_id: Some(&change_id),
+                    branch: Some(&branch_name),
                     target: &base_rev,
                     actor: Some(&ctx.actor),
                     session: ctx.session.as_deref(),

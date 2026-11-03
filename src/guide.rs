@@ -4732,7 +4732,7 @@ SLOTS
     retain = ["target"]         # ignored paths a slot carries between changes
     invalidate = "<command>"    # discards outputs on an identity change
     default = true              # begin uses a slot for worktree checkouts
-    warm = "<command>"          # parsed and reported; arc runs nothing with it
+    warm = "<command>"          # what `arc slots warm` builds a slot with
 
   A pattern without `/` matches a file name at any depth, one with `/`
   matches from the checkout root, and `*` and `?` stay within one path
@@ -4754,7 +4754,7 @@ SLOTS
   --no-worktree or --adopt when `default = true`, leases the best-ranked free
   slot under the pool lock and releases the lock. Ranking uses the slot's
   `built` record (revision and identity digest, set only by a successful
-  preparation in that slot, never by a gate) when its identity matches the
+  preparation or warm in that slot, never by a gate) when its identity matches the
   identity command's digest in the checkout running begin: known distances
   first, by paths changed from the built revision to the target outside
   `documentation`; then built revisions that cannot be compared; then cold
@@ -4775,14 +4775,14 @@ SLOTS
   a project `directory` without `invalidate` refuses the change. Preparation
   follows. The change records the slot as its worktree, with a `slot-leased`
   event carrying the lease token. The slot state's phase (`leasing`,
-  `switching`, `recorded`, `detaching`, `releasing`) lets `recover` resume
-  an interrupted operation.
+  `switching`, `recorded`, `warming`, `detaching`, `releasing`) lets
+  `recover` resume an interrupted operation.
 
   Gates, environment probes and preparation in a slot hold its use lock
   shared, waiting for an operation that changes the checkout. Begin's
-  switch, integrate's and close's detach, release, recover, `rebase` replay
-  and `rewrite` in a slot checkout hold it exclusively without waiting and
-  refuse while it is held. One arc process holds a slot's lock once; nested
+  switch, warming, integrate's and close's detach, release, recover,
+  `rebase` replay and `rewrite` in a slot checkout hold it exclusively
+  without waiting and refuse while it is held. One arc process holds a slot's lock once; nested
   work shares that hold. A command in a slot runs under an arc holder that
   leads its process group and inherits the lock. The holder is a child
   subreaper: it reports the command's exit and keeps the lock until `wait`
@@ -4801,6 +4801,26 @@ SLOTS
   work, or failing ownership keeps its lease, and the command prints the
   release command to run once resolved.
 
+  `arc slots warm [--target <rev>] [--limit <n>]` builds slots before a
+  change needs them. Under the pool lock it ranks the free slots as begin
+  does for the target (default: the primary checkout's branch head) and
+  leases the best one that is not current: current means a `built` record
+  at the target under the identity of the checkout running warm, so a cold
+  slot whose `HEAD` already stands at the target is still warmed. It takes
+  the slot's use lock exclusively for the whole operation, detaches the
+  checkout at the target under begin's reuse rules (creating it when
+  absent, invalidating on an identity change), and runs `warm` under the
+  holder, which receives that exclusive descriptor and never acquires the
+  lock itself. The command runs through the preparation and environment
+  gates use (`ARC_WORKTREE_*`, path-stable storage), so it fills the storage
+  gates consume, at `nice` 19 in the idle I/O class. Success that leaves the
+  checkout detached at the target and reusable records `built` and frees the
+  slot; anything else keeps the lease in phase `warming` and prints the
+  `recover` command, which detaches the clean checkout where it stands and
+  frees it. A running warm's slot is leased, so begin skips it. Warming
+  takes one slot at a time; `--limit` (default 1) bounds how many. Without
+  `warm`, it refuses naming the key.
+
   `arc slots status [--json]` (`arc-slots/1`) shows each slot's phase, lease
   and token, checkout `HEAD`, built revision and identity match, rank for the
   primary checkout's branch, and whether it is in use. `arc slots release
@@ -4808,7 +4828,7 @@ SLOTS
   `arc slots recover <slot> --token <t>` resumes a phase: a begin whose
   change exists records the lease on it; one that opened no change is
   undone, deleting its branch only while it still points at the target;
-  later phases finish the release. Both refuse an obsolete token, a busy
+  later phases and warms finish the release. Both refuse an obsolete token, a busy
   slot and a dirty checkout. Leases never expire; tokens appear only in
   status and recovery output. Compiler freshness after a switch stays with
   the project's build, as for path-stable storage.

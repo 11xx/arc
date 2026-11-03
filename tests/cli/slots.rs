@@ -554,3 +554,234 @@ fn gates_in_a_slot_record_their_command_exit() {
         "the finished gate left the slot in use"
     );
 }
+
+/// The `arc slots recover` command a refusal printed, as a shell line.
+fn recover_command(stderr: &str) -> String {
+    let start = stderr.find("`arc slots recover ").expect(stderr) + 1;
+    let end = start + stderr[start..].find('`').unwrap();
+    stderr[start..end].to_string()
+}
+
+fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while !done() {
+        assert!(Instant::now() < deadline, "timed out waiting until {what}");
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Claim: `arc slots warm` builds the best free slot that is not built at
+/// the target, including a cold slot whose checkout already stands there,
+/// skips a slot whose matching build is at the target, records `built` and
+/// frees the slot, and runs at the lowest CPU priority. Rejects treating a
+/// checkout at the target as warm, re-warming a current slot, and a warm
+/// that leaves its slot leased.
+#[test]
+fn warm_builds_the_best_stale_free_slot() {
+    let repo = pool(
+        2,
+        "warm = '{ nice; ionice 2>/dev/null || echo none; } > \"$HOME/warm-$(basename \"$PWD\")\"'\n",
+    );
+    let (first, worktree) = begin(&repo, "first");
+    integrate(&repo, &first, &worktree, &[]);
+    let target = repo.head(&repo.root);
+    assert_eq!(repo.head(&worktree), target);
+    assert!(status(&repo)["slots"][0]["built"].is_null());
+
+    let out = stdout(repo.arc(&repo.root).args(["slots", "warm"]));
+    assert!(
+        out.contains("warmed slot-01"),
+        "the cold slot at the target was skipped: {out}"
+    );
+    let slots = status(&repo);
+    assert_eq!(slots["slots"][0]["built"]["revision"], target);
+    assert!(
+        slots["slots"][0]["lease"].is_null(),
+        "the warm kept its lease"
+    );
+    assert_eq!(slots["slots"][0]["phase"], "free");
+    assert!(detached(&worktree));
+    let priority = fs::read_to_string(repo.home.join("warm-slot-01")).unwrap();
+    let mut lines = priority.lines();
+    assert_eq!(
+        lines.next(),
+        Some("19"),
+        "the warm ran at a normal priority"
+    );
+    assert!(
+        matches!(lines.next(), Some("idle" | "none")),
+        "the warm ran outside the idle I/O class: {priority}"
+    );
+
+    let out = stdout(repo.arc(&repo.root).args(["slots", "warm"]));
+    assert!(
+        out.contains("warmed slot-02"),
+        "the current slot was warmed again: {out}"
+    );
+    assert_eq!(status(&repo)["slots"][1]["built"]["revision"], target);
+    assert!(detached(&slot(&repo, 2)));
+    let out = stdout(repo.arc(&repo.root).args(["slots", "warm"]));
+    assert!(out.contains("nothing to warm"), "{out}");
+
+    repo.commit(&repo.root, "next.txt", "next\n", "feat: move the target");
+    let moved = repo.head(&repo.root);
+    let out = stdout(repo.arc(&repo.root).args(["slots", "warm", "--limit", "2"]));
+    assert!(
+        out.contains("warmed slot-01") && out.contains("warmed slot-02"),
+        "{out}"
+    );
+    let slots = status(&repo);
+    for index in 0..2 {
+        assert_eq!(slots["slots"][index]["built"]["revision"], moved);
+    }
+}
+
+/// Claim: a running warm holds its slot exclusively: a concurrent begin
+/// skips that slot, or refuses when no other is free, while the warm
+/// command, running under a holder that shares the warm's exclusive use,
+/// starts and completes. Rejects a holder that waits for the lock its
+/// launcher holds, and a begin that takes a slot being warmed.
+#[test]
+fn a_running_warm_holds_its_slot_against_begin() {
+    let repo = pool(
+        2,
+        "warm = 'touch \"$HOME/warm-started\"; i=0; while [ ! -e \"$HOME/warm-go\" ] && [ $i -lt 1200 ]; do sleep 0.1; i=$((i+1)); done; test -e \"$HOME/warm-go\"'\n",
+    );
+    let target = repo.head(&repo.root);
+    let mut warm = spawn_arc(&repo, &repo.root, &["slots", "warm"]);
+    wait_until("the warm command starts", || {
+        repo.home.join("warm-started").exists()
+    });
+    assert!(use_lock_busy(&slot(&repo, 1)));
+
+    let (_, taken) = begin(&repo, "beside");
+    assert_eq!(taken, slot(&repo, 2), "begin took the slot being warmed");
+    repo.arc(&repo.root)
+        .args(["begin", "crowded", "--slot"])
+        .assert()
+        .failure()
+        .stderr(
+            predicates::str::contains("no free slot").and(predicates::str::contains("warming")),
+        );
+
+    fs::write(repo.home.join("warm-go"), "").unwrap();
+    assert!(wait_for_exit(&mut warm).success(), "the warm failed");
+    let slots = status(&repo);
+    assert_eq!(slots["slots"][0]["built"]["revision"], target);
+    assert!(slots["slots"][0]["lease"].is_null());
+    let (_, next) = begin(&repo, "next");
+    assert_eq!(next, slot(&repo, 1));
+}
+
+/// Claim: a failing warm keeps its lease, reports the failure and the
+/// recovery command, and records no build; that command frees the slot.
+/// Rejects a failed warm that frees its slot or records it as built.
+#[test]
+fn a_failing_warm_keeps_its_lease_until_recovered() {
+    let repo = pool(1, "warm = 'exit 7'\n");
+    let output = repo
+        .arc(&repo.root)
+        .args(["slots", "warm"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("exited 7"), "{stderr}");
+    let slots = status(&repo);
+    assert_eq!(slots["slots"][0]["phase"], "warming", "{slots:#}");
+    assert!(
+        !slots["slots"][0]["lease"].is_null(),
+        "the failed warm freed its slot"
+    );
+    assert!(
+        slots["slots"][0]["built"].is_null(),
+        "the failed warm recorded a build"
+    );
+    repo.arc(&repo.root)
+        .args(["begin", "blocked", "--slot"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no free slot"));
+
+    stdout(&mut repo.arc_shell(&repo.root, &recover_command(&stderr)));
+    let slots = status(&repo);
+    assert!(slots["slots"][0]["lease"].is_null());
+    assert_eq!(slots["slots"][0]["phase"], "free");
+    assert!(detached(&slot(&repo, 1)));
+    let (_, again) = begin(&repo, "again");
+    assert_eq!(again, slot(&repo, 1));
+}
+
+/// Claim: without `[slots] warm`, warming refuses naming the key.
+#[test]
+fn warm_without_a_command_refuses_naming_the_key() {
+    let repo = pool(1, "");
+    repo.arc(&repo.root)
+        .args(["slots", "warm"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("`warm` in [slots]"));
+}
+
+/// Claim: a gate in a slot after a warm reuses the warmed build: every unit
+/// of a fixture workspace is fresh, so warming filled the storage the gate
+/// consumes. Rejects a warm that builds anywhere but the slot's own build.
+#[test]
+fn gates_after_a_warm_reuse_the_warmed_build() {
+    let repo = Repo::new();
+    for (name, body) in [
+        ("alpha", "pub fn alpha() -> u32 { 1 }\n"),
+        ("beta", "pub fn beta() -> u32 { 2 }\n"),
+    ] {
+        fs::create_dir_all(repo.root.join(name).join("src")).unwrap();
+        fs::write(
+            repo.root.join(name).join("Cargo.toml"),
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+        )
+        .unwrap();
+        fs::write(repo.root.join(name).join("src/lib.rs"), body).unwrap();
+    }
+    fs::write(
+        repo.root.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"alpha\", \"beta\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+    let lockfile = cargo(&repo.root, &["generate-lockfile", "--offline"]);
+    assert!(lockfile.status.success());
+    let cargo = format!(
+        "env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR {:?} build --offline",
+        env!("CARGO")
+    );
+    declare(&repo, 1, &format!("warm = '{cargo}'\n"));
+
+    let out = stdout(repo.arc(&repo.root).args(["slots", "warm"]));
+    assert!(out.contains("warmed slot-01"), "{out}");
+    let (change, worktree) = begin(&repo, "after-warm");
+    assert_eq!(worktree, slot(&repo, 1));
+    repo.commit(&worktree, "NOTES.md", "notes\n", "docs: notes");
+    stdout(repo.arc(&worktree).args(["snapshot", &change]));
+    let units = repo.home.join("units.json");
+    stdout(repo.arc(&worktree).args([
+        "verify",
+        &change,
+        "--command",
+        &format!("{cargo} --message-format json > {}", units.display()),
+    ]));
+    let fresh: std::collections::BTreeMap<String, bool> = fs::read_to_string(&units)
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|message| message["reason"] == "compiler-artifact")
+        .map(|message| {
+            (
+                message["target"]["name"].as_str().unwrap().to_string(),
+                message["fresh"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        fresh.get("alpha").zip(fresh.get("beta")),
+        Some((&true, &true)),
+        "the gate rebuilt what the warm built: {fresh:?}"
+    );
+}

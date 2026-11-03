@@ -2410,8 +2410,8 @@ enum Cmd {
     /// in .arc/worktrees.toml (see arc guide slots).
     ///
     /// begin --slot leases a slot; integrate and close release it. These
-    /// commands show the pool and release or recover a lease whose holder is
-    /// gone. Leases never expire: the operator decides.
+    /// commands show the pool, warm stale slots, and release or recover a
+    /// lease whose holder is gone. Leases never expire: the operator decides.
     Slots {
         #[command(subcommand)]
         command: SlotsCmd,
@@ -3316,11 +3316,32 @@ enum SlotsCmd {
         #[arg(long)]
         token: String,
     },
+    /// Build stale free slots ahead of the changes that will lease them.
+    ///
+    /// Ranks the free slots as begin does and leases the best one not built
+    /// at the target under this identity: a cold slot, even one whose HEAD is
+    /// already there, or one built at another revision. Holding the slot's
+    /// use lock exclusively throughout, it detaches the checkout at the
+    /// target and runs [slots] warm there through the preparation and
+    /// environment gates use, at the lowest CPU and I/O priority. A success
+    /// that leaves the checkout reusable records the slot's built revision
+    /// and frees it; a failure keeps the lease and prints the `arc slots
+    /// recover` command. Warms one slot at a time. Refuses without [slots]
+    /// warm. Records no events
+    Warm {
+        /// The commit or branch to build (default: the primary checkout's
+        /// branch head)
+        #[arg(long)]
+        target: Option<String>,
+        /// How many slots to warm, one after another
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=32))]
+        limit: u32,
+    },
     /// Resume an interrupted lease phase. A begin whose change exists records
     /// the lease on it; one that opened no change is undone, deleting the
     /// branch it made only while it holds no commits. Detaching and releasing
-    /// phases, and leases of closed changes, finish their release. Refuses an
-    /// obsolete token
+    /// phases, leases of closed changes and warms finish their release.
+    /// Refuses an obsolete token
     Recover {
         /// The slot: slot-NN, or its number
         slot: String,
@@ -7007,6 +7028,9 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 SlotsCmd::Status { json } => commands::slots::status(&ctx, json)?,
                 SlotsCmd::Release { slot, token } => commands::slots::release(&ctx, &slot, &token)?,
                 SlotsCmd::Recover { slot, token } => commands::slots::recover(&ctx, &slot, &token)?,
+                SlotsCmd::Warm { target, limit } => {
+                    commands::slots::warm(&ctx, target.as_deref(), limit)?
+                }
             }
             Ok(0)
         }
@@ -7886,6 +7910,7 @@ mod tests {
             "accept",
             "slots release",
             "slots recover",
+            "slots warm",
             "begin",
             "roles",
             "brief",

@@ -1,5 +1,5 @@
-//! `arc slots`: the pool's state, and operator release and recovery of
-//! leases whose holder is gone.
+//! `arc slots`: the pool's state, warming, and operator release and
+//! recovery of leases whose holder is gone.
 
 use super::*;
 use crate::slots::{self, Finished, Phase, Pool};
@@ -12,6 +12,13 @@ fn declaration(ctx: &Ctx) -> Result<slots::Declaration> {
 
 fn pool(ctx: &Ctx, declaration: &slots::Declaration) -> Result<Pool> {
     Pool::existing(&ctx.cwd, &slots::declared_root(&ctx.cwd, declaration)?)
+}
+
+/// An open change owns its slot until integration or closure releases it.
+/// This is lease authority, not an append guard: what a closed change may
+/// record is the store's append policy.
+fn holds_its_slot(change: &ChangeState) -> bool {
+    change.closure.is_none()
 }
 
 pub fn status(ctx: &Ctx, json: bool) -> Result<()> {
@@ -70,14 +77,22 @@ pub fn status(ctx: &Ctx, json: bool) -> Result<()> {
         let mut line = format!("{}  ", view.name);
         match (&view.error, &view.lease) {
             (Some(error), _) => line.push_str(&format!("unreadable: {error}")),
-            (None, Some(lease)) => line.push_str(&format!(
-                "{} by {} on {} since {} token {}",
-                view.phase.as_deref().unwrap_or("leased"),
-                lease.change_id,
-                lease.branch,
-                lease.leased_at,
-                lease.token
-            )),
+            (None, Some(lease)) => line.push_str(&match &lease.change_id {
+                Some(change_id) => format!(
+                    "{} by {change_id} on {} since {} token {}",
+                    view.phase.as_deref().unwrap_or("leased"),
+                    lease.branch.as_deref().unwrap_or("?"),
+                    lease.leased_at,
+                    lease.token
+                ),
+                None => format!(
+                    "{} for a warm at {} since {} token {}",
+                    view.phase.as_deref().unwrap_or("leased"),
+                    render::short_sha(&lease.target),
+                    lease.leased_at,
+                    lease.token
+                ),
+            }),
             (None, None) => line.push_str(view.phase.as_deref().unwrap_or("free")),
         }
         line.push_str(&format!("  checkout {}", view.checkout));
@@ -191,10 +206,11 @@ pub fn release(ctx: &Ctx, slot: &str, token: &str) -> Result<()> {
     let state = pool.read(&name)?;
     let lease = current_lease(&state, token)?;
     let store = ctx.store()?;
-    let change = leased_change(&store, &lease.change_id)?;
-    // Lease authority, not an append guard: an open change owns its slot
-    // until integration or closure releases it.
-    if let Some(change) = change.as_ref().filter(|change| change.closure.is_none()) {
+    let change = match &lease.change_id {
+        Some(change_id) => leased_change(&store, change_id)?,
+        None => None,
+    };
+    if let Some(change) = change.as_ref().filter(|change| holds_its_slot(change)) {
         bail!(
             "{name} holds open change {}; integrate or close it, which releases the slot",
             change.change_id
@@ -249,12 +265,17 @@ pub fn recover(ctx: &Ctx, slot: &str, token: &str) -> Result<()> {
     let state = pool.read(&name)?;
     let lease = current_lease(&state, token)?.clone();
     let store = ctx.store()?;
-    let change = leased_change(&store, &lease.change_id)?;
     let path = pool.checkout(&name);
+    let Some(change_id) = &lease.change_id else {
+        // A warm records nothing on any change: finishing it detaches the
+        // checkout where it stands and frees the slot.
+        return finish(ctx, &store, &pool, &name, token, None);
+    };
+    let change = leased_change(&store, change_id)?;
     match (state.phase, change) {
         (Phase::Free, _) => bail!("{name} is free"),
         (Phase::Leasing | Phase::Switching | Phase::Recorded, Some(change))
-            if change.closure.is_none() =>
+            if holds_its_slot(&change) =>
         {
             let recorded = change
                 .slot
@@ -293,18 +314,20 @@ pub fn recover(ctx: &Ctx, slot: &str, token: &str) -> Result<()> {
         (Phase::Leasing | Phase::Switching, None) => {
             // A begin that never opened its change: undo the switch, and
             // delete the branch only while it still sits where it was made.
-            let made = gitio::branch_exists(&ctx.cwd, &lease.branch)
-                && gitio::branch_head(&ctx.cwd, &lease.branch)? == lease.target;
+            let branch = lease.branch.as_deref().unwrap_or_default();
+            let made = !branch.is_empty()
+                && gitio::branch_exists(&ctx.cwd, branch)
+                && gitio::branch_head(&ctx.cwd, branch)? == lease.target;
             match slots::detach(&pool, &ctx.cwd, &name, token, None, None)? {
                 Finished::Kept(reason) => bail!("{reason}; {name} keeps its lease"),
                 Finished::Detached(_use) => {
                     if made {
-                        match gitio::git(&ctx.cwd, &["branch", "-D", &lease.branch]) {
-                            Ok(_) => println!("deleted branch {} (no commits)", lease.branch),
-                            Err(error) => println!("kept branch {}: {error:#}", lease.branch),
+                        match gitio::git(&ctx.cwd, &["branch", "-D", branch]) {
+                            Ok(_) => println!("deleted branch {branch} (no commits)"),
+                            Err(error) => println!("kept branch {branch}: {error:#}"),
                         }
-                    } else if gitio::branch_exists(&ctx.cwd, &lease.branch) {
-                        println!("kept branch {}: it holds commits", lease.branch);
+                    } else if !branch.is_empty() && gitio::branch_exists(&ctx.cwd, branch) {
+                        println!("kept branch {branch}: it holds commits");
                     }
                     pool.free(&name, token)?;
                     println!("released {name}; kept checkout {} detached", path.display());
@@ -313,5 +336,118 @@ pub fn recover(ctx: &Ctx, slot: &str, token: &str) -> Result<()> {
             }
         }
         (_, change) => finish(ctx, &store, &pool, &name, token, change.as_ref()),
+    }
+}
+
+/// Warm up to `limit` stale free slots at `target` (the primary checkout's
+/// branch head by default), one at a time, at the lowest CPU and I/O
+/// priority.
+pub fn warm(ctx: &Ctx, target: Option<&str>, limit: u32) -> Result<()> {
+    let declaration = declaration(ctx)?;
+    let script = declaration
+        .warm
+        .clone()
+        .context("no warm command is declared: set `warm` in [slots] of .arc/worktrees.toml")?;
+    let root = slots::declared_root(&ctx.cwd, &declaration)?;
+    if let Some(prefix) = ctx.excluded_by_sandbox(&root)? {
+        bail!(
+            "slot pool {} is outside the sandbox at {}",
+            root.display(),
+            prefix.display()
+        );
+    }
+    let target = match target {
+        Some(target) => gitio::rev_parse(&ctx.cwd, &format!("{target}^{{commit}}"))?,
+        None => {
+            let branch = gitio::primary_worktree_branch(&ctx.cwd)?
+                .context("the primary checkout is detached; pass --target")?;
+            gitio::branch_head(&ctx.cwd, &branch)?
+        }
+    };
+    deprioritize();
+    let identity = slots::identity(&gitio::toplevel(&ctx.cwd)?, &declaration)?;
+    let open_worktrees: Vec<(PathBuf, String)> = ctx
+        .store()?
+        .readable_states()?
+        .into_values()
+        .filter(holds_its_slot)
+        .filter_map(|state| {
+            let worktree = state.worktree?;
+            Some((
+                crate::config::resolved(Path::new(&worktree)),
+                state.change_id,
+            ))
+        })
+        .collect();
+    let short = render::short_sha(&target);
+    let mut warmed = 0;
+    while warmed < limit {
+        let pool = Pool::declared(&ctx.cwd, &declaration)?;
+        let request = slots::LeaseRequest {
+            change_id: None,
+            branch: None,
+            target: &target,
+            actor: Some(&ctx.actor),
+            session: ctx.session.as_deref(),
+        };
+        let leased = match slots::select(
+            &ctx.cwd,
+            pool,
+            &declaration,
+            &request,
+            &identity,
+            |pool, state| !slots::current(pool, state, &target, &identity),
+        )? {
+            slots::Selected::Leased(leased) => leased,
+            slots::Selected::None {
+                table, passed_over, ..
+            } => {
+                if warmed == 0 {
+                    println!(
+                        "nothing to warm at {short}: {passed_over} free slot(s) already built there"
+                    );
+                    for row in table {
+                        println!("  {row}");
+                    }
+                }
+                break;
+            }
+        };
+        let path = crate::config::resolved(&leased.path);
+        let open_change = open_worktrees
+            .iter()
+            .find(|(worktree, _)| *worktree == path)
+            .map(|(_, change)| change.as_str());
+        println!(
+            "warming {} at {} for {short}",
+            leased.name,
+            leased.path.display()
+        );
+        if let Err(error) = leased.warm(&ctx.cwd, &declaration, &script, open_change) {
+            return Err(error.context(leased.kept()));
+        }
+        println!("warmed {}: built {short}", leased.name);
+        warmed += 1;
+    }
+    Ok(())
+}
+
+/// Run this process and everything it starts at the lowest CPU priority
+/// and in the idle I/O class, as `nice -n 19` and `ionice -c 3` would.
+fn deprioritize() {
+    const IOPRIO_WHO_PROCESS: libc::c_long = 1;
+    const IOPRIO_IDLE: libc::c_long = 3 << 13;
+    // SAFETY: both calls take plain integers and affect only this process.
+    let (cpu, io) = unsafe {
+        (
+            libc::setpriority(libc::PRIO_PROCESS, 0, 19),
+            libc::syscall(libc::SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0, IOPRIO_IDLE),
+        )
+    };
+    if cpu != 0 || io != 0 {
+        eprintln!(
+            "warning: cannot lower the warm's priority: {}",
+            std::io::Error::last_os_error()
+        );
     }
 }
