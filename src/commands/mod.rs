@@ -136,12 +136,13 @@ pub use workspace::{
 /// checkout's append policy and refuses every append, and the guide prints its
 /// list from here.
 /// Read-only commands that read the ledger once and render it: each shares
-/// one read of every ledger file, the privilege scope and the readable states
-/// across the store handles it opens. A command that follows the ledger as
+/// one read of every ledger file, the privilege scope, each change's state
+/// and the readable states across the store handles it opens. A command that follows the ledger as
 /// it moves, such as `watch` or `events`, reads afresh and is not one.
 pub(crate) const SHARED_READ_COMMANDS: &[&str] = &[
     "status",
     "show",
+    "check",
     "explain",
     "list",
     "query",
@@ -771,9 +772,7 @@ impl Ctx {
         reference: &str,
     ) -> Result<(String, ChangeState)> {
         let change_id = store.resolve_change(reference)?;
-        let events = store.load_events(&change_id)?;
-        let mut state = store.project_state(&events, &store.rewrites()?)?;
-        crate::replica::localize_change(&store.repository_id, &events, &mut state);
+        let state = store.state(&change_id)?;
         Ok((change_id, state))
     }
 

@@ -61,6 +61,7 @@ mod integrate;
 mod journal;
 mod journal_exchange;
 mod journal_staging;
+mod landing_reads;
 mod lifecycle;
 mod lock_waits;
 mod lookup_reasons;

@@ -233,9 +233,11 @@ impl LedgerRead<'_> {
     }
 
     pub fn state(&self, change_id: &str) -> Result<crate::state::ChangeState> {
-        let events = self.events(change_id)?;
-        self.rewrites()?;
-        self.project(&events)
+        self.store.shared_state(change_id, || {
+            let events = self.events(change_id)?;
+            self.rewrites()?;
+            self.project(&events)
+        })
     }
 }
 
@@ -304,8 +306,8 @@ pub struct ImportBatch {
 /// What one process reads from a ledger once and shares across every store
 /// handle it opens. A command that only reads, and never watches the ledger
 /// move, turns sharing on at start with `share_reads`. Each event file, the
-/// import batches, the privilege scope and the readable states are then read
-/// once per process. Any ledger write the process makes forgets everything
+/// import batches, the privilege scope, each change's state and the readable
+/// states are then read once per process. Any ledger write the process makes forgets everything
 /// shared, so a later read sees it, and a failed read is never held.
 mod shared {
     use super::{ImportBatch, PrivilegeScope};
@@ -392,6 +394,8 @@ mod shared {
         pub change_files: HashMap<String, (RawEvents, bool)>,
         pub import_batches: Option<Vec<ImportBatch>>,
         pub scope: Option<Arc<PrivilegeScope>>,
+        /// Each change's state, reduced once whichever reader asked first.
+        pub change_states: HashMap<String, crate::state::ChangeState>,
         /// The readable states, and the warning naming each unreadable one.
         pub states: Option<(BTreeMap<String, crate::state::ChangeState>, Vec<String>)>,
     }
@@ -2026,7 +2030,35 @@ impl Store {
     }
 
     pub fn state(&self, change_id: &str) -> Result<crate::state::ChangeState> {
-        self.state_in(&self.privilege_scope()?, change_id)
+        self.shared_state(change_id, || {
+            self.state_in(&self.privilege_scope()?, change_id)
+        })
+    }
+
+    /// One change's state, reduced once per process while it shares reads:
+    /// every input of the reduction is then a shared read, so a later reader
+    /// of the same change would reduce the same events to the same state.
+    fn shared_state(
+        &self,
+        change_id: &str,
+        reduce: impl FnOnce() -> Result<crate::state::ChangeState>,
+    ) -> Result<crate::state::ChangeState> {
+        if !self.shares_reads() {
+            return reduce();
+        }
+        if let Some(held) = shared::with(&self.root, |memo| {
+            memo.change_states.get(change_id).cloned()
+        }) {
+            crate::perf::cache("change_states", true);
+            return Ok(held);
+        }
+        crate::perf::cache("change_states", false);
+        let state = reduce()?;
+        shared::with(&self.root, |memo| {
+            memo.change_states
+                .insert(change_id.to_string(), state.clone())
+        });
+        Ok(state)
     }
 
     /// `state` judged by a scope the caller derived for this read.
