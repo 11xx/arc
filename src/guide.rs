@@ -4806,17 +4806,21 @@ TRACING
     counts               repository_materializations, changes_reduced,
                          scope_derivations, receipt_validations,
                          replica_materializations, status_reports,
-                         journal_projections
+                         journal_projections; session_candidates and
+                         session_rows, the recordings session discovery's
+                         backends scanned and the project's rows they kept
     cache.<value>        hits and misses of a value read once per process
     children             runs by kind: the program name, and Git's subcommand;
                          `ms` is time spent waiting on a child arc ran to
                          completion, and a child it only started has a run
                          and no time
   `phases` holds the calls and exclusive milliseconds of enumerate, read,
-  decode, reduce, scope, round_trip, journal, sessions and children. A phase
-  entered inside another is subtracted from the outer one; phases on
-  concurrent threads are summed, so they can total more than elapsed_ms;
-  time outside every phase is not attributed.
+  decode, reduce, scope, round_trip, journal, sessions, listing and
+  children. `sessions` is session discovery as a whole and `listing` one
+  call per backend listing its store, each on a thread of its own. A phase
+  entered inside another on its thread is subtracted from the outer one;
+  phases on concurrent threads are summed, so they can total more than
+  elapsed_ms; time outside every phase is not attributed.
 
   `coverage` names what the counters see. `ledger: store` counts ledger
   files read through the store's readers, not a file a diagnostic opens on

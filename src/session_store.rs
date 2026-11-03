@@ -432,7 +432,14 @@ pub(crate) fn project_sessions(
                         }
                         let mut query = backend::Query::unscoped(usize::MAX);
                         query.scope = Some(scope);
-                        let listing = discovery_listing(&mut query, |query| backend.list(query));
+                        let listing = {
+                            let _phase = crate::perf::phase("listing");
+                            discovery_listing(&mut query, |query| backend.list(query))
+                        };
+                        if let Ok(listing) = &listing {
+                            crate::perf::count("session_candidates", listing.scanned as u64);
+                            crate::perf::count("session_rows", listing.sessions.len() as u64);
+                        }
                         Some((backend.harness(), listing))
                     })
                 })

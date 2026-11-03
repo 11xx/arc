@@ -245,3 +245,43 @@ fn catchup_discovers_sessions_through_one_scope_and_backend_set() {
         }
     }
 }
+
+/// Claim: the `ARC_TRACE` record of `catchup` counts the recordings session
+/// discovery's backends scanned apart from the project's rows they kept, and
+/// times each backend's listing. Rejects a record that counts a recording
+/// made outside the project as kept, or leaves listing time unattributed.
+#[test]
+fn catchup_trace_separates_scanned_recordings_from_kept_rows() {
+    let repo = Repo::new();
+    for index in 0..2 {
+        record_sessions(&repo, index);
+    }
+    let elsewhere = repo.home.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let id = "99999999-2222-3333-4444-555555555555";
+    let row = serde_json::json!({"type":"user", "sessionId":id, "cwd":elsewhere, "timestamp":"2026-01-01T00:00:00Z", "message":{"role":"user", "content":"other"}});
+    fs::write(
+        repo.home
+            .join(format!(".claude/projects/-fixture/{id}.jsonl")),
+        format!("{row}\n"),
+    )
+    .unwrap();
+    let output = repo
+        .arc(&repo.root)
+        .env("CLAUDE_CONFIG_DIR", repo.home.join(".claude"))
+        .env("CODEX_HOME", repo.home.join(".codex"))
+        .env("ARC_TRACE", "1")
+        .args(["catchup", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let record: Value = stderr
+        .lines()
+        .find(|line| line.contains("\"arc-perf/1\""))
+        .map(|line| serde_json::from_str(line).unwrap())
+        .unwrap_or_else(|| panic!("catchup writes a trace record: {stderr}"));
+    assert_eq!(record["counts"]["session_candidates"], 5, "{record}");
+    assert_eq!(record["counts"]["session_rows"], 4, "{record}");
+    assert_eq!(record["phases"]["listing"]["calls"], 2, "{record}");
+}
