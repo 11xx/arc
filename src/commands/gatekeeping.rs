@@ -4192,7 +4192,7 @@ fn prerequisite_closures(
         // checked, so an unreadable one refuses the merge rather than being
         // quietly omitted.
         let events = read.events(blocker).with_context(|| {
-            format!("prerequisite {blocker} cannot be read, so the authorization basis                      would be incomplete")
+            format!("prerequisite {blocker} cannot be read, so the authorization basis would be incomplete")
         })?;
         let mut blocker_id = blocker.clone();
         let mut blocker_state = read.project(&events)?;
@@ -4227,10 +4227,6 @@ fn prerequisite_closures(
     Ok(prerequisites)
 }
 
-/// Report what `integrate` would do without merging, closing, or writing
-/// anything: run the same readiness preflight, then simulate the merge with
-/// the needs-rebase machinery. Exit code mirrors `check`: 0 when the merge
-/// would proceed cleanly, otherwise the first blocker's code.
 /// Everything the guard consumed to authorize one merge, read from the same
 /// state the readiness decision was made against.
 ///
@@ -4852,6 +4848,10 @@ fn print_planned_debt(debt: Option<&integration::PlannedDebt>) {
     }
 }
 
+/// Report what `integrate` would do without merging, closing, or writing
+/// anything: run the same readiness preflight, then simulate the merge with
+/// the needs-rebase machinery. Exit code mirrors `check`: 0 when the merge
+/// would proceed cleanly, otherwise the first blocker's code.
 fn integrate_dry_run(
     ctx: &Ctx,
     store: &Store,
