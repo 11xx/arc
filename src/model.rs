@@ -2054,6 +2054,10 @@ pub enum Payload {
         target_before: String,
         /// The members in landing order, each pinned as planned.
         members: Vec<LandingPin>,
+        /// The attempt this one was split from, when a failed landing was
+        /// split.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<String>,
     },
     /// A landing arc performed under its own guard. Each member's integrated
     /// closure, and the debt a `--debt` landing declared for it, derive from

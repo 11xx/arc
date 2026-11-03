@@ -278,6 +278,9 @@ pub struct Intent {
     /// does.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub composed: Vec<ComposedMember>,
+    /// The attempt this one was split from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
     /// The exact `landing-completed` event, saved when the attempt is
     /// authorized and published unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]

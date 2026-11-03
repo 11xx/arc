@@ -211,6 +211,8 @@ pub struct LandArgs {
     pub recover: Option<String>,
     pub abandon: Option<String>,
     pub reason: Option<String>,
+    /// How many attempts a landing may make, its first included.
+    pub max_attempts: u32,
 }
 
 pub const PLAN_SCHEMA: &str = "arc-landing-plan/1";
@@ -1118,17 +1120,289 @@ pub fn land(ctx: &Ctx, args: LandArgs) -> Result<i32> {
     if args.json && !args.dry_run {
         bail!("--json prints the plan; pass it with --dry-run");
     }
+    if args.max_attempts == 0 {
+        bail!("--max-attempts counts the first attempt, so it is at least 1");
+    }
     let store = ctx.store()?;
     ctx.ensure_declared_actor(&store)?;
     if let Some(refusal) = crate::replica::integration_refusal(&store)? {
         eprintln!("Cannot land: {refusal}");
         return Ok(crate::replica::INTEGRATION_AUTHORITY_EXIT_CODE);
     }
+    if args.dry_run {
+        return match plan(
+            ctx,
+            &store,
+            &args.changes,
+            args.target.as_deref(),
+            args.debt.as_deref(),
+            None,
+        )? {
+            Ok(planned) => {
+                print_plan(&planned.plan, args.json)?;
+                Ok(0)
+            }
+            Err(refusal) => {
+                eprintln!("Cannot land: {}", refusal.message);
+                Ok(refusal.code)
+            }
+        };
+    }
+    let mut first = Attempted::default();
+    let code = run_attempt(ctx, &store, &args, &args.changes, None, &mut first)?;
+    if code == 0 || !first.gate_failed {
+        return Ok(code);
+    }
+    split(ctx, &store, &args, first, code)
+}
+
+/// A must-land-together component, or a member that lands alone, as a
+/// split moves it: whole, its members in landing order.
+type Node = Vec<String>;
+
+/// The plan's members contracted into must-land-together nodes, ordered so
+/// every prerequisite inside the landing comes before its dependent, ties in
+/// landing order. `Err` holds the nodes a prerequisite cycle runs through:
+/// no part of such a landing can land before another.
+fn contracted(plan: &Plan) -> std::result::Result<Vec<Node>, Vec<Node>> {
+    let order: Vec<&String> = plan.members.iter().map(|m| &m.change_id).collect();
+    let mut nodes: Vec<Node> = Vec::new();
+    for id in &order {
+        if nodes.iter().any(|node| node.contains(id)) {
+            continue;
+        }
+        let component = plan
+            .components
+            .iter()
+            .find(|component| component.contains(id));
+        nodes.push(
+            order
+                .iter()
+                .filter(|other| {
+                    *other == id || component.is_some_and(|component| component.contains(other))
+                })
+                .map(|other| (*other).clone())
+                .collect(),
+        );
+    }
+    let node_of = |id: &str| nodes.iter().position(|node| node.iter().any(|m| m == id));
+    let mut needs = vec![std::collections::BTreeSet::new(); nodes.len()];
+    for member in &plan.members {
+        let Some(dependent) = node_of(&member.change_id) else {
+            continue;
+        };
+        for prerequisite in &member.prerequisites {
+            if let Some(first) =
+                node_of(&prerequisite.change_id).filter(|first| *first != dependent)
+            {
+                needs[dependent].insert(first);
+            }
+        }
+    }
+    let mut placed: Vec<usize> = Vec::new();
+    while placed.len() < nodes.len() {
+        let next = (0..nodes.len()).find(|index| {
+            !placed.contains(index) && needs[*index].iter().all(|need| placed.contains(need))
+        });
+        match next {
+            Some(next) => placed.push(next),
+            None => {
+                return Err((0..nodes.len())
+                    .filter(|index| !placed.contains(index))
+                    .map(|index| nodes[index].clone())
+                    .collect())
+            }
+        }
+    }
+    Ok(placed
+        .into_iter()
+        .map(|index| nodes[index].clone())
+        .collect())
+}
+
+/// One line of a split's report.
+struct SplitRow {
+    attempt: Option<String>,
+    parent: Option<String>,
+    members: Vec<String>,
+    outcome: String,
+}
+
+struct SplitRun {
+    used: u32,
+    rows: Vec<SplitRow>,
+}
+
+/// Split a landing whose gates failed: a prefix child and a suffix child
+/// of its contracted dependency order, each a new attempt naming its
+/// parent, the suffix only once the prefix landed, and a failed child split
+/// again while `--max-attempts` allows. The failed parent closes nothing.
+fn split(ctx: &Ctx, store: &Store, args: &LandArgs, first: Attempted, code: i32) -> Result<i32> {
+    let plan = first.plan.context("an attempt that gated has a plan")?;
+    let parent = first.attempt.context("an attempt that gated has an id")?;
+    let nodes = match contracted(&plan) {
+        Ok(nodes) => nodes,
+        Err(cycle) => {
+            eprintln!(
+                "landing {parent} is unsplittable: its must-land-together components and \
+                 prerequisites form a cycle through {}, so no part of it can land before \
+                 another",
+                cycle
+                    .iter()
+                    .map(|node| node.join("+"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            return Ok(code);
+        }
+    };
+    if nodes.len() < 2 {
+        eprintln!(
+            "landing {parent} is one must-land-together component; there is nothing to split"
+        );
+        return Ok(code);
+    }
+    let budget = 2 * nodes.len() - 1;
+    if args.max_attempts <= 1 {
+        eprintln!(
+            "split: `--max-attempts N` retries halves of its {} components in dependency \
+             order, each half on what landed before it; finding every failing component \
+             takes at most {budget} attempts",
+            nodes.len()
+        );
+        return Ok(code);
+    }
+    let mut run = SplitRun {
+        used: 1,
+        rows: vec![SplitRow {
+            attempt: Some(parent.clone()),
+            parent: None,
+            members: nodes.concat(),
+            outcome: "a gate failed; split".into(),
+        }],
+    };
+    let landed = split_nodes(ctx, store, args, &nodes, &parent, &mut run)?;
+    println!(
+        "landing attempts ({} of at most {}):",
+        run.used, args.max_attempts
+    );
+    for row in &run.rows {
+        println!(
+            "  {}{}: {}: {}",
+            row.attempt.as_deref().unwrap_or("(none)"),
+            row.parent
+                .as_deref()
+                .map(|parent| format!(" from {parent}"))
+                .unwrap_or_default(),
+            row.members.join(" "),
+            row.outcome
+        );
+    }
+    Ok(if landed { 0 } else { code })
+}
+
+/// Land `nodes` as a prefix child and then a suffix child of `parent`.
+/// Whether every member of `nodes` landed.
+fn split_nodes(
+    ctx: &Ctx,
+    store: &Store,
+    args: &LandArgs,
+    nodes: &[Node],
+    parent: &str,
+    run: &mut SplitRun,
+) -> Result<bool> {
+    let (prefix, suffix) = nodes.split_at(nodes.len().div_ceil(2));
+    if !split_child(ctx, store, args, prefix, parent, run)? {
+        if !suffix.is_empty() {
+            run.rows.push(SplitRow {
+                attempt: None,
+                parent: Some(parent.to_string()),
+                members: suffix.concat(),
+                outcome: "blocked: the prefix before it did not land".into(),
+            });
+        }
+        return Ok(false);
+    }
+    if suffix.is_empty() {
+        return Ok(true);
+    }
+    split_child(ctx, store, args, suffix, parent, run)
+}
+
+/// One child attempt of a split, split again when its gates fail and the
+/// budget allows. Whether every member of `nodes` landed.
+fn split_child(
+    ctx: &Ctx,
+    store: &Store,
+    args: &LandArgs,
+    nodes: &[Node],
+    parent: &str,
+    run: &mut SplitRun,
+) -> Result<bool> {
+    let members = nodes.concat();
+    if run.used >= args.max_attempts {
+        run.rows.push(SplitRow {
+            attempt: None,
+            parent: Some(parent.to_string()),
+            members,
+            outcome: format!(
+                "not attempted: --max-attempts {} is spent",
+                args.max_attempts
+            ),
+        });
+        return Ok(false);
+    }
+    run.used += 1;
+    let mut attempted = Attempted::default();
+    let code = run_attempt(ctx, store, args, &members, Some(parent), &mut attempted)?;
+    let landed = code == 0;
+    run.rows.push(SplitRow {
+        attempt: attempted.attempt.clone(),
+        parent: Some(parent.to_string()),
+        members,
+        outcome: if landed {
+            "landed".into()
+        } else if attempted.gate_failed && nodes.len() > 1 {
+            "a gate failed; split".into()
+        } else if attempted.gate_failed {
+            "a gate failed".into()
+        } else {
+            format!("refused (exit {code})")
+        },
+    });
+    if landed {
+        return Ok(true);
+    }
+    match (&attempted.attempt, attempted.gate_failed && nodes.len() > 1) {
+        (Some(attempt), true) => split_nodes(ctx, store, args, nodes, attempt, run),
+        _ => Ok(false),
+    }
+}
+
+/// What one attempt did, beside its exit code.
+#[derive(Default)]
+struct Attempted {
+    attempt: Option<String>,
+    /// A required gate failed: the one outcome splitting answers.
+    gate_failed: bool,
+    plan: Option<Plan>,
+}
+
+/// One attempt at landing `changes`, from plan to completion. A split
+/// child names the attempt it was split from.
+fn run_attempt(
+    ctx: &Ctx,
+    store: &Store,
+    args: &LandArgs,
+    changes: &[String],
+    parent: Option<&str>,
+    report: &mut Attempted,
+) -> Result<i32> {
     let started_at = chrono::Utc::now();
     let planned = match plan(
         ctx,
-        &store,
-        &args.changes,
+        store,
+        changes,
         args.target.as_deref(),
         args.debt.as_deref(),
         None,
@@ -1139,10 +1413,7 @@ pub fn land(ctx: &Ctx, args: LandArgs) -> Result<i32> {
             return Ok(refusal.code);
         }
     };
-    if args.dry_run {
-        print_plan(&planned.plan, args.json)?;
-        return Ok(0);
-    }
+    report.plan = Some(planned.plan.clone());
     let mut pinned = planned.plan;
     let gate_declarations = planned.gates;
     let member_ids: Vec<String> = pinned
@@ -1150,10 +1421,11 @@ pub fn land(ctx: &Ctx, args: LandArgs) -> Result<i32> {
         .iter()
         .map(|member| member.change_id.clone())
         .collect();
-    let observed = observe(ctx, &store, &member_ids, &pinned.target_branch)?;
+    let observed = observe(ctx, store, &member_ids, &pinned.target_branch)?;
 
     // Intent, durable before anything moves.
     let attempt = crate::ids::new_identifier();
+    report.attempt = Some(attempt.clone());
     let pins: Vec<crate::model::LandingPin> = pinned
         .members
         .iter()
@@ -1174,19 +1446,21 @@ pub fn land(ctx: &Ctx, args: LandArgs) -> Result<i32> {
         target_after: pinned.target_after.clone(),
         members: pins.clone(),
         composed: Vec::new(),
+        parent: parent.map(str::to_string),
         completion: None,
     };
     store.write_landing_intent(&intent)?;
     {
         let _repository_events = store.lock_repository_events()?;
         let mut prepared = ctx.event(
-            &store,
+            store,
             Store::REPOSITORY_SCOPE,
             Payload::LandingPrepared {
                 attempt: attempt.clone(),
                 target_branch: pinned.target_branch.clone(),
                 target_before: pinned.target_before.clone(),
                 members: pins,
+                parent: parent.map(str::to_string),
             },
         )?;
         store.append_local_repository_event(&mut prepared)?;
@@ -1203,21 +1477,22 @@ pub fn land(ctx: &Ctx, args: LandArgs) -> Result<i32> {
     // A composed attempt replays first: the head it gates is the one it
     // installs.
     let composed_evidence = if pinned.shape == Shape::Composed {
-        if let Err(refusal) = compose(ctx, &store, &mut pinned, &mut intent)? {
-            abandon(ctx, &store, &attempt, &refusal.message)?;
+        if let Err(refusal) = compose(ctx, store, &mut pinned, &mut intent)? {
+            abandon(ctx, store, &attempt, &refusal.message)?;
             eprintln!("Cannot land: {}; nothing closed", refusal.message);
             return Ok(refusal.code);
         }
         crash_point("composed");
         // The gates every member requires run once at the composed head, in
         // a checkout the attempt owns, with no ledger or change lock held.
-        let gated = gate_composed(ctx, &store, &pinned, &gate_declarations, &top, &attempt);
+        let gated = gate_composed(ctx, store, &pinned, &gate_declarations, &top, &attempt);
         match gated {
             Ok((0, evidence)) => Some(evidence),
             Ok(_) => {
+                report.gate_failed = true;
                 abandon(
                     ctx,
-                    &store,
+                    store,
                     &attempt,
                     "a required gate failed at the composed head",
                 )?;
@@ -1229,7 +1504,7 @@ pub fn land(ctx: &Ctx, args: LandArgs) -> Result<i32> {
             Err(error) => {
                 abandon(
                     ctx,
-                    &store,
+                    store,
                     &attempt,
                     &format!("gates did not run: {error:#}"),
                 )?;
@@ -1273,7 +1548,7 @@ pub fn land(ctx: &Ctx, args: LandArgs) -> Result<i32> {
             Err(error) => {
                 abandon(
                     ctx,
-                    &store,
+                    store,
                     &attempt,
                     &format!("gates did not run: {error:#}"),
                 )?;
@@ -1281,9 +1556,10 @@ pub fn land(ctx: &Ctx, args: LandArgs) -> Result<i32> {
             }
         };
         if gate_code != 0 {
+            report.gate_failed = true;
             abandon(
                 ctx,
-                &store,
+                store,
                 &attempt,
                 "a required gate failed at the top head",
             )?;
@@ -1297,8 +1573,8 @@ pub fn land(ctx: &Ctx, args: LandArgs) -> Result<i32> {
 
     commit(
         ctx,
-        &store,
-        &args,
+        store,
+        args,
         pinned,
         &observed,
         intent,

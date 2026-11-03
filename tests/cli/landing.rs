@@ -1696,3 +1696,138 @@ fn a_composed_attempt_gates_in_a_checkout_it_owns_and_gives_it_back() {
         git_out(&repo.root, &["rev-parse", "master"])
     );
 }
+
+/// Approved changes on the target as it is now, one file each.
+fn approved(repo: &Repo, slugs: &[&str]) -> Vec<String> {
+    slugs
+        .iter()
+        .map(|slug| reviewed_change(repo, slug, None).0)
+        .collect()
+}
+
+fn prepared_parents(repo: &Repo) -> Vec<Option<String>> {
+    repository_events(repo)
+        .into_iter()
+        .filter(|event| event["event_type"] == "landing-prepared")
+        .map(|event| event["parent"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// Claim: a landing whose gate fails splits only when `--max-attempts`
+/// allows, between components in halves of their dependency order, each
+/// child a new attempt naming its parent; only the members of children that
+/// landed close, and every attempt is reported. Without the budget the
+/// refusal names the split option and its 2n-1 bound. Rejects closing a
+/// member of a failed attempt, exceeding the budget, and a child that does
+/// not name the attempt it was split from.
+#[test]
+fn a_failed_landing_splits_within_its_budget_and_closes_only_what_landed() {
+    let repo = Repo::new();
+    repo.redeclare_gates("[gates.no-d]\ncommand = \"test ! -f d.txt\"\n");
+    let members = approved(&repo, &["a", "b", "c", "d"]);
+    let mut args = vec!["land"];
+    args.extend(members.iter().map(String::as_str));
+    args.extend(["--debt", "context unread"]);
+
+    let alone = repo.arc(&repo.root).args(&args).output().unwrap();
+    assert_eq!(alone.status.code(), Some(5), "{}", stderr_of(&alone));
+    assert!(
+        stderr_of(&alone).contains("--max-attempts") && stderr_of(&alone).contains("at most 7"),
+        "{}",
+        stderr_of(&alone)
+    );
+    assert_eq!(prepared_parents(&repo).len(), 1);
+
+    let split = repo
+        .arc(&repo.root)
+        .args(&args)
+        .args(["--max-attempts", "3"])
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&split.stdout).into_owned();
+    assert_eq!(split.status.code(), Some(5), "{out}{}", stderr_of(&split));
+    assert!(out.contains("landing attempts (3 of at most 3)"), "{out}");
+    assert_eq!(out.matches(": landed").count(), 1, "{out}");
+    assert!(
+        out.contains(&format!("{} {}: landed", members[0], members[1])),
+        "{out}"
+    );
+    for (index, member) in members.iter().enumerate() {
+        let report = status(&repo, member);
+        assert_eq!(
+            report["closure"]["outcome"].as_str(),
+            (index < 2).then_some("integrated"),
+            "{member}: {report}"
+        );
+    }
+    let parents = prepared_parents(&repo);
+    assert_eq!(parents.len(), 4, "{parents:?}");
+    assert!(parents[1].is_none());
+    assert!(
+        parents[2].is_some() && parents[2] == parents[3],
+        "{parents:?}"
+    );
+}
+
+/// Claim: a landing whose must-land-together components and prerequisites
+/// form a cycle once contracted cannot be split, and says so. Rejects a
+/// split that separates a component or lands a member before its
+/// prerequisite.
+#[test]
+fn a_contracted_cycle_makes_a_landing_unsplittable() {
+    let repo = Repo::new();
+    repo.redeclare_gates("[gates.never]\ncommand = \"false\"\n");
+    let a = reviewed_change(&repo, "a", None).0;
+    let b = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "b",
+        "--blocked-by",
+        &a,
+    ])));
+    let b_tree = repo.home.join(".worktrees/repo-b");
+    repo.commit(&b_tree, "b.txt", "b\n", "feat: b");
+    stdout(repo.arc(&b_tree).args(["snapshot", "b"]));
+    repo.arc(&b_tree)
+        .args(["review", "b", "--verdict", "approved"])
+        .assert()
+        .success();
+    let c = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "c",
+        "--blocked-by",
+        &b,
+    ])));
+    let c_tree = repo.home.join(".worktrees/repo-c");
+    repo.commit(&c_tree, "c.txt", "c\n", "feat: c");
+    stdout(repo.arc(&c_tree).args(["snapshot", "c"]));
+    repo.arc(&c_tree)
+        .args(["review", "c", "--verdict", "approved"])
+        .assert()
+        .success();
+    relate(&repo, &a, &c);
+
+    let refused = repo
+        .arc(&repo.root)
+        .args([
+            "land",
+            &a,
+            &b,
+            &c,
+            "--debt",
+            "context unread",
+            "--max-attempts",
+            "3",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(5), "{}", stderr_of(&refused));
+    assert!(
+        stderr_of(&refused).contains("unsplittable"),
+        "{}",
+        stderr_of(&refused)
+    );
+    assert_eq!(prepared_parents(&repo).len(), 1);
+    for change in [&a, &b, &c] {
+        assert!(status(&repo, change)["closure"].is_null());
+    }
+}

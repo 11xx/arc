@@ -1430,6 +1430,22 @@ RUN A CHANGE
   member's export carries the completion that closed it; an attempt still
   pending is not exported.
 
+  `--max-attempts N` (default 1, the first attempt included) bounds a
+  landing's attempts. When a gate fails and more remain, arc splits it.
+  Each must-land-together component contracts to one node over the
+  members' `blocked_by`; a cycle among the nodes makes the landing
+  unsplittable, and arc says so. The nodes' dependency order is cut into a
+  prefix child and a suffix child. Each is a new attempt whose intent and
+  `landing-prepared` event name its parent and its exact members, planned
+  and gated afresh on the target as it then stands. The suffix runs only
+  once every member of the prefix landed; otherwise it is reported
+  blocked. A child whose gate fails splits the same way while the budget
+  lasts. A failed attempt closes nothing, only the members of children
+  that landed close, and arc reports every attempt with its parent,
+  members and outcome. Finding every failing one of n components takes
+  at most 2n-1 attempts. With a budget of 1, a failed landing names the
+  option and that bound.
+
   `arc land --recover <attempt>` finishes an interrupted attempt. It
   publishes a saved `authorized` completion whose applied ref exists, after
   bringing a target checkout still at the old tree to the new one; it

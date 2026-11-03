@@ -2854,6 +2854,14 @@ enum Cmd {
         /// Why the attempt is abandoned
         #[arg(long)]
         reason: Option<String>,
+        /// How many attempts the landing may make, its first included. When
+        /// a gate fails and more remain, arc splits it between
+        /// must-land-together components: a prefix and a suffix of their
+        /// dependency order, each a new attempt naming its parent, the suffix
+        /// only once the prefix landed, and a failed child split again.
+        /// Finding every failing one of n components takes at most 2n-1
+        #[arg(long = "max-attempts", value_name = "N", default_value_t = 1, conflicts_with_all = ["recover", "abandon", "dry_run"])]
+        max_attempts: u32,
     },
     /// Record a review obligation this change carries but has not discharged
     ///
@@ -7295,6 +7303,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             recover,
             abandon,
             reason,
+            max_attempts,
         } => commands::land::land(
             &ctx,
             commands::land::LandArgs {
@@ -7306,6 +7315,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 recover,
                 abandon,
                 reason,
+                max_attempts,
             },
         ),
         Cmd::Integrate {
