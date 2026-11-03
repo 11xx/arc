@@ -1931,7 +1931,8 @@ enum Cmd {
     /// supplies no environment identity. Storage reuse never supplies a passing gate
     /// result. A result whose evidence a busy ledger lock kept from being recorded prints
     /// as `not recorded:` and is not evidence; see `arc guide rules-claims`. A command
-    /// exiting 75 within its timeout records `not-admitted`; see `arc guide change-gates`.
+    /// exiting 75 within its timeout records `not-admitted`, and `--bypass` records a
+    /// judgement in place of a run; see `arc guide change-gates`.
     Verify {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -2092,6 +2093,21 @@ enum Cmd {
         /// before any gate runs or evidence is recorded; rebase first.
         #[arg(long, value_name = "BRANCH")]
         against: Option<String>,
+        /// Record a judgement in place of --gate's run, saying why this head
+        /// qualifies.
+        ///
+        /// Only a gate whose declaration names `bypass = "<what qualifies>"`
+        /// may be bypassed; any other is refused. The reason is required and
+        /// may not be a placeholder. The record names the actor, the head and
+        /// its tree, and the reason, and no command, exit code or duration:
+        /// nothing ran. It meets that gate's integration requirement at this
+        /// head alone, while the declaration still names `bypass`; a new head
+        /// needs a run or a new bypass. It is shown as `bypassed`, never as a
+        /// pass: `--skip-green` never reuses it, it never satisfies a
+        /// publication gate, and it discharges no review debt. A failure
+        /// recorded at this head is not overruled by one.
+        #[arg(long, value_name = "REASON")]
+        bypass: Option<String>,
     },
     /// Finish implementation: snapshot, verify all gates, then print check state.
     ///
@@ -6609,6 +6625,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             falsified_by,
             predicted,
             against,
+            bypass,
         } => {
             let change = infer(change.as_deref())?;
             commands::verify(
@@ -6636,6 +6653,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     falsified_by,
                     predicted,
                     against,
+                    bypass,
                 },
             )
         }

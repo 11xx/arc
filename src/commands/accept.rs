@@ -819,6 +819,7 @@ fn verify_args() -> VerifyArgs {
         falsified_by: None,
         predicted: None,
         against: None,
+        bypass: None,
     }
 }
 

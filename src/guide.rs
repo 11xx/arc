@@ -1027,6 +1027,20 @@ RUN A CHANGE
   publication guard that ran no failing gate records `not-admitted` and exits
   1. A project whose commands never exit 75 sees nothing change.
 
+  A gate whose declaration names `bypass` may be skipped on a judgement:
+  `arc verify <change> --gate <name> --bypass <reason>` records
+  `verification-bypassed` with the actor, the change's head and tree, the
+  reason and the declared qualification, and no command, exit code or
+  duration. Any other gate refuses, as do an empty or placeholder reason and
+  a failure recorded at that head. A change's own declaration cannot add
+  `bypass` to a gate its target declares, and one that omits it withdraws it. The bypass meets that gate's integration
+  requirement at that head alone, while its declaration still names `bypass`;
+  a new head, even one holding the same tree, or a merged tree, needs a run
+  or a new bypass. `status`, `check`, `show`, `explain` and their JSON name it
+  `bypassed` with its reason, never `pass`. `--skip-green` never reuses it, no
+  publication guard reads it, it discharges no review debt, and importing one
+  takes the waiver capability.
+
   `done` moves its caller's live claim to `verifying` before it snapshots,
   and only after every snapshot input is accepted — the attribution,
   `--thread`, and each `--journal-ref` — so an input it refuses leaves the
@@ -4416,9 +4430,11 @@ FILES
     environment = "<probe command>"     evidence counts only where the probe
                                         prints the same output, run against
                                         the content being evaluated
+    bypass = "<what qualifies>"         omitted: the gate cannot be bypassed;
+                                        every declaration of it must name one
 
   A gate command exits 75 (`EX_TEMPFAIL`) to say it did not run, which arc
-  records as `not-admitted`; see `arc guide change-gates`.
+  records as `not-admitted`. Both are described in `arc guide change-gates`.
 
   `arc verify --all --event integration|publication` selects the event's
   gates. Evidence identifies its event, tree, command and environment;

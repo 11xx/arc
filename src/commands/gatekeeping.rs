@@ -48,6 +48,10 @@ struct CheckOutput<'a> {
     /// or carrying a placeholder or a session id, never block integration.
     #[serde(skip_serializing_if = "<[crate::status::Advisory]>::is_empty")]
     advisories: &'a [crate::status::Advisory],
+    /// Gates whose requirement a bypass at this head meets, by name. A
+    /// bypass is a judgement in place of a run, never a pass.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    bypassed: BTreeMap<&'a str, &'a crate::state::BypassEntry>,
 }
 
 #[derive(serde::Serialize)]
@@ -80,6 +84,7 @@ pub struct VerifyArgs {
     pub falsified_by: Option<String>,
     pub predicted: Option<String>,
     pub against: Option<String>,
+    pub bypass: Option<String>,
 }
 
 struct VerificationInput {
@@ -154,7 +159,45 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         falsified_by,
         predicted,
         against,
+        bypass,
     } = args;
+    if let Some(reason) = bypass {
+        let flagged = [
+            (all, "--all"),
+            (parallel, "--parallel"),
+            (skip_green, "--skip-green"),
+            (event.is_some(), "--event"),
+            (command.is_some(), "--command"),
+            (probe.is_some(), "--probe"),
+            (brief_version.is_some(), "--brief-version"),
+            (probe_phase.is_some(), "--probe-phase"),
+            (attest, "--attest"),
+            (result.is_some(), "--result"),
+            (tested_revision.is_some(), "--tested-revision"),
+            (execution_host.is_some(), "--execution-host"),
+            (runner.is_some(), "--runner"),
+            (environment.is_some(), "--environment"),
+            (note.is_some(), "--note"),
+            (waive_dirty.is_some(), "--waive-dirty"),
+            (falsified_by.is_some(), "--falsified-by"),
+            (predicted.is_some(), "--predicted"),
+            (against.is_some(), "--against"),
+            (after_integration, "--after-integration"),
+        ]
+        .into_iter()
+        .filter_map(|(set, flag)| set.then_some(flag))
+        .collect::<Vec<_>>();
+        if !flagged.is_empty() {
+            bail!(
+                "--bypass records a judgement in place of one gate's run, so it cannot be \
+                 combined with {}",
+                flagged.join(", ")
+            );
+        }
+        let gate =
+            gate.context("--bypass requires --gate <name>: a bypass answers for one gate")?;
+        return bypass_gate(ctx, reference, &gate, &reason);
+    }
     // A receipt is a check somebody else ran against what shipped. Arc has
     // nothing left to run it in, and the flags that select gate sets, excuse
     // dirt, or answer a failure all describe evidence a decision can count.
@@ -694,6 +737,73 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             against_target: None,
         },
     )
+}
+
+/// Record that `gate` was judged not to need its run at the change's head.
+///
+/// The gate's declaration must name `bypass`, which says what qualifies; the
+/// reason says why this head does. A failure already recorded at this head is
+/// a run somebody made, and a judgement does not overrule it.
+fn bypass_gate(ctx: &Ctx, reference: &str, gate: &str, reason: &str) -> Result<i32> {
+    let reason = reason.trim();
+    if reason.is_empty() || crate::coordinate::is_placeholder(reason) {
+        bail!(
+            "--bypass must say why this head qualifies to skip gate {gate:?}; {:?} records no \
+             judgement",
+            reason
+        );
+    }
+    let store = ctx.store()?;
+    ctx.ensure_declared_actor(&store)?;
+    let (change_id, st) = ctx.load_state(&store, reference)?;
+    let declarations = ctx.declarations(&st)?.gates;
+    let declared = declarations
+        .gates
+        .get(gate)
+        .with_context(|| format!("gate {gate:?} not declared in .arc/gates.toml"))?;
+    let qualification = declared.bypass.clone().with_context(|| {
+        format!(
+            "gate {gate:?} does not declare that it may be bypassed; a project allows it with \
+             `bypass = \"<what qualifies>\"` in its [gates.{gate}] table"
+        )
+    })?;
+    // A judgement is about the change's committed head, so no checkout of it
+    // is needed.
+    let revision = gitio::branch_head(&ctx.cwd, &st.branch)?;
+    let tree = gitio::commit_tree(&ctx.cwd, &revision)?;
+    let _transition = store.lock_transition(&change_id)?;
+    let st = store.state(&change_id)?;
+    if let Some(failed) = st.gate_evidence_at_matching(gate, &revision, |evidence| {
+        evidence.result == VerifyResult::Fail
+    }) {
+        if st
+            .gate_evidence_at_matching(gate, &revision, |_| true)
+            .is_some_and(|newest| newest.event_id == failed.event_id)
+        {
+            bail!(
+                "gate {gate:?} failed at this head ({}); a judgement does not overrule a run. \
+                 Fix it and run the gate",
+                failed.event_id
+            );
+        }
+    }
+    let payload = Payload::VerificationBypassed {
+        gate: gate.to_owned(),
+        revision: revision.clone(),
+        tree,
+        reason: reason.to_owned(),
+        qualification,
+    };
+    ensure_append_allowed(&st, &payload)?;
+    let mut ev = ctx.event(&store, &change_id, payload)?;
+    store.append_local_event(&mut ev)?;
+    println!(
+        "gate: {gate} (declared by {})",
+        declared.declared_by.join(", ")
+    );
+    println!("verification: bypassed at {revision}: {reason}");
+    println!("event: {}", ev.event_id);
+    Ok(0)
 }
 
 /// A detached checkout that lives only as long as one evaluation.
@@ -1413,6 +1523,7 @@ fn verify_recorded(
                 falsified_by: None,
                 predicted: None,
                 against: None,
+                bypass: None,
             },
         );
     }
@@ -1508,6 +1619,7 @@ fn verify_recorded(
                 falsified_by: None,
                 predicted: None,
                 against: None,
+                bypass: None,
             },
         )?;
         if code == 0 {
@@ -1584,6 +1696,7 @@ pub fn done(
                 falsified_by: None,
                 predicted: None,
                 against: None,
+                bypass: None,
             },
         )?;
     }
@@ -5296,6 +5409,12 @@ fn check(
                 .collect(),
             advisories: &report.advisories,
             changelog_none: changelog_none.as_deref(),
+            bypassed: report
+                .gates
+                .iter()
+                .filter(|gate| gate.green_at_head)
+                .filter_map(|gate| Some((gate.name.as_str(), gate.bypass.as_ref()?)))
+                .collect(),
         };
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(code);
@@ -5310,6 +5429,9 @@ fn check(
                 "ready: no gates declared for profile {}; nothing was evaluated",
                 report.profile
             );
+        } else if report.gates.iter().any(|gate| gate.bypass.is_some()) {
+            println!("ready: every integration gate passes or is bypassed");
+            print!("{}", render::bypassed_gates(&report));
         } else {
             println!("ready: all integration gates pass");
         }

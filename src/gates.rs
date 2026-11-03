@@ -58,6 +58,12 @@ pub struct Gate {
     pub selector: Option<String>,
     #[serde(default, deserialize_with = "deserialize_timeout")]
     pub timeout: Option<u64>,
+    /// What qualifies a change to skip this gate on an agent's judgement, as
+    /// `arc verify --bypass <reason>` records. Absent, the gate cannot be
+    /// bypassed. It decides nothing about what the command checks, so it is
+    /// no part of the declaration's identity.
+    #[serde(default, deserialize_with = "deserialize_bypass")]
+    pub bypass: Option<String>,
     #[serde(skip, default)]
     pub declared_by: Vec<String>,
 }
@@ -128,6 +134,18 @@ where
     Option::<String>::deserialize(deserializer)?
         .map(|raw| parse_duration(&raw).map_err(D::Error::custom))
         .transpose()
+}
+
+fn deserialize_bypass<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match Option::<String>::deserialize(deserializer)? {
+        Some(qualification) if qualification.trim().is_empty() => Err(D::Error::custom(
+            "bypass must name what qualifies a change to skip the gate",
+        )),
+        qualification => Ok(qualification.map(|text| text.trim().to_owned())),
+    }
 }
 
 /// The result of running one declared environment probe.
@@ -421,8 +439,12 @@ impl Gate {
 
     /// Fold another declaration of the same check into this one. Profiles
     /// and events widen and the stricter timeout wins, so one declaration cannot loosen
-    /// a gate the other bounds.
+    /// a gate the other bounds. The gate may be bypassed only if both allow it,
+    /// on this declaration's terms.
     fn absorb(&mut self, other: Gate) {
+        if other.bypass.is_none() {
+            self.bypass = None;
+        }
         if self.profiles.is_empty() || other.profiles.is_empty() {
             self.profiles.clear();
         } else {
@@ -744,6 +766,33 @@ mod tests {
         let unbounded = declared("[gates.unit]\ncommand = \"t\"\n");
         assert!(target.owe_also(unbounded, "master", "change").is_empty());
         assert_eq!(target.gates["unit"].timeout, Some(60));
+    }
+
+    /// A change cannot let itself skip a gate its target runs, and a
+    /// declaration that omits `bypass` withdraws it.
+    #[test]
+    fn a_gate_may_be_bypassed_only_where_both_declarations_allow_it() {
+        let strict = "[gates.docs]\ncommand = \"t\"\n";
+        let lax = "[gates.docs]\ncommand = \"t\"\nbypass = \"docs only\"\n";
+        let mut target = declared(strict);
+        target.owe_also(declared(lax), "master", "change");
+        assert_eq!(target.gates["docs"].bypass, None);
+
+        let mut target = declared(lax);
+        target.owe_also(declared(strict), "master", "change");
+        assert_eq!(target.gates["docs"].bypass, None);
+
+        let mut target = declared(lax);
+        target.owe_also(
+            declared("[gates.docs]\ncommand = \"t\"\nbypass = \"anything\"\n"),
+            "master",
+            "change",
+        );
+        assert_eq!(target.gates["docs"].bypass.as_deref(), Some("docs only"));
+
+        assert!(
+            toml::from_str::<GatesFile>("[gates.docs]\ncommand = \"t\"\nbypass = \" \"\n").is_err()
+        );
     }
 }
 

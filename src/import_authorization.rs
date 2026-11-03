@@ -137,7 +137,10 @@ pub fn required_roles(payload: &Payload) -> Option<Vec<Vec<Role>>> {
             vec![vec![ReviewInput, ReviewAuthority]]
         }
         DebtDeclared { .. } | AuditDebtDeclared { .. } => vec![vec![DebtInput, Waiver]],
-        DirtyTreeWaived { .. } | HoldReleased { .. } => vec![vec![Waiver]],
+        // A bypass excuses a gate's run as a waiver excuses its dirt.
+        DirtyTreeWaived { .. } | VerificationBypassed { .. } | HoldReleased { .. } => {
+            vec![vec![Waiver]]
+        }
         DispositionRecorded { status, .. }
         | AuditDispositionRecorded { status, .. }
         | PostIntegrationDispositionRecorded { status, .. } => match status {

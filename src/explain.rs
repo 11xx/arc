@@ -294,6 +294,9 @@ pub enum Detail {
         reused: Vec<Reuse>,
         #[serde(skip_serializing_if = "Option::is_none")]
         falsification: Option<Vec<FalsificationRow>>,
+        /// The judgement recorded in place of a run, on a bypassed gate.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bypass: Option<crate::state::BypassEntry>,
     },
     Verdict {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -1107,6 +1110,7 @@ fn gate_row(
                 timeout_seconds: declared_timeout,
                 reused: Vec::new(),
                 falsification: None,
+                bypass: None,
             },
         );
     };
@@ -1147,7 +1151,9 @@ fn gate_detail(state: &ChangeState, gate: &str, entry: &VerificationEntry) -> De
             .map(|environment| environment.identity.clone()),
         timeout_seconds: entry.timeout_seconds,
         reused,
-        falsification: Some(falsification_rows(entry)),
+        // A bypass is not a pass, so it has no falsification to report.
+        falsification: entry.bypass.is_none().then(|| falsification_rows(entry)),
+        bypass: entry.bypass.clone(),
     }
 }
 
@@ -1233,6 +1239,7 @@ fn open_evaluation(
                     timeout_seconds: None,
                     reused: Vec::new(),
                     falsification: None,
+                    bypass: None,
                 },
             ),
         })
@@ -1832,10 +1839,22 @@ fn describe(detail: &Detail) -> String {
             timeout_seconds,
             reused,
             falsification,
+            bypass,
         } => {
             let Some(evidence) = evidence_event_id else {
                 return format!("gate {gate}");
             };
+            if let Some(bypass) = bypass {
+                return format!(
+                    "gate {gate}: bypassed by `{evidence}` at {}, tree {}: judged by {}: {} \
+                     (the gate declares: {}); nothing ran",
+                    opt(revision),
+                    tree.as_deref().unwrap_or("unrecorded"),
+                    bypass.actor,
+                    bypass.reason,
+                    bypass.qualification
+                );
+            }
             let mut text = format!(
                 "gate {gate}: {} by `{evidence}` at {}, tree {}, environment {}, timeout {}",
                 opt(result),

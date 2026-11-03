@@ -933,6 +933,9 @@ pub struct VerificationEntry {
     pub run_id: Option<String>,
     pub probe: Option<ProbeEvidenceRef>,
     pub gate: Option<String>,
+    /// The command that ran. Empty, and omitted, on a bypass, where nothing
+    /// ran.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub command: String,
     /// The timeout the gate declared when this ran. `None` predates the field
     /// or means the gate declared none — unknown, not unlimited.
@@ -945,8 +948,14 @@ pub struct VerificationEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_artifact: Option<crate::verification_output::OutputArtifact>,
     pub timed_out: bool,
+    /// Where the command ran. Empty, and omitted, on a bypass.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub hostname: String,
     pub runner: Option<String>,
+    /// The judgement recorded in place of a run, present exactly when
+    /// `result` is `bypassed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bypass: Option<BypassEntry>,
     /// The tree the command ran against, and whether it differed from the
     /// revision's own. `None` is unknown — attested evidence, or an event
     /// written before arc recorded it — never a claim that the tree was clean.
@@ -986,6 +995,15 @@ pub struct VerificationEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment: Option<crate::model::EnvironmentEvidence>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Who judged a gate not to need its run, and why.
+#[derive(Debug, Clone, Serialize)]
+pub struct BypassEntry {
+    pub actor: String,
+    pub reason: String,
+    /// What the gate's `bypass` declaration said qualifies, when judged.
+    pub qualification: String,
 }
 
 /// Why a falsification reference cannot stand, phrased for whoever offered it.
@@ -3200,6 +3218,12 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                         ev.event_id
                     );
                 }
+                if *result == VerifyResult::Bypassed {
+                    bail!(
+                        "verification {} records a run as bypassed; a bypass is its own event",
+                        ev.event_id
+                    );
+                }
                 if let Some(probe) = probe {
                     let brief = state
                         .briefs
@@ -3272,9 +3296,51 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     timed_out: *timed_out,
                     hostname: hostname.clone(),
                     runner: runner.clone(),
+                    bypass: None,
                     environment: environment.clone(),
                     falsification,
                     falsification_inferred: falsification_inferred.clone(),
+                    created_at: ev.created_at,
+                });
+            }
+            Payload::VerificationBypassed {
+                gate,
+                revision,
+                tree,
+                reason,
+                qualification,
+            } => {
+                state.verifications.push(VerificationEntry {
+                    event_id: ev.event_id.clone(),
+                    delta: None,
+                    run_id: None,
+                    probe: None,
+                    gate: Some(gate.clone()),
+                    command: String::new(),
+                    timeout_seconds: None,
+                    revision: revision.clone(),
+                    result: VerifyResult::Bypassed,
+                    attested: false,
+                    output_tail: None,
+                    output_artifact: None,
+                    timed_out: false,
+                    hostname: String::new(),
+                    runner: None,
+                    bypass: Some(BypassEntry {
+                        actor: ev.actor.clone(),
+                        reason: reason.clone(),
+                        qualification: qualification.clone(),
+                    }),
+                    tested_tree: None,
+                    worktree_dirty: None,
+                    worktree_dirty_tracked: None,
+                    worktree_dirty_untracked: None,
+                    tree_moved: false,
+                    tree: Some(tree.clone()),
+                    against_target: None,
+                    falsification: None,
+                    falsification_inferred: None,
+                    environment: None,
                     created_at: ev.created_at,
                 });
             }

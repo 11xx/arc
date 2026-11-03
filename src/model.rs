@@ -1666,6 +1666,22 @@ pub enum Payload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         against_target: Option<String>,
     },
+    /// A gate judged not to need its run at one head, recorded in place of
+    /// running it.
+    ///
+    /// Only a gate whose declaration names `bypass` may be judged this way.
+    /// The event records who judged, at which head and tree, and why; it
+    /// records no command, exit code or duration, because nothing ran. It
+    /// satisfies that gate's integration requirement at that head alone,
+    /// while the gate still declares `bypass`, and is never a pass.
+    VerificationBypassed {
+        gate: String,
+        revision: String,
+        tree: String,
+        reason: String,
+        /// What the gate's `bypass` declaration said qualifies, when judged.
+        qualification: String,
+    },
     VerificationReused {
         run_id: String,
         gate: String,
@@ -2574,6 +2590,7 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         | Payload::ExternalVerdictRecorded { .. }
         | Payload::VerificationRunStarted { .. }
         | Payload::VerificationRecorded { .. }
+        | Payload::VerificationBypassed { .. }
         | Payload::VerificationReused { .. }
         // Waiving dirt excuses a gate, and a closed change has no gate left
         // to excuse.
@@ -3837,7 +3854,7 @@ pub struct DeferredFinding {
 /// What one verification establishes about its check.
 ///
 /// Only `Pass` is evidence that the check holds, and only `Fail` that it does
-/// not. `NotAdmitted` is evidence of nothing about the code.
+/// not. The other two are evidence of nothing about the code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum VerifyResult {
@@ -3848,6 +3865,11 @@ pub enum VerifyResult {
     /// does. Nothing ran, so it is neither a pass nor a failure.
     #[value(skip)]
     NotAdmitted,
+    /// A judgement stood in for a run: a gate that declares `bypass` was
+    /// judged not to need running at one head. It satisfies that gate's
+    /// integration requirement at that head and nothing else.
+    #[value(skip)]
+    Bypassed,
 }
 
 /// The exit status a gate command reports when it did not run: `EX_TEMPFAIL`
@@ -3874,6 +3896,7 @@ impl VerifyResult {
             Self::Pass => "pass",
             Self::Fail => "fail",
             Self::NotAdmitted => "not-admitted",
+            Self::Bypassed => "bypassed",
         }
     }
 }

@@ -63,7 +63,14 @@ pub struct GateStatus {
     /// `arc-status/23`.
     pub declared_by: Vec<String>,
     pub result: String,
+    /// Whether the gate's integration requirement is met: by a pass, or by a
+    /// bypass at this head while the gate declares `bypass`. `result` says
+    /// which; a bypass is never a pass.
     pub green_at_head: bool,
+    /// The judgement recorded in place of a run, when the counted evidence
+    /// is a bypass. Additive in `arc-status/27`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bypass: Option<crate::state::BypassEntry>,
     /// Passing evidence exists at this head, but for a different command than
     /// the gate now declares. Not green: the declaration is the check.
     #[serde(skip_serializing_if = "is_false")]
@@ -260,6 +267,23 @@ impl GateStatus {
     pub fn not_green_reason(&self) -> Option<String> {
         if self.green_at_head {
             return None;
+        }
+        // A bypass is a judgement about one head's diff, so the only question
+        // is why that judgement does not reach what is being evaluated now.
+        if self.bypass.is_some() {
+            return Some(match (&self.evaluated_tree, &self.inherited_from) {
+                (Some(tree), _) => format!(
+                    "the gate was bypassed at the head, which answers for nothing at the merged \
+                     tree {tree}; run the gate"
+                ),
+                (None, Some(revision)) => format!(
+                    "the gate was bypassed at {}, not at this head; run it or bypass it again",
+                    revision.get(..8).unwrap_or(revision)
+                ),
+                (None, None) => "the gate was bypassed at this head, but its declaration no \
+                                 longer names `bypass`; run the gate"
+                    .into(),
+            });
         }
         // Before the provenance checks: this evidence may be perfectly good
         // provenance for a command the gate no longer declares, and saying
@@ -1616,21 +1640,34 @@ fn build_report(
             }
             _ => (None, None, false),
         };
+        // A bypass is a judgement about one head's diff: it answers for that
+        // head only, never for a merged tree, and only while the gate still
+        // declares that it may be bypassed.
+        let bypass_counts = |e: &state::VerificationEntry| {
+            e.bypass.is_some()
+                && gate.bypass.is_some()
+                && evaluated_tree.is_none()
+                && current_head.as_deref() == Some(e.revision.as_str())
+        };
         let evidence = evidence_at(&|e| {
-            matches_declaration(e, gate)
-                && if live {
-                    matches_environment(e, gate, current.as_deref())
-                } else {
-                    gate.environment.is_none() || e.environment.is_some()
-                }
+            bypass_counts(e)
+                || matches_declaration(e, gate)
+                    && if live {
+                        matches_environment(e, gate, current.as_deref())
+                    } else {
+                        gate.environment.is_none() || e.environment.is_some()
+                    }
         })
         .or(newest);
+        let bypassed = evidence.is_some_and(|e| e.bypass.is_some());
         // Applicability is asked of a checkout holding the content being
         // evaluated. A ledger replay observes no environment and takes a
         // recorded identity at its word; only a live report can say whether
         // the probe answers for that content.
         let environment = match gate.environment.as_deref() {
             None => None,
+            // Nothing ran, so there is no environment to compare.
+            Some(_) if bypassed => None,
             Some(_) => {
                 let recorded = evidence
                     .and_then(|e| e.environment.as_ref())
@@ -1697,10 +1734,12 @@ fn build_report(
             // whose declared timeout is unknown cannot be shown to satisfy
             // a declaration that has one.
             green_at_head: evidence.is_some_and(|e| {
-                e.green_at_head(state.eligible_dirty_tree_waiver())
-                    && matches_declaration(e, gate)
-                    && environment_applies
+                bypass_counts(e)
+                    || e.green_at_head(state.eligible_dirty_tree_waiver())
+                        && matches_declaration(e, gate)
+                        && environment_applies
             }),
+            bypass: evidence.and_then(|e| e.bypass.clone()),
             declaration_changed: evidence.is_some_and(|e| {
                 e.green_at_head(state.eligible_dirty_tree_waiver()) && !matches_declaration(e, gate)
             }),
