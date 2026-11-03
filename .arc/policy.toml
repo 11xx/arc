@@ -197,6 +197,9 @@ paths = [
   # Decides whether a read covers a debt's extent, so whether the debt is
   # discharged.
   "src/extent.rs",
+  # Decides whether a commit map proves an asserted integration that the
+  # source head's ancestry does not.
+  "src/correspondence.rs",
 ]
 
 # Roots inside which classification is closed: every tracked file under one of
