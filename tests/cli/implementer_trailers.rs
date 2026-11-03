@@ -212,6 +212,27 @@ fn a_same_model_read_never_discharges_debt_regardless_of_policy_effort_or_verdic
     }
 }
 
+/// Claim: a reader under the implementer's model is a self-review under any
+/// actor name, on a production record written before it kept
+/// `trailer_implementers` too. Rejects a distinct actor label alone making a
+/// same-model approval independent and discharging the debt.
+#[test]
+fn a_same_model_reader_under_another_actor_leaves_a_legacy_debt_owed() {
+    let repo = repo_with_policy("[policy]\nforbid_self_approval = false\n");
+    let change = trailed_change(&repo, "legacy", &[&[SOL]]);
+    integrate_with_debt(&repo, "legacy");
+    rewrite_event(&repo, &change, "debt-declared", |event| {
+        event["production"]
+            .as_object_mut()
+            .unwrap()
+            .remove("trailer_implementers");
+    });
+    audit_as(&repo, "legacy", "gpt-6.1-sol#xhigh", "approved").success();
+    assert_eq!(debt_of(&repo, "legacy")["standing"], "owed");
+    audit_as(&repo, "legacy", "fixture-opus#medium", "approved").success();
+    assert_eq!(debt_of(&repo, "legacy")["standing"], "discharged");
+}
+
 #[test]
 fn a_same_model_verdict_may_authorize_integration_but_leaves_review_debt_owed() {
     let repo = repo_with_policy("[policy]\nforbid_self_approval = false\n");
