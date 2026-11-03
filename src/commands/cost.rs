@@ -527,7 +527,6 @@ pub(super) struct Acting {
 /// facts that map a role to the sessions behind it.
 pub(super) struct CostView {
     pub report: Value,
-    evidence: evidence::Exported,
     pub runs: Vec<ExecutorRun>,
     pub acting: Vec<Acting>,
 }
@@ -557,9 +556,9 @@ pub fn export_evidence(
     if let Some(dir) = output_dir {
         evidence::vacant(dir)?;
     }
-    let view = read_query(ctx, query)?;
+    let assembled = assemble(ctx, query)?;
     let producer = format!("arc/{}", env!("CARGO_PKG_VERSION"));
-    let written = evidence::render(ctx, &view.evidence, &producer, chrono::Utc::now())?;
+    let written = evidence::render(ctx, &assembled.evidence, &producer, chrono::Utc::now())?;
     let division = evidence::divide(&written.text)?;
     match output_dir {
         None => {
@@ -588,6 +587,30 @@ pub(super) fn read_cost(
 
 /// Read the cost view of the work a query selects.
 fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
+    assemble(ctx, query)?.into_view()
+}
+
+/// What one read of a query holds once its sessions are measured: every
+/// input of its report, which renders from them entry by entry.
+struct Assembled {
+    selection: Selection,
+    runs: Runs,
+    sessions: Vec<SessionRow>,
+    outside: Vec<Value>,
+    ledger: Ledger,
+    unmeasured: BTreeMap<(String, String), String>,
+    children: Children,
+    bound: BTreeSet<(String, String)>,
+    prices: agent_tapes_core::pricing::PriceLookup,
+    evidence: evidence::Exported,
+    by: Vec<String>,
+    allocation: Option<Allocation>,
+    idle_ms: u64,
+    footprint: Option<String>,
+}
+
+/// Read the ledger and measure every session a query selects.
+fn assemble(ctx: &Ctx, query: &CostQuery) -> Result<Assembled> {
     let prices = agent_tapes_core::pricing::lookup(query.prices.as_deref())?;
     let store = ctx.store()?;
     let mut read = CostRead::new(&store);
@@ -761,71 +784,102 @@ fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
     for facts in children.values_mut().flatten() {
         price(facts, prices.table());
     }
-    let view = View {
-        by: &query.by,
-        prices: &prices,
+    Ok(Assembled {
+        selection,
+        runs,
+        sessions,
+        outside,
+        ledger,
+        unmeasured,
+        children,
+        bound,
+        prices,
+        evidence,
+        by: query.by.clone(),
         allocation: query.allocation,
         idle_ms: query.idle_ms(),
-        children: &children,
-        bound: &bound,
-    };
-    let mut report = render_report(&selection, &runs, &sessions, &outside, &ledger, &view);
-    if let Some(footprint) = &query.footprint {
-        report["footprint"] = footprint_figure(&report, footprint);
-    }
-    let executor_runs = runs
-        .iter()
-        .flat_map(|(work, runs)| {
-            runs.iter().map(|run| ExecutorRun {
-                work: work.label(),
-                model: run.model.clone(),
-                role: run.role,
-                sessions: if run.conflicting {
-                    Vec::new()
-                } else {
-                    run.candidates.clone()
-                },
-            })
-        })
-        .collect();
-    let acting = ledger
-        .people
-        .iter()
-        .filter(|(_, person)| person.acts)
-        .filter_map(|((harness, session), person)| {
-            let key = format!("{harness}:{session}");
-            let row = sessions.iter().find(|row| row.key() == key)?;
-            let served = row
-                .measured
-                .facts
-                .as_ref()
-                .and_then(|facts| facts.served_model.as_deref())
-                .and_then(model_of)
-                .map(|model| on_harness(harness, model));
-            Some(Acting {
-                kind: if person.bound {
-                    "executor"
-                } else {
-                    "participant"
-                },
-                roles: person.roles.iter().map(|role| role.name()).collect(),
-                served,
-                models: person
-                    .models
-                    .iter()
-                    .map(|(role, models)| (role.name(), models.clone()))
-                    .collect(),
-                unmeasured: unmeasured.get(&(harness.clone(), session.clone())).cloned(),
-                key,
-            })
-        })
-        .collect();
-    Ok(CostView {
-        report,
-        evidence,
-        runs: executor_runs,
-        acting,
+        footprint: query.footprint.clone(),
     })
+}
+
+impl Assembled {
+    fn view(&self) -> View<'_> {
+        View {
+            by: &self.by,
+            prices: &self.prices,
+            allocation: self.allocation,
+            idle_ms: self.idle_ms,
+            children: &self.children,
+            bound: &self.bound,
+        }
+    }
+
+    /// The whole report, and the facts that map a role to its sessions.
+    fn into_view(self) -> Result<CostView> {
+        let report = {
+            let view = self.view();
+            Render::new(&self, &view).report()
+        };
+        let Assembled {
+            runs,
+            sessions,
+            ledger,
+            unmeasured,
+            ..
+        } = self;
+        let executor_runs = runs
+            .iter()
+            .flat_map(|(work, runs)| {
+                runs.iter().map(|run| ExecutorRun {
+                    work: work.label(),
+                    model: run.model.clone(),
+                    role: run.role,
+                    sessions: if run.conflicting {
+                        Vec::new()
+                    } else {
+                        run.candidates.clone()
+                    },
+                })
+            })
+            .collect();
+        let acting = ledger
+            .people
+            .iter()
+            .filter(|(_, person)| person.acts)
+            .filter_map(|((harness, session), person)| {
+                let key = format!("{harness}:{session}");
+                let row = sessions.iter().find(|row| row.key() == key)?;
+                let served = row
+                    .measured
+                    .facts
+                    .as_ref()
+                    .and_then(|facts| facts.served_model.as_deref())
+                    .and_then(model_of)
+                    .map(|model| on_harness(harness, model));
+                Some(Acting {
+                    kind: if person.bound {
+                        "executor"
+                    } else {
+                        "participant"
+                    },
+                    roles: person.roles.iter().map(|role| role.name()).collect(),
+                    served,
+                    models: person
+                        .models
+                        .iter()
+                        .map(|(role, models)| (role.name(), models.clone()))
+                        .collect(),
+                    unmeasured: unmeasured.get(&(harness.clone(), session.clone())).cloned(),
+                    key,
+                })
+            })
+            .collect();
+        Ok(CostView {
+            report,
+            runs: executor_runs,
+            acting,
+        })
+    }
 }
 
 /// The spawned children each row's recording names under their own session
@@ -4262,6 +4316,12 @@ fn totals(members: &[&SessionRow], withheld: &[String], scope: &str) -> Value {
             }
         }
     }
+    json!({"sessions": keys, "quantities": quantities, "identity": identity(members)})
+}
+
+/// Whether a figure's members are distinct sessions: the lineage groups
+/// that may overlap, and the members whose lineage is unknown.
+fn identity(members: &[&SessionRow]) -> Value {
     let groups = identity_groups(members);
     let unknown: BTreeMap<String, Vec<String>> = members
         .iter()
@@ -4276,10 +4336,10 @@ fn totals(members: &[&SessionRow], withheld: &[String], scope: &str) -> Value {
             (!reasons.is_empty()).then(|| (row.key(), reasons))
         })
         .collect();
-    json!({"sessions": keys, "quantities": quantities, "identity": {
+    json!({
         "status": if groups.is_empty() && unknown.is_empty() { "complete" } else { "incomplete" },
         "groups": groups, "unknown": unknown,
-    }})
+    })
 }
 
 fn base(
@@ -4987,43 +5047,89 @@ impl Members<'_> {
     }
 }
 
-fn render_report(
-    selection: &Selection,
-    runs: &Runs,
-    sessions: &[SessionRow],
-    outside: &[Value],
-    ledger: &Ledger,
-    view: &View<'_>,
-) -> Value {
-    let table = view.prices.table();
-    // An undivided session counts whole for these items when they hold
-    // every work item it acted on, and for a participant when that
-    // membership is complete. A divided session always joins by its items'
-    // shares: its consumption no item holds is unattributed, never charged.
-    let counted = |row: &SessionRow, keys: &[&WorkKey]| -> bool {
-        row.split != Split::Divided
-            && row
-                .participation
-                .as_ref()
-                .is_none_or(|participation| participation.membership_complete)
-            && row.membership.iter().all(|work| keys.contains(&work))
-    };
-    let unbound_in = |key: &WorkKey| -> Vec<String> {
-        runs.get(key)
+/// An undivided session counts whole for these items when they hold every
+/// work item it acted on, and for a participant when that membership is
+/// complete. A divided session always joins by its items' shares: its
+/// consumption no item holds is unattributed, never charged.
+fn counted(row: &SessionRow, keys: &[&WorkKey]) -> bool {
+    row.split != Split::Divided
+        && row
+            .participation
+            .as_ref()
+            .is_none_or(|participation| participation.membership_complete)
+        && row.membership.iter().all(|work| keys.contains(&work))
+}
+
+/// What renders one read's report: [`Render::frame`] is every part but the
+/// work-item and session entries, and each entry renders on its own from
+/// the sessions.
+struct Render<'a> {
+    selection: &'a Selection,
+    runs: &'a Runs,
+    sessions: &'a [SessionRow],
+    outside: &'a [Value],
+    ledger: &'a Ledger,
+    view: &'a View<'a>,
+    footprint: Option<&'a str>,
+    table: Option<&'a agent_tapes_core::pricing::PriceTable>,
+    /// Each session's family, in session order: its entry and the table's
+    /// family lines both show it.
+    families: Vec<Option<Value>>,
+}
+
+impl<'a> Render<'a> {
+    fn new(assembled: &'a Assembled, view: &'a View<'a>) -> Self {
+        let sessions = assembled.sessions.as_slice();
+        Self {
+            selection: &assembled.selection,
+            runs: &assembled.runs,
+            sessions,
+            outside: &assembled.outside,
+            ledger: &assembled.ledger,
+            view,
+            footprint: assembled.footprint.as_deref(),
+            table: view.prices.table(),
+            families: sessions
+                .iter()
+                .map(|row| family_json(row, sessions, view))
+                .collect(),
+        }
+    }
+
+    /// The whole report.
+    fn report(&self) -> Value {
+        let mut report = self.frame();
+        report["work"] = self
+            .selection
+            .items
+            .iter()
+            .map(|item| self.work_entry(item))
+            .collect();
+        report["sessions"] = (0..self.sessions.len())
+            .map(|index| self.session_entry(index))
+            .collect();
+        report
+    }
+
+    fn unbound_in(&self, key: &WorkKey) -> Vec<String> {
+        self.runs
+            .get(key)
             .into_iter()
             .flatten()
             .filter(|run| run.candidates.is_empty())
             .map(|run| run.dispatch_event_id.clone())
             .collect()
-    };
-    let withheld_for = |keys: &[&WorkKey], scope: &str| -> Vec<String> {
+    }
+
+    fn withheld_for(&self, keys: &[&WorkKey], scope: &str) -> Vec<String> {
         let mut reasons: Vec<String> = keys
             .iter()
-            .flat_map(|key| unbound_in(key))
+            .flat_map(|key| self.unbound_in(key))
             .map(|id| format!("dispatch {id} is unbound, so its consumption is unassigned"))
             .collect();
         for key in keys {
-            for run in runs
+            for run in self
+                .runs
                 .get(key)
                 .into_iter()
                 .flatten()
@@ -5038,7 +5144,7 @@ fn render_report(
         // A participant has no dispatch to start from: its whole recording is
         // its figure. A divided executor's consumption before its first
         // dispatch is outside every share.
-        for row in sessions.iter().filter(|row| {
+        for row in self.sessions.iter().filter(|row| {
             row.participation.is_none()
                 && row.membership.iter().any(|work| keys.contains(&work))
                 && !(row.split == Split::Divided && !counted(row, keys))
@@ -5058,7 +5164,7 @@ fn render_report(
                 )),
             }
         }
-        for gap in &selection.gaps {
+        for gap in &self.selection.gaps {
             if gap["work"]
                 .as_array()
                 .is_some_and(|work| keys.iter().any(|key| work.contains(&json!(key.label()))))
@@ -5074,34 +5180,37 @@ fn render_report(
             }
         }
         reasons
-    };
-    // A divided session the items do not hold whole joins with its share.
-    let within = |keys: &[&WorkKey], take: Take| -> Members<'_> {
+    }
+
+    /// A divided session the items do not hold whole joins with its share.
+    fn within(&self, keys: &[&WorkKey], take: Take) -> Members<'a> {
         let mut members = Members {
             whole: Vec::new(),
             shares: Vec::new(),
             shared: Vec::new(),
         };
-        for row in sessions {
+        for row in self.sessions {
             if counted(row, keys) {
                 members.whole.push(row);
             } else if row.membership.iter().any(|work| keys.contains(&work)) {
-                match row.share(keys, take, table) {
+                match row.share(keys, take, self.table) {
                     Some(share) => members.shares.push(share),
                     None => members.shared.push(row.key()),
                 }
             }
         }
         members
-    };
-    // A session these items share with other work and cannot divide has an
-    // unknown share in them, so every figure it would join is withheld.
-    let shared_withheld = |members: &Members<'_>| -> Vec<String> {
+    }
+
+    /// A session these items share with other work and cannot divide has an
+    /// unknown share in them, so every figure it would join is withheld.
+    fn shared_withheld(&self, members: &Members<'_>) -> Vec<String> {
         members
             .shared
             .iter()
             .map(|key| {
-                let reason = sessions
+                let reason = self
+                    .sessions
                     .iter()
                     .find(|row| &row.key() == key)
                     .and_then(|row| match row.split {
@@ -5112,13 +5221,14 @@ fn render_report(
                 format!("session {key} also acted on other work and is not divided ({reason}), so its share here is unknown")
             })
             .collect()
-    };
-    // The figure `take` gives these items, each quantity labelled `label`
-    // when it is not the conserving one.
-    let taken = |keys: &[&WorkKey], scope: &str, take: Take, label: Option<&str>| -> Value {
-        let members = within(keys, take);
-        let mut withheld = withheld_for(keys, scope);
-        withheld.extend(shared_withheld(&members));
+    }
+
+    /// The figure `take` gives these items, each quantity labelled `label`
+    /// when it is not the conserving one.
+    fn taken(&self, keys: &[&WorkKey], scope: &str, take: Take, label: Option<&str>) -> Value {
+        let members = self.within(keys, take);
+        let mut withheld = self.withheld_for(keys, scope);
+        withheld.extend(self.shared_withheld(&members));
         let mut figure = totals(&members.rows(), &withheld, scope);
         if let Some(label) = label {
             for quantity in figure["quantities"].as_array_mut().into_iter().flatten() {
@@ -5127,34 +5237,44 @@ fn render_report(
         }
         figure["shares"] = json!(members.share_keys());
         figure
-    };
-    // A figure; when the view allocates, the allocated figure beside it;
-    // and when a participant's read estimated part of what no item holds,
-    // the figure with those estimates beside it.
-    let figure = |keys: &[&WorkKey], scope: &str| -> Figures {
-        let allocated = view.allocation.map(|allocation| {
-            let mut allocated = taken(keys, scope, Take::Allocated(allocation), Some("allocated"));
+    }
+
+    /// The identity of the conserving figure these items hold, as
+    /// [`Render::taken`] gives it.
+    fn identity_of(&self, keys: &[&WorkKey]) -> Value {
+        identity(&self.within(keys, Take::Conserving).rows())
+    }
+
+    /// A figure; when the view allocates, the allocated figure beside it;
+    /// and when a participant's read estimated part of what no item holds,
+    /// the figure with those estimates beside it.
+    fn figure(&self, keys: &[&WorkKey], scope: &str) -> Figures {
+        let allocated = self.view.allocation.map(|allocation| {
+            let mut allocated =
+                self.taken(keys, scope, Take::Allocated(allocation), Some("allocated"));
             allocated["allocation"] = json!(allocation.as_str());
             allocated
         });
-        let estimates = sessions
+        let estimates = self
+            .sessions
             .iter()
             .any(|row| row.estimated() && row.membership.iter().any(|work| keys.contains(&work)));
         let estimated = estimates.then(|| {
-            let mut estimated = taken(keys, scope, Take::Estimated, Some("estimated"));
-            estimated["estimate"] = estimate_label(view.idle_ms);
+            let mut estimated = self.taken(keys, scope, Take::Estimated, Some("estimated"));
+            estimated["estimate"] = estimate_label(self.view.idle_ms);
             estimated
         });
         Figures {
-            conserving: taken(keys, scope, Take::Conserving, None),
+            conserving: self.taken(keys, scope, Take::Conserving, None),
             allocated,
             estimated,
         }
-    };
-    // Every participant that acted on these items, with its whole figure. It
-    // is `counted` where the items hold every change its events name.
-    let participants_in = |keys: &[&WorkKey]| -> Vec<Value> {
-        sessions
+    }
+
+    /// Every participant that acted on these items, with its whole figure. It
+    /// is `counted` where the items hold every change its events name.
+    fn participants_in(&self, keys: &[&WorkKey]) -> Vec<Value> {
+        self.sessions
             .iter()
             .filter_map(|row| {
                 let participation = row.participation.as_ref()?;
@@ -5171,19 +5291,25 @@ fn render_report(
                 }))
             })
             .collect()
-    };
-    let row_of = |key: &str| sessions.iter().find(|row| row.key() == key);
+    }
 
-    let mut work = Vec::new();
-    for item in &selection.items {
-        let shared = within(&[&item.key], Take::Conserving).shared;
-        let item_runs: Vec<Value> = runs
+    fn row_of(&self, key: &str) -> Option<&'a SessionRow> {
+        self.sessions.iter().find(|row| row.key() == key)
+    }
+
+    /// One work item's entry: its runs, its direct and inclusive figures and
+    /// its participants.
+    fn work_entry(&self, item: &WorkItem) -> Value {
+        let table = self.table;
+        let shared = self.within(&[&item.key], Take::Conserving).shared;
+        let item_runs: Vec<Value> = self
+            .runs
             .get(&item.key)
             .into_iter()
             .flatten()
             .map(|run| {
                 let session = (!run.conflicting).then(|| run.candidates.first()).flatten();
-                let row = session.and_then(|key| row_of(key));
+                let row = session.and_then(|key| self.row_of(key));
                 let divided = row.filter(|row| row.split == Split::Divided);
                 let per_run = match &session {
                     _ if run.invalid => "invalid-binding",
@@ -5205,14 +5331,14 @@ fn render_report(
             conserving: direct,
             allocated,
             estimated,
-        } = figure(&[&item.key], "direct");
+        } = self.figure(&[&item.key], "direct");
         let mut entry = json!({
             "key": item.key.label(),
             "runs": item_runs,
-            "unbound": unbound_in(&item.key),
+            "unbound": self.unbound_in(&item.key),
             "direct": direct,
             "shared": shared,
-            "participants": participants_in(&[&item.key]),
+            "participants": self.participants_in(&[&item.key]),
         });
         if let Some(allocated) = allocated {
             entry["allocated"] = json!({"direct": allocated});
@@ -5238,10 +5364,10 @@ fn render_report(
                 conserving: mut totals,
                 allocated,
                 estimated,
-            } = figure(&keys, "inclusive");
+            } = self.figure(&keys, "inclusive");
             totals["members"] = json!([item.key.label(), source.label()]);
-            totals["shared"] = json!(within(&keys, Take::Conserving).shared);
-            totals["participants"] = json!(participants_in(&keys));
+            totals["shared"] = json!(self.within(&keys, Take::Conserving).shared);
+            totals["participants"] = json!(self.participants_in(&keys));
             entry["inclusive"] = totals;
             if let Some(allocated) = allocated {
                 entry["allocated"]["inclusive"] = allocated;
@@ -5250,142 +5376,160 @@ fn render_report(
                 entry["estimated"]["inclusive"] = estimated;
             }
         }
-        work.push(entry);
+        entry
     }
 
-    let all: Vec<&WorkKey> = selection.items.iter().map(|item| &item.key).collect();
-    let union_members = within(&all, Take::Conserving);
-    let Figures {
-        conserving: mut union,
-        allocated: union_allocated,
-        estimated: union_estimated,
-    } = figure(&all, "union");
-    union["members"] = json!(all.iter().map(|key| key.label()).collect::<Vec<_>>());
-    union["shared"] = json!(union_members.shared);
-    union["participants"] = json!(participants_in(&all));
-    if let Some(allocated) = &union_allocated {
-        union["allocated"] = allocated.clone();
-    }
-    if let Some(estimated) = union_estimated {
-        union["estimated"] = estimated;
+    /// The entry of the session at `index`, with its family.
+    fn session_entry(&self, index: usize) -> Value {
+        let mut value = session_json(&self.sessions[index], self.table);
+        if let Some(family) = &self.families[index] {
+            value["family"] = family.clone();
+        }
+        value
     }
 
-    let session_rows: Vec<Value> = sessions
-        .iter()
-        .map(|row| {
-            let mut value = session_json(row, table);
-            if let Some(family) = family_json(row, sessions, view) {
-                value["family"] = family;
-            }
-            value
-        })
-        .collect();
-    let unmeasured: BTreeMap<String, Vec<String>> = sessions
-        .iter()
-        .filter_map(|row| match (&row.measured.facts, &row.measured.source) {
-            (None, Source::Unavailable(reason)) => Some((row.key(), vec![reason.clone()])),
-            (Some(facts), _) if !measurement_reasons(facts).is_empty() => {
-                Some((row.key(), measurement_reasons(facts)))
-            }
-            _ => None,
-        })
-        .collect();
-    let unbound: Vec<String> = all.iter().flat_map(|key| unbound_in(key)).collect();
-    let mut assignment_gaps = withheld_for(&all, "union");
-    if !ledger.complete && sessions.iter().any(|row| row.participation.is_some()) {
-        assignment_gaps.push(
-            "ledger records are unreadable, so a participant's membership may be incomplete and it is never counted as the work's alone".to_string(),
-        );
-    }
-    for session in outside
-        .iter()
-        .filter(|session| session["reason"].is_string())
-    {
-        assignment_gaps.push(format!(
-            "participant {}:{} acted on the selected work and is not measured ({}), so its consumption is outside assignment coverage",
-            session["harness"].as_str().unwrap_or_default(),
-            session["session"].as_str().unwrap_or_default(),
-            session["reason"].as_str().unwrap_or_default(),
-        ));
-    }
-    if ledger.unattributed_events > 0 {
-        assignment_gaps.push(format!(
-            "{} acting events carry no session identity, so their sessions are not measured here",
-            ledger.unattributed_events
-        ));
-    }
-    assignment_gaps.extend(selection.gaps.iter().map(|gap| {
-        format!(
-            "{}: {}",
-            gap["record"].as_str().unwrap_or("record"),
-            gap["reason"].as_str().unwrap_or("membership unavailable")
-        )
-    }));
-    let unavailable_sources: BTreeMap<String, &str> = sessions
-        .iter()
-        .filter_map(|row| match &row.measured.source {
-            Source::Fresh => None,
-            Source::Retained(_, reason) | Source::Unavailable(reason) => {
-                Some((row.key(), reason.as_str()))
-            }
-        })
-        .collect();
-    let mut identities = vec![json!({"scope": "union", "identity": union["identity"]})];
-    for item in &work {
-        for scope in ["direct", "inclusive"] {
-            if item[scope].is_object() {
-                identities.push(json!({"work": item["key"], "scope": scope, "identity": item[scope]["identity"]}));
+    /// Every part of the report but its `work` and `sessions` entries,
+    /// which hold `null` in their place.
+    fn frame(&self) -> Value {
+        let sessions = self.sessions;
+        let selection = self.selection;
+        let ledger = self.ledger;
+        let all: Vec<&WorkKey> = selection.items.iter().map(|item| &item.key).collect();
+        let union_members = self.within(&all, Take::Conserving);
+        let Figures {
+            conserving: mut union,
+            allocated: union_allocated,
+            estimated: union_estimated,
+        } = self.figure(&all, "union");
+        union["members"] = json!(all.iter().map(|key| key.label()).collect::<Vec<_>>());
+        union["shared"] = json!(union_members.shared);
+        union["participants"] = json!(self.participants_in(&all));
+        if let Some(allocated) = &union_allocated {
+            union["allocated"] = allocated.clone();
+        }
+        if let Some(estimated) = union_estimated {
+            union["estimated"] = estimated;
+        }
+
+        let unmeasured: BTreeMap<String, Vec<String>> = sessions
+            .iter()
+            .filter_map(|row| match (&row.measured.facts, &row.measured.source) {
+                (None, Source::Unavailable(reason)) => Some((row.key(), vec![reason.clone()])),
+                (Some(facts), _) if !measurement_reasons(facts).is_empty() => {
+                    Some((row.key(), measurement_reasons(facts)))
+                }
+                _ => None,
+            })
+            .collect();
+        let unbound: Vec<String> = all.iter().flat_map(|key| self.unbound_in(key)).collect();
+        let mut assignment_gaps = self.withheld_for(&all, "union");
+        if !ledger.complete && sessions.iter().any(|row| row.participation.is_some()) {
+            assignment_gaps.push(
+                "ledger records are unreadable, so a participant's membership may be incomplete and it is never counted as the work's alone".to_string(),
+            );
+        }
+        for session in self
+            .outside
+            .iter()
+            .filter(|session| session["reason"].is_string())
+        {
+            assignment_gaps.push(format!(
+                "participant {}:{} acted on the selected work and is not measured ({}), so its consumption is outside assignment coverage",
+                session["harness"].as_str().unwrap_or_default(),
+                session["session"].as_str().unwrap_or_default(),
+                session["reason"].as_str().unwrap_or_default(),
+            ));
+        }
+        if ledger.unattributed_events > 0 {
+            assignment_gaps.push(format!(
+                "{} acting events carry no session identity, so their sessions are not measured here",
+                ledger.unattributed_events
+            ));
+        }
+        assignment_gaps.extend(selection.gaps.iter().map(|gap| {
+            format!(
+                "{}: {}",
+                gap["record"].as_str().unwrap_or("record"),
+                gap["reason"].as_str().unwrap_or("membership unavailable")
+            )
+        }));
+        let unavailable_sources: BTreeMap<String, &str> = sessions
+            .iter()
+            .filter_map(|row| match &row.measured.source {
+                Source::Fresh => None,
+                Source::Retained(_, reason) | Source::Unavailable(reason) => {
+                    Some((row.key(), reason.as_str()))
+                }
+            })
+            .collect();
+        let mut identities = vec![json!({"scope": "union", "identity": union["identity"]})];
+        for item in &selection.items {
+            identities.push(json!({"work": item.key.label(), "scope": "direct",
+                "identity": self.identity_of(&[&item.key])}));
+            if let Some(source) = &item.source {
+                identities.push(json!({"work": item.key.label(), "scope": "inclusive",
+                    "identity": self.identity_of(&[&item.key, source])}));
             }
         }
+        let identity_complete = identities
+            .iter()
+            .all(|figure| figure["identity"]["status"] == "complete");
+        let mut union_withheld = self.withheld_for(&all, "union");
+        union_withheld.extend(self.shared_withheld(&union_members));
+        let mut report = json!({
+            "schema": COST_SCHEMA,
+            "target": selection.target,
+            "work": null,
+            "union": union,
+            "sessions": null,
+            "coverage": {
+                "selection": {"status": if selection.gaps.is_empty() { "complete" } else { "incomplete" }, "records": selection.gaps},
+                "ledger": {"status": if selection.ledger_gaps.is_empty() { "complete" } else { "incomplete" }, "records": selection.ledger_gaps},
+                "measurement": {
+                    "status": if unmeasured.is_empty() && unavailable_sources.is_empty() { "complete" } else { "incomplete" },
+                    "sessions": unmeasured,
+                    "current_sources": {"status": if unavailable_sources.is_empty() { "complete" } else { "incomplete" }, "unavailable": unavailable_sources},
+                    "residual": residual_coverage(sessions),
+                },
+                "assignment": {
+                    "status": if assignment_gaps.is_empty() { "complete" } else { "incomplete" },
+                    "unbound": unbound,
+                    "reasons": assignment_gaps,
+                    "participants": {
+                        "statement": "a participant is a session no dispatch binds whose ledger events act on the selected work; its span on each work item runs from its first to its last event there, and it may also act in other repositories' ledgers, which this ledger cannot see",
+                        "sessions": sessions
+                            .iter()
+                            .filter(|row| row.participation.is_some())
+                            .map(SessionRow::key)
+                            .collect::<Vec<_>>(),
+                    },
+                    "outside": {
+                        "statement": "a session that acted on the selected work without a measured recording, such as one the store cannot resolve, is outside assignment coverage: it is not measured here and is never zero",
+                        "sessions": self.outside,
+                        "unattributed_events": ledger.unattributed_events,
+                    },
+                },
+                "identity": {
+                    "status": if identity_complete { "complete" } else { "incomplete" },
+                    "key": "executor harness and native session",
+                    "figures": identities,
+                },
+            },
+        });
+        report["prices"] = prices_json(self.view.prices);
+        report["table"] = cost_table(
+            &report,
+            sessions,
+            &self.families,
+            &union_members,
+            &union_withheld,
+            self.view,
+        );
+        if let Some(footprint) = self.footprint {
+            report["footprint"] = footprint_figure(&report, footprint);
+        }
+        report
     }
-    let identity_complete = identities
-        .iter()
-        .all(|figure| figure["identity"]["status"] == "complete");
-    let mut union_withheld = withheld_for(&all, "union");
-    union_withheld.extend(shared_withheld(&union_members));
-    let mut report = json!({
-        "schema": COST_SCHEMA,
-        "target": selection.target,
-        "work": work,
-        "union": union,
-        "sessions": session_rows,
-        "coverage": {
-            "selection": {"status": if selection.gaps.is_empty() { "complete" } else { "incomplete" }, "records": selection.gaps},
-            "ledger": {"status": if selection.ledger_gaps.is_empty() { "complete" } else { "incomplete" }, "records": selection.ledger_gaps},
-            "measurement": {
-                "status": if unmeasured.is_empty() && unavailable_sources.is_empty() { "complete" } else { "incomplete" },
-                "sessions": unmeasured,
-                "current_sources": {"status": if unavailable_sources.is_empty() { "complete" } else { "incomplete" }, "unavailable": unavailable_sources},
-                "residual": residual_coverage(sessions),
-            },
-            "assignment": {
-                "status": if assignment_gaps.is_empty() { "complete" } else { "incomplete" },
-                "unbound": unbound,
-                "reasons": assignment_gaps,
-                "participants": {
-                    "statement": "a participant is a session no dispatch binds whose ledger events act on the selected work; its span on each work item runs from its first to its last event there, and it may also act in other repositories' ledgers, which this ledger cannot see",
-                    "sessions": sessions
-                        .iter()
-                        .filter(|row| row.participation.is_some())
-                        .map(SessionRow::key)
-                        .collect::<Vec<_>>(),
-                },
-                "outside": {
-                    "statement": "a session that acted on the selected work without a measured recording, such as one the store cannot resolve, is outside assignment coverage: it is not measured here and is never zero",
-                    "sessions": outside,
-                    "unattributed_events": ledger.unattributed_events,
-                },
-            },
-            "identity": {
-                "status": if identity_complete { "complete" } else { "incomplete" },
-                "key": "executor harness and native session",
-                "figures": identities,
-            },
-        },
-    });
-    report["prices"] = prices_json(view.prices);
-    report["table"] = cost_table(&report, sessions, &union_members, &union_withheld, view);
-    report
 }
 
 /// Which price table the view priced with, or why it has none.
@@ -5612,6 +5756,7 @@ fn membership_label(row: &SessionRow) -> String {
 fn cost_table(
     report: &Value,
     sessions: &[SessionRow],
+    families: &[Option<Value>],
     union: &Members<'_>,
     union_withheld: &[String],
     view: &View<'_>,
@@ -5759,14 +5904,12 @@ fn cost_table(
             .find(|(row, _)| row.key() == key)
             .map(|(_, short)| short.clone())
     };
-    let families: Vec<Value> = report["sessions"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|row| row["family"].is_object())
-        .map(|row| {
-            let family = &row["family"];
-            let key = row["key"].as_str().unwrap_or_default();
+    let families: Vec<Value> = sessions
+        .iter()
+        .zip(families)
+        .filter_map(|(row, family)| Some((row.key(), family.as_ref()?)))
+        .map(|(key, family)| {
+            let key = key.as_str();
             let mut unassigned = table_figure(&family["unassigned"]["totals"]);
             unassigned["children"] = family["unassigned"]["children"].clone();
             unassigned["unmeasured"] = family["unassigned"]["unmeasured"].clone();
@@ -6161,7 +6304,19 @@ pub(super) fn report_text(report: &Value) -> String {
 }
 
 fn write_report(out: &mut String, report: &Value) {
-    let target = &report["target"];
+    write_heading(out, &report["target"]);
+    for item in report["work"].as_array().into_iter().flatten() {
+        write_work(out, item);
+    }
+    write_union(out, &report["union"]);
+    emit!(out, "sessions");
+    for session in report["sessions"].as_array().into_iter().flatten() {
+        write_session(out, session);
+    }
+    write_coverage(out, &report["coverage"]);
+}
+
+fn write_heading(out: &mut String, target: &Value) {
     match target["kind"].as_str() {
         Some("journal") => {
             let lineage: Vec<&str> = target["lineage"]
@@ -6183,146 +6338,152 @@ fn write_report(out: &mut String, report: &Value) {
             target["id"].as_str().unwrap_or_default()
         ),
     }
-    for item in report["work"].as_array().into_iter().flatten() {
-        let runs = item["runs"].as_array().map_or(0, Vec::len);
+}
+
+fn write_work(out: &mut String, item: &Value) {
+    let runs = item["runs"].as_array().map_or(0, Vec::len);
+    emit!(
+        out,
+        "{}  runs={runs}",
+        item["key"].as_str().unwrap_or_default()
+    );
+    for unbound in item["unbound"].as_array().into_iter().flatten() {
         emit!(
             out,
-            "{}  runs={runs}",
-            item["key"].as_str().unwrap_or_default()
+            "  unbound dispatch {}",
+            unbound.as_str().unwrap_or_default()
         );
-        for unbound in item["unbound"].as_array().into_iter().flatten() {
-            emit!(
-                out,
-                "  unbound dispatch {}",
-                unbound.as_str().unwrap_or_default()
-            );
-        }
-        write_totals(out, "  ", "direct", &item["direct"]);
-        let shares: Vec<&str> = item["direct"]["shares"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .collect();
-        if !shares.is_empty() {
-            emit!(out, "  span shares: {}", shares.join(", "));
-        }
-        if item["estimated"]["direct"].is_object() {
-            write_totals(out, "  ", "with estimates", &item["estimated"]["direct"]);
-        }
-        if item["allocated"]["direct"].is_object() {
-            let label = format!(
-                "allocated {}",
-                item["allocated"]["direct"]["allocation"]
-                    .as_str()
-                    .unwrap_or_default()
-            );
-            write_totals(out, "  ", &label, &item["allocated"]["direct"]);
-        }
-        let shared: Vec<&str> = item["shared"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .collect();
-        if !shared.is_empty() {
-            emit!(out, "  shared: {}", shared.join(", "));
-        }
-        write_participants(out, "  ", &item["participants"]);
-        if item["inclusive"].is_object() {
-            write_totals(out, "  ", "inclusive", &item["inclusive"]);
-        }
     }
-    emit!(out, "union");
-    write_totals(out, "  ", "total", &report["union"]);
-    if report["union"]["estimated"].is_object() {
-        write_totals(out, "  ", "with estimates", &report["union"]["estimated"]);
+    write_totals(out, "  ", "direct", &item["direct"]);
+    let shares: Vec<&str> = item["direct"]["shares"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    if !shares.is_empty() {
+        emit!(out, "  span shares: {}", shares.join(", "));
     }
-    if report["union"]["allocated"].is_object() {
+    if item["estimated"]["direct"].is_object() {
+        write_totals(out, "  ", "with estimates", &item["estimated"]["direct"]);
+    }
+    if item["allocated"]["direct"].is_object() {
         let label = format!(
             "allocated {}",
-            report["union"]["allocated"]["allocation"]
+            item["allocated"]["direct"]["allocation"]
                 .as_str()
                 .unwrap_or_default()
         );
-        write_totals(out, "  ", &label, &report["union"]["allocated"]);
+        write_totals(out, "  ", &label, &item["allocated"]["direct"]);
     }
-    write_participants(out, "  ", &report["union"]["participants"]);
-    emit!(out, "sessions");
-    for session in report["sessions"].as_array().into_iter().flatten() {
-        let measurement = &session["measurement"];
+    let shared: Vec<&str> = item["shared"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    if !shared.is_empty() {
+        emit!(out, "  shared: {}", shared.join(", "));
+    }
+    write_participants(out, "  ", &item["participants"]);
+    if item["inclusive"].is_object() {
+        write_totals(out, "  ", "inclusive", &item["inclusive"]);
+    }
+}
+
+fn write_union(out: &mut String, union: &Value) {
+    emit!(out, "union");
+    write_totals(out, "  ", "total", union);
+    if union["estimated"].is_object() {
+        write_totals(out, "  ", "with estimates", &union["estimated"]);
+    }
+    if union["allocated"].is_object() {
+        let label = format!(
+            "allocated {}",
+            union["allocated"]["allocation"]
+                .as_str()
+                .unwrap_or_default()
+        );
+        write_totals(out, "  ", &label, &union["allocated"]);
+    }
+    write_participants(out, "  ", &union["participants"]);
+}
+
+fn write_session(out: &mut String, session: &Value) {
+    let measurement = &session["measurement"];
+    emit!(
+        out,
+        "  {}  {} {}  frontier={}  spans={}  {}",
+        session["key"].as_str().unwrap_or_default(),
+        measurement["source"].as_str().unwrap_or_default(),
+        measurement["status"].as_str().unwrap_or_default(),
+        measurement["frontier"],
+        if session["kind"] == "participant" {
+            session["participant"]["spans"].clone()
+        } else {
+            json!(session["spans"].as_array().map_or(0, Vec::len))
+        },
+        if session["kind"] == "participant" {
+            format!(
+                "participant ({})",
+                role_names(&session["participant"]["roles"])
+            )
+        } else {
+            session["per_run"].as_str().unwrap_or_default().to_string()
+        },
+    );
+    let liveness = &measurement["liveness"];
+    if let Some(answer) = liveness["answer"].as_str() {
         emit!(
             out,
-            "  {}  {} {}  frontier={}  spans={}  {}",
-            session["key"].as_str().unwrap_or_default(),
-            measurement["source"].as_str().unwrap_or_default(),
-            measurement["status"].as_str().unwrap_or_default(),
-            measurement["frontier"],
-            if session["kind"] == "participant" {
-                session["participant"]["spans"].clone()
-            } else {
-                json!(session["spans"].as_array().map_or(0, Vec::len))
-            },
-            if session["kind"] == "participant" {
-                format!(
-                    "participant ({})",
-                    role_names(&session["participant"]["roles"])
-                )
-            } else {
-                session["per_run"].as_str().unwrap_or_default().to_string()
-            },
+            "    liveness: {answer}{}{}",
+            liveness["reason"]
+                .as_str()
+                .map_or(String::new(), |reason| format!(" ({reason})")),
+            liveness["retained"]
+                .as_str()
+                .map_or(String::new(), |retained| format!("; retained {retained}"))
         );
-        let liveness = &measurement["liveness"];
-        if let Some(answer) = liveness["answer"].as_str() {
-            emit!(
-                out,
-                "    liveness: {answer}{}{}",
-                liveness["reason"]
-                    .as_str()
-                    .map_or(String::new(), |reason| format!(" ({reason})")),
-                liveness["retained"]
-                    .as_str()
-                    .map_or(String::new(), |retained| format!("; retained {retained}"))
-            );
-        }
-        if measurement["conflict"].is_object() {
-            emit!(
-                out,
-                "    conflict: a fresh read disagrees with retained facts at the same frontier"
-            );
-        }
-        if measurement["fresh_read"]["status"] == "unavailable" {
-            emit!(
-                out,
-                "    fresh read unavailable: {}",
-                measurement["fresh_read"]["reason"]
-                    .as_str()
-                    .unwrap_or_default()
-            );
-        }
-        if let Some(selection) = measurement["selection"].as_str() {
-            emit!(
-                out,
-                "    counts {selection}: {} events, {} beyond the active branch",
-                measurement["events"]["counted"],
-                measurement["events"]["other_branches"]
-            );
-        }
-        for reason in measurement["reasons"].as_array().into_iter().flatten() {
-            emit!(out, "    {}", reason.as_str().unwrap_or_default());
-        }
-        write_totals(out, "    ", "measured", &session["totals"]);
-        write_split(out, &session["split"]);
     }
-    let coverage = &report["coverage"];
+    if measurement["conflict"].is_object() {
+        emit!(
+            out,
+            "    conflict: a fresh read disagrees with retained facts at the same frontier"
+        );
+    }
+    if measurement["fresh_read"]["status"] == "unavailable" {
+        emit!(
+            out,
+            "    fresh read unavailable: {}",
+            measurement["fresh_read"]["reason"]
+                .as_str()
+                .unwrap_or_default()
+        );
+    }
+    if let Some(selection) = measurement["selection"].as_str() {
+        emit!(
+            out,
+            "    counts {selection}: {} events, {} beyond the active branch",
+            measurement["events"]["counted"],
+            measurement["events"]["other_branches"]
+        );
+    }
+    for reason in measurement["reasons"].as_array().into_iter().flatten() {
+        emit!(out, "    {}", reason.as_str().unwrap_or_default());
+    }
+    write_totals(out, "    ", "measured", &session["totals"]);
+    write_split(out, &session["split"]);
+}
+
+fn write_coverage(out: &mut String, coverage: &Value) {
     emit!(out, "coverage");
     write_read_gaps(
         out,
-        report["coverage"]["selection"]["records"]
+        coverage["selection"]["records"]
             .as_array()
             .map(Vec::as_slice)
             .unwrap_or_default(),
-        report["coverage"]["ledger"]["records"]
+        coverage["ledger"]["records"]
             .as_array()
             .map(Vec::as_slice)
             .unwrap_or_default(),
