@@ -342,6 +342,10 @@ pub fn template(ctx: &Ctx, kind: ItemKind, references: &[String]) -> Result<()> 
             "dispositions": [],
             "assessment": null,
         }));
+        if kind == ItemKind::Audit {
+            let item = items.last_mut().expect("just pushed");
+            item["extent"] = serde_json::Value::Null;
+        }
     }
     let template = serde_json::json!({
         "schema": SCHEMA,
@@ -393,6 +397,55 @@ struct RawItem {
     dispositions: Vec<RawDisposition>,
     #[serde(default)]
     assessment: Option<serde_json::Value>,
+    #[serde(default)]
+    extent: Option<RawExtent>,
+}
+
+/// What an audit item says its reader covered: the whole subject, or path
+/// globs with exclusions, in the change's diff (the default) or its tree.
+/// arc resolves the globs against the subject `arc audit` reads when it
+/// records the item; the globs themselves are never stored.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawExtent {
+    #[serde(default)]
+    domain: Option<crate::extent::Domain>,
+    #[serde(default)]
+    whole: bool,
+    #[serde(default)]
+    paths: Vec<String>,
+    #[serde(default)]
+    exclude: Vec<String>,
+}
+
+impl RawExtent {
+    fn input(&self) -> Result<crate::extent::ExtentInput> {
+        use crate::extent::InputScope;
+        let scope = match (self.whole, self.paths.is_empty()) {
+            (true, true) if self.exclude.is_empty() => InputScope::Whole,
+            (true, _) => {
+                return Err(refuse(
+                    "invalid",
+                    "extent: \"whole\": true takes no \"paths\" or \"exclude\"",
+                ))
+            }
+            (false, false) => InputScope::Paths {
+                include: self.paths.clone(),
+                exclude: self.exclude.clone(),
+            },
+            (false, true) => {
+                return Err(refuse(
+                    "invalid",
+                    "extent names neither \"whole\": true nor \"paths\"; set one, or leave \
+                     extent null for a read whose extent is not established",
+                ))
+            }
+        };
+        Ok(crate::extent::ExtentInput {
+            domain: self.domain.unwrap_or_default(),
+            scope,
+        })
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -461,6 +514,11 @@ fn refuse(code: &'static str, message: impl Into<String>) -> anyhow::Error {
         events: Vec::new(),
     }
     .into()
+}
+
+/// An item whose extent does not resolve against its subject.
+pub(super) fn extent_refusal(error: anyhow::Error) -> anyhow::Error {
+    refuse("extent-unresolved", format!("{error:#}"))
 }
 
 /// What a receipt item's read carries into the one event it publishes.
@@ -872,6 +930,7 @@ struct Item {
     raw: RawItem,
     guard: ItemGuard,
     assessed: Option<crate::assessment::Assessment>,
+    extent: Option<crate::extent::ExtentInput>,
 }
 
 /// Parse and check what an item says on its own, before any lock: shape,
@@ -883,11 +942,11 @@ fn prepare(
     receipt_digest: &str,
     receipt_dir: &Path,
 ) -> Result<Item> {
-    if value.get("extent").is_some() {
+    if kind == ItemKind::Verdict && value.get("extent").is_some() {
         return Err(refuse(
             "extent-not-accepted",
-            "the item carries an extent, which this build does not yet accept; drop it to record \
-             a whole-subject read",
+            "a verdict item records no extent: an extent is what an audit of what shipped \
+             covered; drop it from the verdict item",
         ));
     }
     let raw: RawItem = serde_json::from_value(value.clone())
@@ -911,6 +970,7 @@ fn prepare(
     let Some(verdict) = raw.verdict else {
         return Err(refuse("invalid", "the item's verdict is not filled in"));
     };
+    let extent = raw.extent.as_ref().map(RawExtent::input).transpose()?;
     let blocking: Vec<String> = raw
         .findings
         .iter()
@@ -1024,6 +1084,7 @@ fn prepare(
         raw,
         guard,
         assessed,
+        extent,
     })
 }
 
@@ -1345,6 +1406,7 @@ fn record(
         raw,
         guard,
         assessed,
+        extent,
     } = item;
     let verdict = raw.verdict.expect("prepare refuses an unfilled verdict");
     match kind {
@@ -1418,7 +1480,7 @@ fn record(
                     assessment: None,
                     assessed,
                     findings,
-                    extent: None,
+                    extent,
                 },
                 Some(&guard),
             )

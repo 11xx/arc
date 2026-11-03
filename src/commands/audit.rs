@@ -699,7 +699,11 @@ pub(super) fn record_audit(
                      the extent against"
                 )
             })?;
-            Some(crate::extent::resolve(&ctx.cwd, input, base, revision)?)
+            let resolved = crate::extent::resolve(&ctx.cwd, input, base, revision);
+            Some(match receipt {
+                Some(_) => resolved.map_err(super::receipt::extent_refusal)?,
+                None => resolved?,
+            })
         }
     };
     let implementers = audited_implementers(ctx, &st);

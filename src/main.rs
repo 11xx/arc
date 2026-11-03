@@ -1991,7 +1991,14 @@ enum Cmd {
     /// finding event id, a `disposition` of `fixed`, `still-open` or
     /// `not-a-defect`, and optional `evidence`), and `assessment`, an
     /// embedded `agent-routing-assessment` object or a path relative to the
-    /// receipt. Unknown fields are refused; an `extent` is not yet accepted.
+    /// receipt. An audit item also carries `extent`, what its reader
+    /// covered: null when not established, `{"whole": true}`, or `{"paths":
+    /// [<glob>...]}` with optional `"exclude": [<glob>...]`, either with an
+    /// optional `"domain"` of `diff` (the default) or `tree`. Its globs
+    /// resolve against the subject `arc audit --extent-paths` resolves them
+    /// against (`arc guide debt-obligations`), and only the resolved entries
+    /// are recorded. Unknown fields are refused, and so is an
+    /// `extent` on a verdict item (`extent-not-accepted`).
     ///
     /// `fixed` records `resolved`, `still-open` records `still-open`, and
     /// `not-a-defect` records `disputed`, which releases no blocking
@@ -2018,7 +2025,8 @@ enum Cmd {
     /// after the template (`stale-frontier`, naming them), and a
     /// contradiction (`contradiction`: approved with a blocking finding,
     /// changes-requested without causes, a disposition of a finding not on
-    /// the subject or of one finding twice) are refused, never normalised.
+    /// the subject or of one finding twice) and an extent whose glob matches
+    /// nothing (`extent-unresolved`) are refused, never normalised.
     /// A recorded read that clears nothing is not refused; its bar is
     /// reported. Where the reviewer's session store holds the session, the
     /// model it observed is compared with the receipt's: a difference is

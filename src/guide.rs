@@ -2973,8 +2973,9 @@ RECEIPTS
   A delegated reader that cannot write to the ledger returns its reading as
   an `arc-review-receipt/1` file. `arc receipt template --verdict <change>...`
   or `--audit <change>...` pins each item's subject and frontier before
-  dispatch; the reader fills in its identity, verdict, findings and
-  dispositions and copies each `key` and `subject` unchanged. `arc review
+  dispatch; the reader fills in its identity, verdict, findings,
+  dispositions and, on an audit item, the `extent` it read, and copies each
+  `key` and `subject` unchanged. `arc review
   --receipt` records verdict items and `arc audit --receipt` audit items, each
   as the read `--verdict` records: the reader is the represented subject, the
   invoker the writer, and the event names the receipt item, whose file the

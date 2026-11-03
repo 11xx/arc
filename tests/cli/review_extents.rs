@@ -261,3 +261,98 @@ fn event_count_of(repo: &Repo, slug: &str) -> usize {
         .lines()
         .count()
 }
+
+const REVIEWER_SESSION: &str = "01a12b77-6c25-7c01-b325-6e5e44523cc4";
+
+/// The audit template for `slugs`, filled in as approvals by the fixture
+/// reviewer.
+fn audit_receipt(repo: &Repo, slugs: &[&str]) -> serde_json::Value {
+    let mut receipt = json_stdout(
+        repo.arc(&repo.root)
+            .args(["receipt", "template", "--audit"])
+            .args(slugs),
+    );
+    receipt["reviewer"] = serde_json::json!({
+        "harness": "codex",
+        "session": REVIEWER_SESSION,
+        "model": AUDITOR_MODEL,
+    });
+    for item in receipt["items"].as_array_mut().unwrap() {
+        assert!(item["extent"].is_null(), "{item}");
+        item["verdict"] = serde_json::json!("approved");
+    }
+    receipt
+}
+
+fn ingest_audits(repo: &Repo, receipt: &serde_json::Value) -> (i32, serde_json::Value) {
+    let path = repo.home.join("receipt.json");
+    fs::write(&path, json_file_bytes(receipt)).unwrap();
+    let output = repo
+        .arc(&repo.root)
+        .args(["audit", "--receipt"])
+        .arg(&path)
+        .arg("--json")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    let value = serde_json::from_str(&text).unwrap_or_else(|error| {
+        panic!(
+            "not JSON ({error}): {text}\nstderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    (output.status.code().unwrap(), value)
+}
+
+/// Claim: a receipt audit item's `extent` is resolved against what shipped
+/// and recorded on the audit, and its coverage judges discharge as a
+/// hand-recorded audit's does: a scoped item leaves a whole obligation owed
+/// as partial coverage, a whole item discharges, and a glob matching nothing
+/// refuses only its item. Rejects dropping the reader's stated extent.
+#[test]
+fn a_receipt_item_extent_judges_discharge_as_an_audit_does() {
+    let repo = Repo::new();
+    for slug in ["scopedrc", "wholerc", "nomatchrc"] {
+        owed_with(&repo, slug, &["--extent", "whole"]);
+    }
+    let mut receipt = audit_receipt(&repo, &["scopedrc", "wholerc", "nomatchrc"]);
+    receipt["items"][0]["extent"] = serde_json::json!({"paths": ["sdk/"]});
+    receipt["items"][1]["extent"] = serde_json::json!({"whole": true});
+    receipt["items"][2]["extent"] = serde_json::json!({"paths": ["docs/"]});
+
+    let (code, result) = ingest_audits(&repo, &receipt);
+    assert_eq!(code, 1, "{result:#}");
+    let scoped = &result["items"][0];
+    assert_eq!(scoped["outcome"], "recorded", "{result:#}");
+    assert_eq!(scoped["debt_discharged"], false, "{result:#}");
+    assert_eq!(scoped["bar"]["code"], "extent-uncovered", "{result:#}");
+    let scoped_event = scoped["event"].as_str().unwrap();
+    assert_partial(&repo, "scopedrc", scoped_event, "scoped-read");
+    let recorded = stdout(
+        repo.arc(&repo.root)
+            .args(["events", "--change", "scopedrc"]),
+    )
+    .lines()
+    .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+    .find(|event| event["event_id"] == scoped_event)
+    .unwrap();
+    assert_eq!(recorded["extent"]["domain"], "diff", "{recorded}");
+    assert_eq!(
+        recorded["extent"]["scope"]["entries"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3,
+        "{recorded}"
+    );
+    assert!(!recorded.to_string().contains("sdk/\""), "{recorded}");
+
+    let whole = &result["items"][1];
+    assert_eq!(whole["debt_discharged"], true, "{result:#}");
+    assert_discharged_by(&repo, "wholerc", whole["event"].as_str().unwrap());
+
+    let nomatch = &result["items"][2];
+    assert_eq!(nomatch["outcome"], "refused", "{result:#}");
+    assert_eq!(nomatch["code"], "extent-unresolved", "{result:#}");
+    assert_eq!(debt_of(&repo, "nomatchrc")["standing"], "owed");
+}

@@ -522,9 +522,9 @@ fn a_twenty_item_audit_receipt_judges_each_read_on_its_own() {
 
 /// Claim: whole-receipt errors refuse everything and write nothing: a mixed
 /// receipt, a receipt for the other command, a reviewer session that is a
-/// prefix or a delegate handle, and an item carrying an extent is refused on
-/// its own. Rejects recording a reviewer arc cannot corroborate, and silently
-/// dropping a coverage claim.
+/// prefix or a delegate handle, and a verdict item carrying an extent is
+/// refused on its own. Rejects recording a reviewer arc cannot corroborate,
+/// and silently dropping a coverage claim a verdict cannot carry.
 #[test]
 fn envelope_errors_refuse_the_whole_receipt() {
     let repo = Repo::new();
