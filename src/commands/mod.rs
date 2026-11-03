@@ -132,10 +132,6 @@ pub use workspace::{
     WorkspaceView,
 };
 
-/// The commands that record nothing, in every form and flag. An invocation of
-/// one reads the ledger through a handle that never parses the invoking
-/// checkout's append policy and refuses every append, and the guide prints its
-/// list from here.
 /// Read-only commands that read the ledger once and render it: each shares
 /// one read of every ledger file, the privilege scope, each change's state
 /// and the readable states across the store handles it opens. A command that follows the ledger as
@@ -162,6 +158,10 @@ pub(crate) const SHARED_READ_COMMANDS: &[&str] = &[
     "journal open",
 ];
 
+/// The commands that record nothing, in every form and flag. An invocation of
+/// one reads the ledger through a handle that never parses the invoking
+/// checkout's append policy and refuses every append, and the guide prints its
+/// list from here.
 pub(crate) const READ_ONLY_COMMANDS: &[&str] = &[
     "guide",
     "forge show",
