@@ -213,6 +213,8 @@ pub fn environment_probe(cwd: &Path, probe: &str, timeout: Option<u64>) -> Resul
             });
         }
     };
+    let _watch = crate::interruption::Watch::start().context("cannot watch for interruption")?;
+    crate::interruption::check()?;
     let mut child = match OwnedGroup::spawn(&mut command) {
         Ok(child) => child,
         Err(error) => {
@@ -265,7 +267,9 @@ pub fn environment_probe(cwd: &Path, probe: &str, timeout: Option<u64>) -> Resul
                 .leader_exited()
                 .context("failed to wait for environment probe")?;
         }
-        if exited && stdout_reader.is_finished() && stderr_reader.is_finished() {
+        if (exited && stdout_reader.is_finished() && stderr_reader.is_finished())
+            || crate::interruption::check().is_err()
+        {
             break false;
         }
         if Instant::now() >= deadline {
@@ -276,6 +280,7 @@ pub fn environment_probe(cwd: &Path, probe: &str, timeout: Option<u64>) -> Resul
     let status = child
         .stop()
         .context("failed to stop the environment probe's process group")?;
+    crate::interruption::check()?;
     let (stdout_digest, printed) = join_before_deadline(
         stdout_reader,
         Some(deadline),

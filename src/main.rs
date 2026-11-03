@@ -27,6 +27,7 @@ mod ids;
 mod import_authorization;
 mod inbox;
 mod integration;
+mod interruption;
 mod journal;
 mod journal_exchange;
 mod model;
@@ -1917,7 +1918,8 @@ enum Cmd {
     /// after the shell exits. Arc kills the process group and does not wait for escaped
     /// descendants; unfinished readers supply no output tail, diagnostic artifact or
     /// environment identity. A gate's process group is killed when it ends, so nothing
-    /// left in it outlives the run. Executed gates capture combined stdout and stderr as private
+    /// left in it outlives the run. SIGINT, SIGTERM or SIGHUP during a gate kills its group,
+    /// records nothing from the run and ends arc with that signal. Executed gates capture combined stdout and stderr as private
     /// local artifacts: the first 16 MiB per run, retaining 16 completed captures. Events
     /// and status carry the producing store, relative path, retained and observed SHA-256
     /// digests and sizes, and truncation or capture errors. Exports carry metadata only;
@@ -5440,10 +5442,16 @@ fn main() {
     };
     let result = run(cli, reads_only);
     store::write_read_counts();
+    // A command may have reported an interrupted child as one failure among
+    // others and gone on; the signal still ends arc.
+    let result = result.and_then(|code| interruption::check().map(|()| code).map_err(Into::into));
     match result {
         Ok(code) => std::process::exit(code),
         Err(e) => {
             eprintln!("error: {e:#}");
+            if let Some(interrupted) = e.downcast_ref::<interruption::Interrupted>() {
+                interrupted.end_process();
+            }
             if e.downcast_ref::<import_authorization::Refusal>().is_some() {
                 eprintln!("Read: arc guide replicas");
             }

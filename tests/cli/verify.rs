@@ -4439,3 +4439,139 @@ fn a_verify_without_a_selector_names_all_and_the_declared_gates() {
     );
     assert!(!events.contains("verification"), "{events}");
 }
+
+/// A fixture process that is killed when dropped, so a failing assertion
+/// leaves nothing running.
+struct FixturePid(u32);
+
+impl FixturePid {
+    fn read(path: &Path) -> FixturePid {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(pid) = fs::read_to_string(path)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+            {
+                return FixturePid(pid);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{} was never written",
+                path.display()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Whether the process is gone, or a zombie nobody has reaped yet,
+    /// within `bound`.
+    fn ends_within(&self, bound: Duration) -> bool {
+        let deadline = Instant::now() + bound;
+        loop {
+            let state = fs::read_to_string(format!("/proc/{}/stat", self.0))
+                .ok()
+                .and_then(|stat| stat.rsplit_once(") ")?.1.chars().next());
+            if matches!(state, None | Some('Z' | 'X')) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn signal(&self, name: &str) {
+        let sent = Command::new("kill")
+            .args([&format!("-{name}"), &self.0.to_string()])
+            .status()
+            .unwrap();
+        assert!(sent.success());
+    }
+}
+
+impl Drop for FixturePid {
+    fn drop(&mut self) {
+        if !self.ends_within(Duration::ZERO) {
+            let _ = Command::new("kill")
+                .args(["-KILL", &self.0.to_string()])
+                .status();
+        }
+    }
+}
+
+/// A signal that ends `arc verify` ends the gate it is running, and the
+/// stopped run is reported as interrupted rather than recorded. Rejects arc
+/// dying on SIGINT while its gate shell and that shell's children run on,
+/// reparented to init, rejects recording an interrupted run as evidence, and
+/// rejects swallowing the signal into an ordinary failure exit.
+#[test]
+fn an_interrupted_verify_stops_its_gate_and_records_nothing() {
+    for signal in ["INT", "TERM"] {
+        let repo = Repo::new();
+        let marks = repo.home.join("marks");
+        fs::create_dir_all(&marks).unwrap();
+        let gate = format!(
+            "echo $PPID > {m}/arc.pid; echo $$ > {m}/leader.pid; \
+             sleep 60 & echo $! > {m}/child.pid; wait",
+            m = marks.display()
+        );
+        fs::create_dir_all(repo.root.join(".arc")).unwrap();
+        fs::write(
+            repo.root.join(".arc/gates.toml"),
+            format!("[gates.slow]\ncommand = {gate:?}\n"),
+        )
+        .unwrap();
+        git(&repo.root, &["add", ".arc/gates.toml"]);
+        git(&repo.root, &["commit", "-m", "test: declare a slow gate"]);
+        stdout(
+            repo.arc(&repo.root)
+                .args(["begin", "interrupted", "--no-worktree"]),
+        );
+
+        let mut verify = repo.arc(&repo.root);
+        verify.args(["verify", "interrupted", "--gate", "slow"]);
+        let run = thread::spawn(move || verify.output().unwrap());
+        let arc = FixturePid::read(&marks.join("arc.pid"));
+        let leader = FixturePid::read(&marks.join("leader.pid"));
+        let child = FixturePid::read(&marks.join("child.pid"));
+        arc.signal(signal);
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !run.is_finished() {
+            assert!(
+                Instant::now() < deadline,
+                "arc did not exit after SIG{signal}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let output = run.join().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            leader.ends_within(Duration::from_secs(2)),
+            "gate shell outlived arc after SIG{signal}"
+        );
+        assert!(
+            child.ends_within(Duration::from_secs(2)),
+            "gate child outlived arc after SIG{signal}"
+        );
+        let expected = if signal == "INT" { 2 } else { 15 };
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&output.status),
+            Some(expected),
+            "arc must end by the signal it received; stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains(&format!("interrupted by SIG{signal}")),
+            "stderr: {stderr}"
+        );
+        let events = stdout(repo.arc(&repo.root).args([
+            "events",
+            "--change",
+            "interrupted",
+            "--type",
+            "verification-recorded",
+        ]));
+        assert!(events.trim().is_empty(), "recorded: {events}");
+    }
+}

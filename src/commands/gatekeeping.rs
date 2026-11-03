@@ -2505,6 +2505,8 @@ pub(super) fn run_gate(
                 .context("gate timeout is too large")
         })
         .transpose()?;
+    let _watch = crate::interruption::Watch::start().context("cannot watch for interruption")?;
+    crate::interruption::check()?;
     let mut child = OwnedGroup::spawn(&mut command).context("failed to run gate command")?;
     let stdout = child
         .child()
@@ -2533,7 +2535,7 @@ pub(super) fn run_gate(
                 Err(TryRecvError::Empty) => false,
             };
         }
-        if exited && reader_done {
+        if (exited && reader_done) || crate::interruption::check().is_err() {
             break false;
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
@@ -2544,6 +2546,7 @@ pub(super) fn run_gate(
     let status = child
         .stop()
         .context("failed to stop the gate's process group")?;
+    crate::interruption::check()?;
 
     let (output, output_artifact) = join_before_deadline(reader, deadline, "gate output reader")?
         .transpose()

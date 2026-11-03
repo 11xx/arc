@@ -1008,6 +1008,13 @@ RUN A CHANGE
   A change whose worktree is gone has nowhere to gate: give it one with `git
   worktree add`, or record evidence arc did not run with `verify --attest`.
 
+  A gate or environment probe runs in its own process group, which a
+  terminal's interrupt does not reach. When SIGINT, SIGTERM or SIGHUP reaches
+  arc while one runs, arc kills that group, records no result from the run,
+  says on stderr that it was interrupted, and then ends with the same signal,
+  so a calling shell sees an interruption rather than a failure. A signal
+  arc inherited as ignored stays ignored.
+
   `done` moves its caller's live claim to `verifying` before it snapshots,
   and only after every snapshot input is accepted — the attribution,
   `--thread`, and each `--journal-ref` — so an input it refuses leaves the
@@ -4144,7 +4151,8 @@ EXIT CODES
 
   Codes 1 and 2 are also reachable without a blocker at all: `arc` exits 1 on
   an internal error and 2 on a usage error, which argument parsing decides
-  before any command runs.
+  before any command runs. A signal that interrupts a gate or probe ends arc
+  with that signal rather than an exit code; see `arc guide change-gates`.
 
   The other commands a script branches on:
 
