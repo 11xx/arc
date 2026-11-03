@@ -3366,3 +3366,73 @@ fn provisional_retries_reuse_a_debt_held_in_an_import_batch() {
         assert!(!loose.exists());
     }
 }
+
+/// Claim: resolving a provisional integration in the repository whose slot
+/// the change leased releases that slot as integrate does: the checkout is
+/// detached, the lease freed and `slot-released` recorded. Rejects a
+/// resolution that leaves an integrated change's slot leased.
+#[test]
+fn resolving_a_provisional_integration_releases_its_slot() {
+    let (authority, worker) = worker();
+    fs::create_dir_all(worker.root.join(".arc")).unwrap();
+    worker.commit(
+        &worker.root,
+        ".arc/worktrees.toml",
+        "[slots]\nsize = 1\n",
+        "build: declare a slot pool",
+    );
+    let change = opened_change_id(&stdout(
+        worker
+            .arc(&worker.root)
+            .args(["begin", "slotted", "--slot"]),
+    ));
+    let slot = worker.home.join(".worktrees/repo-slots/slot-01");
+    worker.commit(&slot, "slotted.txt", "slotted\n", "feat: slotted");
+    stdout(worker.arc(&slot).args(["snapshot", &change]));
+    stdout(worker.arc(&worker.root).env("ARC_ACTOR", "reviewer").args([
+        "review",
+        &change,
+        "--verdict",
+        "approved",
+    ]));
+    prepare(&worker, &change);
+    deliver(&worker, &authority, &change, true);
+    let integration = integrate_authority(&authority, &change);
+    deliver(&authority, &worker, &change, true);
+    stdout(authority.arc(&authority.root).args([
+        "replica",
+        "authority",
+        "offer",
+        "--to",
+        "worker",
+    ]));
+    import_replica_facts(&authority, &worker);
+    let slots = |repo: &Repo| json_stdout(repo.arc(&repo.root).args(["slots", "status", "--json"]));
+    assert!(
+        !slots(&worker)["slots"][0]["lease"].is_null(),
+        "the imported closure already freed the slot"
+    );
+
+    stdout(worker.arc(&worker.root).args([
+        "replica",
+        "provisional",
+        "resolve",
+        &change,
+        "--integration",
+        &integration,
+        "--because",
+        "accepted by the authority",
+    ]));
+    let pool = slots(&worker);
+    assert!(
+        pool["slots"][0]["lease"].is_null(),
+        "the slot stayed leased: {pool:#}"
+    );
+    assert_eq!(pool["slots"][0]["phase"], "free");
+    assert!(
+        git_out(&slot, &["branch", "--show-current"]).is_empty(),
+        "the slot stayed on its branch"
+    );
+    let events = stdout(worker.arc(&worker.root).args(["log", &change]));
+    assert!(events.contains("slot-released"), "{events}");
+}

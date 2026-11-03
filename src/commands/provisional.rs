@@ -1320,5 +1320,15 @@ pub fn resolve(
             println!("resolved provisional obligation {id} by {integration}");
         }
     }
+    // The accepting integration closed the change without an `integrate`
+    // here, so its slot is released as integrate releases one: detached at
+    // the landed commit when this repository holds it, at its own HEAD
+    // otherwise.
+    let landed = state
+        .closure
+        .as_ref()
+        .and_then(|closure| closure.integrated_commit.clone())
+        .filter(|commit| gitio::commit_exists(&ctx.cwd, commit).unwrap_or(false));
+    super::slots::release_change_slot(ctx, &store, &state, landed.as_deref(), Some(&state.branch));
     Ok(0)
 }

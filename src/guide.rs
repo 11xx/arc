@@ -4801,7 +4801,10 @@ SLOTS
   outcome, detaches a clean slot at its `HEAD`, keeps the branch, records
   `slot-released` and frees it. A slot in use, with uncommitted or untracked
   work, or failing ownership keeps its lease, and the command prints the
-  release command to run once resolved.
+  release command to run once resolved. A provisional integration resolved
+  by `arc replica provisional resolve` releases its slot the same way, at
+  the accepting integration's commit when this repository holds it and at
+  the slot's `HEAD` otherwise.
 
   `arc slots warm [--target <rev>] [--limit <n>]` builds slots before a
   change needs them. Under the pool lock it ranks the free slots as begin
