@@ -3904,9 +3904,11 @@ fn read_ledger(
         {
             ledger.unattributed_events += 1;
         }
-        // The subject's event was recorded by the invoker: its instant, model
-        // and session are the invoker's, so it opens no span of the subject
-        // and declares only the model its subject names.
+        // The subject's event was recorded by the invoker: its instant and
+        // session are the invoker's, so it opens no span of the subject. Its
+        // model is the subject's, so it credits the invoker with none, and the
+        // subject with only what its subject names.
+        let for_other_session = named.iter().any(|named| !named.own);
         for Named { key, own, declared } in named {
             let role = acting_role(&event.payload, assigned.bound.contains(&key));
             let harness = key.0.clone();
@@ -3927,7 +3929,11 @@ fn read_ledger(
                 continue;
             }
             person.selected_events += 1;
-            let model = if own { event.model.clone() } else { declared };
+            let model = if own && !for_other_session {
+                event.model.clone()
+            } else {
+                declared
+            };
             if let Some(model) = model.as_deref().filter(|model| portable_coordinate(model)) {
                 person.coordinates.insert(model.to_string());
             }

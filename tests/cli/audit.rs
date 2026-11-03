@@ -4690,3 +4690,32 @@ fn a_subject_declared_model_cannot_be_a_placeholder() {
         .failure()
         .stderr(predicates::str::contains("unknown"));
 }
+
+/// Claim: an event recorded for a `harness:id` subject never credits the
+/// invoker's model to it. Rejects `ARC_MODEL`, which describes the invoker,
+/// landing on an audit recorded for another session, where it would read as
+/// the reviewer's model and misjudge independence.
+#[test]
+fn a_bare_subject_session_does_not_take_the_invoker_model() {
+    let repo = Repo::new();
+    let worktree = snapshotted_change(&repo, "bare-subject");
+    repo.arc(&repo.root)
+        .args(["integrate", "bare-subject", "--debt", "owed"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .env("ARC_MODEL", "claude-opus-5-5#high")
+        .args(["--on-behalf-of", "codex:rev1"])
+        .args(["audit", "bare-subject", "--verdict", "approved"])
+        .assert()
+        .success();
+    let events = stdout(
+        repo.arc(&repo.root)
+            .args(["events", "--change", "bare-subject"]),
+    );
+    let audit = events
+        .lines()
+        .find(|line| line.contains("codex:rev1"))
+        .unwrap();
+    assert!(!audit.contains("claude-opus-5-5"), "{audit}");
+}

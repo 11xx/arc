@@ -3750,8 +3750,10 @@ RULES THAT CHANGE WHAT YOU DO
     `harness:<id>:<model>[#effort]`, followed by a parenthesized label or
     not, names the session `<id>` and declares `<model>` as that session's
     model on the event. It counts as `--model` does, including for a verdict's
-    or audit's independence check; `--model` outranks it and it outranks
-    `ARC_MODEL`. The subject names a session
+    or audit's independence check, and `--model` outranks it. Without either,
+    the event's model is the one observed for session `<id>`, or none: neither
+    `ARC_MODEL` nor the invoker's session speaks for a `harness:<id>` subject.
+    The subject names a session
     when the tapes reader of its harness locates the id as one of that
     harness's recordings, each harness shaping its own ids (an OpenCode
     `ses_…`, a Pi id as its recording names it, a Claude or Codex UUID),

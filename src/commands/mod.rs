@@ -412,29 +412,41 @@ impl Ctx {
         self.model_attribution
             .get_or_init(|| {
                 let (declared, source) = self.declared_model();
-                crate::context::resolve_model(
+                let invoker = crate::context::resolve_model(
                     declared,
                     source,
                     self.harness.as_deref(),
                     self.session.as_deref(),
-                )
+                );
+                let Some((harness, id, _)) = self.subject_session() else {
+                    return invoker;
+                };
+                // The event's model is the subject's; its session fields, and
+                // so the store's verdict on them, stay the invoker's.
+                crate::model::ModelAttribution {
+                    session_verdict: invoker.session_verdict,
+                    ..crate::context::resolve_model(declared, source, Some(harness), Some(id))
+                }
             })
             .clone()
     }
 
-    /// The model this event declares: `--model`, else the one its subject
-    /// names, else `ARC_MODEL`. The subject outranks the environment because
-    /// the environment describes the invoker.
+    /// The model this event declares: `--model`, else what a session subject
+    /// names. `ARC_MODEL` describes the invoker, so it applies only to an event
+    /// with no session subject.
     fn declared_model(&self) -> (Option<&str>, Option<ModelSource>) {
-        match (self.model_source, self.subject_model()) {
+        match (self.model_source, self.subject_session()) {
             (Some(ModelSource::Flag), _) | (_, None) => (self.model.as_deref(), self.model_source),
-            (_, Some(model)) => (Some(model), Some(ModelSource::Flag)),
+            (_, Some((_, _, model))) => (model, model.map(|_| ModelSource::Flag)),
         }
     }
 
     fn subject_model(&self) -> Option<&str> {
-        let subject = self.on_behalf_of.as_deref()?;
-        crate::coordinate::session_subject(subject)?.2
+        self.subject_session()?.2
+    }
+
+    fn subject_session(&self) -> Option<(&str, &str, Option<&str>)> {
+        crate::coordinate::session_subject(self.on_behalf_of.as_deref()?)
     }
 
     /// Refuse an identity no write may record: a placeholder harness,
