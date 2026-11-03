@@ -78,6 +78,11 @@ paths = [
   "src/commands/publication.rs",
   # Decides whether a merge is authorized and what it must ship.
   "src/integration.rs",
+  # `land` moves a target over several changes in one ref transaction and
+  # derives every member's closure from one completion; lands-with decides
+  # which changes may integrate alone.
+  "src/commands/land.rs",
+  "src/landing.rs",
   "src/provisional.rs",
   "src/commands/provisional.rs",
   "src/commands/chain.rs",
