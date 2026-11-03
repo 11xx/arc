@@ -1352,10 +1352,65 @@ RUN A CHANGE
   No integration path takes a member alone. `integrate`, a queue of `integrate
   a b` (its members are gated and moved one at a time), provisional
   integration, and `close --assert-integrated` refuse while another member is
-  open, with blocker `lands-with` (exit 19), naming every open member to land
-  with it. An integrated member satisfies its part. A member
+  open, with blocker `lands-with` (exit 19) and the remedy `arc land` naming
+  every open member. An integrated member satisfies its part. A member
   abandoned or superseded wedges the rest with the same blocker until the
   relation is withdrawn, and the remedy names that withdrawal.
+
+  `arc land <change>... [--target T] [--debt <why>] [--dry-run [--json]]`
+  installs a stack in one guarded transition. The members, in landing
+  order, must already stack: the first's recorded base is the target's
+  current revision and each later member's base is the previous member's
+  head. Nothing is replayed, so a membership that does not chain refuses
+  naming the members. Every open member of each component is named, and a
+  `blocked_by` prerequisite is satisfied by an earlier member, which the
+  basis records as `landing <attempt>`. Each member keeps its own approval,
+  judged against the destination's policy at the revision the landing starts
+  from; with `--debt`, a member no approval covers carries the debt
+  `integrate --debt` would declare, inside the completion. A target that
+  integrates with no-ff or receives contributions refuses, and
+  `integration.history = squash` refuses more than one commit. `--dry-run`
+  prints the plan, as `arc-landing-plan/1` with `--json`: the members and
+  their pins (patchset, base, head, brief digest, approval or debt basis,
+  holds, findings, component, prerequisites, gates, policy, danger scope),
+  the components, and the gate union, each gate with its binding and the
+  members requiring it.
+
+  The intent is written to `landing-intents/<attempt>.json` in the ledger
+  directory, and a `landing-prepared` event names the attempt. Until it
+  finishes, its members show `pending landing <attempt>` (blocker
+  `landing-pending`, exit 20) and refuse every other terminal transition,
+  naming `arc land --recover <attempt>`. The gates every member requires
+  run once, at the top head, with no ledger or change lock held; their
+  evidence carries `landing: <attempt>`. A gate two members declare
+  differently, `binds` included, or one the top head does not declare the
+  same way, refuses. Reuse follows each gate's binding: a tree-bound pass
+  by tree, a commit-bound pass only at the top head's own commit. A failed
+  gate abandons the attempt and closes nothing.
+
+  Commit takes replica authority, the target, the graph, each member's
+  transition lock in change-ID order, then repository events, and reads
+  everything pinned again; any difference refuses naming the field and
+  abandons the attempt. The exact completion and its basis are saved
+  (`authorized`), then one ref transaction moves the target from its old
+  revision and creates `refs/arc/landing-applied/<attempt>`; the target
+  checkout follows (`applied`); one `landing-completed` event is appended
+  (`published`); the applied ref goes once cleanup is done. Each member's
+  closure derives from that event: integrated via the landing, with
+  `target_before` the revision the landing started from, which every
+  declaration and policy reader keeps reading, and `range_base` and
+  `integrated_commit` its own landed range, which `diff --integrated`,
+  audits, `stats` and cost attribution read. The shared gate run is counted
+  once, on the top member.
+
+  `arc land --recover <attempt>` finishes an interrupted attempt. It
+  publishes a saved `authorized` completion whose applied ref exists, after
+  bringing a target checkout still at the old tree to the new one; it
+  abandons an attempt whose applied ref is absent and whose target never
+  moved; anything else it reports as movement arc did not authorize, and
+  closes nothing. Run again, it changes nothing. `arc land --abandon
+  <attempt> --reason <why>` abandons an attempt whose target arc did not
+  move.
 
   `integration.cleanup` governs branch and worktree cleanup after integration
   (built-in false). A slot checkout is never removed; its release detaches it
@@ -4319,8 +4374,9 @@ EXIT CODES
       branch that cannot be resolved.
     `arc check` exits 7 while a prerequisite change is unresolved.
     `arc check` exits 19 while a must-land-together partner is open or
-      closed without integrating.
-    `arc check` exits 20 while a pending landing attempt holds the change.
+      closed without integrating; the change lands only with `arc land`.
+    `arc check` exits 20 while a pending landing attempt holds the change;
+      `arc land --recover <attempt>` finishes it.
     `arc check` exits 11 when the target conflicts or ff-only ancestry
       requires rebasing; it shadows 14 when both are present.
     `arc check` exits 12 when a declared acceptance probe is not
@@ -4789,6 +4845,7 @@ SCHEMAS
     `arc-export/1`                   arc export --json
     `arc-import/1`                   arc import --json
     `arc-integration-plan/1`         arc integrate --dry-run --json
+    `arc-landing-plan/1`             arc land --dry-run --json
     `arc-gate-delta/1`               gate selector stdin
     `arc-gate-selection/1`           gate selector stdout
     `arc-provisional-transition/2`   arc integrate --provisional --json
@@ -4878,6 +4935,7 @@ SCHEMAS
   Internal:
     store format 8                   .git/arc/config.json and the change ledger
     `arc-accept-checkout/1`           local administrative allocation recovery
+    `arc-landing-intent/1`            landing-intents/<attempt>.json recovery
     `arc-import-batch/1`             local atomic change import and authorization
     `arc-replica-import/3`           receipt of an imported replica bundle
     `arc-journal-exchange-import/1`  receipt of an imported journal bundle

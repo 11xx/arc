@@ -9,8 +9,9 @@
 //! the events this module synthesizes join the member's own events before
 //! reduction and are never written to its ledger.
 
-use crate::model::{Event, LandedMember, LandingMembership, Payload};
+use crate::model::{Event, LandedMember, LandingMembership, LandingPin, Payload};
 use crate::state::ChangeState;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Everything the repository events say about relations and landings.
@@ -143,6 +144,18 @@ impl Landings {
             .map(|(attempt, _)| attempt.as_str())
     }
 
+    pub fn prepared(&self, attempt: &str) -> Option<&Event> {
+        self.prepared.get(attempt)
+    }
+
+    pub fn completion(&self, attempt: &str) -> Option<&Event> {
+        self.completed.get(attempt)
+    }
+
+    pub fn abandonment(&self, attempt: &str) -> Option<&Event> {
+        self.abandoned.get(attempt)
+    }
+
     /// The events a change's completed landings derive for it, in ID order:
     /// each member's debt, when the landing declared one, then its closure.
     pub fn derived_events(&self, change: &str) -> Vec<Event> {
@@ -224,6 +237,61 @@ fn member_closure(
             target_after: target_after.to_string(),
         }),
     }
+}
+
+/// How far a landing attempt has gone, as its intent file records it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Phase {
+    /// Planned and pinned; nothing authorized, nothing moved.
+    Prepared,
+    /// Revalidated under the commit guards; the exact completion is saved.
+    Authorized,
+    /// The target moved and its checkout matches.
+    Applied,
+    /// The completion is in the ledger.
+    Published,
+}
+
+pub const INTENT_SCHEMA: &str = "arc-landing-intent/1";
+
+/// What one landing attempt is about to do, written before anything moves
+/// and synced at each phase, so an interrupted attempt is finished or
+/// abandoned from what it recorded rather than from what the target holds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Intent {
+    pub schema: String,
+    pub attempt: String,
+    pub phase: Phase,
+    pub target_branch: String,
+    /// The target revision the attempt planned against.
+    pub target_before: String,
+    /// The revision the attempt installs: its top member's head.
+    pub target_after: String,
+    pub members: Vec<LandingPin>,
+    /// The exact `landing-completed` event, saved when the attempt is
+    /// authorized and published unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<Event>,
+}
+
+impl Intent {
+    /// The ID this attempt reserved and has not published yet, if any.
+    pub fn reservation(&self) -> Option<&str> {
+        match self.phase {
+            Phase::Authorized | Phase::Applied => self
+                .completion
+                .as_ref()
+                .map(|completion| completion.event_id.as_str()),
+            Phase::Prepared | Phase::Published => None,
+        }
+    }
+}
+
+/// The ref that moves with the target in one transaction and says the
+/// attempt's own compare-and-swap happened.
+pub fn applied_ref(attempt: &str) -> String {
+    format!("refs/arc/landing-applied/{attempt}")
 }
 
 /// A change's events with the events its landings derive, merged in ID order.

@@ -1721,6 +1721,9 @@ impl ChangeState {
             if let Some(before) = closure.target_before.as_deref() {
                 note(before, "integration target".to_string());
             }
+            if let Some(base) = closure.range_base.as_deref() {
+                note(base, "landed range base".to_string());
+            }
             if let Some(authorization) = &closure.authorization {
                 for prerequisite in &authorization.prerequisites {
                     if let Some(commit) = prerequisite.integrated_commit.as_deref() {
@@ -1835,6 +1838,10 @@ impl ChangeState {
             rewrites.advance_opt(&mut closure.integrated_commit)?;
             rewrites.advance_opt(&mut closure.source_head)?;
             rewrites.advance_opt(&mut closure.target_before)?;
+            rewrites.advance_opt(&mut closure.range_base)?;
+            if let Some(landing) = &mut closure.landing {
+                rewrites.advance(&mut landing.target_after)?;
+            }
             if let Some(authorization) = &mut closure.authorization {
                 for prerequisite in &mut authorization.prerequisites {
                     rewrites.advance_opt(&mut prerequisite.integrated_commit)?;
@@ -6072,6 +6079,7 @@ mod tests {
                 timeout_seconds: None,
                 tree: None,
                 against_target: None,
+                landing: None,
                 gate: Some("unit".into()),
                 command: "true".into(),
                 revision: "head".into(),

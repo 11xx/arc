@@ -1732,6 +1732,10 @@ pub enum Payload {
         /// is about and when it stops applying.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         against_target: Option<String>,
+        /// The landing attempt whose single gate run at its top head this
+        /// evidence is. Absent on every run outside a landing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        landing: Option<String>,
     },
     /// A gate judged not to need its run at one head, recorded in place of
     /// running it.

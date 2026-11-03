@@ -2558,6 +2558,7 @@ fn append_policy_has_a_single_authority() {
         "audit.rs::plan_debt::letpatchset_id=ifst.is_closed(){",
         "hooks.rs::post_commit::ifstate.is_closed(){",
         "hooks.rs::prepare_commit_msg::ifstate.is_closed(){",
+        "land.rs::plan::ifmember.is_closed(){",
         "lifecycle.rs::begin::ifst.is_closed(){",
         "lifecycle.rs::list::.filter(|state|!open_only||!state.is_closed())",
         "lifecycle.rs::list_row::\"state\":ifstate.is_closed(){\"closed\"}else{\"open\"},",

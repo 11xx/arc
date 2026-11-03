@@ -86,6 +86,8 @@ pub struct VerifyArgs {
     pub predicted: Option<String>,
     pub against: Option<String>,
     pub bypass: Option<String>,
+    /// The landing attempt a whole-set run gates, recorded on its evidence.
+    pub landing: Option<String>,
 }
 
 struct VerificationInput {
@@ -108,6 +110,8 @@ struct VerificationInput {
     /// The target head a synthesized merge was computed against, on a run
     /// evaluating that merge rather than a commit either branch holds.
     against_target: Option<String>,
+    /// The landing attempt this run gates.
+    landing: Option<String>,
 }
 
 struct CompletedVerification {
@@ -135,6 +139,7 @@ struct CompletedVerification {
     worktree_dirty_untracked: Option<bool>,
     tree_moved: bool,
     against_target: Option<String>,
+    landing: Option<String>,
 }
 
 pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
@@ -161,6 +166,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         predicted,
         against,
         bypass,
+        landing,
     } = args;
     if let Some(reason) = bypass {
         let flagged = [
@@ -529,6 +535,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
                 note,
                 falsification,
                 against_target: None,
+                landing: None,
             },
         );
         if let Some(path) = scratch {
@@ -629,6 +636,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
                 &head,
                 &environments,
                 note,
+                landing,
             );
         }
         let mut passed = reused.len();
@@ -652,6 +660,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
                     note: note.clone(),
                     falsification: None,
                     against_target: None,
+                    landing: landing.clone(),
                 },
             )?;
             if result == 0 {
@@ -717,6 +726,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             note,
             falsification,
             against_target: None,
+            landing: None,
         },
     )
 }
@@ -1073,6 +1083,7 @@ fn verify_against(
                     note: note.clone(),
                     falsification: None,
                     against_target: Some(target_head.clone()),
+                    landing: None,
                 },
             )?;
             if code == 0 {
@@ -1628,6 +1639,7 @@ fn verify_recorded(
                 predicted: None,
                 against: None,
                 bypass: None,
+                landing: None,
             },
         );
     }
@@ -1715,6 +1727,7 @@ fn verify_recorded(
                     note: None,
                     falsification: None,
                     against_target: None,
+                    landing: None,
                 },
             )?;
             if code == 0 {
@@ -1753,6 +1766,7 @@ fn verify_recorded(
                 predicted: None,
                 against: None,
                 bypass: None,
+                landing: None,
             },
         )?;
         if code == 0 {
@@ -1830,6 +1844,7 @@ pub fn done(
                 predicted: None,
                 against: None,
                 bypass: None,
+                landing: None,
             },
         )?;
     }
@@ -2058,6 +2073,7 @@ fn verify_all_parallel(
     revision: &str,
     environments: &DeclaredEnvironments,
     note: Option<String>,
+    landing: Option<String>,
 ) -> Result<i32> {
     let hostname = super::local_hostname();
     let cwd = ctx.cwd.clone();
@@ -2082,6 +2098,7 @@ fn verify_all_parallel(
             note: note.clone(),
             falsification: None,
             against_target: None,
+            landing: landing.clone(),
         })
         .collect::<Vec<_>>();
     for input in &inputs {
@@ -2464,6 +2481,7 @@ fn execute_verification(
         note,
         falsification,
         against_target,
+        landing,
     } = input;
     let attested = attested_result.is_some();
     let (result, exit_code, duration_ms, output_tail, output_artifact, timed_out) =
@@ -2512,6 +2530,7 @@ fn execute_verification(
         note,
         falsification,
         against_target,
+        landing,
         // Filled in by the caller, which is what sees the worktree on both
         // sides of the run.
         tested_tree: None,
@@ -2612,6 +2631,7 @@ fn record_verifications(
             // naming a revision this repository does not have.
             tree: gitio::commit_tree(&ctx.cwd, &revision).ok(),
             against_target: item.against_target,
+            landing: item.landing,
             // Set below, once the tree is pinned.
             tested_tree: None,
             worktree_dirty: item.worktree_dirty,
@@ -3591,7 +3611,7 @@ enum ClosedBehavior {
 /// worktree holding the change branch, so checking the target out there puts
 /// the checkout back on the branch it stood on before `begin`. Any other
 /// shape refuses, naming the missing target checkout.
-fn target_checkout(ctx: &Ctx, st: &ChangeState, target: &str) -> Result<TargetCheckout> {
+pub(super) fn target_checkout(ctx: &Ctx, st: &ChangeState, target: &str) -> Result<TargetCheckout> {
     if let Some(path) = gitio::worktree_for_branch(&ctx.cwd, target)? {
         return Ok(TargetCheckout {
             path,
@@ -4450,7 +4470,7 @@ fn cleanup_local_content(
 
 /// The closure that satisfied each of the change's prerequisites, followed
 /// through supersession, read through one read of the ledger.
-fn prerequisite_closures(
+pub(super) fn prerequisite_closures(
     store: &Store,
     st: &ChangeState,
 ) -> Result<Vec<crate::model::PrerequisiteClosure>> {
@@ -4612,7 +4632,10 @@ fn consumed_declarations(
     Ok(normalized_declarations(declarations, st))
 }
 
-fn ensure_destination_actor(ctx: &Ctx, policy: &crate::policy::PolicyFile) -> Result<()> {
+pub(super) fn ensure_destination_actor(
+    ctx: &Ctx,
+    policy: &crate::policy::PolicyFile,
+) -> Result<()> {
     if policy.policy.require_declared_actor
         && !ctx.actor_source.declared()
         && ctx.on_behalf_of.is_none()
@@ -5490,7 +5513,7 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
 /// `journal_ref` plan with no open promotion. Best-effort: the closure it
 /// describes is already recorded, so a join that cannot be read is a warning
 /// rather than a failed close.
-fn advise_plan_promotions(store: &Store, st: &crate::state::ChangeState) {
+pub(super) fn advise_plan_promotions(store: &Store, st: &crate::state::ChangeState) {
     let Some(plan) = st.journal_ref.as_deref() else {
         return;
     };
@@ -5684,7 +5707,11 @@ fn render_changelog_none(reason: Option<&str>) {
 /// rewrite replaced is on no branch, so it is almost never one the
 /// integration reaches; where one is, history holds it and the ref is
 /// redundant.
-fn release_retention_refs(ctx: &Ctx, change_id: &str, integrated: Option<&str>) -> Result<()> {
+pub(super) fn release_retention_refs(
+    ctx: &Ctx,
+    change_id: &str,
+    integrated: Option<&str>,
+) -> Result<()> {
     for (prefix, what) in [
         (gitio::retention_prefix(change_id), "head"),
         (gitio::retained_prefix(change_id), "commit"),

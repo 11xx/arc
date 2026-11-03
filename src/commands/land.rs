@@ -1,11 +1,12 @@
 //! Must-land-together relations, and `arc land`: several changes installed on
 //! their target by one guarded transition.
 
+use crate::gitio;
 use crate::landing::{self, Landings};
 use crate::model::{Closure, Payload};
 use crate::state::ChangeState;
 use crate::store::Store;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -198,4 +199,1592 @@ pub fn describe_block(change_id: &str, report: &LandsWithReport) -> String {
             report.remedy(change_id)
         )
     }
+}
+
+/// Everything `arc land` was asked for.
+pub struct LandArgs {
+    pub changes: Vec<String>,
+    pub target: Option<String>,
+    pub debt: Option<String>,
+    pub dry_run: bool,
+    pub json: bool,
+    pub recover: Option<String>,
+    pub abandon: Option<String>,
+    pub reason: Option<String>,
+}
+
+pub const PLAN_SCHEMA: &str = "arc-landing-plan/1";
+
+/// A refusal with the exit code of the blocker it answers to.
+struct Refusal {
+    code: i32,
+    message: String,
+}
+
+fn refuse<T>(code: i32, message: impl Into<String>) -> Result<std::result::Result<T, Refusal>> {
+    Ok(Err(Refusal {
+        code,
+        message: message.into(),
+    }))
+}
+
+/// One member as the plan pins it. Commit compares a fresh reading of every
+/// field with this one, and any difference refuses naming the field.
+#[derive(Debug, Clone, Serialize)]
+struct MemberPin {
+    change_id: String,
+    slug: String,
+    patchset_id: String,
+    base: String,
+    head: String,
+    /// Where the change's branch stands now.
+    branch_head: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    brief_digest: Option<String>,
+    /// Every verdict recorded on the patchset, by event.
+    verdicts: Vec<String>,
+    external_verdicts: Vec<String>,
+    approval: ApprovalPin,
+    holds: Vec<String>,
+    blocking_findings: Vec<String>,
+    /// The latest debt declared on the change, by event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    debt: Option<String>,
+    /// The debt this landing would declare in place of an absent approval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    planned_debt: Option<PlannedDebt>,
+    lands_with: Vec<String>,
+    prerequisites: Vec<PrerequisitePin>,
+    /// The member's required gates and their declaration identities.
+    gates: BTreeMap<String, String>,
+    policy: serde_json::Value,
+    danger: crate::model::DangerScope,
+    iterating: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ApprovalPin {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verdict_event_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    external_verdict_event_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    debt_event_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PlannedDebt {
+    kind: crate::model::DebtMissing,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PrerequisitePin {
+    change_id: String,
+    /// `landing` for an earlier member of this landing, else the closure
+    /// event that satisfied it.
+    satisfied_by: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GateUnion {
+    identity: String,
+    binds: &'static str,
+    command: String,
+    required_by: Vec<String>,
+}
+
+/// What a landing would do, decided before anything is written.
+#[derive(Debug, Clone, Serialize)]
+struct Plan {
+    schema: &'static str,
+    target_branch: String,
+    target_before: String,
+    target_after: String,
+    tree: String,
+    members: Vec<MemberPin>,
+    components: Vec<Vec<String>>,
+    gates: BTreeMap<String, GateUnion>,
+}
+
+/// A plan with the readings authorization is built from.
+struct Planned {
+    plan: Plan,
+    states: Vec<ChangeState>,
+    reports: Vec<crate::status::StatusReport>,
+    declarations: Vec<crate::integration::Declarations>,
+}
+
+fn brief_digest(state: &ChangeState) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    state.latest_brief().map(|brief| {
+        format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(brief.body.as_bytes()))
+        )
+    })
+}
+
+/// Blockers a landing answers itself: gates run once at the top head, an
+/// earlier member satisfies a prerequisite, and the landing holds the whole
+/// component. Every other blocker refuses.
+fn landing_answers(blocker: crate::blockers::Blocker) -> bool {
+    use crate::blockers::Blocker;
+    matches!(
+        blocker,
+        Blocker::GatesNotGreen
+            | Blocker::MergedTreeUnevaluated
+            | Blocker::BlockedByChanges
+            | Blocker::LandsWith
+    )
+}
+
+/// Plan a stack landing of `references`. Reads only; a refusal carries the
+/// exit code of the blocker it answers to.
+fn plan(
+    ctx: &Ctx,
+    store: &Store,
+    references: &[String],
+    target: Option<&str>,
+    debt: Option<&str>,
+    attempt: Option<&str>,
+) -> Result<std::result::Result<Planned, Refusal>> {
+    use crate::blockers::Blocker;
+    if references.is_empty() {
+        bail!("name the changes to land, in landing order");
+    }
+    let mut ids = Vec::new();
+    for reference in references {
+        let id = store.resolve_change(reference)?;
+        if ids.contains(&id) {
+            bail!("{id} is named twice; each member lands once");
+        }
+        ids.push(id);
+    }
+    let states = store.readable_states()?;
+    let mut members = Vec::new();
+    for id in &ids {
+        let state = states
+            .get(id)
+            .cloned()
+            .with_context(|| format!("{id} cannot be read"))?;
+        members.push(state);
+    }
+    let target = match target {
+        Some(target) => target.to_string(),
+        None => members[0].target_branch.clone(),
+    };
+    for member in &members {
+        if member.is_closed() {
+            return refuse(
+                Blocker::Closed.exit_code(),
+                format!("{} is already closed", member.change_id),
+            );
+        }
+        if let Some(pending) = member
+            .pending_landing
+            .as_deref()
+            .filter(|pending| Some(*pending) != attempt)
+        {
+            return refuse(
+                Blocker::LandingPending.exit_code(),
+                format!(
+                    "{} is a member of pending landing {pending}; finish it with `arc land \
+                     --recover {pending}`",
+                    member.change_id
+                ),
+            );
+        }
+        if member.target_branch != target {
+            return refuse(
+                1,
+                format!(
+                    "{} targets {}, not {target}; one landing moves one target",
+                    member.change_id, member.target_branch
+                ),
+            );
+        }
+    }
+    let Ok(target_before) = gitio::branch_head(&ctx.cwd, &target) else {
+        return refuse(
+            Blocker::TargetUnreadable.exit_code(),
+            format!("target branch {target:?} cannot be resolved"),
+        );
+    };
+
+    // The stack shape: each member stands on the one before it, the first on
+    // the target as it is now, and each branch holds its recorded patchset.
+    let mut unchained = Vec::new();
+    let mut expected_base = target_before.clone();
+    for member in &members {
+        let Some(patchset) = member.latest_patchset() else {
+            return refuse(
+                Blocker::NoValidApproval.exit_code(),
+                format!("{} has no patchset; snapshot it first", member.change_id),
+            );
+        };
+        if gitio::branch_head(&ctx.cwd, &member.branch).ok().as_deref() != Some(&patchset.head) {
+            return refuse(
+                Blocker::NoValidApproval.exit_code(),
+                format!(
+                    "{}'s branch moved from its recorded patchset {}; snapshot it first",
+                    member.change_id, patchset.id
+                ),
+            );
+        }
+        if patchset.base != expected_base {
+            unchained.push(format!(
+                "{} stands on {}, not {}",
+                member.change_id,
+                crate::render::short_sha(&patchset.base),
+                crate::render::short_sha(&expected_base)
+            ));
+        }
+        expected_base = patchset.head.clone();
+    }
+    if !unchained.is_empty() {
+        return refuse(
+            Blocker::NeedsRebase.exit_code(),
+            format!(
+                "the members do not stack on {target} at {} in the order given: {}",
+                crate::render::short_sha(&target_before),
+                unchained.join("; ")
+            ),
+        );
+    }
+    let target_after = expected_base;
+    let tree = gitio::commit_tree(&ctx.cwd, &target_after)?;
+
+    // Must-land-together components travel whole.
+    let mut components: Vec<Vec<String>> = Vec::new();
+    for member in &members {
+        let Some(report) = lands_with_report(member, &states) else {
+            continue;
+        };
+        if !report.wedged_members.is_empty() {
+            return refuse(
+                Blocker::LandsWith.exit_code(),
+                describe_block(&member.change_id, &report),
+            );
+        }
+        let missing: Vec<&String> = report
+            .open_members
+            .iter()
+            .filter(|other| !ids.contains(other))
+            .collect();
+        if !missing.is_empty() {
+            let mut all = ids.clone();
+            all.extend(missing.iter().map(|other| (*other).clone()));
+            return refuse(
+                Blocker::LandsWith.exit_code(),
+                format!(
+                    "{} must land with {}, which this landing leaves out: arc land {}",
+                    member.change_id,
+                    missing
+                        .iter()
+                        .map(|other| other.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    all.join(" ")
+                ),
+            );
+        }
+        let mut component: Vec<String> = member.lands_with.clone();
+        component.push(member.change_id.clone());
+        component.sort();
+        if !components.contains(&component) {
+            components.push(component);
+        }
+    }
+
+    // The destination governs every member: its policy at the revision the
+    // landing starts from.
+    let policy = crate::policy::load_at(&ctx.cwd, &target_before)?;
+    super::gatekeeping::ensure_destination_actor(ctx, &policy)?;
+    if policy.contribution.is_some() {
+        return refuse(
+            1,
+            format!("{target} receives contributions one change at a time; integrate each"),
+        );
+    }
+    let style = crate::style::resolved_style_with_policy(&policy, Default::default())?;
+    if style.shape() != crate::integration::Shape::FfOnly {
+        return refuse(
+            1,
+            format!(
+                "{target} integrates with a merge commit; a stack landing fast-forwards it, so \
+                 integrate each member"
+            ),
+        );
+    }
+    if policy.integration_history == crate::policy::History::Squash {
+        let count: usize = gitio::git(
+            &ctx.cwd,
+            &[
+                "rev-list",
+                "--count",
+                &format!("{target_before}..{target_after}"),
+            ],
+        )?
+        .trim()
+        .parse()?;
+        if count > 1 {
+            return refuse(
+                1,
+                format!(
+                    "integration history is squash and the landing has {count} commits since \
+                     {}; squash each member and land one commit",
+                    crate::render::short_sha(&target_before)
+                ),
+            );
+        }
+    }
+
+    let mut pins = Vec::new();
+    let mut reports = Vec::new();
+    let mut projected_states = Vec::new();
+    let mut declarations_used = Vec::new();
+    let mut union: BTreeMap<String, GateUnion> = BTreeMap::new();
+    let top_index = members.len() - 1;
+    let mut top_gates: BTreeMap<String, String> = BTreeMap::new();
+    for (index, member) in members.iter().enumerate() {
+        let mut selected = member.clone();
+        selected.target_branch = target.clone();
+        ctx.ensure_target_declares_actor(&selected)?;
+        let mut report = ctx.report_for_integration(
+            store,
+            &selected,
+            &target,
+            crate::integration::Shape::FfOnly,
+        )?;
+        let mut planned_debt = None;
+        if report.blockers().contains(&Blocker::NoValidApproval) {
+            if let Some(reason) = debt {
+                let debt_plan = super::audit::plan_debt(
+                    ctx,
+                    store,
+                    &selected,
+                    reason,
+                    None,
+                    &super::audit::IneligibleInputs::default(),
+                )?;
+                if let Payload::DebtDeclared { missing, .. } = debt_plan.payload() {
+                    planned_debt = Some(PlannedDebt {
+                        kind: *missing,
+                        reason: reason.trim().to_string(),
+                    });
+                }
+                selected = debt_plan.projected(store, &selected)?;
+                selected.target_branch = target.clone();
+                report = ctx.report_for_integration(
+                    store,
+                    &selected,
+                    &target,
+                    crate::integration::Shape::FfOnly,
+                )?;
+            }
+        }
+        if member.iterating {
+            return refuse(
+                Blocker::Iterating.exit_code(),
+                format!(
+                    "{} declares it is iterating; clear it with arc iterating {} --off",
+                    member.change_id, member.change_id
+                ),
+            );
+        }
+        // Prerequisites: an earlier member satisfies one inside this
+        // landing; any other must already be integrated.
+        let mut prerequisites = Vec::new();
+        for prerequisite in &member.blocked_by {
+            if let Some(position) = ids.iter().position(|id| id == prerequisite) {
+                if position >= index {
+                    return refuse(
+                        Blocker::BlockedByChanges.exit_code(),
+                        format!(
+                            "{} needs {prerequisite} first; name {prerequisite} before it",
+                            member.change_id
+                        ),
+                    );
+                }
+                prerequisites.push(PrerequisitePin {
+                    change_id: prerequisite.clone(),
+                    satisfied_by: "landing".into(),
+                });
+                continue;
+            }
+            let ready = report
+                .blocker_status
+                .blockers_ready
+                .iter()
+                .find(|dependency| &dependency.change_id == prerequisite);
+            match ready {
+                Some(dependency) if dependency.integrated => prerequisites.push(PrerequisitePin {
+                    change_id: prerequisite.clone(),
+                    satisfied_by: states
+                        .get(prerequisite)
+                        .and_then(|state| state.closure.as_ref())
+                        .map(|closure| closure.event_id.clone())
+                        .unwrap_or_else(|| dependency.status.clone()),
+                }),
+                _ => {
+                    return refuse(
+                        Blocker::BlockedByChanges.exit_code(),
+                        format!(
+                            "{} needs {prerequisite}, which has not integrated and is not in \
+                             this landing",
+                            member.change_id
+                        ),
+                    )
+                }
+            }
+        }
+        // Its own attempt holds a member it is committing.
+        let held_by_this_attempt =
+            attempt.is_some() && member.pending_landing.as_deref() == attempt;
+        if let Some(blocker) = report.blockers().iter().find(|blocker| {
+            !landing_answers(**blocker)
+                && !(held_by_this_attempt && **blocker == Blocker::LandingPending)
+        }) {
+            let mut explanation = crate::render::blocker_explanation(&selected, &report);
+            if explanation.ends_with('\n') {
+                explanation.pop();
+            }
+            return refuse(blocker.exit_code(), explanation);
+        }
+        let patchset = selected
+            .latest_patchset()
+            .context("a planned member has a patchset")?
+            .clone();
+        let approval = crate::integration::approval(&selected, &report, &patchset.id);
+        let declarations = ctx.declarations(&selected)?;
+        let required: Vec<(String, String, bool, String)> = declarations
+            .gates
+            .required_for_event(&selected.profile, crate::model::GateEvent::Integration)
+            .into_iter()
+            .map(|(name, gate)| {
+                (
+                    name.clone(),
+                    crate::gates::declaration_identity(gate),
+                    gate.binds.is_tree(),
+                    gate.command.clone(),
+                )
+            })
+            .collect();
+        let mut gates = BTreeMap::new();
+        for (name, identity, binds_tree, command) in required {
+            let name = &name;
+            match union.get_mut(name) {
+                Some(existing) if existing.identity != identity => {
+                    return refuse(
+                        Blocker::GatesNotGreen.exit_code(),
+                        format!(
+                            "gate {name:?} is declared one way for {} and another for {}; \
+                             one landing runs one declaration of each gate",
+                            existing.required_by.join(", "),
+                            member.change_id
+                        ),
+                    );
+                }
+                Some(existing) => existing.required_by.push(member.change_id.clone()),
+                None => {
+                    union.insert(
+                        name.clone(),
+                        GateUnion {
+                            identity: identity.clone(),
+                            binds: if binds_tree { "tree" } else { "commit" },
+                            command: command.clone(),
+                            required_by: vec![member.change_id.clone()],
+                        },
+                    );
+                }
+            }
+            gates.insert(name.clone(), identity);
+        }
+        if index == top_index {
+            top_gates = gates.clone();
+        }
+        let normalized = super::gatekeeping::normalized_declarations(declarations, &selected);
+        pins.push(MemberPin {
+            change_id: member.change_id.clone(),
+            slug: member.slug.clone(),
+            patchset_id: patchset.id.clone(),
+            base: patchset.base.clone(),
+            head: patchset.head.clone(),
+            branch_head: gitio::branch_head(&ctx.cwd, &member.branch).ok(),
+            brief_digest: brief_digest(member),
+            verdicts: member
+                .verdicts
+                .iter()
+                .filter(|verdict| verdict.patchset_id == patchset.id)
+                .map(|verdict| verdict.event_id.clone())
+                .collect(),
+            external_verdicts: member
+                .external_verdicts
+                .iter()
+                .map(|verdict| verdict.event_id.clone())
+                .collect(),
+            approval: ApprovalPin {
+                verdict_event_id: approval.verdict_event_id.clone(),
+                external_verdict_event_id: approval
+                    .external_verdict
+                    .as_ref()
+                    .map(|external| external.event_id.clone()),
+                debt_event_id: planned_debt
+                    .is_none()
+                    .then(|| approval.audit_debt_event_id.clone())
+                    .flatten(),
+            },
+            holds: member.holds.keys().cloned().collect(),
+            blocking_findings: report.open_blocking_findings.clone(),
+            debt: member.debt.as_ref().map(|debt| debt.event_id.clone()),
+            planned_debt,
+            lands_with: member.lands_with.clone(),
+            prerequisites,
+            gates,
+            policy: serde_json::to_value(&normalized.policy)?,
+            danger: report.danger.clone(),
+            iterating: member.iterating,
+        });
+        reports.push(report);
+        projected_states.push(selected);
+        declarations_used.push(normalized);
+    }
+    // One gate set runs, at the top head: every gate a member requires must
+    // be one the top head requires, under the same declaration.
+    for (name, gate) in &union {
+        if top_gates.get(name) != Some(&gate.identity) {
+            return refuse(
+                Blocker::GatesNotGreen.exit_code(),
+                format!(
+                    "{} requires gate {name:?}, which the top head {} does not declare the \
+                     same way; the landing runs one gate set at the top head",
+                    gate.required_by.join(", "),
+                    crate::render::short_sha(&target_after)
+                ),
+            );
+        }
+    }
+    Ok(Ok(Planned {
+        plan: Plan {
+            schema: PLAN_SCHEMA,
+            target_branch: target,
+            target_before,
+            target_after,
+            tree,
+            members: pins,
+            components,
+            gates: union,
+        },
+        states: projected_states,
+        reports,
+        declarations: declarations_used,
+    }))
+}
+
+/// The facts a landing pins, read straight from the ledger and Git with no
+/// judgement over them, so a moved one is named even where the fresh plan
+/// would refuse for it.
+fn observe(
+    ctx: &Ctx,
+    store: &Store,
+    members: &[String],
+    target: &str,
+) -> Result<serde_json::Value> {
+    let states = store.readable_states()?;
+    let mut observed = serde_json::Map::new();
+    observed.insert(
+        "target_before".into(),
+        serde_json::json!(gitio::branch_head(&ctx.cwd, target).ok()),
+    );
+    for id in members {
+        let Some(state) = states.get(id) else {
+            observed.insert(id.clone(), serde_json::Value::Null);
+            continue;
+        };
+        let patchset = state.latest_patchset();
+        let mut findings: Vec<String> = state
+            .open_blocking_findings()
+            .iter()
+            .map(|finding| finding.id.clone())
+            .collect();
+        findings.sort();
+        observed.insert(
+            id.clone(),
+            serde_json::json!({
+                "lifecycle": state.closure.as_ref().map(|closure| format!("{:?}", closure.outcome)),
+                "pending_landing": state.pending_landing,
+                "patchset_id": patchset.map(|patchset| &patchset.id),
+                "base": patchset.map(|patchset| &patchset.base),
+                "head": patchset.map(|patchset| &patchset.head),
+                "branch_head": gitio::branch_head(&ctx.cwd, &state.branch).ok(),
+                "brief_digest": brief_digest(state),
+                "verdicts": state.verdicts.iter().map(|verdict| &verdict.event_id).collect::<Vec<_>>(),
+                "external_verdicts": state
+                    .external_verdicts
+                    .iter()
+                    .map(|verdict| &verdict.event_id)
+                    .collect::<Vec<_>>(),
+                "holds": state.holds.keys().collect::<Vec<_>>(),
+                "blocking_findings": findings,
+                "debt": state.debt.as_ref().map(|debt| &debt.event_id),
+                "lands_with": state.lands_with,
+                "blocked_by": state.blocked_by,
+                "iterating": state.iterating,
+            }),
+        );
+    }
+    Ok(serde_json::Value::Object(observed))
+}
+
+/// The first observed fact that differs between two readings.
+fn moved_observation(pinned: &serde_json::Value, fresh: &serde_json::Value) -> Option<String> {
+    if pinned["target_before"] != fresh["target_before"] {
+        return Some("target_before".into());
+    }
+    let members = pinned.as_object()?;
+    for (id, old) in members.iter().filter(|(key, _)| *key != "target_before") {
+        let new = &fresh[id.as_str()];
+        let (Some(old_fields), Some(new_fields)) = (old.as_object(), new.as_object()) else {
+            if old != new {
+                return Some(id.clone());
+            }
+            continue;
+        };
+        for (key, value) in old_fields {
+            // Its own attempt holds a member once prepared.
+            if key == "pending_landing" {
+                continue;
+            }
+            if new_fields.get(key) != Some(value) {
+                return Some(format!("{id}.{key}"));
+            }
+        }
+    }
+    None
+}
+
+/// The first field where two readings of a plan differ, named by member.
+fn moved_field(pinned: &Plan, fresh: &Plan) -> Result<Option<String>> {
+    let pinned = serde_json::to_value(pinned)?;
+    let fresh = serde_json::to_value(fresh)?;
+    for key in [
+        "target_branch",
+        "target_before",
+        "target_after",
+        "tree",
+        "components",
+        "gates",
+    ] {
+        if pinned[key] != fresh[key] {
+            return Ok(Some(key.to_string()));
+        }
+    }
+    let (Some(old), Some(new)) = (pinned["members"].as_array(), fresh["members"].as_array()) else {
+        return Ok(Some("members".into()));
+    };
+    if old.len() != new.len() {
+        return Ok(Some("members".into()));
+    }
+    for (old, new) in old.iter().zip(new) {
+        let (Some(old_fields), Some(new_fields)) = (old.as_object(), new.as_object()) else {
+            continue;
+        };
+        let mut keys: Vec<&String> = old_fields.keys().chain(new_fields.keys()).collect();
+        keys.sort();
+        keys.dedup();
+        for key in keys {
+            if old_fields.get(key) != new_fields.get(key) {
+                return Ok(Some(format!(
+                    "{}.{key}",
+                    old["change_id"].as_str().unwrap_or("member")
+                )));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn print_plan(plan: &Plan, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(plan)?);
+        return Ok(());
+    }
+    println!(
+        "land onto {} at {} -> {} (tree {})",
+        plan.target_branch,
+        crate::render::short_sha(&plan.target_before),
+        crate::render::short_sha(&plan.target_after),
+        crate::render::short_sha(&plan.tree)
+    );
+    for (index, member) in plan.members.iter().enumerate() {
+        let basis = match (&member.approval, &member.planned_debt) {
+            (_, Some(debt)) => format!("debt {} would be declared", debt.kind.as_str()),
+            (approval, None) => approval
+                .verdict_event_id
+                .as_deref()
+                .map(|id| format!("verdict {id}"))
+                .or_else(|| {
+                    approval
+                        .external_verdict_event_id
+                        .as_deref()
+                        .map(|id| format!("external verdict {id}"))
+                })
+                .or_else(|| {
+                    approval
+                        .debt_event_id
+                        .as_deref()
+                        .map(|id| format!("debt {id}"))
+                })
+                .unwrap_or_else(|| "no approval".into()),
+        };
+        println!(
+            "  {}. {} ({}) {} {}..{}: {basis}",
+            index + 1,
+            member.slug,
+            member.change_id,
+            member.patchset_id,
+            crate::render::short_sha(&member.base),
+            crate::render::short_sha(&member.head),
+        );
+    }
+    for component in &plan.components {
+        println!("  lands together: {}", component.join(", "));
+    }
+    for (name, gate) in &plan.gates {
+        println!(
+            "  gate {name} (binds {}): required by {}",
+            gate.binds,
+            gate.required_by.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// Stop a test run at a named point, as a crash there would.
+fn crash_point(phase: &str) {
+    #[cfg(debug_assertions)]
+    if std::env::var("ARC_TEST_LANDING_CRASH").as_deref() == Ok(phase) {
+        eprintln!("arc test: landing stopped at {phase}");
+        std::process::exit(86);
+    }
+    let _ = phase;
+}
+
+/// Run `arc land`.
+pub fn land(ctx: &Ctx, args: LandArgs) -> Result<i32> {
+    if let Some(attempt) = args.recover.as_deref() {
+        if !args.changes.is_empty() || args.abandon.is_some() || args.debt.is_some() {
+            bail!("--recover takes only the attempt it finishes");
+        }
+        return recover(ctx, attempt);
+    }
+    if let Some(attempt) = args.abandon.as_deref() {
+        let reason = args
+            .reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+            .context("--abandon needs --reason: say why the attempt will not finish")?;
+        if !args.changes.is_empty() || args.debt.is_some() {
+            bail!("--abandon takes only the attempt it abandons");
+        }
+        return abandon_command(ctx, attempt, reason);
+    }
+    if args.reason.is_some() {
+        bail!("--reason explains --abandon");
+    }
+    if args.json && !args.dry_run {
+        bail!("--json prints the plan; pass it with --dry-run");
+    }
+    let store = ctx.store()?;
+    ctx.ensure_declared_actor(&store)?;
+    if let Some(refusal) = crate::replica::integration_refusal(&store)? {
+        eprintln!("Cannot land: {refusal}");
+        return Ok(crate::replica::INTEGRATION_AUTHORITY_EXIT_CODE);
+    }
+    let started_at = chrono::Utc::now();
+    let planned = match plan(
+        ctx,
+        &store,
+        &args.changes,
+        args.target.as_deref(),
+        args.debt.as_deref(),
+        None,
+    )? {
+        Ok(planned) => planned,
+        Err(refusal) => {
+            eprintln!("Cannot land: {}", refusal.message);
+            return Ok(refusal.code);
+        }
+    };
+    if args.dry_run {
+        print_plan(&planned.plan, args.json)?;
+        return Ok(0);
+    }
+    let pinned = planned.plan;
+    let member_ids: Vec<String> = pinned
+        .members
+        .iter()
+        .map(|member| member.change_id.clone())
+        .collect();
+    let observed = observe(ctx, &store, &member_ids, &pinned.target_branch)?;
+
+    // Intent, durable before anything moves.
+    let attempt = crate::ids::new_identifier();
+    let pins: Vec<crate::model::LandingPin> = pinned
+        .members
+        .iter()
+        .map(|member| crate::model::LandingPin {
+            change_id: member.change_id.clone(),
+            patchset_id: member.patchset_id.clone(),
+            base: member.base.clone(),
+            head: member.head.clone(),
+            brief_digest: member.brief_digest.clone(),
+        })
+        .collect();
+    let intent = landing::Intent {
+        schema: landing::INTENT_SCHEMA.into(),
+        attempt: attempt.clone(),
+        phase: landing::Phase::Prepared,
+        target_branch: pinned.target_branch.clone(),
+        target_before: pinned.target_before.clone(),
+        target_after: pinned.target_after.clone(),
+        members: pins.clone(),
+        completion: None,
+    };
+    store.write_landing_intent(&intent)?;
+    {
+        let _repository_events = store.lock_repository_events()?;
+        let mut prepared = ctx.event(
+            &store,
+            Store::REPOSITORY_SCOPE,
+            Payload::LandingPrepared {
+                attempt: attempt.clone(),
+                target_branch: pinned.target_branch.clone(),
+                target_before: pinned.target_before.clone(),
+                members: pins,
+            },
+        )?;
+        store.append_local_repository_event(&mut prepared)?;
+    }
+    println!("landing: {attempt}");
+    crash_point("prepared");
+
+    // One gate run at the top head, with no ledger or change lock held: a
+    // gate command may itself run arc.
+    let top = pinned
+        .members
+        .last()
+        .context("a plan has members")?
+        .change_id
+        .clone();
+    let gated = super::gatekeeping::verify(
+        ctx,
+        &top,
+        super::gatekeeping::VerifyArgs {
+            event: Some(crate::model::GateEvent::Integration),
+            all: true,
+            parallel: false,
+            rerun: false,
+            gate: None,
+            command: None,
+            probe: None,
+            brief_version: None,
+            probe_phase: None,
+            attest: false,
+            after_integration: false,
+            result: None,
+            tested_revision: None,
+            execution_host: None,
+            runner: None,
+            environment: None,
+            note: None,
+            waive_dirty: None,
+            falsified_by: None,
+            predicted: None,
+            against: None,
+            bypass: None,
+            landing: Some(attempt.clone()),
+        },
+    );
+    let gate_code = match gated {
+        Ok(code) => code,
+        Err(error) => {
+            abandon(
+                ctx,
+                &store,
+                &attempt,
+                &format!("gates did not run: {error:#}"),
+            )?;
+            return Err(error);
+        }
+    };
+    if gate_code != 0 {
+        abandon(
+            ctx,
+            &store,
+            &attempt,
+            "a required gate failed at the top head",
+        )?;
+        eprintln!("Cannot land: a required gate failed at the top head; nothing closed");
+        return Ok(crate::blockers::Blocker::GatesNotGreen.exit_code());
+    }
+    crash_point("gated");
+    super::pause_until_released("ARC_LAND_PAUSE")?;
+
+    commit(ctx, &store, &args, pinned, &observed, intent, started_at)
+}
+
+/// Revalidate under the commit guards, authorize, move the target, and
+/// publish the completion.
+fn commit(
+    ctx: &Ctx,
+    store: &Store,
+    args: &LandArgs,
+    pinned: Plan,
+    observed: &serde_json::Value,
+    mut intent: landing::Intent,
+    started_at: chrono::DateTime<chrono::Utc>,
+) -> Result<i32> {
+    let attempt = intent.attempt.clone();
+    let _authority = crate::replica::lock(store)?;
+    if let Some(refusal) = crate::replica::integration_refusal(store)? {
+        abandon(
+            ctx,
+            store,
+            &attempt,
+            &format!("integration authority: {refusal}"),
+        )?;
+        eprintln!("Cannot land: {refusal}");
+        return Ok(crate::replica::INTEGRATION_AUTHORITY_EXIT_CODE);
+    }
+    let _target = store.lock_target(&pinned.target_branch)?;
+    let _graph = store.lock_graph()?;
+    let mut sorted: Vec<&String> = pinned
+        .members
+        .iter()
+        .map(|member| &member.change_id)
+        .collect();
+    sorted.sort();
+    let mut _transitions = Vec::new();
+    for change_id in sorted {
+        _transitions.push(store.lock_transition(change_id)?);
+    }
+    let _repository_events = store.lock_repository_events()?;
+
+    let references: Vec<String> = pinned
+        .members
+        .iter()
+        .map(|member| member.change_id.clone())
+        .collect();
+    let now = observe(ctx, store, &references, &pinned.target_branch)?;
+    if let Some(field) = moved_observation(observed, &now) {
+        abandon_locked(ctx, store, &attempt, &format!("stale-{field}"))?;
+        bail!("{field} moved while landing {attempt} was gated; nothing closed, land again");
+    }
+    let fresh = match plan(
+        ctx,
+        store,
+        &references,
+        Some(&pinned.target_branch),
+        args.debt.as_deref(),
+        Some(&attempt),
+    )? {
+        Ok(fresh) => fresh,
+        Err(refusal) => {
+            abandon_locked(ctx, store, &attempt, &format!("stale: {}", refusal.message))?;
+            eprintln!("Cannot land: {}; nothing closed", refusal.message);
+            return Ok(refusal.code);
+        }
+    };
+    if let Some(field) = moved_field(&pinned, &fresh.plan)? {
+        abandon_locked(ctx, store, &attempt, &format!("stale-{field}"))?;
+        bail!("{field} moved while landing {attempt} was gated; nothing closed, land again");
+    }
+    let plan = fresh.plan;
+    let top_index = plan.members.len() - 1;
+    let top_report = &fresh.reports[top_index];
+    let mut gate_evidence = BTreeMap::new();
+    for gate in &top_report.gates {
+        if !plan.gates.contains_key(&gate.name) {
+            continue;
+        }
+        match (&gate.evidence_event_id, gate.green_at_head) {
+            (Some(evidence), true) => {
+                gate_evidence.insert(gate.name.clone(), evidence.clone());
+            }
+            _ => {
+                abandon_locked(
+                    ctx,
+                    store,
+                    &attempt,
+                    "a required gate is not green at the top head",
+                )?;
+                eprintln!(
+                    "Cannot land: gate {} is not green at the top head; nothing closed",
+                    gate.name
+                );
+                return Ok(crate::blockers::Blocker::GatesNotGreen.exit_code());
+            }
+        }
+    }
+    if let Some(missing) = plan
+        .gates
+        .keys()
+        .find(|name| !gate_evidence.contains_key(*name))
+    {
+        abandon_locked(
+            ctx,
+            store,
+            &attempt,
+            "a required gate has no evidence at the top head",
+        )?;
+        eprintln!("Cannot land: gate {missing} has no evidence at the top head; nothing closed");
+        return Ok(crate::blockers::Blocker::GatesNotGreen.exit_code());
+    }
+
+    // The checkout the target is installed in, when one holds it.
+    let checkout = gitio::worktree_for_branch(&ctx.cwd, &plan.target_branch)?;
+    if let Some(path) = &checkout {
+        let checkout = crate::integration::TargetCheckout {
+            path: path.clone(),
+            switch_from: None,
+        };
+        let refusal = (|| -> Result<()> {
+            if gitio::head(path)? != plan.target_before {
+                bail!("{} is not at {}", path.display(), plan.target_before);
+            }
+            super::gatekeeping::checkout_tracked_dirt(path)?;
+            super::gatekeeping::checkout_writes(&checkout, &plan.target_before, Some(&plan.tree))
+        })();
+        if let Err(error) = refusal {
+            abandon_locked(ctx, store, &attempt, &format!("target checkout: {error:#}"))?;
+            return Err(error);
+        }
+    }
+    for state in &fresh.states {
+        if let Some(worktree) = state.worktree.as_deref() {
+            crate::journal::promote_worktree_spool(ctx, std::path::Path::new(worktree));
+        }
+    }
+
+    // Authorize: the exact completion and its basis are saved before the
+    // target moves.
+    // Planned against the change as its ledger holds it, not the projection
+    // that already reads the planned declaration.
+    let debts: Vec<Option<super::audit::DebtPlan>> = plan
+        .members
+        .iter()
+        .map(|member| {
+            member
+                .planned_debt
+                .as_ref()
+                .map(|debt| {
+                    let mut recorded = store.state(&member.change_id)?;
+                    recorded.target_branch = plan.target_branch.clone();
+                    super::audit::plan_debt(
+                        ctx,
+                        store,
+                        &recorded,
+                        &debt.reason,
+                        None,
+                        &super::audit::IneligibleInputs::default(),
+                    )
+                })
+                .transpose()
+                .map(|plan| plan.filter(|plan| plan.restated_event_id().is_none()))
+        })
+        .collect::<Result<_>>()?;
+    let reserved = debts.iter().filter(|debt| debt.is_some()).count() + plan.members.len() + 1;
+    let lander = ctx
+        .event(
+            store,
+            Store::REPOSITORY_SCOPE,
+            Payload::LandingAbandoned {
+                attempt: attempt.clone(),
+                reason: String::new(),
+            },
+        )?
+        .into_event();
+    let built = |ids: Vec<String>| -> Result<landing::Intent> {
+        let mut ids = ids.into_iter();
+        let mut debt_ids = Vec::new();
+        for debt in &debts {
+            debt_ids.push(debt.as_ref().map(|_| ids.next().expect("reserved")));
+        }
+        let closure_ids: Vec<String> = plan
+            .members
+            .iter()
+            .map(|_| ids.next().expect("reserved"))
+            .collect();
+        let completion_id = ids.next().expect("reserved");
+        let mut landed = Vec::new();
+        for (index, member) in plan.members.iter().enumerate() {
+            let state = &fresh.states[index];
+            let report = &fresh.reports[index];
+            let approval = crate::integration::approval(state, report, &member.patchset_id);
+            let mut prerequisites = super::gatekeeping::prerequisite_closures(store, state)?;
+            for prerequisite in &member.prerequisites {
+                if prerequisite.satisfied_by != "landing" {
+                    continue;
+                }
+                let position = plan
+                    .members
+                    .iter()
+                    .position(|other| other.change_id == prerequisite.change_id)
+                    .context("a landing prerequisite is a member")?;
+                prerequisites.push(crate::model::PrerequisiteClosure {
+                    change_id: prerequisite.change_id.clone(),
+                    closure_event_id: closure_ids[position].clone(),
+                    integrated_commit: Some(plan.members[position].head.clone()),
+                    landing: Some(attempt.clone()),
+                });
+            }
+            let selected_verdict_provenance = approval
+                .verdict_event_id
+                .as_ref()
+                .and_then(|id| {
+                    state
+                        .verdicts
+                        .iter()
+                        .find(|verdict| &verdict.event_id == id)
+                })
+                .map(
+                    |verdict| crate::import_authorization::SelectedVerdictProvenance {
+                        origin_replica_id: verdict.origin_replica_id.clone(),
+                        admission_provenance: state
+                            .privilege_scope
+                            .as_ref()
+                            .map(|scope| scope.provenance(&verdict.event_id))
+                            .unwrap_or("legacy-unknown")
+                            .into(),
+                        receipt: state
+                            .privilege_scope
+                            .as_ref()
+                            .and_then(|scope| scope.admission_for(&verdict.event_id))
+                            .cloned(),
+                    },
+                );
+            let debt = match (&debts[index], &debt_ids[index]) {
+                (Some(plan_debt), Some(event_id)) => match plan_debt.payload() {
+                    Payload::DebtDeclared {
+                        reason,
+                        patchset_id,
+                        missing,
+                        coverage,
+                        production,
+                        ..
+                    } => Some(crate::model::LandedDebt {
+                        event_id: event_id.clone(),
+                        reason: reason.clone(),
+                        patchset_id: patchset_id
+                            .clone()
+                            .unwrap_or_else(|| member.patchset_id.clone()),
+                        missing: *missing,
+                        coverage: coverage.clone(),
+                        production: production.clone(),
+                    }),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let declarations = fresh.declarations[index].clone();
+            landed.push(crate::model::LandedMember {
+                change_id: member.change_id.clone(),
+                closure_event_id: closure_ids[index].clone(),
+                source_patchset_id: member.patchset_id.clone(),
+                source_head: member.head.clone(),
+                range_base: member.base.clone(),
+                integrated_commit: member.head.clone(),
+                authorization: crate::model::AuthorizationBasis {
+                    selected_verdict_provenance,
+                    verdict_event_id: approval.verdict_event_id,
+                    external_verdict: approval.external_verdict,
+                    verdict_provisional: approval.verdict_provisional,
+                    gate_evidence: member
+                        .gates
+                        .keys()
+                        .filter_map(|name| {
+                            gate_evidence
+                                .get(name)
+                                .map(|evidence| (name.clone(), evidence.clone()))
+                        })
+                        .collect(),
+                    prerequisites,
+                    provisional_prerequisites: Vec::new(),
+                    blocking_findings: report.open_blocking_findings.clone(),
+                    holds: report
+                        .holds
+                        .iter()
+                        .map(|hold| hold.hold_event_id.clone())
+                        .collect(),
+                    gates: declarations.gates,
+                    policy: declarations.policy,
+                    danger: Some(report.danger.clone()),
+                    audit_debt_event_id: debt
+                        .as_ref()
+                        .map(|debt| debt.event_id.clone())
+                        .or(approval.audit_debt_event_id),
+                },
+                debt,
+            });
+        }
+        let mut completion = lander.clone();
+        completion.event_id = completion_id;
+        completion.created_at = chrono::Utc::now();
+        completion.payload = Payload::LandingCompleted {
+            attempt: attempt.clone(),
+            target_branch: plan.target_branch.clone(),
+            target_before: plan.target_before.clone(),
+            target_after: plan.target_after.clone(),
+            tree: plan.tree.clone(),
+            gate_evidence: gate_evidence.clone(),
+            members: landed,
+            started_at: Some(started_at),
+        };
+        let mut authorized = intent.clone();
+        authorized.phase = landing::Phase::Authorized;
+        authorized.completion = Some(completion);
+        Ok(authorized)
+    };
+    intent = store.reserve_landing_ids(reserved, built)?;
+    crash_point("authorized");
+
+    // Apply: the target and the applied ref move in one transaction.
+    let target_ref = format!("refs/heads/{}", plan.target_branch);
+    let applied = landing::applied_ref(&attempt);
+    if let Err(error) = gitio::update_refs(
+        &ctx.cwd,
+        &[
+            gitio::RefUpdate {
+                name: target_ref.clone(),
+                old: plan.target_before.clone(),
+                new: plan.target_after.clone(),
+            },
+            gitio::RefUpdate {
+                name: applied.clone(),
+                old: gitio::absent_oid(&plan.target_after),
+                new: plan.target_after.clone(),
+            },
+        ],
+    ) {
+        abandon_locked(
+            ctx,
+            store,
+            &attempt,
+            &format!("target did not move: {error:#}"),
+        )?;
+        return Err(error.context("the target did not move; nothing closed"));
+    }
+    crash_point("moved");
+    if let Err(error) = reconcile_checkout(
+        &ctx.cwd,
+        checkout.as_deref(),
+        &plan.target_branch,
+        &plan.target_before,
+        &plan.target_after,
+    ) {
+        let rollback = gitio::update_refs(
+            &ctx.cwd,
+            &[
+                gitio::RefUpdate {
+                    name: target_ref,
+                    old: plan.target_after.clone(),
+                    new: plan.target_before.clone(),
+                },
+                gitio::RefUpdate {
+                    name: applied,
+                    old: plan.target_after.clone(),
+                    new: gitio::absent_oid(&plan.target_after),
+                },
+            ],
+        );
+        return match rollback {
+            Ok(()) => {
+                abandon_locked(
+                    ctx,
+                    store,
+                    &attempt,
+                    &format!("checkout update failed: {error:#}"),
+                )?;
+                Err(error.context(
+                    "the target checkout could not be updated; the target was \
+                                   restored and nothing closed",
+                ))
+            }
+            Err(rollback) => Err(error.context(format!(
+                "the target checkout could not be updated and restoring the target failed \
+                 ({rollback:#}); run `arc land --recover {attempt}`"
+            ))),
+        };
+    }
+    intent.phase = landing::Phase::Applied;
+    store.write_landing_intent(&intent)?;
+    crash_point("applied");
+    publish(store, &mut intent)?;
+    drop(_repository_events);
+    drop(_transitions);
+    drop(_graph);
+    drop(_target);
+    finish(ctx, store, &intent)?;
+    Ok(0)
+}
+
+/// Bring the target checkout to `after`, where it still holds `before`, and
+/// confirm it. A checkout that holds neither is left alone and refused.
+fn reconcile_checkout(
+    cwd: &std::path::Path,
+    checkout: Option<&std::path::Path>,
+    target: &str,
+    before: &str,
+    after: &str,
+) -> Result<()> {
+    let Some(path) = checkout else {
+        return Ok(());
+    };
+    if gitio::current_branch(path)?.as_deref() != Some(target) {
+        bail!("{} no longer holds {target}", path.display());
+    }
+    let index = gitio::git(path, &["write-tree"])?;
+    let before_tree = gitio::commit_tree(cwd, before)?;
+    let after_tree = gitio::commit_tree(cwd, after)?;
+    let worktree_matches_index = gitio::git(path, &["diff-files", "--quiet"]).is_ok();
+    if index == before_tree && worktree_matches_index {
+        gitio::git(path, &["read-tree", "-u", "-m", before, after])?;
+    } else if !(index == after_tree && worktree_matches_index) {
+        bail!(
+            "{} matches neither {} nor {}; reconcile it by hand",
+            path.display(),
+            crate::render::short_sha(before),
+            crate::render::short_sha(after)
+        );
+    }
+    if gitio::head(path)? != after
+        || gitio::git(path, &["write-tree"])? != after_tree
+        || gitio::dirt(path)?.tracked
+    {
+        bail!("{} did not come to {after}", path.display());
+    }
+    Ok(())
+}
+
+/// Append the saved completion and record that it is published.
+fn publish(store: &Store, intent: &mut landing::Intent) -> Result<()> {
+    let completion = intent
+        .completion
+        .as_ref()
+        .context("an applied landing intent holds its completion")?;
+    store.publish_reserved_repository_event(completion)?;
+    intent.phase = landing::Phase::Published;
+    store.write_landing_intent(intent)
+}
+
+/// Cleanup after publication: the applied ref, the intent, and each member's
+/// retention pins.
+fn finish(ctx: &Ctx, store: &Store, intent: &landing::Intent) -> Result<()> {
+    let completion = intent
+        .completion
+        .as_ref()
+        .context("a published landing intent holds its completion")?;
+    println!(
+        "landed: {} into {} ({} members)",
+        crate::render::short_sha(&intent.target_after),
+        intent.target_branch,
+        intent.members.len()
+    );
+    println!("event: {}", completion.event_id);
+    for member in &intent.members {
+        if let Err(error) =
+            super::gatekeeping::release_retention_refs(ctx, &member.change_id, Some(&member.head))
+        {
+            eprintln!(
+                "warning: {} landed; retention cleanup failed: {error:#}",
+                member.change_id
+            );
+        }
+    }
+    let applied = landing::applied_ref(&intent.attempt);
+    if gitio::ref_value(&ctx.cwd, &applied)?.is_some() {
+        gitio::delete_ref(&ctx.cwd, &applied)?;
+    }
+    store.clear_landing_intent(&intent.attempt)
+}
+
+/// Record that the attempt closes nothing. The caller holds no
+/// repository-events lock.
+fn abandon(ctx: &Ctx, store: &Store, attempt: &str, reason: &str) -> Result<()> {
+    let _repository_events = store.lock_repository_events()?;
+    abandon_locked(ctx, store, attempt, reason)
+}
+
+/// `abandon`, for a caller holding the repository-events lock.
+fn abandon_locked(ctx: &Ctx, store: &Store, attempt: &str, reason: &str) -> Result<()> {
+    let landings = Landings::from_events(store.repository_events()?.iter());
+    if landings.completion(attempt).is_none() && landings.abandonment(attempt).is_none() {
+        let mut event = ctx.event(
+            store,
+            Store::REPOSITORY_SCOPE,
+            Payload::LandingAbandoned {
+                attempt: attempt.to_string(),
+                reason: reason.to_string(),
+            },
+        )?;
+        store.append_local_repository_event(&mut event)?;
+        println!("landing {attempt} abandoned: {reason}");
+    }
+    store.clear_landing_intent(attempt)
+}
+
+/// The attempt's target and members, from its intent or its prepared event.
+fn attempt_facts(store: &Store, attempt: &str) -> Result<(String, String, String, Vec<String>)> {
+    if let Some(intent) = store.landing_intent(attempt)? {
+        return Ok((
+            intent.target_branch,
+            intent.target_before,
+            intent.target_after,
+            intent
+                .members
+                .into_iter()
+                .map(|member| member.change_id)
+                .collect(),
+        ));
+    }
+    let landings = Landings::from_events(store.repository_events()?.iter());
+    match landings.prepared(attempt).map(|event| &event.payload) {
+        Some(Payload::LandingPrepared {
+            target_branch,
+            target_before,
+            members,
+            ..
+        }) => Ok((
+            target_branch.clone(),
+            target_before.clone(),
+            members
+                .last()
+                .map(|member| member.head.clone())
+                .unwrap_or_default(),
+            members
+                .iter()
+                .map(|member| member.change_id.clone())
+                .collect(),
+        )),
+        _ => bail!("no landing attempt {attempt} is recorded here"),
+    }
+}
+
+/// Take the commit guards an attempt's recovery or abandonment needs.
+fn attempt_locks(
+    store: &Store,
+    target: &str,
+    members: &[String],
+) -> Result<Vec<crate::store::TransitionLock>> {
+    let mut locks = vec![store.lock_target(target)?, store.lock_graph()?];
+    let mut sorted: Vec<&String> = members.iter().collect();
+    sorted.sort();
+    for member in sorted {
+        locks.push(store.lock_transition(member)?);
+    }
+    locks.push(store.lock_repository_events()?);
+    Ok(locks)
+}
+
+/// `arc land --recover <attempt>`: publish a saved, authorized completion
+/// whose applied ref exists, abandon an attempt that never moved the target,
+/// and report anything else without closing anything.
+fn recover(ctx: &Ctx, attempt: &str) -> Result<i32> {
+    let store = ctx.store()?;
+    ctx.ensure_declared_actor(&store)?;
+    let _authority = crate::replica::lock(&store)?;
+    let (target, before, after, members) = attempt_facts(&store, attempt)?;
+    let locks = attempt_locks(&store, &target, &members)?;
+    let landings = Landings::from_events(store.repository_events()?.iter());
+    if let Some(completion) = landings.completion(attempt) {
+        println!(
+            "landing {attempt} is complete: event {}",
+            completion.event_id
+        );
+        let applied = landing::applied_ref(attempt);
+        if gitio::ref_value(&ctx.cwd, &applied)?.is_some() {
+            gitio::delete_ref(&ctx.cwd, &applied)?;
+        }
+        store.clear_landing_intent(attempt)?;
+        return Ok(0);
+    }
+    if let Some(abandoned) = landings.abandonment(attempt) {
+        if let Payload::LandingAbandoned { reason, .. } = &abandoned.payload {
+            println!("landing {attempt} was abandoned: {reason}");
+        }
+        store.clear_landing_intent(attempt)?;
+        return Ok(0);
+    }
+    let intent = store.landing_intent(attempt)?;
+    let applied = gitio::ref_value(&ctx.cwd, &landing::applied_ref(attempt))?;
+    let target_now = gitio::branch_head(&ctx.cwd, &target).ok();
+    let authorized = intent
+        .as_ref()
+        .filter(|intent| intent.phase >= landing::Phase::Authorized && intent.completion.is_some());
+    match (authorized, applied.as_deref(), target_now.as_deref()) {
+        (Some(intent), Some(applied), _) if applied == intent.target_after => {
+            let mut intent = intent.clone();
+            let checkout = gitio::worktree_for_branch(&ctx.cwd, &target)?;
+            if let Err(error) =
+                reconcile_checkout(&ctx.cwd, checkout.as_deref(), &target, &before, &after)
+            {
+                eprintln!(
+                    "Cannot recover landing {attempt}: {error:#}; it stays pending until the \
+                     checkout holds either side"
+                );
+                return Ok(1);
+            }
+            if intent.phase < landing::Phase::Applied {
+                intent.phase = landing::Phase::Applied;
+                store.write_landing_intent(&intent)?;
+            }
+            publish(&store, &mut intent)?;
+            drop(locks);
+            finish(ctx, &store, &intent)?;
+            Ok(0)
+        }
+        (_, None, Some(now)) if now == before => {
+            abandon_locked(ctx, &store, attempt, "recovered: the target never moved")?;
+            Ok(0)
+        }
+        _ => {
+            eprintln!(
+                "Cannot recover landing {attempt}: {target} is at {}, the attempt started at {} \
+                 and {}; arc did not authorize that movement, so nothing closes. Inspect the \
+                 target, then `arc land --abandon {attempt} --reason <why>`",
+                target_now
+                    .as_deref()
+                    .map(crate::render::short_sha)
+                    .unwrap_or_else(|| "nothing".into()),
+                crate::render::short_sha(&before),
+                if applied.is_some() {
+                    "its applied ref has no authorized completion".to_string()
+                } else {
+                    "its applied ref is absent".to_string()
+                }
+            );
+            Ok(1)
+        }
+    }
+}
+
+/// `arc land --abandon <attempt> --reason <why>`.
+fn abandon_command(ctx: &Ctx, attempt: &str, reason: &str) -> Result<i32> {
+    let store = ctx.store()?;
+    ctx.ensure_declared_actor(&store)?;
+    let _authority = crate::replica::lock(&store)?;
+    let (target, _, _, members) = attempt_facts(&store, attempt)?;
+    let _locks = attempt_locks(&store, &target, &members)?;
+    let landings = Landings::from_events(store.repository_events()?.iter());
+    if landings.completion(attempt).is_some() {
+        bail!("landing {attempt} completed; there is nothing to abandon");
+    }
+    if gitio::ref_value(&ctx.cwd, &landing::applied_ref(attempt))?.is_some() {
+        bail!("landing {attempt} moved its target; finish it with `arc land --recover {attempt}`");
+    }
+    abandon_locked(ctx, &store, attempt, reason)?;
+    Ok(0)
 }

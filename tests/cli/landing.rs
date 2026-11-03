@@ -243,3 +243,488 @@ fn a_relation_is_one_repository_event_between_open_changes() {
         a.as_str()
     );
 }
+
+/// A two-member stack: `lower` on the target tip, `upper` on `lower`'s head,
+/// each reviewed at its own patchset with no gate run anywhere yet.
+fn stack(repo: &Repo) -> ((String, PathBuf, String), (String, PathBuf, String)) {
+    let lower = reviewed_change(repo, "lower", None);
+    let upper = reviewed_change(repo, "upper", Some(&lower.2));
+    (lower, upper)
+}
+
+fn repository_events(repo: &Repo) -> Vec<Value> {
+    stdout(repo.arc(&repo.root).args(["events", "--repository"]))
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+fn change_events(repo: &Repo, change: &str) -> Vec<Value> {
+    stdout(repo.arc(&repo.root).args(["events", "--change", change]))
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+/// Claim: a stack lands with one gate run at the top head; both members read
+/// integrated via the landing, each keeping its own approval and its own
+/// integrated range, and the round-trip statistics list both. Rejects: a gate
+/// run per member, a member closed through another's verdict, and a member
+/// whose integrated diff shows the whole landing.
+#[test]
+fn a_stack_lands_with_one_gate_run_and_each_member_keeps_its_own_range() {
+    let repo = gated_repo();
+    let ((lower, _, lower_head), (upper, _, upper_head)) = stack(&repo);
+    let before = git_out(&repo.root, &["rev-parse", "master"]);
+
+    let landed = repo
+        .arc(&repo.root)
+        .args(["land", &lower, &upper])
+        .output()
+        .unwrap();
+    assert!(landed.status.success(), "{}", stderr_of(&landed));
+    assert_eq!(git_out(&repo.root, &["rev-parse", "master"]), upper_head);
+    assert_eq!(git_out(&repo.root, &["rev-parse", "HEAD"]), upper_head);
+
+    // One gate run, recorded on the top member and naming the attempt.
+    let runs: Vec<Value> = [&lower, &upper]
+        .iter()
+        .flat_map(|change| change_events(&repo, change))
+        .filter(|event| event["event_type"] == "verification-recorded")
+        .collect();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    let attempt = runs[0]["landing"].as_str().unwrap().to_string();
+    assert_eq!(runs[0]["revision"], upper_head.as_str());
+
+    let completions: Vec<Value> = repository_events(&repo)
+        .into_iter()
+        .filter(|event| event["event_type"] == "landing-completed")
+        .collect();
+    assert_eq!(completions.len(), 1);
+    assert_eq!(completions[0]["attempt"], attempt.as_str());
+
+    for (change, base, head) in [
+        (&lower, &before, &lower_head),
+        (&upper, &lower_head, &upper_head),
+    ] {
+        let report = status(&repo, change);
+        let closure = &report["closure"];
+        assert_eq!(closure["outcome"], "integrated", "{report}");
+        assert_eq!(closure["integration"], "guarded");
+        assert_eq!(closure["landing"]["attempt"], attempt.as_str());
+        assert_eq!(closure["target_before"], before.as_str());
+        assert_eq!(closure["range_base"], base.as_str());
+        assert_eq!(closure["integrated_commit"], head.as_str());
+        let verdict = closure["authorization"]["verdict_event_id"]
+            .as_str()
+            .unwrap();
+        assert!(
+            change_events(&repo, change)
+                .iter()
+                .any(|event| event["event_id"] == verdict
+                    && event["event_type"] == "verdict-recorded")
+        );
+
+        let diff = stdout(
+            repo.arc(&repo.root)
+                .args(["diff", change, "--integrated", "--stat"]),
+        );
+        assert!(
+            diff.contains(&format!("{}.txt", report["slug"].as_str().unwrap())),
+            "{diff}"
+        );
+        assert_eq!(diff.matches(".txt").count(), 1, "{change}: {diff}");
+    }
+
+    let stats = json_stdout(
+        repo.arc(&repo.root)
+            .args(["stats", "--round-trip", "--json"]),
+    );
+    let listed = stats.to_string();
+    assert!(
+        listed.contains(&lower) && listed.contains(&upper),
+        "{stats}"
+    );
+}
+
+const LANDER: &str = "019a0000-0000-7000-8000-0000000000d4";
+
+/// A Claude recording with one request, so the lander's session reads.
+fn lander_recording(repo: &Repo) {
+    let path = repo
+        .home
+        .join(".claude/projects/-fixture-project")
+        .join(format!("{LANDER}.jsonl"));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let lines = [
+        serde_json::json!({"type": "user", "sessionId": LANDER, "uuid": "prompt-1", "timestamp": "2026-01-01T10:00:00Z", "cwd": "/fixture/project", "message": {"role": "user", "content": "Land."}}),
+        serde_json::json!({"type": "assistant", "sessionId": LANDER, "uuid": "assistant-1", "requestId": "request-1", "timestamp": "2026-01-01T10:00:01Z", "cwd": "/fixture/project",
+            "message": {"role": "assistant", "model": "claude-opus-5-5", "content": [{"type": "text", "text": "Landed."}],
+                "usage": {"input_tokens": 9, "output_tokens": 3, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}}),
+    ];
+    let body: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    fs::write(path, body).unwrap();
+}
+
+/// Claim: the session that ran a landing is each member's integrator in cost
+/// attribution, as the session that ran `integrate` is. Rejects a reader that
+/// looks only at a member's own events, where the lander appears on no
+/// member at all.
+#[test]
+fn the_lander_is_each_members_integrator_in_cost_attribution() {
+    let repo = gated_repo();
+    lander_recording(&repo);
+    let ((lower, _, _), (upper, _, _)) = stack(&repo);
+    repo.arc(&repo.root)
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_SESSION", LANDER)
+        .env_remove("ARC_ACTOR")
+        .args(["land", &lower, &upper])
+        .assert()
+        .success();
+    let key = format!("claude:{LANDER}");
+    for change in [&lower, &upper] {
+        let view = json_stdout(
+            repo.arc(&repo.root)
+                .args(["cost", "show", "--json", change]),
+        );
+        let row = view["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["key"] == key.as_str())
+            .unwrap_or_else(|| panic!("{change}: no lander row: {view:#}"));
+        assert!(
+            row["roles"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|role| role == "integrator"),
+            "{change}: {row:#}"
+        );
+    }
+}
+
+/// Claim: every member's declarations are read at the revision the landing
+/// started from, so a member that weakens policy does not govern the members
+/// landed beside it. Rejects a closure that records a member's own range
+/// base as its policy anchor, under which the later member's author could
+/// approve their own audit.
+#[test]
+fn a_member_weakening_policy_does_not_govern_the_audits_of_a_later_member() {
+    let repo = gated_repo();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nforbid_self_approval = true\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(
+        &repo.root,
+        &["commit", "-q", "-m", "policy: forbid self-approval"],
+    );
+    let reviewer = |cwd: &Path, slug: &str| {
+        repo.arc(cwd)
+            .env("ARC_ACTOR", "reviewer")
+            .env("ARC_SESSION", "session-r")
+            .args(["review", slug, "--verdict", "approved"])
+            .assert()
+            .success();
+    };
+
+    let lower = opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", "lower"])));
+    let lower_tree = repo.home.join(".worktrees/repo-lower");
+    fs::write(
+        lower_tree.join(".arc/policy.toml"),
+        "[policy]\nforbid_self_approval = false\n",
+    )
+    .unwrap();
+    git(
+        &lower_tree,
+        &["commit", "-q", "-am", "policy: allow self-approval"],
+    );
+    stdout(repo.arc(&lower_tree).args(["snapshot", "lower"]));
+    reviewer(&lower_tree, "lower");
+    let lower_head = repo.head(&lower_tree);
+
+    let upper = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "upper",
+        "--base",
+        &lower_head,
+    ])));
+    let upper_tree = repo.home.join(".worktrees/repo-upper");
+    repo.commit(&upper_tree, "upper.txt", "upper\n", "feat: upper");
+    stdout(repo.arc(&upper_tree).args(["snapshot", "upper"]));
+    reviewer(&upper_tree, "upper");
+
+    let landed = repo
+        .arc(&repo.root)
+        .args(["land", &lower, &upper])
+        .output()
+        .unwrap();
+    assert!(landed.status.success(), "{}", stderr_of(&landed));
+
+    let audit = repo
+        .arc(&repo.root)
+        .args(["audit", &upper, "--verdict", "approved"])
+        .output()
+        .unwrap();
+    assert!(
+        !audit.status.success(),
+        "the upper author approved its own audit"
+    );
+    assert!(
+        stderr_of(&audit).contains("policy declared by .arc/policy.toml"),
+        "{}",
+        stderr_of(&audit)
+    );
+
+    let diff = stdout(
+        repo.arc(&repo.root)
+            .args(["diff", &upper, "--integrated", "--stat"]),
+    );
+    assert!(
+        diff.contains("upper.txt") && !diff.contains("policy.toml"),
+        "{diff}"
+    );
+
+    // An independent audit of the member's own landed revision records.
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "reviewer")
+        .env("ARC_SESSION", "session-r")
+        .args(["audit", &upper, "--verdict", "approved"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(repo.head(&upper_tree)));
+}
+
+/// Claim: members related as must-land-together integrate only in one landing
+/// naming both. Rejects `integrate` of one member and a landing of one
+/// member alone.
+#[test]
+fn related_members_land_only_together() {
+    let repo = gated_repo();
+    let ((lower, _, _), (upper, _, upper_head)) = stack(&repo);
+    relate(&repo, &lower, &upper);
+    let before = git_out(&repo.root, &["rev-parse", "master"]);
+
+    let alone = repo
+        .arc(&repo.root)
+        .args(["integrate", &lower])
+        .output()
+        .unwrap();
+    assert_eq!(alone.status.code(), Some(19), "{}", stderr_of(&alone));
+    let single = repo
+        .arc(&repo.root)
+        .args(["land", &lower])
+        .output()
+        .unwrap();
+    assert_eq!(single.status.code(), Some(19), "{}", stderr_of(&single));
+    assert!(
+        stderr_of(&single).contains(&upper),
+        "{}",
+        stderr_of(&single)
+    );
+    assert_eq!(git_out(&repo.root, &["rev-parse", "master"]), before);
+
+    repo.arc(&repo.root)
+        .args(["land", &lower, &upper])
+        .assert()
+        .success();
+    assert_eq!(git_out(&repo.root, &["rev-parse", "master"]), upper_head);
+    for change in [&lower, &upper] {
+        assert_eq!(status(&repo, change)["closure"]["outcome"], "integrated");
+    }
+}
+
+/// Claim: a gate only the top member declares runs at the top head, and its
+/// failure closes nothing and leaves no member pending. Rejects a landing
+/// that runs only the gates the first member declares, and an attempt left
+/// holding its members after a failed gate.
+#[test]
+fn a_gate_the_top_member_adds_fails_and_nothing_closes() {
+    let repo = gated_repo();
+    let (lower, _, lower_head) = reviewed_change(&repo, "lower", None);
+    let upper = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "upper",
+        "--base",
+        &lower_head,
+    ])));
+    let upper_tree = repo.home.join(".worktrees/repo-upper");
+    fs::write(
+        upper_tree.join(".arc/gates.toml"),
+        "[gates.smoke]\ncommand = \"test -f README.md\"\n\n[gates.strict]\ncommand = \"false\"\n",
+    )
+    .unwrap();
+    git(
+        &upper_tree,
+        &["commit", "-q", "-am", "feat: require strict"],
+    );
+    stdout(repo.arc(&upper_tree).args(["snapshot", "upper"]));
+    repo.arc(&upper_tree)
+        .args(["review", "upper", "--verdict", "approved"])
+        .assert()
+        .success();
+    let before = git_out(&repo.root, &["rev-parse", "master"]);
+
+    let plan =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["land", &lower, &upper, "--dry-run", "--json"]),
+        );
+    assert_eq!(plan["schema"], "arc-landing-plan/1");
+    assert_eq!(
+        plan["gates"]["strict"]["required_by"],
+        serde_json::json!([upper])
+    );
+
+    let landed = repo
+        .arc(&repo.root)
+        .args(["land", &lower, &upper])
+        .output()
+        .unwrap();
+    assert_eq!(landed.status.code(), Some(5), "{}", stderr_of(&landed));
+    assert_eq!(git_out(&repo.root, &["rev-parse", "master"]), before);
+    for change in [&lower, &upper] {
+        let report = status(&repo, change);
+        assert!(report["closure"].is_null(), "{report}");
+        assert!(report.get("pending_landing").is_none(), "{report}");
+    }
+    let failed: Vec<Value> = change_events(&repo, &upper)
+        .into_iter()
+        .filter(|event| event["event_type"] == "verification-recorded" && event["gate"] == "strict")
+        .collect();
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0]["result"], "fail");
+    assert!(repository_events(&repo)
+        .iter()
+        .any(|event| event["event_type"] == "landing-abandoned"));
+}
+
+/// Claim: a membership that does not form one chain on the target refuses
+/// before anything is written, naming the member that does not stand on its
+/// predecessor. Rejects a landing that replays, or that moves the target to
+/// the last member while skipping another.
+#[test]
+fn members_that_do_not_chain_refuse_naming_them() {
+    let repo = gated_repo();
+    let (first, _, _) = reviewed_change(&repo, "first", None);
+    let (second, _, _) = reviewed_change(&repo, "second", None);
+    let before = git_out(&repo.root, &["rev-parse", "master"]);
+    let refused = repo
+        .arc(&repo.root)
+        .args(["land", &first, &second])
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(11), "{}", stderr_of(&refused));
+    assert!(
+        stderr_of(&refused).contains(&second),
+        "{}",
+        stderr_of(&refused)
+    );
+    assert!(
+        !stderr_of(&refused).contains(&format!("{first} stands")),
+        "{}",
+        stderr_of(&refused)
+    );
+    assert_eq!(git_out(&repo.root, &["rev-parse", "master"]), before);
+    assert!(!repository_events(&repo)
+        .iter()
+        .any(|event| event["event_type"] == "landing-prepared"));
+}
+
+/// Claim: a prerequisite that is an earlier member of the same landing is
+/// satisfied by it, and the authorization basis says so. Rejects reading the
+/// prerequisite as unintegrated, and a basis that names no landing.
+#[test]
+fn an_earlier_member_satisfies_a_prerequisite_inside_the_landing() {
+    let repo = gated_repo();
+    let (lower, _, lower_head) = reviewed_change(&repo, "lower", None);
+    let upper = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "upper",
+        "--base",
+        &lower_head,
+        "--blocked-by",
+        &lower,
+    ])));
+    let upper_tree = repo.home.join(".worktrees/repo-upper");
+    repo.commit(&upper_tree, "upper.txt", "upper\n", "feat: upper");
+    stdout(repo.arc(&upper_tree).args(["snapshot", "upper"]));
+    repo.arc(&upper_tree)
+        .args(["review", "upper", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    let reversed = repo
+        .arc(&repo.root)
+        .args(["land", &upper, &lower])
+        .output()
+        .unwrap();
+    assert!(!reversed.status.success());
+    repo.arc(&repo.root)
+        .args(["land", &lower, &upper])
+        .assert()
+        .success();
+    let report = status(&repo, &upper);
+    let prerequisite = &report["closure"]["authorization"]["prerequisites"][0];
+    assert_eq!(prerequisite["change_id"], lower.as_str());
+    assert_eq!(prerequisite["integrated_commit"], lower_head.as_str());
+    assert_eq!(
+        prerequisite["landing"],
+        report["closure"]["landing"]["attempt"]
+    );
+    assert_eq!(
+        prerequisite["closure_event_id"],
+        status(&repo, &lower)["closure"]["event_id"]
+    );
+}
+
+/// Claim: `--debt` lands a member no approval covers and records the debt
+/// `integrate --debt` would, derived from the completion and owed once the
+/// member integrates. Rejects a landing that drops the unapproved member's
+/// obligation, and one that lands it without `--debt`.
+#[test]
+fn debt_lands_an_unapproved_member_and_keeps_its_obligation() {
+    let repo = gated_repo();
+    let (lower, _, lower_head) = reviewed_change(&repo, "lower", None);
+    let upper = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "upper",
+        "--base",
+        &lower_head,
+    ])));
+    let upper_tree = repo.home.join(".worktrees/repo-upper");
+    repo.commit(&upper_tree, "upper.txt", "upper\n", "feat: upper");
+    stdout(repo.arc(&upper_tree).args(["snapshot", "upper"]));
+
+    let refused = repo
+        .arc(&repo.root)
+        .args(["land", &lower, &upper])
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(3), "{}", stderr_of(&refused));
+
+    repo.arc(&repo.root)
+        .args([
+            "land",
+            &lower,
+            &upper,
+            "--debt",
+            "nobody read the upper slice",
+        ])
+        .assert()
+        .success();
+    let report = status(&repo, &upper);
+    assert_eq!(report["closure"]["outcome"], "integrated");
+    assert_eq!(report["debt"]["missing"], "nothing-read", "{report}");
+    assert_eq!(report["debt_standing"], "owed", "{report}");
+    assert_eq!(
+        report["closure"]["authorization"]["audit_debt_event_id"],
+        report["debt"]["event_id"]
+    );
+    assert!(status(&repo, &lower)["debt"].is_null());
+}

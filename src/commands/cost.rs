@@ -207,8 +207,9 @@ impl Role {
 }
 
 /// The one place an event kind names a role: a snapshot or a verdict is a
-/// reviewer's, an integration, a debt or a closure an integrator's, and a
-/// dispatch an orchestrator's. Any other kind makes its session no
+/// reviewer's, an integration, a debt or a closure an integrator's (a
+/// landing member's included, through the closure its completion derives),
+/// and a dispatch an orchestrator's. Any other kind makes its session no
 /// participant, and nothing else, prose or trailer, supplies a role.
 fn role_of(payload: &Payload) -> Option<Role> {
     match payload {
@@ -4074,8 +4075,13 @@ fn read_ledger(
             note(event, work.clone());
         }
     }
+    // A landing's completion closes each member through a closure derived
+    // from it, which makes the lander each member's integrator.
+    let landings = crate::landing::Landings::from_events(repository);
     for change_id in read.change_ids() {
-        for event in read.events(&change_id) {
+        let events = read.events(&change_id);
+        let derived = landings.derived_events(&change_id);
+        for event in crate::landing::with_derived(&events, derived) {
             note(&event, WorkKey::Change(change_id.clone()));
         }
     }

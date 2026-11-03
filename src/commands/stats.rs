@@ -706,6 +706,7 @@ fn round_trips(store: &Store, change_ids: &[String], json: bool) -> Result<()> {
     for change_id in change_ids {
         let events = read.events(change_id)?;
         let state = read.project(&events)?;
+        let events = read.events_with_landings(change_id)?;
         landings.extend(landing(change_id, &state.slug, &events));
     }
     let aggregate = round_trip_aggregate(&landings);
@@ -793,6 +794,7 @@ pub fn stats(ctx: &Ctx, selection: StatsSelection, json: bool, view: StatsView) 
         let events = read.events(&change_id)?;
         let mut state = read.project(&events)?;
         crate::replica::localize_change(&store.repository_id, &events, &mut state);
+        let events = read.events_with_landings(&change_id)?;
         for (gate, seconds) in observed_gate_runs(&events) {
             gate_runs.entry(gate).or_default().push(seconds);
         }
@@ -1459,6 +1461,7 @@ mod tests {
                 timeout_seconds: None,
                 tree: None,
                 against_target: None,
+                landing: None,
                 tested_tree: None,
                 worktree_dirty: None,
                 worktree_dirty_tracked: None,
@@ -1491,6 +1494,7 @@ mod tests {
                 timeout_seconds: None,
                 tree: None,
                 against_target: None,
+                landing: None,
                 tested_tree: None,
                 worktree_dirty: None,
                 worktree_dirty_tracked: None,
@@ -1605,6 +1609,7 @@ mod tests {
                 timeout_seconds: None,
                 tree: None,
                 against_target: None,
+                landing: None,
                 tested_tree: Some("t".into()),
                 worktree_dirty: Some(false),
                 worktree_dirty_tracked: None,

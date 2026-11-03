@@ -189,6 +189,15 @@ impl LedgerRead<'_> {
         self.store.load_events_in(change_id, &self.batches)
     }
 
+    /// A change's events with those its completed landings derive for it, in
+    /// ID order: what a reader of integration events reads.
+    pub fn events_with_landings(&self, change_id: &str) -> Result<Vec<Event>> {
+        let events = self.events(change_id)?;
+        let derived = crate::landing::Landings::from_events(self.repository_events()?)
+            .derived_events(change_id);
+        Ok(crate::landing::with_derived(&events, derived))
+    }
+
     pub fn rewrites(&self) -> Result<&crate::rewrite::RewriteMap> {
         if let Some(held) = self.rewrites.get() {
             return Ok(held);
@@ -1032,6 +1041,109 @@ impl Store {
             .map_err(Into::into)
     }
 
+    fn landing_intents_dir(&self) -> PathBuf {
+        self.root.join("landing-intents")
+    }
+
+    pub(crate) fn landing_intent_path(&self, attempt: &str) -> Result<PathBuf> {
+        ids::validate_id_component(attempt)?;
+        Ok(self.landing_intents_dir().join(format!("{attempt}.json")))
+    }
+
+    /// The intent a landing attempt left, if it left one.
+    pub(crate) fn landing_intent(&self, attempt: &str) -> Result<Option<crate::landing::Intent>> {
+        let path = self.landing_intent_path(attempt)?;
+        match fs::read(&path) {
+            Ok(bytes) => {
+                let intent: crate::landing::Intent = serde_json::from_slice(&bytes)
+                    .with_context(|| format!("malformed landing intent {}", path.display()))?;
+                if intent.attempt != attempt {
+                    bail!(
+                        "landing intent {} names attempt {}",
+                        path.display(),
+                        intent.attempt
+                    );
+                }
+                Ok(Some(intent))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error).with_context(|| format!("cannot read {}", path.display())),
+        }
+    }
+
+    pub(crate) fn landing_intents(&self) -> Result<Vec<crate::landing::Intent>> {
+        let mut attempts = Vec::new();
+        for id in event_file_stems(&self.landing_intents_dir())? {
+            attempts.push(id);
+        }
+        attempts.sort();
+        let mut intents = Vec::new();
+        for attempt in attempts {
+            if let Some(intent) = self.landing_intent(&attempt)? {
+                intents.push(intent);
+            }
+        }
+        Ok(intents)
+    }
+
+    /// Replace the attempt's intent with `intent`, synced before returning.
+    pub(crate) fn write_landing_intent(&self, intent: &crate::landing::Intent) -> Result<()> {
+        self.refuse_read_only()?;
+        let path = self.landing_intent_path(&intent.attempt)?;
+        create_private_dir_all(&self.landing_intents_dir())?;
+        let mut body = serde_json::to_vec_pretty(intent)?;
+        body.push(b'\n');
+        crate::commands::write_atomically(&path, &body, crate::commands::FileMode::Create(0o600))
+    }
+
+    /// Issue `count` event IDs and save `intent` with them under one hold of
+    /// the ledger ID lock, so no cursor reads past an ID the intent reserves.
+    pub(crate) fn reserve_landing_ids(
+        &self,
+        count: usize,
+        save: impl FnOnce(Vec<String>) -> Result<crate::landing::Intent>,
+    ) -> Result<crate::landing::Intent> {
+        let _ledger = self.lock_event_ids()?;
+        let mut issued = Vec::with_capacity(count);
+        for _ in 0..count {
+            issued.push(self.issue_event_id()?.to_string());
+        }
+        let intent = save(issued)?;
+        self.write_landing_intent(&intent)?;
+        Ok(intent)
+    }
+
+    pub(crate) fn clear_landing_intent(&self, attempt: &str) -> Result<()> {
+        let path = self.landing_intent_path(attempt)?;
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot remove {}", path.display()))
+            }
+        }
+        File::open(self.landing_intents_dir())?
+            .sync_all()
+            .map_err(Into::into)
+    }
+
+    /// Publish a repository event whose ID an intent reserved, once, and
+    /// confirm it durable.
+    pub(crate) fn publish_reserved_repository_event(&self, event: &Event) -> Result<()> {
+        self.refuse_read_only()?;
+        let _ledger = self.lock_event_ids()?;
+        if !self.repository_event_is_published(event)? {
+            self.advance_event_id(&event.event_id)?;
+            self.append_repository_event_locked(event)?;
+        }
+        let path = self
+            .repository_events_dir()
+            .join(format!("{}.json", event.event_id));
+        File::open(&path)?.sync_all()?;
+        File::open(self.repository_events_dir())?.sync_all()?;
+        Ok(())
+    }
+
     /// Where a rewrite writes down what it is about to do, beside the events
     /// its map will become. One repository, one rewrite at a time.
     pub fn rewrite_intent_path(&self) -> PathBuf {
@@ -1227,6 +1339,11 @@ impl Store {
         for intent in self.provisional_intents()? {
             include(&intent.event.event_id)?;
         }
+        for intent in self.landing_intents()? {
+            if let Some(completion) = &intent.completion {
+                include(&completion.event_id)?;
+            }
+        }
         for id in event_file_stems(&self.root.join("provisional-abandoned"))? {
             include(&id)?;
         }
@@ -1304,6 +1421,20 @@ impl Store {
                 if oldest.as_ref().is_none_or(|held| id < *held) {
                     oldest = Some(id);
                 }
+            }
+        }
+        for intent in self.landing_intents()? {
+            let Some(id) = intent.reservation() else {
+                continue;
+            };
+            let completion = intent
+                .completion
+                .as_ref()
+                .expect("a reservation is its completion");
+            if !self.repository_event_is_published(completion)?
+                && oldest.as_deref().is_none_or(|held| id < held)
+            {
+                oldest = Some(id.to_string());
             }
         }
         Ok(oldest)

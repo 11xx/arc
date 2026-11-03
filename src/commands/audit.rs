@@ -402,6 +402,16 @@ pub(super) fn plan_debt(
 }
 
 impl DebtPlan {
+    /// The declaration this plan would write.
+    pub(super) fn payload(&self) -> &Payload {
+        &self.event.payload
+    }
+
+    /// The debt already declared that this plan restates, when there is one.
+    pub(super) fn restated_event_id(&self) -> Option<&str> {
+        self.restated.as_ref().map(|debt| debt.event_id.as_str())
+    }
+
     /// The debt as a plan reports it, whose event is the one already in the
     /// ledger or none until `declare` writes it.
     pub fn planned(&self) -> crate::integration::PlannedDebt {

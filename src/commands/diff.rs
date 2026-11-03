@@ -120,9 +120,10 @@ fn follow_rewrites(
 }
 
 /// The exact range an integration recorded: from where the target stood
-/// before to the commit that landed. This is what an audit reviews — not a
-/// patchset range, which describes the work rather than what reached the
-/// target.
+/// before to the commit that landed, or, for a member of a landing, from the
+/// parent of its first landed commit to its last. This is what an audit
+/// reviews — not a patchset range, which describes the work rather than what
+/// reached the target.
 fn diff_integrated(
     ctx: &Ctx,
     state: &ChangeState,
@@ -148,7 +149,7 @@ fn diff_integrated(
     // not what it landed onto. Guessing a base would misreport the range an
     // audit is about, so the caller supplies it — and only then, because a
     // recorded range is the fact and an override would quietly replace it.
-    let base = match (base, closure.target_before.as_deref()) {
+    let base = match (base, closure.range_base()) {
         (Some(_), Some(before)) => bail!(
             "{change_id} recorded its integration base ({}); --base would render a range it \
              did not integrate",

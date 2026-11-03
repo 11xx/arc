@@ -285,8 +285,7 @@ fn debt_range<'a>(
         .as_ref()
         .and_then(|closure| {
             closure
-                .target_before
-                .as_deref()
+                .range_base()
                 .zip(closure.integrated_commit.as_deref())
         })
         .or_else(|| {

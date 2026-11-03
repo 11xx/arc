@@ -784,7 +784,7 @@ enum Cmd {
         /// Compare the last approved patchset with the latest snapshot
         #[arg(long, conflicts_with = "patchset")]
         since_approved: bool,
-        /// Render the exact recorded integration range of a closed change
+        /// Render the exact recorded integration range of a closed change; a landing member's range is its own landed commits
         #[arg(long, conflicts_with_all = ["patchset", "between", "since_approved", "findings"])]
         integrated: bool,
         /// Base revision for an integration that recorded none
@@ -2714,6 +2714,57 @@ enum Cmd {
         /// Recorded as a coordinate and nothing else
         #[arg(long = "route-version", value_name = "VERSION", requires = "debt")]
         route_version: Option<String>,
+    },
+    /// Land a stack of changes on their target in one guarded transition
+    ///
+    /// The members, in landing order, must already stack: the first's recorded
+    /// base is the target's current revision and each later member's base is
+    /// the previous member's head. Every open member of each must-land-together
+    /// component is named. Each member keeps its own approval and is judged
+    /// against the destination's policy at the revision the landing starts from;
+    /// a `blocked_by` prerequisite is satisfied by an earlier member. The gates
+    /// every member requires run once, at the top head, recording the attempt
+    /// on their evidence; a gate declared differently by two members, or one the
+    /// top head does not declare the same way, refuses. Under the commit guards
+    /// everything pinned is read again and any difference refuses naming the
+    /// field. The target and `refs/arc/landing-applied/<attempt>` move in one
+    /// ref transaction, the target checkout follows, and one `landing-completed`
+    /// event closes every member: each reads integrated via the landing, with
+    /// its own range. Until then the members show `pending landing <attempt>`
+    /// and refuse every other terminal transition. See `arc guide
+    /// change-landing`
+    #[command(
+        after_help = "Exit status: 0 when the landing completed, recovered, or was abandoned as asked; a refusal before anything moved exits with its blocker's `arc check` code (7 prerequisite, 19 lands-with, 20 a pending landing, 5 a gate failed at the top head); 1 for any other refusal, including a field that moved during the gate or an attempt recovery cannot finish; 17 when a paired replica does not hold integration authority."
+    )]
+    Land {
+        /// The changes to land, in landing order
+        #[arg(required_unless_present_any = ["recover", "abandon"])]
+        changes: Vec<String>,
+        /// The branch to land on; defaults to the members' recorded target
+        #[arg(long)]
+        target: Option<String>,
+        /// Land members no approval covers, declaring for each the debt `arc
+        /// integrate --debt` would, carried inside the completion
+        #[arg(long, value_name = "REASON")]
+        debt: Option<String>,
+        /// Print the plan without writing anything
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+        /// With --dry-run, print the plan as `arc-landing-plan/1` JSON
+        #[arg(long, requires = "dry_run")]
+        json: bool,
+        /// Finish an interrupted attempt: publish its saved completion when its
+        /// applied ref exists, abandon it when the target never moved, and
+        /// otherwise report the movement and close nothing. Running it again
+        /// changes nothing
+        #[arg(long, value_name = "ATTEMPT", conflicts_with_all = ["changes", "abandon", "debt", "dry_run"])]
+        recover: Option<String>,
+        /// Abandon an attempt whose target arc did not move; needs --reason
+        #[arg(long, value_name = "ATTEMPT", requires = "reason", conflicts_with_all = ["changes", "debt", "dry_run"])]
+        abandon: Option<String>,
+        /// Why the attempt is abandoned
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Record a review obligation this change carries but has not discharged
     ///
@@ -5312,6 +5363,7 @@ fn role_refusal(role: ExecutionRole, command: &Cmd) -> Option<(&'static str, &'s
         ExecutionRole::Reviewer => match command {
             Cmd::Accept { .. } => Some(("accept", "lead")),
             Cmd::Integrate { .. } => Some(("integrate", "lead")),
+            Cmd::Land { .. } => Some(("land", "lead")),
             Cmd::Replica {
                 cmd: ReplicaCmd::Provisional { .. },
             } => Some(("replica provisional resolve", "lead")),
@@ -5333,6 +5385,7 @@ fn role_refusal(role: ExecutionRole, command: &Cmd) -> Option<(&'static str, &'s
             Cmd::Close { .. } => Some(("close", "lead")),
             Cmd::Accept { .. } => Some(("accept", "lead")),
             Cmd::Integrate { .. } => Some(("integrate", "lead")),
+            Cmd::Land { .. } => Some(("land", "lead")),
             Cmd::Replica {
                 cmd: ReplicaCmd::Provisional { .. },
             } => Some(("replica provisional resolve", "lead")),
@@ -6857,6 +6910,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     predicted,
                     against,
                     bypass,
+                    landing: None,
                 },
             )
         }
@@ -6988,6 +7042,28 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             commands::release_hold(&ctx, &change, &hold, reason)?;
             Ok(0)
         }
+        Cmd::Land {
+            changes,
+            target,
+            debt,
+            dry_run,
+            json,
+            recover,
+            abandon,
+            reason,
+        } => commands::land::land(
+            &ctx,
+            commands::land::LandArgs {
+                changes,
+                target,
+                debt,
+                dry_run,
+                json,
+                recover,
+                abandon,
+                reason,
+            },
+        ),
         Cmd::Integrate {
             provisional,
             for_replica,
@@ -7838,6 +7914,7 @@ mod tests {
             "hold",
             "release-hold",
             "integrate",
+            "land",
             "debt",
             "audit",
             "close",
