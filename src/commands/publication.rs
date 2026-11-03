@@ -74,6 +74,10 @@ pub fn publication(
     let scratch = super::gatekeeping::ScratchWorktree::create(&ctx.cwd, path, &revision)?;
     let mut results = BTreeMap::new();
     let mut passed = true;
+    // A gate that was not admitted ran nothing, so the guard is not a pass;
+    // it is a failure only if some gate that did run failed.
+    let mut not_admitted = false;
+    let mut failed = false;
     println!("publication target: {target} at {revision}");
     for (name, gate) in required {
         let environment = match gate.environment.as_deref() {
@@ -125,27 +129,22 @@ pub fn publication(
                 &["status", "--porcelain=v1", "--untracked-files=normal"],
             )?
             .is_empty();
-            if run.status.success()
-                && !run.timed_out
-                && clean_before
-                && clean_after
-                && environment_known
-                && gitio::head(&scratch.path)? == revision
-            {
+            match VerifyResult::observed(run.status.success(), run.status.code(), run.timed_out) {
                 VerifyResult::Pass
-            } else {
-                VerifyResult::Fail
+                    if !(clean_before
+                        && clean_after
+                        && environment_known
+                        && gitio::head(&scratch.path)? == revision) =>
+                {
+                    VerifyResult::Fail
+                }
+                observed => observed,
             }
         };
-        println!(
-            "publication gate {name}: {}",
-            if result == VerifyResult::Pass {
-                "pass"
-            } else {
-                "fail"
-            }
-        );
+        println!("publication gate {name}: {}", result.as_str());
         passed &= result == VerifyResult::Pass;
+        not_admitted |= result == VerifyResult::NotAdmitted;
+        failed |= result == VerifyResult::Fail;
         results.insert(
             name.clone(),
             PublicationGateResult {
@@ -162,11 +161,11 @@ pub fn publication(
     }) {
         Ok(current) if current == declarations => {}
         Ok(_) => {
-            passed = false;
+            failed = true;
             eprintln!("publication gate declarations changed while checks ran; rerun the guard");
         }
         Err(error) => {
-            passed = false;
+            failed = true;
             eprintln!("publication gate declarations became unavailable: {error:#}");
         }
     }
@@ -179,13 +178,13 @@ pub fn publication(
                     .and_then(|receipt| receipt.environment.as_ref())
                     != current.as_ref()
             {
-                passed = false;
+                failed = true;
                 eprintln!("publication gate {name}: environment changed while checks ran; rerun the guard");
             }
         }
     }
     if gitio::branch_head(&ctx.cwd, target)? != revision {
-        passed = false;
+        failed = true;
         eprintln!("publication target moved while checks ran; rerun the guard");
     }
     let retention_ref = format!("refs/arc/publication/{}", ids::new_identifier());
@@ -197,10 +196,12 @@ pub fn publication(
         tree,
         profile: profile.to_owned(),
         gates: results,
-        result: if passed {
-            VerifyResult::Pass
-        } else {
+        result: if failed {
             VerifyResult::Fail
+        } else if not_admitted {
+            VerifyResult::NotAdmitted
+        } else {
+            VerifyResult::Pass
         },
         declarations,
     };
@@ -210,7 +211,7 @@ pub fn publication(
         store.append_local_repository_event(&mut event)?;
         println!("publication event: {}", event.event_id);
     }
-    if !passed {
+    if failed {
         println!("integrations since last successful publication pass:");
         for (id, state) in store.readable_states()? {
             let Some(closure) = state.closure else {
@@ -233,7 +234,7 @@ pub fn publication(
             }
         }
     }
-    Ok(if passed { 0 } else { 1 })
+    Ok(if passed && !failed { 0 } else { 1 })
 }
 
 fn declarations_identity(required: &[(&String, &gates::Gate)]) -> Result<String> {

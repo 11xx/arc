@@ -2227,12 +2227,12 @@ fn execute_verification(
                 let observed =
                     run_gate(&command, cwd, timeout_seconds, output_root, producing_store)?;
                 let duration_ms = started.elapsed().as_millis() as u64;
+                let result = VerifyResult::observed(
+                    observed.status.success(),
+                    observed.status.code(),
+                    observed.timed_out,
+                );
                 let exit_code = observed.status.code().unwrap_or(-1);
-                let result = if observed.status.success() && !observed.timed_out {
-                    VerifyResult::Pass
-                } else {
-                    VerifyResult::Fail
-                };
                 (
                     result,
                     Some(exit_code),
@@ -2452,6 +2452,13 @@ fn record_verifications(
         }
         let marker = if attested { " (attested)" } else { "" };
         println!("verification: {result:?}{marker} at {revision}");
+        if result == VerifyResult::NotAdmitted {
+            println!(
+                "not admitted: the command exited {} before any check ran, so nothing was \
+                 evaluated; rerun the gate",
+                crate::model::NOT_ADMITTED_EXIT
+            );
+        }
         println!("event: {}", ev.event_id);
     }
     Ok(())

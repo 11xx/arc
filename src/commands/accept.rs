@@ -780,10 +780,15 @@ fn check_execution(
         timed_out,
         tree_moved,
         revision,
+        result,
         ..
     } = &evidence.payload
     {
-        if exit_code.is_none() || matches!(exit_code, Some(126 | 127)) || *timed_out || *tree_moved
+        if exit_code.is_none()
+            || matches!(exit_code, Some(126 | 127))
+            || *result == VerifyResult::NotAdmitted
+            || *timed_out
+            || *tree_moved
         {
             return refuse(1, format!("gate {gate} at {revision} could not execute or be observed; evidence {} remains recorded; inspect it before retrying", evidence.event_id));
         }
@@ -1357,13 +1362,15 @@ fn execute_acceptance(
                                 timed_out,
                                 tree_moved,
                                 revision,
+                                result,
                                 ..
-                            } => Some((exit_code, timed_out, tree_moved, revision)),
+                            } => Some((exit_code, timed_out, tree_moved, revision, result)),
                             _ => None,
                         })
                         .context("probe execution produced no observed evidence")?;
                     if evidence.0.is_none()
                         || matches!(evidence.0, Some(126 | 127))
+                        || *evidence.4 == VerifyResult::NotAdmitted
                         || *evidence.1
                         || *evidence.2
                     {

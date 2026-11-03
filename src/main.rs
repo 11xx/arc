@@ -1930,7 +1930,8 @@ enum Cmd {
     /// environment probes and gates. Probes never prepare or compile; unavailable storage
     /// supplies no environment identity. Storage reuse never supplies a passing gate
     /// result. A result whose evidence a busy ledger lock kept from being recorded prints
-    /// as `not recorded:` and is not evidence; see `arc guide rules-claims`.
+    /// as `not recorded:` and is not evidence; see `arc guide rules-claims`. A command
+    /// exiting 75 within its timeout records `not-admitted`; see `arc guide change-gates`.
     Verify {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in

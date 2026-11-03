@@ -3834,11 +3834,48 @@ pub struct DeferredFinding {
     pub why: String,
 }
 
+/// What one verification establishes about its check.
+///
+/// Only `Pass` is evidence that the check holds, and only `Fail` that it does
+/// not. `NotAdmitted` is evidence of nothing about the code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum VerifyResult {
     Pass,
     Fail,
+    /// The command exited [`NOT_ADMITTED_EXIT`] within its timeout: it gave up
+    /// before any check started, as a gate waiting in a host admission queue
+    /// does. Nothing ran, so it is neither a pass nor a failure.
+    #[value(skip)]
+    NotAdmitted,
+}
+
+/// The exit status a gate command reports when it did not run: `EX_TEMPFAIL`
+/// from `sysexits.h`.
+pub const NOT_ADMITTED_EXIT: i32 = 75;
+
+impl VerifyResult {
+    /// The result of a command arc ran. A timeout outranks every exit status,
+    /// so a command that exits 75 after overrunning its timeout timed out.
+    pub fn observed(success: bool, exit_code: Option<i32>, timed_out: bool) -> Self {
+        if timed_out {
+            Self::Fail
+        } else if success {
+            Self::Pass
+        } else if exit_code == Some(NOT_ADMITTED_EXIT) {
+            Self::NotAdmitted
+        } else {
+            Self::Fail
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+            Self::NotAdmitted => "not-admitted",
+        }
+    }
 }
 
 #[derive(

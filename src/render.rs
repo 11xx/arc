@@ -745,6 +745,8 @@ pub fn markdown(
                     " (attested)"
                 } else if g.timed_out {
                     " (timed out)"
+                } else if g.result == crate::model::VerifyResult::NotAdmitted.as_str() {
+                    " (not admitted)"
                 } else {
                     ""
                 },
@@ -2477,7 +2479,7 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
                     .map(|probe| format!("probe:{}:{:?}", probe.name, probe.phase))
                     .or_else(|| gate.clone())
                     .unwrap_or_else(|| "-".into()),
-                format!("{result:?}").to_lowercase()
+                result.as_str()
             ),
         ),
         Payload::PostIntegrationVerificationRecorded {

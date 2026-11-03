@@ -1018,6 +1018,15 @@ RUN A CHANGE
   so a calling shell sees an interruption rather than a failure. A signal
   arc inherited as ignored stays ignored.
 
+  A command that exits 75 (`EX_TEMPFAIL`), as a wrapper does when a host
+  admission queue gives up before any check starts, records `not-admitted`:
+  evidence of nothing, neither a pass nor a failure. A timeout outranks it, so
+  a command that exits 75 after overrunning its timeout timed out. The gate is
+  not green; `status`, `check` and `show` say it did not run and should be
+  rerun, `--skip-green` reruns it, acceptance refuses it as unobserved, and a
+  publication guard that ran no failing gate records `not-admitted` and exits
+  1. A project whose commands never exit 75 sees nothing change.
+
   `done` moves its caller's live claim to `verifying` before it snapshots,
   and only after every snapshot input is accepted — the attribution,
   `--thread`, and each `--journal-ref` — so an input it refuses leaves the
@@ -4194,7 +4203,7 @@ EXIT CODES
       discriminating.
     `arc check` exits 13 while the change declares it is iterating.
     `arc check` exits 14 when the tree a merge would ship has no gate
-      evidence.
+      evidence; a `not-admitted` run is none.
     `arc check` exits 15 when the change's branch is a fork's: fork work is
       unintegrated by intent, and the boundary binds to the change rather
       than to the directory the command runs in.
@@ -4407,6 +4416,9 @@ FILES
     environment = "<probe command>"     evidence counts only where the probe
                                         prints the same output, run against
                                         the content being evaluated
+
+  A gate command exits 75 (`EX_TEMPFAIL`) to say it did not run, which arc
+  records as `not-admitted`; see `arc guide change-gates`.
 
   `arc verify --all --event integration|publication` selects the event's
   gates. Evidence identifies its event, tree, command and environment;

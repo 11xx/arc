@@ -310,6 +310,10 @@ impl GateStatus {
                 "pending" if self.evaluated_tree.is_some() => "no evidence at the merged tree",
                 "pending" => "no evidence at head",
                 "fail" => "the gate failed",
+                "not-admitted" => {
+                    "the gate was not admitted: its command exited 75 before any check ran, so \
+                     nothing was evaluated; rerun it"
+                }
                 _ if self.tree_moved => "the worktree changed while the gate ran",
                 _ if self.worktree_dirty == Some(true) => {
                     "evidence recorded on a dirty worktree, so no checkout of this revision \
@@ -1677,12 +1681,7 @@ fn build_report(
             inherited_from: evidence
                 .map(|e| e.revision.clone())
                 .filter(|revision| Some(revision.as_str()) != current_head.as_deref()),
-            result: match result {
-                Some(crate::model::VerifyResult::Pass) => "pass",
-                Some(crate::model::VerifyResult::Fail) => "fail",
-                None => "pending",
-            }
-            .into(),
+            result: verification_result_label(result),
             // Evidence produced on a dirty tree describes something no
             // checkout of this revision reproduces, and evidence whose
             // tree moved mid-run describes no single tree at all. Both
@@ -1717,7 +1716,12 @@ fn build_report(
             runner: evidence.and_then(|e| e.runner.clone()),
             environment,
             output_tail: evidence
-                .filter(|e| e.result == crate::model::VerifyResult::Fail)
+                .filter(|e| {
+                    matches!(
+                        e.result,
+                        crate::model::VerifyResult::Fail | crate::model::VerifyResult::NotAdmitted
+                    )
+                })
                 .and_then(|e| e.output_tail.clone()),
             output_artifact: evidence.and_then(|e| e.output_artifact.clone()),
             timed_out: evidence
@@ -1812,7 +1816,10 @@ fn build_report(
             .iter()
             .map(|gate| GateFact {
                 green_at_head: gate.green_at_head,
-                evidence_recorded: gate.evidence_event_id.is_some(),
+                // A gate that was not admitted ran nothing, so it evaluated
+                // nothing either.
+                evidence_recorded: gate.evidence_event_id.is_some()
+                    && gate.result != VerifyResult::NotAdmitted.as_str(),
             })
             .collect(),
         open_blocking_findings: !open_blocking.is_empty(),
@@ -2240,12 +2247,7 @@ pub fn check_exit_code(report: &StatusReport) -> i32 {
 }
 
 fn verification_result_label(result: Option<VerifyResult>) -> String {
-    match result {
-        Some(VerifyResult::Pass) => "pass",
-        Some(VerifyResult::Fail) => "fail",
-        None => "pending",
-    }
-    .into()
+    result.map_or("pending", VerifyResult::as_str).into()
 }
 
 /// Walk every verdict and finding, grouping by the identity policy attributes

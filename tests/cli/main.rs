@@ -115,6 +115,7 @@ mod trailer_edits;
 mod trailer_projection;
 mod tree_gates;
 mod variant_share_pricing;
+mod verification_outcomes;
 mod verify;
 mod warm_worktrees;
 mod workspace;
