@@ -39,7 +39,8 @@ pub struct ApprovalFacts<'a> {
     /// The branch head is the newest patchset's head.
     pub head_matches: bool,
     /// The branch head is the commit the newest patchset's approval stands
-    /// on: its recorded head followed only through signature-only rewrites.
+    /// on: its recorded head followed only through signature-only and
+    /// role-addition rewrites.
     pub approved_head_matches: bool,
     /// The sole authoritative local verdict, when the verdict graph has one
     /// tip.

@@ -28,7 +28,8 @@ pub fn record_rewrite(ctx: &Ctx, map: &str, reason: String, tool: Option<String>
 /// with the event that holds it.
 ///
 /// Computed and supplied maps use [`prepare_mapping`] to validate their
-/// successors, consistency and signature-only approval equivalence.
+/// successors, consistency and the signature-only and role-addition
+/// judgements an approval follows.
 pub fn record_mapping(
     ctx: &Ctx,
     mapping: std::collections::BTreeMap<String, Option<String>>,
@@ -131,6 +132,7 @@ pub(super) fn prepare_mapping(
             reason,
             tool,
             signature_only: Vec::new(),
+            role_additions: Vec::new(),
             refs,
             retained,
         },
@@ -139,20 +141,27 @@ pub(super) fn prepare_mapping(
     let rewrites = RewriteMap::from_events(combined.iter())
         .context("this rewrite contradicts one already recorded; nothing was written")?;
     // Judged here, while the old commits still exist: an approval follows a
-    // rewrite only when this says the successor differs by signature alone.
+    // rewrite only when this says the successor differs by signature alone,
+    // or by appended role entries.
     if let Payload::HistoryRewritten {
         mapping,
         signature_only,
+        role_additions,
         ..
     } = &mut event.payload
     {
-        *signature_only = crate::provisional::retain_signature_only(
+        let retain = |judged| {
+            crate::provisional::retain_signature_only(&ctx.cwd, Some(store), &[], &rewrites, judged)
+        };
+        *signature_only = retain(crate::rewrite::signature_only_successors(
+            &ctx.cwd, mapping, &rewrites,
+        ))?;
+        *role_additions = retain(crate::rewrite::role_addition_successors(
             &ctx.cwd,
-            Some(store),
-            &[],
+            mapping,
             &rewrites,
-            crate::rewrite::signature_only_successors(&ctx.cwd, mapping, &rewrites),
-        )?;
+            signature_only,
+        ))?;
     }
     Ok(event)
 }

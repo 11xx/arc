@@ -62,6 +62,17 @@ pub(crate) fn canonical_revision(revision: &str) -> String {
     }
 }
 
+/// Whether two spellings name one commit: equal once canonical, or one
+/// abbreviating the other from the length at which an abbreviation names one.
+fn names_one_commit(left: &str, right: &str) -> bool {
+    let (left, right) = (canonical_revision(left), canonical_revision(right));
+    if left == right {
+        return !left.is_empty();
+    }
+    left.len().min(right.len()) >= ABBREVIATION_FLOOR
+        && (left.starts_with(&right) || right.starts_with(&left))
+}
+
 /// One ref move a rewrite has planned: the value the ref held when the
 /// rewrite read it, and the value it is to hold instead.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -141,6 +152,10 @@ pub struct RewriteMap {
     /// The keys of `steps` whose successor differs in nothing but its
     /// signature, as the event that recorded them judged.
     signature_only: BTreeSet<String>,
+    /// The keys of `steps` whose successor differs only by role entries
+    /// appended to its message, and perhaps its signature, as the event that
+    /// recorded them judged.
+    role_additions: BTreeSet<String>,
 }
 
 impl RewriteMap {
@@ -173,6 +188,7 @@ impl RewriteMap {
         let withdrawn = withdrawn_event_ids(&active_withdrawals)?;
         let mut steps: BTreeMap<String, Option<String>> = BTreeMap::new();
         let mut signature_only: BTreeSet<String> = BTreeSet::new();
+        let mut role_additions: BTreeSet<String> = BTreeSet::new();
         for event in events {
             if !permits(event) || withdrawn.contains(event.event_id.as_str()) {
                 continue;
@@ -180,6 +196,7 @@ impl RewriteMap {
             if let Payload::HistoryRewritten {
                 mapping,
                 signature_only: judged,
+                role_additions: added,
                 ..
             } = &event.payload
             {
@@ -218,17 +235,21 @@ impl RewriteMap {
                     .keys()
                     .map(|revision| canonical_revision(revision))
                     .collect();
-                signature_only.extend(
+                let claimed = |judged: &[String]| -> Vec<String> {
                     judged
                         .iter()
                         .map(|old| canonical_revision(old))
-                        .filter(|old| mapped.contains(old)),
-                );
+                        .filter(|old| mapped.contains(old))
+                        .collect()
+                };
+                signature_only.extend(claimed(judged));
+                role_additions.extend(claimed(added));
             }
         }
         Ok(Self {
             steps,
             signature_only,
+            role_additions,
         })
     }
 
@@ -329,22 +350,48 @@ impl RewriteMap {
     }
 
     /// The revision an approval of `revision` still stands on: `revision`
-    /// followed through every recorded rewrite that changed its signature and
-    /// nothing else, and stopping before the first that changed anything, that
-    /// dropped it, or that no event verified.
+    /// followed through every recorded rewrite that changed its signature,
+    /// appended role entries to its message, or both, and stopping before the
+    /// first that changed anything else, that dropped it, or that no event
+    /// verified.
     ///
     /// An approval binds to what was reviewed. Following a rewrite that moved
     /// the commit onto a different tree, message or author would carry it to
-    /// content nobody approved.
+    /// content nobody approved; a recorded role entry declares who took part
+    /// and is not a verdict.
     pub fn approved_successor(&self, revision: &str) -> Result<String> {
-        self.follow(revision, |key| self.signature_only.contains(key))
+        self.follow(revision, |key| {
+            self.signature_only.contains(key) || self.role_additions.contains(key)
+        })
     }
 
     /// The revision `revision` is re-signed as: followed through every
     /// recorded rewrite that changed its signature and nothing else. This is
-    /// what admits a signing, whatever else an approval follows.
+    /// what admits a signing; a rewrite that added role entries is no signing.
     pub fn signature_successor(&self, revision: &str) -> Result<String> {
         self.follow(revision, |key| self.signature_only.contains(key))
+    }
+
+    /// Whether `before` reaches `after` through links `carries` accepts, or
+    /// is `after` already. `carries` sees each canonical old revision.
+    fn reaches(&self, before: &str, after: &str, carries: impl Fn(&str) -> bool) -> bool {
+        let mut visited = BTreeSet::new();
+        let mut current = canonical_revision(before);
+        loop {
+            if names_one_commit(&current, after) {
+                return true;
+            }
+            match self.step(&current) {
+                Ok(Step::Mapped {
+                    key,
+                    fate: Some(next),
+                }) if carries(&key) && !visited.contains(&key) => {
+                    visited.insert(key);
+                    current = next;
+                }
+                _ => return false,
+            }
+        }
     }
 
     fn follow(&self, revision: &str, carries: impl Fn(&str) -> bool) -> Result<String> {
@@ -386,14 +433,10 @@ impl RewriteMap {
     /// "different commit" for one commit — and an abbreviation stands for a
     /// commit only from the length at which it names one.
     pub fn same(&self, left: &str, right: &str) -> Result<bool> {
-        let (left, right) = (self.current(left)?, self.current(right)?);
-        let (left, right) = (canonical_revision(&left), canonical_revision(&right));
-        if left == right {
-            return Ok(!left.is_empty());
-        }
-        let abbreviation = left.len().min(right.len());
-        Ok(abbreviation >= ABBREVIATION_FLOOR
-            && (left.starts_with(&right) || right.starts_with(&left)))
+        Ok(names_one_commit(
+            &self.current(left)?,
+            &self.current(right)?,
+        ))
     }
 
     /// One hop: the recorded revision `revision` names, exactly where it names
@@ -464,6 +507,113 @@ pub fn signature_only_successors(
     mapping: &BTreeMap<String, Option<String>>,
     rewrites: &RewriteMap,
 ) -> Vec<String> {
+    successors_where(cwd, mapping, |old, new| {
+        same_frame(old, new, |before, after| {
+            rewrites.same(before, after).unwrap_or(false)
+        }) && old.message == new.message
+    })
+}
+
+/// The old revisions of `mapping` whose successor differs from them only by
+/// complete role entries appended to its message's final trailer block, and
+/// perhaps its signature: the same tree, the same bytes in every other
+/// header, and the message
+/// [`adds_only_role_entries`](crate::trailers::adds_only_role_entries)
+/// accepts.
+///
+/// Its parents have to be its old parents, or reached from them through
+/// rewrites that preserve an approval: a link `signature_only` names, one this
+/// judges, or one an earlier event recorded as either. So a successor whose
+/// ancestry changed in any other way is left out, and an approval that
+/// follows it stands on a range in which every rewritten commit kept its
+/// content and its message bar the added entries. `signature_only` is the
+/// same event's judgement from [`signature_only_successors`]. Like it, a
+/// revision either commit of which is not readable here is left out.
+pub fn role_addition_successors(
+    cwd: &Path,
+    mapping: &BTreeMap<String, Option<String>>,
+    rewrites: &RewriteMap,
+    signature_only: &[String],
+) -> Vec<String> {
+    let signature_only: BTreeSet<String> = signature_only
+        .iter()
+        .map(|old| canonical_revision(old))
+        .collect();
+    let mut links: BTreeMap<String, Link> = BTreeMap::new();
+    for (old, new) in mapping {
+        let Some(new) = new.as_deref() else {
+            continue;
+        };
+        let (Ok(before), Ok(after)) = (
+            crate::gitio::read_commit(cwd, old),
+            crate::gitio::read_commit(cwd, new),
+        ) else {
+            continue;
+        };
+        let key = canonical_revision(old);
+        let adds = same_frame(&before, &after, |_, _| true)
+            && crate::trailers::adds_only_role_entries(&before.message, &after.message);
+        if adds || signature_only.contains(&key) {
+            let parents = before.parents.into_iter().zip(after.parents).collect();
+            links.insert(
+                key,
+                Link {
+                    old: old.clone(),
+                    adds,
+                    parents,
+                },
+            );
+        }
+    }
+    // A link stays only while each of its parents is carried by a link that
+    // stays, so one removal can remove the links above it; repeat until none
+    // goes.
+    loop {
+        let carries = |key: &str| {
+            links.contains_key(key)
+                || rewrites.signature_only.contains(key)
+                || rewrites.role_additions.contains(key)
+        };
+        let broken: Vec<String> = links
+            .iter()
+            .filter(|(_, link)| {
+                link.parents
+                    .iter()
+                    .any(|(before, after)| !rewrites.reaches(before, after, carries))
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        if broken.is_empty() {
+            break;
+        }
+        for key in broken {
+            links.remove(&key);
+        }
+    }
+    links
+        .into_values()
+        .filter_map(|link| link.adds.then_some(link.old))
+        .collect()
+}
+
+/// One rewritten commit an approval may follow, while its parents allow.
+struct Link {
+    /// The old revision, spelled as in the mapping.
+    old: String,
+    /// Whether the successor appended role entries, rather than only being
+    /// signed differently.
+    adds: bool,
+    /// Each parent of the old commit beside the successor's in its place.
+    parents: Vec<(String, String)>,
+}
+
+/// The old revisions of `mapping` whose successor `keeps` accepts, both
+/// commits read here.
+fn successors_where(
+    cwd: &Path,
+    mapping: &BTreeMap<String, Option<String>>,
+    keeps: impl Fn(&crate::gitio::RawCommit, &crate::gitio::RawCommit) -> bool,
+) -> Vec<String> {
     mapping
         .iter()
         .filter_map(|(old, new)| {
@@ -472,26 +622,34 @@ pub fn signature_only_successors(
                 crate::gitio::read_commit(cwd, old).ok()?,
                 crate::gitio::read_commit(cwd, new).ok()?,
             );
-            let carried = |commit: &crate::gitio::RawCommit| {
-                commit
-                    .headers
-                    .iter()
-                    .filter(|header| header.field != "parent")
-                    .map(|header| header.block.clone())
-                    .collect::<Vec<_>>()
-            };
-            let same_parents = old_commit.parents.len() == new_commit.parents.len()
-                && old_commit
-                    .parents
-                    .iter()
-                    .zip(&new_commit.parents)
-                    .all(|(before, after)| rewrites.same(before, after).unwrap_or(false));
-            (carried(&old_commit) == carried(&new_commit)
-                && old_commit.message == new_commit.message
-                && same_parents)
-                .then(|| old.clone())
+            keeps(&old_commit, &new_commit).then(|| old.clone())
         })
         .collect()
+}
+
+/// Whether two commits carry the same bytes in every header but their
+/// parents and signature, with parents pairing up in order as `parents`
+/// accepts.
+fn same_frame(
+    old: &crate::gitio::RawCommit,
+    new: &crate::gitio::RawCommit,
+    parents: impl Fn(&str, &str) -> bool,
+) -> bool {
+    let carried = |commit: &crate::gitio::RawCommit| {
+        commit
+            .headers
+            .iter()
+            .filter(|header| header.field != "parent")
+            .map(|header| header.block.clone())
+            .collect::<Vec<_>>()
+    };
+    carried(old) == carried(new)
+        && old.parents.len() == new.parents.len()
+        && old
+            .parents
+            .iter()
+            .zip(&new.parents)
+            .all(|(before, after)| parents(before, after))
 }
 
 /// Parse a commit map: `<old> <new>` per line, which is what `git filter-repo`
@@ -919,6 +1077,7 @@ mod tests {
                 reason: "test".into(),
                 tool: None,
                 signature_only: judged.iter().map(|old| old.to_string()).collect(),
+                role_additions: Vec::new(),
                 refs: BTreeMap::new(),
                 retained: BTreeMap::new(),
             },
@@ -944,6 +1103,27 @@ mod tests {
             "dddddddddd",
             "every other recorded revision follows the whole chain"
         );
+    }
+
+    /// An approval follows a role-addition link as it follows a signature
+    /// link, while a signing follows only the signature links. Rejects either
+    /// chain taking the other's links.
+    #[test]
+    fn an_approval_follows_role_additions_and_a_signing_does_not() {
+        let mut added = rewrite_event("01B", "bbbbbbbbbb", "cccccccccc", &[]);
+        if let Payload::HistoryRewritten { role_additions, .. } = &mut added.payload {
+            role_additions.push("BBBBBBBBBB".into());
+        }
+        let events = [
+            rewrite_event("01A", "aaaaaaaaaa", "bbbbbbbbbb", &["aaaaaaaaaa"]),
+            added,
+            rewrite_event("01C", "cccccccccc", "dddddddddd", &[]),
+        ];
+        let map = RewriteMap::from_events(events.iter()).unwrap();
+        assert_eq!(map.approved_successor("aaaaaaaaaa").unwrap(), "cccccccccc");
+        assert_eq!(map.signature_successor("aaaaaaaaaa").unwrap(), "bbbbbbbbbb");
+        assert_eq!(map.signature_successor("bbbbbbbbbb").unwrap(), "bbbbbbbbbb");
+        assert_eq!(map.current("aaaaaaaaaa").unwrap(), "dddddddddd");
     }
 
     /// A judgement about a revision the event does not map is about nothing.

@@ -994,6 +994,102 @@ fn forged_signature_only_rewrite_cannot_carry_a_trusted_approval() {
     assert_eq!(state["verdict_assessments"][0]["gating_eligible"], true);
 }
 
+/// The receiver judges a bundled rewrite's role additions against its own
+/// objects, as it judges `signature_only`: a sender's claim on a content
+/// change carries nothing, and a genuine addition the sender left unclaimed
+/// carries the trusted approval. Rejects taking either judgement on the
+/// sender's word.
+#[test]
+fn an_imported_role_addition_is_judged_by_the_receiver() {
+    for genuine in [false, true] {
+        let (source, path, mut bundle) = exported_review();
+        let receiver = Repo::new();
+        deliver_git_objects(&source, &receiver);
+        bind_branch(&receiver, &source, &bundle);
+        enroll(
+            &receiver,
+            &bundle,
+            &["facts", "review-authority", "rewrite"],
+            &["operator"],
+            true,
+        );
+        received(&receiver, &path, false).assert().success();
+        assert_eq!(status(&receiver, &bundle)["has_valid_approval"], true);
+        let old = bundle["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["event_type"] == "patchset-added")
+            .unwrap()["head"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let tree = source.home.join(".worktrees/repo-review-origin");
+        let successor = if genuine {
+            let raw = crate::role_carry::raw_commit(&tree, &old);
+            let added = crate::role_carry::write_commit(
+                &tree,
+                &[
+                    &raw[..],
+                    b"\nReviewed-by: Operator <operator@example.invalid>\n",
+                ]
+                .concat(),
+            );
+            git(&tree, &["reset", "-q", "--hard", &added]);
+            let branch = bundle["events"][0]["branch"].as_str().unwrap();
+            git(
+                &receiver.root,
+                &[
+                    "fetch",
+                    source.root.to_str().unwrap(),
+                    &format!("+{branch}:{branch}"),
+                ],
+            );
+            added
+        } else {
+            source.commit(
+                &tree,
+                "feature.txt",
+                "different content\n",
+                "fix: revise feature\n\nReviewed-by: Operator <operator@example.invalid>",
+            );
+            source.head(&tree)
+        };
+        bind_branch(&receiver, &source, &bundle);
+        let mut rewrite = bundle["events"][0].clone();
+        rewrite["event_id"] = serde_json::json!("ZZZZ-rewrite-roles");
+        rewrite["change_id"] = serde_json::json!("repository");
+        rewrite["event_type"] = serde_json::json!("history-rewritten");
+        rewrite["reason"] = serde_json::json!("recorded the reviewer");
+        rewrite["mapping"] = serde_json::json!({old.clone():successor});
+        if genuine {
+            rewrite["signature_only"] = serde_json::json!([old]);
+        } else {
+            rewrite["role_additions"] = serde_json::json!([old]);
+        }
+        bundle["repository_events"] = serde_json::json!([rewrite]);
+        write_bundle(&path, &mut bundle);
+        received(&receiver, &path, false).assert().success();
+        let state = status(&receiver, &bundle);
+        assert_eq!(state["has_valid_approval"], genuine, "{state}");
+        let held: serde_json::Value = stdout(
+            receiver
+                .arc(&receiver.root)
+                .args(["events", "--repository"]),
+        )
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|event| event["event_id"] == "ZZZZ-rewrite-roles")
+        .expect("the rewrite was imported");
+        assert!(held.get("signature_only").is_none(), "{held}");
+        assert_eq!(
+            held.get("role_additions"),
+            genuine.then(|| serde_json::json!([old])).as_ref(),
+            "{held}"
+        );
+    }
+}
+
 #[test]
 #[cfg(debug_assertions)]
 fn authorization_movement_before_publication_preserves_admitted_state() {

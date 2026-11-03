@@ -1254,9 +1254,20 @@ fn plan_repository_events(
     };
     let mut novel = Vec::new();
     for value in &validated.bundle.repository_events {
-        if let Some(event) = crate::bundle::parse_typed_event(value)? {
+        if let Some(mut event) = crate::bundle::parse_typed_event(value)? {
             if !held.contains(&event.event_id) {
                 novel.push(event.clone());
+                // What the sender judged is no link here: the map that
+                // re-judges the bundle's rewrites carries none of its claims.
+                if let Payload::HistoryRewritten {
+                    signature_only,
+                    role_additions,
+                    ..
+                } = &mut event.payload
+                {
+                    signature_only.clear();
+                    role_additions.clear();
+                }
                 combined.push(event);
             }
         }
@@ -1313,8 +1324,9 @@ fn plan_repository_events(
     })?;
     let borrowed: Vec<_> = combined.iter().collect();
     let withdrawn = crate::rewrite::withdrawn_event_ids(&borrowed)?;
-    // Whether a successor differs from its old commit by signature alone is
-    // this repository's judgement to make, against the objects it holds. What
+    // Whether a successor differs from its old commit by signature alone, or
+    // by appended role entries, is this repository's judgement to make,
+    // against the objects it holds. What
     // the sender recorded is a claim about the sender's objects, and taking it
     // would let a bundle move an approval onto content nobody reviewed.
     for value in &validated.bundle.repository_events {
@@ -1332,21 +1344,25 @@ fn plan_repository_events(
             .iter()
             .filter_map(|event| event.typed.clone())
             .collect();
-        let judged = crate::provisional::retain_signature_only(
-            cwd,
-            store,
-            &extra,
-            &rewrites,
-            crate::rewrite::signature_only_successors(cwd, mapping, &rewrites),
-        )?;
+        let retain = |judged| {
+            crate::provisional::retain_signature_only(cwd, store, &extra, &rewrites, judged)
+        };
+        let signed = retain(crate::rewrite::signature_only_successors(
+            cwd, mapping, &rewrites,
+        ))?;
+        let added = retain(crate::rewrite::role_addition_successors(
+            cwd, mapping, &rewrites, &signed,
+        ))?;
         let mut value = value.clone();
         if let Some(object) = value.as_object_mut() {
-            object.remove(crate::store::SIGNATURE_ONLY_FIELD);
-            if !judged.is_empty() {
-                object.insert(
-                    crate::store::SIGNATURE_ONLY_FIELD.to_string(),
-                    serde_json::json!(judged),
-                );
+            for (field, judged) in [
+                (crate::store::SIGNATURE_ONLY_FIELD, signed),
+                (crate::store::ROLE_ADDITIONS_FIELD, added),
+            ] {
+                object.remove(field);
+                if !judged.is_empty() {
+                    object.insert(field.to_string(), serde_json::json!(judged));
+                }
             }
         }
         let mut bytes = serde_json::to_vec_pretty(&value)?;

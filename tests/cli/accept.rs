@@ -1911,3 +1911,53 @@ fn accept_delivery_installs_a_supplied_custody_sidecar() {
         );
     }
 }
+
+/// Admitting a pending rewrite stays a signature-only judgement: a pending
+/// map whose successor only appended a role entry is no signing, and accept
+/// refuses to recover it. Rejects admission reading the approval-carry rule.
+#[test]
+fn accept_refuses_a_pending_rewrite_that_only_added_role_entries() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = Delivery::new();
+    let events = d.receiver.root.join(".git/arc/repository/events");
+    fs::create_dir_all(&events).unwrap();
+    fs::set_permissions(&events, fs::Permissions::from_mode(0o500)).unwrap();
+    d.command().assert().code(1);
+    fs::set_permissions(&events, fs::Permissions::from_mode(0o700)).unwrap();
+    let intent_path = d
+        .receiver
+        .root
+        .join(".git/arc/repository/rewrite-intent.json");
+    let mut intent: serde_json::Value =
+        serde_json::from_slice(&fs::read(&intent_path).unwrap()).unwrap();
+    assert_eq!(
+        git_out(&d.receiver.root, &["rev-parse", &d.branch]),
+        d.head,
+        "the failed recording left the branch where it was"
+    );
+    let raw = crate::role_carry::raw_commit(&d.receiver.root, &d.head);
+    let added = crate::role_carry::write_commit(
+        &d.receiver.root,
+        &[
+            &raw[..],
+            b"\nReviewed-by: Reviewer <reviewer@example.invalid>\n",
+        ]
+        .concat(),
+    );
+    intent["mapping"][&d.head] = serde_json::json!(added);
+    intent["refs"][format!("refs/heads/{}", d.branch)]["new"] = serde_json::json!(added);
+    fs::write(&intent_path, serde_json::to_vec_pretty(&intent).unwrap()).unwrap();
+
+    let output = d.command().assert().code(11).get_output().clone();
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("pending rewrite changes content or provisional ancestry"),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(
+        git_out(&d.receiver.root, &["rev-parse", &d.branch]),
+        d.head,
+        "a refused recovery moves no ref"
+    );
+}

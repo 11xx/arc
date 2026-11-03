@@ -2074,8 +2074,9 @@ FORGE
   revision has a null successor. Stored event fields are raw observations.
 
   show and status expose observed_head_match and resolved_head_match against
-  the patchset's approval anchor, which follows signature-only rewrites.
-  A content or trailer rewrite keeps the open patchset's approval anchor;
+  the patchset's approval anchor, which follows signature-only and
+  role-addition rewrites (`arc guide rewrites-evidence`). Any other content
+  or trailer rewrite keeps the open patchset's approval anchor;
   a fresh snapshot binds the successor. A local rewrite correspondence does not supply
   provider evidence at its successor. checks_record preserves the rollup's
   observed_pr_head, resolved_pr_head and the link persisted when recorded.
@@ -2265,9 +2266,10 @@ REVIEW COVERAGE AND DEBT
   by repository policy. It binds to the exact patchset head declared, so new
   work needs a new
   declaration — it does not excuse the rest of the change's life. A waiver
-  follows only signature-only rewrites. A message or content rewrite leaves
-  the waiver stale even when the patchset's mapped head matches the branch;
-  a fresh snapshot and declaration are required for that head. A refused
+  follows the rewrites an approval follows: signature-only and role-addition
+  ones (`arc guide rewrites-evidence`). Any other message or content rewrite
+  leaves the waiver stale even when the patchset's mapped head matches the
+  branch; a fresh snapshot and declaration are required for that head. A refused
   `arc integrate --debt` keeps the debt it declared; declaring it again with
   the same reason, kind, and declarer against the same patchset and coverage
   records nothing and prints the debt already in force.
@@ -2527,9 +2529,12 @@ REVIEW ASSURANCE
   - The authors are the models of the shipped work's `Implemented-by` lines,
     read from the debt's production record, else from the shipped range, else
     the recorded patchset model. A change with several authors is stale when
-    it is stale for any one of them.
+    it is stale for any one of them. An `Implemented-by` entry appended after
+    approval is part of the shipped range and is read as written.
   - A read counts only when routing assesses it eligible. A verdict counts
-    when it approves the shipped patchset, an audit when it approves.
+    when it approves the shipped patchset, an audit when it approves. An
+    approval carried across a role-addition rewrite (`arc guide
+    rewrites-evidence`) still approves that patchset.
     Standing compares tiers only, so a same-family read at the frontier tier
     still does not count: a change with no eligible read is `owed`, which its
     debt view already says, and is never `stale`.
@@ -2688,8 +2693,11 @@ CONTRIBUTION TRAILERS
     lines drop or replace exactly those lines and leave the valid lines under
     the same key. Neither advice blocks
     integration or changes ready or the exit code; rewrite before
-    integration. A message rewrite requires fresh snapshot and approval or
-    declared debt; post-integration audits stay in the ledger.
+    integration. Appending complete role entries keeps the approval or
+    declared debt, and the appended text is a declaration, not a verdict;
+    any other message rewrite requires fresh snapshot and approval or
+    declared debt (`arc guide rewrites-evidence`). Post-integration audits
+    stay in the ledger.
     arc instructions git [--check <file>]
                        Print the portable contribution-trailer convention
                        `arc-contribution-trailers/2`: `Planned-by`,
@@ -2934,13 +2942,31 @@ HISTORY REWRITES
   range shares no commit with the branch it was cut from — the rewrite names
   each one and the `git rebase --onto` that replays it, and until then no
   comparison between the two has an answer. An approval follows a recorded
-  rewrite only when the successor differs from the approved head in nothing but
-  its signature — same tree, author, committer and message — which is what
-  `arc rewrite sign` produces. Any other successor leaves it stale in `arc
-  status` and `arc check`. To re-approve after `arc rewrite trailers`, or a map
-  naming different content, run `arc snapshot` and record a verdict on the
-  fresh patchset, or use `arc review --snapshot --verdict approved` with the
-  work's contributor attribution. Snapshot records a new patchset whenever
+  rewrite in two cases, judged per commit over every commit the rewrite
+  recreated:
+
+  - signature-only: the successor differs in nothing but its signature —
+    same tree, author, committer, message and every other header, with
+    parents the map translates — which is what `arc rewrite sign` produces;
+  - role-addition: the successor's message is the old one with complete
+    `Planned-by`, `Implemented-by`, `Reviewed-by` or `Orchestrated-by`
+    entries (a line with a value and its continuation lines) appended to its
+    final trailer block, or to a new block after one blank line when it had
+    none; tree and every other header byte-identical, the signature aside,
+    and parents reached only through rewrites of either kind. This is what
+    `arc rewrite trailers --append` with role lines produces.
+
+  Any other successor leaves the approval stale in `arc status` and `arc
+  check`: a replaced, removed or reordered role entry, `Assisted-by` or any
+  other key, a body edit, a changed committer or extra header, or a commit
+  beneath the head whose content or message changed. Added role text is
+  declared, not reread: it is no verdict, and the ledger's contributor,
+  production and debt records stay what they recorded. Admitting a pending
+  signing (`arc accept`) still requires signature-only. To re-approve after
+  any other trailer edit, or a map naming different content, run `arc
+  snapshot` and record a verdict on the fresh patchset, or use `arc review
+  --snapshot --verdict approved` with the work's contributor attribution.
+  Snapshot records a new patchset whenever
   the latest patchset's approved head differs from the current branch head,
   even when its mapped head matches. Earlier verdicts remain bound to their
   own patchsets and stay stale for the rewritten head; a snapshot or rewrite
@@ -2948,8 +2974,9 @@ HISTORY REWRITES
   check direct the caller to snapshot, and an implicit verdict on the latest
   patchset refuses before recording anything. An explicit --patchset judgment
   may record historical work, retaining that patchset's review head and its
-  stale coverage. Whether a successor differs by signature alone is
-  judged when the map is recorded or imported, never when a change is read.
+  stale coverage. Whether a successor is signature-only or a role addition is
+  judged when the map is recorded, and again by the receiver when imported
+  (the sender's judgement is dropped), never when a change is read.
 
 THE HISTORY MODEL
   Git is the accepted history and the object store; arc records what the
@@ -3353,7 +3380,10 @@ RULES THAT CHANGE WHAT YOU DO
     on the tree that was evaluated, and the evidence carries over to it. The
     gate line reads `inherited from <revision>` wherever the run that answered
     was against another commit holding that tree, and `verify --all
-    --skip-green` reuses that run. A single `integrate` runs no
+    --skip-green` reuses that run. Reuse claims content alone: a gate whose
+    command reads commit messages or history keeps a pass across a rewrite
+    that changed only those, such as an appended role entry, and is not run
+    again by arc. A single `integrate` runs no
     gate; it checks that the merge it made carries the tree that was
     evaluated, and undoes it otherwise. A queue runs the ones with no answer
     at that tree, because it moves the target itself and every member behind

@@ -594,6 +594,7 @@ fn validate_recovery(
             reason: intent.reason.clone(),
             tool: intent.tool.clone(),
             signature_only: Vec::new(),
+            role_additions: Vec::new(),
             refs: intent.refs.clone(),
             retained: intent.retained.clone(),
         },

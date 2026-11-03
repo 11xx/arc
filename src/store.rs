@@ -2660,21 +2660,25 @@ impl Store {
     }
 }
 
-/// The field of a `history-rewritten` event that records what the recording
+/// The fields of a `history-rewritten` event that record what the recording
 /// repository found when it compared the commits.
 pub const SIGNATURE_ONLY_FIELD: &str = "signature_only";
+pub const ROLE_ADDITIONS_FIELD: &str = "role_additions";
+pub const JUDGEMENT_FIELDS: [&str; 2] = [SIGNATURE_ONLY_FIELD, ROLE_ADDITIONS_FIELD];
 
 /// Whether two copies of one repository event are the same fact.
 ///
-/// The signature-only judgement is the receiver's own: an import replaces the
-/// sender's with one made against the objects it holds, so the copy it holds
-/// and the copy a bundle carries are one event when they agree on everything
-/// else.
+/// The judgements of [`JUDGEMENT_FIELDS`] are the receiver's own: an import
+/// replaces the sender's with ones made against the objects it holds, so the
+/// copy it holds and the copy a bundle carries are one event when they agree
+/// on everything else.
 fn same_repository_event(existing: &serde_json::Value, incoming: &serde_json::Value) -> bool {
     let bare = |value: &serde_json::Value| {
         let mut value = value.clone();
         if let Some(object) = value.as_object_mut() {
-            object.remove(SIGNATURE_ONLY_FIELD);
+            for field in JUDGEMENT_FIELDS {
+                object.remove(field);
+            }
         }
         value
     };

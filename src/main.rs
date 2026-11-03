@@ -2517,8 +2517,8 @@ enum Cmd {
         /// for a verdict nobody recorded — and
         /// for a self-approval policy would reject — in the same invocation.
         /// The waiver binds to the patchset's review head, following only
-        /// signature-only rewrites; a message or content rewrite requires a
-        /// fresh snapshot and declaration.
+        /// signature-only and role-addition rewrites; any other message or
+        /// content rewrite requires a fresh snapshot and declaration.
         /// The debt's production record names the ledger's planner,
         /// implementer, orchestrator and integrator. It also keeps the
         /// `Implemented-by` values of the commits in the range verbatim as a
@@ -2579,8 +2579,9 @@ enum Cmd {
     /// Record a review obligation this change carries but has not discharged
     ///
     /// A waiver binds to the patchset's review head, following only
-    /// signature-only rewrites. A message or content rewrite requires a fresh
-    /// snapshot and declaration before debt can waive review of that head.
+    /// signature-only and role-addition rewrites. Any other message or content
+    /// rewrite requires a fresh snapshot and declaration before debt can waive
+    /// review of that head.
     /// The production record names the ledger's planner, implementer,
     /// orchestrator and integrator. It also keeps the `Implemented-by` values
     /// of the commits in the range verbatim as a projection for comparison; a
@@ -3828,9 +3829,12 @@ enum RewriteCmd {
     /// under the same key. A recreated commit keeps its tree, author,
     /// committer and both dates, and is signed with --key unless --no-sign.
     ///
-    /// A message edit leaves earlier approvals stale. Run `arc snapshot`
-    /// followed by a verdict on the fresh patchset, or `arc review --snapshot`,
-    /// to re-approve the rewritten head. A rewrite grants no approval.
+    /// Appending complete Planned-by, Implemented-by, Reviewed-by or
+    /// Orchestrated-by entries, and nothing else, keeps earlier approvals and
+    /// waivers; see `arc guide rewrites-evidence`. Any other message edit
+    /// leaves them stale. Run `arc snapshot` followed by a verdict on the
+    /// fresh patchset, or `arc review --snapshot`, to re-approve the rewritten
+    /// head. A rewrite grants no approval.
     /// Map validation and append policy precede ref movement. Every moved ref
     /// is named. A recording failure with no published event restores this
     /// attempt's ref moves and retains its intent for retry. Published or

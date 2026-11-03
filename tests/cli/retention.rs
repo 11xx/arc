@@ -482,8 +482,21 @@ fn doctor_names_a_retained_commit_whose_object_is_gone() {
     let repo = repo_with_gates();
     let (worktree, old) = approved_change(&repo, "alpha");
     let change = only_change(&repo);
-    rewrite_trailers(&repo, &worktree, &old);
-    // Another cited head keeps the reachability walk nonempty.
+    // A non-role trailer leaves the approval behind, so the snapshot below
+    // records a second patchset: another cited head keeps the reachability
+    // walk nonempty.
+    repo.arc(&worktree)
+        .args([
+            "rewrite",
+            "trailers",
+            "--from",
+            &old,
+            "--no-sign",
+            "--append",
+            "Signed-off-by: Planner <planner@example.invalid>",
+        ])
+        .assert()
+        .success();
     repo.arc(&worktree)
         .args(["snapshot", "alpha"])
         .assert()

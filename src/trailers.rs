@@ -242,6 +242,60 @@ pub fn edit(message: &[u8], drop: &[String], append: &[String]) -> Vec<u8> {
     parts.assemble(message, kept)
 }
 
+/// Whether `new` is `old` with one or more complete role entries appended to
+/// its final trailer block, and nothing else changed.
+///
+/// An entry is a `Planned-by`, `Implemented-by`, `Reviewed-by` or
+/// `Orchestrated-by` line with a value, and the continuation lines under it.
+/// Every line of `old`'s block stays where it was and as it was, so a
+/// replaced, removed or reordered entry, a continuation added to an existing
+/// one, or any other key answers `false`. A message with no block gains one
+/// after the blank line [`edit`] separates it with, and that separator is the
+/// only other byte allowed to differ.
+pub(crate) fn adds_only_role_entries(old: &[u8], new: &[u8]) -> bool {
+    let (before, after) = (Parts::of(old), Parts::of(new));
+    let Some(block) = after.block.clone() else {
+        return false;
+    };
+    let kept: &[&[u8]] = match &before.block {
+        Some(block) => &before.lines[block.clone()],
+        None => &[],
+    };
+    let Some(added) = after.lines[block.clone()].strip_prefix(kept) else {
+        return false;
+    };
+    let lines = after.lines[block]
+        .iter()
+        .map(|line| line.to_vec())
+        .collect();
+    complete_role_entries(added) && before.assemble(old, lines) == new
+}
+
+/// Whether `lines` is one or more whole role entries, each a role key line
+/// with the continuations under it, carrying a value.
+fn complete_role_entries(lines: &[&[u8]]) -> bool {
+    let mut entries = 0;
+    let mut valued = true;
+    for line in lines {
+        if is_continuation(line) {
+            if entries == 0 {
+                return false;
+            }
+            valued |= !is_blank(line);
+            continue;
+        }
+        let Some(key) = trailer_key(line) else {
+            return false;
+        };
+        if !valued || !CONTRIBUTION_ROLES.iter().any(|role| same_key(&key, role)) {
+            return false;
+        }
+        entries += 1;
+        valued = !is_blank(&line[key.len() + 1..]);
+    }
+    entries > 0 && valued
+}
+
 /// The version of the per-line edit file format [`parse_edits`] reads.
 pub const EDITS_SCHEMA: &str = "arc-trailer-edits/1";
 
@@ -871,6 +925,160 @@ fn recorded_coordinate(state: &crate::state::ChangeState, actor: &str) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const REVIEWED: &[u8] = b"feat: x\n\nbody\n\nImplemented-by: a:b#c\nReviewed-by: d:e#f\n";
+
+    /// Appending complete role entries to the final block is the one message
+    /// change an approval follows. Rejects an addition read as anything else.
+    #[test]
+    fn appended_role_entries_are_an_addition() {
+        let old: &[u8] = b"feat: x\n\nbody\n\nImplemented-by: a:b#c\n";
+        assert!(adds_only_role_entries(old, REVIEWED));
+        let both = b"feat: x\n\nbody\n\nImplemented-by: a:b#c\nReviewed-by: d:e#f\nOrchestrated-by: Person <p@example.invalid>\n";
+        assert!(adds_only_role_entries(old, both));
+        let spelled = b"feat: x\n\nbody\n\nImplemented-by: a:b#c\nreviewed-BY: d:e#f\n";
+        assert!(
+            adds_only_role_entries(old, spelled),
+            "keys match without case"
+        );
+        let unterminated = b"feat: x\n\nbody\n\nImplemented-by: a:b#c";
+        assert!(adds_only_role_entries(
+            unterminated,
+            b"feat: x\n\nbody\n\nImplemented-by: a:b#c\nReviewed-by: d:e#f"
+        ));
+    }
+
+    /// A message without a block gains one after a blank line, which is the
+    /// only byte besides the entries allowed to differ. Rejects a block
+    /// opened without its separator, or with a different one.
+    #[test]
+    fn a_message_without_a_block_gains_one_after_its_separator() {
+        assert!(adds_only_role_entries(
+            b"feat: x\n\nbody\n",
+            b"feat: x\n\nbody\n\nReviewed-by: d:e#f\n"
+        ));
+        assert!(adds_only_role_entries(
+            b"feat: x\n",
+            b"feat: x\n\nReviewed-by: d:e#f\n"
+        ));
+        assert!(adds_only_role_entries(
+            b"feat: x\n\nbody\n\n",
+            b"feat: x\n\nbody\n\nReviewed-by: d:e#f\n"
+        ));
+        assert!(!adds_only_role_entries(
+            b"feat: x\n\nbody\n",
+            b"feat: x\n\nbody\n\n\nReviewed-by: d:e#f\n"
+        ));
+        assert!(!adds_only_role_entries(
+            b"feat: x\n\nbody\n",
+            b"feat: x\n\nbody\n \nReviewed-by: d:e#f\n"
+        ));
+    }
+
+    /// Every other edit keeps the reset. Rejects a predicate that compares
+    /// role values, the block, or the message loosely.
+    #[test]
+    fn any_other_message_change_is_not_an_addition() {
+        let old: &[u8] = b"feat: x\n\nbody\n\nImplemented-by: a:b#c\n";
+        let refused: [(&str, &[u8]); 12] = [
+            ("unchanged", old),
+            (
+                "a changed body line",
+                b"feat: x\n\nbody!\n\nImplemented-by: a:b#c\nReviewed-by: d:e#f\n",
+            ),
+            (
+                "a non-role trailer",
+                b"feat: x\n\nbody\n\nImplemented-by: a:b#c\nSigned-off-by: P <p@example.invalid>\n",
+            ),
+            (
+                "Assisted-by",
+                b"feat: x\n\nbody\n\nImplemented-by: a:b#c\nAssisted-by: d:e#f (review)\n",
+            ),
+            (
+                "a replaced role entry",
+                b"feat: x\n\nbody\n\nImplemented-by: g:h#i\nReviewed-by: d:e#f\n",
+            ),
+            (
+                "a removed role entry",
+                b"feat: x\n\nbody\n\nReviewed-by: d:e#f\n",
+            ),
+            (
+                "a role entry inserted before an existing one",
+                b"feat: x\n\nbody\n\nReviewed-by: d:e#f\nImplemented-by: a:b#c\n",
+            ),
+            (
+                "a malformed block",
+                b"feat: x\n\nbody\n\nImplemented-by: a:b#c\nReviewed-by: d:e#f\nprose\n",
+            ),
+            (
+                "an entry without a value",
+                b"feat: x\n\nbody\n\nImplemented-by: a:b#c\nReviewed-by: \n",
+            ),
+            (
+                "a role entry and a non-role trailer",
+                b"feat: x\n\nbody\n\nImplemented-by: a:b#c\nReviewed-by: d:e#f\nX-y: z\n",
+            ),
+            (
+                "a lost final newline",
+                b"feat: x\n\nbody\n\nImplemented-by: a:b#c\nReviewed-by: d:e#f",
+            ),
+            (
+                "a role entry as its own paragraph",
+                b"feat: x\n\nbody\n\nImplemented-by: a:b#c\n\nReviewed-by: d:e#f\n",
+            ),
+        ];
+        for (case, new) in refused {
+            assert!(!adds_only_role_entries(old, new), "{case}");
+        }
+        assert!(
+            !adds_only_role_entries(REVIEWED, old),
+            "removing the last entry"
+        );
+    }
+
+    /// An appended entry may continue on following lines; a continuation
+    /// added under an existing entry changes that entry. Rejects reading the
+    /// block line by line rather than entry by entry.
+    #[test]
+    fn continuations_belong_to_the_entry_above_them() {
+        let old: &[u8] = b"feat: x\n\nImplemented-by: a:b#c\n";
+        assert!(adds_only_role_entries(
+            old,
+            b"feat: x\n\nImplemented-by: a:b#c\nReviewed-by: Person\n <p@example.invalid>\n"
+        ));
+        assert!(!adds_only_role_entries(
+            old,
+            b"feat: x\n\nImplemented-by: a:b#c\n  more\n"
+        ));
+        assert!(!adds_only_role_entries(
+            old,
+            b"feat: x\n\nImplemented-by: a:b#c\n  more\nReviewed-by: d:e#f\n"
+        ));
+        let continued: &[u8] = b"feat: x\n\nImplemented-by: a:b\n #c\n";
+        assert!(adds_only_role_entries(
+            continued,
+            b"feat: x\n\nImplemented-by: a:b\n #c\nReviewed-by: d:e#f\n"
+        ));
+    }
+
+    /// The comparison is over bytes, so a message in another encoding is
+    /// compared exactly. Rejects a UTF-8 round trip, which would equate two
+    /// different invalid sequences.
+    #[test]
+    fn a_message_outside_utf8_is_compared_as_bytes() {
+        let old: &[u8] = b"feat: caf\xe9\n\nImplemented-by: Jos\xe9 <j@example.invalid>\n";
+        let mut new = old.to_vec();
+        new.extend_from_slice(b"Reviewed-by: d:e#f\n");
+        assert!(adds_only_role_entries(old, &new));
+        let mut other = new.clone();
+        other[9] = 0xe8;
+        assert!(!adds_only_role_entries(old, &other));
+        assert_eq!(
+            String::from_utf8_lossy(&new),
+            String::from_utf8_lossy(&other),
+            "a lossy read could not tell these apart"
+        );
+    }
 
     #[test]
     fn implemented_by_reads_every_line_of_the_final_block() {

@@ -619,7 +619,11 @@ pub fn retain_signature_only(
                     original.clone(),
                     Some(candidate.to_string()),
                 )]);
-                if !crate::rewrite::signature_only_successors(cwd, &mapping, rewrites).is_empty() {
+                let signed = crate::rewrite::signature_only_successors(cwd, &mapping, rewrites);
+                if !signed.is_empty()
+                    || !crate::rewrite::role_addition_successors(cwd, &mapping, rewrites, &signed)
+                        .is_empty()
+                {
                     provisional.insert(candidate.to_string());
                 }
             }

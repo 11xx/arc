@@ -1830,6 +1830,19 @@ pub enum Payload {
         /// it verify nothing.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         signature_only: Vec<String>,
+        /// The old revisions, spelled as in `mapping`, whose successor
+        /// differs from them only by complete role entries (`Planned-by`,
+        /// `Implemented-by`, `Reviewed-by`, `Orchestrated-by`) appended to
+        /// the message's final trailer block, and perhaps by its signature:
+        /// the same tree and bytes in every other header, with parents
+        /// reached only through rewrites that preserve an approval. An
+        /// approval follows a rewrite through these as through
+        /// `signature_only`, and no revision is named by both. Admitting a
+        /// signing reads `signature_only` alone. Judged the same way, by
+        /// whoever records the event; an older reader skips the field and
+        /// holds the approval stale, which is the stricter reading.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        role_additions: Vec<String>,
         /// Ref moves performed by the rewrite. External maps and records
         /// without this field have no recorded ref-move information.
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

@@ -1793,7 +1793,7 @@ fn re_signing_an_approved_change_keeps_the_approval() {
 }
 
 /// A trailer edit keeps the tree and changes the message, and the message is
-/// part of what was approved.
+/// part of what was approved unless the edit only appended role entries.
 #[test]
 fn editing_a_trailer_of_an_approved_change_leaves_the_approval_stale() {
     let repo = repo_with_gates();
@@ -1805,7 +1805,7 @@ fn editing_a_trailer_of_an_approved_change_leaves_the_approval_stale() {
             "trailers",
             "--no-sign",
             "--append",
-            "Reviewed-by: Someone <someone@example.invalid>",
+            "Signed-off-by: Someone <someone@example.invalid>",
             "--from",
             &approved,
         ])
@@ -1848,7 +1848,7 @@ fn assert_trailer_reapproval(repo: &Repo, key: Option<&Key>, composed: bool) {
         "--from",
         &approved,
         "--append",
-        "Reviewed-by: Reviewer <reviewer@example.invalid>",
+        "Signed-off-by: Reviewer <reviewer@example.invalid>",
     ]);
     match key {
         Some(key) => {
@@ -2105,7 +2105,7 @@ fn a_trailer_rewrite_does_not_inherit_a_debt_waiver() {
                 "HEAD",
                 "--no-sign",
                 "--append",
-                "Planned-by: Planner <planner@example.invalid>",
+                "Signed-off-by: Planner <planner@example.invalid>",
             ])
             .assert()
             .success();
