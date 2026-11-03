@@ -209,7 +209,7 @@ impl LedgerRead<'_> {
         if let Some(held) = self.scope.get() {
             return Ok(held);
         }
-        let derived = self.store.privilege_scope()?;
+        let derived = self.store.privilege_scope_over(&self.batches)?;
         Ok(self.scope.get_or_init(|| derived))
     }
 
@@ -2029,10 +2029,12 @@ impl Store {
         Ok(state)
     }
 
+    /// One change's state from one read of the ledger: its import batches,
+    /// repository events and scope each read once.
     pub fn state(&self, change_id: &str) -> Result<crate::state::ChangeState> {
-        self.shared_state(change_id, || {
-            self.state_in(&self.privilege_scope()?, change_id)
-        })
+        let read = self.read()?;
+        read.scope()?;
+        read.state(change_id)
     }
 
     /// One change's state, reduced once per process while it shares reads:
@@ -2061,30 +2063,29 @@ impl Store {
         Ok(state)
     }
 
-    /// `state` judged by a scope the caller derived for this read.
-    pub fn state_in(
-        &self,
-        scope: &Arc<PrivilegeScope>,
-        change_id: &str,
-    ) -> Result<crate::state::ChangeState> {
-        let events = self.load_events(change_id)?;
-        self.project_state_in(scope, &events, &self.rewrites()?)
-    }
-
     /// What the receiver permits, derived from the ledger as it stands.
     ///
     /// The scope is a value the caller holds for one read, never state kept on
     /// the store: an import, an append or a replica change made through any
     /// handle in the process changes what the next derivation answers, and a
     /// scope kept past that would judge events by permissions that no longer
-    /// hold. A reader of several changes derives it once and passes it to
-    /// `state_in` and `project_state_in`; a reader that writes between reads
-    /// derives a fresh one for each.
+    /// hold. A reader of several changes reads them through one `read`, or
+    /// derives the scope once and passes it to `project_state_in`; a reader
+    /// that writes between reads derives a fresh one for each.
     pub fn privilege_scope(&self) -> Result<Arc<PrivilegeScope>> {
         self.shared_or(
             "scope",
             |memo| &mut memo.scope,
             || Ok(Arc::new(PrivilegeScope::for_store(self)?)),
+        )
+    }
+
+    /// `privilege_scope` judging import batches a read already holds.
+    fn privilege_scope_over(&self, batches: &[ImportBatch]) -> Result<Arc<PrivilegeScope>> {
+        self.shared_or(
+            "scope",
+            |memo| &mut memo.scope,
+            || Ok(Arc::new(PrivilegeScope::for_batches(self, batches)?)),
         )
     }
 
@@ -3335,14 +3336,21 @@ mod tests {
         assert_eq!(derivations() - before, 1);
 
         let before = derivations();
-        let scope = store.privilege_scope().unwrap();
+        let read = store.read().unwrap();
         for change in changes {
-            store.state_in(&scope, change).unwrap();
+            read.state(change).unwrap();
         }
         assert_eq!(
             derivations() - before,
             1,
-            "reading a change with a held scope derives nothing"
+            "reading changes through one read derives the scope once"
+        );
+        let before = derivations();
+        store.state("one").unwrap();
+        assert_eq!(
+            derivations() - before,
+            1,
+            "reading one change derives its scope once"
         );
     }
 

@@ -1,6 +1,6 @@
-//! `arc check`, which every landing runs, and `arc journal open`, the queue a
-//! lead reads beside it, read the ledger a fixed number of times however many
-//! changes it holds. Counts come from the `ARC_TRACE` record and
+//! The commands every landing runs, `check` and `integrate`, and the journal
+//! queue a lead reads beside them, read the ledger a fixed number of times
+//! however many changes it holds. Counts come from the `ARC_TRACE` record and
 //! from the file `ARC_TEST_LEDGER_READS` names.
 
 use super::common::*;
@@ -184,4 +184,54 @@ fn journal_open_reads_the_ledger_once_however_many_changes() {
     add_changes(&repo, 2, 3);
     assert_read_once(&repo, &["journal", "open"]);
     assert_read_once(&repo, &["journal", "open", "--json"]);
+}
+
+/// The reads one traced integration of a fresh approved change makes in a
+/// ledger holding `extra` more changes.
+fn integration_reads(extra: usize) -> (Value, Value, u64) {
+    let repo = ledger_with_import();
+    add_changes(&repo, 0, extra);
+    let (_, worktree, _) = change_with_patchset(&repo, "landing");
+    repo.arc(&worktree)
+        .args(["review", "landing", "--verdict", "approved"])
+        .assert()
+        .success();
+    let (record, counts, code) = traced(&repo, &repo.root, &["integrate", "landing"]);
+    assert_eq!(code, Some(0), "{record}");
+    (record, counts, changes_held(&repo))
+}
+
+/// Claim: `arc integrate` reads the repository events once per read of the
+/// ledger it makes, however many changes the ledger holds: the change before
+/// the locks, once to resolve the style and once to judge it, the confirming
+/// re-read under them, the readiness report and the confirmation. Rejects a
+/// change read that materializes the repository events once for its rewrites
+/// and again for its projection.
+#[test]
+fn integrate_reads_the_ledger_once_per_read_however_many_changes() {
+    let (few, few_counts, few_changes) = integration_reads(1);
+    let (many, many_counts, many_changes) = integration_reads(5);
+    for (record, counts) in [(&few, &few_counts), (&many, &many_counts)] {
+        assert_eq!(
+            record["counts"]["repository_materializations"], 5,
+            "{record} {counts}"
+        );
+        assert_eq!(record["counts"]["status_reports"], 2, "{record}");
+    }
+    for ((name, few_value), (_, many_value)) in fixed_reads(&few, &few_counts)
+        .into_iter()
+        .zip(fixed_reads(&many, &many_counts))
+    {
+        assert_eq!(
+            few_value, many_value,
+            "{name} grew from {few_value} to {many_value} with more changes"
+        );
+    }
+    // Each change is reduced by the readiness report and by the confirmation.
+    let reduced = |record: &Value| record["counts"]["changes_reduced"].as_u64().unwrap();
+    assert_eq!(
+        reduced(&many) - reduced(&few),
+        2 * (many_changes - few_changes),
+        "{few} {many}"
+    );
 }

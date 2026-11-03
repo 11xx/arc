@@ -593,13 +593,22 @@ impl PrivilegeScope {
     /// Derive the scope from the ledger as it stands. The import batches come
     /// from the store, so a process that shares its reads decodes each batch
     /// once for the store and the scope together.
+    pub fn for_store(store: &crate::store::Store) -> Result<Self> {
+        Self::for_batches(store, &store.import_batches()?)
+    }
+
+    /// Derive the scope from the ledger, judging the import batches a read of
+    /// it already holds.
     ///
     /// Only an event an admission receipt names, or one whose ID the ledger
     /// holds in more than one place, is read for its identity: IDs come from
     /// file names and import batches, and the digest that binds an admission
     /// to the bytes it admitted is computed for those events alone. The cost
     /// grows with the admissions, not with the ledger.
-    pub fn for_store(store: &crate::store::Store) -> Result<Self> {
+    pub fn for_batches(
+        store: &crate::store::Store,
+        batches: &[crate::store::ImportBatch],
+    ) -> Result<Self> {
         #[cfg(test)]
         note_scope_derived();
         let _phase = crate::perf::phase("scope");
@@ -610,8 +619,7 @@ impl PrivilegeScope {
         };
         let mut admissions = std::collections::BTreeMap::new();
         let mut imported_event_ids = BTreeSet::new();
-        let batches = store.import_batches()?;
-        for batch in &batches {
+        for batch in batches {
             for value in batch.events.iter().chain(&batch.repository_events) {
                 imported_event_ids.insert(
                     value["event_id"]
@@ -634,7 +642,7 @@ impl PrivilegeScope {
         let (mut bound_events, ambiguous_event_ids) = if admissions.is_empty() {
             Default::default()
         } else {
-            bind_held_events(store, &batches, &admissions)?
+            bind_held_events(store, batches, &admissions)?
         };
         admissions.retain(|id, receipt| {
             !ambiguous_event_ids.contains(id)
