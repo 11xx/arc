@@ -342,7 +342,7 @@ fn resume_reports_worktree_state_and_head_drift() {
         .success()
         .stdout(predicate::str::contains("## Worktree"))
         .stdout(predicate::str::contains(
-            "Branch head: matches the newest approved/snapshotted head",
+            "Branch head: matches the newest patchset",
         ))
         .stdout(predicate::str::contains("Uncommitted edits: absent"));
 

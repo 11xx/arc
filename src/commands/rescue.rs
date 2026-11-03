@@ -429,7 +429,7 @@ fn render(output: &RescueOutput<'_>) {
         "- Branch head: {}",
         match output.head_state {
             "no-patchset" => "no patchset recorded",
-            "matches" => "matches the newest approved/snapshotted head",
+            "matches" => "matches the newest patchset",
             _ => "has moved past the newest patchset",
         }
     );

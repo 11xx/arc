@@ -816,7 +816,7 @@ pub fn resume(
             status.report.head_matches_latest_patchset,
         ) {
             (None, _) => "no patchset recorded",
-            (Some(_), true) => "matches the newest approved/snapshotted head",
+            (Some(_), true) => "matches the newest patchset",
             (Some(_), false) => "has moved past the newest patchset",
         }
     );

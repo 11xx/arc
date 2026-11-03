@@ -383,7 +383,7 @@ pub fn markdown(
                 }
             }
             (None, _) => "has no recorded patchset".to_string(),
-            (Some(_), true) => "matches newest approved/snapshotted head".to_string(),
+            (Some(id), true) => format!("matches newest patchset {id}"),
             (Some(_), false) => "has moved past newest patchset".to_string(),
         },
         match report.worktree_dirty {

@@ -3778,3 +3778,21 @@ fn query_commit_honors_json() {
     .unwrap();
     assert_eq!(none, serde_json::json!([]));
 }
+
+/// Claim: `arc show` describes the branch head against the newest patchset by
+/// name and claims no approval. Rejects "matches newest approved/snapshotted
+/// head" for a change nobody approved, which read as an approval two lines
+/// above a stale one.
+#[test]
+fn show_names_the_patchset_the_head_matches_without_claiming_approval() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "head-line", "--no-worktree"]),
+    );
+    repo.commit(&repo.root, "work.txt", "work\n", "feat: work");
+    stdout(repo.arc(&repo.root).args(["snapshot", "head-line"]));
+    let shown = stdout(repo.arc(&repo.root).args(["show", "head-line"]));
+    assert!(shown.contains("matches newest patchset ps-01"), "{shown}");
+    assert!(!shown.contains("approved/snapshotted"), "{shown}");
+}
