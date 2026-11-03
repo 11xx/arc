@@ -2379,6 +2379,90 @@ fn recovery_at_the_composed_crash_point_runs_twice_to_the_same_end() {
     }
 }
 
+/// Claim: a slot leased by a landing attempt names that attempt as its
+/// holder, and while the attempt is pending neither `arc slots release` nor
+/// `arc slots recover` frees it: each refuses naming the attempt and its
+/// recovery. Once the attempt is finished, the slot is released as any
+/// lease whose holder is done. Rejects treating a live attempt as an absent
+/// change and freeing the checkout its gates run in.
+#[test]
+fn a_slot_a_pending_landing_holds_is_not_released_under_it() {
+    let repo = Repo::new();
+    repo.redeclare_gates(
+        "[gates.smoke]\ncommand = \"touch \\\"$HOME/gating\\\"; while ! test -e \\\"$HOME/go\\\"; do sleep 0.05; done; test -f README.md\"\n",
+    );
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/worktrees.toml"),
+        "[slots]\nsize = 1\nretain = [\"target\"]\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", "-A"]);
+    git(&repo.root, &["commit", "-m", "test: declare a slot pool"]);
+    let ((first, _, _), (second, _, _)) = independent(&repo);
+    // The lander dies while its gate runs in the slot, as a crash there
+    // would leave it: the lease stays with the attempt.
+    let mut lander = spawn_arc(
+        &repo,
+        &repo.root,
+        &["land", &first, &second, "--debt", "context unread"],
+    );
+    let deadline = Instant::now() + HANG_BOUND;
+    while !repo.home.join("gating").exists() {
+        assert!(Instant::now() < deadline, "the landing never gated");
+        thread::sleep(Duration::from_millis(20));
+    }
+    lander.kill().unwrap();
+    lander.wait().unwrap();
+    fs::write(repo.home.join("go"), "").unwrap();
+    let attempt = prepared_attempt(&repo);
+
+    let lease = |repo: &Repo| {
+        json_stdout(repo.arc(&repo.root).args(["slots", "status", "--json"]))["slots"][0].clone()
+    };
+    while lease(&repo)["in_use"] == true {
+        assert!(
+            Instant::now() < deadline,
+            "the orphaned gate never finished"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let held = lease(&repo);
+    assert_eq!(held["lease"]["change_id"], attempt.as_str(), "{held:#}");
+    assert_eq!(held["holder"]["state"], "landing-pending", "{held:#}");
+    let token = held["lease"]["token"].as_str().unwrap().to_string();
+    for verb in ["release", "recover"] {
+        let refused = repo
+            .arc(&repo.root)
+            .args(["slots", verb, "slot-01", "--token", &token])
+            .output()
+            .unwrap();
+        assert!(!refused.status.success(), "{verb}: {}", stderr_of(&refused));
+        assert!(
+            stderr_of(&refused).contains(&attempt)
+                && stderr_of(&refused).contains("arc land --recover"),
+            "{verb}: {}",
+            stderr_of(&refused)
+        );
+        assert_eq!(lease(&repo)["lease"]["token"], token.as_str(), "{verb}");
+    }
+
+    repo.arc(&repo.root)
+        .args(["land", "--recover", &attempt])
+        .assert()
+        .success();
+    let finished = lease(&repo);
+    assert_eq!(
+        finished["holder"]["state"], "landing-abandoned",
+        "{finished:#}"
+    );
+    repo.arc(&repo.root)
+        .args(["slots", "release", "slot-01", "--token", &token])
+        .assert()
+        .success();
+    assert!(lease(&repo)["lease"].is_null());
+}
+
 /// Claim: an audit of a replayed member resolves its extent against the
 /// range the landing replayed it as, from the composed parent to the
 /// integrated revision, so a whole audit of that range discharges

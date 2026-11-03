@@ -25,6 +25,10 @@ fn holds_its_slot(change: &ChangeState) -> bool {
 
 fn holder(store: Option<&Store>, change_id: &str) -> slots::Holder {
     let state = store.map(|store| leased_change(store, change_id));
+    let landing = match (store, &state) {
+        (Some(store), Some(Ok(None))) => landing_holder(store, change_id).ok().flatten(),
+        _ => None,
+    };
     slots::Holder {
         change_id: change_id.into(),
         slug: match &state {
@@ -33,7 +37,7 @@ fn holder(store: Option<&Store>, change_id: &str) -> slots::Holder {
         },
         state: match &state {
             None | Some(Err(_)) => "unreadable".into(),
-            Some(Ok(None)) => "absent".into(),
+            Some(Ok(None)) => landing.unwrap_or("absent").into(),
             Some(Ok(Some(state))) => match &state.closure {
                 None => "open".into(),
                 Some(closure) => serde_json::to_value(closure.outcome)
@@ -199,6 +203,34 @@ fn leased_change(store: &Store, change_id: &str) -> Result<Option<ChangeState>> 
     }
 }
 
+/// A lease a landing attempt took to gate in names the attempt where a
+/// change would be: its state, when `id` is an attempt.
+fn landing_holder(store: &Store, id: &str) -> Result<Option<&'static str>> {
+    let events = store.repository_events()?;
+    let landings = crate::landing::Landings::from_events(events.iter());
+    Ok(if landings.prepared(id).is_none() {
+        None
+    } else if landings.completion(id).is_some() {
+        Some("landing-completed")
+    } else if landings.abandonment(id).is_some() {
+        Some("landing-abandoned")
+    } else {
+        Some("landing-pending")
+    })
+}
+
+/// Refuse to free a slot whose lease names a landing attempt still pending:
+/// its gates may run there, and only the attempt's recovery ends it.
+fn refuse_pending_landing(store: &Store, name: &str, id: &str) -> Result<()> {
+    if landing_holder(store, id)? == Some("landing-pending") {
+        bail!(
+            "{name} is held by pending landing {id}; finish it with `arc land --recover {id}`, \
+             then release the slot"
+        );
+    }
+    Ok(())
+}
+
 /// Record on `state` that its lease `token` on `slot` ended, when the change
 /// recorded that lease and has not recorded its end.
 fn record_release(
@@ -287,6 +319,9 @@ pub fn release(ctx: &Ctx, slot: &str, token: &str) -> Result<()> {
         Some(change_id) => leased_change(&store, change_id)?,
         None => None,
     };
+    if let (Some(id), None) = (&lease.change_id, &change) {
+        refuse_pending_landing(&store, &name, id)?;
+    }
     if let Some(change) = change.as_ref().filter(|change| holds_its_slot(change)) {
         bail!(
             "{name} holds open change {}; integrate or close it, which releases the slot",
@@ -349,6 +384,9 @@ pub fn recover(ctx: &Ctx, slot: &str, token: &str) -> Result<()> {
         return finish(ctx, &store, &pool, &name, token, None);
     };
     let change = leased_change(&store, change_id)?;
+    if change.is_none() {
+        refuse_pending_landing(&store, &name, change_id)?;
+    }
     match (state.phase, change) {
         (Phase::Free, _) => bail!("{name} is free"),
         (Phase::Leasing | Phase::Switching | Phase::Recorded, Some(change))

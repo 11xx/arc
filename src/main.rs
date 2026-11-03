@@ -3535,9 +3535,10 @@ enum SlotsCmd {
         json: bool,
     },
     /// Free a slot whose holder is gone. Refuses an obsolete token, a lease
-    /// whose change is still open (integrate or close it instead), a slot in
-    /// use and a checkout with uncommitted or untracked work; leaves the
-    /// checkout detached and records slot-released on a closed change
+    /// whose change is still open (integrate or close it instead), a lease
+    /// held by a pending landing attempt (`arc land --recover` it first), a
+    /// slot in use and a checkout with uncommitted or untracked work; leaves
+    /// the checkout detached and records slot-released on a closed change
     Release {
         /// The slot: slot-NN, or its number
         slot: String,
@@ -3570,7 +3571,8 @@ enum SlotsCmd {
     /// the lease on it; one that opened no change is undone, deleting the
     /// branch it made only while it holds no commits. Detaching and releasing
     /// phases, leases of closed changes and warms finish their release.
-    /// Refuses an obsolete token
+    /// Refuses an obsolete token and a lease held by a pending landing
+    /// attempt, which `arc land --recover` ends
     Recover {
         /// The slot: slot-NN, or its number
         slot: String,
