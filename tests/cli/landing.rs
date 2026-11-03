@@ -997,6 +997,18 @@ fn a_target_moved_by_someone_else_is_never_published_as_the_landing() {
         assert_eq!(report["pending_landing"], attempt.as_str());
     }
 
+    let close = repo
+        .arc(&repo.root)
+        .args(["close", &lower, "--abandoned"])
+        .output()
+        .unwrap();
+    assert!(!close.status.success());
+    assert!(
+        stderr_of(&close).contains(&format!("arc land --recover {attempt}")),
+        "{}",
+        stderr_of(&close)
+    );
+
     repo.arc(&repo.root)
         .args([
             "land",
@@ -1135,4 +1147,36 @@ fn an_exported_member_arrives_integrated_via_its_landing() {
         .is_some_and(|events| events
             .iter()
             .any(|event| event["event_type"] == "landing-prepared")));
+}
+
+/// Claim: a target whose history is squashed refuses a landing of more than
+/// one commit, and a target that integrates with merge commits refuses the
+/// fast-forward a stack landing makes. Rejects installing several commits
+/// where one is required, or moving a merge-shaped target as a fast-forward.
+#[test]
+fn a_squash_or_merge_target_refuses_a_multi_commit_landing() {
+    for (policy, needle) in [
+        ("[integration]\nhistory = 'squash'\n", "squash"),
+        ("[defaults.integration]\nshape = 'no-ff'\n", "merge commit"),
+    ] {
+        let repo = gated_repo();
+        fs::create_dir_all(repo.root.join(".arc")).unwrap();
+        fs::write(repo.root.join(".arc/policy.toml"), policy).unwrap();
+        git(&repo.root, &["add", ".arc/policy.toml"]);
+        git(&repo.root, &["commit", "-q", "-m", "policy: history"]);
+        let ((lower, _, _), (upper, _, _)) = stack(&repo);
+        let before = git_out(&repo.root, &["rev-parse", "master"]);
+        let refused = repo
+            .arc(&repo.root)
+            .args(["land", &lower, &upper])
+            .output()
+            .unwrap();
+        assert!(!refused.status.success(), "{needle}");
+        assert!(
+            stderr_of(&refused).contains(needle),
+            "{}",
+            stderr_of(&refused)
+        );
+        assert_eq!(git_out(&repo.root, &["rev-parse", "master"]), before);
+    }
 }

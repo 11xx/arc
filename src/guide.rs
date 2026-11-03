@@ -5138,6 +5138,7 @@ RUN A CHANGE
   arc verify --all               run the gates and record the evidence
   arc check                      preflight integration
   arc integrate                  land it once review is settled
+  arc land <change>...           land stacked changes in one transaction
   arc close <change> --abandoned   stop without landing
   Readiness is computed, not declared: nothing marks a change ready.
 

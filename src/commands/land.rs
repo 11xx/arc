@@ -1546,6 +1546,8 @@ fn reconcile_checkout(
     if gitio::current_branch(path)?.as_deref() != Some(target) {
         bail!("{} no longer holds {target}", path.display());
     }
+    // Stat information alone must not read as a modified file.
+    let _ = gitio::git(path, &["update-index", "-q", "--refresh"]);
     let index = gitio::git(path, &["write-tree"])?;
     let before_tree = gitio::commit_tree(cwd, before)?;
     let after_tree = gitio::commit_tree(cwd, after)?;
