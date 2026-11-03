@@ -594,6 +594,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             required,
             Answering {
                 tree: &tree,
+                head: &head,
                 label: "green at head",
                 against_target: None,
             },
@@ -743,11 +744,13 @@ fn reuse_named_gate(
     let resolve_tree = |revision: &str| legacy_trees.get(revision).cloned();
     let label = "green at head";
     let Some(evidence) = reusable_evidence_for_event(
+        &run_ctx.cwd,
         st,
         name,
         gate,
         &Answering {
             tree: &tree,
+            head: &head,
             label,
             against_target: None,
         },
@@ -967,6 +970,7 @@ fn verify_against(
     )?;
     let answering = Answering {
         tree: &merged_tree,
+        head: &change_head,
         label: "green at the merged tree",
         against_target: Some(&target_head),
     };
@@ -980,8 +984,17 @@ fn verify_against(
         let legacy_trees = status::legacy_evidence_trees(st, &ctx.cwd);
         let resolve_tree = |revision: &str| legacy_trees.get(revision).cloned();
         required.iter().all(|(name, gate)| {
-            reusable_evidence_for_event(st, name, gate, &answering, &resolve_tree, None, event)
-                .is_some()
+            reusable_evidence_for_event(
+                &ctx.cwd,
+                st,
+                name,
+                gate,
+                &answering,
+                &resolve_tree,
+                None,
+                event,
+            )
+            .is_some()
         })
     };
     let mut _scratch = None;
@@ -1283,6 +1296,8 @@ fn start_verification_run_for_event(
 /// The content a run answers for, and what it says when a gate is reused.
 struct Answering<'a> {
     tree: &'a str,
+    /// The change's head, which a commit-bound gate's evidence must name.
+    head: &'a str,
     label: &'a str,
     /// The target head a synthesized merge of `head` was computed against.
     against_target: Option<&'a str>,
@@ -1299,8 +1314,9 @@ struct Partition<'a> {
 /// Answer each gate from a pass already recorded for this content where one
 /// exists, unless `reuse` is off, and print the gates that will not run.
 ///
-/// `ctx` is the checkout holding that content, which incremental reuse asks a
-/// project selector about.
+/// `ctx` is the checkout holding that content: incremental reuse asks a
+/// project selector about it, and a commit-bound gate's merge evidence is told
+/// apart by its parents there.
 fn partition<'a>(
     ctx: &Ctx,
     st: &ChangeState,
@@ -1328,6 +1344,7 @@ fn partition<'a>(
     for (name, gate) in gates {
         let environment = declared_environment(environments, gate);
         if let Some(evidence) = reusable_evidence_for_event(
+            &ctx.cwd,
             st,
             name,
             gate,
@@ -1370,9 +1387,9 @@ fn partition<'a>(
 /// The passing evidence a run reuses for `name` at the content it answers
 /// for, if any.
 ///
-/// Reuse is keyed by tree exactly as readiness is, so a gate a run skips is a
-/// gate status already counts as green, whichever commit the run that answered
-/// was against. Reuse is
+/// Reuse is keyed the way readiness is: by tree, so a gate a run skips is a
+/// gate status already counts as green whichever commit the run that answered
+/// was against, and by commit as well for a gate bound to commits. Reuse is
 /// reuse of a *run*: the recorded command must be the one declared now, and
 /// evidence from another environment ran, but not here.
 /// Only the newest evidence that applies is a candidate, because it is the
@@ -1382,6 +1399,7 @@ fn partition<'a>(
 /// rerun.
 #[allow(clippy::too_many_arguments)]
 fn reusable_evidence_for_event<'a>(
+    cwd: &Path,
     st: &'a ChangeState,
     name: &str,
     gate: &gates::Gate,
@@ -1393,6 +1411,7 @@ fn reusable_evidence_for_event<'a>(
     let tree = answering.tree;
     st.gate_evidence_at_tree_matching(name, tree, resolve_tree, |evidence| {
         state::verification_event(st, evidence) == event
+            && status::answers_for_commit(evidence, gate, answering.head, Some(cwd))
             && status::matches_declaration(evidence, gate)
             && status::matches_environment(evidence, gate, environment)
     })
@@ -1413,7 +1432,9 @@ fn incremental_evidence(
     environment: Option<&str>,
     event: GateEvent,
 ) -> Option<(String, DeltaSelection)> {
-    if event != GateEvent::Integration {
+    // A delta is a difference between trees, which says nothing about the
+    // commits a commit-bound gate reads.
+    if event != GateEvent::Integration || gate.binds == gates::Binding::Commit {
         return None;
     }
     gate.selector.as_deref()?;
@@ -1655,6 +1676,7 @@ fn verify_recorded(
             selected,
             Answering {
                 tree: &tree,
+                head: &revision,
                 label: "green at head",
                 against_target: None,
             },

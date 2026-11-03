@@ -64,8 +64,24 @@ pub struct Gate {
     /// no part of the declaration's identity.
     #[serde(default, deserialize_with = "deserialize_bypass")]
     pub bypass: Option<String>,
+    /// What one pass answers for. It changes what a pass means, so it is
+    /// part of the declaration's identity.
+    #[serde(default)]
+    pub binds: Binding,
     #[serde(skip, default)]
     pub declared_by: Vec<String>,
+}
+
+/// What a gate's pass answers for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Binding {
+    /// The tree it ran against, whichever commit holds that tree.
+    #[default]
+    Tree,
+    /// The commit it ran on, for a command that reads commit messages or
+    /// history, which a commit with the same tree need not share.
+    Commit,
 }
 
 #[derive(Debug, Clone)]
@@ -440,10 +456,13 @@ impl Gate {
     /// Fold another declaration of the same check into this one. Profiles
     /// and events widen and the stricter timeout wins, so one declaration cannot loosen
     /// a gate the other bounds. The gate may be bypassed only if both allow it,
-    /// on this declaration's terms.
+    /// on this declaration's terms, and binds to commits if either says so.
     fn absorb(&mut self, other: Gate) {
         if other.bypass.is_none() {
             self.bypass = None;
+        }
+        if other.binds == Binding::Commit {
+            self.binds = Binding::Commit;
         }
         if self.profiles.is_empty() || other.profiles.is_empty() {
             self.profiles.clear();
@@ -540,12 +559,18 @@ impl GatesFile {
 }
 
 /// Identity of the gate declaration whose evidence can be reused.
+///
+/// A tree binding is the default and adds nothing, so the identity of every
+/// declaration that does not name `binds` is the one it has always had.
 pub fn declaration_identity(gate: &Gate) -> String {
-    let value = serde_json::json!({
+    let mut value = serde_json::json!({
         "command": gate.command, "environment": gate.environment,
         "profiles": gate.profiles, "events": gate.events,
         "timeout": gate.timeout, "selector": gate.selector,
     });
+    if gate.binds == Binding::Commit {
+        value["binds"] = serde_json::json!("commit");
+    }
     format!(
         "sha256:{}",
         hex::encode(Sha256::digest(value.to_string().as_bytes()))
@@ -792,6 +817,36 @@ mod tests {
 
         assert!(
             toml::from_str::<GatesFile>("[gates.docs]\ncommand = \"t\"\nbypass = \" \"\n").is_err()
+        );
+    }
+
+    /// A change cannot loosen a commit binding its target declares, and a
+    /// commit binding is a different declaration from a tree binding while
+    /// the default leaves every existing identity as it was.
+    #[test]
+    fn a_commit_binding_is_kept_by_either_declaration_and_changes_the_identity() {
+        let tree = "[gates.log]\ncommand = \"t\"\n";
+        let commit = "[gates.log]\ncommand = \"t\"\nbinds = \"commit\"\n";
+        for (target, own) in [(tree, commit), (commit, tree)] {
+            let mut target = declared(target);
+            target.owe_also(declared(own), "master", "change");
+            assert_eq!(target.gates["log"].binds, Binding::Commit);
+        }
+
+        let tree_gate = &declared(tree).gates["log"];
+        assert_eq!(
+            declaration_identity(tree_gate),
+            declaration_identity(
+                &declared("[gates.log]\ncommand = \"t\"\nbinds = \"tree\"\n").gates["log"]
+            )
+        );
+        assert_ne!(
+            declaration_identity(tree_gate),
+            declaration_identity(&declared(commit).gates["log"])
+        );
+        assert!(
+            toml::from_str::<GatesFile>("[gates.log]\ncommand = \"t\"\nbinds = \"head\"\n")
+                .is_err()
         );
     }
 }

@@ -942,6 +942,10 @@ pub struct VerificationEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_seconds: Option<u64>,
     pub revision: String,
+    /// The commit the evidence was recorded at. `revision` follows recorded
+    /// rewrites to the successor; this stays where the check ran.
+    #[serde(skip)]
+    pub recorded_revision: String,
     pub result: VerifyResult,
     pub attested: bool,
     pub output_tail: Option<String>,
@@ -3289,6 +3293,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     gate: gate.clone(),
                     command: command.clone(),
                     revision: revision.clone(),
+                    recorded_revision: revision.clone(),
                     result: *result,
                     attested: *attested,
                     output_tail: output_tail.clone(),
@@ -3319,6 +3324,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     command: String::new(),
                     timeout_seconds: None,
                     revision: revision.clone(),
+                    recorded_revision: revision.clone(),
                     result: VerifyResult::Bypassed,
                     attested: false,
                     output_tail: None,
@@ -3397,6 +3403,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     derived.event_id = ev.event_id.clone();
                     derived.run_id = Some(run_id.clone());
                     derived.revision = revision.clone();
+                    derived.recorded_revision = revision.clone();
                     derived.tree = tree.clone();
                     derived.against_target = delta.against_target.clone();
                     derived.delta = Some(delta.clone());

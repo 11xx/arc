@@ -1586,6 +1586,11 @@ fn build_report(
     let mut probe_subject: Option<ProbeSubject> = None;
     let live = matches!(probe_site, ProbeSite::Live { .. });
     for (name, gate) in gates.required_for(&state.profile) {
+        let bound = |entry: &state::VerificationEntry| {
+            current_head
+                .as_deref()
+                .is_some_and(|head| answers_for_commit(entry, gate, head, cwd))
+        };
         let evidence_at = |matches: &dyn Fn(&state::VerificationEntry) -> bool| match (
             &lookup_tree,
             current_head.as_deref(),
@@ -1597,6 +1602,7 @@ fn build_report(
                 |entry: &state::VerificationEntry| {
                     crate::state::verification_event(state, entry)
                         == crate::model::GateEvent::Integration
+                        && bound(entry)
                         && matches(entry)
                 },
             ),
@@ -2425,6 +2431,29 @@ pub fn matches_declaration(
             delta.declaration == crate::gates::declaration_identity(gate)
                 && gate.selector.as_deref() == Some(delta.selector.as_str())
         })
+}
+
+/// Whether evidence answers for the change at `head` under the gate's binding.
+///
+/// A tree-bound gate takes evidence from any commit holding the tree. A
+/// commit-bound one takes only a run at `head` itself, never one a recorded
+/// rewrite carried forward to it, or at the merge of `head` into the target
+/// that the evidence names; telling that merge apart reads its parents from
+/// `cwd`, and without one only `head` itself answers.
+pub fn answers_for_commit(
+    evidence: &crate::state::VerificationEntry,
+    gate: &crate::gates::Gate,
+    head: &str,
+    cwd: Option<&Path>,
+) -> bool {
+    if gate.binds == crate::gates::Binding::Tree || evidence.recorded_revision == head {
+        return true;
+    }
+    let (Some(target), Some(cwd)) = (evidence.against_target.as_deref(), cwd) else {
+        return false;
+    };
+    gitio::commit_parents(cwd, &evidence.recorded_revision)
+        .is_ok_and(|parents| parents == [target, head])
 }
 
 /// Whether evidence was produced in the environment a gate declares.

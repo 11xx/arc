@@ -1,5 +1,7 @@
 //! A complete pass at an unchanged tree answers for every later invocation:
-//! `verify` reuses it unless told to `--rerun`, and records the reuse.
+//! `verify` reuses it unless told to `--rerun`, and records the reuse. A gate
+//! that reads commit messages or history declares `binds = "commit"`, and its
+//! pass answers only for the commit it ran on.
 
 use crate::common::*;
 
@@ -43,6 +45,17 @@ fn reuse_events(repo: &Repo, worktree: &Path, change: &str) -> Vec<serde_json::V
     .filter(|line| !line.trim().is_empty())
     .map(|line| serde_json::from_str(line).unwrap())
     .collect()
+}
+
+fn gate_green(repo: &Repo, worktree: &Path, change: &str, gate: &str) -> bool {
+    let status = json_stdout(repo.arc(worktree).args(["status", change]));
+    status["gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == gate)
+        .unwrap_or_else(|| panic!("no gate {gate} in {status}"))["green_at_head"]
+        == true
 }
 
 /// Claim: a second `verify --all` at an unchanged tree runs no gate and
@@ -290,4 +303,70 @@ fn a_failing_or_unadmitted_newest_run_reruns() {
         (1, 4),
         "a pass that is the newest evidence is reused"
     );
+}
+
+/// Claim: a gate declaring `binds = "commit"` is not green after `arc
+/// rewrite trailers` makes a new commit around the same tree, and `verify`
+/// runs it there, while an ordinary gate stays green and is reused. Rejects
+/// a pass for one commit answering for another that holds the same tree,
+/// for a gate that reads commit messages.
+#[test]
+fn a_commit_bound_gate_reruns_after_a_trailer_rewrite_at_the_same_tree() {
+    let repo = Repo::new();
+    declare(
+        &repo,
+        &[
+            ("build", command(&repo, "build", "true")),
+            (
+                "history",
+                format!(
+                    "command = {:?}\nbinds = \"commit\"",
+                    counting(&repo, "history", "true")
+                ),
+            ),
+        ],
+    );
+    let (_, worktree, verified) = change_with_patchset(&repo, "reworded");
+    repo.arc(&worktree)
+        .args(["verify", "--all"])
+        .assert()
+        .success();
+    let tree = git_out(&worktree, &["rev-parse", "HEAD^{tree}"]);
+
+    repo.arc(&worktree)
+        .args([
+            "rewrite",
+            "trailers",
+            "--no-sign",
+            "--append",
+            "Reviewed-by: Reviewer <reviewer@example.invalid>",
+            "--from",
+            &verified,
+        ])
+        .assert()
+        .success();
+    assert_ne!(repo.head(&worktree), verified);
+    assert_eq!(git_out(&worktree, &["rev-parse", "HEAD^{tree}"]), tree);
+
+    assert!(gate_green(&repo, &worktree, "reworded", "build"));
+    assert!(
+        !gate_green(&repo, &worktree, "reworded", "history"),
+        "a commit-bound pass answered for another commit"
+    );
+
+    let rerun = stdout(repo.arc(&worktree).args(["verify", "--all"]));
+    assert_eq!(
+        (runs(&repo, "build"), runs(&repo, "history")),
+        (1, 2),
+        "{rerun}"
+    );
+    assert!(gate_green(&repo, &worktree, "reworded", "build"));
+    assert!(gate_green(&repo, &worktree, "reworded", "history"));
+
+    // At its own commit, a commit-bound pass is reused like any other.
+    repo.arc(&worktree)
+        .args(["verify", "--all"])
+        .assert()
+        .success();
+    assert_eq!((runs(&repo, "build"), runs(&repo, "history")), (1, 2));
 }

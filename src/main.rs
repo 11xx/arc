@@ -1976,7 +1976,8 @@ enum Cmd {
         /// head's tree, or with --against at the merged tree, under the same
         /// declaration and environment. Evidence counts for its tree whichever
         /// commit it ran on, as it does for readiness, and only the newest
-        /// evidence readiness counts there is a candidate. The
+        /// evidence readiness counts there is a candidate; a gate declaring
+        /// `binds = "commit"` takes only evidence for the head's own commit. The
         /// reuse is recorded as `verification-reused` naming that tree and
         /// requires that evidence to carry the same content key. A gate reruns
         /// when its newest evidence failed, was not admitted, was bypassed, or

@@ -1027,7 +1027,8 @@ RUN A CHANGE
   newest evidence there passed under the same declaration and environment,
   and run the rest; `--rerun` on `verify` and `snapshot` runs them anyway.
   Acceptance runs each local gate itself, and `arc publication` reuses only
-  with its own `--skip-green`. What a pass answers for is in `arc guide
+  with its own `--skip-green`. What a pass answers for, and the `binds =
+  "commit"` declaration that narrows it to one commit, is in `arc guide
   rules-evidence`.
 
   A gate or environment probe runs in its own process group, which a
@@ -3443,9 +3444,13 @@ RULES THAT CHANGE WHAT YOU DO
     was against another commit holding that tree, and `verify`, `snapshot
     --verify`, `done` and an integration queue reuse that run instead of
     repeating it, recording `verification-reused`, unless `--rerun` is
-    given. Reuse claims content alone: a gate whose command reads commit
-    messages or history keeps a pass across a rewrite that changed only
-    those, such as an appended role entry, and is not run again by arc. A single `integrate` runs no
+    given. Reuse claims content alone. A gate whose command reads commit
+    messages or history declares `binds = "commit"`, which no other
+    declaration of that gate withdraws: only a run at the
+    head's own commit, or at the merge of that commit, answers for it, and a
+    recorded rewrite never carries its evidence to the successor. A rewrite
+    that changed only messages, such as an appended role entry, keeps every
+    other gate's pass and leaves that one to run again. A single `integrate` runs no
     gate; it checks that the merge it made carries the tree that was
     evaluated, and undoes it otherwise. A queue runs the ones with no answer
     at that tree, because it moves the target itself and every member behind
@@ -4452,6 +4457,8 @@ FILES
                                         the content being evaluated
     bypass = "<what qualifies>"         omitted: the gate cannot be bypassed;
                                         every declaration of it must name one
+    binds = "commit"                    a pass answers for its commit, not
+                                        its tree; omitted: "tree"
 
   A gate command exits 75 (`EX_TEMPFAIL`) to say it did not run, which arc
   records as `not-admitted`. Both are described in `arc guide change-gates`.
