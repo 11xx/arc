@@ -62,6 +62,11 @@ paths = [
   "src/commands/sandbox.rs",
   # Integrate and merge: the only path that writes to a shared branch.
   "src/gitio.rs",
+  # Batched answers `gitio` takes before running Git itself: ancestry,
+  # cleanliness and merge outcomes a status report's readiness rests on. A
+  # stale held answer reads as what Git would say now.
+  "src/gitio/listing.rs",
+  "src/gitio/listing/tests.rs",
   "src/chain.rs",
   "src/commands/gatekeeping.rs",
   "src/commands/publication.rs",
@@ -223,8 +228,21 @@ acknowledged_safe = [
   # and `cost note` a local Git note, a cache of one read. Nothing reads either
   # to authorize work, so a defect renders a wrong figure.
   "src/commands/cost.rs",
+  "src/commands/cost/evidence.rs",
+  "src/commands/cost/span.rs",
   "src/commands/cost_commit.rs",
+  "src/commands/cost_liveness.rs",
   "src/commands/cost_read.rs",
+  "src/commands/cost_table.rs",
+  # Identifies a native child a dispatch binding names, for measurement, as
+  # `src/commands/run.rs` records the binding itself.
+  "src/commands/native_child.rs",
+  # Review assurance reads the verdicts and audits the ledger holds, git blame
+  # at a revision, and routing's frontier, keeping only a per-change blame
+  # cache. It reports how a change was read; nothing reads it to authorize work.
+  "src/assurance.rs",
+  "src/assurance_live.rs",
+  "src/assurance_routing.rs",
   # A pass records what a caller says it opened and nothing reads it to decide
   # whether work ships.
   "src/commands/pass.rs",
