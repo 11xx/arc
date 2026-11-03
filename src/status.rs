@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub use crate::blockers::Blocker;
 
@@ -150,8 +150,8 @@ pub struct GateStatus {
 ///
 /// Present only for a gate that declares an environment probe. Readiness
 /// counts the evidence only when the recorded identity equals the one the
-/// probe yields here; the identities are opaque, and only equality between
-/// them is read.
+/// probe yields in a clean checkout of the content the evidence is looked up
+/// at; the identities are opaque, and only equality between them is read.
 #[derive(Debug, Clone, Serialize)]
 pub struct GateEnvironmentStatus {
     /// The identity recorded on the evidence being counted. Absent when that
@@ -159,9 +159,10 @@ pub struct GateEnvironmentStatus {
     /// were recorded or evidence whose probe could not answer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence: Option<String>,
-    /// The identity the declared probe yields where this report was built.
-    /// Absent on a ledger replay, which observes no environment, and where
-    /// the probe could not answer here.
+    /// The identity the declared probe yields in a clean checkout of the
+    /// evaluated content. Absent on a ledger replay, which observes no
+    /// environment, where no such checkout exists, and where the probe could
+    /// not answer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current: Option<String>,
     /// The evidence was produced in a different environment, so it does not
@@ -174,11 +175,80 @@ pub struct GateEnvironmentStatus {
     /// identity to compare against.
     #[serde(skip_serializing_if = "is_false")]
     pub unknown: bool,
-    /// The declared probe could not be read where this report was built;
+    /// The declared probe could not be read in that checkout;
     /// the run's exit, overrun, or empty output is named. Every receipt for
     /// the gate is not-green while this holds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub probe_failed: Option<String>,
+    /// No clean checkout holds the content the evidence is looked up at, so
+    /// the probe ran nowhere and nothing was compared. Every receipt for the
+    /// gate is not-green while this holds. Additive in `arc-status/27`.
+    #[serde(skip_serializing_if = "is_false")]
+    pub needs_evaluation: bool,
+}
+
+/// A checkout created to hold the content an evaluation reads, removed when
+/// dropped.
+pub trait EvaluationCheckout {
+    fn path(&self) -> &Path;
+}
+
+/// Creates a checkout holding exactly the given tree, for a caller allowed to
+/// create one.
+pub type CreateEvaluationCheckout<'a> = &'a dyn Fn(&str) -> Result<Box<dyn EvaluationCheckout>>;
+
+/// Where a report runs a gate's declared environment probe.
+enum ProbeSite<'a> {
+    /// A ledger replay observes no environment and takes a recorded identity
+    /// at its word.
+    Replay,
+    /// A live report runs the probe in a clean checkout whose content is the
+    /// tree the evidence is looked up at: `invoking` when it holds that tree,
+    /// else the change's worktree, else one `create` makes. With none of
+    /// them the probe runs nowhere.
+    Live {
+        invoking: &'a Path,
+        create: Option<CreateEvaluationCheckout<'a>>,
+    },
+}
+
+/// The checkout a report's environment probes run in, resolved once.
+enum ProbeSubject {
+    Checkout(PathBuf),
+    Owned(Box<dyn EvaluationCheckout>),
+    Unobservable,
+}
+
+impl ProbeSubject {
+    fn resolve(site: &ProbeSite<'_>, tree: Option<&str>, state: &ChangeState) -> Result<Self> {
+        let (ProbeSite::Live { invoking, create }, Some(tree)) = (site, tree) else {
+            return Ok(Self::Unobservable);
+        };
+        let recorded = state
+            .worktree
+            .as_deref()
+            .map(PathBuf::from)
+            .filter(|worktree| worktree.exists());
+        let holding = std::iter::once(invoking.to_path_buf())
+            .chain(recorded)
+            .find(|checkout| {
+                gitio::commit_tree(checkout, "HEAD").is_ok_and(|head| head == tree)
+                    && gitio::is_clean(checkout).unwrap_or(false)
+            });
+        Ok(match (holding, create) {
+            (Some(checkout), _) => Self::Checkout(checkout),
+            (None, Some(create)) => Self::Owned(create(tree)?),
+            (None, None) => Self::Unobservable,
+        })
+    }
+
+    fn path(&self) -> Option<&Path> {
+        match self {
+            Self::Checkout(path) => Some(path),
+            Self::Owned(checkout) => Some(checkout.path()),
+            Self::Unobservable => None,
+        }
+    }
 }
 
 impl GateStatus {
@@ -209,8 +279,8 @@ impl GateStatus {
             }
             if environment.inapplicable {
                 return Some(format!(
-                    "the evidence was produced in environment {} but this checkout's declared \
-                     probe yields {}",
+                    "the evidence was produced in environment {} but the declared probe yields \
+                     {} for the content being evaluated",
                     environment.evidence.as_deref().unwrap_or("unknown"),
                     environment.current.as_deref().unwrap_or("unknown")
                 ));
@@ -219,6 +289,18 @@ impl GateStatus {
                 return Some(format!(
                     "the declared environment probe could not be read here: {failure}"
                 ));
+            }
+            if environment.needs_evaluation {
+                return Some(match &self.evaluated_tree {
+                    Some(tree) => format!(
+                        "no clean checkout holds the merged tree {tree}, so the declared \
+                         environment probe ran nowhere"
+                    ),
+                    None => "no clean checkout holds the head's tree, so the declared \
+                             environment probe ran nowhere; run this from the change's worktree \
+                             with its head checked out and clean"
+                        .into(),
+                });
             }
         }
         Some(
@@ -1078,6 +1160,7 @@ pub fn build_at(
         now,
         fork,
         shape,
+        None,
     )
 }
 
@@ -1123,6 +1206,7 @@ pub fn build_at_with_shape(
     now: DateTime<Utc>,
     fork: Option<String>,
     shape: crate::integration::Shape,
+    evaluate: Option<CreateEvaluationCheckout<'_>>,
 ) -> Result<StatusReport> {
     // A closed change is judged at the head its ledger recorded: its branch
     // may be deleted or reused, and its target is never merged into again.
@@ -1180,7 +1264,10 @@ pub fn build_at_with_shape(
         blocks,
         now,
         Some(cwd),
-        Some(cwd),
+        ProbeSite::Live {
+            invoking: cwd,
+            create: evaluate,
+        },
         current_head,
         needs_rebase,
         merged_tree,
@@ -1229,7 +1316,7 @@ pub fn build_as_of(
         blocks,
         now,
         repo,
-        None,
+        ProbeSite::Replay,
         current_head.clone(),
         false,
         None,
@@ -1249,9 +1336,9 @@ pub(crate) fn reports_built() -> usize {
     REPORTS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// `probe_cwd` is the checkout a declared environment probe runs in, when the
-/// report is built where the environment can be observed. A ledger replay
-/// passes `None` and reports recorded identities without probing.
+/// `probe_site` says where a declared environment probe may run: a live
+/// report probes the content the evidence is looked up at, and a ledger
+/// replay reports recorded identities without probing.
 #[allow(clippy::too_many_arguments)]
 fn build_report(
     state: &ChangeState,
@@ -1262,7 +1349,7 @@ fn build_report(
     blocks: Vec<String>,
     now: DateTime<Utc>,
     cwd: Option<&Path>,
-    probe_cwd: Option<&Path>,
+    probe_site: ProbeSite<'_>,
     current_head: Option<String>,
     needs_rebase: bool,
     merged_tree: Option<String>,
@@ -1457,8 +1544,12 @@ fn build_report(
 
     let mut gate_statuses: Vec<GateStatus> = Vec::new();
     // A probe is one property of the checkout, so gates declaring the same
-    // probe under the same bound share one run.
+    // probe under the same bound share one run. The checkout is resolved at
+    // the first probe that needs one, and one this report owns lives until
+    // the report is built.
     let mut probe_runs: BTreeMap<(String, Option<u64>), crate::gates::ProbeRun> = BTreeMap::new();
+    let mut probe_subject: Option<ProbeSubject> = None;
+    let live = matches!(probe_site, ProbeSite::Live { .. });
     for (name, gate) in gates.required_for(&state.profile) {
         let evidence_at = |matches: &dyn Fn(&state::VerificationEntry) -> bool| match (
             &lookup_tree,
@@ -1484,36 +1575,49 @@ fn build_report(
             (None, None) => None,
         };
         let newest = evidence_at(&|_| true);
-        let (current, probe_failed) = match (gate.environment.as_deref(), probe_cwd) {
-            (Some(probe), Some(cwd)) if evidence_at(&|e| e.environment.is_some()).is_some() => {
-                let key = (probe.to_owned(), gate.timeout);
-                if !probe_runs.contains_key(&key) {
-                    probe_runs.insert(
-                        key.clone(),
-                        crate::gates::environment_probe(cwd, probe, gate.timeout)?,
-                    );
+        let (current, probe_failed, needs_evaluation) = match gate.environment.as_deref() {
+            Some(probe) if live && evidence_at(&|e| e.environment.is_some()).is_some() => {
+                if probe_subject.is_none() {
+                    probe_subject = Some(ProbeSubject::resolve(
+                        &probe_site,
+                        lookup_tree.as_deref(),
+                        state,
+                    )?);
                 }
-                let run = probe_runs.get(&key).expect("probe run just cached");
-                (
-                    run.identity.clone(),
-                    run.failure.as_ref().map(|failure| failure.describe()),
-                )
+                match probe_subject.as_ref().and_then(ProbeSubject::path) {
+                    None => (None, None, true),
+                    Some(checkout) => {
+                        let key = (probe.to_owned(), gate.timeout);
+                        if !probe_runs.contains_key(&key) {
+                            probe_runs.insert(
+                                key.clone(),
+                                crate::gates::environment_probe(checkout, probe, gate.timeout)?,
+                            );
+                        }
+                        let run = probe_runs.get(&key).expect("probe run just cached");
+                        (
+                            run.identity.clone(),
+                            run.failure.as_ref().map(|failure| failure.describe()),
+                            false,
+                        )
+                    }
+                }
             }
-            _ => (None, None),
+            _ => (None, None, false),
         };
         let evidence = evidence_at(&|e| {
             matches_declaration(e, gate)
-                && if probe_cwd.is_some() {
+                && if live {
                     matches_environment(e, gate, current.as_deref())
                 } else {
                     gate.environment.is_none() || e.environment.is_some()
                 }
         })
         .or(newest);
-        // Applicability is asked where the checkout being evaluated exists. A
-        // ledger replay observes no environment and takes a recorded identity
-        // at its word; only a live report can say whether the probe answers
-        // here.
+        // Applicability is asked of a checkout holding the content being
+        // evaluated. A ledger replay observes no environment and takes a
+        // recorded identity at its word; only a live report can say whether
+        // the probe answers for that content.
         let environment = match gate.environment.as_deref() {
             None => None,
             Some(_) => {
@@ -1531,17 +1635,19 @@ fn build_report(
                     inapplicable,
                     unknown,
                     probe_failed,
+                    needs_evaluation,
                 })
             }
         };
         // A gate that declares an environment probe is answered only by
-        // evidence whose recorded identity is the one the probe yields here.
-        // A probe that yields none here leaves every receipt not-green; a
-        // ledger replay counts a recorded identity by its presence.
-        let environment_applies = match (&environment, probe_cwd) {
+        // evidence whose recorded identity is the one the probe yields for
+        // the evaluated content. A probe that yields none, or that no clean
+        // checkout of that content can run, leaves every receipt not-green;
+        // a ledger replay counts a recorded identity by its presence.
+        let environment_applies = match (&environment, live) {
             (None, _) => true,
-            (Some(environment), None) => environment.evidence.is_some(),
-            (Some(environment), Some(_)) => {
+            (Some(environment), false) => environment.evidence.is_some(),
+            (Some(environment), true) => {
                 environment.current.is_some()
                     && environment.evidence.is_some()
                     && !environment.inapplicable

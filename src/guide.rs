@@ -3413,22 +3413,27 @@ RULES THAT CHANGE WHAT YOU DO
     identity is a digest of the probe's stdout, and only a successful run
     that prints something yields one; a failed, empty, or overrunning probe
     yields none, so two environments in which it fails do not share one.
-    `check` and `integrate` run the probe in the integrating checkout; a
-    different identity leaves the gate not green until `arc verify --all`
-    records evidence there.
-    `status` runs the probe where it is evaluating and counts the evidence
-    only when the two identities agree; a receipt from another environment is
-    reported inapplicable, naming both identities, and a receipt with no
-    identity is reported unknown. A probe that yields no identity there
-    leaves every receipt for the gate not-green. Evidence that records no
-    environment identity satisfies only gates that declare no probe, and a
-    gate that declares none takes evidence from any environment. A probe is
-    bounded by the gate's declared timeout, or thirty seconds when the gate
-    declares none, and its process group is stopped before arc uses its
-    answer, so nothing a probe starts outlives it. The newest run at the evaluated tree under the declared
-    gate and applicable environment decides; other runs cannot hide it. An
-    attested run happened where arc observes nothing, so `--attest` takes the
-    identity with `--environment <IDENTITY>`.
+    Readiness runs the probe the target's declarations select against the
+    content the evidence is looked up at: the merged tree when the change is
+    behind its target, else the head's. It runs in the invoking checkout when
+    that holds the content clean, else in the change's worktree when that
+    does, so a change editing a probe's script, or adding a gate with the
+    script its probe runs, is judged by its own copy. With neither, the
+    probe runs nowhere and counts no receipt: the gate reports
+    `needs_evaluation`. Readiness counts the evidence only when the two identities agree; a receipt from another
+    environment is reported inapplicable, naming both identities, and a
+    receipt with no identity is reported unknown. A probe that yields no
+    identity leaves every receipt for the gate not-green. Evidence that
+    records no environment identity satisfies only gates that declare no
+    probe, and a gate that declares none takes evidence from any
+    environment. A probe is bounded by the gate's declared timeout, or
+    thirty seconds when the gate declares none, and its process group is
+    stopped before arc uses its answer, so nothing a probe starts outlives
+    it. The newest run at the
+    evaluated tree under the declared gate and applicable environment
+    decides; other runs cannot hide it. An attested run happened where arc
+    observes nothing, so `--attest` takes the identity with
+    `--environment <IDENTITY>`.
   - A hostname arc could not read is recorded as `unknown`, a host fact
     on verification and candidate-evaluation events.
   - Executed verification and candidate gates retain combined stdout and
@@ -4342,7 +4347,8 @@ FILES
     events = ["integration"]           omitted: integration and publication
     timeout = "10m"                     s, m, or h; omitted: unbounded
     environment = "<probe command>"     evidence counts only where the probe
-                                        prints the same output
+                                        prints the same output, run against
+                                        the content being evaluated
 
   `arc verify --all --event integration|publication` selects the event's
   gates. Evidence identifies its event, tree, command and environment;

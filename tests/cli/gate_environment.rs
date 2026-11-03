@@ -653,3 +653,176 @@ fn an_overrunning_probe_is_bounded_and_yields_no_identity() {
         "{state}"
     );
 }
+
+/// Commit on master a gate whose environment probe runs `probe.sh`, and the
+/// script printing `output`.
+fn write_script_probe_gate(repo: &Repo, output: &str) {
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.build]\ncommand = \"true\"\nenvironment = \"sh probe.sh\"\n",
+    )
+    .unwrap();
+    fs::write(repo.root.join("probe.sh"), probe_script(output)).unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml", "probe.sh"]);
+    git(
+        &repo.root,
+        &["commit", "-m", "test: declare a script probe"],
+    );
+}
+
+/// A probe script printing `output` followed by `$ARC_TEST_ENV`.
+fn probe_script(output: &str) -> String {
+    format!("printf '%s' \"{output}-$ARC_TEST_ENV\"\n")
+}
+
+/// Open `env-gate`, let `edit` change its worktree, then commit, snapshot,
+/// verify every gate under `ARC_TEST_ENV=A`, and approve it. A probe counting
+/// its runs appends to `probe-runs` under the fixture's home.
+fn verified_change(repo: &Repo, edit: impl FnOnce(&Path)) -> PathBuf {
+    stdout(repo.arc(&repo.root).args(["begin", "env-gate"]));
+    let worktree = repo.home.join(".worktrees/repo-env-gate");
+    edit(&worktree);
+    git(&worktree, &["add", "."]);
+    git(&worktree, &["commit", "-m", "test: change the probe"]);
+    stdout(repo.arc(&worktree).args(["snapshot", "env-gate"]));
+    let counter = repo.home.join("probe-runs");
+    repo.arc(&worktree)
+        .env("ARC_TEST_ENV", "A")
+        .env("ARC_TEST_COUNTER", &counter)
+        .args(["verify", "env-gate", "--all"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .env("ARC_TEST_ENV", "A")
+        .env("ARC_TEST_COUNTER", &counter)
+        .env("ARC_ACTOR", "reviewer")
+        .args([
+            "review",
+            "env-gate",
+            "--verdict",
+            "approved",
+            "--body",
+            "ok",
+        ])
+        .assert()
+        .success();
+    worktree
+}
+
+fn registered_worktrees(repo: &Repo) -> usize {
+    git_out(&repo.root, &["worktree", "list", "--porcelain"])
+        .lines()
+        .filter(|line| line.starts_with("worktree "))
+        .count()
+}
+
+/// Claim: integration reads a gate's probe from the content its evidence
+/// describes. Rejects running the target checkout's copy of a probe script
+/// the change edits, which can never agree with the evidence.
+#[test]
+fn integration_probes_the_script_the_change_edits() {
+    let repo = Repo::new();
+    write_script_probe_gate(&repo, "v1");
+    verified_change(&repo, |worktree| {
+        fs::write(worktree.join("probe.sh"), probe_script("v2")).unwrap();
+    });
+    repo.arc(&repo.root)
+        .env("ARC_TEST_ENV", "A")
+        .args(["check", "env-gate"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .env("ARC_TEST_ENV", "A")
+        .args(["integrate", "env-gate"])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(repo.root.join("probe.sh")).unwrap(),
+        probe_script("v2")
+    );
+}
+
+/// Claim: a gate the change adds may probe with a script the same change
+/// adds. Rejects reading the probe where the script does not exist yet.
+#[test]
+fn integration_probes_a_script_the_change_adds() {
+    let repo = Repo::new();
+    verified_change(&repo, |worktree| {
+        fs::create_dir_all(worktree.join(".arc")).unwrap();
+        fs::write(
+            worktree.join(".arc/gates.toml"),
+            "[gates.build]\ncommand = \"true\"\nenvironment = \"sh probe.sh\"\n",
+        )
+        .unwrap();
+        fs::write(worktree.join("probe.sh"), probe_script("v1")).unwrap();
+    });
+    repo.arc(&repo.root)
+        .env("ARC_TEST_ENV", "A")
+        .args(["integrate", "env-gate"])
+        .assert()
+        .success();
+    assert!(repo.root.join("probe.sh").exists());
+}
+
+/// Claim: a read-only report probes only a clean checkout holding the
+/// evaluated content, and with none it counts nothing. Rejects probing the
+/// invoking checkout's content instead, and rejects reading "cannot observe"
+/// as green.
+#[test]
+fn a_report_with_no_clean_candidate_checkout_probes_nothing() {
+    let repo = Repo::new();
+    let counter = repo.home.join("probe-runs");
+    repo.declare_gates_locally(&format!(
+        "[gates.build]\ncommand = \"true\"\nenvironment = {:?}\n",
+        "printf %s A && echo tick >> \"$ARC_TEST_COUNTER\""
+    ));
+    let worktree = verified_change(&repo, |worktree| {
+        fs::write(worktree.join("work.txt"), "a\n").unwrap();
+    });
+    let runs = || fs::read_to_string(&counter).unwrap().lines().count();
+    let arc = |cwd: &Path, args: &[&str]| {
+        let mut command = repo.arc(cwd);
+        command.env("ARC_TEST_COUNTER", &counter).args(args);
+        command
+    };
+    let before = runs();
+    let ready = json_stdout(&mut arc(&repo.root, &["status", "env-gate"]));
+    assert_eq!(ready["gates"][0]["green_at_head"], true, "{ready}");
+    assert_eq!(
+        runs(),
+        before + 1,
+        "the change's clean worktree is the subject"
+    );
+
+    fs::write(worktree.join("scratch.txt"), "dirt\n").unwrap();
+    let refused = json_stdout(&mut arc(&repo.root, &["status", "env-gate"]));
+    let gate = &refused["gates"][0];
+    assert_eq!(gate["green_at_head"], false, "{refused}");
+    assert_eq!(gate["environment"]["needs_evaluation"], true, "{refused}");
+    assert!(gate["environment"]["current"].is_null(), "{refused}");
+    let explain = stdout_any_status(&mut arc(&repo.root, &["check", "env-gate", "--explain"]));
+    assert!(explain.contains("no clean checkout holds"), "{explain}");
+    assert_eq!(
+        runs(),
+        before + 1,
+        "a dirty worktree is not probed, nor is this checkout"
+    );
+
+    git(
+        &repo.root,
+        &["worktree", "remove", "--force", worktree.to_str().unwrap()],
+    );
+    let refused = json_stdout(&mut arc(&repo.root, &["status", "env-gate"]));
+    assert_eq!(refused["gates"][0]["green_at_head"], false, "{refused}");
+    assert_eq!(
+        refused["gates"][0]["environment"]["needs_evaluation"], true,
+        "{refused}"
+    );
+    assert_eq!(
+        registered_worktrees(&repo),
+        1,
+        "a report creates no checkout"
+    );
+    assert_eq!(runs(), before + 1);
+}

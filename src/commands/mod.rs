@@ -824,7 +824,7 @@ impl Ctx {
         let mut selected = state.clone();
         selected.target_branch = target.to_string();
         let declarations = crate::declarations::for_change(&self.cwd, &selected)?;
-        self.integration_report_with_declarations(store, &selected, shape, declarations)
+        self.integration_report_with_declarations(store, &selected, shape, declarations, None)
     }
 
     /// Queue authorization uses destination declarations at the projected revision.
@@ -849,6 +849,7 @@ impl Ctx {
             state,
             crate::integration::Shape::NoFf,
             declarations,
+            None,
         )
     }
 
@@ -858,6 +859,7 @@ impl Ctx {
         state: &ChangeState,
         shape: crate::integration::Shape,
         declarations: crate::declarations::Declarations,
+        evaluate: Option<status::CreateEvaluationCheckout<'_>>,
     ) -> Result<StatusReport> {
         let states = store.readable_states()?;
         let mut report = status::build_at_with_shape(
@@ -871,6 +873,7 @@ impl Ctx {
             chrono::Utc::now(),
             fork::fork_slug_for_branch(&self.cwd, &state.branch)?,
             shape,
+            evaluate,
         )?;
         report.require_provisional_replay(crate::provisional::obsolete_ancestry(
             &self.cwd, state, &states,

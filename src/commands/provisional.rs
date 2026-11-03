@@ -272,6 +272,7 @@ fn report(
         chrono::Utc::now(),
         fork::fork_slug_for_branch(&ctx.cwd, &state.branch)?,
         Shape::NoFf,
+        None,
     )?;
     report.blocker_status = canonical_dependencies;
     report.require_replay_snapshot(crate::provisional::needs_replay_snapshot(
