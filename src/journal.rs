@@ -1190,7 +1190,8 @@ pub enum JournalCmd {
     /// model_recorded: false when missing, a placeholder or a session id;
     /// valid models omit the flag.
     Show {
-        /// Artifact filename inside the journal dir (a name, not a path)
+        /// Artifact filename inside the journal dir (a name, not a path), or a
+        /// topic, which shows its newest live artifact and says which on stderr
         filename: String,
         /// Emit the versioned artifact metadata projection: the body, the
         /// planners credited with `planner_status` and its sources, and
@@ -14554,9 +14555,12 @@ fn show(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         // the answer, so the error names it. Teaching the grammar and stopping
         // leaves the caller to guess which verb takes the other shape.
         if valid_topic(filename) {
+            if let Some(newest) = newest_live_under(ctx, filename)? {
+                return show(ctx, &newest, json);
+            }
             bail!(
-                "{filename:?} is a topic, not a journal artifact name\n\
-                 tip: `arc journal latest {filename}` resolves its newest artifact, \
+                "no live artifact under topic {filename:?}\n\
+                 tip: `arc journal latest {filename}` also searches the cold archive, \
                  `arc journal list` browses them all"
             );
         }
@@ -14700,18 +14704,7 @@ fn latest(ctx: &Ctx, topic: &str, kind: Option<&str>, json: bool) -> Result<i32>
     let events = read_events(&hot)?;
 
     for (dir, storage) in [(&hot, "hot"), (&cold, "cold")] {
-        let candidates: Vec<LatestCandidate> = sorted_artifact_names(dir)?
-            .into_iter()
-            .filter_map(|name| {
-                let (timestamp, file_topic, file_kind) = parse_artifact_name(&name)?;
-                (file_topic == topic && kind.is_none_or(|selected| file_kind == selected))
-                    .then_some(LatestCandidate {
-                        name,
-                        timestamp,
-                        kind: file_kind,
-                    })
-            })
-            .collect();
+        let candidates = topic_candidates(dir, topic, kind)?;
         let Some(found) = latest_candidate(&candidates, &events) else {
             continue;
         };
@@ -14748,6 +14741,40 @@ fn latest(ctx: &Ctx, topic: &str, kind: Option<&str>, json: bool) -> Result<i32>
             hot.display()
         ),
     }
+}
+
+/// The artifacts in `dir` under `topic`, of `kind` when one is named.
+fn topic_candidates(dir: &Path, topic: &str, kind: Option<&str>) -> Result<Vec<LatestCandidate>> {
+    Ok(sorted_artifact_names(dir)?
+        .into_iter()
+        .filter_map(|name| {
+            let (timestamp, file_topic, file_kind) = parse_artifact_name(&name)?;
+            (file_topic == topic && kind.is_none_or(|selected| file_kind == selected)).then_some(
+                LatestCandidate {
+                    name,
+                    timestamp,
+                    kind: file_kind,
+                },
+            )
+        })
+        .collect())
+}
+
+/// The newest live artifact under `topic`, said on stderr so a caller who
+/// named a topic knows which artifact answered and how many there are.
+fn newest_live_under(ctx: &Ctx, topic: &str) -> Result<Option<String>> {
+    let hot = resolve_dir(&ctx.cwd)?;
+    let candidates = topic_candidates(&hot, topic, None)?;
+    let Some(found) = latest_candidate(&candidates, &read_events(&hot)?) else {
+        return Ok(None);
+    };
+    eprintln!(
+        "showing {}, the newest of {} live artifact(s) under topic {topic:?}; \
+         `arc journal list` names them all",
+        found.name,
+        candidates.len()
+    );
+    Ok(Some(found.name))
 }
 
 /// Separates a journal directory from an artifact filename in a qualified

@@ -387,7 +387,8 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                      `arc journal discussion <file.md>` reads its stances and
                      open questions.
     known topic      `arc journal latest <topic> [--kind <kind>]`, matched
-                     exactly.
+                     exactly; `arc journal show <topic>` shows the newest
+                     live one and names it on stderr.
     no filename      `arc journal list [--kind <kind>]` browses live
                      artifacts; `arc journal open` lists the actionable ones.
     a path           `arc journal dir` (`--explain` names the source that

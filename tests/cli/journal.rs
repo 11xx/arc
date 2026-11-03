@@ -17192,7 +17192,7 @@ fn the_guide_and_help_teach_reading_a_known_artifact_without_a_filesystem_search
         "never by searching the filesystem",
         "known filename `arc journal show <file.md>` reads the body, hot storage first and the cold archive after it;",
         "`arc journal discussion <file.md>` reads its stances and open questions.",
-        "known topic `arc journal latest <topic> [--kind <kind>]`, matched exactly.",
+        "known topic `arc journal latest <topic> [--kind <kind>]`, matched exactly; `arc journal show <topic>` shows the newest live one and names it on stderr.",
         "no filename `arc journal list [--kind <kind>]` browses live artifacts;",
         "a path `arc journal dir` (`--explain` names the source that resolved it) only when a filesystem path is required.",
     ] {
@@ -18438,4 +18438,42 @@ fn lane_state_writers_share_transition_lock() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+/// Claim: `arc journal show <topic>` shows the topic's newest live artifact
+/// and names it on stderr. Rejects refusing a topic, which cost a second
+/// lookup, and showing an older artifact under the same topic.
+#[test]
+fn journal_show_resolves_a_topic_to_its_newest_artifact() {
+    let repo = Repo::new();
+    for body in ["# Older\n\nfirst\n", "# Newer\n\nsecond\n"] {
+        repo.arc(&repo.root)
+            .args(["journal", "todo", "show-topic", "--body-file", "-"])
+            .write_stdin(body)
+            .assert()
+            .success();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+    }
+    let output = repo
+        .arc(&repo.root)
+        .args(["journal", "show", "show-topic"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let shown = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        shown.contains("second") && !shown.contains("first"),
+        "{shown}"
+    );
+    let note = String::from_utf8_lossy(&output.stderr);
+    assert!(note.contains("the newest of 2 live artifact(s)"), "{note}");
+    repo.arc(&repo.root)
+        .args(["journal", "show", "no-such-topic"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no live artifact under topic"));
 }
