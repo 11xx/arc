@@ -142,6 +142,27 @@ struct PoolRecord {
     size: u32,
 }
 
+/// Whether the pool at `root` exists and belongs to the repository whose
+/// checkout is `cwd`. A slot record imported from another replica names a
+/// pool this repository does not own; reading that takes no lock.
+pub fn owned_here(cwd: &Path, root: &Path) -> bool {
+    let Ok(common) = gitio::common_dir(cwd).and_then(|dir| Ok(fs::canonicalize(dir)?)) else {
+        return false;
+    };
+    owned_by(root, &common)
+}
+
+fn owned_by(root: &Path, common: &Path) -> bool {
+    let Ok(root) = fs::canonicalize(root) else {
+        return false;
+    };
+    let Ok(bytes) = fs::read(root.join(POOL_FILE)) else {
+        return false;
+    };
+    serde_json::from_slice::<PoolRecord>(&bytes)
+        .is_ok_and(|record| record.schema == POOL_SCHEMA && Path::new(&record.repository) == common)
+}
+
 /// A slot pool owned by this repository.
 pub struct Pool {
     pub root: PathBuf,
@@ -1551,6 +1572,29 @@ pub fn view(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pool is this repository's only when its record names this Git
+    /// common directory; a missing root, a root without a pool record, and
+    /// another repository's pool are not. Rejects releasing a slot record
+    /// that arrived from another replica against a pool it does not own.
+    #[test]
+    fn a_pool_is_owned_only_by_the_repository_it_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let common = fs::canonicalize(dir.path()).unwrap().join("common");
+        fs::create_dir_all(&common).unwrap();
+        let root = dir.path().join("pool");
+        assert!(!owned_by(&root, &common), "a missing root");
+        fs::create_dir_all(&root).unwrap();
+        assert!(!owned_by(&root, &common), "a root without a pool record");
+        let record = |repository: &Path| {
+            serde_json::json!({"schema": POOL_SCHEMA, "repository": repository, "id": "p", "size": 1})
+                .to_string()
+        };
+        fs::write(root.join(POOL_FILE), record(&dir.path().join("elsewhere"))).unwrap();
+        assert!(!owned_by(&root, &common), "another repository's pool");
+        fs::write(root.join(POOL_FILE), record(&common)).unwrap();
+        assert!(owned_by(&root, &common), "this repository's pool");
+    }
 
     /// Documentation patterns without a slash match file names at any depth;
     /// a wildcard never crosses a directory.

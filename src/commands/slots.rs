@@ -240,6 +240,13 @@ pub(crate) fn release_change_slot(
     let Some(record) = state.slot.as_ref().filter(|record| record.held()) else {
         return;
     };
+    if !slots::owned_here(&ctx.cwd, Path::new(&record.root)) {
+        println!(
+            "slot {} is recorded in the pool at {}, which this repository does not own; nothing to release here",
+            record.slot, record.root
+        );
+        return;
+    }
     let kept = |reason: String| {
         println!(
             "kept slot {} leased at {}: {reason}; once resolved, run `arc slots release {} --token {}`",

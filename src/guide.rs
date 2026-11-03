@@ -4804,7 +4804,8 @@ SLOTS
   release command to run once resolved. A provisional integration resolved
   by `arc replica provisional resolve` releases its slot the same way, at
   the accepting integration's commit when this repository holds it and at
-  the slot's `HEAD` otherwise.
+  the slot's `HEAD` otherwise. A slot record naming a pool this repository
+  does not own, as one imported from another replica does, is left alone.
 
   `arc slots warm [--target <rev>] [--limit <n>]` builds slots before a
   change needs them. Under the pool lock it ranks the free slots as begin
