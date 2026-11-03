@@ -563,7 +563,7 @@ fn stale_claims_are_time_derived_and_watch_until_stalled_reaches() {
             "--until",
             "stalled",
             "--timeout",
-            "4",
+            &reaching_watch_timeout(),
         ],
     );
     assert!(wait_for_exit(&mut watcher).success());
@@ -598,7 +598,7 @@ fn stale_claims_are_time_derived_and_watch_until_stalled_reaches() {
             "--until",
             "stalled",
             "--timeout",
-            "1",
+            &reaching_watch_timeout(),
         ])
         .assert()
         .success()
@@ -1640,7 +1640,14 @@ fn watch_reaches_stalled_on_an_expired_artifact_claim_and_refuses_other_conditio
         ));
     age_journal_events(&dir, 3_600);
     repo.arc(&repo.root)
-        .args(["watch", &file, "--until", "stalled", "--timeout", "10"])
+        .args([
+            "watch",
+            &file,
+            "--until",
+            "stalled",
+            "--timeout",
+            &reaching_watch_timeout(),
+        ])
         .assert()
         .success()
         .stdout(predicates::str::contains("reached: stalled"));
@@ -1650,7 +1657,7 @@ fn watch_reaches_stalled_on_an_expired_artifact_claim_and_refuses_other_conditio
         "--until",
         "stalled",
         "--timeout",
-        "10",
+        &reaching_watch_timeout(),
         "--json",
     ]));
     assert_eq!(reached["schema"], "arc-watch/1", "{reached}");

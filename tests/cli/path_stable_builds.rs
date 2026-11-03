@@ -55,7 +55,7 @@ fn verify(repo: &Repo, path: &Path) {
 }
 
 fn wait_for(path: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + HANG_BOUND;
     while !path.exists() {
         assert!(
             Instant::now() < deadline,
@@ -314,7 +314,7 @@ fn owned_gate_and_probe_keep_lease_after_arc_parent_dies() {
 }
 
 fn wait_for_lease_release(path: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + HANG_BOUND;
     loop {
         let file = fs::OpenOptions::new()
             .read(true)

@@ -4943,7 +4943,7 @@ fn journal_position_refuses_a_branch_on_a_todo_before_reading_stdin() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + HANG_BOUND;
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;
@@ -18314,7 +18314,7 @@ fn lane_renewal_preflights_status_stdin() {
                 "-",
             ],
         );
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + HANG_BOUND;
         let status = loop {
             if let Some(status) = child.try_wait().unwrap() {
                 break Some(status);

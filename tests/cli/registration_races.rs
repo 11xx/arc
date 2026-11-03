@@ -49,7 +49,7 @@ fn retirement_refuses_an_anchor_recreated_before_its_binding() {
         "session-a",
     );
     let expected = journal.join(".locks/events.lock");
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + HANG_BOUND;
     loop {
         let descriptors = PathBuf::from(format!("/proc/{}/fd", child.id()));
         let waiting = fs::read_dir(descriptors).is_ok_and(|entries| {

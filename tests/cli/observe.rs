@@ -383,7 +383,7 @@ fn events_follow_exec_observes_each_emitted_event() {
         ],
     );
     for expected in 1..=2 {
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + HANG_BOUND;
         while fs::read_to_string(&observed)
             .map(|contents| contents.lines().count())
             .unwrap_or(0)
@@ -418,19 +418,12 @@ fn watch_snapshot_observes_a_later_snapshot() {
         "test: add snapshot",
     );
 
-    let mut child = spawn_arc(
+    let (mut child, evaluated) = spawn_watch(
         &repo,
         &repo.root,
-        &[
-            "watch",
-            "watch-snapshot",
-            "--until",
-            "snapshot",
-            "--timeout",
-            "2",
-        ],
+        &["watch", "watch-snapshot", "--until", "snapshot"],
     );
-    thread::sleep(Duration::from_millis(50));
+    await_watch_evaluation(&mut child, &evaluated);
     stdout(repo.arc(&worktree).args(["snapshot", "watch-snapshot"]));
     assert!(wait_for_exit(&mut child).success());
     assert_eq!(child_stdout(&mut child).trim(), "reached: snapshot");
@@ -444,7 +437,7 @@ fn watch_exec_fires_exactly_once_on_snapshot() {
     repo.commit(&worktree, "snapshot.txt", "snapshot\n", "test: snapshot");
     let observed = repo.root.join("watch-hook");
     let command = format!("cat >> {}", observed.display());
-    let mut child = spawn_arc(
+    let (mut child, evaluated) = spawn_watch(
         &repo,
         &repo.root,
         &[
@@ -452,13 +445,11 @@ fn watch_exec_fires_exactly_once_on_snapshot() {
             "watch-exec",
             "--until",
             "snapshot",
-            "--timeout",
-            "2",
             "--exec",
             &command,
         ],
     );
-    thread::sleep(Duration::from_millis(50));
+    await_watch_evaluation(&mut child, &evaluated);
     stdout(repo.arc(&worktree).args(["snapshot", "watch-exec"]));
     assert!(wait_for_exit(&mut child).success());
     let diagnostic: serde_json::Value =
@@ -482,7 +473,7 @@ fn watch_multiple_conditions_reports_the_winner() {
             "--until",
             "ready,stalled",
             "--timeout",
-            "4",
+            &reaching_watch_timeout(),
         ])
         .assert()
         .success()
@@ -521,7 +512,7 @@ fn watch_stalled_names_the_stage_its_age_and_its_budget() {
         "--until",
         "stalled",
         "--timeout",
-        "5",
+        &reaching_watch_timeout(),
     ];
     repo.arc(&repo.root)
         .args(watch)
@@ -812,7 +803,7 @@ fn watch_approved_does_not_return_on_an_approval_policy_refuses() {
         "--until",
         "approved",
         "--timeout",
-        "1",
+        &reaching_watch_timeout(),
     ]));
     assert!(out.contains("reached: approved"), "{out}");
 }
@@ -1189,19 +1180,12 @@ fn watch_ready_observes_a_git_only_head_transition() {
     let branch = "refs/heads/arc/watch-ready-live";
     let base = git_out(&repo.root, &["rev-parse", "master"]);
     git(&repo.root, &["update-ref", branch, &base]);
-    let mut child = spawn_arc(
+    let (mut child, evaluated) = spawn_watch(
         &repo,
         &repo.root,
-        &[
-            "watch",
-            "watch-ready-live",
-            "--until",
-            "ready",
-            "--timeout",
-            "2",
-        ],
+        &["watch", "watch-ready-live", "--until", "ready"],
     );
-    thread::sleep(Duration::from_millis(50));
+    await_watch_evaluation(&mut child, &evaluated);
     // Ref restoration changes readiness without appending a ledger event.
     git(&repo.root, &["update-ref", branch, &head]);
 
@@ -1261,7 +1245,14 @@ fn watch_closed_accepts_abandoned_and_superseded_but_integrated_does_not() {
 
     for change in ["watch-abandoned", "watch-superseded"] {
         repo.arc(&repo.root)
-            .args(["watch", change, "--until", "closed", "--timeout", "1"])
+            .args([
+                "watch",
+                change,
+                "--until",
+                "closed",
+                "--timeout",
+                &reaching_watch_timeout(),
+            ])
             .assert()
             .success()
             .stdout("reached: closed\n");
@@ -1305,7 +1296,7 @@ fn watch_tag_any_names_the_first_member_to_reach_a_condition() {
         "stalled",
         "--any",
         "--timeout",
-        "6",
+        &reaching_watch_timeout(),
     ]));
     assert!(
         out.starts_with("reached: stalled (stalls-fast-"),
@@ -1356,7 +1347,7 @@ fn watch_tag_all_waits_for_every_member() {
             "stalled",
             "--all",
             "--timeout",
-            "6",
+            &reaching_watch_timeout(),
         ])
         .assert()
         .success()
@@ -1471,7 +1462,7 @@ fn watch_json_omits_the_event_id_for_a_derived_condition() {
         "--until",
         "ready",
         "--timeout",
-        "10",
+        &reaching_watch_timeout(),
         "--json",
     ]));
     let value: serde_json::Value = serde_json::from_str(out.trim()).unwrap();

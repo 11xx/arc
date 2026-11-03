@@ -810,7 +810,14 @@ fn typed_consumers_tolerate_imported_unknown_event_type() {
     // The patchset is present in the ledger, so this condition is immediately
     // satisfied and watch (also a typed consumer) returns without waiting.
     dest.arc(&dest.root)
-        .args(["watch", &change_id, "--until", "snapshot", "--timeout", "5"])
+        .args([
+            "watch",
+            &change_id,
+            "--until",
+            "snapshot",
+            "--timeout",
+            &reaching_watch_timeout(),
+        ])
         .assert()
         .success();
 

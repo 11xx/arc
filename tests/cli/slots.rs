@@ -401,7 +401,7 @@ fn killed_launcher_keeps_the_slot_in_use_until_descendants_exit() {
         .stderr(predicates::str::contains("no free slot"));
 
     fs::write(repo.home.join("go"), "").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + HANG_BOUND;
     while use_lock_busy(&path) {
         assert!(
             Instant::now() < deadline,
