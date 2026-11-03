@@ -2754,6 +2754,22 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             "landing-abandoned",
             format!("{attempt}: {}", one_line(reason)),
         ),
+        Payload::CheckpointRecorded {
+            name,
+            revision,
+            changes,
+            todos,
+            ..
+        } => (
+            "checkpoint-recorded",
+            format!(
+                "{} at {}: {} changes, {} todos",
+                one_line(name),
+                short_sha(revision),
+                changes.len(),
+                todos.len()
+            ),
+        ),
         Payload::RunDispatched {
             route,
             worktree,

@@ -1997,6 +1997,8 @@ impl Store {
             | Payload::LandingPrepared { .. }
             | Payload::LandingCompleted { .. }
             | Payload::LandingAbandoned { .. } => Some(7),
+            // An older reader skips a checkpoint and reports none recorded.
+            Payload::CheckpointRecorded { .. } => Some(7),
             Payload::ChangeIntegrated { .. } | Payload::IntegrationAsserted { .. } => Some(2),
             _ => None,
         };
@@ -2089,7 +2091,8 @@ impl Store {
                 | "lands-with-withdrawn"
                 | "landing-prepared"
                 | "landing-completed"
-                | "landing-abandoned",
+                | "landing-abandoned"
+                | "checkpoint-recorded",
             ) => Some(7),
             Some("change-integrated") | Some("integration-asserted") => Some(2),
             _ => None,
@@ -3621,6 +3624,43 @@ mod tests {
                         .unwrap();
                 assert_eq!(stored.schema_version, 7, "{} {path}", value["event_type"]);
             }
+        }
+    }
+
+    /// Claim: a checkpoint stamps format 7 typed and imported, so a build
+    /// that would skip it, and report no checkpoint recorded, refuses the
+    /// store. Rejects a checkpoint written under an older format.
+    #[test]
+    fn a_checkpoint_stamps_seven_typed_and_imported() {
+        let value = serde_json::json!({"event_type": "checkpoint-recorded", "name": "n", "revision": "r", "tree": "t", "changes": [], "todos": []});
+        let payload: Payload = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&payload).unwrap()["event_type"],
+            value["event_type"]
+        );
+        for typed in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let config = StoreConfig {
+                schema_version: 6,
+                repository_id: "repo".into(),
+                created_at: chrono::Utc::now(),
+            };
+            fs::write(
+                dir.path().join("config.json"),
+                serde_json::to_vec(&config).unwrap(),
+            )
+            .unwrap();
+            let store = test_store(dir.path());
+            if typed {
+                store.stamp_format_for(&payload).unwrap();
+            } else {
+                store
+                    .append_raw_repository_event("event", &serde_json::to_vec(&value).unwrap())
+                    .unwrap();
+            }
+            let stored: StoreConfig =
+                serde_json::from_slice(&fs::read(dir.path().join("config.json")).unwrap()).unwrap();
+            assert_eq!(stored.schema_version, 7, "typed {typed}");
         }
     }
 

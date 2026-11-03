@@ -3970,6 +3970,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
             | Payload::LandingPrepared { .. }
             | Payload::LandingCompleted { .. }
             | Payload::LandingAbandoned { .. }
+            | Payload::CheckpointRecorded { .. }
             | Payload::RunDispatched { .. }
             | Payload::RunBound { .. }
             | Payload::RunEnded { .. }

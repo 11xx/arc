@@ -2069,6 +2069,25 @@ pub enum Payload {
         attempt: String,
         reason: String,
     },
+    /// A named revision somebody is testing, with the changes and journal
+    /// todos open when it was named. A plain fact: it grants and requires no
+    /// authority, and nothing reads it to decide what may integrate.
+    CheckpointRecorded {
+        /// Unique among this repository's checkpoints.
+        name: String,
+        revision: String,
+        tree: String,
+        /// The branch the recording checkout had checked out, when it had one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+        /// The annotated tag written on the revision, when one was.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tag: Option<String>,
+        changes: Vec<CheckpointChange>,
+        todos: Vec<CheckpointTodo>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
     /// A caller told arc that a delegated run was dispatched through a
     /// resolved route. arc records the dispatch context but does not choose,
     /// start, or supervise the run.
@@ -2648,6 +2667,35 @@ pub struct PrerequisiteClosure {
     pub landing: Option<String>,
 }
 
+/// A change open when a checkpoint was recorded, as it stood then.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointChange {
+    pub change_id: String,
+    pub slug: String,
+    /// The stage its claim had reached, or `open` before any claim declared one.
+    pub state: String,
+    /// Absent on a change that had no patchset yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patchset_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+}
+
+/// A live, unconsumed journal todo when a checkpoint was recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointTodo {
+    pub file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_key: Option<String>,
+    /// The time of the journal event that filed it, or the filename stamp
+    /// when no event names it. Journal events carry no identifier, so the
+    /// filename and this time identify the creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+}
+
 /// One landing member as its attempt pinned it at plan time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LandingPin {
@@ -2850,7 +2898,8 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         | Payload::LandsWithWithdrawn { .. }
         | Payload::LandingPrepared { .. }
         | Payload::LandingCompleted { .. }
-        | Payload::LandingAbandoned { .. } => AppendPermission::AnyPhaseFact,
+        | Payload::LandingAbandoned { .. }
+        | Payload::CheckpointRecorded { .. } => AppendPermission::AnyPhaseFact,
         | Payload::RunDispatched { .. }
         | Payload::RunBound { .. }
         | Payload::RunEnded { .. }
