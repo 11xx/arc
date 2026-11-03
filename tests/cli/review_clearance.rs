@@ -60,6 +60,14 @@ fn assert_findings_read(repo: &Repo, slug: &str, output: &str, reason: &str) {
     );
     let status = json_stdout(repo.arc(&repo.root).args(["status", slug, "--json"]));
     assert_eq!(status["debt_outstanding"], true, "{status}");
+    let show = json_stdout(repo.arc(&repo.root).args(["show", slug, "--json"]));
+    assert_eq!(
+        show["debt"]["findings_reads"][0]["kind"], "findings",
+        "{show}"
+    );
+    let text = stdout(repo.arc(&repo.root).args(["show", slug]));
+    assert!(text.contains("findings read"), "{text}");
+    assert!(text.contains(reason), "{text}");
 }
 
 /// Claim: under the policy a `/2` read that routing says does not clear
