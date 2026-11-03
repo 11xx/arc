@@ -2696,12 +2696,20 @@ fn piped_output_dies_on_sigpipe_without_panicking() {
     use std::os::unix::process::ExitStatusExt;
 
     let repo = Repo::new();
-    // Produce enough ledger events that `arc events` output overflows the OS
-    // pipe buffer, so the child is guaranteed to still be writing when the
-    // reader goes away.
-    for i in 0..250 {
-        begin_without_checkout(&repo, &format!("ch{i}"), &[]);
-    }
+    // A brief larger than the OS pipe buffer makes `arc events` output
+    // overflow it, so the child is still writing when the reader goes away.
+    begin_without_checkout(&repo, "large-brief", &[]);
+    let body = repo.home.join("large-brief.md");
+    fs::write(&body, format!("# Large\n\n{}\n", "x".repeat(512 * 1024))).unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "brief",
+            "large-brief",
+            "--body-file",
+            body.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
 
     let binary = std::env::var_os("CARGO_BIN_EXE_arc").expect("cargo should provide arc binary");
     let mut child = Command::new(binary)

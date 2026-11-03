@@ -5339,6 +5339,17 @@ fn repository_cleanup_boundary(repo: &Repo, wt: &Path, recognizer: &str) -> Path
     root
 }
 
+macro_rules! repository_cleanup_cases {
+    ($($name:ident: $scope:literal, $recognizer:literal, $kind:literal;)*) => {
+        $(
+            #[test]
+            fn $name() {
+                assert_repository_cleanup_retains($scope, $recognizer, $kind, false);
+            }
+        )*
+    };
+}
+
 fn assert_repository_cleanup_retains(scope: &str, recognizer: &str, kind: &str, at_root: bool) {
     let (repo, id, wt) = disposable_cleanup_fixture(false);
     let boundary = wt.join(if recognizer == "builtin" {
@@ -5504,22 +5515,25 @@ fn cleanup_repository_tagged_bare_at_ignored_root() {
     assert_repository_cleanup_retains("artifacts", "tag", "bare", true);
 }
 
-#[test]
-fn cleanup_repository_configured_boundary_protects_both_scopes() {
-    for scope in ["ignored", "artifacts"] {
-        for kind in ["clone", "linked", "bare"] {
-            assert_repository_cleanup_retains(scope, "configured", kind, false);
-        }
-    }
+// A boundary protects a repository of every kind under both discard scopes.
+// One test per case: each builds and integrates a whole change, so the cases
+// run in parallel instead of one after another.
+repository_cleanup_cases! {
+    cleanup_repository_configured_boundary_keeps_clone_under_ignored: "ignored", "configured", "clone";
+    cleanup_repository_configured_boundary_keeps_linked_under_ignored: "ignored", "configured", "linked";
+    cleanup_repository_configured_boundary_keeps_bare_under_ignored: "ignored", "configured", "bare";
+    cleanup_repository_configured_boundary_keeps_clone_under_artifacts: "artifacts", "configured", "clone";
+    cleanup_repository_configured_boundary_keeps_linked_under_artifacts: "artifacts", "configured", "linked";
+    cleanup_repository_configured_boundary_keeps_bare_under_artifacts: "artifacts", "configured", "bare";
 }
 
-#[test]
-fn cleanup_repository_builtin_boundary_protects_both_scopes() {
-    for scope in ["ignored", "artifacts"] {
-        for kind in ["clone", "linked", "bare"] {
-            assert_repository_cleanup_retains(scope, "builtin", kind, false);
-        }
-    }
+repository_cleanup_cases! {
+    cleanup_repository_builtin_boundary_keeps_clone_under_ignored: "ignored", "builtin", "clone";
+    cleanup_repository_builtin_boundary_keeps_linked_under_ignored: "ignored", "builtin", "linked";
+    cleanup_repository_builtin_boundary_keeps_bare_under_ignored: "ignored", "builtin", "bare";
+    cleanup_repository_builtin_boundary_keeps_clone_under_artifacts: "artifacts", "builtin", "clone";
+    cleanup_repository_builtin_boundary_keeps_linked_under_artifacts: "artifacts", "builtin", "linked";
+    cleanup_repository_builtin_boundary_keeps_bare_under_artifacts: "artifacts", "builtin", "bare";
 }
 
 #[test]
