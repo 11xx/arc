@@ -811,7 +811,9 @@ fn an_imported_second_evidence_event_for_one_candidate_is_refused_before_anythin
         .unwrap()
         .clone();
     // ULIDs minted in one millisecond differ only in their last digits, so
-    // the replacement is one no event in the bundle already carries.
+    // the replacement is one no event in the bundle already carries, and the
+    // highest such digit, so the copy still sorts after the registration the
+    // evidence names.
     let original = second["event_id"].as_str().unwrap().to_string();
     let taken: Vec<&str> = events
         .iter()
@@ -820,6 +822,7 @@ fn an_imported_second_evidence_event_for_one_candidate_is_refused_before_anythin
     let stem = &original[..original.len() - 1];
     let id = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
         .chars()
+        .rev()
         .map(|digit| format!("{stem}{digit}"))
         .find(|candidate| !taken.contains(&candidate.as_str()))
         .unwrap();
