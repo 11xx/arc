@@ -16,6 +16,8 @@ import tomllib
 
 TARGET = "refs/heads/master"
 FULL = ("full", [], False)
+# Sources whose tests live in modules not named after them.
+SOURCE_MODULES = {"src/guide.rs": ("guide_topics", "schemas")}
 
 
 def git(*args):
@@ -62,6 +64,10 @@ def select(paths):
     units = False
     for path in paths:
         if path.endswith(".md"):
+            continue
+        if path in SOURCE_MODULES:
+            selected.update(SOURCE_MODULES[path])
+            units = True
             continue
         name = Path(path).stem
         if (

@@ -62,6 +62,12 @@ class SelectionClaims(unittest.TestCase):
             selection.select(paths), ("modules", ["diff", "stats"], True)
         )
 
+    def test_guide_source_selects_the_modules_that_read_it(self):
+        self.assertEqual(
+            selection.select(["src/guide.rs"]),
+            ("modules", ["guide_topics", "schemas"], True),
+        )
+
     def test_deleted_or_unregistered_modules_require_the_full_suite(self):
         with patch.object(selection.Path, "is_file", return_value=False):
             self.assertEqual(
