@@ -5,6 +5,7 @@ pub(crate) use std::fs;
 pub(crate) use std::io::{BufRead, BufReader, Read};
 pub(crate) use std::path::{Path, PathBuf};
 pub(crate) use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::OnceLock;
 pub(crate) use std::thread;
 pub(crate) use std::time::{Duration, Instant};
 pub(crate) use tempfile::TempDir;
@@ -20,22 +21,16 @@ impl Repo {
         Self::with_object_format("sha1")
     }
 
+    /// A repository holding one commit on `master` that adds README.md,
+    /// with the fixture identity in its local config, copied from the seed
+    /// for `format`. Each fixture owns every file it holds, so nothing one
+    /// fixture writes reaches the seed or another fixture.
     pub(crate) fn with_object_format(format: &str) -> Repo {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("repo");
         let home = tmp.path().join("home");
-        fs::create_dir_all(&root).unwrap();
+        seed(format).copy_to(&root);
         fs::create_dir_all(&home).unwrap();
-        git(
-            &root,
-            &["init", "-b", "master", &format!("--object-format={format}")],
-        );
-        git(&root, &["config", "user.name", "Tester"]);
-        git(&root, &["config", "user.email", "tester@example.invalid"]);
-        git(&root, &["config", "commit.gpgsign", "false"]);
-        fs::write(root.join("README.md"), "hello\n").unwrap();
-        git(&root, &["add", "."]);
-        git(&root, &["commit", "-m", "init"]);
         let config = home.join(".local/ai/arc");
         fs::create_dir_all(&config).unwrap();
         fs::write(
@@ -180,6 +175,145 @@ impl Repo {
     }
 }
 
+/// What every fixture of one object format starts from, built once per test
+/// process from Git's own commands. It holds no ledger and is never handed to
+/// a test: fixtures copy it.
+pub(crate) struct Seed {
+    pub(crate) root: PathBuf,
+    /// Git commands that building this seed ran.
+    pub(crate) initializer_spawns: usize,
+    hash_len: usize,
+}
+
+pub(crate) fn seed(format: &str) -> &'static Seed {
+    static SHA1: OnceLock<Seed> = OnceLock::new();
+    static SHA256: OnceLock<Seed> = OnceLock::new();
+    match format {
+        "sha1" => SHA1.get_or_init(|| Seed::build("sha1", 20)),
+        "sha256" => SHA256.get_or_init(|| Seed::build("sha256", 32)),
+        other => panic!("no fixture seed for object format {other:?}"),
+    }
+}
+
+impl Seed {
+    fn build(format: &str, hash_len: usize) -> Seed {
+        let root = seed_scratch().join(format);
+        fs::create_dir_all(&root).unwrap();
+        let initializer_spawns = git_spawns_during(|| {
+            git(
+                &root,
+                &["init", "-b", "master", &format!("--object-format={format}")],
+            );
+            git(&root, &["config", "user.name", "Tester"]);
+            git(&root, &["config", "user.email", "tester@example.invalid"]);
+            git(&root, &["config", "commit.gpgsign", "false"]);
+            fs::write(root.join("README.md"), "hello\n").unwrap();
+            git(&root, &["add", "."]);
+            git(&root, &["commit", "-m", "init"]);
+        })
+        .0;
+        Seed {
+            root,
+            initializer_spawns,
+            hash_len,
+        }
+    }
+
+    fn copy_to(&self, destination: &Path) {
+        copy_tree(&self.root, destination);
+        self.restat_index(destination);
+    }
+
+    /// Point the copied index's one entry, README.md, at the copy's stat data
+    /// and reseal it, as `git update-index --refresh` would. Without this,
+    /// plumbing that trusts stat data reports README.md modified.
+    fn restat_index(&self, root: &Path) {
+        use std::os::unix::fs::MetadataExt;
+        let index_path = root.join(".git/index");
+        let mut index = fs::read(&index_path).unwrap();
+        let readme = fs::metadata(root.join("README.md")).unwrap();
+        // The index header is 12 bytes; the first entry opens with its ctime,
+        // mtime, device and inode, each a big-endian 32-bit field.
+        let stat = [
+            readme.ctime(),
+            readme.ctime_nsec(),
+            readme.mtime(),
+            readme.mtime_nsec(),
+            readme.dev() as i64,
+            readme.ino() as i64,
+        ];
+        for (field, value) in index[12..36].chunks_exact_mut(4).zip(stat) {
+            field.copy_from_slice(&(value as u32).to_be_bytes());
+        }
+        let body = index.len() - self.hash_len;
+        let seal = match self.hash_len {
+            20 => sha1::Sha1::digest(&index[..body]).to_vec(),
+            _ => Sha256::digest(&index[..body]).to_vec(),
+        };
+        index[body..].copy_from_slice(&seal);
+        fs::write(index_path, index).unwrap();
+    }
+}
+
+fn copy_tree(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let target = destination.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// This process's seed directory, on the build's disk scratch space rather
+/// than the system temporary directory. Statics are never dropped, so each
+/// process removes the directories its exited predecessors left.
+fn seed_scratch() -> &'static Path {
+    static SCRATCH: OnceLock<PathBuf> = OnceLock::new();
+    SCRATCH.get_or_init(|| {
+        let parent = Path::new(env!("CARGO_TARGET_TMPDIR")).join("fixture-seeds");
+        fs::create_dir_all(&parent).unwrap();
+        for entry in fs::read_dir(&parent).unwrap().flatten() {
+            let owner = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse().ok());
+            if owner.is_some_and(|pid| !process_exists(pid)) {
+                let _ = fs::remove_dir_all(entry.path());
+            }
+        }
+        let own = parent.join(std::process::id().to_string());
+        let _ = fs::remove_dir_all(&own);
+        fs::create_dir_all(&own).unwrap();
+        own
+    })
+}
+
+fn process_exists(pid: libc::pid_t) -> bool {
+    // SAFETY: signal 0 delivers nothing; it only asks whether `pid` exists.
+    let signalled = unsafe { libc::kill(pid, 0) } == 0;
+    signalled || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+thread_local! {
+    static GIT_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn count_git_spawn() {
+    GIT_SPAWNS.with(|spawns| spawns.set(spawns.get() + 1));
+}
+
+/// `f`'s result and how many Git commands this suite's helpers ran on this
+/// thread while it ran.
+pub(crate) fn git_spawns_during<T>(f: impl FnOnce() -> T) -> (usize, T) {
+    let before = GIT_SPAWNS.with(|spawns| spawns.get());
+    let value = f();
+    (GIT_SPAWNS.with(|spawns| spawns.get()) - before, value)
+}
+
 /// Turn on the opt-in ambient identity detection this suite's harness
 /// environment otherwise never reaches.
 pub(crate) fn enable_identity_detection(repo: &Repo) {
@@ -256,6 +390,7 @@ pub(crate) fn deliver_git_objects(source: &Repo, destination: &Repo) {
 }
 
 pub(crate) fn git(cwd: &Path, args: &[&str]) {
+    count_git_spawn();
     let st = Command::new("git")
         .args(args)
         .current_dir(cwd)
@@ -273,6 +408,7 @@ pub(crate) fn git(cwd: &Path, args: &[&str]) {
 }
 
 pub(crate) fn git_out(cwd: &Path, args: &[&str]) -> String {
+    count_git_spawn();
     let out = Command::new("git")
         .args(args)
         .current_dir(cwd)
