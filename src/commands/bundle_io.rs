@@ -1437,7 +1437,7 @@ fn validate_import_candidate(
     } else {
         candidate.clone()
     };
-    crate::forge_observation::validate_import_admission(&admission_history, &new_events)?;
+    crate::forge_observation::validate_import_admission(&admission_history, &new_events, rewrites)?;
     let mut round_trip_history = store
         .map(crate::forge_round_trip::held_events)
         .transpose()?

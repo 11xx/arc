@@ -2079,6 +2079,9 @@ pub fn reduce_following(events: &[Event], rewrites: &RewriteMap) -> Result<Chang
 /// Replay recorded structure without deciding which claims can authorize
 /// this receiver. Eligibility belongs to `apply_privilege_scope`; changing
 /// receiver trust cannot invalidate recorded references or later facts.
+/// Without a rewrite map, a change that needs one does not replay, so every
+/// reader outside tests replays through `reduce_with_rewrites`.
+#[cfg(test)]
 pub fn reduce(events: &[Event]) -> Result<ChangeState> {
     reduce_with_rewrites(events, &RewriteMap::default())
 }

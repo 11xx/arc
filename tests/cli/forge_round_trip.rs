@@ -268,10 +268,13 @@ fn compact_provenance_absent_frontier_cost_and_model_degrade_independently() {
     assert!(!shown.contains("unmeasured"), "{shown}");
 }
 fn admitted_round_trip(repo: &Repo, path: &Path) -> AssertCommand {
+    admitted_with_roles(repo, path, "'facts','rewrite','integration'")
+}
+fn admitted_with_roles(repo: &Repo, path: &Path, roles: &str) -> AssertCommand {
     let bytes = fs::read(path).unwrap();
     let bundle: Value = serde_json::from_slice(&bytes).unwrap();
     let source = bundle["source_replica_id"].as_str().unwrap();
-    repo.declare_gates_locally(&format!("[[replica.publishers]]\nprincipal='fixture-round-trip'\nsource_replica_id='{source}'\n[[replica.publishers.origins]]\nreplica_id='{source}'\nroles=['facts','rewrite','integration']\nactors=['tester']\n"));
+    repo.declare_gates_locally(&format!("[[replica.publishers]]\nprincipal='fixture-round-trip'\nsource_replica_id='{source}'\n[[replica.publishers.origins]]\nreplica_id='{source}'\nroles=[{roles}]\nactors=['tester']\n"));
     let mut command = repo.arc(&repo.root);
     command.args([
         "import",
@@ -1102,4 +1105,125 @@ fn forge_import_refuses_a_delivery_source_no_recorded_read_supports() {
         .stderr(predicates::str::contains(
             "source generation is not present in the exact observation",
         ));
+}
+
+/// An origin change carrying a forge read, integrated, its integrated commit
+/// reworded under a recorded map, and a receipt after integration naming the
+/// successor, as receipts recorded by earlier arc releases do: the change
+/// replays only through the map. Answers the repository, the origin change
+/// and its read's observation event.
+fn shipped_origin_needing_the_map() -> (Repo, String, String) {
+    let (repo, origin) = setup();
+    repo.declare_gates_locally("[gates.unit]\ncommand = \"true\"\n");
+    let observation = observe(&repo, &origin, "read-1", "g1", "first", None);
+    let worktree = repo.home.join(".worktrees").join("repo-frontier");
+    repo.commit(&worktree, "marker", "", "feat: work");
+    stdout(repo.arc(&worktree).args(["snapshot", &origin]));
+    repo.arc(&worktree)
+        .args(["verify", &origin, "--all"])
+        .write_stdin("")
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["review", &origin, "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", &origin])
+        .assert()
+        .success();
+    let integrated = git_out(&repo.root, &["rev-parse", "master"]);
+    git(
+        &repo.root,
+        &["commit", "--amend", "-q", "-m", "feat: work, reworded"],
+    );
+    let successor = git_out(&repo.root, &["rev-parse", "master"]);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["history", "rewrite", "--map", "-", "--reason", "reworded"])
+            .write_stdin(format!("{integrated} {successor}\n")),
+    );
+    stdout(repo.arc(&repo.root).args([
+        "verify",
+        &origin,
+        "--gate",
+        "unit",
+        "--attest",
+        "--after-integration",
+        "--result",
+        "pass",
+        "--tested-revision",
+        &successor,
+        "--execution-host",
+        "ci-host-1",
+        "--runner",
+        "watch-job-85",
+    ]));
+    rewrite_event(
+        &repo,
+        &origin,
+        "post-integration-verification-recorded",
+        |event| event["integrated_commit"] = json!(successor),
+    );
+    (repo, origin, observation)
+}
+
+/// Claim: a delivery may cite a generation read on a shipped change that
+/// replays only through the rewrite map, and the forge view reports that
+/// source as valid. Rejects resolving the source change without the store's
+/// map, which refuses the receipt naming the successor and with it the
+/// delivery, and a view that cannot find the read it resolved.
+#[test]
+fn a_delivery_cites_a_shipped_change_that_replays_only_through_the_rewrite_map() {
+    let (repo, origin, observation) = shipped_origin_needing_the_map();
+    let recipient = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "response-record",
+        "--target",
+        "master",
+    ])));
+    let mut cited = delivery();
+    cited["sources"] = json!([source(&origin, &observation, "g1")]);
+    stdout(&mut send(&repo, &recipient, &cited));
+
+    let view = json_stdout(
+        repo.arc(&repo.root)
+            .args(["forge", "show", &recipient, "--json"]),
+    );
+    assert_eq!(
+        view["source_availability"][0]["source_status"], "valid",
+        "{view:#}"
+    );
+}
+
+/// Claim: an import admits a forge read recorded on a shipped change after a
+/// receipt naming the integrated commit's successor. Rejects judging the read
+/// against a replay of the change without the bundle's admitted rewrite map,
+/// which refuses the receipt and with it the whole import.
+#[test]
+fn an_import_admits_a_read_recorded_after_a_receipt_naming_a_rewritten_successor() {
+    let (repo, origin, _) = shipped_origin_needing_the_map();
+    observe(&repo, &origin, "read-2", "g2", "second", Some("g1"));
+    let bundle = repo.home.join("shipped-origin.json");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["export", &origin, "--output", bundle.to_str().unwrap()]),
+    );
+    let receiving = Repo::new();
+    deliver_git_objects(&repo, &receiving);
+    stdout(&mut admitted_with_roles(
+        &receiving,
+        &bundle,
+        "'facts','rewrite','integration','review-input','review-authority','debt-input'",
+    ));
+    let shown = json_stdout(
+        receiving
+            .arc(&receiving.root)
+            .args(["show", &origin, "--json"]),
+    );
+    assert_eq!(
+        shown["forge"]["observations"].as_array().map(Vec::len),
+        Some(2),
+        "{shown:#}"
+    );
 }

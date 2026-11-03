@@ -97,13 +97,20 @@ impl SourceGeneration {
             .context("source generation is not present in the exact observation")
     }
     pub fn resolve<'a>(&self, events: &'a [Event]) -> Result<&'a RetainedContentRef> {
+        self.resolve_through(events, &held_rewrites(events))
+    }
+    fn resolve_through<'a>(
+        &self,
+        events: &'a [Event],
+        rewrites: &crate::rewrite::RewriteMap,
+    ) -> Result<&'a RetainedContentRef> {
         self.validate()?;
         let source_history: Vec<_> = events
             .iter()
             .filter(|e| e.change_id == self.change_id)
             .cloned()
             .collect();
-        let projected = crate::state::reduce(&source_history)?;
+        let projected = crate::state::reduce_with_rewrites(&source_history, rewrites)?;
         let resolved =
             crate::forge_observation::find_observation(&projected.forge, &self.observation)?;
         ensure!(
@@ -793,6 +800,12 @@ pub fn validate_history(
 }
 
 /// Held histories, including repository-scoped candidate context.
+/// The rewrite map the held repository events record. A map that does not
+/// load leaves every change replaying at its recorded revisions.
+fn held_rewrites(events: &[Event]) -> crate::rewrite::RewriteMap {
+    crate::rewrite::RewriteMap::from_events(events.iter()).unwrap_or_default()
+}
+
 pub fn held_events(store: &crate::store::Store) -> Result<Vec<Event>> {
     let mut events = store.load_repository_events()?;
     for change in store.list_change_ids()? {
@@ -1059,11 +1072,12 @@ pub fn source_view(
         .filter(|e| e.change_id == source.change_id)
         .cloned()
         .collect();
-    let projected = crate::state::reduce(&history);
+    let rewrites = held_rewrites(events);
+    let projected = crate::state::reduce_with_rewrites(&history, &rewrites);
     let record = projected.as_ref().ok().and_then(|state| {
         crate::forge_observation::find_observation(&state.forge, &source.observation).ok()
     });
-    match (record, source.resolve(events)) {
+    match (record, source.resolve_through(events, &rewrites)) {
         (Some(record), Ok(content)) => {
             serde_json::json!({"reference":source,"source_status":"valid","canonical_observation_id":record.event_id,"aliases":record.aliases,"content":content,"availability":custody.availability(&content.into()).label()})
         }

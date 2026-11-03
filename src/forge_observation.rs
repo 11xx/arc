@@ -794,6 +794,7 @@ pub fn replay_observation(
 pub fn validate_import_admission(
     events: &[crate::model::Event],
     introduced: &BTreeSet<&String>,
+    rewrites: &crate::rewrite::RewriteMap,
 ) -> Result<()> {
     use crate::model::Payload;
     for (index, event) in events.iter().enumerate() {
@@ -838,7 +839,7 @@ pub fn validate_import_admission(
         let prefix: Vec<_> = events[..index].iter().filter(|e| {
             !matches!((&e.payload, source), (Payload::ForgeObservationRecorded { observation: old }, Some(doc)) if old.read_id == doc.read_id && old != doc)
         }).cloned().collect();
-        let state = crate::state::reduce(&prefix)?;
+        let state = crate::state::reduce_with_rewrites(&prefix, rewrites)?;
         match &event.payload {
             Payload::ForgeObservationRecorded { observation } => {
                 observation.validate(&state.forge.observations)?
