@@ -4033,6 +4033,79 @@ printf 'stable environment\n'
     assert_eq!(events(&repo, &id), recorded);
 }
 
+/// Claim: the confirmation reads the ledger afresh, so a prerequisite that
+/// stops satisfying the change after the readiness report read it refuses the
+/// merge. Rejects a confirmation answered from the readiness observation,
+/// which would merge on a dependency the ledger no longer records as landed.
+#[test]
+fn authorization_confirmation_reads_prerequisites_afresh() {
+    let repo = repo_with_gates();
+    let counter = repo.home.join("probe-count");
+    let probe = repo.home.join("probe.sh");
+    let moved = repo.home.join("prerequisite-closure.json");
+    let closure_path = repo.home.join("closure-path");
+    fs::write(&counter, "0").unwrap();
+    fs::write(
+        &probe,
+        format!(
+            r#"count=$(cat '{counter}')
+count=$((count + 1))
+printf '%s' "$count" > '{counter}'
+if [ "$count" = 1 ] && [ -f '{closure_path}' ]; then
+    mv "$(cat '{closure_path}')" '{moved}'
+fi
+printf 'stable environment\n'
+"#,
+            counter = counter.display(),
+            closure_path = closure_path.display(),
+            moved = moved.display(),
+        ),
+    )
+    .unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        format!(
+            "[gates.smoke]\ncommand='test -f README.md'\nenvironment=\"sh '{}'\"\n",
+            probe.display()
+        ),
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "gate environment probe"]);
+    let (prerequisite, _) = approved_change(&repo, "prerequisite", "p.txt", "p\n");
+    let (id, _) = approved_change_based_on(
+        &repo,
+        "dependent",
+        "d.txt",
+        "d\n",
+        &[&prerequisite],
+        Some("arc/prerequisite"),
+    );
+    stdout(repo.arc(&repo.root).args(["integrate", &prerequisite]));
+    let closure = fs::read_dir(event_dir(&repo, &prerequisite))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            let event: serde_json::Value =
+                serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            event["event_type"] == "change-integrated"
+        })
+        .expect("the prerequisite's integration is an event");
+    fs::write(&closure_path, closure.to_str().unwrap()).unwrap();
+    fs::write(&counter, "0").unwrap();
+    let recorded = events(&repo, &id);
+    let before = repo.head(&repo.root);
+    repo.arc(&repo.root)
+        .args(["integrate", &id])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("configuration changed"));
+    assert!(moved.exists(), "the probe moved the prerequisite's closure");
+    assert_eq!(fs::read_to_string(&counter).unwrap(), "2");
+    assert_eq!(repo.head(&repo.root), before);
+    assert_eq!(events(&repo, &id), recorded);
+}
+
 #[test]
 fn takeover_hook_failures_report_transition_state() {
     use std::os::unix::fs::PermissionsExt;
