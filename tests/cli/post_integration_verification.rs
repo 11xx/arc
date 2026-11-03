@@ -466,6 +466,16 @@ fn stored_integrated_commit(fixture: &Fixture) -> String {
         .to_string()
 }
 
+fn doctor_advice(repo: &Repo) -> Vec<serde_json::Value> {
+    let output = repo
+        .arc(&repo.root)
+        .args(["doctor", "--json"])
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    report["advice"].as_array().unwrap().clone()
+}
+
 /// Claim: a receipt recorded after a rewrite stores the integrated commit as
 /// the integration recorded it, reads as the successor while the map is
 /// active, and stays counted when the map is withdrawn.
@@ -506,10 +516,12 @@ fn a_receipt_recorded_after_a_rewrite_survives_the_maps_withdrawal() {
 }
 
 /// Claim: a receipt naming the integrated commit's successor, whose rewrite
-/// map is later withdrawn, is set aside and reported, and the change stays
-/// readable; re-recording the map restores it.
-/// Rejects: the withdrawal making the whole change unreadable, or the
-/// stranded receipt still reading as verification of what shipped.
+/// map is later withdrawn, is set aside and reported by `show` and by
+/// `doctor` advice, and the change stays readable; re-recording the map
+/// restores it.
+/// Rejects: the withdrawal making the whole change unreadable, the stranded
+/// receipt still reading as verification of what shipped, or its effect
+/// visible only by opening the change.
 #[test]
 fn a_receipt_stranded_by_a_withdrawn_map_is_set_aside_and_reported() {
     let fixture = integrated_owing_review();
@@ -526,10 +538,32 @@ fn a_receipt_stranded_by_a_withdrawn_map_is_set_aside_and_reported() {
         show(repo)["post_integration_verifications"][0]["integrated_commit"],
         successor.as_str()
     );
+    assert!(
+        !doctor_advice(repo)
+            .iter()
+            .any(|finding| finding["code"] == "set-aside-reference"),
+        "nothing is set aside while the map is active"
+    );
+
     repo.arc(&repo.root)
         .args(["history", "withdraw", &map, "--reason", "wrong map"])
         .assert()
         .success();
+
+    let advice = doctor_advice(repo);
+    let listed = advice
+        .iter()
+        .find(|finding| finding["code"] == "set-aside-reference")
+        .unwrap_or_else(|| panic!("doctor lists no set-aside reference: {advice:?}"));
+    let detail = listed["detail"].as_str().unwrap();
+    for named in [
+        &fixture.change_id,
+        &receipt_event,
+        &successor,
+        &fixture.integrated,
+    ] {
+        assert!(detail.contains(named.as_str()), "{detail}");
+    }
 
     let shown = show(repo);
     assert!(

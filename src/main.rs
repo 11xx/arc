@@ -2919,7 +2919,9 @@ enum Cmd {
     /// that failure. A change whose events fail to reduce is the problem
     /// `unreplayable-change`, naming the change with the reduction error. Admitted active
     /// rewrites prove falsification identity without advancing recorded revisions; dangling
-    /// revision diagnostics still inspect the recorded objects. A hold release that names no
+    /// revision diagnostics still inspect the recorded objects. A reference replay set aside
+    /// because only a withdrawn rewrite map carried it is the advice `set-aside-reference`,
+    /// naming the change, the event, both revisions and the recovery. A hold release that names no
     /// active hold is the advice `hold-release-names-no-hold`; a change already reported with
     /// a problem is not checked for one.
     ///
@@ -3793,8 +3795,8 @@ enum HistoryCmd {
     /// reference storing a rewritten failure revision, or a receipt after integration naming
     /// the integrated commit's successor, that only a withdrawn map carried is set aside:
     /// the change stays readable, `show` reports it under `Set aside` (`set_aside` in
-    /// `--json`), and it counts for nothing. Re-record the actual map with history rewrite
-    /// to restore it
+    /// `--json`), `doctor` lists it as the advice `set-aside-reference`, and it counts for
+    /// nothing. Re-record the actual map with history rewrite to restore it
     Withdraw {
         /// Exact repository event ID of the history-rewritten map
         event_id: String,

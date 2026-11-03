@@ -582,6 +582,16 @@ fn inspect_change(
     };
     state.apply_privilege_scope(std::sync::Arc::clone(&inspection.scope), &events);
     crate::replica::localize_change(inspection.local_repository_id, &events, &mut state);
+    for reference in &state.set_aside {
+        advice.push(Finding {
+            code: "set-aside-reference",
+            detail: format!(
+                "{change_id}: {} {} names {}, which only a withdrawn rewrite map carried {} to; \
+                 it counts for nothing until `arc history rewrite` records a map that does",
+                reference.reference, reference.event_id, reference.revision, reference.follows
+            ),
+        });
+    }
     if state.closure.is_none() && !gitio::branch_exists(inspection.cwd, &state.branch) {
         advice.push(Finding {
             code: "missing-open-branch",

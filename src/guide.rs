@@ -2888,7 +2888,8 @@ HISTORY REWRITES
                        revision, or a receipt after integration naming the
                        integrated commit's successor, that only the withdrawn
                        map carried is set aside: the change stays readable,
-                       `show` reports it under `Set aside`, and it counts for
+                       `show` reports it under `Set aside`, `doctor` lists it
+                       as the advice `set-aside-reference`, and it counts for
                        nothing. Re-record the actual mapping with
                        `arc history rewrite --map <file> --reason <why>` to
                        restore it without editing ledger events.
