@@ -4474,7 +4474,7 @@ struct FixturePid(u32);
 
 impl FixturePid {
     fn read(path: &Path) -> FixturePid {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + HANG_BOUND;
         loop {
             if let Some(pid) = fs::read_to_string(path)
                 .ok()
@@ -4532,7 +4532,9 @@ impl Drop for FixturePid {
 /// stopped run is reported as interrupted rather than recorded. Rejects arc
 /// dying on SIGINT while its gate shell and that shell's children run on,
 /// reparented to init, rejects recording an interrupted run as evidence, and
-/// rejects swallowing the signal into an ordinary failure exit.
+/// rejects swallowing the signal into an ordinary failure exit. The gate's
+/// child outlives every bound the test waits, so only arc stopping it ends it
+/// in time.
 #[test]
 fn an_interrupted_verify_stops_its_gate_and_records_nothing() {
     for signal in ["INT", "TERM"] {
@@ -4541,8 +4543,9 @@ fn an_interrupted_verify_stops_its_gate_and_records_nothing() {
         fs::create_dir_all(&marks).unwrap();
         let gate = format!(
             "echo $PPID > {m}/arc.pid; echo $$ > {m}/leader.pid; \
-             sleep 60 & echo $! > {m}/child.pid; wait",
-            m = marks.display()
+             sleep {s} & echo $! > {m}/child.pid; wait",
+            m = marks.display(),
+            s = 2 * HANG_BOUND.as_secs()
         );
         fs::create_dir_all(repo.root.join(".arc")).unwrap();
         fs::write(
@@ -4565,7 +4568,7 @@ fn an_interrupted_verify_stops_its_gate_and_records_nothing() {
         let child = FixturePid::read(&marks.join("child.pid"));
         arc.signal(signal);
 
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + HANG_BOUND;
         while !run.is_finished() {
             assert!(
                 Instant::now() < deadline,
@@ -4576,11 +4579,11 @@ fn an_interrupted_verify_stops_its_gate_and_records_nothing() {
         let output = run.join().unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            leader.ends_within(Duration::from_secs(2)),
+            leader.ends_within(HANG_BOUND),
             "gate shell outlived arc after SIG{signal}"
         );
         assert!(
-            child.ends_within(Duration::from_secs(2)),
+            child.ends_within(HANG_BOUND),
             "gate child outlived arc after SIG{signal}"
         );
         let expected = if signal == "INT" { 2 } else { 15 };
