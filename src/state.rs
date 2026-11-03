@@ -1466,6 +1466,10 @@ pub struct ClosureState {
     /// The landing this closure derives from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub landing: Option<ClosureLanding>,
+    /// For an asserted integration whose commits landed as other commits,
+    /// each source commit and the commit asserted to be it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub correspondence: Vec<crate::model::CorrespondedCommit>,
     pub event_id: String,
     #[serde(skip)]
     pub created_at: DateTime<Utc>,
@@ -1521,6 +1525,7 @@ fn integrated_closure(
         )),
         range_base: None,
         landing: None,
+        correspondence: Vec::new(),
         event_id: ev.event_id.clone(),
         created_at: ev.created_at,
     }
@@ -3137,6 +3142,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                         integrator: None,
                         range_base: None,
                         landing: None,
+                        correspondence: Vec::new(),
                         event_id: ev.event_id.clone(),
                         created_at: ev.created_at,
                     });
@@ -3814,6 +3820,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     external_reference: None,
                     range_base: None,
                     landing: None,
+                    correspondence: Vec::new(),
                     event_id: ev.event_id.clone(),
                     created_at: ev.created_at,
                 });
@@ -3873,6 +3880,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 target_branch,
                 target_before,
                 external_reference,
+                correspondence,
             } => {
                 let mut closure = integrated_closure(
                     ev,
@@ -3884,6 +3892,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     target_before.clone(),
                 );
                 closure.external_reference = external_reference.clone();
+                closure.correspondence = correspondence.clone();
                 state.closure = Some(closure);
             }
             Payload::ForgeProjection {

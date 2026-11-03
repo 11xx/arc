@@ -19,6 +19,7 @@ mod commit_lookup_gaps;
 mod common;
 mod context;
 mod contribution;
+mod correspondence;
 mod cost;
 mod cost_backend_sets;
 mod cost_completeness;

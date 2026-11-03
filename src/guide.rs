@@ -1455,6 +1455,21 @@ RUN A CHANGE
   <attempt> --reason <why>` abandons an attempt whose target arc did not
   move.
 
+  A change whose commits reached its target as other commits that arc did
+  not produce (a cherry-pick, a rebase elsewhere) closes with `arc close
+  <change> --assert-integrated <rev> --target-before <before>
+  --correspondence <file>`. The file (`arc-correspondence/1`, shape in `arc
+  close --help`) stands in for the asserted revision containing the source
+  head, and for nothing else. It names the change, the closed patchset and
+  its head, `<before>` and `<rev>`, each of which must match, and maps every
+  commit of the patchset, oldest first, to one commit in `<before>..<rev>`:
+  one to one, each landed commit descending from the previous one, with
+  equal stable Git patch ids. A merge or an empty commit on either side
+  has no ordinary patch identity and refuses. Each refusal names the commit
+  and the rule it broke. The closure stays asserted, never via a landing,
+  carries no gate evidence, and records the pairs, which `status`, `show`,
+  `explain` and an export carry.
+
   `integration.cleanup` governs branch and worktree cleanup after integration
   (built-in false). A slot checkout is never removed; its release detaches it
   and deletes the merged branch (arc guide slots). `integrate --cleanup` enables it; `--no-cleanup` overrides
@@ -5123,6 +5138,7 @@ SCHEMAS
     `journal-events/2`               events.jsonl, streamed by arc journal events
     `arc-journal-spool/2`            .arc/outbox/<ts>-<kind>-<topic>.json
     `arc-trailer-edits/1`            arc rewrite trailers --edits
+    `arc-correspondence/1`           arc close --correspondence
 
   `arc cost evidence` writes `tapes-attribution-evidence/1`, a format tapes
   owns and versions; this rule counts the shapes arc defines, so that file

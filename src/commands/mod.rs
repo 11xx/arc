@@ -1593,6 +1593,7 @@ mod tests {
                 superseded_by: None,
                 range_base: None,
                 landing: None,
+                correspondence: Vec::new(),
                 event_id: "event".into(),
                 created_at: Utc::now(),
             }),

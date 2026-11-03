@@ -5480,6 +5480,7 @@ pub struct CloseArgs {
     pub patchset: Option<String>,
     pub into: Option<String>,
     pub target_before: Option<String>,
+    pub correspondence: Option<std::path::PathBuf>,
     pub abandoned: bool,
     pub superseded_by: Option<String>,
     pub external_reference: Option<String>,
@@ -5491,6 +5492,7 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
         patchset,
         into,
         target_before,
+        correspondence,
         abandoned,
         superseded_by,
         external_reference,
@@ -5521,6 +5523,9 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
     }
     if target_before.is_some() && assert_integrated.is_none() {
         bail!("--target-before describes an asserted integration; pass --assert-integrated <REV>");
+    }
+    if correspondence.is_some() && assert_integrated.is_none() {
+        bail!("--correspondence describes an asserted integration; pass --assert-integrated <REV>");
     }
     if let Some(reference) = external_reference.as_deref() {
         if reference.trim().is_empty() || reference.contains('\n') || reference.contains('\r') {
@@ -5572,8 +5577,11 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
             // change. Without these two checks it could name any commit at
             // all, and the ledger would record an integration that never
             // happened — worse than recording nothing, because it reads as
-            // authoritative.
-            if external_reference.is_none() && !gitio::is_ancestor(&ctx.cwd, &patchset.head, &rev)?
+            // authoritative. A correspondence stands in for the ancestry
+            // proof, and is checked once `target_before` is known.
+            if external_reference.is_none()
+                && correspondence.is_none()
+                && !gitio::is_ancestor(&ctx.cwd, &patchset.head, &rev)?
             {
                 bail!(
                     "{rev} does not contain {} ({}), so it is not an integration of this change",
@@ -5600,6 +5608,22 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
                 (None, 2..) => parents.into_iter().next(),
                 (None, _) => None,
             };
+            let correspondence = match (&correspondence, &target_before) {
+                (Some(path), Some(before)) => crate::correspondence::check(
+                    &ctx.cwd,
+                    path,
+                    &crate::correspondence::Subject {
+                        change_id: &change_id,
+                        patchset_id: &patchset.id,
+                        base: &patchset.base,
+                        head: &patchset.head,
+                        target_before: before,
+                        revision: &rev,
+                    },
+                )?,
+                (Some(_), None) => bail!("--correspondence needs --target-before"),
+                (None, _) => Vec::new(),
+            };
             (
                 Payload::IntegrationAsserted {
                     integrated_commit: rev.clone(),
@@ -5608,6 +5632,7 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
                     target_branch: target,
                     target_before,
                     external_reference: external_reference.clone(),
+                    correspondence,
                 },
                 Some(rev),
             )

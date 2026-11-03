@@ -1267,11 +1267,27 @@ fn open_evaluation(
 }
 
 fn no_basis(state: &ChangeState) -> String {
-    match state
-        .closure
-        .as_ref()
-        .and_then(|closure| closure.integration)
-    {
+    let Some(closure) = state.closure.as_ref() else {
+        return "the integration event recorded no authorization basis".to_string();
+    };
+    match closure.integration {
+        Some(crate::state::IntegrationKind::Asserted) if !closure.correspondence.is_empty() => {
+            format!(
+                "the integration was asserted, not performed by arc, so no authorization basis \
+                 was recorded; it asserts that the {} source commits landed as {}",
+                closure.correspondence.len(),
+                closure
+                    .correspondence
+                    .iter()
+                    .map(|pair| format!(
+                        "{}->{}",
+                        crate::render::short_sha(&pair.source),
+                        crate::render::short_sha(&pair.landed)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
         Some(crate::state::IntegrationKind::Asserted) => {
             "the integration was asserted, not performed by arc, so no authorization basis was \
              recorded"

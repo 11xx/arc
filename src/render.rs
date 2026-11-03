@@ -408,6 +408,20 @@ pub fn markdown(
                 c.range_base().map(short_sha).unwrap_or_default()
             );
         }
+        if !c.correspondence.is_empty() {
+            let _ = writeln!(
+                w,
+                "  - asserted correspondence, source commit to landed commit:"
+            );
+            for pair in &c.correspondence {
+                let _ = writeln!(
+                    w,
+                    "    - `{}` -> `{}`",
+                    short_sha(&pair.source),
+                    short_sha(&pair.landed)
+                );
+            }
+        }
         if let Some(reference) = &c.external_reference {
             let _ = writeln!(w, "  - external outcome reference: `{reference}`");
         }
@@ -2710,16 +2724,22 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             integrated_commit,
             target_branch,
             external_reference,
+            correspondence,
             ..
         } => {
             let external = external_reference
                 .as_deref()
                 .map(|reference| format!(" [external: {reference}]"))
                 .unwrap_or_default();
+            let corresponded = if correspondence.is_empty() {
+                String::new()
+            } else {
+                format!(" ({} commits by correspondence)", correspondence.len())
+            };
             (
                 "integration-asserted",
                 format!(
-                    "{} into {target_branch}{external}",
+                    "{} into {target_branch}{external}{corresponded}",
                     short_sha(integrated_commit)
                 ),
             )

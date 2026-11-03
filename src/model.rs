@@ -1904,6 +1904,12 @@ pub enum Payload {
         target_before: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         external_reference: Option<String>,
+        /// The asserted commit-for-commit correspondence that stands in for
+        /// ancestry when the change's commits reached the target as other
+        /// commits. Empty when the asserted revision contains the source
+        /// head.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        correspondence: Vec<CorrespondedCommit>,
     },
     /// The author declares whether this change is being iterated on rather
     /// than driven to a merge. An iterating change records progress with
@@ -2736,6 +2742,15 @@ pub struct LandingPin {
     /// `sha256:` over the latest brief body, when the change has a brief.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub brief_digest: Option<String>,
+}
+
+/// One source commit of an asserted integration and the commit it landed as,
+/// patch-equal and in source order along `target_before..integrated_commit`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CorrespondedCommit {
+    pub source: String,
+    pub landed: String,
 }
 
 /// One member of a completed landing: its own landed range and what

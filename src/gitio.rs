@@ -2819,6 +2819,45 @@ pub fn commit_parents(cwd: &Path, rev: &str) -> Result<Vec<String>> {
     Ok(ids.collect())
 }
 
+/// The stable patch id of a single-parent or root commit's own diff, or
+/// `None` when the commit changes nothing. A merge has no ordinary patch
+/// identity; callers refuse one before asking.
+pub fn patch_id(cwd: &Path, commit: &str) -> Result<Option<String>> {
+    let diff = git_bytes(
+        cwd,
+        &[
+            "diff-tree",
+            "--patch",
+            "--root",
+            "--no-commit-id",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-renames",
+            "--full-index",
+            commit,
+        ],
+    )?;
+    let out = git_piped(cwd, &["patch-id", "--stable"], &diff)?;
+    Ok(String::from_utf8(out)?
+        .split_whitespace()
+        .next()
+        .map(str::to_string))
+}
+
+/// Every commit in `base..head`, parents before children.
+pub fn range_commits(cwd: &Path, base: &str, head: &str) -> Result<Vec<String>> {
+    let out = git(
+        cwd,
+        &[
+            "rev-list",
+            "--topo-order",
+            "--reverse",
+            &format!("{base}..{head}"),
+        ],
+    )?;
+    Ok(out.lines().map(str::to_string).collect())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitIdentity {
     pub author_name: String,

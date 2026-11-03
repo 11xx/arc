@@ -13,6 +13,7 @@ mod commands;
 mod config;
 mod context;
 mod coordinate;
+mod correspondence;
 mod custody;
 mod declarations;
 mod explain;
@@ -3142,6 +3143,27 @@ enum Cmd {
         /// merge head supplies its first parent; other heads record no base
         #[arg(long = "target-before", requires = "assert_integrated")]
         target_before: Option<String>,
+        /// Assert that the patchset's commits landed as other commits (a
+        /// cherry-pick, or a rebase arc did not perform), in place of the
+        /// asserted revision containing the source head. FILE is
+        /// `arc-correspondence/1` JSON: {"schema", "change" (the change id),
+        /// "patchset", "source_head", "target_before", "revision",
+        /// "commits": [{"source", "landed"}]}. The binding fields must name
+        /// this change, the closed patchset and its head, --target-before
+        /// (required) and the asserted revision. Every commit of the
+        /// patchset, oldest first, maps to one commit in
+        /// target-before..revision, one to one, each landed commit
+        /// descending from the one before it, with equal stable Git patch
+        /// ids. A merge or an empty commit on either side is refused.
+        /// Each refusal names the commit and the rule. The closure stays
+        /// asserted, carries no gate evidence and records the pairs
+        #[arg(
+            long,
+            value_name = "FILE",
+            requires_all = ["assert_integrated", "target_before"],
+            conflicts_with = "external_reference"
+        )]
+        correspondence: Option<PathBuf>,
         /// Close as abandoned: the work stopped and nothing was merged
         #[arg(long)]
         abandoned: bool,
@@ -7570,6 +7592,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             patchset,
             into,
             target_before,
+            correspondence,
             abandoned,
             superseded,
             external_reference,
@@ -7582,6 +7605,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     patchset,
                     into,
                     target_before,
+                    correspondence,
                     abandoned,
                     superseded_by: superseded,
                     external_reference,
