@@ -1,0 +1,6 @@
+# Lanes begin in leased fixed-path checkouts (`arc begin <slug> --slot`), so a
+# change starts from the previous change's `target/` instead of a cold build.
+[slots]
+size = 4
+identity = "rustc -vV && cargo -V"
+retain = ["target"]
