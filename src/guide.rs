@@ -2118,8 +2118,11 @@ REVIEW COVERAGE AND DEBT
   `arc status` and `arc review <change>` print the rule as `review_options`:
   for ordinary scope, `declare_debt` then `request_review`, with
   `next_action` `declare_debt`; a required-review or undetermined-danger
-  change lists `request_review` alone. Reading the list writes nothing — the
-  lead runs `arc debt` or `arc integrate --debt` itself. A current
+  change lists `request_review` alone. The list is what arc advises, not what
+  integration permits: `arc integrate --debt` still lands a required-review
+  change, on the lead's own judgement and with its review owed. Reading the
+  list writes nothing — the lead runs `arc debt` or `arc integrate --debt`
+  itself. A current
   `changes-requested` or `comment-only` verdict is its own next action and
   offers no debt route: a waiver records a missing review, not a way past a
   refusal.
