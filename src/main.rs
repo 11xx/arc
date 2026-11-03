@@ -2740,7 +2740,8 @@ enum Cmd {
         /// The changes to land, in landing order
         #[arg(required_unless_present_any = ["recover", "abandon"])]
         changes: Vec<String>,
-        /// The branch to land on; defaults to the members' recorded target
+        /// The branch to land on, for every member, as `integrate --into`
+        /// names one; without it the members must share a recorded target
         #[arg(long)]
         target: Option<String>,
         /// Land members no approval covers, declaring for each the debt `arc

@@ -1180,3 +1180,24 @@ fn a_squash_or_merge_target_refuses_a_multi_commit_landing() {
         assert_eq!(git_out(&repo.root, &["rev-parse", "master"]), before);
     }
 }
+
+/// Claim: `--target` lands every member on the named branch, as `integrate
+/// --into` does for one change, and their closures name it. Rejects a flag
+/// that can only repeat the recorded target, and a landing that moves the
+/// recorded target instead of the named one.
+#[test]
+fn target_lands_every_member_on_the_named_branch() {
+    let repo = gated_repo();
+    git(&repo.root, &["branch", "release", "master"]);
+    let ((lower, _, _), (upper, _, upper_head)) = stack(&repo);
+    let master = git_out(&repo.root, &["rev-parse", "master"]);
+    repo.arc(&repo.root)
+        .args(["land", &lower, &upper, "--target", "release"])
+        .assert()
+        .success();
+    assert_eq!(git_out(&repo.root, &["rev-parse", "release"]), upper_head);
+    assert_eq!(git_out(&repo.root, &["rev-parse", "master"]), master);
+    for change in [&lower, &upper] {
+        assert_eq!(status(&repo, change)["closure"]["target_branch"], "release");
+    }
+}

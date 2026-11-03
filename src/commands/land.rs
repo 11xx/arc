@@ -370,6 +370,7 @@ fn plan(
             .with_context(|| format!("{id} cannot be read"))?;
         members.push(state);
     }
+    let explicit_target = target;
     let target = match target {
         Some(target) => target.to_string(),
         None => members[0].target_branch.clone(),
@@ -395,7 +396,7 @@ fn plan(
                 ),
             );
         }
-        if member.target_branch != target {
+        if explicit_target.is_none() && member.target_branch != target {
             return refuse(
                 1,
                 format!(
