@@ -2841,7 +2841,7 @@ RECEIPTS
   or disposition was recorded after the template, or when it contradicts
   itself; a contradiction is refused, never repaired by editing the report.
   A read that clears nothing is recorded and reports its bar. Dispositions
-  publish inside the read's own event, which stamps store format 8. Rerunning
+  publish inside the read's own event, which stamps store format 7. Rerunning
   a receipt prints the event of each item an identical item already
   published and writes nothing for it, so an interrupted batch resumes; a
   changed item under a published key is refused. `arc receipt --help` holds
@@ -4997,7 +4997,7 @@ SCHEMAS
   are recovery evidence, separate from versioned journal events.
 
   Internal:
-    store format 8                   .git/arc/config.json and the change ledger
+    store format 7                   .git/arc/config.json and the change ledger
     `arc-accept-checkout/1`           local administrative allocation recovery
     `arc-landing-intent/1`            landing-intents/<attempt>.json recovery
     `arc-import-batch/1`             local atomic change import and authorization

@@ -417,7 +417,7 @@ fn a_receipt_reopening_a_finding_keeps_integration_blocked() {
 
     let config: serde_json::Value =
         serde_json::from_slice(&fs::read(repo.root.join(".git/arc/config.json")).unwrap()).unwrap();
-    assert_eq!(config["schema_version"], 8, "{config}");
+    assert_eq!(config["schema_version"], 7, "{config}");
 }
 
 /// A change that integrated owing a review, whose commit names `trailer`

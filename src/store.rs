@@ -1930,7 +1930,7 @@ impl Store {
             | Payload::AuditVerdictRecorded { dispositions, .. }
                 if !dispositions.is_empty() =>
             {
-                Some(8)
+                Some(7)
             }
             Payload::ChangeProvisionallyIntegrated { .. }
             | Payload::ProvisionalIntegrationResolved { .. } => Some(7),
@@ -2024,7 +2024,7 @@ impl Store {
                     .and_then(serde_json::Value::as_array)
                     .is_some_and(|dispositions| !dispositions.is_empty()) =>
             {
-                Some(8)
+                Some(7)
             }
             Some("external-verdict-recorded") | Some("ready-to-send") => Some(4),
             Some("history-rewritten") => Some(6),
@@ -3689,23 +3689,23 @@ mod tests {
         assert!(mismatches.is_empty(), "{}", mismatches.join("; "));
     }
 
-    /// Claim: a verdict or audit carrying inline dispositions stamps format 8
-    /// on every append path, so a reader at format 7, which would ignore the
+    /// Claim: a verdict or audit carrying inline dispositions stamps format 7
+    /// on every append path, so a reader at format 6, which would ignore the
     /// field and keep a reopened finding resolved, refuses the store. The
     /// same events without dispositions stamp nothing.
     #[test]
-    fn inline_dispositions_stamp_eight_on_every_path() {
+    fn inline_dispositions_stamp_seven_on_every_path() {
         let still_open = serde_json::json!([{"finding_id": "f-1", "status": "still-open", "supersedes": ["d-1"]}]);
         let receipt =
             serde_json::json!({"key": "rk-1", "item_digest": "sha256:aa", "receipt_digest": "bb"});
         let fixtures = [
             (
                 serde_json::json!({"event_type": "verdict-recorded", "patchset_id": "ps", "verdict": "changes-requested", "causes": ["executor"], "dispositions": still_open, "receipt": receipt}),
-                8,
+                7,
             ),
             (
                 serde_json::json!({"event_type": "audit-verdict-recorded", "revision": "r", "verdict": "approved", "dispositions": still_open}),
-                8,
+                7,
             ),
             (
                 serde_json::json!({"event_type": "verdict-recorded", "patchset_id": "ps", "verdict": "approved", "receipt": receipt}),
@@ -3752,10 +3752,10 @@ mod tests {
                         stored.schema_version
                     ));
                 }
-                if expected > 7 {
-                    let refused = ensure_readable_format_at(stored.schema_version, 7);
+                if expected > 6 {
+                    let refused = ensure_readable_format_at(stored.schema_version, 6);
                     if refused.is_ok() {
-                        mismatches.push(format!("{value} {path}: a format-7 reader opens it"));
+                        mismatches.push(format!("{value} {path}: a format-6 reader opens it"));
                     }
                 }
             }

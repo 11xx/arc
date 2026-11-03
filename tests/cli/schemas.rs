@@ -138,7 +138,7 @@ fn model_provenance_versions_are_registered() {
             assert!(guide.contains(&format!("`{schema}`")), "{name}: {schema}");
         }
     }
-    assert!(guide.contains("store format 8"));
+    assert!(guide.contains("store format 7"));
 }
 
 /// The guide's rule is one version per release, counted from the last one:
