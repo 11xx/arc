@@ -54,8 +54,15 @@ struct ReadView {
     #[serde(skip_serializing_if = "Option::is_none")]
     route_version: Option<String>,
     /// Whether the read can clear the change: an approval of the shipped
-    /// patchset, or an approving audit.
+    /// patchset, or an approving audit, that under `review_clearance =
+    /// "assessed"` also clears.
     counts: bool,
+    /// Under `review_clearance = "assessed"`, `clearing` or `findings`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    read_kind: Option<&'static str>,
+    /// Why a `findings` read does not clear.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    findings_reason: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -186,9 +193,32 @@ fn shipped(state: &ChangeState) -> Option<&Patchset> {
         .or_else(|| state.latest_patchset())
 }
 
+/// Under `review_clearance = "assessed"`, the read kind and findings reason
+/// of a read by `author` at `model` under `assessment`; nothing otherwise.
+fn clearance_of(
+    state: &ChangeState,
+    author: &str,
+    model: Option<&str>,
+    assessment: Option<&crate::model::AuditAssessment>,
+) -> (Option<&'static str>, Option<&'static str>) {
+    if !state.review_clearance.is_assessed() {
+        return (None, None);
+    }
+    match crate::state::clearance_gap(author, model, assessment) {
+        Some(why) => (Some("findings"), Some(why.as_str())),
+        None => (Some("clearing"), None),
+    }
+}
+
 fn reads_of(state: &ChangeState, shipped: Option<&Patchset>) -> Vec<ReadView> {
     let mut reads = Vec::new();
     for verdict in &state.verdicts {
+        let (read_kind, findings_reason) = clearance_of(
+            state,
+            verdict.effective_author(),
+            verdict.model.as_deref(),
+            verdict.assessment.as_ref(),
+        );
         reads.push(ReadView {
             event: verdict.event_id.clone(),
             kind: ReadKind::Verdict,
@@ -202,10 +232,19 @@ fn reads_of(state: &ChangeState, shipped: Option<&Patchset>) -> Vec<ReadView> {
             at: verdict.created_at,
             route_version: verdict.route_version.clone(),
             counts: verdict.verdict == Verdict::Approved
-                && shipped.is_some_and(|patchset| patchset.id == verdict.patchset_id),
+                && shipped.is_some_and(|patchset| patchset.id == verdict.patchset_id)
+                && findings_reason.is_none(),
+            read_kind,
+            findings_reason,
         });
     }
     for audit in &state.audit_verdicts {
+        let (read_kind, findings_reason) = clearance_of(
+            state,
+            audit.effective_author(),
+            audit.model.as_deref(),
+            audit.assessment.as_ref(),
+        );
         reads.push(ReadView {
             event: audit.event_id.clone(),
             kind: ReadKind::Audit,
@@ -218,7 +257,9 @@ fn reads_of(state: &ChangeState, shipped: Option<&Patchset>) -> Vec<ReadView> {
             model: audit.model.clone(),
             at: audit.created_at,
             route_version: audit.route_version.clone(),
-            counts: audit.verdict == Verdict::Approved,
+            counts: audit.verdict == Verdict::Approved && findings_reason.is_none(),
+            read_kind,
+            findings_reason,
         });
     }
     reads.sort_by(|a, b| (a.at, &a.event).cmp(&(b.at, &b.event)));

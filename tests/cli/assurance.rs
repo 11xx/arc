@@ -827,3 +827,44 @@ fn assurance_never_gates_an_integration() {
     // A stale change in the ledger does not stand in the way of the next.
     integrate(&repo, &change("next", &["gpt-5-5#high"]));
 }
+
+/// Claim: under `review_clearance = "assessed"` assurance counts only a read
+/// that clears, so an approving audit with no assessment is listed as a
+/// findings read and leaves the change owed. Rejects such an audit, which
+/// counts without the policy, refreshing assurance as if it had cleared.
+#[test]
+fn under_the_clearance_policy_a_non_clearing_audit_does_not_count() {
+    let audited = |policy: Option<&str>| {
+        let repo = Repo::new();
+        if let Some(policy) = policy {
+            fs::create_dir_all(repo.root.join(".arc")).unwrap();
+            fs::write(repo.root.join(".arc/policy.toml"), policy).unwrap();
+            git(&repo.root, &["add", ".arc/policy.toml"]);
+            git(&repo.root, &["commit", "-m", "policy"]);
+        }
+        let fake = FakeRouting::new(&repo);
+        fake.author("claude-sonnet-5-5#high", FRONTIER_TIER)
+            .read(ASTRA_READ, true, 3, "at");
+        let id = integrate(&repo, &change("audited", &[]));
+        stdout(repo.arc(&repo.root).env("ARC_ACTOR", "auditor").args([
+            "--model",
+            ASTRA_READ,
+            "audit",
+            "audited",
+            "--verdict",
+            "approved",
+        ]));
+        let report = assurance(&fake, &repo, &["--stale"]);
+        (id, report)
+    };
+
+    let (_, legacy) = audited(None);
+    assert!(ids(&legacy).is_empty(), "counted and fresh: {legacy}");
+
+    let (id, assessed) = audited(Some("[policy]\nreview_clearance = \"assessed\"\n"));
+    assert_eq!(standing(&assessed, &id), "owed", "{assessed}");
+    let read = &row(&assessed, &id)["reads"][0];
+    assert_eq!(read["counts"], false, "{assessed}");
+    assert_eq!(read["read_kind"], "findings", "{assessed}");
+    assert_eq!(read["findings_reason"], "no-assessment", "{assessed}");
+}

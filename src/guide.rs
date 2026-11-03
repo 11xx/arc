@@ -2649,7 +2649,10 @@ REVIEW ASSURANCE
   - A read counts only when routing assesses it eligible. A verdict counts
     when it approves the shipped patchset, an audit when it approves. An
     approval carried across a role-addition rewrite (`arc guide
-    rewrites-evidence`) still approves that patchset.
+    rewrites-evidence`) still approves that patchset. Under
+    `review_clearance = "assessed"` (`arc guide debt-review`) a read counts
+    only when it also clears; every read carries `read_kind` `clearing` or
+    `findings`, and a findings read its `findings_reason` and `counts: false`.
     Standing compares tiers only, so a same-family read at the frontier tier
     still does not count: a change with no eligible read is `owed`, which its
     debt view already says, and is never `stale`.
