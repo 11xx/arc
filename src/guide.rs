@@ -2313,9 +2313,9 @@ REVIEW COVERAGE AND DEBT
   `arc integrate --debt <why> --kind ineligible-review` (and `arc debt`)
   records beside the debt:
 
-    read         the verdict event of that read: `--read <event>`, else the
-                 latest verdict on the patchset the debt covers. Refused when
-                 there is none
+    read         the verdict or audit event of that read: `--read <event>`,
+                 else the latest verdict on the patchset the debt covers, else
+                 once integrated its latest audit. Refused when there is none
     qualifiers   why it does not count, from the closed set same-model,
                  same-family, below-floor, floor-unknown, reviewer-unseated
                  (a reviewer holding no seated review tier)

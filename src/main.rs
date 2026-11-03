@@ -2601,10 +2601,11 @@ enum Cmd {
         /// `--assessment` or `--qualifier`, and the read from `--read`
         #[arg(long, value_enum)]
         kind: Option<DebtMissing>,
-        /// The verdict event of the read an `ineligible-review` debt names.
-        /// Omitted, the latest verdict on the patchset the debt covers.
-        /// Refused when the patchset has no verdict, or the event is not one
-        /// of its verdicts
+        /// The verdict or audit event of the read an `ineligible-review` debt
+        /// names: a verdict on the patchset the debt covers or, once the
+        /// change integrated, an audit of what shipped. Omitted, the latest
+        /// such verdict, else the latest audit. Refused when there is
+        /// neither, or the event is not one of them
         #[arg(long = "read", value_name = "EVENT")]
         read: Option<String>,
         /// Why routing did not count that read: an `agent-routing assess

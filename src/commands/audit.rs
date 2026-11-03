@@ -12,8 +12,8 @@ use crate::state::{ChangeState, Debt, Patchset};
 /// and why routing did not count it, as the caller supplied them.
 #[derive(Debug, Default, Clone)]
 pub struct IneligibleInputs {
-    /// The verdict event of the read. Omitted, the latest verdict on the
-    /// bound patchset.
+    /// The verdict or audit event of the read. Omitted, the latest verdict
+    /// on the bound patchset, else its latest audit.
     pub read: Option<String>,
     /// An `agent-routing assess --json` file.
     pub assessment: Option<PathBuf>,
@@ -84,26 +84,41 @@ impl IneligibleInputs {
             st.verdicts
                 .iter()
                 .filter(|verdict| subject.is_some_and(|subject| verdict.patchset_id == subject.id))
+                .map(|verdict| (&verdict.event_id, verdict.created_at))
+        };
+        // An audit exists only once the change integrated, when the patchset
+        // the debt covers is the one that shipped and every audit read it.
+        let audits = || {
+            st.audit_verdicts
+                .iter()
+                .filter(|_| subject.is_some())
+                .map(|audit| (&audit.event_id, audit.created_at))
+        };
+        let latest = |reads: Vec<(&String, _)>| {
+            reads
+                .into_iter()
+                .max_by_key(|(_, at)| *at)
+                .map(|(id, _)| id.clone())
         };
         let read = match &self.read {
             Some(named) => verdicts()
-                .find(|verdict| &verdict.event_id == named)
-                .map(|verdict| verdict.event_id.clone())
+                .chain(audits())
+                .find(|(id, _)| *id == named)
+                .map(|(id, _)| id.clone())
                 .with_context(|| {
                     format!(
-                        "--read {named} is not a verdict on the patchset this debt covers; \
-                         `arc status {} --json` lists them",
+                        "--read {named} is not a verdict or audit on the patchset this debt \
+                         covers; `arc status {} --json` lists them",
                         st.change_id
                     )
                 })?,
-            None => verdicts()
-                .max_by_key(|verdict| verdict.created_at)
-                .map(|verdict| verdict.event_id.clone())
+            None => latest(verdicts().collect())
+                .or_else(|| latest(audits().collect()))
                 .with_context(|| {
                     format!(
-                        "{} has no verdict on the patchset this debt covers, so there is no \
-                         read to name; record the review first, or declare the kind arc \
-                         derives",
+                        "{} has no verdict or audit on the patchset this debt covers, so \
+                         there is no read to name; record the review or audit first, or \
+                         declare the kind arc derives",
                         st.change_id
                     )
                 })?,

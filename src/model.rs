@@ -688,11 +688,12 @@ impl Independence {
 }
 
 /// The read an `ineligible-review` debt names, and why routing did not count
-/// it. Model strings and tiers are not here: the verdict event carries the
-/// reviewer's model verbatim, and a tier is routing's reading at read time.
+/// it. Model strings and tiers are not here: the verdict or audit event
+/// carries the reviewer's model verbatim, and a tier is routing's reading at
+/// read time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IneligibleRead {
-    /// The verdict event the read recorded.
+    /// The verdict, or post-integration audit, event the read recorded.
     pub read: String,
     /// Never empty.
     pub qualifiers: Vec<ReviewQualifier>,

@@ -675,7 +675,7 @@ pub struct Debt {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub production: Option<DebtProduction>,
     /// The read an `ineligible-review` obligation names, with the reviewer
-    /// read off that verdict event and the audits since that did not clear
+    /// read off that verdict or audit event and the audits since that did not clear
     /// it. Absent on every other kind.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ineligible: Option<DebtRead>,
@@ -693,7 +693,7 @@ pub struct Debt {
 /// The read an `ineligible-review` debt names, as the ledger reads it now.
 ///
 /// `record` is what was declared. The reviewer and the model are copied from
-/// the verdict event it names, so they are as recorded there and never a
+/// the verdict or audit event it names, so they are as recorded there and never a
 /// tier or a family. `later_reads` lists what has been recorded since without
 /// clearing the obligation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -4382,15 +4382,22 @@ impl ChangeState {
         let discharged_by = self.debt_discharge(&debt);
         let standing = self.debt_standing().expect("held debt");
         let read = debt.ineligible.as_ref().map(|read| {
-            let verdict = self
+            let reviewer = self
                 .verdicts
                 .iter()
-                .find(|verdict| verdict.event_id == read.record.read);
+                .find(|verdict| verdict.event_id == read.record.read)
+                .map(|verdict| (verdict.effective_author(), verdict.model.clone()))
+                .or_else(|| {
+                    self.audit_verdicts
+                        .iter()
+                        .find(|audit| audit.event_id == read.record.read)
+                        .map(|audit| (audit.effective_author(), audit.model.clone()))
+                });
             let cleared = discharged_by.as_ref().map(|(id, _)| id.as_str());
             DebtRead {
                 record: read.record.clone(),
-                reviewer: verdict.map(|verdict| verdict.effective_author().to_string()),
-                reviewer_model: verdict.and_then(|verdict| verdict.model.clone()),
+                reviewer: reviewer.as_ref().map(|(reviewer, _)| reviewer.to_string()),
+                reviewer_model: reviewer.and_then(|(_, model)| model),
                 later_reads: self
                     .audit_verdicts
                     .iter()

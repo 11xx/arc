@@ -140,3 +140,72 @@ fn a_later_audit_names_the_read_that_discharged_the_debt() {
         "{output}"
     );
 }
+
+/// Claim: an ineligible post-integration audit can be the read an
+/// `ineligible-review` debt names, by `--read` or implicitly when the shipped
+/// patchset has no verdict. Rejects `arc debt` refusing an audit as the read,
+/// which left a lane only the broad debt kind or a misattributed verdict.
+#[test]
+fn an_ineligible_review_debt_names_a_post_integration_audit() {
+    let repo = repo_forbidding_self_approval();
+    integrated_owing(&repo, "late-read", &[]);
+    let file = assessment(&repo, "late.json", "ineligible", &["same-model"]);
+    let read = event_of(&audit(
+        &repo,
+        "late-read",
+        "Auditor",
+        "approved",
+        &["--assessment", file.to_str().unwrap()],
+    ));
+    repo.arc(&repo.root)
+        .args(["debt", "late-read", "--reason", "same-model read only"])
+        .args(["--kind", "ineligible-review", "--read", &read])
+        .args(["--assessment", file.to_str().unwrap()])
+        .assert()
+        .success();
+    let debt = debt_of(&repo, "late-read");
+    assert_eq!(debt["missing"], "ineligible-review", "{debt}");
+    assert_eq!(debt["standing"], "owed", "{debt}");
+    assert_eq!(debt["ineligible"]["read"], read.as_str(), "{debt}");
+    assert_eq!(debt["ineligible"]["reviewer"], "Auditor", "{debt}");
+    assert_eq!(
+        debt["ineligible"]["reviewer_model"], AUDITOR_MODEL,
+        "{debt}"
+    );
+    assert_eq!(
+        debt["ineligible"]["qualifiers"],
+        serde_json::json!(["same-model"]),
+        "{debt}"
+    );
+
+    // An unknown read is still refused, and nothing is written.
+    repo.arc(&repo.root)
+        .args(["debt", "late-read", "--reason", "named elsewhere"])
+        .args(["--kind", "ineligible-review", "--read", "01NOTAREAD"])
+        .args(["--qualifier", "same-family"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("is not a verdict or audit"));
+    assert_eq!(
+        debt_of(&repo, "late-read")["ineligible"]["read"],
+        read.as_str()
+    );
+
+    // Omitted, the read is the latest audit when no verdict exists.
+    let second = event_of(&audit(
+        &repo,
+        "late-read",
+        "Second",
+        "changes-requested",
+        &["--assessment", file.to_str().unwrap()],
+    ));
+    repo.arc(&repo.root)
+        .args(["debt", "late-read", "--reason", "same-model reads only"])
+        .args(["--kind", "ineligible-review", "--qualifier", "same-model"])
+        .assert()
+        .success();
+    assert_eq!(
+        debt_of(&repo, "late-read")["ineligible"]["read"],
+        second.as_str()
+    );
+}
