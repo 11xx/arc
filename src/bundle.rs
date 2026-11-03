@@ -229,6 +229,27 @@ impl Bundle {
         if raw.is_empty() {
             bail!("change {change_id:?} has no events");
         }
+        // A landing attempt still pending is local: it travels once a
+        // completion or an abandonment finishes it.
+        let finished: std::collections::BTreeSet<String> = repository_events
+            .iter()
+            .filter(|value| {
+                matches!(
+                    value["event_type"].as_str(),
+                    Some("landing-completed" | "landing-abandoned")
+                )
+            })
+            .filter_map(|value| value["attempt"].as_str().map(str::to_string))
+            .collect();
+        let repository_events: Vec<Value> = repository_events
+            .into_iter()
+            .filter(|value| {
+                value["event_type"] != "landing-prepared"
+                    || value["attempt"]
+                        .as_str()
+                        .is_some_and(|attempt| finished.contains(attempt))
+            })
+            .collect();
         for value in &repository_events {
             if matches!(
                 value["event_type"].as_str(),

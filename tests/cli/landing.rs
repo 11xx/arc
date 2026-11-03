@@ -728,3 +728,411 @@ fn debt_lands_an_unapproved_member_and_keeps_its_obligation() {
     );
     assert!(status(&repo, &lower)["debt"].is_null());
 }
+
+/// Wait until the landing's single gate run at the top head is recorded.
+fn wait_for_gate_run(repo: &Repo, top: &str) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !change_events(repo, top)
+        .iter()
+        .any(|event| event["event_type"] == "verification-recorded" && event["landing"].is_string())
+    {
+        assert!(Instant::now() < deadline, "the landing never gated");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Claim: whatever moves between the gate run and commit refuses the landing
+/// at commit, naming the moved field, and closes nothing. Rejects a commit
+/// that trusts the plan it gated: a moved target, a new commit on a member,
+/// a changes-requested verdict, a hold, or a relation to a change outside
+/// the landing.
+#[test]
+fn a_fact_that_moves_during_the_gate_refuses_commit_naming_it() {
+    type Mutate = fn(&Repo, &str, &Path);
+    let cases: [(&str, Mutate, &str); 5] = [
+        (
+            "target",
+            |repo, _, _| repo.commit(&repo.root, "moved.txt", "moved\n", "chore: move target"),
+            "target_before",
+        ),
+        (
+            "commit",
+            |repo, _, lower_tree| repo.commit(lower_tree, "late.txt", "late\n", "feat: late"),
+            ".branch_head",
+        ),
+        (
+            "verdict",
+            |repo, lower, _| {
+                repo.arc(&repo.root)
+                    .env("ARC_ACTOR", "reviewer")
+                    .env("ARC_SESSION", "session-r")
+                    .args([
+                        "review",
+                        lower,
+                        "--verdict",
+                        "changes-requested",
+                        "--cause",
+                        "executor",
+                        "--body",
+                        "not yet",
+                    ])
+                    .assert()
+                    .success();
+            },
+            ".verdicts",
+        ),
+        (
+            "hold",
+            |repo, lower, _| {
+                repo.arc(&repo.root)
+                    .args(["hold", lower, "--reason", "wait"])
+                    .assert()
+                    .success();
+            },
+            ".holds",
+        ),
+        (
+            "relation",
+            |repo, lower, _| {
+                let (outside, _, _) = reviewed_change(repo, "outside", None);
+                relate(repo, lower, &outside);
+            },
+            ".lands_with",
+        ),
+    ];
+    for (name, mutate, field) in cases {
+        let repo = gated_repo();
+        let ((lower, lower_tree, _), (upper, _, _)) = stack(&repo);
+        let before = git_out(&repo.root, &["rev-parse", "master"]);
+        let release = repo.home.join("release-land");
+        let mut child = spawn_arc_keeping_stderr_with_env(
+            &repo,
+            &repo.root,
+            &["land", &lower, &upper],
+            &[("ARC_LAND_PAUSE", release.to_str().unwrap())],
+        );
+        wait_for_gate_run(&repo, &upper);
+        mutate(&repo, &lower, &lower_tree);
+        fs::write(&release, "").unwrap();
+        let status_code = wait_for_exit(&mut child);
+        let stderr = child_stderr(&mut child);
+        assert!(!status_code.success(), "{name}: landed anyway");
+        let named = if field.starts_with('.') {
+            format!("{lower}{field}")
+        } else {
+            field.to_string()
+        };
+        assert!(
+            stderr.contains(&format!("{named} moved")),
+            "{name}: {stderr}"
+        );
+        if name != "target" {
+            assert_eq!(
+                git_out(&repo.root, &["rev-parse", "master"]),
+                before,
+                "{name}"
+            );
+        }
+        for change in [&lower, &upper] {
+            let report = status(&repo, change);
+            assert!(report["closure"].is_null(), "{name}: {report}");
+            assert!(report.get("pending_landing").is_none(), "{name}: {report}");
+        }
+    }
+}
+
+/// The landing attempt the repository's prepared event names.
+fn prepared_attempt(repo: &Repo) -> String {
+    repository_events(repo)
+        .into_iter()
+        .find(|event| event["event_type"] == "landing-prepared")
+        .and_then(|event| event["attempt"].as_str().map(str::to_string))
+        .expect("a landing was prepared")
+}
+
+/// Claim: an attempt interrupted anywhere is finished or abandoned by
+/// `--recover`, run twice, so that no member reads integrated unless the
+/// target holds the landing and none stays open when it does. Rejects
+/// recovery that publishes before arc's own ref transaction, that leaves a
+/// moved target unclosed, or that changes anything on a second run.
+#[test]
+fn recovery_after_every_crash_point_closes_exactly_what_landed() {
+    for point in ["prepared", "gate", "authorized", "moved", "applied"] {
+        let repo = Repo::new();
+        repo.redeclare_gates(
+            "[gates.smoke]\ncommand = \"if test -e \\\"$HOME/kill-lander\\\"; then kill -9 $PPID; fi; test -f README.md\"\n",
+        );
+        let ((lower, _, _), (upper, _, upper_head)) = stack(&repo);
+        let before = git_out(&repo.root, &["rev-parse", "master"]);
+        let kill = repo.home.join("kill-lander");
+        let mut land = repo.arc(&repo.root);
+        land.args(["land", &lower, &upper]);
+        if point == "gate" {
+            fs::write(&kill, "").unwrap();
+        } else {
+            land.env("ARC_TEST_LANDING_CRASH", point);
+        }
+        let crashed = land.output().unwrap();
+        assert!(
+            !crashed.status.success(),
+            "{point}: {}",
+            stderr_of(&crashed)
+        );
+        let _ = fs::remove_file(&kill);
+        let attempt = prepared_attempt(&repo);
+        for change in [&lower, &upper] {
+            assert_eq!(
+                status(&repo, change)["pending_landing"],
+                attempt.as_str(),
+                "{point}"
+            );
+            let integrate = repo
+                .arc(&repo.root)
+                .args(["integrate", change])
+                .output()
+                .unwrap();
+            assert_eq!(
+                integrate.status.code(),
+                Some(20),
+                "{point}: {}",
+                stderr_of(&integrate)
+            );
+        }
+
+        for run in 0..2 {
+            let recovered = repo
+                .arc(&repo.root)
+                .args(["land", "--recover", &attempt])
+                .output()
+                .unwrap();
+            assert!(
+                recovered.status.success(),
+                "{point} run {run}: {}",
+                stderr_of(&recovered)
+            );
+        }
+        let landed = matches!(point, "moved" | "applied");
+        let target = git_out(&repo.root, &["rev-parse", "master"]);
+        assert_eq!(
+            &target,
+            if landed { &upper_head } else { &before },
+            "{point}"
+        );
+        for change in [&lower, &upper] {
+            let report = status(&repo, change);
+            assert!(report.get("pending_landing").is_none(), "{point}: {report}");
+            if landed {
+                assert_eq!(
+                    report["closure"]["landing"]["attempt"],
+                    attempt.as_str(),
+                    "{point}"
+                );
+            } else {
+                assert!(report["closure"].is_null(), "{point}: {report}");
+            }
+        }
+        // The target checkout holds exactly what the target does.
+        assert_eq!(
+            git_out(
+                &repo.root,
+                &["status", "--porcelain", "--untracked-files=no"]
+            ),
+            "",
+            "{point}"
+        );
+        assert_eq!(repo.root.join("upper.txt").exists(), landed, "{point}");
+        assert_eq!(
+            git_out(&repo.root, &["for-each-ref", "refs/arc/landing-applied/"]),
+            "",
+            "{point}"
+        );
+    }
+}
+
+/// Claim: a target someone else moved to the top head before arc's own ref
+/// transaction is not a landing, and recovery closes nothing; only an
+/// operator's abandonment releases the members. Rejects recovery that infers
+/// authorization from where the target stands.
+#[test]
+fn a_target_moved_by_someone_else_is_never_published_as_the_landing() {
+    let repo = gated_repo();
+    let ((lower, _, _), (upper, _, upper_head)) = stack(&repo);
+    let crashed = repo
+        .arc(&repo.root)
+        .env("ARC_TEST_LANDING_CRASH", "authorized")
+        .args(["land", &lower, &upper])
+        .output()
+        .unwrap();
+    assert_eq!(crashed.status.code(), Some(86), "{}", stderr_of(&crashed));
+    let attempt = prepared_attempt(&repo);
+    git(
+        &repo.root,
+        &["update-ref", "refs/heads/master", &upper_head],
+    );
+
+    for _ in 0..2 {
+        let recovered = repo
+            .arc(&repo.root)
+            .args(["land", "--recover", &attempt])
+            .output()
+            .unwrap();
+        assert_eq!(
+            recovered.status.code(),
+            Some(1),
+            "{}",
+            stderr_of(&recovered)
+        );
+        assert!(
+            stderr_of(&recovered).contains("did not authorize"),
+            "{}",
+            stderr_of(&recovered)
+        );
+    }
+    assert!(!repository_events(&repo)
+        .iter()
+        .any(|event| event["event_type"] == "landing-completed"));
+    for change in [&lower, &upper] {
+        let report = status(&repo, change);
+        assert!(report["closure"].is_null(), "{report}");
+        assert_eq!(report["pending_landing"], attempt.as_str());
+    }
+
+    repo.arc(&repo.root)
+        .args([
+            "land",
+            "--abandon",
+            &attempt,
+            "--reason",
+            "the target moved outside arc",
+        ])
+        .assert()
+        .success();
+    for change in [&lower, &upper] {
+        let report = status(&repo, change);
+        assert!(report["closure"].is_null(), "{report}");
+        assert!(report.get("pending_landing").is_none(), "{report}");
+    }
+}
+
+/// Claim: a commit-bound gate that passed at another commit holding the top
+/// head's tree runs again at the top head, while a tree-bound gate's pass at
+/// that tree is reused. Rejects reuse by tree alone, under which a history
+/// the gate would refuse lands on another commit's pass.
+#[test]
+fn a_commit_bound_gate_passed_at_a_same_tree_commit_runs_again() {
+    let repo = Repo::new();
+    repo.redeclare_gates(
+        "[gates.smoke]\ncommand = \"test -f README.md\"\n\n[gates.history]\ncommand = \"git log -1 --format=%s | grep -q good\"\nbinds = \"commit\"\n",
+    );
+    let (lower, _, lower_head) = reviewed_change(&repo, "lower", None);
+    let upper = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "upper",
+        "--base",
+        &lower_head,
+    ])));
+    let upper_tree = repo.home.join(".worktrees/repo-upper");
+    repo.commit(&upper_tree, "upper.txt", "upper\n", "feat: upper good");
+    stdout(repo.arc(&upper_tree).args(["snapshot", "upper"]));
+    repo.arc(&upper_tree)
+        .args(["verify", "upper", "--all"])
+        .assert()
+        .success();
+    git(
+        &upper_tree,
+        &["commit", "-q", "--amend", "-m", "feat: upper"],
+    );
+    stdout(repo.arc(&upper_tree).args(["snapshot", "upper"]));
+    repo.arc(&upper_tree)
+        .args(["review", "upper", "--verdict", "approved"])
+        .assert()
+        .success();
+    let before = git_out(&repo.root, &["rev-parse", "master"]);
+
+    let landed = repo
+        .arc(&repo.root)
+        .args(["land", &lower, &upper])
+        .output()
+        .unwrap();
+    assert_eq!(landed.status.code(), Some(5), "{}", stderr_of(&landed));
+    assert_eq!(git_out(&repo.root, &["rev-parse", "master"]), before);
+    let attempt = prepared_attempt(&repo);
+    let events = change_events(&repo, &upper);
+    let history: Vec<&Value> = events
+        .iter()
+        .filter(|event| {
+            event["event_type"] == "verification-recorded"
+                && event["gate"] == "history"
+                && event["landing"] == attempt.as_str()
+        })
+        .collect();
+    assert_eq!(history.len(), 1, "{events:?}");
+    assert_eq!(history[0]["result"], "fail");
+    assert!(events
+        .iter()
+        .any(|event| event["event_type"] == "verification-reused" && event["gate"] == "smoke"));
+    assert!(!events
+        .iter()
+        .any(|event| event["event_type"] == "verification-recorded"
+            && event["gate"] == "smoke"
+            && event["landing"] == attempt.as_str()));
+}
+
+/// Claim: one member exported alone carries the completion that closed it,
+/// and reads integrated via the landing where it is imported, with its own
+/// range; an attempt still pending is not exported. Rejects an export that
+/// leaves the member open on arrival, and one that ships a pending attempt
+/// another store could never finish.
+#[test]
+fn an_exported_member_arrives_integrated_via_its_landing() {
+    let repo = gated_repo();
+    let ((lower, _, lower_head), (upper, _, _)) = stack(&repo);
+    let before = git_out(&repo.root, &["rev-parse", "master"]);
+    repo.arc(&repo.root)
+        .args(["land", &lower, &upper])
+        .assert()
+        .success();
+    let bundle = repo.home.join("lower.json");
+    repo.arc(&repo.root)
+        .args(["export", &lower, "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let recipient = Repo::new();
+    deliver_git_objects(&repo, &recipient);
+    let imported = recipient
+        .arc(&recipient.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(imported.status.success(), "{}", stderr_of(&imported));
+    let closure = json_stdout_any_status(recipient.arc(&recipient.root).args(["status", &lower]))
+        ["closure"]
+        .clone();
+    assert_eq!(closure["outcome"], "integrated", "{closure}");
+    assert!(closure["landing"]["attempt"].is_string(), "{closure}");
+    assert_eq!(closure["range_base"], before.as_str());
+    assert_eq!(closure["integrated_commit"], lower_head.as_str());
+
+    // A pending attempt stays local.
+    let other = gated_repo();
+    let ((low, _, _), (up, _, _)) = stack(&other);
+    other
+        .arc(&other.root)
+        .env("ARC_TEST_LANDING_CRASH", "prepared")
+        .args(["land", &low, &up])
+        .assert()
+        .failure();
+    let pending = other.home.join("pending.json");
+    other
+        .arc(&other.root)
+        .args(["export", &low, "--output", pending.to_str().unwrap()])
+        .assert()
+        .success();
+    let shipped: Value = serde_json::from_slice(&fs::read(&pending).unwrap()).unwrap();
+    assert!(!shipped["repository_events"]
+        .as_array()
+        .is_some_and(|events| events
+            .iter()
+            .any(|event| event["event_type"] == "landing-prepared")));
+}
