@@ -164,3 +164,27 @@ fn catchup_names_the_surfaces_of_every_debt_over_one_range() {
         assert!(line.contains("surfaces: first.txt;"), "{line}");
     }
 }
+
+/// Claim: `catchup`, in text and JSON, reduces each change at most once
+/// however many changes the ledger holds. Rejects the journal queue's
+/// inventory reducing every change again beside the ledger sections'
+/// shared states.
+#[test]
+fn catchup_reduces_each_change_once_however_many_changes() {
+    let repo = ledger(1);
+    for extra in [0, 3] {
+        for index in 0..extra {
+            begin_without_checkout(&repo, &format!("more-{index}"), &[]);
+        }
+        let held = super::landing_reads::changes_held(&repo);
+        for args in [&["catchup"][..], &["catchup", "--json"][..]] {
+            let (record, _, code) = super::landing_reads::traced(&repo, &repo.root, args);
+            assert_eq!(code, Some(0), "arc {args:?}: {record}");
+            let reduced = record["counts"]["changes_reduced"].as_u64().unwrap();
+            assert!(
+                reduced <= held,
+                "arc {args:?} reduced {reduced} changes of {held}: {record}"
+            );
+        }
+    }
+}

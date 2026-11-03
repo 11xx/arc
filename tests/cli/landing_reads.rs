@@ -8,7 +8,7 @@ use serde_json::Value;
 
 /// One traced run of `arc args` from `cwd`: its trace record, its read counts
 /// and its exit status.
-fn traced(repo: &Repo, cwd: &Path, args: &[&str]) -> (Value, Value, Option<i32>) {
+pub(crate) fn traced(repo: &Repo, cwd: &Path, args: &[&str]) -> (Value, Value, Option<i32>) {
     let counts = repo.home.join("landing-reads.json");
     let _ = fs::remove_file(&counts);
     let output = repo
@@ -80,14 +80,15 @@ fn land(repo: &Repo, slug: &str) {
 }
 
 /// The changes the ledger holds: a directory each, and each change an import
-/// batch carries.
-fn changes_held(repo: &Repo) -> u64 {
+/// batch carries, if the ledger holds any.
+pub(crate) fn changes_held(repo: &Repo) -> u64 {
     let ledger = repo.root.join(".git/arc");
     let mut changes: std::collections::BTreeSet<String> = fs::read_dir(ledger.join("changes"))
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
-    for entry in fs::read_dir(ledger.join("imports")).unwrap() {
+    let imports = fs::read_dir(ledger.join("imports"));
+    for entry in imports.into_iter().flatten() {
         let batch: Value =
             serde_json::from_slice(&fs::read(entry.unwrap().path()).unwrap()).unwrap();
         changes.insert(batch["change_id"].as_str().unwrap().to_string());

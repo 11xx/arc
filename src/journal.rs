@@ -13390,16 +13390,14 @@ struct InventoryLedger {
     reason: Option<String>,
 }
 
-fn all_changes_in(
-    store: &Store,
-    rewrites: &crate::rewrite::RewriteMap,
-) -> Result<Vec<ChangeState>> {
+/// Every change's state, through the read's own rewrites, so a process that
+/// shares reads reduces each change once across all its views.
+fn all_changes_in(store: &Store) -> Result<Vec<ChangeState>> {
     let read = store.read()?;
     let mut changes = Vec::new();
     for id in read.change_ids()? {
-        let events = read.events(&id)?;
         changes.push(
-            read.project_with_rewrites(&events, rewrites)
+            read.state(&id)
                 .with_context(|| format!("cannot read change {id}"))?,
         );
     }
@@ -13437,11 +13435,10 @@ pub(crate) fn last_promotion_closed(store: &Store, filename: &str) -> Result<boo
     if parse_artifact_name(filename).is_none_or(|(_, _, kind)| kind != JournalKind::Plan.as_str()) {
         return Ok(false);
     }
-    let rewrites = store.rewrites().ok();
-    let Some(rewrites) = rewrites.as_ref() else {
+    if store.rewrites().is_err() {
         return Ok(false);
-    };
-    let changes = all_changes_in(store, rewrites)?;
+    }
+    let changes = all_changes_in(store)?;
     let promotions = inventory_promotions(&changes, filename);
     Ok(!promotions.is_empty()
         && promotions
@@ -13618,7 +13615,7 @@ fn project_inventory(
                 let loaded = rewrites
                     .as_ref()
                     .context("rewrite map unreadable")
-                    .and_then(|rewrites| all_changes_in(&store, rewrites));
+                    .and_then(|_| all_changes_in(&store));
                 let reason = loaded.as_ref().err().map(|e| format!("{e:#}"));
                 let changes = loaded.unwrap_or_default();
                 let state = if reason.is_none() {
