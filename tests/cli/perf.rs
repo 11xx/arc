@@ -122,10 +122,11 @@ fn a_trace_is_written_on_every_exit_path() {
 }
 
 /// Claim: an aggregate read's record counts its ledger work, each event file
-/// and the import batch opened once, the repository events materialized
-/// once and every change reduced, and names no path or argument value.
-/// Rejects counters that double count, miss a namespace, or leak the
-/// fixture's paths or the selected change.
+/// and the import batch opened and decoded once, the repository events
+/// materialized once and every change reduced, and names no path or argument
+/// value. Rejects counters that double count, miss a namespace, or leak the
+/// fixture's paths or the selected change, and a privilege scope that decodes
+/// the import batches the store already holds.
 #[test]
 fn a_trace_counts_ledger_work_and_names_no_path_or_argument() {
     let source = Repo::new();
@@ -181,15 +182,10 @@ fn a_trace_counts_ledger_work_and_names_no_path_or_argument() {
         assert_eq!(&ledger_counts[namespace]["opens"], opened, "{record}");
         assert!(ledger_counts[namespace]["bytes"].as_u64().unwrap() > 0);
     }
-    // The store and the privilege scope each decode the batch they share.
-    for namespace in ["change", "repository"] {
+    for namespace in ["change", "repository", "import"] {
         let opened = &ledger_counts[namespace]["opened"];
         assert_eq!(&ledger_counts[namespace]["decoded"], opened, "{record}");
     }
-    assert!(
-        ledger_counts["import"]["decoded"].as_u64() >= ledger_counts["import"]["opened"].as_u64(),
-        "{record}"
-    );
     assert!(record["phases"]["read"]["calls"].as_u64().unwrap() > 0);
 
     let (_, record) = traced(&repo, &["check", &local]);

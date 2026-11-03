@@ -590,7 +590,9 @@ fn bind_held_events(
 }
 
 impl PrivilegeScope {
-    /// Derive the scope from the ledger as it stands.
+    /// Derive the scope from the ledger as it stands. The import batches come
+    /// from the store, so a process that shares its reads decodes each batch
+    /// once for the store and the scope together.
     ///
     /// Only an event an admission receipt names, or one whose ID the ledger
     /// holds in more than one place, is read for its identity: IDs come from
@@ -608,7 +610,7 @@ impl PrivilegeScope {
         };
         let mut admissions = std::collections::BTreeMap::new();
         let mut imported_event_ids = BTreeSet::new();
-        let batches = crate::store::import_batches(&store.root)?;
+        let batches = store.import_batches()?;
         for batch in &batches {
             for value in batch.events.iter().chain(&batch.repository_events) {
                 imported_event_ids.insert(

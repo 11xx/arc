@@ -2084,7 +2084,7 @@ impl Store {
     }
 
     /// The published import batches, read once when this handle shares reads.
-    fn import_batches(&self) -> Result<Vec<ImportBatch>> {
+    pub(crate) fn import_batches(&self) -> Result<Vec<ImportBatch>> {
         self.shared_or(
             "import_batches",
             |memo| &mut memo.import_batches,
