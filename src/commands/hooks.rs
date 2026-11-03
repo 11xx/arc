@@ -187,10 +187,11 @@ fn prepare_commit_msg(ctx: &Ctx, args: &[String]) -> Result<()> {
 /// any patchset head, or the integration/closure commit. Ledger-only — no
 /// commit-trailer scanning. A change whose state cannot be read is named on
 /// stderr, and the answer says it might also record the commit.
-pub fn query_commit(ctx: &Ctx, sha: &str) -> Result<()> {
+pub fn query_commit(ctx: &Ctx, sha: &str, json: bool) -> Result<()> {
     let store = ctx.store()?;
     let mut matched = Vec::new();
     let mut unreadable = Vec::new();
+    let mut states = std::collections::BTreeMap::new();
     let read = store.read()?;
     for change_id in read.change_ids()? {
         let state = match read.state(&change_id) {
@@ -212,10 +213,22 @@ pub fn query_commit(ctx: &Ctx, sha: &str) -> Result<()> {
             }
         }
         if revisions.iter().any(|rev| rev.starts_with(sha)) {
-            matched.push(state);
+            matched.push(state.clone());
         }
+        states.insert(change_id, state);
     }
     let found = !matched.is_empty();
+    if json {
+        let rows: Vec<serde_json::Value> = matched
+            .iter()
+            .map(|state| super::lifecycle::list_row(state, &states))
+            .collect();
+        for change_id in &unreadable {
+            eprintln!("warning: unreadable change {change_id} might also record the commit");
+        }
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
     for state in matched {
         println!(
             "{}  [{}] {}",

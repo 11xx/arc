@@ -1486,7 +1486,10 @@ pub(crate) fn worktree_path_for(cwd: &Path, name: &str) -> Result<PathBuf> {
     Ok(config.worktrees_dir.join(format!("{repo_name}-{name}")))
 }
 
-fn list_row(state: &ChangeState, states: &BTreeMap<String, ChangeState>) -> serde_json::Value {
+pub(super) fn list_row(
+    state: &ChangeState,
+    states: &BTreeMap<String, ChangeState>,
+) -> serde_json::Value {
     serde_json::json!({
         "change_id": state.change_id,
         "slug": state.slug,

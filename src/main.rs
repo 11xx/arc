@@ -495,7 +495,8 @@ enum Cmd {
         /// matches this revision (unique prefix accepted). Each change whose
         /// state cannot be read is named with its error on stderr, and a
         /// closing line names them all: a match beside one may not be unique,
-        /// and no match beside one is not a no-match
+        /// and no match beside one is not a no-match. With --json it prints
+        /// the rows `query --json` prints, `[]` when nothing matches
         #[arg(long)]
         commit: Option<String>,
         /// Recorded identities and explicitly related acceptance/source changes,
@@ -5729,7 +5730,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             json,
         } => {
             if let Some(commit) = commit {
-                commands::query_commit(&ctx, &commit)?;
+                commands::query_commit(&ctx, &commit, json)?;
             } else {
                 commands::query(
                     &ctx,

@@ -3745,3 +3745,36 @@ fn asserted_target_before_refuses_non_ancestor_without_events() {
         );
     }
 }
+
+/// Claim: `arc query --commit <rev> --json` prints the rows `query --json`
+/// prints, and `[]` when nothing matches. Rejects text rows under --json and
+/// empty output for no match.
+#[test]
+fn query_commit_honors_json() {
+    let repo = Repo::new();
+    let change = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "commit-json",
+        "--no-worktree",
+    ])));
+    repo.commit(&repo.root, "work.txt", "work\n", "feat: work");
+    stdout(repo.arc(&repo.root).args(["snapshot", "commit-json"]));
+    let head = repo.head(&repo.root);
+    let rows: serde_json::Value = serde_json::from_str(&stdout(repo.arc(&repo.root).args([
+        "query",
+        "--commit",
+        &head[..10],
+        "--json",
+    ])))
+    .unwrap();
+    assert_eq!(rows.as_array().map(Vec::len), Some(1), "{rows}");
+    assert_eq!(rows[0]["change_id"], change, "{rows}");
+    let none: serde_json::Value = serde_json::from_str(&stdout(repo.arc(&repo.root).args([
+        "query",
+        "--commit",
+        "0000000000",
+        "--json",
+    ])))
+    .unwrap();
+    assert_eq!(none, serde_json::json!([]));
+}
