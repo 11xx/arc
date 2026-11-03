@@ -3289,7 +3289,9 @@ RULES THAT CHANGE WHAT YOU DO
     publication locks are waited for up to 15 seconds, and a wait past one
     second prints a stderr line naming the lock. A lock still held after that
     refuses the command, naming the lock and asking for a retry; an integration
-    target lock waits up to 30 seconds.
+    target lock waits up to 30 seconds. A verification whose gates ran but whose
+    evidence could not be recorded prints each such result as `not recorded:`
+    and exits non-zero; that result is not evidence until a rerun records it.
   - An executor's first act is `arc config --check-writable`; a nonzero exit
     means stop, not work around. Only writability decides that exit: the
     `commit` line says whether a commit can be made at all, while the

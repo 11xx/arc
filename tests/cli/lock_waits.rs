@@ -194,6 +194,38 @@ fn verification_evidence_outwaits_event_id_contention_after_its_gate_ran() {
     assert!(check_green_at_head(&repo, &wt));
 }
 
+/// Claim: when a sibling outlasts the wait after the gate ran, the refusal
+/// names the lock, says to retry, and reports the observed result as not
+/// recorded, and nothing is green. Rejects: losing the observed result
+/// silently, or treating evidence that was never written as green.
+#[test]
+#[cfg(debug_assertions)]
+fn unrecorded_verification_evidence_is_reported_and_not_green() {
+    let (repo, ran, relocked) = declaring_gate_held_open();
+    let wt = snapshotted_change(&repo, "event-id-holdout");
+    let (mut child, lock) = verify_paused_at_evidence(
+        &repo,
+        &wt,
+        &ran,
+        &relocked,
+        &[("ARC_TEST_LOCK_BUDGET_MS", "200")],
+    );
+    release_lock_wait(&mut child);
+    let status = wait_for_exit(&mut child);
+    let stderr = child_stderr(&mut child);
+    drop(lock);
+    assert!(!status.success(), "{stderr}");
+    assert!(
+        stderr.contains("ledger event IDs lock") && stderr.contains("retry the command"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("not recorded: gate check: Pass"),
+        "the observed result was lost: {stderr}"
+    );
+    assert!(!check_green_at_head(&repo, &wt));
+}
+
 /// Claim: a journal write waits for a sibling's journal events lock.
 /// Rejects: refusing a note because another worktree is appending to the
 /// shared journal for longer than a second.

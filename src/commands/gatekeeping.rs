@@ -2264,11 +2264,44 @@ fn execute_verification(
     })
 }
 
+/// Record what the gates observed. Whatever could not be recorded is printed
+/// as `not recorded:`, so a refusal keeps the observed result without the
+/// ledger holding evidence nobody wrote.
 fn append_verifications(
     ctx: &Ctx,
     store: &Store,
     change_id: &str,
     completed: Vec<CompletedVerification>,
+) -> Result<()> {
+    let observed = completed.iter().map(observed_result).collect::<Vec<_>>();
+    let mut recorded = 0;
+    let appended = record_verifications(ctx, store, change_id, completed, &mut recorded);
+    if appended.is_err() {
+        for line in &observed[recorded..] {
+            eprintln!("not recorded: {line}");
+        }
+    }
+    appended.context("verification evidence was not recorded; rerun the gate to record it")
+}
+
+fn observed_result(item: &CompletedVerification) -> String {
+    let subject = match &item.gate {
+        Some(gate) => format!("gate {gate}"),
+        None => format!("command {}", item.command),
+    };
+    let exit = item
+        .exit_code
+        .map(|code| format!(" (exit {code})"))
+        .unwrap_or_default();
+    format!("{subject}: {:?}{exit} at {}", item.result, item.revision)
+}
+
+fn record_verifications(
+    ctx: &Ctx,
+    store: &Store,
+    change_id: &str,
+    completed: Vec<CompletedVerification>,
+    recorded: &mut usize,
 ) -> Result<()> {
     // Gates are arbitrary external commands and may legitimately invoke arc.
     // Acquire the append lock only after they return, then re-check closure.
@@ -2370,6 +2403,7 @@ fn append_verifications(
             }
         }
         store.append_local_event(&mut ev)?;
+        *recorded += 1;
         if let Payload::VerificationRecorded {
             tested_tree: Some(tree),
             ..

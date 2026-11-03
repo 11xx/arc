@@ -1924,7 +1924,8 @@ enum Cmd {
     /// capture. Configured path-stable build storage is leased through preparation,
     /// environment probes and gates. Probes never prepare or compile; unavailable storage
     /// supplies no environment identity. Storage reuse never supplies a passing gate
-    /// result.
+    /// result. A result whose evidence a busy ledger lock kept from being recorded prints
+    /// as `not recorded:` and is not evidence; see `arc guide rules-claims`.
     Verify {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
