@@ -1988,7 +1988,7 @@ impl Store {
             | Payload::LandsWithWithdrawn { .. }
             | Payload::LandingPrepared { .. }
             | Payload::LandingCompleted { .. }
-            | Payload::LandingAbandoned { .. } => Some(8),
+            | Payload::LandingAbandoned { .. } => Some(7),
             Payload::ChangeIntegrated { .. } | Payload::IntegrationAsserted { .. } => Some(2),
             _ => None,
         };
@@ -2074,7 +2074,7 @@ impl Store {
                 | "landing-prepared"
                 | "landing-completed"
                 | "landing-abandoned",
-            ) => Some(8),
+            ) => Some(7),
             Some("change-integrated") | Some("integration-asserted") => Some(2),
             _ => None,
         };
@@ -3560,7 +3560,7 @@ mod tests {
     /// and skipping a landing would read its members as open; every landing
     /// payload therefore raises the store to a format such a build refuses.
     #[test]
-    fn landing_payloads_stamp_eight_through_typed_and_both_raw_paths() {
+    fn landing_payloads_stamp_seven_through_typed_and_both_raw_paths() {
         let fixtures = [
             serde_json::json!({"event_type": "lands-with-declared", "changes": ["a", "b"]}),
             serde_json::json!({"event_type": "lands-with-withdrawn", "changes": ["a", "b"], "reason": "r"}),
@@ -3577,7 +3577,7 @@ mod tests {
             for path in ["typed", "raw-change", "raw-repository"] {
                 let dir = tempfile::tempdir().unwrap();
                 let config = StoreConfig {
-                    schema_version: 7,
+                    schema_version: 6,
                     repository_id: "repo".into(),
                     created_at: chrono::Utc::now(),
                 };
@@ -3598,7 +3598,7 @@ mod tests {
                 let stored: StoreConfig =
                     serde_json::from_slice(&fs::read(dir.path().join("config.json")).unwrap())
                         .unwrap();
-                assert_eq!(stored.schema_version, 8, "{} {path}", value["event_type"]);
+                assert_eq!(stored.schema_version, 7, "{} {path}", value["event_type"]);
             }
         }
     }

@@ -4934,7 +4934,7 @@ SCHEMAS
   are recovery evidence, separate from versioned journal events.
 
   Internal:
-    store format 8                   .git/arc/config.json and the change ledger
+    store format 7                   .git/arc/config.json and the change ledger
     `arc-accept-checkout/1`           local administrative allocation recovery
     `arc-landing-intent/1`            landing-intents/<attempt>.json recovery
     `arc-import-batch/1`             local atomic change import and authorization
