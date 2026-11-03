@@ -1455,6 +1455,15 @@ RUN A CHANGE
   <attempt> --reason <why>` abandons an attempt whose target arc did not
   move.
 
+  A member exported alone carries every finished landing's events: a
+  completion and the gate evidence it names reproduce the member's closure
+  via the landing wherever it is imported, with its own range. Admitting a
+  completion needs the capabilities `arc guide replicas` lists. Gate evidence
+  recorded at a composed head is pinned by
+  `refs/arc/tree/<change>/landing-<commit>` until the member closes, so a
+  failed attempt's evidence still names content both stores can hold; no
+  rewrite map ever names a trial commit, on either side.
+
   A change whose commits reached its target as other commits that arc did
   not produce (a cherry-pick, a rebase elsewhere) closes with `arc close
   <change> --assert-integrated <rev> --target-before <before>
@@ -1738,7 +1747,10 @@ PAIR REPLICA STORES
   Recorded supersession history remains visible; foreign edges cannot replace
   a local refusal or settle a contested local graph. Review-input audits cannot
   discharge debt or corroborate provisional approval; debt-input cannot waive
-  approval. Status and check separate head coverage from gating permission.
+  approval. A landing completion needs integration, and debt-input or waiver
+  as well when it carries a member's debt; it never grants rewrite, so a
+  replayed member's commits map to nothing without a rewrite event of their
+  own. Status and check separate head coverage from gating permission.
   Historical closures remain facts; legacy events have legacy-unknown admission
   provenance, with no transport authentication invented for their claims.
 

@@ -2155,6 +2155,14 @@ pub fn merge_retention_ref(change_id: &str, commit: &str) -> String {
     format!("refs/arc/tree/{change_id}/merge-{commit}")
 }
 
+/// The ref that keeps a composed landing head reachable while the gate
+/// evidence recorded at it is cited. A failed attempt's head is on no branch
+/// and in no rewrite map; this pin is all that holds it, and it goes with the
+/// change's other tree pins.
+pub fn landing_retention_ref(change_id: &str, commit: &str) -> String {
+    format!("refs/arc/tree/{change_id}/landing-{commit}")
+}
+
 /// Where every commit arc holds as evidence of what was read lives.
 pub const RETAINED_PREFIX: &str = "refs/arc/retained/";
 

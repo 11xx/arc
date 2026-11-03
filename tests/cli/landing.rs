@@ -2,7 +2,7 @@
 //! target in one guarded transition, or not at all.
 
 use crate::common::*;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 /// A repository declaring one gate every change passes.
 fn gated_repo() -> Repo {
@@ -1593,10 +1593,11 @@ fn a_member_that_conflicts_on_replay_closes_nothing_and_names_the_rebase() {
 
 /// Claim: a composed attempt whose gate fails at the composed head closes
 /// nothing and leaves no trace in revision resolution: each member's
-/// patchsets read as before, no rewrite map names a trial commit, and
-/// nothing pins the trial head. Rejects publishing the replay's
-/// correspondence as a rewrite, which would make every reader follow a
-/// member's head to commits that never landed.
+/// patchsets read as before, no rewrite map names a trial commit, and the
+/// only ref holding the trial head is the pin of the gate evidence that
+/// cites it. Rejects publishing the replay's correspondence as a rewrite,
+/// which would make every reader follow a member's head to commits that
+/// never landed, and a landing pin outliving its attempt.
 #[test]
 fn a_failed_composed_attempt_leaves_no_trial_commit_in_revision_resolution() {
     let repo = Repo::new();
@@ -1631,9 +1632,13 @@ fn a_failed_composed_attempt_leaves_no_trial_commit_in_revision_resolution() {
         git_out(&repo.root, &["for-each-ref", "refs/arc/landing"]),
         ""
     );
-    assert!(
-        !git_out(&repo.root, &["for-each-ref", "--contains", &trial]).contains("refs/"),
-        "a ref still holds the trial head {trial}"
+    assert_eq!(
+        git_out(
+            &repo.root,
+            &["for-each-ref", "--format=%(refname)", "--contains", &trial]
+        ),
+        format!("refs/arc/tree/{second}/landing-{trial}"),
+        "a ref other than the evidence pin holds the trial head {trial}"
     );
 }
 
@@ -1830,6 +1835,311 @@ fn a_contracted_cycle_makes_a_landing_unsplittable() {
     for change in [&a, &b, &c] {
         assert!(status(&repo, change)["closure"].is_null());
     }
+}
+
+/// Grant the publisher `channel` exactly `roles` for the bundle's origin,
+/// with the fixture's actor allowed to hold privileged ones.
+fn enroll_publisher(receiver: &Repo, bundle: &Path, roles: &[&str]) {
+    let value: Value = serde_json::from_slice(&fs::read(bundle).unwrap()).unwrap();
+    let source = value["source_replica_id"]
+        .as_str()
+        .unwrap_or_else(|| value["repository_id"].as_str().unwrap())
+        .to_string();
+    let origin = value["repository_id"].as_str().unwrap();
+    receiver.declare_gates_locally(&format!(
+        "[[replica.publishers]]\nprincipal='channel'\nsource_replica_id='{source}'\n\
+         [[replica.publishers.origins]]\nreplica_id='{origin}'\nroles={}\nactors=['tester']\n",
+        serde_json::to_string(roles).unwrap()
+    ));
+}
+
+fn import_from_publisher(receiver: &Repo, bundle: &Path) -> std::process::Output {
+    use sha2::Digest;
+    let digest = hex::encode(sha2::Sha256::digest(fs::read(bundle).unwrap()));
+    receiver
+        .arc(&receiver.root)
+        .args([
+            "import",
+            bundle.to_str().unwrap(),
+            "--publisher",
+            "channel",
+            "--received-sha256",
+            &digest,
+        ])
+        .output()
+        .unwrap()
+}
+
+fn export_to(repo: &Repo, change: &str, name: &str) -> PathBuf {
+    let bundle = repo.home.join(name);
+    repo.arc(&repo.root)
+        .args(["export", change, "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    bundle
+}
+
+/// Claim: after a split landing in which one member landed and every
+/// attempt holding the other failed, each member exported alone arrives as
+/// it left: the landed one integrated via its landing with its own range,
+/// the other open with its patchsets untouched. On neither side does any
+/// trial commit, or any member's own head, resolve through a rewrite.
+/// Rejects an import that leaves a landed member open, and a landing whose
+/// trial correspondence leaks into revision resolution on either store.
+#[test]
+fn a_split_landing_travels_member_by_member_without_its_trial_commits() {
+    let repo = Repo::new();
+    repo.redeclare_gates("[gates.no-second]\ncommand = \"test ! -f second.txt\"\n");
+    let ((first, _, first_head), (second, _, second_head)) = independent(&repo);
+    let landed = repo
+        .arc(&repo.root)
+        .args([
+            "land",
+            &first,
+            &second,
+            "--debt",
+            "context unread",
+            "--max-attempts",
+            "3",
+        ])
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&landed.stdout).into_owned();
+    assert_eq!(landed.status.code(), Some(5), "{out}{}", stderr_of(&landed));
+    let trials: Vec<String> = out
+        .lines()
+        .filter_map(|line| line.strip_prefix("composed: ").map(str::to_string))
+        .collect();
+    assert!(!trials.is_empty(), "{out}");
+    let attempt = status(&repo, &first)["closure"]["landing"]["attempt"]
+        .as_str()
+        .expect("first landed via its landing")
+        .to_string();
+    let second_patchsets =
+        json_stdout(repo.arc(&repo.root).args(["show", &second, "--json"]))["patchsets"].clone();
+
+    let no_trial_resolves = |side: &Repo| {
+        for revision in trials.iter().chain([&first_head, &second_head]) {
+            let resolved = side
+                .arc(&side.root)
+                .args(["history", "resolve", revision])
+                .output()
+                .unwrap();
+            assert_eq!(
+                resolved.status.code(),
+                Some(2),
+                "{revision} resolved to {}",
+                String::from_utf8_lossy(&resolved.stdout)
+            );
+        }
+        assert!(!repository_events(side)
+            .iter()
+            .any(|event| event["event_type"] == "history-rewritten"));
+    };
+    no_trial_resolves(&repo);
+
+    let first_bundle = export_to(&repo, &first, "first.json");
+    let second_bundle = export_to(&repo, &second, "second.json");
+    let recipient = Repo::new();
+    deliver_git_objects(&repo, &recipient);
+    for bundle in [&first_bundle, &second_bundle] {
+        let imported = recipient
+            .arc(&recipient.root)
+            .args(["import", bundle.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(imported.status.success(), "{}", stderr_of(&imported));
+    }
+    let closure = status(&recipient, &first)["closure"].clone();
+    assert_eq!(closure["outcome"], "integrated", "{closure}");
+    assert_eq!(closure["landing"]["attempt"], attempt.as_str(), "{closure}");
+    assert_eq!(closure["integrated_commit"], first_head.as_str());
+    assert!(status(&recipient, &second)["closure"].is_null());
+    assert_eq!(
+        json_stdout(
+            recipient
+                .arc(&recipient.root)
+                .args(["show", &second, "--json"])
+        )["patchsets"],
+        second_patchsets
+    );
+    no_trial_resolves(&recipient);
+}
+
+/// Claim: a completion is admitted with the integration capability alone
+/// when it carries no debt, and repeat admission changes nothing; one that
+/// carries a member's debt also needs debt-input or waiver, and without it
+/// the whole import refuses naming the missing capability, publishing
+/// neither the closure nor the obligation. Rejects a completion widening an
+/// integration-only publisher's authority to declaring debt.
+#[test]
+fn a_completion_needs_debt_authority_only_when_it_carries_debt() {
+    let repo = gated_repo();
+    let ((lower, _, _), (upper, _, _)) = stack(&repo);
+    repo.arc(&repo.root)
+        .args(["land", &lower, &upper])
+        .assert()
+        .success();
+    let clean = export_to(&repo, &lower, "clean.json");
+    let receiver = Repo::new();
+    deliver_git_objects(&repo, &receiver);
+    enroll_publisher(&receiver, &clean, &["facts", "review-input", "integration"]);
+    for _ in 0..2 {
+        let imported = import_from_publisher(&receiver, &clean);
+        assert!(imported.status.success(), "{}", stderr_of(&imported));
+        assert_eq!(
+            status(&receiver, &lower)["closure"]["outcome"],
+            "integrated"
+        );
+    }
+    let held = change_events(&receiver, &lower).len();
+    assert_eq!(held, change_events(&repo, &lower).len());
+
+    let repo = gated_repo();
+    let (lower, _, lower_head) = reviewed_change(&repo, "lower", None);
+    let upper = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "upper",
+        "--base",
+        &lower_head,
+    ])));
+    let upper_tree = repo.home.join(".worktrees/repo-upper");
+    repo.commit(&upper_tree, "upper.txt", "upper\n", "feat: upper");
+    stdout(repo.arc(&upper_tree).args(["snapshot", "upper"]));
+    repo.arc(&repo.root)
+        .args([
+            "land",
+            &lower,
+            &upper,
+            "--debt",
+            "nobody read the upper slice",
+        ])
+        .assert()
+        .success();
+    let completion = repository_events(&repo)
+        .into_iter()
+        .find(|event| event["event_type"] == "landing-completed")
+        .unwrap();
+    let indebted = export_to(&repo, &upper, "indebted.json");
+    let receiver = Repo::new();
+    deliver_git_objects(&repo, &receiver);
+    enroll_publisher(
+        &receiver,
+        &indebted,
+        &["facts", "review-input", "integration"],
+    );
+    let refused = import_from_publisher(&receiver, &indebted);
+    assert_eq!(refused.status.code(), Some(18), "{}", stderr_of(&refused));
+    let stderr = stderr_of(&refused);
+    assert!(
+        stderr.contains(completion["event_id"].as_str().unwrap())
+            && stderr.contains("DebtInput")
+            && stderr.contains("Waiver"),
+        "{stderr}"
+    );
+    assert!(!receiver.root.join(".git/arc/changes").exists());
+
+    enroll_publisher(
+        &receiver,
+        &indebted,
+        &["facts", "review-input", "integration", "debt-input"],
+    );
+    for _ in 0..2 {
+        let imported = import_from_publisher(&receiver, &indebted);
+        assert!(imported.status.success(), "{}", stderr_of(&imported));
+        let report = status(&receiver, &upper);
+        assert_eq!(report["closure"]["outcome"], "integrated", "{report}");
+        assert_eq!(report["debt"]["missing"], "nothing-read", "{report}");
+    }
+}
+
+/// Claim: a completion confers integration and never rewrite authority. A
+/// composed member whose landing replayed it arrives integrated through a
+/// publisher holding no rewrite capability, and none of its original
+/// commits resolves to what it landed as; a rewrite map smuggled beside the
+/// completion still needs the rewrite capability. Rejects the completion's
+/// correspondence standing in for a rewrite the publisher could not record.
+#[test]
+fn a_completion_confers_integration_never_rewrite_authority() {
+    let repo = gated_repo();
+    let ((first, _, _), (second, _, second_head)) = independent(&repo);
+    repo.arc(&repo.root)
+        .args(["land", &first, &second, "--debt", "context unread"])
+        .assert()
+        .success();
+    let landed_as = status(&repo, &second)["closure"]["integrated_commit"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(landed_as, second_head);
+    let bundle = export_to(&repo, &second, "second.json");
+    let receiver = Repo::new();
+    deliver_git_objects(&repo, &receiver);
+    let roles = ["facts", "review-input", "integration", "debt-input"];
+    enroll_publisher(&receiver, &bundle, &roles);
+    let imported = import_from_publisher(&receiver, &bundle);
+    assert!(imported.status.success(), "{}", stderr_of(&imported));
+    assert_eq!(
+        status(&receiver, &second)["closure"]["integrated_commit"],
+        landed_as.as_str()
+    );
+    receiver
+        .arc(&receiver.root)
+        .args(["history", "resolve", &second_head])
+        .assert()
+        .code(2);
+
+    let mut value: Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    let completion = value["repository_events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["event_type"] == "landing-completed")
+        .unwrap()
+        .clone();
+    let mut rewrite = completion.clone();
+    let object = rewrite.as_object_mut().unwrap();
+    object.retain(|key, _| {
+        matches!(
+            key.as_str(),
+            "schema_version"
+                | "event_id"
+                | "repository_id"
+                | "change_id"
+                | "actor"
+                | "created_at"
+                | "harness"
+                | "session"
+                | "model"
+        )
+    });
+    object.insert(
+        "event_id".into(),
+        json!(format!("{}Z", completion["event_id"].as_str().unwrap())),
+    );
+    object.insert("event_type".into(), json!("history-rewritten"));
+    object.insert(
+        "mapping".into(),
+        json!({ second_head.clone(): landed_as.clone() }),
+    );
+    object.insert("reason".into(), json!("the landing replayed it"));
+    value["repository_events"]
+        .as_array_mut()
+        .unwrap()
+        .push(rewrite);
+    refresh_bundle_checksum(&mut value);
+    let smuggled = repo.home.join("smuggled.json");
+    fs::write(&smuggled, serde_json::to_vec(&value).unwrap()).unwrap();
+    let receiver = Repo::new();
+    deliver_git_objects(&repo, &receiver);
+    enroll_publisher(&receiver, &smuggled, &roles);
+    let refused = import_from_publisher(&receiver, &smuggled);
+    assert_eq!(refused.status.code(), Some(18), "{}", stderr_of(&refused));
+    assert!(
+        stderr_of(&refused).contains("Rewrite"),
+        "{}",
+        stderr_of(&refused)
+    );
 }
 
 /// Claim: an audit of a replayed member resolves its extent against the

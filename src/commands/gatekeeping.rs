@@ -1130,6 +1130,14 @@ pub(crate) fn verify_landing_head(
     let required: Vec<(&String, &gates::Gate)> =
         run.gates.iter().map(|(name, gate)| (name, gate)).collect();
     let checkout_ctx = ctx.with_cwd(run.checkout.to_path_buf());
+    // The evidence about to be recorded cites the composed head, which a
+    // failed attempt leaves on no branch: without a pin the record would
+    // cite content that is gone, and no other store could import it.
+    gitio::update_ref(
+        &ctx.cwd,
+        &gitio::landing_retention_ref(run.change_id, run.commit),
+        run.commit,
+    )?;
     let run_id = start_verification_run_for_event(
         ctx,
         store,
