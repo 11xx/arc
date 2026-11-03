@@ -650,3 +650,55 @@ fn provenance_and_by_model_are_exclusive() {
         .failure()
         .stdout(predicates::str::is_empty());
 }
+
+/// Claim: `arc stats --round-trip` reports one landing per integrated change
+/// under its own schema, its phases summing to the round trip, and a change
+/// nothing integrated has no row. Rejects a zero-length landing for the open
+/// change, and a view that cannot be selected from the command line.
+#[test]
+fn round_trip_reports_integrated_changes_only() {
+    let repo = Repo::new();
+    let (landed_id, _, _) = change_with_patchset(&repo, "landed");
+    integrate(&repo, "landed");
+    change_with_patchset(&repo, "still-open");
+
+    let report = json_stdout(
+        repo.arc(&repo.root)
+            .args(["stats", "--round-trip", "--json"]),
+    );
+    assert_eq!(report["schema"], "arc-stats-round-trip/1");
+    let landings = report["landings"].as_array().unwrap();
+    assert_eq!(landings.len(), 1, "{report:#}");
+    let landing = &landings[0];
+    assert_eq!(landing["change_id"], landed_id);
+    assert_eq!(landing["patchset_id"], "ps-01");
+    let phase = |name: &str| landing[name].as_u64().unwrap();
+    assert_eq!(
+        phase("gate_seconds") + phase("waiting_seconds") + phase("integration_seconds"),
+        phase("round_trip_seconds")
+    );
+    assert_eq!(report["aggregate"]["landings"], 1);
+    assert_eq!(report["aggregate"]["slowest"][0]["change_id"], landed_id);
+
+    let open = json_stdout(repo.arc(&repo.root).args([
+        "stats",
+        "--round-trip",
+        "--json",
+        "--change",
+        "still-open",
+    ]));
+    assert_eq!(open["landings"], serde_json::json!([]));
+    assert!(open["aggregate"]["median_seconds"].is_null());
+}
+
+#[test]
+fn round_trip_is_exclusive_with_the_other_views() {
+    let repo = Repo::new();
+    for other in ["--provenance", "--by-model"] {
+        repo.arc(&repo.root)
+            .args(["stats", "--round-trip", other])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("cannot be used with"));
+    }
+}

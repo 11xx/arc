@@ -25,6 +25,8 @@ pub enum StatsView {
     ByModel,
     /// How often each provenance record was written where it could have been.
     Provenance,
+    /// Each integrated change's final landing, split into phases.
+    RoundTrip,
 }
 
 #[derive(Serialize)]
@@ -448,6 +450,283 @@ fn provenance(store: &Store, change_ids: &[String], json: bool) -> Result<()> {
     Ok(())
 }
 
+/// One landing: the integrated patchset's recording to the integration event.
+///
+/// The phases partition that window. `gates` is the union of the arc-observed
+/// gate runs recorded inside it, each run spanning its `duration_ms` back from
+/// its own event, so concurrent runs count once. `integration` runs from the
+/// last event before the integration event to that event. `waiting` is the
+/// rest. A rebase and a reuse take no time here: the rebase's replayed head is
+/// the patchset that opens the window, and a reuse runs nothing.
+#[derive(Serialize, Debug, PartialEq)]
+struct Landing {
+    change_id: String,
+    slug: String,
+    patchset_id: String,
+    /// The `patchset-added` event that opens the window.
+    start_event_id: String,
+    /// The final integration event, which closes it.
+    integration_event_id: String,
+    /// The opening patchset's base differs from the base recorded before it.
+    rebased: bool,
+    round_trip_seconds: u64,
+    gate_seconds: u64,
+    waiting_seconds: u64,
+    integration_seconds: u64,
+    /// Each gate's own observed run time inside the window, keyed by gate
+    /// name, or by command for an unnamed run. Concurrent runs overlap, so
+    /// these may sum above `gate_seconds`.
+    gates: BTreeMap<String, u64>,
+    gate_runs: usize,
+    /// `verification-reused` events inside the window. Counted, never timed.
+    reused: usize,
+    /// The longest of gates, waiting and integration; the first on a tie.
+    dominant_phase: &'static str,
+}
+
+#[derive(Serialize)]
+struct SlowLanding {
+    change_id: String,
+    round_trip_seconds: u64,
+    dominant_phase: &'static str,
+}
+
+#[derive(Serialize)]
+struct RoundTripAggregate {
+    landings: usize,
+    /// Nearest-rank median of `round_trip_seconds`; absent with no landings.
+    median_seconds: Option<u64>,
+    worst_seconds: Option<u64>,
+    /// The five longest landings, longest first.
+    slowest: Vec<SlowLanding>,
+}
+
+#[derive(Serialize)]
+struct RoundTripOutput {
+    schema: &'static str,
+    landings: Vec<Landing>,
+    aggregate: RoundTripAggregate,
+}
+
+fn is_integration(payload: &Payload) -> bool {
+    matches!(
+        payload,
+        Payload::ChangeIntegrated { .. }
+            | Payload::IntegrationAsserted { .. }
+            | Payload::ChangeClosed {
+                outcome: Closure::Integrated,
+                ..
+            }
+    )
+}
+
+/// The change's final landing, or `None` when nothing integrated it or the
+/// integrated patchset was never recorded on this ledger.
+fn landing(change_id: &str, slug: &str, events: &[Event]) -> Option<Landing> {
+    let end = events
+        .iter()
+        .rposition(|event| is_integration(&event.payload))?;
+    let integrated_patchset = match &events[end].payload {
+        Payload::ChangeIntegrated {
+            source_patchset_id, ..
+        }
+        | Payload::IntegrationAsserted {
+            source_patchset_id, ..
+        } => Some(source_patchset_id.as_str()),
+        // An integration closed before arc named its patchset landed the
+        // latest one recorded before it.
+        _ => None,
+    };
+    let start = events[..end]
+        .iter()
+        .rposition(|event| match &event.payload {
+            Payload::PatchsetAdded { patchset_id, .. } => {
+                integrated_patchset.is_none_or(|wanted| wanted == patchset_id)
+            }
+            _ => false,
+        })?;
+    let Payload::PatchsetAdded {
+        patchset_id, base, ..
+    } = &events[start].payload
+    else {
+        unreachable!("the window opens on a patchset");
+    };
+    let prior_base = events[..start]
+        .iter()
+        .rev()
+        .find_map(|event| match &event.payload {
+            Payload::PatchsetAdded { base, .. } | Payload::ChangeOpened { base, .. } => Some(base),
+            _ => None,
+        });
+
+    let opened = events[start].created_at.timestamp_millis();
+    let closed = events[end].created_at.timestamp_millis().max(opened);
+    let last_before = if end > start + 1 {
+        events[end - 1].created_at.timestamp_millis()
+    } else {
+        opened
+    }
+    .clamp(opened, closed);
+
+    let mut gates: BTreeMap<String, i64> = BTreeMap::new();
+    let mut spans: Vec<(i64, i64)> = Vec::new();
+    let mut reused = 0;
+    for event in &events[start + 1..end] {
+        match &event.payload {
+            Payload::VerificationRecorded {
+                gate,
+                command,
+                duration_ms: Some(duration_ms),
+                attested: false,
+                ..
+            } => {
+                let recorded = event.created_at.timestamp_millis();
+                let from = (recorded - *duration_ms as i64).clamp(opened, last_before);
+                let to = recorded.clamp(opened, last_before);
+                *gates
+                    .entry(gate.clone().unwrap_or_else(|| command.clone()))
+                    .or_default() += to - from;
+                spans.push((from, to));
+            }
+            Payload::VerificationReused { .. } => reused += 1,
+            _ => {}
+        }
+    }
+    let gate_runs = spans.len();
+    spans.sort_unstable();
+    let mut busy = 0;
+    let mut covered = opened;
+    for (from, to) in spans {
+        let from = from.max(covered);
+        if to > from {
+            busy += to - from;
+            covered = to;
+        }
+    }
+
+    let seconds = |millis: i64| (millis / 1000) as u64;
+    let round_trip_seconds = seconds(closed - opened);
+    let gate_seconds = seconds(busy);
+    let integration_seconds = seconds(closed - last_before);
+    // Flooring each phase separately can only lose time to the remainder, so
+    // the phases still sum to the round trip.
+    let waiting_seconds = round_trip_seconds - gate_seconds - integration_seconds;
+    let dominant_phase = [
+        ("gates", gate_seconds),
+        ("waiting", waiting_seconds),
+        ("integration", integration_seconds),
+    ]
+    .into_iter()
+    .rev()
+    .max_by_key(|(_, phase)| *phase)
+    .map(|(name, _)| name)
+    .unwrap_or("gates");
+
+    Some(Landing {
+        change_id: change_id.to_string(),
+        slug: slug.to_string(),
+        patchset_id: patchset_id.clone(),
+        start_event_id: events[start].event_id.clone(),
+        integration_event_id: events[end].event_id.clone(),
+        rebased: prior_base.is_some_and(|prior| prior != base),
+        round_trip_seconds,
+        gate_seconds,
+        waiting_seconds,
+        integration_seconds,
+        gates: gates
+            .into_iter()
+            .map(|(gate, millis)| (gate, seconds(millis)))
+            .collect(),
+        gate_runs,
+        reused,
+        dominant_phase,
+    })
+}
+
+fn round_trip_aggregate(landings: &[Landing]) -> RoundTripAggregate {
+    let mut by_length: Vec<&Landing> = landings.iter().collect();
+    by_length.sort_by(|a, b| {
+        b.round_trip_seconds
+            .cmp(&a.round_trip_seconds)
+            .then_with(|| a.change_id.cmp(&b.change_id))
+    });
+    let mut samples: Vec<u64> = landings.iter().map(|l| l.round_trip_seconds).collect();
+    samples.sort_unstable();
+    RoundTripAggregate {
+        landings: landings.len(),
+        median_seconds: (!samples.is_empty()).then(|| nearest_rank(&samples, 0.5)),
+        worst_seconds: samples.last().copied(),
+        slowest: by_length
+            .into_iter()
+            .take(5)
+            .map(|landing| SlowLanding {
+                change_id: landing.change_id.clone(),
+                round_trip_seconds: landing.round_trip_seconds,
+                dominant_phase: landing.dominant_phase,
+            })
+            .collect(),
+    }
+}
+
+fn round_trips(store: &Store, change_ids: &[String], json: bool) -> Result<()> {
+    let read = store.read()?;
+    read.rewrites()?;
+    let mut landings = Vec::new();
+    for change_id in change_ids {
+        let events = read.events(change_id)?;
+        let state = read.project(&events)?;
+        landings.extend(landing(change_id, &state.slug, &events));
+    }
+    let aggregate = round_trip_aggregate(&landings);
+    if json {
+        let output = RoundTripOutput {
+            schema: "arc-stats-round-trip/1",
+            landings,
+            aggregate,
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+    println!(
+        "{:<28} {:>10} {:>8} {:>8} {:>8} {:>6} {:>7} dominant",
+        "change", "round-trip", "gates", "waiting", "integ", "reused", "rebased"
+    );
+    for landing in &landings {
+        println!(
+            "{:<28} {:>10} {:>8} {:>8} {:>8} {:>6} {:>7} {}",
+            truncate(&landing.slug, 28),
+            format_duration(landing.round_trip_seconds),
+            format_duration(landing.gate_seconds),
+            format_duration(landing.waiting_seconds),
+            format_duration(landing.integration_seconds),
+            landing.reused,
+            if landing.rebased { "yes" } else { "no" },
+            landing.dominant_phase
+        );
+    }
+    match (aggregate.median_seconds, aggregate.worst_seconds) {
+        (Some(median), Some(worst)) => {
+            println!(
+                "\nRound trip ({} landings): median {}, worst {}",
+                aggregate.landings,
+                format_duration(median),
+                format_duration(worst)
+            );
+            println!("slowest:");
+            for slow in &aggregate.slowest {
+                println!(
+                    "  {:<40} {:>10} {}",
+                    slow.change_id,
+                    format_duration(slow.round_trip_seconds),
+                    slow.dominant_phase
+                );
+            }
+        }
+        _ => println!("\nno landings: no selected change is integrated"),
+    }
+    Ok(())
+}
+
 pub fn stats(ctx: &Ctx, selection: StatsSelection, json: bool, view: StatsView) -> Result<()> {
     let store = ctx.store()?;
     let change_ids = match &selection {
@@ -467,6 +746,7 @@ pub fn stats(ctx: &Ctx, selection: StatsSelection, json: bool, view: StatsView) 
     match view {
         StatsView::ByModel => return by_model(&store, &change_ids, json),
         StatsView::Provenance => return provenance(&store, &change_ids, json),
+        StatsView::RoundTrip => return round_trips(&store, &change_ids, json),
         StatsView::Changes => {}
     }
 
@@ -1242,6 +1522,192 @@ mod tests {
             ),
         ];
         assert_eq!(wall_time(&events), Some(3600));
+    }
+
+    fn patchset(id: &str, seconds: i64, patchset_id: &str, base: &str) -> Event {
+        event(
+            id,
+            seconds,
+            Payload::PatchsetAdded {
+                patchset_id: patchset_id.into(),
+                base: base.into(),
+                head: "h".into(),
+                merge_base: None,
+                brief_ref: None,
+                author_name: None,
+                author_email: None,
+                committer_name: None,
+                committer_email: None,
+                contributors: Vec::new(),
+                inherited_authors: Vec::new(),
+                claim_id: None,
+                claim_actor: None,
+                journal_refs: Vec::new(),
+                thread: None,
+                candidate: None,
+            },
+        )
+    }
+
+    fn gate_run(id: &str, seconds: i64, gate: &str, duration_seconds: u64) -> Event {
+        event(
+            id,
+            seconds,
+            Payload::VerificationRecorded {
+                timeout_seconds: None,
+                tree: None,
+                against_target: None,
+                tested_tree: Some("t".into()),
+                worktree_dirty: Some(false),
+                worktree_dirty_tracked: None,
+                worktree_dirty_untracked: None,
+                tree_moved: false,
+                gate: Some(gate.into()),
+                command: format!("run {gate}"),
+                revision: "h".into(),
+                result: VerifyResult::Pass,
+                exit_code: Some(0),
+                duration_ms: Some(duration_seconds * 1000),
+                output_tail: None,
+                output_artifact: None,
+                timed_out: false,
+                hostname: "host".into(),
+                attested: false,
+                run_id: None,
+                probe: None,
+                runner: None,
+                environment: None,
+                note: None,
+                falsification: None,
+                falsification_inferred: None,
+            },
+        )
+    }
+
+    fn reuse(id: &str, seconds: i64, gate: &str, evidence: &str) -> Event {
+        event(
+            id,
+            seconds,
+            Payload::VerificationReused {
+                run_id: "run".into(),
+                gate: gate.into(),
+                revision: "h".into(),
+                tree: None,
+                evidence_event_id: evidence.into(),
+                delta: None,
+            },
+        )
+    }
+
+    fn integrated(id: &str, seconds: i64, patchset_id: &str) -> Event {
+        event(
+            id,
+            seconds,
+            Payload::ChangeIntegrated {
+                authority_grant_event_id: None,
+                provisional_resolutions: Vec::new(),
+                integrated_commit: "m".into(),
+                source_patchset_id: patchset_id.into(),
+                source_head: "h".into(),
+                target_branch: "master".into(),
+                target_before: "b".into(),
+                authorization: None,
+                already_contained: false,
+                shape: None,
+            },
+        )
+    }
+
+    /// Claim: gates, waiting and integration partition the round trip, with
+    /// concurrent gate runs counted once and a run that began before the
+    /// window counted only inside it. Rejects summing each run's duration,
+    /// which charges three parallel 200-second runs as 600 seconds of a
+    /// 220-second landing.
+    #[test]
+    fn landing_phases_sum_to_the_round_trip() {
+        let events = vec![
+            gate_run("0", -50, "build", 10),
+            patchset("1", 0, "ps-01", "b"),
+            // Started 30 seconds before the window opened.
+            gate_run("2", 20, "build", 50),
+            gate_run("3", 210, "lint", 200),
+            gate_run("4", 210, "test", 200),
+            gate_run("5", 210, "doc", 200),
+            integrated("6", 220, "ps-01"),
+        ];
+        let landing = landing("c", "s", &events).expect("an integrated change lands");
+        assert_eq!(landing.round_trip_seconds, 220);
+        assert_eq!(landing.gate_seconds, 210, "[0,20] and [10,210] cover 210s");
+        assert_eq!(landing.integration_seconds, 10);
+        assert_eq!(landing.waiting_seconds, 0);
+        assert_eq!(
+            landing.gate_seconds + landing.waiting_seconds + landing.integration_seconds,
+            landing.round_trip_seconds
+        );
+        assert_eq!(landing.gates.get("build"), Some(&20));
+        assert_eq!(landing.gates.get("test"), Some(&200));
+        assert_eq!(landing.gate_runs, 4);
+        assert_eq!(landing.dominant_phase, "gates");
+    }
+
+    /// Claim: a reused gate costs the landing nothing; its evidence's run
+    /// time belongs to the landing that ran it. Rejects charging every run on
+    /// the change, which bills this landing the 100 seconds an earlier
+    /// patchset's build took.
+    #[test]
+    fn a_reused_gate_counts_zero_seconds() {
+        let events = vec![
+            patchset("1", 0, "ps-01", "b"),
+            gate_run("2", 100, "build", 100),
+            patchset("3", 200, "ps-02", "b"),
+            reuse("4", 210, "build", "2"),
+            integrated("5", 220, "ps-02"),
+        ];
+        let landing = landing("c", "s", &events).expect("an integrated change lands");
+        assert_eq!(landing.reused, 1);
+        assert_eq!(landing.gate_seconds, 0);
+        assert!(landing.gates.is_empty(), "{:?}", landing.gates);
+        assert_eq!(landing.gate_runs, 0);
+        assert_eq!(landing.round_trip_seconds, 20);
+        assert_eq!(landing.waiting_seconds, 10);
+        assert_eq!(landing.integration_seconds, 10);
+        assert!(!landing.rebased);
+    }
+
+    /// Claim: a change integrated twice reports the landing of its last
+    /// integration, from the patchset that integration names. Rejects the
+    /// first integration event, which reports the 100-second landing of
+    /// `ps-01`, and the change's first patchset, which spans the whole change.
+    #[test]
+    fn a_change_integrated_twice_reports_its_final_landing() {
+        let events = vec![
+            patchset("1", 0, "ps-01", "b"),
+            integrated("2", 100, "ps-01"),
+            patchset("3", 1000, "ps-02", "b2"),
+            gate_run("4", 1050, "build", 30),
+            integrated("5", 1150, "ps-02"),
+        ];
+        let landing = landing("c", "s", &events).expect("an integrated change lands");
+        assert_eq!(landing.integration_event_id, "5");
+        assert_eq!(landing.patchset_id, "ps-02");
+        assert_eq!(landing.start_event_id, "3");
+        assert_eq!(landing.round_trip_seconds, 150);
+        assert_eq!(landing.gate_seconds, 30);
+        assert_eq!(landing.integration_seconds, 100);
+        assert_eq!(landing.waiting_seconds, 20);
+        assert_eq!(landing.dominant_phase, "integration");
+        assert!(landing.rebased, "ps-02 moved its base from b to b2");
+    }
+
+    /// Claim: only an integration makes a landing. Rejects a zero-length row
+    /// for a change that was snapshotted and verified but never integrated.
+    #[test]
+    fn an_unintegrated_change_has_no_round_trip() {
+        let events = vec![
+            patchset("1", 0, "ps-01", "b"),
+            gate_run("2", 100, "build", 100),
+        ];
+        assert_eq!(landing("c", "s", &events), None);
     }
 
     #[test]

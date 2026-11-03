@@ -477,6 +477,10 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          rejected alternatives, plan-linked briefs, cited
                          facts, changes with read records — each count beside
                          what it counts in.
+  arc stats --round-trip Each integrated change's final landing, from its
+                         patchset's recording to the integration event, split
+                         into gates, waiting and integration, with reuses
+                         counted; the median, the worst and the five slowest.
 
   Work waiting for this project lives in two places. The ledger holds changes
   already open; the journal holds everything not yet opened as one. An empty
@@ -4600,6 +4604,7 @@ SCHEMAS
     `arc-stats/1`                    arc stats --json
     `arc-stats-by-model/1`           arc stats --by-model --json
     `arc-stats-provenance/1`         arc stats --provenance --json
+    `arc-stats-round-trip/1`         arc stats --round-trip --json
     `arc-cost/1`                     arc cost show --json
     `arc-cost-commit/1`              arc cost show --commit --json
     `arc-changelog/1`                arc changelog --json

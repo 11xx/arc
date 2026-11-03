@@ -667,8 +667,8 @@ enum Cmd {
         #[arg(long, hide = true)]
         oneline: bool,
     },
-    /// Derived ledger analytics: stage, review, and gate durations, and how often
-    /// provenance is recorded
+    /// Derived ledger analytics: stage, review, and gate durations, each landing's
+    /// round trip, and how often provenance is recorded
     ///
     /// Aggregate reads name unreadable changes with their errors on stderr and retain
     /// readable changes; a selected unreadable change fails Records no events; ledger reads
@@ -685,7 +685,7 @@ enum Cmd {
         all: bool,
         /// One row per delegated identity instead of per change: patchsets
         /// contributed, rework rounds they opened, verdicts issued
-        #[arg(long = "by-model", conflicts_with = "provenance")]
+        #[arg(long = "by-model", conflicts_with_all = ["provenance", "round_trip"])]
         by_model: bool,
         /// How often each provenance record was written, one line per class,
         /// each count beside the population it was counted in. With `--json`,
@@ -714,8 +714,30 @@ enum Cmd {
         ///
         /// Read records: changes with at least one `context-read` on their
         /// ledger, of the selected changes.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "round_trip")]
         provenance: bool,
+        /// Each integrated change's final landing, split into phases, with the
+        /// median, the worst, and the five slowest. With `--json`,
+        /// `arc-stats-round-trip/1`. A change nothing integrated has no row.
+        ///
+        /// The round trip runs from the `patchset-added` event of the patchset
+        /// the last integration event names (or, on a legacy close, the last
+        /// one before it) to that integration event. Gates: the union of every
+        /// arc-observed `verification-recorded` run inside the window, each
+        /// spanning its `duration_ms` back from its event and clamped to the
+        /// window, so concurrent runs count once; per gate, each gate's own run
+        /// time. Integration: from the last event before the integration event
+        /// to it. Waiting: the remainder, so the three sum to the round trip.
+        /// Reuse: `verification-reused` events inside the window, counted and
+        /// never timed. Rebased: the patchset's base differs from the base
+        /// recorded before it.
+        ///
+        /// Not recorded, so not reported: how long a rebase took (it ends where
+        /// the window opens), when `arc integrate` started, and build versus
+        /// test inside one gate command. Attested evidence carries no observed
+        /// duration and counts as waiting.
+        #[arg(long = "round-trip")]
+        round_trip: bool,
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
@@ -5873,6 +5895,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             all,
             by_model,
             provenance,
+            round_trip,
             json,
         } => {
             // clap rejects the pair on the subcommand, but a global `--change`
@@ -5888,9 +5911,10 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 // `--change` placed before it never reaches that check.
                 (Some(_), Some(_)) => bail!("--change and --tag are mutually exclusive"),
             };
-            let view = match (by_model, provenance) {
-                (true, _) => commands::StatsView::ByModel,
-                (_, true) => commands::StatsView::Provenance,
+            let view = match (by_model, provenance, round_trip) {
+                (true, _, _) => commands::StatsView::ByModel,
+                (_, true, _) => commands::StatsView::Provenance,
+                (_, _, true) => commands::StatsView::RoundTrip,
                 _ => commands::StatsView::Changes,
             };
             commands::stats(&ctx, selection, json, view)?;
