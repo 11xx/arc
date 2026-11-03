@@ -359,11 +359,13 @@ fn killed_launcher_keeps_the_slot_in_use_until_descendants_exit() {
     let home = repo.home.display().to_string();
     let grandchild = format!(
         "import os, time\nos.closerange(0, 65536)\nopen({home:?} + '/grand.pid', 'w').write(str(os.getpid()))\n\
-         while not os.path.exists({home:?} + '/go'):\n    time.sleep(0.05)\n"
+         deadline = time.time() + 120\n\
+         while not os.path.exists({home:?} + '/go') and time.time() < deadline:\n    time.sleep(0.05)\n"
     );
     fs::write(repo.home.join("grand.py"), grandchild).unwrap();
     let gate = format!(
-        "( setsid python3 {home}/grand.py & ) ; while ! test -s {home}/grand.pid; do sleep 0.05; done; sleep 2"
+        "( setsid python3 {home}/grand.py & ) ; while ! test -s {home}/grand.pid; do sleep 0.05; done; \
+         sleep 1; : > {home}/gate-exiting"
     );
     let mut launcher = spawn_arc(&repo, &path, &["verify", &change, "--command", &gate]);
     let pid_file = repo.home.join("grand.pid");
@@ -378,7 +380,13 @@ fn killed_launcher_keeps_the_slot_in_use_until_descendants_exit() {
     launcher.kill().unwrap();
     wait_for_exit(&mut launcher);
     // Past the gate shell's own exit, only the detached grandchild remains.
-    thread::sleep(Duration::from_secs(3));
+    let exiting = repo.home.join("gate-exiting");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !exiting.exists() {
+        assert!(Instant::now() < deadline, "the gate shell never finished");
+        thread::sleep(Duration::from_millis(20));
+    }
+    thread::sleep(Duration::from_millis(500));
     assert!(
         use_lock_busy(&path),
         "the slot was freed while the grandchild runs"
@@ -500,4 +508,49 @@ fn default_pool_and_obsolete_tokens() {
         .stderr(predicates::str::contains(format!(
             "holds open change {change}"
         )));
+}
+
+/// Claim: a gate in a slot records its command's own exit through the
+/// holder, and a background child left in its process group neither delays
+/// completion nor outlives it. Rejects a holder whose exit stands in for the
+/// command's, or one that keeps the gate waiting on its group.
+#[test]
+fn gates_in_a_slot_record_their_command_exit() {
+    let repo = pool(1, "");
+    let (change, path) = begin(&repo, "gates");
+    repo.commit(&path, "work.txt", "work\n", "feat: work");
+    stdout(repo.arc(&path).args(["snapshot", &change]));
+    repo.arc(&path)
+        .args(["verify", &change, "--command", "exit 3"])
+        .assert()
+        .stdout(predicates::str::contains("verification: Fail"));
+    let marker = repo.home.join("background.pid");
+    let started = Instant::now();
+    repo.arc(&path)
+        .args([
+            "verify",
+            &change,
+            "--command",
+            &format!(
+                "sleep 60 >/dev/null 2>&1 & echo $! > {}; exit 0",
+                marker.display()
+            ),
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("verification: Pass"));
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "the gate waited on its background child"
+    );
+    let pid = fs::read_to_string(&marker).unwrap();
+    let alive = Path::new(&format!("/proc/{}", pid.trim())).exists()
+        && !fs::read_to_string(format!("/proc/{}/stat", pid.trim()))
+            .unwrap_or_default()
+            .contains(") Z ");
+    assert!(!alive, "the gate's background child outlived it");
+    assert!(
+        !use_lock_busy(&path),
+        "the finished gate left the slot in use"
+    );
 }
