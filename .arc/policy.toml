@@ -88,6 +88,10 @@ paths = [
   # Kills an overrunning declared command with its whole process group. A
   # defect leaves the command running past its bound.
   "src/process_group.rs",
+  # Holds SIGINT, SIGTERM and SIGHUP while a gate or probe runs, so arc stops
+  # the group it owns and records nothing from an interrupted run. A defect
+  # records an interrupted gate as evidence or leaves its processes running.
+  "src/interruption.rs",
   # Captures private gate diagnostics and expires its own completed files.
   "src/verification_output.rs",
   # Bundle import writes foreign events into the append-only store.
