@@ -5882,7 +5882,10 @@ fn verify_after_integration(
     }
     // The receipt names the commit the integration recorded, which no
     // withdrawal can strand; views follow it forward like every revision.
-    let recorded = state::reduce_with_rewrites(&store.load_events(change_id)?, &store.rewrites()?)?;
+    let recorded = state::reduce_with_rewrites(
+        &store.load_events_with_landings(change_id)?,
+        &store.rewrites()?,
+    )?;
     let payload = Payload::PostIntegrationVerificationRecorded {
         gate: receipt.gate.clone(),
         command,

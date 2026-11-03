@@ -1654,8 +1654,11 @@ fn range_targets(
     // A map that does not load leaves every change replaying at its recorded
     // revisions; one that needs the map then reads as a selection gap.
     let rewrites = crate::rewrite::RewriteMap::from_events(events.iter()).unwrap_or_default();
+    // A landing acts on each member it closes, at the time it completed.
+    let landings = crate::landing::Landings::from_events(events);
     for id in &ids {
-        let change_events = read.events(id);
+        let change_events =
+            crate::landing::with_derived(&read.events(id), landings.derived_events(id));
         let tagged = !query.tags.is_empty()
             && match crate::state::reduce_with_rewrites(&change_events, &rewrites) {
                 Ok(state) => query.tags.iter().all(|tag| state.tags.contains(tag)),

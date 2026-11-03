@@ -367,9 +367,10 @@ fn lander_recording(repo: &Repo) {
 }
 
 /// Claim: the session that ran a landing is each member's integrator in cost
-/// attribution, as the session that ran `integrate` is. Rejects a reader that
-/// looks only at a member's own events, where the lander appears on no
-/// member at all.
+/// attribution, as the session that ran `integrate` is, and its footprint
+/// selects every member it landed. Rejects a reader that looks only at a
+/// member's own events, where the lander appears on no member but the top
+/// one, whose gate run it recorded.
 #[test]
 fn the_lander_is_each_members_integrator_in_cost_attribution() {
     let repo = gated_repo();
@@ -403,6 +404,13 @@ fn the_lander_is_each_members_integrator_in_cost_attribution() {
             "{change}: {row:#}"
         );
     }
+    let footprint =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["cost", "show", "--json", "--footprint", &key]),
+        );
+    let selected = footprint["work"].to_string();
+    assert!(selected.contains(&lower), "{footprint:#}");
 }
 
 /// Claim: every member's declarations are read at the revision the landing
@@ -1200,4 +1208,157 @@ fn target_lands_every_member_on_the_named_branch() {
     for change in [&lower, &upper] {
         assert_eq!(status(&repo, change)["closure"]["target_branch"], "release");
     }
+}
+
+/// The member's own events recorded before its landing completed: the last
+/// one is a point `--at` reads the member still open at.
+fn last_event_before_landing(repo: &Repo, change: &str) -> String {
+    let completion = repository_events(repo)
+        .into_iter()
+        .find(|event| event["event_type"] == "landing-completed")
+        .expect("a completed landing")["event_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    change_events(repo, change)
+        .into_iter()
+        .map(|event| event["event_id"].as_str().unwrap().to_string())
+        .filter(|id| *id < completion)
+        .last()
+        .expect("events before the landing")
+}
+
+/// Claim: every reader of a change's closure sees a landed member as
+/// integrated through its landing: `doctor` judges it as closed, a receipt
+/// after integration binds to its landed commit, and `--at` a point before
+/// the completion shows it open. Rejects readers that reduce the member's
+/// own events alone, where `doctor` reports its removed branch as a missing
+/// open branch and the receipt refuses the member as open, and an `--at`
+/// replay that joins a completion recorded after the point it reads.
+#[test]
+fn a_landed_member_reads_integrated_to_every_reader_and_open_before_it() {
+    let repo = gated_repo();
+    let ((lower, lower_tree, lower_head), (upper, _, _)) = stack(&repo);
+    repo.arc(&repo.root)
+        .args(["land", &lower, &upper])
+        .assert()
+        .success();
+
+    // `--at` an event before the completion: open, and not pending either.
+    let before = last_event_before_landing(&repo, &lower);
+    let then = json_stdout_any_status(
+        repo.arc(&repo.root)
+            .args(["status", &lower, "--at", &before]),
+    );
+    assert!(then["closure"].is_null(), "{then}");
+    assert!(then["pending_landing"].is_null(), "{then}");
+    let shown = json_stdout(
+        repo.arc(&repo.root)
+            .args(["show", &lower, "--at", &before, "--json"]),
+    );
+    assert!(
+        shown["round_trip"]["local_integration_revision"].is_null(),
+        "{shown}"
+    );
+    let shown = json_stdout(repo.arc(&repo.root).args(["show", &lower, "--json"]));
+    assert_eq!(
+        shown["round_trip"]["local_integration_revision"],
+        lower_head.as_str(),
+        "{shown}"
+    );
+
+    // `doctor` judges the member closed: its branch may go.
+    let branch = status(&repo, &lower)["branch"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            lower_tree.to_str().unwrap(),
+        ],
+    );
+    git(&repo.root, &["branch", "-D", &branch]);
+    let doctor = json_stdout_any_status(repo.arc(&repo.root).args(["doctor", "--json"]));
+    assert!(
+        !doctor["advice"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["code"] == "missing-open-branch"),
+        "{doctor:#}"
+    );
+
+    // A receipt after integration binds to the member's landed commit.
+    let receipt = repo
+        .arc(&repo.root)
+        .args([
+            "verify",
+            &lower,
+            "--gate",
+            "smoke",
+            "--attest",
+            "--after-integration",
+            "--result",
+            "pass",
+            "--tested-revision",
+            &lower_head,
+            "--execution-host",
+            "ci-host-1",
+            "--runner",
+            "watch-job-1",
+        ])
+        .output()
+        .unwrap();
+    assert!(receipt.status.success(), "{}", stderr_of(&receipt));
+    assert!(
+        String::from_utf8_lossy(&receipt.stdout)
+            .contains(&format!("for integrated commit {lower_head}")),
+        "{}",
+        String::from_utf8_lossy(&receipt.stdout)
+    );
+}
+
+/// Claim: a landed member's export carrying work recorded after its landing
+/// imports, judged as following the closure its landing derived. Rejects an
+/// import that reads the member's own events alone, where an audit of what
+/// shipped reads as post-integration work before the change integrated.
+#[test]
+fn an_audited_landed_member_imports_with_its_audit() {
+    let repo = gated_repo();
+    let ((lower, _, _), (upper, _, _)) = stack(&repo);
+    repo.arc(&repo.root)
+        .args(["land", &lower, &upper])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "auditor")
+        .args([
+            "audit",
+            &lower,
+            "--verdict",
+            "approved",
+            "--body",
+            "read it",
+        ])
+        .assert()
+        .success();
+    let bundle = repo.home.join("lower.json");
+    repo.arc(&repo.root)
+        .args(["export", &lower, "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    let recipient = Repo::new();
+    deliver_git_objects(&repo, &recipient);
+    let imported = recipient
+        .arc(&recipient.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(imported.status.success(), "{}", stderr_of(&imported));
+    let report = json_stdout_any_status(recipient.arc(&recipient.root).args(["status", &lower]));
+    assert_eq!(report["closure"]["outcome"], "integrated", "{report}");
 }

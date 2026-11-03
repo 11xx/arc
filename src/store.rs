@@ -2272,6 +2272,31 @@ impl Store {
         self.project_state_with_repository(scope, events, rewrites, &self.repository_events()?)
     }
 
+    /// `project_state` as of `event_id`: the relations and landings recorded
+    /// after it are left out, so a landing completed later neither closes
+    /// the change nor holds it pending.
+    pub fn project_state_before(
+        &self,
+        events: &[Event],
+        rewrites: &crate::rewrite::RewriteMap,
+        event_id: &str,
+    ) -> Result<crate::state::ChangeState> {
+        let repository_events: Vec<Event> = self
+            .repository_events()?
+            .iter()
+            .filter(|event| {
+                event.event_id.as_str() <= event_id || !crate::landing::is_landing_fact(event)
+            })
+            .cloned()
+            .collect();
+        self.project_state_with_repository(
+            &self.privilege_scope()?,
+            events,
+            rewrites,
+            &repository_events,
+        )
+    }
+
     fn project_state_with_repository(
         &self,
         scope: &Arc<PrivilegeScope>,
@@ -2497,6 +2522,15 @@ impl Store {
     /// All events of one change in ID order, preserving imported identities.
     pub fn load_events(&self, change_id: &str) -> Result<Vec<Event>> {
         typed_events(self.raw_events(change_id)?)
+    }
+
+    /// A change's events with those its completed landings derive for it,
+    /// in ID order: the history a reader of its closure or debt reduces.
+    pub fn load_events_with_landings(&self, change_id: &str) -> Result<Vec<Event>> {
+        Ok(crate::landing::joined(
+            &self.load_events(change_id)?,
+            &self.repository_events()?,
+        ))
     }
 
     /// `load_events` over import batches the caller already holds.

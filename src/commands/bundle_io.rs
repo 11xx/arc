@@ -1465,9 +1465,12 @@ fn validate_import_candidate(
         &introduced_round_trip,
         crate::forge_round_trip::Standing::Recorded,
     )?;
+    // A landed member's closure, and any debt its landing declared, are part
+    // of its history: what follows them is judged as following a closure.
+    let repository_events = combined_repository_events(store, repository)?;
+    let candidate = crate::landing::joined(&candidate, &repository_events);
     let mut projected = state::reduce_with_rewrites(&candidate, rewrites)
         .context("combined local and bundled known events are not replayable")?;
-    let repository_events = combined_repository_events(store, repository)?;
     projected.follow_rewrites(&crate::rewrite::RewriteMap::from_events(
         repository_events.iter(),
     )?)?;

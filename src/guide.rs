@@ -1401,8 +1401,12 @@ RUN A CHANGE
   declaration and policy reader keeps reading, and `range_base` and
   `integrated_commit` its own landed range, which `diff --integrated`,
   audits, `stats` and cost attribution read. The shared gate run is counted
-  once, on the top member. A member's export carries the completion that
-  closed it; an attempt still pending is not exported.
+  once, on the top member. Every reader of a closure sees a member closed
+  by its landing: `doctor`, import admission, `accept` preflight, receipts
+  after integration, and a cost `--footprint` of the lander. `--at` a point
+  before the completion replays without it, so the member reads open. A
+  member's export carries the completion that closed it; an attempt still
+  pending is not exported.
 
   `arc land --recover <attempt>` finishes an interrupted attempt. It
   publishes a saved `authorized` completion whose applied ref exists, after

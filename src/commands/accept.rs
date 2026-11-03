@@ -335,6 +335,7 @@ fn plan_acceptance(
             }
             repository.sort_by(|a, b| a.event_id.cmp(&b.event_id));
             let rewrites = RewriteMap::from_events(repository.iter())?;
+            let events = crate::landing::joined(&events, &repository);
             let mut state = state::reduce_following(&events, &rewrites)?;
             crate::replica::localize_change(&store.repository_id, &events, &mut state);
             ensure_append_allowed(

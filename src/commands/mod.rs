@@ -1033,7 +1033,9 @@ impl Ctx {
 }
 
 /// Replay a change's ledger up to and including `event_id`, answering
-/// "what did an actor see at this point?". Rejects an event ID absent from
+/// "what did an actor see at this point?". Relations and landings recorded
+/// after that point do not join the replay, so a landing completed later
+/// neither closes the change nor holds it pending. Rejects an event ID absent from
 /// this change's ledger.
 pub(crate) fn reduce_at(store: &Store, change_id: &str, event_id: &str) -> Result<ChangeState> {
     let events = store.load_events(change_id)?;
@@ -1042,7 +1044,7 @@ pub(crate) fn reduce_at(store: &Store, change_id: &str, event_id: &str) -> Resul
         .position(|event| event.event_id == event_id)
         .with_context(|| format!("unknown event {event_id:?} in {change_id}"))?;
     let prefix = &events[..=position];
-    let mut state = store.project_state(prefix, &store.rewrites()?)?;
+    let mut state = store.project_state_before(prefix, &store.rewrites()?, event_id)?;
     crate::replica::localize_change(&store.repository_id, prefix, &mut state);
     Ok(state)
 }

@@ -294,6 +294,31 @@ pub fn applied_ref(attempt: &str) -> String {
     format!("refs/arc/landing-applied/{attempt}")
 }
 
+/// Whether a repository event records a relation or a landing attempt.
+pub fn is_landing_fact(event: &Event) -> bool {
+    matches!(
+        event.payload,
+        Payload::LandsWithDeclared { .. }
+            | Payload::LandsWithWithdrawn { .. }
+            | Payload::LandingPrepared { .. }
+            | Payload::LandingCompleted { .. }
+            | Payload::LandingAbandoned { .. }
+    )
+}
+
+/// One change's events joined with what the completed landings among
+/// `repository_events` derive for it: the history every reader of a
+/// change's closure or debt reduces.
+pub fn joined(events: &[Event], repository_events: &[Event]) -> Vec<Event> {
+    let Some(change_id) = events.first().map(|event| event.change_id.as_str()) else {
+        return Vec::new();
+    };
+    with_derived(
+        events,
+        Landings::from_events(repository_events).derived_events(change_id),
+    )
+}
+
 /// A change's events with the events its landings derive, merged in ID order.
 pub fn with_derived(events: &[Event], derived: Vec<Event>) -> Vec<Event> {
     if derived.is_empty() {

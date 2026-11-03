@@ -39,6 +39,8 @@ struct ChangeInspection<'a> {
     cwd: &'a Path,
     local_repository_id: &'a str,
     rewrites: crate::rewrite::RewriteMap,
+    /// The repository events, whose completed landings close their members.
+    repository_events: Vec<crate::model::Event>,
     /// Every inspected change shares the receiver permissions of this read.
     scope: std::sync::Arc<crate::import_authorization::PrivilegeScope>,
     /// The clearance rule the store projects every change under.
@@ -117,24 +119,26 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     let store = ctx.store()?;
     match store.privilege_scope() {
         Ok(scope) => {
-            // Repository diagnostics report unreadable maps independently of changes.
-            let rewrites = store
-                .load_repository_events()
-                .and_then(|events| {
-                    crate::rewrite::RewriteMap::from_permitted_events(events.iter(), |event| {
-                        scope.permits(
-                            &event.event_id,
-                            &event.repository_id,
-                            crate::import_authorization::Role::Rewrite,
-                        )
-                    })
-                })
-                .unwrap_or_default();
+            // Repository diagnostics report unreadable events and maps
+            // independently of changes.
+            let repository_events = store.load_repository_events().unwrap_or_default();
+            let rewrites = crate::rewrite::RewriteMap::from_permitted_events(
+                repository_events.iter(),
+                |event| {
+                    scope.permits(
+                        &event.event_id,
+                        &event.repository_id,
+                        crate::import_authorization::Role::Rewrite,
+                    )
+                },
+            )
+            .unwrap_or_default();
             inspect_changes(
                 ChangeInspection {
                     cwd: &ctx.cwd,
                     local_repository_id: &local_repository_id,
                     rewrites,
+                    repository_events,
                     scope,
                     review_clearance: store.review_clearance,
                 },
@@ -574,7 +578,10 @@ fn inspect_change(
     }
     // Recorded revisions remain unresolved for dangling-object diagnostics;
     // admitted rewrites prove only the falsification's failure identity.
-    let mut state = match state::reduce_with_rewrites(&events, &inspection.rewrites) {
+    // A landed member reads as the landing closed it; the raw events stay
+    // what the remaining checks inspect.
+    let joined = crate::landing::joined(&events, &inspection.repository_events);
+    let mut state = match state::reduce_with_rewrites(&joined, &inspection.rewrites) {
         Ok(state) => state,
         Err(error) => {
             problems.push(Finding {
@@ -585,8 +592,8 @@ fn inspect_change(
         }
     };
     state.review_clearance = inspection.review_clearance;
-    state.apply_privilege_scope(std::sync::Arc::clone(&inspection.scope), &events);
-    crate::replica::localize_change(inspection.local_repository_id, &events, &mut state);
+    state.apply_privilege_scope(std::sync::Arc::clone(&inspection.scope), &joined);
+    crate::replica::localize_change(inspection.local_repository_id, &joined, &mut state);
     for reference in &state.set_aside {
         advice.push(Finding {
             code: "set-aside-reference",

@@ -1961,3 +1961,32 @@ fn accept_refuses_a_pending_rewrite_that_only_added_role_entries() {
         "a refused recovery moves no ref"
     );
 }
+
+/// Claim: accept's preflight reads a delivered change closed by a landing as
+/// integrated, and refuses to prepare it again. Rejects a preflight that
+/// reduces the change's own events alone, where the landed change reads
+/// open and the retry is prepared as if it had never shipped.
+#[test]
+fn accept_delivery_preflight_refuses_a_change_its_landing_integrated() {
+    let d = Delivery::new();
+    d.local_approval();
+    d.gates("true");
+    d.result(0);
+    let landed = d
+        .receiver
+        .arc(&d.receiver.root)
+        .env("ARC_ROLE", "lead")
+        .args(["land", &d.change])
+        .output()
+        .unwrap();
+    assert!(
+        landed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&landed.stderr)
+    );
+    let retried = d.command().arg("--dry-run").output().unwrap();
+    let transcript = String::from_utf8_lossy(&retried.stdout).into_owned()
+        + &String::from_utf8_lossy(&retried.stderr);
+    assert!(!retried.status.success(), "{transcript}");
+    assert!(transcript.contains("is integrated"), "{transcript}");
+}
