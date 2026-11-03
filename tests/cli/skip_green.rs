@@ -177,7 +177,7 @@ fn verification_run_records_manifest_results_and_reused_evidence() {
     let (_id, worktree, head) = change_with_patchset(&repo, "run-identity");
 
     repo.arc(&worktree)
-        .args(["verify", "run-identity", "--all"])
+        .args(["verify", "run-identity", "--all", "--rerun"])
         .assert()
         .success();
     repo.arc(&worktree)
@@ -349,15 +349,19 @@ fn skip_green_reruns_when_the_tested_tree_cannot_be_retained() {
     assert!(!rerun.contains("build: skipped"), "{rerun}");
 }
 
+/// Claim: `--rerun` names a declared gate arc runs itself. Rejects accepting
+/// it beside a check that has no pass to reuse, where it would mean nothing.
 #[test]
-fn skip_green_requires_all() {
+fn rerun_refuses_checks_that_have_nothing_to_reuse() {
     let repo = repo_with_trivial_gates();
     change_with_patchset(&repo, "feat-x");
     repo.arc(&repo.root)
-        .args(["verify", "feat-x", "--gate", "build", "--skip-green"])
+        .args(["verify", "feat-x", "--command", "true", "--rerun"])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("--skip-green requires --all"));
+        .stderr(predicates::str::contains(
+            "--rerun forces a declared gate to run",
+        ));
 }
 
 #[test]

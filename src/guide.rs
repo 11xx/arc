@@ -799,9 +799,10 @@ RUN A CHANGE
                                      clean `arc rebase` keeps the replayed
                                      patchset's recorded contributor
                                      coordinates.
-    --verify [--gate <name>...]      Run required gates, reusing the newest
-                                     green evidence at the same tree. Selected
-                                     --gate names rerun explicitly and must be unique and declared;
+    --verify [--gate <name>...]      Run required gates, or the named ones,
+                                     reusing the newest green evidence at the
+                                     same tree; --rerun runs them anyway.
+                                     Names must be unique and declared;
                                      invalid names refuse before any write.
     --contributors <a,b> | --solo    Declare who wrote it; required while
                                      another actor holds a live claim.
@@ -817,16 +818,21 @@ RUN A CHANGE
                                      A textual conflict refuses before any
                                      gate runs or evidence is recorded;
                                      rebase first.
-    --skip-green                    Reuse passing evidence with --all at the
-                                     head's tree, or --against at the merged
-                                     tree, whichever commit it ran on.
-                                     Only the newest evidence readiness
-                                     counts there is a candidate: a gate
-                                     reruns when it failed or carries
-                                     neither tree nor tested_tree. The
-                                     reuse records its tree. Replays of
-                                     reuse events without a tree require
-                                     matching revisions.
+    --rerun                          Run declared gates even where a pass
+                                     would be reused. Without it, --all,
+                                     --gate and --against reuse passing
+                                     evidence at the head's tree, or at the
+                                     merged tree, whichever commit it ran
+                                     on, under the same declaration and
+                                     environment. Only the newest evidence
+                                     readiness counts there is a candidate:
+                                     a gate reruns when it failed, was not
+                                     admitted, or carries neither tree nor
+                                     tested_tree, and when its probe yields
+                                     no identity. The reuse records its
+                                     tree. Replays of reuse events without
+                                     a tree require matching revisions.
+                                     `--skip-green` is accepted and ignored.
     --attest --environment <id>      Record a run arc did not perform, naming
                                      the environment it applies to.
     --attest --after-integration     Retain a check run on an integrated
@@ -1015,6 +1021,15 @@ RUN A CHANGE
   A change whose worktree is gone has nowhere to gate: give it one with `git
   worktree add`, or record evidence arc did not run with `verify --attest`.
 
+  A pass already recorded for the content answers again instead of running
+  again: `verify`, `snapshot --verify`, `done`, `rebase --verify` and an
+  integration queue record `verification-reused` for each declared gate whose
+  newest evidence there passed under the same declaration and environment,
+  and run the rest; `--rerun` on `verify` and `snapshot` runs them anyway.
+  Acceptance runs each local gate itself, and `arc publication` reuses only
+  with its own `--skip-green`. What a pass answers for is in `arc guide
+  rules-evidence`.
+
   A gate or environment probe runs in its own process group, which a
   terminal's interrupt does not reach. When SIGINT, SIGTERM or SIGHUP reaches
   arc while one runs, arc kills that group, records no result from the run,
@@ -1027,9 +1042,9 @@ RUN A CHANGE
   evidence of nothing, neither a pass nor a failure. A timeout outranks it, so
   a command that exits 75 after overrunning its timeout timed out. The gate is
   not green; `status`, `check` and `show` say it did not run and should be
-  rerun, `--skip-green` reruns it, acceptance refuses it as unobserved, and a
-  publication guard that ran no failing gate records `not-admitted` and exits
-  1. A project whose commands never exit 75 sees nothing change.
+  rerun, `verify` reruns it rather than reuse an older pass, acceptance
+  refuses it as unobserved, and a publication guard that ran no failing gate
+  records `not-admitted` and exits 1. A project whose commands never exit 75 sees nothing change.
 
   A gate whose declaration names `bypass` may be skipped on a judgement:
   `arc verify <change> --gate <name> --bypass <reason>` records
@@ -1041,7 +1056,7 @@ RUN A CHANGE
   requirement at that head alone, while its declaration still names `bypass`;
   a new head, even one holding the same tree, or a merged tree, needs a run
   or a new bypass. `status`, `check`, `show`, `explain` and their JSON name it
-  `bypassed` with its reason, never `pass`. `--skip-green` never reuses it, no
+  `bypassed` with its reason, never `pass`. `verify` never reuses it, no
   publication guard reads it, it discharges no review debt, and importing one
   takes the waiver capability.
 
@@ -3425,11 +3440,12 @@ RULES THAT CHANGE WHAT YOU DO
     nothing new: a rebase that moves the base without touching the diff lands
     on the tree that was evaluated, and the evidence carries over to it. The
     gate line reads `inherited from <revision>` wherever the run that answered
-    was against another commit holding that tree, and `verify --all
-    --skip-green` reuses that run. Reuse claims content alone: a gate whose
-    command reads commit messages or history keeps a pass across a rewrite
-    that changed only those, such as an appended role entry, and is not run
-    again by arc. A single `integrate` runs no
+    was against another commit holding that tree, and `verify`, `snapshot
+    --verify`, `done` and an integration queue reuse that run instead of
+    repeating it, recording `verification-reused`, unless `--rerun` is
+    given. Reuse claims content alone: a gate whose command reads commit
+    messages or history keeps a pass across a rewrite that changed only
+    those, such as an appended role entry, and is not run again by arc. A single `integrate` runs no
     gate; it checks that the merge it made carries the tree that was
     evaluated, and undoes it otherwise. A queue runs the ones with no answer
     at that tree, because it moves the target itself and every member behind

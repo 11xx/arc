@@ -1792,7 +1792,7 @@ fn evidence_from_a_dirty_worktree_is_recorded_and_not_green() {
     // Dirty: recorded, displayed, and not green.
     fs::write(wt.join("work.rs"), "staged but uncommitted\n").unwrap();
     repo.arc(&wt)
-        .args(["verify", "dirty", "--gate", "unit"])
+        .args(["verify", "dirty", "--gate", "unit", "--rerun"])
         .assert()
         .success();
     let status = json_stdout(repo.arc(&wt).args(["status", "dirty", "--json"]));
@@ -1936,7 +1936,7 @@ fn a_waiver_cannot_green_evidence_whose_cleanliness_is_unknown() {
         .assert()
         .success();
     repo.arc(&wt)
-        .args(["verify", "unknown-prov", "--all", "--parallel"])
+        .args(["verify", "unknown-prov", "--all", "--parallel", "--rerun"])
         .assert()
         .success();
     let status = json_stdout(repo.arc(&wt).args(["status", "unknown-prov", "--json"]));
@@ -3292,7 +3292,7 @@ fn a_rerun_at_the_same_head_does_not_retract_discrimination() {
         last_gate_verification_event_id(&repo, "rerun", "fixable", "pass");
 
     repo.arc(&repo.root)
-        .args(["verify", "rerun", "--all"])
+        .args(["verify", "rerun", "--all", "--rerun"])
         .assert()
         .success();
     let counted = last_gate_verification_event_id(&repo, "rerun", "fixable", "pass");
@@ -4349,15 +4349,19 @@ fn snapshot_verify_reuses_green_tree_evidence_and_reruns_failed_gates() {
     );
     assert!(reused.contains("skipped"), "{reused}");
     assert_eq!(fs::read_to_string(&runs).unwrap().lines().count(), 1);
-    // An explicit gate requests execution even when its evidence is green.
+    // A named gate is reused as well, and --rerun runs it anyway.
     stdout(
         repo.arc(&repo.root)
             .args(["snapshot", &id, "--verify", "--gate", "unit", "--solo"]),
     );
+    assert_eq!(fs::read_to_string(&runs).unwrap().lines().count(), 1);
+    stdout(repo.arc(&repo.root).args([
+        "snapshot", &id, "--verify", "--gate", "unit", "--rerun", "--solo",
+    ]));
     assert_eq!(fs::read_to_string(&runs).unwrap().lines().count(), 2);
     fs::write(&failure, "fail").unwrap();
     repo.arc(&repo.root)
-        .args(["verify", &id, "--gate", "unit"])
+        .args(["verify", &id, "--gate", "unit", "--rerun"])
         .assert()
         .code(1);
     fs::remove_file(&failure).unwrap();

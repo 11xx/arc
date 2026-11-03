@@ -3922,7 +3922,10 @@ fn ready_to_send_reuse_requires_destination_and_authorization() {
         repo.arc(&repo.root)
             .args(["integrate", &id, "--into", "receiver"]),
     );
-    stdout(repo.arc(&wt).args(["verify", &id, "--against", "receiver"]));
+    stdout(
+        repo.arc(&wt)
+            .args(["verify", &id, "--against", "receiver", "--rerun"]),
+    );
     stdout(
         repo.arc(&repo.root)
             .args(["integrate", &id, "--into", "receiver"]),

@@ -64,7 +64,8 @@ pub struct VerifyArgs {
     pub event: Option<GateEvent>,
     pub all: bool,
     pub parallel: bool,
-    pub skip_green: bool,
+    /// Run declared gates even where a pass at this tree would answer.
+    pub rerun: bool,
     pub gate: Option<String>,
     pub command: Option<String>,
     pub probe: Option<String>,
@@ -141,7 +142,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         event,
         all,
         parallel,
-        skip_green,
+        rerun,
         gate,
         command,
         probe,
@@ -165,7 +166,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         let flagged = [
             (all, "--all"),
             (parallel, "--parallel"),
-            (skip_green, "--skip-green"),
+            (rerun, "--rerun"),
             (event.is_some(), "--event"),
             (command.is_some(), "--command"),
             (probe.is_some(), "--probe"),
@@ -290,12 +291,14 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
              sequentially to waive."
         );
     }
-    // Reuse is a whole-gate-set question: it needs a set to choose within.
-    // `--all` supplies one at the change's head, `--against` at the merged
-    // tree; a single named check has nothing to select from.
-    if skip_green && !all && against.is_none() {
-        bail!("--skip-green requires --all or --against");
+    // Only a declared gate arc runs itself has a pass to reuse.
+    if rerun && (attest || command.is_some() || probe.is_some()) {
+        bail!(
+            "--rerun forces a declared gate to run where a pass would be reused, so it cannot \
+             be combined with --attest, --command, or --probe"
+        );
     }
+    let reuse = !rerun;
     if probe.is_some() && (gate.is_some() || command.is_some()) {
         bail!("--probe is mutually exclusive with --gate and --command");
     }
@@ -548,9 +551,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     // Evidence for a merge is counted at its tree rather than at the change's
     // head, so the head check below is not the question this path answers.
     if let Some(target) = against {
-        return verify_against(
-            ctx, &store, &change_id, &st, &target, note, skip_green, event,
-        );
+        return verify_against(ctx, &store, &change_id, &st, &target, note, reuse, event);
     }
     // The remaining paths record evidence for the selected event at the
     // change's head.
@@ -574,7 +575,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             VerificationRunMode::Sequential
         };
         let run_id = start_verification_run_for_event(
-            run_ctx, &store, &change_id, &head, mode, skip_green, &required, event,
+            run_ctx, &store, &change_id, &head, mode, reuse, &required, event,
         )?;
         // Applicability is a property of this checkout, so every declared
         // probe is read before reuse is decided. A probe is run once per
@@ -583,59 +584,23 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             &run_ctx.cwd,
             required.iter().map(|(name, gate)| (name.as_str(), *gate)),
         )?;
-        let legacy_trees = status::legacy_evidence_trees(&st, &run_ctx.cwd);
-        let resolve_tree = |revision: &str| legacy_trees.get(revision).cloned();
-        let mut reused = Vec::new();
-        let mut delta_reuses = Vec::new();
-        let declared_names = required
-            .iter()
-            .map(|(name, _)| (*name).clone())
-            .collect::<Vec<_>>();
-        let mut to_run = Vec::new();
-        for (name, gate) in required {
-            let reusable = skip_green
-                .then(|| {
-                    reusable_evidence_for_event(
-                        &st,
-                        name,
-                        gate,
-                        &tree,
-                        &resolve_tree,
-                        declared_environment(&environments, gate),
-                        event,
-                    )
-                })
-                .flatten();
-            if let Some(evidence) = reusable {
-                println!(
-                    "gate {name}: skipped (green at head; declared by {})",
-                    gate.declared_by.join(", ")
-                );
-                reused.push((name.clone(), evidence.event_id.clone()));
-            } else if let Some((source, delta)) = skip_green
-                .then(|| {
-                    incremental_evidence(
-                        run_ctx,
-                        &st,
-                        name,
-                        gate,
-                        &tree,
-                        &declared_names,
-                        declared_environment(&environments, gate),
-                        event,
-                    )
-                })
-                .flatten()
-            {
-                println!(
-                    "gate {name}: skipped (project selector proves unchanged scope from {})",
-                    delta.source_tree
-                );
-                delta_reuses.push((name.clone(), source, delta));
-            } else {
-                to_run.push((name, gate));
-            }
-        }
+        let Partition {
+            mut reused,
+            delta_reuses,
+            to_run,
+        } = partition(
+            run_ctx,
+            &st,
+            required,
+            Answering {
+                tree: &tree,
+                label: "green at head",
+                against_target: None,
+            },
+            &environments,
+            event,
+            reuse,
+        );
         append_reuses(ctx, &store, &change_id, &run_id, &head, &tree, &reused)?;
         append_delta_reuses(
             ctx,
@@ -715,6 +680,22 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         }
         (false, None) => None,
     };
+    // A falsification is a claim about the run it names, so it always runs.
+    if let Some(name) = gate
+        .as_deref()
+        .filter(|_| reuse && !attest && falsified_by.is_none())
+    {
+        if reuse_named_gate(
+            run_ctx,
+            &store,
+            &change_id,
+            &st,
+            name,
+            environment_identity.as_deref(),
+        )? {
+            return Ok(0);
+        }
+    }
     let falsification =
         resolve_falsification(&store, &change_id, gate.as_deref(), &cmd, falsified_by)?;
     record_verification(
@@ -737,6 +718,61 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             against_target: None,
         },
     )
+}
+
+/// Record reuse of a pass that already answers for one named gate at the
+/// head of `run_ctx`, and say whether there was one.
+///
+/// The reuse is recorded as a run of that one gate, the way a whole-set run
+/// records each gate it does not run.
+fn reuse_named_gate(
+    run_ctx: &Ctx,
+    store: &Store,
+    change_id: &str,
+    st: &ChangeState,
+    name: &str,
+    environment: Option<&str>,
+) -> Result<bool> {
+    let declarations = run_ctx.declarations(st)?.gates;
+    let Some((name, gate)) = declarations.gates.get_key_value(name) else {
+        return Ok(false);
+    };
+    let head = gitio::head(&run_ctx.cwd)?;
+    let tree = gitio::commit_tree(&run_ctx.cwd, &head)?;
+    let legacy_trees = status::legacy_evidence_trees(st, &run_ctx.cwd);
+    let resolve_tree = |revision: &str| legacy_trees.get(revision).cloned();
+    let label = "green at head";
+    let Some(evidence) = reusable_evidence_for_event(
+        st,
+        name,
+        gate,
+        &Answering {
+            tree: &tree,
+            label,
+            against_target: None,
+        },
+        &resolve_tree,
+        environment,
+        GateEvent::Integration,
+    ) else {
+        return Ok(false);
+    };
+    let reused = [(name.clone(), evidence.event_id.clone())];
+    let run_id = start_verification_run(
+        run_ctx,
+        store,
+        change_id,
+        &head,
+        VerificationRunMode::Sequential,
+        true,
+        &[(name, gate)],
+    )?;
+    println!(
+        "gate {name}: skipped ({label}; declared by {})",
+        gate.declared_by.join(", ")
+    );
+    append_reuses(run_ctx, store, change_id, &run_id, &head, &tree, &reused)?;
+    Ok(true)
 }
 
 /// Record that `gate` was judged not to need its run at the change's head.
@@ -867,8 +903,8 @@ impl Drop for ScratchWorktree {
 /// with a moved target is a different merge and this evidence is about the
 /// earlier one.
 ///
-/// `skip_green` reuses the evidence already recorded at that merged tree
-/// instead of rerunning the gate that produced it.
+/// `reuse` answers a gate from the evidence already recorded at that merged
+/// tree instead of rerunning the gate that produced it.
 #[allow(clippy::too_many_arguments)]
 fn verify_against(
     ctx: &Ctx,
@@ -877,7 +913,7 @@ fn verify_against(
     st: &ChangeState,
     target: &str,
     note: Option<String>,
-    skip_green: bool,
+    reuse: bool,
     event: GateEvent,
 ) -> Result<i32> {
     let mut selected = st.clone();
@@ -925,36 +961,29 @@ fn verify_against(
         change_id,
         &synthesized,
         VerificationRunMode::Sequential,
-        skip_green,
+        reuse,
         &required,
         event,
     )?;
-    let legacy_trees = status::legacy_evidence_trees(st, &ctx.cwd);
-    let resolve_tree = |revision: &str| legacy_trees.get(revision).cloned();
+    let answering = Answering {
+        tree: &merged_tree,
+        label: "green at the merged tree",
+        against_target: Some(&target_head),
+    };
     // A checkout exists only to run a command or a declared probe in, and a
     // probe reads the merged content: applicability is a property of the tree
     // that would ship. A declared probe therefore needs the checkout before
     // reuse can be decided; without one, a gate answered at this tree already
     // leaves nothing to run.
-    let cheap_reusable = |name: &String, gate: &gates::Gate| {
-        skip_green
-            .then(|| {
-                reusable_evidence_for_event(
-                    st,
-                    name,
-                    gate,
-                    &merged_tree,
-                    &resolve_tree,
-                    None,
-                    event,
-                )
-            })
-            .flatten()
-    };
     let any_probe = required.iter().any(|(_, gate)| gate.environment.is_some());
-    let answered_already = required
-        .iter()
-        .all(|(name, gate)| cheap_reusable(name, gate).is_some());
+    let answered_already = reuse && {
+        let legacy_trees = status::legacy_evidence_trees(st, &ctx.cwd);
+        let resolve_tree = |revision: &str| legacy_trees.get(revision).cloned();
+        required.iter().all(|(name, gate)| {
+            reusable_evidence_for_event(st, name, gate, &answering, &resolve_tree, None, event)
+                .is_some()
+        })
+    };
     let mut _scratch = None;
     let mut scratch_ctx = None;
     if any_probe || !answered_already {
@@ -969,58 +998,19 @@ fn verify_against(
         &probe_ctx.cwd,
         required.iter().map(|(name, gate)| (name.as_str(), *gate)),
     )?;
-    let mut reused = Vec::new();
-    let mut delta_reuses = Vec::new();
-    let declared_names = required
-        .iter()
-        .map(|(name, _)| (*name).clone())
-        .collect::<Vec<_>>();
-    let mut to_run = Vec::new();
-    for (name, gate) in required {
-        let reusable = skip_green
-            .then(|| {
-                reusable_evidence_for_event(
-                    st,
-                    name,
-                    gate,
-                    &merged_tree,
-                    &resolve_tree,
-                    declared_environment(&environments, gate),
-                    event,
-                )
-            })
-            .flatten();
-        if let Some(evidence) = reusable {
-            println!(
-                "gate {name}: skipped (green at the merged tree; declared by {})",
-                gate.declared_by.join(", ")
-            );
-            reused.push((name.clone(), evidence.event_id.clone()));
-        } else if let Some((source, mut delta)) = skip_green
-            .then(|| {
-                incremental_evidence(
-                    probe_ctx,
-                    st,
-                    name,
-                    gate,
-                    &merged_tree,
-                    &declared_names,
-                    declared_environment(&environments, gate),
-                    event,
-                )
-            })
-            .flatten()
-        {
-            delta.against_target = Some(target_head.clone());
-            println!(
-                "gate {name}: skipped (project selector proves unchanged scope from {})",
-                delta.source_tree
-            );
-            delta_reuses.push((name.clone(), source, delta));
-        } else {
-            to_run.push((name, gate));
-        }
-    }
+    let Partition {
+        mut reused,
+        delta_reuses,
+        to_run,
+    } = partition(
+        probe_ctx,
+        st,
+        required,
+        answering,
+        &environments,
+        event,
+        reuse,
+    );
     append_reuses(
         ctx,
         store,
@@ -1242,7 +1232,7 @@ fn start_verification_run(
     change_id: &str,
     revision: &str,
     mode: VerificationRunMode,
-    skip_green: bool,
+    reuse: bool,
     gates: &[(&String, &gates::Gate)],
 ) -> Result<String> {
     start_verification_run_for_event(
@@ -1251,7 +1241,7 @@ fn start_verification_run(
         change_id,
         revision,
         mode,
-        skip_green,
+        reuse,
         gates,
         GateEvent::Integration,
     )
@@ -1264,7 +1254,7 @@ fn start_verification_run_for_event(
     change_id: &str,
     revision: &str,
     mode: VerificationRunMode,
-    skip_green: bool,
+    reuse: bool,
     gates: &[(&String, &gates::Gate)],
     event: GateEvent,
 ) -> Result<String> {
@@ -1274,7 +1264,7 @@ fn start_verification_run_for_event(
         event,
         revision: revision.to_owned(),
         mode,
-        skip_green,
+        skip_green: reuse,
         gates: gates
             .iter()
             .map(|(name, gate)| VerificationRunGate {
@@ -1290,12 +1280,101 @@ fn start_verification_run_for_event(
     Ok(event.event_id.clone())
 }
 
-/// The passing evidence `--skip-green` reuses for `name` at `tree`, if any.
+/// The content a run answers for, and what it says when a gate is reused.
+struct Answering<'a> {
+    tree: &'a str,
+    label: &'a str,
+    /// The target head a synthesized merge of `head` was computed against.
+    against_target: Option<&'a str>,
+}
+
+/// Which of a run's gates are answered by evidence already recorded, and
+/// which are left to run.
+struct Partition<'a> {
+    reused: Vec<(String, String)>,
+    delta_reuses: Vec<(String, String, DeltaSelection)>,
+    to_run: Vec<(&'a String, &'a gates::Gate)>,
+}
+
+/// Answer each gate from a pass already recorded for this content where one
+/// exists, unless `reuse` is off, and print the gates that will not run.
+///
+/// `ctx` is the checkout holding that content, which incremental reuse asks a
+/// project selector about.
+fn partition<'a>(
+    ctx: &Ctx,
+    st: &ChangeState,
+    gates: Vec<(&'a String, &'a gates::Gate)>,
+    answering: Answering<'_>,
+    environments: &DeclaredEnvironments,
+    event: GateEvent,
+    reuse: bool,
+) -> Partition<'a> {
+    let mut partition = Partition {
+        reused: Vec::new(),
+        delta_reuses: Vec::new(),
+        to_run: Vec::new(),
+    };
+    if !reuse {
+        partition.to_run = gates;
+        return partition;
+    }
+    let legacy_trees = status::legacy_evidence_trees(st, &ctx.cwd);
+    let resolve_tree = |revision: &str| legacy_trees.get(revision).cloned();
+    let declared_names = gates
+        .iter()
+        .map(|(name, _)| (*name).clone())
+        .collect::<Vec<_>>();
+    for (name, gate) in gates {
+        let environment = declared_environment(environments, gate);
+        if let Some(evidence) = reusable_evidence_for_event(
+            st,
+            name,
+            gate,
+            &answering,
+            &resolve_tree,
+            environment,
+            event,
+        ) {
+            println!(
+                "gate {name}: skipped ({}; declared by {})",
+                answering.label,
+                gate.declared_by.join(", ")
+            );
+            partition
+                .reused
+                .push((name.clone(), evidence.event_id.clone()));
+        } else if let Some((source, mut delta)) = incremental_evidence(
+            ctx,
+            st,
+            name,
+            gate,
+            answering.tree,
+            &declared_names,
+            environment,
+            event,
+        ) {
+            delta.against_target = answering.against_target.map(str::to_owned);
+            println!(
+                "gate {name}: skipped (project selector proves unchanged scope from {})",
+                delta.source_tree
+            );
+            partition.delta_reuses.push((name.clone(), source, delta));
+        } else {
+            partition.to_run.push((name, gate));
+        }
+    }
+    partition
+}
+
+/// The passing evidence a run reuses for `name` at the content it answers
+/// for, if any.
 ///
 /// Reuse is keyed by tree exactly as readiness is, so a gate a run skips is a
 /// gate status already counts as green, whichever commit the run that answered
-/// was against. Reuse is reuse of a *run*: the recorded command must be the
-/// one declared now, and evidence from another environment ran, but not here.
+/// was against. Reuse is
+/// reuse of a *run*: the recorded command must be the one declared now, and
+/// evidence from another environment ran, but not here.
 /// Only the newest evidence that applies is a candidate, because it is the
 /// one readiness counts; an older pass never stands in for it. The reuse
 /// event names the tree, and replay checks it against the content key the
@@ -1306,11 +1385,12 @@ fn reusable_evidence_for_event<'a>(
     st: &'a ChangeState,
     name: &str,
     gate: &gates::Gate,
-    tree: &str,
+    answering: &Answering<'_>,
     resolve_tree: &dyn Fn(&str) -> Option<String>,
     environment: Option<&str>,
     event: GateEvent,
 ) -> Option<&'a state::VerificationEntry> {
+    let tree = answering.tree;
     st.gate_evidence_at_tree_matching(name, tree, resolve_tree, |evidence| {
         state::verification_event(st, evidence) == event
             && status::matches_declaration(evidence, gate)
@@ -1447,13 +1527,14 @@ pub fn snapshot_with_verify(
     verify_requested: bool,
     gates: Vec<String>,
     all: bool,
+    rerun: bool,
     contributors: Option<Vec<String>>,
     solo: bool,
     journal_refs: Vec<String>,
     thread: Option<String>,
 ) -> Result<i32> {
-    if !verify_requested && (!gates.is_empty() || all) {
-        bail!("--gate and --all require --verify");
+    if !verify_requested && (!gates.is_empty() || all || rerun) {
+        bail!("--gate, --all and --rerun require --verify");
     }
     if all && !gates.is_empty() {
         bail!("--all cannot be combined with --gate");
@@ -1482,17 +1563,19 @@ pub fn snapshot_with_verify(
         journal_refs,
         thread,
     )?;
-    verify_recorded(ctx, reference, verify_requested, gates, all)
+    verify_recorded(ctx, reference, verify_requested, gates, all, rerun)
 }
 
 /// The verification `snapshot --verify` runs once the patchset is recorded:
-/// every required gate, or the named ones.
+/// every required gate, or the named ones, each answered by a pass already
+/// recorded for this tree unless `rerun` is set.
 fn verify_recorded(
     ctx: &Ctx,
     reference: &str,
     verify_requested: bool,
     gates: Vec<String>,
     all: bool,
+    rerun: bool,
 ) -> Result<i32> {
     if !verify_requested {
         return Ok(0);
@@ -1505,7 +1588,7 @@ fn verify_recorded(
                 event: None,
                 all: true,
                 parallel: false,
-                skip_green: true,
+                rerun,
                 gate: None,
                 command: None,
                 probe: None,
@@ -1547,13 +1630,14 @@ fn verify_recorded(
             })
             .collect::<Result<Vec<_>>>()?;
         let revision = gitio::head(&run_ctx.cwd)?;
+        let tree = gitio::commit_tree(&run_ctx.cwd, &revision)?;
         let run_id = start_verification_run(
             run_ctx,
             &store,
             &change_id,
             &revision,
             VerificationRunMode::Sequential,
-            false,
+            !rerun,
             &selected,
         )?;
         let environments = gate_environments(
@@ -1561,8 +1645,35 @@ fn verify_recorded(
             selected.iter().map(|(name, gate)| (name.as_str(), *gate)),
         )?;
         let total = selected.len();
-        let mut passed = 0;
-        for (name, gate) in selected {
+        let Partition {
+            reused,
+            delta_reuses,
+            to_run,
+        } = partition(
+            run_ctx,
+            &st,
+            selected,
+            Answering {
+                tree: &tree,
+                label: "green at head",
+                against_target: None,
+            },
+            &environments,
+            GateEvent::Integration,
+            !rerun,
+        );
+        append_reuses(ctx, &store, &change_id, &run_id, &revision, &tree, &reused)?;
+        append_delta_reuses(
+            ctx,
+            &store,
+            &change_id,
+            &run_id,
+            &revision,
+            &tree,
+            &delta_reuses,
+        )?;
+        let mut passed = reused.len() + delta_reuses.len();
+        for (name, gate) in to_run {
             let code = record_verification(
                 run_ctx,
                 &store,
@@ -1601,7 +1712,7 @@ fn verify_recorded(
                 event: None,
                 all: false,
                 parallel: false,
-                skip_green: false,
+                rerun,
                 gate: Some(gate),
                 command: None,
                 probe: None,
@@ -1678,7 +1789,7 @@ pub fn done(
                 event: None,
                 all: true,
                 parallel: false,
-                skip_green: false,
+                rerun: false,
                 gate: None,
                 command: None,
                 probe: None,
@@ -1843,7 +1954,7 @@ pub fn rebase(
             )?;
             // Verification takes the lock for each run it records.
             drop(transition);
-            let code = verify_recorded(ctx, reference, verify_requested, Vec::new(), false)?;
+            let code = verify_recorded(ctx, reference, verify_requested, Vec::new(), false, false)?;
             // The gates the replayed head owes are advice about a rebase that
             // already stands, so a failure to evaluate them is a warning and
             // never the rebase's result.

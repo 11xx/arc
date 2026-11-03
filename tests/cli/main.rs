@@ -51,6 +51,7 @@ mod forge_view;
 mod fork;
 mod gate_declarations;
 mod gate_environment;
+mod gate_reuse;
 mod gate_tiers;
 mod guide_topics;
 mod hooks;

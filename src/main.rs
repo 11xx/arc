@@ -1648,8 +1648,8 @@ enum Cmd {
         /// Brief version this patchset implements (defaults to latest)
         #[arg(long)]
         brief_version: Option<usize>,
-        /// Run verification after recording the patchset. Without --gate,
-        /// reuse the newest green evidence at the same tree and rerun the rest
+        /// Run verification after recording the patchset, reusing the newest
+        /// green evidence at the same tree and running the rest
         #[arg(long)]
         verify: bool,
         /// Gate name from .arc/gates.toml (repeatable with --verify). Names must
@@ -1659,6 +1659,9 @@ enum Cmd {
         /// Run every gate declared for the change profile
         #[arg(long)]
         all: bool,
+        /// Run the selected gates even where a pass would be reused (with --verify)
+        #[arg(long)]
+        rerun: bool,
         #[command(flatten)]
         attribution: AttributionOpts,
         /// Amend one patchset's contributors before any verdict exists
@@ -1671,6 +1674,7 @@ enum Cmd {
                 "verify",
                 "gate",
                 "all",
+                "rerun",
                 "journal_ref",
                 "thread"
             ]
@@ -1965,19 +1969,27 @@ enum Cmd {
         /// Run all declared gates concurrently and append evidence in name order
         #[arg(long)]
         parallel: bool,
-        /// Record reuse of passing evidence instead of rerunning the gate that
-        /// produced it: with --all, evidence green at the current head's tree;
-        /// with --against, evidence green at the merged tree. Evidence counts
-        /// for its tree whichever commit it ran on, as it does for readiness,
-        /// and only the newest evidence readiness counts there is a candidate.
-        /// Reuse records that tree and requires that evidence to carry the same
-        /// content key; a gate whose newest evidence failed or has neither
-        /// tree nor tested_tree is rerun
+        /// Run each declared gate even where a pass would be reused.
+        ///
+        /// By default a declared gate run by --all, --gate or --against is not
+        /// run again where a pass already answers for the content: at the
+        /// head's tree, or with --against at the merged tree, under the same
+        /// declaration and environment. Evidence counts for its tree whichever
+        /// commit it ran on, as it does for readiness, and only the newest
+        /// evidence readiness counts there is a candidate. The
+        /// reuse is recorded as `verification-reused` naming that tree and
+        /// requires that evidence to carry the same content key. A gate reruns
+        /// when its newest evidence failed, was not admitted, was bypassed, or
+        /// has neither tree nor tested_tree, and when its environment probe
+        /// yields no identity. --falsified-by always runs.
         /// Integration may reuse a clean passing source across a delta when
         /// a complete project selector excludes the gate. Its provenance is
         /// recorded; unavailable or uncertain selection runs the gate.
         /// Publication checks the complete tier on changed trees.
-        #[arg(long = "skip-green")]
+        #[arg(long)]
+        rerun: bool,
+        /// Accepted and ignored: reuse is the default. See --rerun
+        #[arg(long = "skip-green", conflicts_with = "rerun")]
         skip_green: bool,
         /// Select integration or publication gates for --all or --against
         #[arg(long, value_enum)]
@@ -2105,8 +2117,8 @@ enum Cmd {
         /// scratch checkout is removed whatever the gates do, and is not
         /// created at all when no gate is left to run. The evidence is spent
         /// as soon as the target moves again, because that is a different
-        /// merge. With --skip-green, a gate already green at that merged tree
-        /// records reuse rather than running a second time.
+        /// merge. A gate already green at that merged tree records reuse
+        /// rather than running a second time, unless --rerun is given.
         ///
         /// Gate declarations come from this destination's local branch ref,
         /// including when it differs from the change's recorded target. A
@@ -2125,7 +2137,7 @@ enum Cmd {
         /// nothing ran. It meets that gate's integration requirement at this
         /// head alone, while the declaration still names `bypass`; a new head
         /// needs a run or a new bypass. It is shown as `bypassed`, never as a
-        /// pass: `--skip-green` never reuses it, it never satisfies a
+        /// pass: it is never reused, it never satisfies a
         /// publication gate, and it discharges no review debt. A failure
         /// recorded at this head is not overruled by one.
         #[arg(long, value_name = "REASON")]
@@ -6438,6 +6450,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             verify,
             gate,
             all,
+            rerun,
             attribution: AttributionOpts { contributors, solo },
             amend,
             links,
@@ -6455,6 +6468,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     verify,
                     gate,
                     all,
+                    rerun,
                     contributors,
                     solo,
                     links.journal_ref,
@@ -6633,7 +6647,8 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             change,
             all,
             parallel,
-            skip_green,
+            rerun,
+            skip_green: _,
             event,
             gate,
             command,
@@ -6661,7 +6676,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 commands::VerifyArgs {
                     all,
                     parallel,
-                    skip_green,
+                    rerun,
                     event,
                     gate,
                     command,

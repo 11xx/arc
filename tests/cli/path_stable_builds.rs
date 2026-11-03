@@ -237,13 +237,13 @@ fn stable_gate_and_probe_hold_exclusive_build_lease() {
         let args = if probe {
             vec!["status", "--json"]
         } else {
-            vec!["verify", "--all"]
+            vec!["verify", "--all", "--rerun"]
         };
         let mut child = spawn_arc_keeping_stderr(&repo, &slot, &args, "session-a");
         wait_for(&repo.home.join("ready"));
         assert_busy(&repo);
         repo.arc(&slot)
-            .args(["verify", "--all"])
+            .args(["verify", "--all", "--rerun"])
             .assert()
             .failure()
             .stderr(predicates::str::contains("path-stable build lease is busy"));
@@ -263,9 +263,14 @@ fn cleaning_build_outputs_does_not_release_the_active_lease() {
     begin(&repo, "compiler-clean", &slot);
     verify(&repo, &slot);
     fs::write(repo.home.join("block"), "yes").unwrap();
-    let mut child = spawn_arc_keeping_stderr(&repo, &slot, &["verify", "--all"], "session-a");
+    let mut child =
+        spawn_arc_keeping_stderr(&repo, &slot, &["verify", "--all", "--rerun"], "session-a");
     wait_for(&repo.home.join("ready"));
-    let competing = repo.arc(&slot).args(["verify", "--all"]).output().unwrap();
+    let competing = repo
+        .arc(&slot)
+        .args(["verify", "--all", "--rerun"])
+        .output()
+        .unwrap();
     let raced = repo.home.join("raced").exists();
     fs::write(repo.home.join("release"), "yes").unwrap();
     assert!(wait_for_exit(&mut child).success());
@@ -290,7 +295,7 @@ fn owned_gate_and_probe_keep_lease_after_arc_parent_dies() {
         let args = if probe {
             vec!["status", "--json"]
         } else {
-            vec!["verify", "--all"]
+            vec!["verify", "--all", "--rerun"]
         };
         let mut child = spawn_arc_keeping_stderr(&repo, &slot, &args, "session-a");
         wait_for(&repo.home.join("ready"));
@@ -298,7 +303,7 @@ fn owned_gate_and_probe_keep_lease_after_arc_parent_dies() {
         child.wait().unwrap();
         assert_busy(&repo);
         repo.arc(&slot)
-            .args(["verify", "--all"])
+            .args(["verify", "--all", "--rerun"])
             .assert()
             .failure()
             .stderr(predicates::str::contains("path-stable build lease is busy"));

@@ -801,7 +801,7 @@ fn verify_args() -> VerifyArgs {
         event: None,
         all: false,
         parallel: false,
-        skip_green: false,
+        rerun: false,
         gate: None,
         command: None,
         probe: None,
@@ -935,7 +935,7 @@ fn execute_acceptance(
     for (name, _) in gates.required_for(&plan.state.profile) {
         operations.push((
             format!("gate:{name}"),
-            command(["verify", &plan.state.change_id, "--gate", name]),
+            command(["verify", &plan.state.change_id, "--gate", name, "--rerun"]),
             plan.checkout.clone(),
         ));
     }
@@ -948,7 +948,6 @@ fn execute_acceptance(
                 &plan.state.change_id,
                 "--against",
                 &plan.state.target_branch,
-                "--skip-green",
             ]),
             plan.checkout.clone(),
         ));
@@ -1267,11 +1266,14 @@ fn execute_acceptance(
             result,
             &run,
             &format!("gate:{name}"),
-            command(["verify", &plan.state.change_id, "--gate", name]),
+            command(["verify", &plan.state.change_id, "--gate", name, "--rerun"]),
             || {
                 revalidate(&run, plan, &prepared)?;
+                // Acceptance runs each local gate itself, so a pass already
+                // recorded never stands in for it.
                 let mut verify = verify_args();
                 verify.gate = Some(name.clone());
+                verify.rerun = true;
                 let before = event_ids(&plan.store, Some(&plan.state.change_id))?;
                 let code = gatekeeping::verify(&run, &plan.state.change_id, verify)?;
                 check_execution(&plan.store, &plan.state.change_id, &before, name)?;
@@ -1293,7 +1295,6 @@ fn execute_acceptance(
                 &plan.state.change_id,
                 "--against",
                 &plan.state.target_branch,
-                "--skip-green",
             ]),
             || {
                 revalidate(&run, plan, &prepared)?;
@@ -1316,10 +1317,9 @@ fn execute_acceptance(
                 {
                     let mut verify = verify_args();
                     verify.against = Some(plan.state.target_branch.clone());
-                    verify.skip_green = true;
                     let code = gatekeeping::verify(&run, &plan.state.change_id, verify)?;
                     if code != 0 {
-                        return refuse(5, "required target-tree gates failed; inspect recorded evidence and rerun arc verify --against with --skip-green");
+                        return refuse(5, "required target-tree gates failed; inspect recorded evidence and rerun arc verify --against");
                     }
                 }
                 revalidate(&run, plan, &prepared)
