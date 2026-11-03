@@ -1526,7 +1526,9 @@ pub enum Payload {
         /// The tree of `revision`, equal to the integrated commit's tree when
         /// the receipt was recorded.
         tree: String,
-        /// The integrated commit whose content this receipt verifies.
+        /// The integrated commit whose content this receipt verifies, as the
+        /// change's integration recorded it. An earlier release's receipt
+        /// recorded after a rewrite names the commit a map carried it to.
         integrated_commit: String,
         result: VerifyResult,
         /// The timeout the gate declared when the receipt was recorded.

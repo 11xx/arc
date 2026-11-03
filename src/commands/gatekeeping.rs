@@ -5820,12 +5820,15 @@ fn verify_after_integration(
     if shipped_commit(&st)? != integrated_commit {
         bail!("change {change_id} changed while the receipt was prepared; run it again");
     }
+    // The receipt names the commit the integration recorded, which no
+    // withdrawal can strand; views follow it forward like every revision.
+    let recorded = state::reduce_with_rewrites(&store.load_events(change_id)?, &store.rewrites()?)?;
     let payload = Payload::PostIntegrationVerificationRecorded {
         gate: receipt.gate.clone(),
         command,
         revision: receipt.tested_revision.clone(),
         tree,
-        integrated_commit: integrated_commit.clone(),
+        integrated_commit: shipped_commit(&recorded)?,
         result: receipt.result,
         timeout_seconds,
         hostname: receipt.execution_host,

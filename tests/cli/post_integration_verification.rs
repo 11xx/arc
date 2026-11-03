@@ -437,9 +437,77 @@ fn reword_integrated(fixture: &Fixture) -> (String, String) {
     (successor, map)
 }
 
-/// Claim: a receipt recorded against the integrated commit's successor, whose
-/// rewrite map is later withdrawn, is set aside and reported, and the change
-/// stays readable; re-recording the map restores it.
+/// Make the newest receipt name `successor`, as receipts recorded after a
+/// rewrite by earlier arc releases do.
+fn name_the_successor_as_older_receipts_do(fixture: &Fixture, successor: &str) {
+    rewrite_event(
+        &fixture.repo,
+        &fixture.change_id,
+        "post-integration-verification-recorded",
+        |event| event["integrated_commit"] = serde_json::json!(successor),
+    );
+}
+
+/// The integrated commit the newest receipt stores in the ledger.
+fn stored_integrated_commit(fixture: &Fixture) -> String {
+    let mut paths = fs::read_dir(event_dir(&fixture.repo, &fixture.change_id))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths
+        .iter()
+        .rev()
+        .map(|path| serde_json::from_slice::<serde_json::Value>(&fs::read(path).unwrap()).unwrap())
+        .find(|event| event["event_type"] == "post-integration-verification-recorded")
+        .expect("a receipt event")["integrated_commit"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// Claim: a receipt recorded after a rewrite stores the integrated commit as
+/// the integration recorded it, reads as the successor while the map is
+/// active, and stays counted when the map is withdrawn.
+/// Rejects: storing the projected successor, which the map's withdrawal
+/// strands and sets aside although the receipt verified what shipped.
+#[test]
+fn a_receipt_recorded_after_a_rewrite_survives_the_maps_withdrawal() {
+    let fixture = integrated_owing_review();
+    let repo = &fixture.repo;
+    let (successor, map) = reword_integrated(&fixture);
+    let recorded = stdout(&mut receipt(repo, "unit", "pass", &successor));
+    let receipt_event = recorded
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap()
+        .to_string();
+    assert_eq!(stored_integrated_commit(&fixture), fixture.integrated);
+    assert_eq!(
+        show(repo)["post_integration_verifications"][0]["integrated_commit"],
+        successor.as_str()
+    );
+
+    repo.arc(&repo.root)
+        .args(["history", "withdraw", &map, "--reason", "wrong map"])
+        .assert()
+        .success();
+
+    let shown = show(repo);
+    assert!(shown.get("set_aside").is_none(), "{shown}");
+    assert_eq!(
+        shown["post_integration_verifications"][0]["event_id"],
+        receipt_event.as_str()
+    );
+    assert_eq!(
+        shown["post_integration_verifications"][0]["integrated_commit"],
+        fixture.integrated.as_str()
+    );
+}
+
+/// Claim: a receipt naming the integrated commit's successor, whose rewrite
+/// map is later withdrawn, is set aside and reported, and the change stays
+/// readable; re-recording the map restores it.
 /// Rejects: the withdrawal making the whole change unreadable, or the
 /// stranded receipt still reading as verification of what shipped.
 #[test]
@@ -453,11 +521,11 @@ fn a_receipt_stranded_by_a_withdrawn_map_is_set_aside_and_reported() {
         .find_map(|line| line.strip_prefix("event: "))
         .unwrap()
         .to_string();
+    name_the_successor_as_older_receipts_do(&fixture, &successor);
     assert_eq!(
         show(repo)["post_integration_verifications"][0]["integrated_commit"],
         successor.as_str()
     );
-
     repo.arc(&repo.root)
         .args(["history", "withdraw", &map, "--reason", "wrong map"])
         .assert()
@@ -541,6 +609,7 @@ fn tag_selection_reads_a_change_whose_receipt_names_a_rewritten_successor() {
     let repo = &fixture.repo;
     let (successor, _) = reword_integrated(&fixture);
     stdout(&mut receipt(repo, "unit", "pass", &successor));
+    name_the_successor_as_older_receipts_do(&fixture, &successor);
 
     let view =
         json_stdout(

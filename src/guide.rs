@@ -1313,12 +1313,13 @@ RUN A CHANGE
   when it was recorded. `show` lists it under `Verification after
   integration`; `show --json` and `status --json` carry it in
   `post_integration_verifications` with `after_integration: true`; `explain`
-  lists it as later knowledge, `declared` because arc ran nothing. Recorded
-  after a rewrite, it names the integrated commit's successor; if that map is
-  withdrawn, the receipt is set aside and reported under `Set aside` until
-  the map is recorded again. It changes no authorization basis, discharges no
-  debt, and satisfies no gate. On an
-  open change the form is refused, naming the ordinary attestation; plain
+  lists it as later knowledge, `declared` because arc ran nothing. It names
+  the integrated commit as the integration recorded it, and views follow that
+  through rewrite maps, so a withdrawal strands none. An earlier release's
+  receipt recorded after a rewrite names the successor instead; if that map
+  is withdrawn, the receipt is set aside until the map is recorded again. It
+  changes no authorization basis, discharges no debt, and satisfies no gate.
+  On an open change the form is refused, naming the ordinary attestation; plain
   `--attest` on an integrated change is refused, naming this form.
 
   The decision is one function of facts observed under the target and change

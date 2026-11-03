@@ -2035,9 +2035,11 @@ enum Cmd {
         /// reads as verification of what shipped. The receipt records the
         /// producer, the execution host and runner, the command, the gate's
         /// declared timeout, the result, the tested revision and tree, and
-        /// when it was recorded. It changes no authorization basis, discharges
-        /// no review debt, and satisfies no gate. An open change takes the
-        /// ordinary attestation instead
+        /// when it was recorded. It names the integrated commit as the
+        /// integration recorded it, which views follow through rewrite maps,
+        /// so withdrawing a map strands none. It changes no authorization
+        /// basis, discharges no review debt, and satisfies no gate. An open
+        /// change takes the ordinary attestation instead
         #[arg(long = "after-integration", requires = "attest")]
         after_integration: bool,
         /// The attested result; required with --attest, rejected without it
