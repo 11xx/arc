@@ -603,18 +603,11 @@ fn watch_reviewed_returns_on_any_verdict_including_changes_requested() {
     let (_, worktree, _) = change_with_patchset(&repo, "watch-reviewed");
 
     // Nothing recorded yet: the wait is genuinely waiting.
-    repo.arc(&worktree)
-        .args([
-            "watch",
-            "watch-reviewed",
-            "--until",
-            "reviewed",
-            "--timeout",
-            "1",
-        ])
-        .assert()
-        .code(2)
-        .stdout("timeout: reviewed\n");
+    assert_watch_keeps_waiting(
+        &repo,
+        &worktree,
+        &["watch", "watch-reviewed", "--until", "reviewed"],
+    );
 
     // A verdict that refuses the change still ends the wait: the caller reads
     // the verdict to learn which way it went.
@@ -639,7 +632,7 @@ fn watch_reviewed_returns_on_any_verdict_including_changes_requested() {
             "--until",
             "reviewed",
             "--timeout",
-            "4",
+            &reaching_watch_timeout(),
         ])
         .assert()
         .success()
@@ -647,17 +640,11 @@ fn watch_reviewed_returns_on_any_verdict_including_changes_requested() {
 
     // `ready` remains the stricter, different question, and this change does
     // not satisfy it.
-    repo.arc(&worktree)
-        .args([
-            "watch",
-            "watch-reviewed",
-            "--until",
-            "ready",
-            "--timeout",
-            "1",
-        ])
-        .assert()
-        .code(2);
+    assert_watch_keeps_waiting(
+        &repo,
+        &worktree,
+        &["watch", "watch-reviewed", "--until", "ready"],
+    );
 }
 
 /// A verdict answered by a commit since is not a review of what is there now.
@@ -1232,26 +1219,14 @@ fn watch_integrated_returns_after_real_integration() {
         .success();
     // No `--timeout`: the watcher waits as long as integration takes, and
     // only a watcher that never sees it reaches the harness's hang bound.
-    let evaluated = repo.home.join("watch-evaluated");
-    let mut child = spawn_arc_with_env(
+    let (mut child, evaluated) = spawn_watch(
         &repo,
         &repo.root,
         &["watch", "watch-integrated", "--until", "integrated"],
-        &[("ARC_WATCH_EVALUATED", &evaluated)],
     );
     // Integrate only once the watcher has seen the change unintegrated, so a
     // watcher that returns without waiting cannot pass by starting late.
-    let deadline = Instant::now() + HANG_BOUND;
-    while !evaluated.exists() {
-        if let Some(status) = child.try_wait().unwrap() {
-            panic!("watch exited {status} before it evaluated the unintegrated change");
-        }
-        if Instant::now() >= deadline {
-            child.kill().unwrap();
-            panic!("watch never evaluated the unintegrated change within {HANG_BOUND:?}");
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
+    await_watch_evaluation(&mut child, &evaluated);
     assert!(
         child.try_wait().unwrap().is_none(),
         "watch returned before the change was integrated"

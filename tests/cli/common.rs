@@ -789,6 +789,56 @@ pub(crate) fn wait_for_exit(child: &mut Child) -> ExitStatus {
     }
 }
 
+/// The `--timeout` of an `arc watch` a test expects to reach its condition.
+/// The watch returns as soon as it does, so only one that never reaches it
+/// runs this long.
+pub(crate) fn reaching_watch_timeout() -> String {
+    HANG_BOUND.as_secs().to_string()
+}
+
+/// `arc watch <args>`, with no `--timeout` of its own, spawned with the
+/// marker it writes once it has evaluated its conditions and found none
+/// reached.
+pub(crate) fn spawn_watch(repo: &Repo, cwd: &Path, args: &[&str]) -> (Child, PathBuf) {
+    let evaluated = repo.home.join("watch-evaluated");
+    let _ = fs::remove_file(&evaluated);
+    let child = spawn_arc_with_env(repo, cwd, args, &[("ARC_WATCH_EVALUATED", &evaluated)]);
+    (child, evaluated)
+}
+
+/// Wait until the watch has evaluated its conditions unreached, so a state
+/// change made afterwards is one it observes. A watch that exits first has
+/// reached a condition it should not have.
+pub(crate) fn await_watch_evaluation(child: &mut Child, evaluated: &Path) {
+    let deadline = Instant::now() + HANG_BOUND;
+    while !evaluated.exists() {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!(
+                "watch exited {status} before it found its conditions unreached: {}",
+                child_stdout(child)
+            );
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            panic!("watch never evaluated its conditions within {HANG_BOUND:?}");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// `arc watch <args>` evaluates its conditions, finds none reached, and keeps
+/// waiting; the watch is then stopped. A `--timeout` short enough to keep a
+/// test fast can expire on a loaded host before the watch reads anything,
+/// so the evaluation marker, not a deadline, is what this waits on.
+pub(crate) fn assert_watch_keeps_waiting(repo: &Repo, cwd: &Path, args: &[&str]) {
+    let (mut child, evaluated) = spawn_watch(repo, cwd, args);
+    await_watch_evaluation(&mut child, &evaluated);
+    let early = child.try_wait().unwrap();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(early.is_none(), "watch {args:?} returned after evaluating");
+}
+
 pub(crate) fn child_stdout(child: &mut Child) -> String {
     let mut output = String::new();
     child
