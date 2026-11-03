@@ -473,6 +473,7 @@ fn import_events(
         repository_id: repository_id.clone(),
         require_declared_actor: false,
         require_declared_actor_sources: Vec::new(),
+        review_clearance: Default::default(),
         read_only: true,
     });
     // A suffix is only meaningful against the prefix it extends, and the
@@ -755,6 +756,7 @@ fn import_events(
         require_declared_actor_sources: initial_policy
             .sources
             .sources_for("policy.require_declared_actor=true"),
+        review_clearance: initial_policy.policy.review_clearance,
         read_only: false,
     };
     #[cfg(debug_assertions)]

@@ -835,6 +835,7 @@ mod tests {
                 repository_id: LOCAL.into(),
                 require_declared_actor: false,
                 require_declared_actor_sources: Vec::new(),
+                review_clearance: Default::default(),
                 read_only: false,
             };
             Self { dir, store }

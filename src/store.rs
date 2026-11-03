@@ -156,6 +156,10 @@ pub struct Store {
     pub require_declared_actor: bool,
     /// Files that enabled the declared-actor requirement.
     pub require_declared_actor_sources: Vec<String>,
+    /// What a read must show to clear review, read once when the store was
+    /// opened and applied to every change this handle projects. Discharge is
+    /// a projection, so it follows the policy in force at the read.
+    pub review_clearance: crate::policy::ReviewClearance,
     /// Opened for reading only: the append policy was never parsed, so this
     /// handle refuses every append.
     pub read_only: bool,
@@ -733,28 +737,37 @@ impl Store {
         // Read the invoking checkout's policy before creating anything. An
         // unreadable local policy fails with the filesystem untouched, and
         // repository-wide appends have no change target to read instead.
-        let checkout = if read_only {
-            None
-        } else {
-            gitio::toplevel(cwd).ok()
-        };
-        let (require_declared_actor, require_declared_actor_sources) = match checkout {
-            Some(top) => {
-                let policy = crate::policy::load(&top)?;
-                let required = policy.policy.require_declared_actor;
-                let sources = if required {
-                    policy
-                        .sources
-                        .sources_for("policy.require_declared_actor=true")
-                } else {
-                    Vec::new()
-                };
-                (required, sources)
-            }
-            // A store opened outside a repository, or for reading, has no
-            // policy to honour.
-            None => (false, Vec::new()),
-        };
+        let checkout = gitio::toplevel(cwd).ok();
+        let (require_declared_actor, require_declared_actor_sources, review_clearance) =
+            match checkout {
+                Some(top) if !read_only => {
+                    let policy = crate::policy::load(&top)?;
+                    let required = policy.policy.require_declared_actor;
+                    let sources = if required {
+                        policy
+                            .sources
+                            .sources_for("policy.require_declared_actor=true")
+                    } else {
+                        Vec::new()
+                    };
+                    (required, sources, policy.policy.review_clearance)
+                }
+                // A read appends nothing, so it honours no append policy, but
+                // it projects discharge under the clearance rule in force. A
+                // policy it cannot read leaves the stricter rule.
+                Some(top) => (
+                    false,
+                    Vec::new(),
+                    crate::policy::load(&top)
+                        .map(|policy| policy.policy.review_clearance)
+                        .unwrap_or(crate::policy::ReviewClearance::Assessed),
+                ),
+                None => (
+                    false,
+                    Vec::new(),
+                    crate::policy::operator_clearance(&crate::policy::operator_path(cwd)?),
+                ),
+            };
         create_private_dir(&root)?;
         let config_path = root.join("config.json");
         let repository_id = match fs::read(&config_path) {
@@ -789,6 +802,7 @@ impl Store {
             repository_id,
             require_declared_actor,
             require_declared_actor_sources,
+            review_clearance,
             read_only,
         };
         store.repair_missing_format_three_stamp()?;
@@ -807,6 +821,9 @@ impl Store {
                 repository_id,
                 require_declared_actor: false,
                 require_declared_actor_sources: Vec::new(),
+                review_clearance: crate::policy::operator_clearance(
+                    &root.join("operator-policy.toml"),
+                ),
                 read_only: false,
             })),
             None => Ok(None),
@@ -816,7 +833,9 @@ impl Store {
     pub fn open_at_for(root: &Path, cwd: &Path) -> Result<Option<Store>> {
         let mut store = Self::open_at(root)?;
         if let Some(store) = &mut store {
-            store.operator_policy_path = Some(crate::policy::operator_path(cwd)?);
+            let operator = crate::policy::operator_path(cwd)?;
+            store.review_clearance = crate::policy::operator_clearance(&operator);
+            store.operator_policy_path = Some(operator);
         }
         Ok(store)
     }
@@ -2099,6 +2118,7 @@ impl Store {
         let reduce = crate::perf::phase("reduce");
         crate::perf::count("changes_reduced", 1);
         let mut state = crate::state::reduce_following(events, rewrites)?;
+        state.review_clearance = self.review_clearance;
         state.apply_privilege_scope(Arc::clone(scope), events);
         crate::replica::localize_change(&self.repository_id, events, &mut state);
         drop(reduce);
@@ -2915,6 +2935,7 @@ mod tests {
             repository_id: "repo".into(),
             require_declared_actor: false,
             require_declared_actor_sources: Vec::new(),
+            review_clearance: Default::default(),
             read_only: false,
         }
     }

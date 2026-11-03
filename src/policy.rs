@@ -248,6 +248,7 @@ struct ContributionLayer {
 #[derive(Debug, Default, Deserialize)]
 struct PolicyLayerPolicy {
     forbid_self_approval: Option<bool>,
+    review_clearance: Option<DeclaredClearance>,
     require_declared_actor: Option<bool>,
     debt_count_threshold: Option<usize>,
     debt_age_threshold_seconds: Option<u64>,
@@ -421,6 +422,15 @@ fn layered_with_operator(operator: &Path, project: Option<(String, String)>) -> 
                 policy.forbid_self_approval |= value;
                 sources.record(format!("policy.forbid_self_approval={value}"), &source);
             }
+            if let Some(DeclaredClearance::Assessed) = raw.review_clearance {
+                // `assessed` is the stricter reading, and it wins.
+                let value = ReviewClearance::Assessed;
+                policy.review_clearance = value;
+                sources.record(
+                    format!("policy.review_clearance={}", value.as_str()),
+                    &source,
+                );
+            }
             if let Some(value) = raw.require_declared_actor {
                 policy.require_declared_actor |= value;
                 sources.record(format!("policy.require_declared_actor={value}"), &source);
@@ -574,11 +584,50 @@ fn config_declares_git_identity(path: &Path) -> Result<bool> {
         .is_some_and(|table| table.contains_key("git_identity")))
 }
 
+/// What a recorded read must show before it clears review: discharges debt,
+/// satisfies the approval an integration needs, and counts toward assurance.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReviewClearance {
+    /// No key declared: independence and authorship decide, and an
+    /// assessment's `clears` answer is kept but not read.
+    #[default]
+    Legacy,
+    /// An agent's read clears only with a bound assessment whose `clears` is
+    /// true; every other agent read is a findings read. A person's read is
+    /// judged by authorship alone.
+    Assessed,
+}
+
+impl ReviewClearance {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Assessed => "assessed",
+        }
+    }
+
+    pub fn is_assessed(self) -> bool {
+        self == Self::Assessed
+    }
+}
+
+/// The values a policy file may give `review_clearance`.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum DeclaredClearance {
+    Assessed,
+}
+
 /// Policy that applies to every change in the repository.
 #[derive(Debug, Default, Deserialize)]
 pub struct Policy {
     #[serde(default)]
     pub forbid_self_approval: bool,
+    /// `[policy] review_clearance`. Only `"assessed"` may be declared; the
+    /// key absent is [`ReviewClearance::Legacy`].
+    #[serde(default)]
+    pub review_clearance: ReviewClearance,
     /// Refuse to record an event whose effective author nobody declared.
     /// Opt-in, like `forbid_self_approval`: a local ledger cannot verify who
     /// an actor claims to be, but it can decline to invent one.
@@ -606,6 +655,25 @@ pub struct Policy {
 #[derive(Debug, Default)]
 pub struct Review {
     pub checklist: Vec<String>,
+}
+
+/// The clearance rule the operator policy at `path` declares, for a ledger
+/// read without a checkout whose project policy could be layered under it.
+/// A file it cannot read leaves the stricter rule.
+pub fn operator_clearance(path: &Path) -> ReviewClearance {
+    let declared = || -> Result<ReviewClearance> {
+        let Some(text) = read_optional(path)? else {
+            return Ok(ReviewClearance::Legacy);
+        };
+        let layer = toml::from_str::<PolicyLayer>(&text)?;
+        Ok(
+            match layer.policy.and_then(|policy| policy.review_clearance) {
+                Some(DeclaredClearance::Assessed) => ReviewClearance::Assessed,
+                None => ReviewClearance::Legacy,
+            },
+        )
+    };
+    declared().unwrap_or(ReviewClearance::Assessed)
 }
 
 /// Read publishing grants and review trust exclusively from operator policy.

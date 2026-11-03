@@ -201,6 +201,11 @@ pub(crate) fn coordinate_defect(value: &str, session: Option<&str>) -> Option<De
     model_defect(rest, session)
 }
 
+/// Whether `value` names a person, `Name <address>`, rather than an agent.
+pub(crate) fn is_person(value: &str) -> bool {
+    is_human(value)
+}
+
 /// `Name <address>`: a name with no `:`, and an address with an `@`.
 fn is_human(value: &str) -> bool {
     let Some((name, address)) = value.trim().rsplit_once('<') else {

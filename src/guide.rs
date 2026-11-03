@@ -2399,16 +2399,18 @@ REVIEW COVERAGE AND DEBT
     route_version  `--route-version`, or the assessment's, as a coordinate
 
   The assessment file is `agent-routing assess --json` output, schema
-  `agent-routing-assessment/1` or `/2`. `/2` keeps `independence` with its
-  `/1` meaning and adds `findings` (`eligible` or `ineligible`) and `clears`
-  (true or false); arc stores both beside `independence`, and a `/1` file
-  leaves them absent. A `/2` file that clears is eligible on both answers,
-  names no qualifier and names its reviewer's effort; one that does not
-  clear names a qualifier. arc keeps its `independence`, `qualifiers`
-  and `route_version`, never a tier or a model string (an audit's binding
-  to its auditor is the one comparison made, below), and validates shape only: qualifier
-  names from the closed set, a one-token route version, qualifiers present
-  exactly when the independence is `ineligible`. An `eligible` assessment is
+  `agent-routing-assessment/1` or `agent-routing-assessment/2`. `/2` keeps
+  `independence` with its `/1` meaning and adds `findings` (`eligible` or
+  `ineligible`) and `clears` (true or false); arc stores both beside
+  `independence`, and a `/1` file leaves them absent. arc keeps its
+  `independence`, `qualifiers` and `route_version`, never a tier or a model
+  string (an audit's binding to its auditor is the one comparison made,
+  below), and validates shape only: qualifier names from the closed set, a
+  one-token route version, and answers that agree. In `/1` qualifiers are
+  present exactly when the independence is `ineligible`; in `/2` a file that
+  clears is eligible on both answers, names no qualifier and names its
+  reviewer's effort, and one that does not clear names a qualifier. An
+  `eligible` assessment is
   refused on this kind, because there is no debt to record. A tier is
   routing's reading at the time it is read, so every read shows the record
   as its route version and basis say, never as current. Within the kind,
@@ -2546,6 +2548,16 @@ REVIEW COVERAGE AND DEBT
   read is recorded, and declared trailers alone neither discharge nor refuse
   it. The `ineligible-review` kind is the exception stated above: only an
   approving audit with an eligible, bound assessment clears it.
+
+  Under `review_clearance = "assessed"` (`arc guide debt-review`) only a
+  clearing read discharges a debt of any kind. Every other read since the
+  declaration is a findings read: its verdict and findings stand, the debt
+  stays owed, and `arc status`, `arc show` and `arc check` list it beside the
+  obligation as `debt.findings_reads`, each with kind `findings`, the reason
+  it does not clear (`model-unrecorded`, `no-assessment`,
+  `assessment-without-clearance`, `not-clearing`, `unbound`,
+  `effort-unrecorded`), and the remedy `agent-routing assess --purpose
+  clearance --json`. A `comment-only` read stays a read that judged nothing.
 
   An audit is a separate event from the verdict that shipped, so attaching one
   never rewrites what shipped with what review. An approving audit must come
@@ -4382,6 +4394,7 @@ FILES
     [policy] debt_count_threshold = <n>          debt turns advisory past n
     [policy] debt_age_threshold_seconds = <n>    or once the oldest is older
     [policy] worktree_free_floor_bytes = <n>     `arc begin` warns below it
+    [policy] review_clearance = "assessed"       what clears: arc guide debt-review
     [danger] paths = ["<glob>"]                  `*` in a segment, `**` across
     [danger] acknowledged_safe = ["<glob>"]
     [danger] source_roots = ["<dir>/"]           every file inside is classified
@@ -5572,9 +5585,10 @@ mod route_tests {
                             .next()
                             .is_some_and(|ch| ch.is_ascii_alphabetic())
                         && !flag_names.contains(&flag)
-                        // Git and tapes options, and the schematic --flag placeholder, are separate namespaces.
+                        // Git, tapes and agent-routing options, and the schematic --flag placeholder, are separate namespaces.
                         && ![
                             "flag",
+                            "purpose",
                             "continue",
                             "recurse-submodules",
                             "no-checkout",

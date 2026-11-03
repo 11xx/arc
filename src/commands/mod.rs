@@ -1504,6 +1504,7 @@ mod tests {
             provisional_integrations: Vec::new(),
             provisional_resolutions: Vec::new(),
             privilege_scope: None,
+            review_clearance: Default::default(),
             schema: crate::state::CHANGE_STATE_SCHEMA,
             model_attributions: BTreeMap::new(),
             contribution_roles: BTreeMap::new(),

@@ -1240,6 +1240,9 @@ pub fn markdown(
                     let _ = writeln!(w, "    - Later read: {}", later_read_label(later));
                 }
             }
+            for read in &debt.findings_reads {
+                let _ = writeln!(w, "  - {}", read.label());
+            }
             if let Some(discharged_by) = debt
                 .discharged_by
                 .as_ref()

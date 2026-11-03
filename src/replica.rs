@@ -1858,6 +1858,7 @@ mod authority_tests {
             repository_id: "origin-id".into(),
             require_declared_actor: false,
             require_declared_actor_sources: Vec::new(),
+            review_clearance: Default::default(),
             read_only: false,
         }
     }

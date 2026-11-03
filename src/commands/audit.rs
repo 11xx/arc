@@ -646,6 +646,11 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
             .and_then(|debt| debt.discharged_by_event_id.as_deref());
         if after.debt_outstanding() {
             let owed = match after.debt.as_ref().and_then(|debt| debt.missing) {
+                _ if after.review_clearance.is_assessed() => {
+                    "a clearing read: an audit by a person, or by an agent with --assessment \
+                     <file> from `agent-routing assess --purpose clearance --json` that says \
+                     it clears and describes the model and effort it recorded"
+                }
                 Some(DebtMissing::IneligibleReview) => {
                     "an eligible read: an approving audit with --assessment <file> \
                      saying the auditor is eligible and describing the model it recorded"

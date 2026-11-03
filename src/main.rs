@@ -2760,16 +2760,27 @@ enum Cmd {
     /// beside the obligation, which stays open. Every other kind, read
     /// without an assessment, is judged by that authorship rule alone.
     ///
+    /// Under `[policy] review_clearance = "assessed"` an audit discharges a
+    /// debt of any kind only when it clears: a person's audit by the
+    /// authorship rule alone; an agent's only when it records a model with an
+    /// effort and its `--assessment` (`agent-routing-assessment/2`) says
+    /// `clears: true` and is `bound`. Any other audit is a findings read:
+    /// recorded with its verdict and findings, listed beside the obligation
+    /// with kind `findings`, and naming the remedy `agent-routing assess
+    /// --purpose clearance --json`. `independence` is not read there.
+    ///
     /// After writing, the audit prints `debt discharged` when it discharged
     /// the debt, `debt already discharged by <event>` when an earlier read
     /// had, and otherwise what the debt still owes and why this read leaves
     /// it owed.
     ///
-    /// An `ineligible-review` debt is also cleared only when the assessment's
-    /// authors answer to the model of every `Implemented-by` line in the
-    /// audited range. An assessment that omits one is recorded with binding
-    /// `authors-uncovered`, names the omitted models, and leaves the debt
-    /// open. When the range's `Implemented-by` lines cannot be established
+    /// An `ineligible-review` debt, and under the clearance policy any debt,
+    /// is also cleared only when the assessment's authors answer for the
+    /// model and effort of every `Implemented-by` line in the audited range:
+    /// an author entry covers a line at its own effort, or at any effort
+    /// when it names none. An assessment that omits one is recorded with
+    /// binding `authors-uncovered`, names the omitted `model[#effort]`
+    /// coordinates, and leaves the debt open. When the range's `Implemented-by` lines cannot be established
     /// (the production record kept none and the range does not read) the
     /// binding is `authors-unread` and the debt stays open too.
     ///
@@ -2808,8 +2819,9 @@ enum Cmd {
         #[arg(long = "route-version", value_name = "VERSION")]
         route_version: Option<String>,
         /// Routing's assessment of this auditor: an `agent-routing assess
-        /// --json` file (schema `agent-routing-assessment/1`). arc keeps its
-        /// independence, qualifiers and route version, never its tiers, and
+        /// --json` file (schema `agent-routing-assessment/1` or `/2`). arc
+        /// keeps its independence, qualifiers and route version, a `/2`
+        /// file's `findings` and `clears` beside them, never its tiers, and
         /// whether its reviewer `identities` (every model string routing
         /// accepts for the reviewer) and `effort` match the model this audit
         /// records; only that outcome is kept: `bound`, `model-mismatch`,

@@ -679,6 +679,11 @@ pub struct Debt {
     /// it. Absent on every other kind.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ineligible: Option<DebtRead>,
+    /// Under `review_clearance = "assessed"`, the reads since the
+    /// declaration that find without clearing, listed beside the obligation
+    /// and never counted against it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub findings_reads: Vec<FindingsRead>,
     /// The first verdict or audit no [`DischargeBar`] bars, when one exists.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discharged_by: Option<DebtCoverage>,
@@ -744,6 +749,38 @@ impl DebtRead {
         self.record
             .qualifiers
             .contains(&ReviewQualifier::BelowFloor)
+    }
+}
+
+/// A verdict or audit that judged the work an obligation covers but, under
+/// `review_clearance = "assessed"`, does not clear it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FindingsRead {
+    /// Always `findings`: the kind of read this is.
+    pub kind: &'static str,
+    pub event_id: String,
+    /// `verdict` or `audit`.
+    pub source: &'static str,
+    pub verdict: Verdict,
+    pub reviewer: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Why it does not clear, a stable name.
+    pub reason: &'static str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub qualifiers: Vec<ReviewQualifier>,
+    /// The command whose answer would let a read clear.
+    pub remedy: &'static str,
+}
+
+impl FindingsRead {
+    /// One line naming the read and why it does not clear.
+    pub fn label(&self) -> String {
+        let model = self.model.as_deref().unwrap_or("model unrecorded");
+        format!(
+            "findings read {} ({} {:?} by {} ({model})): {}; remedy `{}`",
+            self.event_id, self.source, self.verdict, self.reviewer, self.reason, self.remedy
+        )
     }
 }
 
@@ -1450,6 +1487,10 @@ impl SlotRecord {
 pub struct ChangeState {
     #[serde(skip)]
     pub privilege_scope: Option<std::sync::Arc<crate::import_authorization::PrivilegeScope>>,
+    /// The clearance rule this projection judged reads by: the policy in
+    /// force where the ledger was read, never a recorded fact.
+    #[serde(skip)]
+    pub review_clearance: crate::policy::ReviewClearance,
     pub schema: &'static str,
     #[serde(skip)]
     pub provisional_signature_successors: BTreeMap<String, String>,
@@ -2143,6 +2184,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     provisional_integrations: Vec::new(),
                     provisional_resolutions: Vec::new(),
                     privilege_scope: None,
+                    review_clearance: Default::default(),
                     schema: CHANGE_STATE_SCHEMA,
                     model_attributions: BTreeMap::new(),
                     contribution_roles: BTreeMap::new(),
@@ -2958,6 +3000,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     coverage: None,
                     production: None,
                     ineligible: None,
+                    findings_reads: Vec::new(),
                     discharged_by: None,
                     discharged_by_event_id: None,
                     standing: DebtStanding::Declared,
@@ -2996,6 +3039,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                         reviewer_model: None,
                         later_reads: Vec::new(),
                     }),
+                    findings_reads: Vec::new(),
                     discharged_by: None,
                     discharged_by_event_id: None,
                     standing: DebtStanding::Declared,
@@ -4678,6 +4722,7 @@ impl ChangeState {
         };
         let discharged_by = self.debt_discharge(&debt);
         let standing = self.debt_standing().expect("held debt");
+        let findings_reads = self.findings_reads(&debt);
         let read = debt.ineligible.as_ref().map(|read| {
             let reviewer = self
                 .verdicts
@@ -4741,6 +4786,7 @@ impl ChangeState {
         if let (Some(production), Some(integrator)) = (current.production.as_mut(), integrator) {
             production.integrator = Some(integrator);
         }
+        current.findings_reads = findings_reads;
         current.discharged_by_event_id = discharged_by.as_ref().map(|(id, _)| id.clone());
         current.discharged_by = discharged_by.map(|(_, coverage)| coverage);
         current.ineligible = read;
@@ -4790,6 +4836,45 @@ impl ChangeState {
             })
     }
 
+    /// The audits, then the verdicts on the shipped patchset, that `debt`
+    /// bars only because they find without clearing.
+    fn findings_reads(&self, debt: &Debt) -> Vec<FindingsRead> {
+        let Some(shipped) = self.closure_shipped_patchset() else {
+            return Vec::new();
+        };
+        let audits = self
+            .audit_verdicts
+            .iter()
+            .map(|audit| ("audit", Read::audit(audit)));
+        let verdicts = self
+            .verdicts
+            .iter()
+            .filter(|verdict| verdict.patchset_id == shipped.id)
+            .map(|verdict| ("verdict", Read::verdict(verdict)));
+        audits
+            .chain(verdicts)
+            .filter_map(
+                |(source, read)| match self.discharge_bar(debt, shipped, &read) {
+                    Some(DischargeBar::FindingsRead(why)) => Some(FindingsRead {
+                        kind: "findings",
+                        event_id: read.event_id.to_string(),
+                        source,
+                        verdict: read.verdict,
+                        reviewer: read.author.to_string(),
+                        model: read.model.map(str::to_string),
+                        reason: why.as_str(),
+                        qualifiers: match why {
+                            FindingsReason::NotClearing(qualifiers) => qualifiers,
+                            _ => Vec::new(),
+                        },
+                        remedy: CLEARANCE_REMEDY,
+                    }),
+                    _ => None,
+                },
+            )
+            .collect()
+    }
+
     /// Why the audit `event_id` leaves the held debt owed, or `None` when it
     /// discharges it or there is no such audit or debt.
     pub fn audit_discharge_bar(&self, event_id: &str) -> Option<DischargeBar> {
@@ -4820,6 +4905,17 @@ impl ChangeState {
         }
         if read.verdict == Verdict::CommentOnly {
             return Some(DischargeBar::CommentOnly);
+        }
+        if self.review_clearance.is_assessed() {
+            if let Some(why) = read.findings_only() {
+                return Some(DischargeBar::FindingsRead(why));
+            }
+            if read.author_assumed {
+                return Some(DischargeBar::AuthorAssumed);
+            }
+            return self
+                .authorship_match(shipped, debt.production.as_ref(), read.author, read.model)
+                .map(DischargeBar::Authored);
         }
         if let Some(assessment) = read
             .assessment
@@ -4860,6 +4956,14 @@ struct Read<'a> {
 }
 
 impl<'a> Read<'a> {
+    /// Why this read cannot clear under `review_clearance = "assessed"`, or
+    /// `None` when it clears. A person's read is judged by authorship alone,
+    /// because routing seats no people. An agent's read clears only with a
+    /// recorded model and effort and a bound assessment saying it clears.
+    fn findings_only(&self) -> Option<FindingsReason> {
+        clearance_gap(self.author, self.model, self.assessment)
+    }
+
     fn audit(audit: &'a AuditVerdictEntry) -> Self {
         Self {
             event_id: &audit.event_id,
@@ -4887,6 +4991,107 @@ impl<'a> Read<'a> {
     }
 }
 
+/// Why a read by `author` at `model` under `assessment` is a findings read
+/// under `review_clearance = "assessed"`, or `None` when it clears. A person
+/// subject (`Name <email>`) clears on authorship alone; an agent clears only
+/// with a recorded `model#effort` and a bound assessment whose `clears` is
+/// true.
+pub fn clearance_gap(
+    author: &str,
+    model: Option<&str>,
+    assessment: Option<&AuditAssessment>,
+) -> Option<FindingsReason> {
+    if crate::coordinate::is_person(author) {
+        return None;
+    }
+    let Some(model) = model.filter(|model| !model.trim().is_empty()) else {
+        return Some(FindingsReason::ModelUnrecorded);
+    };
+    let Some(assessment) = assessment else {
+        return Some(FindingsReason::NoAssessment);
+    };
+    match assessment.clears {
+        None => return Some(FindingsReason::FirstSchema),
+        Some(false) => return Some(FindingsReason::NotClearing(assessment.qualifiers.clone())),
+        Some(true) => {}
+    }
+    match assessment.binding {
+        Some(AuditorBinding::Bound) => {}
+        binding => return Some(FindingsReason::Unbound(binding)),
+    }
+    if crate::model::model_effort(model).is_none() {
+        return Some(FindingsReason::EffortUnrecorded);
+    }
+    None
+}
+
+/// Why an agent's read records findings without clearing, under
+/// `review_clearance = "assessed"`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FindingsReason {
+    /// The read records no model for its agent subject.
+    ModelUnrecorded,
+    /// The read carries no routing assessment.
+    NoAssessment,
+    /// The assessment is `agent-routing-assessment/1`, which has no
+    /// clearance answer.
+    FirstSchema,
+    /// Routing assessed the read as not clearing, for these reasons.
+    NotClearing(Vec<ReviewQualifier>),
+    /// The assessment does not describe this reader or its authors.
+    Unbound(Option<AuditorBinding>),
+    /// The recorded model names no effort, so the assessed effort is not
+    /// established.
+    EffortUnrecorded,
+}
+
+impl FindingsReason {
+    /// The stable name a projection lists beside the read.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ModelUnrecorded => "model-unrecorded",
+            Self::NoAssessment => "no-assessment",
+            Self::FirstSchema => "assessment-without-clearance",
+            Self::NotClearing(_) => "not-clearing",
+            Self::Unbound(_) => "unbound",
+            Self::EffortUnrecorded => "effort-unrecorded",
+        }
+    }
+
+    /// Why the read does not clear, phrased to follow "the read".
+    pub fn reason(&self) -> String {
+        match self {
+            Self::ModelUnrecorded => "records no model for its agent subject".into(),
+            Self::NoAssessment => "carries no routing assessment".into(),
+            Self::FirstSchema => {
+                "carries an agent-routing-assessment/1, which answers no clearance".into()
+            }
+            Self::NotClearing(qualifiers) if qualifiers.is_empty() => {
+                "was assessed as not clearing".into()
+            }
+            Self::NotClearing(qualifiers) => format!(
+                "was assessed as not clearing ({})",
+                qualifiers
+                    .iter()
+                    .map(|qualifier| qualifier.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::Unbound(Some(binding)) => format!(
+                "carries an assessment not bound to it: {}",
+                binding.failure().unwrap_or("unbound")
+            ),
+            Self::Unbound(None) => "carries an assessment bound to no reader".into(),
+            Self::EffortUnrecorded => {
+                "records a model without an effort, so the assessed effort is unestablished".into()
+            }
+        }
+    }
+}
+
+/// The command that answers whether a reader clears.
+pub const CLEARANCE_REMEDY: &str = "agent-routing assess --purpose clearance --json";
+
 /// Why a recorded read leaves review debt owed. A debt is discharged by a
 /// read that approves or requests changes, recorded after it was declared, by an identity the ledger
 /// does not credit with the work, that routing did not assess `ineligible`;
@@ -4909,6 +5114,9 @@ pub enum DischargeBar {
     AuthorAssumed,
     /// The reader is this identity the ledger credits with the work.
     Authored(String),
+    /// Under `review_clearance = "assessed"`, the read finds but does not
+    /// clear.
+    FindingsRead(FindingsReason),
     /// The shipped range has no ledger authorship to compare against.
     NoAuthorshipRecord,
 }
@@ -4945,6 +5153,11 @@ impl DischargeBar {
             Self::NoAuthorshipRecord => {
                 "cannot be compared with authorship: the shipped range has no ledger record".into()
             }
+            Self::FindingsRead(why) => format!(
+                "is a findings read: it {}; review_clearance = \"assessed\" clears only a bound \
+                 assessment from `{CLEARANCE_REMEDY}` that says it clears",
+                why.reason()
+            ),
         }
     }
 }
