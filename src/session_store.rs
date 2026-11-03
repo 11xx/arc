@@ -13,6 +13,7 @@ use agent_tapes_core::ResolveError;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 const CLAUDE_MODEL_WAIT: Duration = Duration::from_secs(1);
@@ -392,6 +393,18 @@ impl Drop for DiscoveryEnvironment {
     }
 }
 
+static DISCOVERY_SCOPES: AtomicUsize = AtomicUsize::new(0);
+static DISCOVERY_BACKEND_SETS: AtomicUsize = AtomicUsize::new(0);
+
+/// How many project scopes and tapes backend sets session discovery built in
+/// this process.
+pub(crate) fn discovery_builds() -> (usize, usize) {
+    (
+        DISCOVERY_SCOPES.load(Ordering::Relaxed),
+        DISCOVERY_BACKEND_SETS.load(Ordering::Relaxed),
+    )
+}
+
 /// Discover recordings in the repository's primary checkout and worktrees.
 /// Each backend is queried once; every readable row contributes its activity.
 pub(crate) fn project_sessions(
@@ -400,25 +413,25 @@ pub(crate) fn project_sessions(
     let _phase = crate::perf::phase("sessions");
     let _environment = DiscoveryEnvironment::sandboxed()?;
     // A scope that cannot be read fails discovery as a whole. Each backend
-    // then scans its own store at once with a scope of its own, and their
+    // then scans its own store at once through that one scope, so a
+    // directory's repository is resolved once for all of them, and their
     // rows keep the backends' order.
-    agent_tapes_core::scope::Scope::at(cwd)?;
-    let count = backend::backends().len();
+    DISCOVERY_SCOPES.fetch_add(1, Ordering::Relaxed);
+    let scope = agent_tapes_core::scope::Scope::at(cwd)?;
+    DISCOVERY_BACKEND_SETS.fetch_add(1, Ordering::Relaxed);
+    let backends = backend::backends();
     let listings: Vec<Option<(&'static str, anyhow::Result<backend::Listing>)>> =
         std::thread::scope(|threads| {
-            let workers: Vec<_> = (0..count)
-                .map(|index| {
+            let workers: Vec<_> = backends
+                .iter()
+                .map(|backend| {
+                    let scope = &scope;
                     threads.spawn(move || {
-                        let backend = backend::backends().into_iter().nth(index)?;
                         if !backend.available() {
                             return None;
                         }
-                        let scope = match agent_tapes_core::scope::Scope::at(cwd) {
-                            Ok(scope) => scope,
-                            Err(error) => return Some((backend.harness(), Err(error))),
-                        };
                         let mut query = backend::Query::unscoped(usize::MAX);
-                        query.scope = Some(&scope);
+                        query.scope = Some(scope);
                         let listing = discovery_listing(&mut query, |query| backend.list(query));
                         Some((backend.harness(), listing))
                     })

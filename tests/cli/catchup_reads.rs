@@ -188,3 +188,60 @@ fn catchup_reduces_each_change_once_however_many_changes() {
         }
     }
 }
+
+/// Write a Claude and a Codex recording of session `index`, each made in the
+/// repository's checkout.
+fn record_sessions(repo: &Repo, index: usize) {
+    let claude = repo.home.join(".claude/projects/-fixture");
+    fs::create_dir_all(&claude).unwrap();
+    let id = format!("11111111-2222-3333-4444-{index:012}");
+    let row = serde_json::json!({"type":"user", "sessionId":id, "cwd":repo.root, "timestamp":"2026-01-01T00:00:00Z", "message":{"role":"user", "content":"work"}});
+    fs::write(claude.join(format!("{id}.jsonl")), format!("{row}\n")).unwrap();
+    let codex = repo.home.join(".codex/sessions/2026/01/01");
+    fs::create_dir_all(&codex).unwrap();
+    let id = format!("019f0000-0000-7000-8000-{index:012}");
+    let meta = serde_json::json!({"type":"session_meta", "timestamp":"2026-01-01T00:00:00Z", "payload":{"id":id, "cwd":repo.root}});
+    fs::write(
+        codex.join(format!("rollout-2026-01-01T00-00-00-{id}.jsonl")),
+        format!("{meta}\n"),
+    )
+    .unwrap();
+}
+
+/// Claim: `catchup`, in text and JSON, builds one project scope and one set
+/// of tapes backends for session discovery, however many backends hold
+/// recordings and however many recordings they hold. Rejects each backend's
+/// listing building its own scope, with the Git processes that resolve it,
+/// and its own backend set.
+#[test]
+fn catchup_discovers_sessions_through_one_scope_and_backend_set() {
+    let repo = Repo::new();
+    for recorded in [1, 3] {
+        for index in 0..recorded {
+            record_sessions(&repo, index);
+        }
+        for args in [&[][..], &["--json"][..]] {
+            let counts = repo.home.join("catchup-reads.json");
+            let output = stdout(
+                repo.arc(&repo.root)
+                    .env("CLAUDE_CONFIG_DIR", repo.home.join(".claude"))
+                    .env("CODEX_HOME", repo.home.join(".codex"))
+                    .env("ARC_TEST_LEDGER_READS", &counts)
+                    .arg("catchup")
+                    .args(args),
+            );
+            let counts: Value = serde_json::from_slice(&fs::read(&counts).unwrap()).unwrap();
+            for harness in ["claude", "codex"] {
+                assert!(output.contains(harness), "catchup {args:?}: {output}");
+            }
+            assert_eq!(
+                (
+                    &counts["tapes"]["discovery_scopes"],
+                    &counts["tapes"]["discovery_backend_sets"]
+                ),
+                (&Value::from(1), &Value::from(1)),
+                "catchup {args:?} with {recorded} recordings per harness: {counts}"
+            );
+        }
+    }
+}

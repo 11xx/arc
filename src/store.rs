@@ -473,12 +473,14 @@ const READ_COUNTS_VAR: &str = "ARC_TEST_LEDGER_READS";
 /// how many Git processes ran, how many status reports were built, how often
 /// the most-read journal's event log was read and parsed, the most cost
 /// report entries held rendered and unwritten at once, and the tapes reader's
-/// work (backend sets built and whole-recording passes), to the file
+/// work (cost's backend sets, whole-recording passes, and the project scopes
+/// and backend sets session discovery built), to the file
 /// `ARC_TEST_LEDGER_READS` names.
 pub(crate) fn write_read_counts() {
     let Some(path) = std::env::var_os(READ_COUNTS_VAR) else {
         return;
     };
+    let (discovery_scopes, discovery_backend_sets) = crate::session_store::discovery_builds();
     let counts = serde_json::json!({
         "most_reads_per_file": shared::disk_reads(),
         "git_processes": crate::gitio::processes(),
@@ -490,6 +492,8 @@ pub(crate) fn write_read_counts() {
         "tapes": {
             "backend_sets": crate::commands::cost_backend_sets(),
             "recording_passes": agent_tapes_core::counters::recording_passes(),
+            "discovery_scopes": discovery_scopes,
+            "discovery_backend_sets": discovery_backend_sets,
         },
     });
     let _ = std::fs::write(path, counts.to_string());
