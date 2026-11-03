@@ -3073,6 +3073,15 @@ enum Cmd {
         #[command(subcommand)]
         cmd: PassCmd,
     },
+    /// Name a revision somebody is testing, with the changes and todos open
+    /// at it, and read what landed, closed or was filed since.
+    ///
+    /// `arc journal checkpoint` is a different record: progress on a claimed
+    /// journal artifact. See `arc guide ending`.
+    Checkpoint {
+        #[command(subcommand)]
+        cmd: CheckpointCmd,
+    },
     /// Record delegated run dispatches, the backend sessions that executed
     /// them, and their terminal outcomes
     Run {
@@ -4822,6 +4831,59 @@ enum PassCmd {
     /// Records no events; ledger reads do not require a parseable append policy.
     List {
         /// Emit the machine-readable JSON view instead of text
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum CheckpointCmd {
+    /// Record a checkpoint: the revision and tree, the branch when there is
+    /// one, every open change with its current patchset and head, and every
+    /// live, unconsumed journal todo of this project.
+    ///
+    /// Names are unique in this repository; a second record under a name
+    /// refuses and names the first. The event grants and requires no
+    /// authority.
+    Record {
+        /// The checkpoint's name: letters, digits, `.`, `_` and `-`
+        name: String,
+        /// The revision being tested; defaults to this checkout's HEAD
+        #[arg(long)]
+        rev: Option<String>,
+        /// Also write the annotated tag `checkpoint/<name>` on the revision
+        /// with `git tag -a`, signed when Git's configuration signs tags. An
+        /// existing tag refuses before anything is recorded; a tag whose
+        /// event cannot be written is deleted again
+        #[arg(long)]
+        tag: bool,
+        /// A note kept with the checkpoint and in the tag message
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Show a checkpoint against the current state.
+    ///
+    /// Changes open at the checkpoint: integrated (at which commit, and
+    /// whether that commit is inside the checkpoint revision), closed
+    /// otherwise, or still open with the head then and now. Landed since:
+    /// every integrated change whose integrated commit the checkpoint
+    /// revision does not reach and its target branch does, by Git ancestry,
+    /// whether or not it was open at the checkpoint. Todos open at the
+    /// checkpoint: consumed since (outcome and time), or still open. Filed
+    /// since: todos filed after the checkpoint, which are not part of it.
+    /// `--json` emits `arc-checkpoint/1`. Records no events.
+    Show {
+        /// Checkpoint name
+        name: String,
+        /// Emit `arc-checkpoint/1` JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
+    /// List every checkpoint: name, revision, tag, when, and how many
+    /// changes and todos were open at it. `--json` emits
+    /// `arc-checkpoint-list/1`. Records no events.
+    List {
+        /// Emit `arc-checkpoint-list/1` JSON instead of text
         #[arg(long)]
         json: bool,
     },
@@ -7728,6 +7790,18 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             }
             PassCmd::List { json } => commands::list_passes(&ctx, json).map(|_| 0),
         },
+        Cmd::Checkpoint { cmd } => match cmd {
+            CheckpointCmd::Record {
+                name,
+                rev,
+                tag,
+                note,
+            } => commands::record_checkpoint(&ctx, name, rev, tag, note).map(|_| 0),
+            CheckpointCmd::Show { name, json } => {
+                commands::show_checkpoint(&ctx, name, json).map(|_| 0)
+            }
+            CheckpointCmd::List { json } => commands::list_checkpoints(&ctx, json).map(|_| 0),
+        },
         Cmd::Run { cmd } => match cmd {
             RunCmd::Dispatch {
                 route,
@@ -8122,6 +8196,7 @@ mod tests {
             "context declare",
             "context capture",
             "pass open",
+            "checkpoint record",
             "pass complete",
             "pass abandon",
             "run dispatch",

@@ -8,6 +8,7 @@ mod bundle_output;
 pub(crate) mod candidate;
 mod chain;
 mod changelog;
+mod checkpoint;
 mod claims;
 mod config_cmd;
 mod cost;
@@ -72,6 +73,7 @@ pub use bundle_io::{export_bundle, import_bundle};
 pub use chain::chain;
 pub(crate) use changelog::advisory_changelog_none;
 pub use changelog::changelog;
+pub use checkpoint::{list_checkpoints, record_checkpoint, show_checkpoint};
 pub use claims::{claim, release_claim, stage, take};
 use clap::ValueEnum;
 pub use config_cmd::check_writable;
@@ -207,6 +209,8 @@ pub(crate) const READ_ONLY_COMMANDS: &[&str] = &[
     "candidate list",
     "pass list",
     "receipt template",
+    "checkpoint show",
+    "checkpoint list",
     "run list",
     "cost show",
     "cost evidence",

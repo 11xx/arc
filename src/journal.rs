@@ -5308,7 +5308,7 @@ fn infer_change_state(cwd: &Path) -> Option<ChangeState> {
 /// How far a change has got, named the way every other view names it: the
 /// stage its claim is progressing through, or `open` before any claim has
 /// declared one.
-fn stage_label(state: &ChangeState) -> String {
+pub(crate) fn stage_label(state: &ChangeState) -> String {
     match state
         .claim
         .as_ref()
@@ -12664,6 +12664,92 @@ fn consumption(events: &[JournalEvent], filename: &str) -> Option<String> {
 
 pub(crate) fn is_consumed(events: &[JournalEvent], filename: &str) -> bool {
     consumption(events, filename).is_some()
+}
+
+/// One todo of a project's journal, live or consumed, hot or archived.
+pub(crate) struct TodoRecord {
+    pub(crate) file: String,
+    pub(crate) title: Option<String>,
+    pub(crate) item_key: Option<String>,
+    /// The filing event's time, or the filename stamp when no event names
+    /// the file.
+    pub(crate) created_at: Option<DateTime<Utc>>,
+    /// Whether the body is in the active journal rather than its archive.
+    pub(crate) hot: bool,
+    /// The latest consumption: its outcome and the consuming event's time.
+    pub(crate) consumed: Option<(String, DateTime<Utc>)>,
+}
+
+impl TodoRecord {
+    /// Live and unconsumed: what `journal open` lists as a todo.
+    pub(crate) fn is_open(&self) -> bool {
+        self.hot && self.consumed.is_none()
+    }
+}
+
+/// Every todo the journal resolved from `cwd` holds or has filed, oldest
+/// first: bodies in the active journal and its archive, and files a filing
+/// event names whose body is in neither.
+pub(crate) fn todo_records(cwd: &Path) -> Result<Vec<TodoRecord>> {
+    let hot = resolve_dir(cwd)?;
+    let archive = archive_dir(&hot);
+    let events = read_events(&hot)?;
+    let is_todo = |name: &str| {
+        parse_artifact_name(name).is_some_and(|(_, _, kind)| kind == JournalKind::Todo.as_str())
+    };
+    let hot_names: BTreeSet<String> = sorted_artifact_names(&hot)?
+        .into_iter()
+        .filter(|name| is_todo(name))
+        .collect();
+    let mut names = hot_names.clone();
+    names.extend(
+        sorted_artifact_names(&archive)?
+            .into_iter()
+            .filter(|name| is_todo(name)),
+    );
+    names.extend(
+        events
+            .iter()
+            .filter(|event| event.known() && event.event == "note")
+            .filter_map(|event| event.file.clone())
+            .filter(|name| is_todo(name)),
+    );
+    let mut records = Vec::new();
+    for name in names {
+        let filing = events.iter().find(|event| {
+            event.known() && event.event == "note" && event.file.as_deref() == Some(name.as_str())
+        });
+        let hot_body = hot_names.contains(&name);
+        let heading = amended_heading(&events, if hot_body { &hot } else { &archive }, &name);
+        let title = heading
+            .map(|heading| heading.trim_start_matches('#').trim().to_string())
+            .filter(|title| !title.is_empty())
+            .or_else(|| filing.and_then(|event| event.title.clone()));
+        let created_at = filing.and_then(JournalEvent::timestamp).or_else(|| {
+            parse_artifact_name(&name).and_then(|(stamp, _, _)| parse_artifact_timestamp(&stamp))
+        });
+        let consumed = events
+            .iter()
+            .rev()
+            .find(|event| {
+                event.known()
+                    && event.event == "consumed"
+                    && event.file.as_deref() == Some(name.as_str())
+                    && event.outcome.as_deref().is_some_and(|outcome| {
+                        ["done", "superseded", "discarded"].contains(&outcome)
+                    })
+            })
+            .and_then(|event| Some((event.outcome.clone()?, event.timestamp()?)));
+        records.push(TodoRecord {
+            item_key: filing.and_then(|event| event.item_key.clone()),
+            file: name,
+            title,
+            created_at,
+            hot: hot_body,
+            consumed,
+        });
+    }
+    Ok(records)
 }
 
 /// Who filed an artifact, as the event that filed it recorded them.

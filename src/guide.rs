@@ -1945,6 +1945,33 @@ END A SESSION (what the next one reads)
   later scan of the same recording finds it already filed. The end of a
   session checks that nothing is left; it is not when filing happens.
 
+CHECKPOINTS (a revision handed over for testing)
+  arc checkpoint record <name> [--rev REV] [--tag] [--note TEXT]
+  arc checkpoint show <name> [--json]
+  arc checkpoint list [--json]
+
+  A series that pauses so somebody can test an integrated build records a
+  checkpoint at the revision handed over (`HEAD` unless `--rev` names one).
+  It holds the revision, its tree and branch, every open change with its
+  patchset and head, and every live, unconsumed journal todo of the
+  project. Names are unique in a repository. `--tag` also writes the
+  annotated tag `checkpoint/<name>` with `git tag -a`, signed as Git's
+  configuration signs tags; an existing tag refuses with nothing recorded,
+  and a tag whose event cannot be written is deleted again. The event is a
+  plain fact: it grants and requires no authority.
+
+  When findings come back, `show` sorts them against the checkpoint. A
+  change open at it is integrated (whether the integrated commit is inside
+  the checkpoint revision is stated), closed otherwise, or still open with
+  its head then and now. Landed since lists every integrated change whose
+  integrated commit its target branch reaches and the checkpoint revision
+  does not, by Git ancestry, open at the checkpoint or not. Each todo open
+  at it is consumed since, with outcome and time, or still open. Filed since
+  lists todos filed after the checkpoint; they are not part of it. A
+  finding about a change landed since is fixed since, one matching a todo
+  is already filed, and the rest are new. `arc journal checkpoint` is a
+  different record: progress on a claimed journal artifact.
+
 PROFILES (--profile, default local)
   direct   Bounded, reversible, one session and checkout. Checkout follows
            [change] checkout (built-in in-place) and --worktree/--no-worktree.
@@ -4952,6 +4979,8 @@ SCHEMAS
     `arc-journal-filed/1`            arc journal filed --json
     `arc-journal-latest/1`           arc journal latest --json
     `arc-journal-scaffolds/1`        arc journal scaffolds --json
+    `arc-checkpoint/1`               arc checkpoint show --json
+    `arc-checkpoint-list/1`          arc checkpoint list --json
 
   Commitments, files:
     `arc-bundle/6`                   arc export / arc import
@@ -5233,6 +5262,7 @@ KEEP WHAT YOU LEARN
 END A SESSION
   arc journal handoff <topic> --derive   for unfinished work
   arc journal conclusion <topic>         for a completed outcome
+  arc checkpoint record <name>           a revision handed over for testing
   Release your claims when you stop.
 
 GO DEEPER

@@ -12,6 +12,7 @@ mod catchup_reads;
 mod chain;
 mod changelog;
 mod checkout_defaults;
+mod checkpoint;
 mod claims;
 mod codex_model_checkpoint;
 mod commit_lookup_gaps;

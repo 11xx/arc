@@ -1,0 +1,188 @@
+//! Checkpoints: the revision somebody is testing and what was open at it,
+//! read back against what landed, closed and was filed since.
+
+use crate::common::*;
+use serde_json::Value;
+
+fn todo(repo: &Repo, topic: &str) -> String {
+    journal_artifact(repo, topic, "todo", &format!("# {topic}\n")).1
+}
+
+/// Open a change with its own checkout, which `complete_change` commits in.
+fn open(repo: &Repo, slug: &str) -> String {
+    opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", slug])))
+}
+
+fn show(repo: &Repo, name: &str) -> Value {
+    json_stdout(
+        repo.arc(&repo.root)
+            .args(["checkpoint", "show", name, "--json"]),
+    )
+}
+
+fn list(repo: &Repo) -> Value {
+    json_stdout(repo.arc(&repo.root).args(["checkpoint", "list", "--json"]))
+}
+
+fn strings(value: &Value, field: &str) -> Vec<String> {
+    value
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item[field].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Claim: a checkpoint holds exactly the changes and todos open when it was
+/// recorded, at the revision named, and `show` reads each against now: the
+/// in-flight change as integrated outside the checkpoint and landed since,
+/// one todo as consumed since and the other as still open, a todo filed
+/// afterwards as filed since and not part of the checkpoint, and a change
+/// opened afterwards and integrated as landed since. Rejects: a checkpoint
+/// missing or adding an item, a change integrated before the checkpoint
+/// read as landed since (timestamps instead of ancestry), a later todo
+/// counted as part of the checkpoint, and a consumption left unreported.
+#[test]
+fn show_sorts_what_was_open_at_the_checkpoint_from_what_happened_since() {
+    let repo = Repo::new();
+    open(&repo, "early");
+    complete_change(&repo, "early");
+    let first = todo(&repo, "first-finding");
+    let second = todo(&repo, "second-finding");
+    let (flight, flight_worktree, flight_head) = change_with_patchset(&repo, "flight");
+    let revision = git_out(&repo.root, &["rev-parse", "master"]);
+
+    let recorded = stdout(repo.arc(&repo.root).args([
+        "checkpoint",
+        "record",
+        "beta-1",
+        "--rev",
+        "master",
+        "--note",
+        "operator build",
+    ]));
+    assert!(recorded.contains("open changes: 1"), "{recorded}");
+    assert!(recorded.contains("open todos: 2"), "{recorded}");
+
+    let at = show(&repo, "beta-1");
+    assert_eq!(at["schema"], "arc-checkpoint/1");
+    assert_eq!(at["revision"], revision.as_str());
+    assert_eq!(at["branch"], "master");
+    assert_eq!(at["note"], "operator build");
+    assert_eq!(strings(&at["changes"], "change_id"), [flight.as_str()]);
+    assert_eq!(at["changes"][0]["head"], flight_head.as_str());
+    assert_eq!(at["changes"][0]["status"], "open");
+    let mut expected = vec![first.clone(), second.clone()];
+    expected.sort();
+    assert_eq!(strings(&at["todos"], "file"), expected);
+    assert_eq!(at["todos"][0]["title"], "first-finding");
+    assert!(at["landed_since"].as_array().unwrap().is_empty(), "{at}");
+    assert!(at["filed_since"].as_array().unwrap().is_empty(), "{at}");
+
+    repo.arc(&flight_worktree)
+        .args(["review", "flight", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", "flight"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &first, "--outcome", "done"])
+        .assert()
+        .success();
+    let third = todo(&repo, "third-finding");
+    let late = open(&repo, "late");
+    complete_change(&repo, "late");
+
+    let now = show(&repo, "beta-1");
+    assert_eq!(strings(&now["changes"], "change_id"), [flight.as_str()]);
+    assert_eq!(now["changes"][0]["status"], "integrated");
+    assert_eq!(now["changes"][0]["in_checkpoint"], false);
+    assert!(now["changes"][0]["integrated_commit"].is_string(), "{now}");
+
+    let landed = strings(&now["landed_since"], "change_id");
+    assert_eq!(landed.len(), 2, "{now}");
+    assert!(landed.contains(&flight) && landed.contains(&late), "{now}");
+    for entry in now["landed_since"].as_array().unwrap() {
+        let open_then = entry["change_id"] == flight.as_str();
+        assert_eq!(entry["open_at_checkpoint"], open_then, "{entry}");
+        assert_eq!(entry["target_branch"], "master");
+    }
+
+    let todos = now["todos"].as_array().unwrap();
+    assert_eq!(strings(&now["todos"], "file"), expected);
+    let consumed = todos.iter().find(|t| t["file"] == first.as_str()).unwrap();
+    assert_eq!(consumed["status"], "consumed");
+    assert_eq!(consumed["outcome"], "done");
+    assert!(consumed["consumed_at"].is_string(), "{consumed}");
+    let open = todos.iter().find(|t| t["file"] == second.as_str()).unwrap();
+    assert_eq!(open["status"], "open");
+
+    assert_eq!(strings(&now["filed_since"], "file"), [third.as_str()]);
+    assert_eq!(now["filed_since"][0]["status"], "open");
+
+    let text = stdout(repo.arc(&repo.root).args(["checkpoint", "show", "beta-1"]));
+    assert!(text.contains("todos open at the checkpoint:"), "{text}");
+    assert!(text.contains("consumed done at"), "{text}");
+    assert!(
+        text.contains("filed since (not part of the checkpoint):"),
+        "{text}"
+    );
+
+    let listed = list(&repo);
+    assert_eq!(listed["schema"], "arc-checkpoint-list/1");
+    assert_eq!(listed["checkpoints"][0]["name"], "beta-1");
+    assert_eq!(listed["checkpoints"][0]["open_changes"], 1);
+    assert_eq!(listed["checkpoints"][0]["open_todos"], 2);
+}
+
+/// Claim: `--tag` writes the annotated tag `checkpoint/<name>` on the
+/// recorded revision; a tag already standing there refuses before anything
+/// is recorded, and a second record under one name refuses naming the
+/// first. Rejects: a lightweight or misplaced tag, an event written beside
+/// a tag that could not be made, and two checkpoints sharing a name.
+#[test]
+fn tags_and_names_are_unique_and_a_standing_tag_records_nothing() {
+    let repo = Repo::new();
+    let revision = git_out(&repo.root, &["rev-parse", "HEAD"]);
+    repo.commit(&repo.root, "later.txt", "later\n", "later");
+
+    stdout(
+        repo.arc(&repo.root)
+            .args(["checkpoint", "record", "rc", "--rev", &revision, "--tag"]),
+    );
+    assert_eq!(
+        git_out(&repo.root, &["cat-file", "-t", "refs/tags/checkpoint/rc"]),
+        "tag"
+    );
+    assert_eq!(
+        git_out(&repo.root, &["rev-parse", "checkpoint/rc^{commit}"]),
+        revision
+    );
+    assert_eq!(show(&repo, "rc")["tag"], "checkpoint/rc");
+
+    let again = repo
+        .arc(&repo.root)
+        .args(["checkpoint", "record", "rc"])
+        .output()
+        .unwrap();
+    assert!(!again.status.success());
+    let stderr = String::from_utf8_lossy(&again.stderr);
+    assert!(stderr.contains("already recorded"), "{stderr}");
+    assert!(stderr.contains(&revision), "{stderr}");
+
+    git(&repo.root, &["tag", "checkpoint/standing", &revision]);
+    let refused = repo
+        .arc(&repo.root)
+        .args(["checkpoint", "record", "standing", "--tag"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("already exists"), "{stderr}");
+
+    let listed = list(&repo);
+    assert_eq!(strings(&listed["checkpoints"], "name"), ["rc"]);
+    assert_eq!(listed["checkpoints"][0]["tag"], "checkpoint/rc");
+}
