@@ -1510,6 +1510,8 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
         provisional: provisional.clone(),
         route_version,
         assessment,
+        dispositions: Vec::new(),
+        receipt: None,
     };
     ensure_append_allowed(&st, &payload)?;
     let mut ev = ctx.event(&store, &change_id, payload)?;

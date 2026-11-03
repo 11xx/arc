@@ -40,7 +40,7 @@ impl std::error::Error for OperationFailure {}
 /// store stamped newer than this, because the alternative is what silently
 /// went wrong before: an older binary skipping event types it does not know,
 /// concluding the change is still open, and closing it a second way.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DisplacedClaim {
@@ -1433,6 +1433,12 @@ pub enum Payload {
         /// with one that is bound and says it clears.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         assessment: Option<AuditAssessment>,
+        /// Dispositions of review findings published with this verdict.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        dispositions: Vec<InlineDisposition>,
+        /// The receipt item this verdict was ingested from.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receipt: Option<ReceiptReference>,
     },
     /// A verdict copied from a decision made outside Arc, with its source and
     /// exact revision kept apart from witnessed review.
@@ -1527,6 +1533,12 @@ pub enum Payload {
         /// dirty-context fact for routing to score, never a refusal here.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         held_roles: Vec<ReviewRole>,
+        /// Dispositions of audit findings published with this audit.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        dispositions: Vec<InlineDisposition>,
+        /// The receipt item this audit was ingested from.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receipt: Option<ReceiptReference>,
     },
     /// A finding raised by a post-integration audit. An audit that could only
     /// say approved-or-not would be a rubber stamp.
@@ -2991,6 +3003,34 @@ pub struct InlineFinding {
     pub body: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor: Option<Anchor>,
+}
+
+/// A disposition recorded inside a verdict or audit event, applied by the
+/// reducer exactly as a separate disposition event of the same kind would be:
+/// a verdict's to a review finding, an audit's to an audit finding. Its entry
+/// carries the enclosing event's identity, so the read and the dispositions
+/// it carries publish or fail together.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InlineDisposition {
+    pub finding_id: String,
+    pub status: DispositionStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    /// Event IDs of the finding's disposition tips this one observed and
+    /// replaces, as a separate disposition records them.
+    #[serde(default)]
+    pub supersedes: Vec<String>,
+}
+
+/// Where a verdict or audit came from when it was ingested from an
+/// `arc-review-receipt/1` item: the item's key, the digest of the item's
+/// canonical content, and the digest of the whole receipt file, whose bytes
+/// the ledger keeps in custody under that digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiptReference {
+    pub key: String,
+    pub item_digest: String,
+    pub receipt_digest: String,
 }
 
 /// A finding copied from an external review record.

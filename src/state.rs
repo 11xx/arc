@@ -437,6 +437,9 @@ pub struct VerdictEntry {
     /// How this verdict relates to the verdict tips it observed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relation: Option<VerdictRelation>,
+    /// The receipt item this verdict was ingested from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<crate::model::ReceiptReference>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -488,6 +491,46 @@ trait TipEntry {
     fn counts_as_tip(&self) -> bool {
         true
     }
+}
+
+/// Append the dispositions a verdict or audit event carries to the findings
+/// they name, as separate disposition events of that kind would append them.
+/// A finding the event does not know, or one named twice, refuses the event.
+fn apply_inline_dispositions(
+    findings: &mut BTreeMap<String, FindingState>,
+    ev: &Event,
+    dispositions: &[crate::model::InlineDisposition],
+    kind: &str,
+) -> Result<()> {
+    let mut named = BTreeSet::new();
+    for inline in dispositions {
+        if !named.insert(inline.finding_id.as_str()) {
+            bail!(
+                "event {} disposes {kind} {:?} twice",
+                ev.event_id,
+                inline.finding_id
+            );
+        }
+        let Some(finding) = findings.get_mut(&inline.finding_id) else {
+            bail!(
+                "event {} disposes unknown {kind} {:?}",
+                ev.event_id,
+                inline.finding_id
+            );
+        };
+        finding.dispositions.push(DispositionEntry {
+            origin_replica_id: ev.repository_id.clone(),
+            gating_eligible: true,
+            event_id: ev.event_id.clone(),
+            status: inline.status,
+            commit: None,
+            evidence: inline.evidence.clone(),
+            evidence_event_id: None,
+            actor: ev.actor.clone(),
+            supersedes: inline.supersedes.clone(),
+        });
+    }
+    Ok(())
 }
 
 /// Whether a disposition history releases its finding: a single tip that is
@@ -900,6 +943,9 @@ pub struct AuditVerdictEntry {
     /// provenance, which is unknown rather than declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor_source: Option<ActorSource>,
+    /// The receipt item this audit was ingested from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<crate::model::ReceiptReference>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -2902,6 +2948,8 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 relation,
                 route_version,
                 assessment,
+                dispositions,
+                receipt,
             } => {
                 for inline in findings {
                     state.findings.insert(
@@ -2944,8 +2992,10 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     on_behalf_of: ev.on_behalf_of.clone(),
                     actor_source: ev.actor_source,
                     relation: relation.clone(),
+                    receipt: receipt.clone(),
                     created_at: ev.created_at,
                 });
+                apply_inline_dispositions(&mut state.findings, ev, dispositions, "finding")?;
             }
             Payload::ReadyToSend {
                 patchset_id,
@@ -3097,6 +3147,8 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 route_version,
                 assessment,
                 held_roles,
+                dispositions,
+                receipt,
             } => {
                 for inline in findings {
                     state.audit_findings.insert(
@@ -3134,8 +3186,15 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     actor: ev.actor.clone(),
                     on_behalf_of: ev.on_behalf_of.clone(),
                     actor_source: ev.actor_source,
+                    receipt: receipt.clone(),
                     created_at: ev.created_at,
                 });
+                apply_inline_dispositions(
+                    &mut state.audit_findings,
+                    ev,
+                    dispositions,
+                    "audit finding",
+                )?;
             }
             Payload::AuditFindingAdded {
                 finding_id,
@@ -5340,6 +5399,8 @@ mod tests {
                 ev(
                     "fix",
                     Payload::AuditVerdictRecorded {
+                        dispositions: Vec::new(),
+                        receipt: None,
                         revision: "h1".into(),
                         verdict: Verdict::Approved,
                         body: None,
@@ -5736,6 +5797,8 @@ mod tests {
         ev(
             change,
             Payload::VerdictRecorded {
+                dispositions: Vec::new(),
+                receipt: None,
                 forge_frontier: None,
                 forge_sources: Vec::new(),
                 patchset_id: patchset.into(),
@@ -6298,6 +6361,8 @@ mod tests {
         let mut audit = ev(
             "fix",
             Payload::AuditVerdictRecorded {
+                dispositions: Vec::new(),
+                receipt: None,
                 revision: "h1".into(),
                 verdict: Verdict::Approved,
                 body: None,

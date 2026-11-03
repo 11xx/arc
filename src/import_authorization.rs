@@ -128,13 +128,30 @@ impl ReplicaPolicy {
     }
 }
 
+/// The capabilities a disposition of `status` needs, as one group.
+fn disposition_roles(status: DispositionStatus) -> Vec<Role> {
+    match status {
+        DispositionStatus::AcceptedRisk => vec![Role::Waiver],
+        DispositionStatus::Resolved | DispositionStatus::Obsolete => vec![Role::ReviewAuthority],
+        DispositionStatus::StillOpen | DispositionStatus::Disputed => vec![Role::Facts],
+    }
+}
+
 /// Alternatives within a group; every group requires one granted capability.
 pub fn required_roles(payload: &Payload) -> Option<Vec<Vec<Role>>> {
     use Payload::*;
     use Role::*;
     Some(match payload {
-        VerdictRecorded { .. } | AuditVerdictRecorded { .. } => {
-            vec![vec![ReviewInput, ReviewAuthority]]
+        // A disposition published inside the read asks what the same
+        // disposition asks as its own event.
+        VerdictRecorded { dispositions, .. } | AuditVerdictRecorded { dispositions, .. } => {
+            let mut roles = vec![vec![ReviewInput, ReviewAuthority]];
+            roles.extend(
+                dispositions
+                    .iter()
+                    .map(|inline| disposition_roles(inline.status)),
+            );
+            roles
         }
         DebtDeclared { .. } | AuditDebtDeclared { .. } => vec![vec![DebtInput, Waiver]],
         // A bypass excuses a gate's run as a waiver excuses its dirt.
@@ -143,13 +160,7 @@ pub fn required_roles(payload: &Payload) -> Option<Vec<Vec<Role>>> {
         }
         DispositionRecorded { status, .. }
         | AuditDispositionRecorded { status, .. }
-        | PostIntegrationDispositionRecorded { status, .. } => match status {
-            DispositionStatus::AcceptedRisk => vec![vec![Waiver]],
-            DispositionStatus::Resolved | DispositionStatus::Obsolete => {
-                vec![vec![ReviewAuthority]]
-            }
-            DispositionStatus::StillOpen | DispositionStatus::Disputed => vec![vec![Facts]],
-        },
+        | PostIntegrationDispositionRecorded { status, .. } => vec![disposition_roles(*status)],
         ExternalVerdictRecorded { verdict, .. } => {
             let mut roles = vec![vec![ExternalDecision]];
             if *verdict == ExternalVerdict::Rejected {

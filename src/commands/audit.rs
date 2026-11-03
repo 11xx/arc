@@ -630,6 +630,8 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
         route_version: args.route_version,
         assessment,
         held_roles,
+        dispositions: Vec::new(),
+        receipt: None,
     };
     ensure_append_allowed(&st, &payload)?;
     let mut event = ctx.event(&store, &change_id, payload)?;

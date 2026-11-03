@@ -1924,6 +1924,14 @@ impl Store {
 
     fn stamp_format_for(&self, payload: &Payload) -> Result<()> {
         let introduced_in = match payload {
+            // An older reader ignores the field and keeps a finding resolved
+            // that the event reopens, so it must refuse the store instead.
+            Payload::VerdictRecorded { dispositions, .. }
+            | Payload::AuditVerdictRecorded { dispositions, .. }
+                if !dispositions.is_empty() =>
+            {
+                Some(8)
+            }
             Payload::ChangeProvisionallyIntegrated { .. }
             | Payload::ProvisionalIntegrationResolved { .. } => Some(7),
             Payload::VerdictRecorded {
@@ -2010,6 +2018,14 @@ impl Store {
             .and_then(|value| value.get("event_type"))
             .and_then(serde_json::Value::as_str)
         {
+            Some("verdict-recorded") | Some("audit-verdict-recorded")
+                if value
+                    .and_then(|value| value.get("dispositions"))
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|dispositions| !dispositions.is_empty()) =>
+            {
+                Some(8)
+            }
             Some("external-verdict-recorded") | Some("ready-to-send") => Some(4),
             Some("history-rewritten") => Some(6),
             Some("verdict-recorded")
@@ -3007,12 +3023,17 @@ fn authorization_has_no_verdict(
 /// and it has to hold on every path that opens a store, not just the one that
 /// creates it.
 fn ensure_readable_format(schema_version: u32, path: &Path) -> Result<()> {
-    if schema_version > crate::model::SCHEMA_VERSION {
+    ensure_readable_format_at(schema_version, crate::model::SCHEMA_VERSION)
+        .with_context(|| format!("{} was written by a newer arc", path.display()))
+}
+
+/// Whether a build that understands store format `understood` may read a
+/// store stamped `schema_version`.
+fn ensure_readable_format_at(schema_version: u32, understood: u32) -> Result<()> {
+    if schema_version > understood {
         bail!(
-            "{} was written by a newer arc (store format {schema_version}, this build \
-             understands {}); upgrade arc rather than reading it with this build",
-            path.display(),
-            crate::model::SCHEMA_VERSION
+            "store format {schema_version}, this build understands {understood}; upgrade arc \
+             rather than reading it with this build"
         );
     }
     Ok(())
@@ -3662,6 +3683,80 @@ mod tests {
                         "{value} {path}: {} (expected {expected})",
                         stored.schema_version
                     ));
+                }
+            }
+        }
+        assert!(mismatches.is_empty(), "{}", mismatches.join("; "));
+    }
+
+    /// Claim: a verdict or audit carrying inline dispositions stamps format 8
+    /// on every append path, so a reader at format 7, which would ignore the
+    /// field and keep a reopened finding resolved, refuses the store. The
+    /// same events without dispositions stamp nothing.
+    #[test]
+    fn inline_dispositions_stamp_eight_on_every_path() {
+        let still_open = serde_json::json!([{"finding_id": "f-1", "status": "still-open", "supersedes": ["d-1"]}]);
+        let receipt =
+            serde_json::json!({"key": "rk-1", "item_digest": "sha256:aa", "receipt_digest": "bb"});
+        let fixtures = [
+            (
+                serde_json::json!({"event_type": "verdict-recorded", "patchset_id": "ps", "verdict": "changes-requested", "causes": ["executor"], "dispositions": still_open, "receipt": receipt}),
+                8,
+            ),
+            (
+                serde_json::json!({"event_type": "audit-verdict-recorded", "revision": "r", "verdict": "approved", "dispositions": still_open}),
+                8,
+            ),
+            (
+                serde_json::json!({"event_type": "verdict-recorded", "patchset_id": "ps", "verdict": "approved", "receipt": receipt}),
+                1,
+            ),
+            (
+                serde_json::json!({"event_type": "audit-verdict-recorded", "revision": "r", "verdict": "approved"}),
+                1,
+            ),
+        ];
+        let mut mismatches = Vec::new();
+        for (value, expected) in fixtures {
+            let payload: Payload = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&payload).unwrap(), value);
+            for path in ["typed", "raw-change", "raw-repository"] {
+                let dir = tempfile::tempdir().unwrap();
+                let config = StoreConfig {
+                    schema_version: 1,
+                    repository_id: "repo".into(),
+                    created_at: chrono::Utc::now(),
+                };
+                fs::write(
+                    dir.path().join("config.json"),
+                    serde_json::to_vec(&config).unwrap(),
+                )
+                .unwrap();
+                let store = test_store(dir.path());
+                let bytes = serde_json::to_vec(&value).unwrap();
+                match path {
+                    "typed" => store.stamp_format_for(&payload).unwrap(),
+                    "raw-change" => {
+                        store.append_raw_event("change", "event", &bytes).unwrap();
+                    }
+                    _ => {
+                        store.append_raw_repository_event("event", &bytes).unwrap();
+                    }
+                }
+                let stored: StoreConfig =
+                    serde_json::from_slice(&fs::read(dir.path().join("config.json")).unwrap())
+                        .unwrap();
+                if stored.schema_version != expected {
+                    mismatches.push(format!(
+                        "{value} {path}: {} (expected {expected})",
+                        stored.schema_version
+                    ));
+                }
+                if expected > 7 {
+                    let refused = ensure_readable_format_at(stored.schema_version, 7);
+                    if refused.is_ok() {
+                        mismatches.push(format!("{value} {path}: a format-7 reader opens it"));
+                    }
                 }
             }
         }

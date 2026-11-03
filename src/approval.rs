@@ -588,6 +588,7 @@ mod tests {
 
     fn verdict(verdict: Verdict, actor: &str) -> VerdictEntry {
         VerdictEntry {
+            receipt: None,
             forge_frontier: None,
             forge_sources: Vec::new(),
             origin_replica_id: "repo".into(),
