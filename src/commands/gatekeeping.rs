@@ -52,6 +52,10 @@ struct CheckOutput<'a> {
     /// bypass is a judgement in place of a run, never a pass.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     bypassed: BTreeMap<&'a str, &'a crate::state::BypassEntry>,
+    /// Reads that would discharge the change's review debt but for their
+    /// extent, each listed on its own beside the obligation.
+    #[serde(skip_serializing_if = "<[crate::state::PartialCoverage]>::is_empty")]
+    debt_partial_coverage: &'a [crate::state::PartialCoverage],
 }
 
 #[derive(serde::Serialize)]
@@ -5708,6 +5712,11 @@ fn check(
     } else {
         None
     };
+    let partial_coverage = st
+        .debt
+        .as_ref()
+        .map(|debt| debt.partial_coverage.as_slice())
+        .unwrap_or_default();
     if json {
         if let Some(queue) = &review_queue {
             if !queue.is_empty() {
@@ -5744,6 +5753,7 @@ fn check(
                 .filter(|gate| gate.green_at_head)
                 .filter_map(|gate| Some((gate.name.as_str(), gate.bypass.as_ref()?)))
                 .collect(),
+            debt_partial_coverage: partial_coverage,
         };
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(code);
@@ -5773,6 +5783,9 @@ fn check(
     }
     render_changelog_none(changelog_none.as_deref());
     render::advisories(&report);
+    for read in partial_coverage {
+        println!("debt: {}", read.label());
+    }
     Ok(code)
 }
 

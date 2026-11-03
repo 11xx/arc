@@ -1278,7 +1278,11 @@ pub fn markdown(
                     let _ = writeln!(w, "    - Later read: {}", later_read_label(later));
                 }
             }
+            let _ = writeln!(w, "  - Extent: {}", extent_label(debt.extent.as_ref()));
             for read in &debt.findings_reads {
+                let _ = writeln!(w, "  - {}", read.label());
+            }
+            for read in &debt.partial_coverage {
                 let _ = writeln!(w, "  - {}", read.label());
             }
             if let Some(discharged_by) = debt
@@ -1288,15 +1292,19 @@ pub fn markdown(
             {
                 let _ = writeln!(
                     w,
-                    "  - Discharged by: {}",
-                    debt_coverage_detail(discharged_by)
+                    "  - Discharged by: {}{}",
+                    debt_coverage_detail(discharged_by),
+                    match debt.discharge_extent {
+                        Some("not-established") => "; extent: not established",
+                        _ => "",
+                    }
                 );
             }
         }
         for audit in &report.audit_verdicts {
             let _ = writeln!(
                 w,
-                "- {:?} at `{}` by {} ({}){}",
+                "- {:?} at `{}` by {} ({}){}{}",
                 audit.verdict,
                 &audit.revision[..audit.revision.len().min(8)],
                 audit.effective_author(),
@@ -1306,6 +1314,11 @@ pub fn markdown(
                     audit.session.as_deref(),
                     crate::coordinate::ModelStyle::Coordinate
                 ),
+                audit
+                    .extent
+                    .as_ref()
+                    .map(|extent| format!("; extent: {}", extent.label()))
+                    .unwrap_or_default(),
                 audit
                     .body
                     .as_deref()
@@ -1333,6 +1346,13 @@ pub fn markdown(
 /// single-reviewer changes that make up most of the work, and an
 /// orchestrator's review is a valid review unless a project's policy says
 /// otherwise; the point is that nobody integrates without having been told.
+/// An extent as a reader sees it, or that none was established.
+fn extent_label(extent: Option<&crate::extent::Extent>) -> String {
+    extent
+        .map(crate::extent::Extent::label)
+        .unwrap_or_else(|| "not established".into())
+}
+
 /// One line naming the identities the independence check compares on the
 /// current review subject. Shown beside approval rejection and in check
 /// output so a lead reading the refusal sees the exact sets that were compared,
@@ -2442,10 +2462,11 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             production,
             ineligible,
             replayed,
+            extent,
         } => (
             "debt-declared",
             format!(
-                "{}; missing {}; coverage: {}{}{}{}",
+                "{}; missing {}; coverage: {}{}{}{}; extent: {}",
                 match patchset_id {
                     Some(id) => format!("{id}: {reason}"),
                     None => reason.clone(),
@@ -2481,7 +2502,8 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
                         short_sha(&replayed.base),
                         short_sha(&replayed.parent)
                     ))
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
+                extent_label(extent.as_ref())
             ),
         ),
         Payload::AuditVerdictRecorded {
@@ -2489,6 +2511,7 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             verdict,
             body,
             held_roles,
+            extent,
             ..
         } => {
             let mut summary = format!(
@@ -2496,6 +2519,9 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
                 format!("{verdict:?}").to_lowercase(),
                 &revision[..revision.len().min(8)]
             );
+            if let Some(extent) = extent {
+                summary.push_str(&format!(" (extent: {})", extent.label()));
+            }
             if !held_roles.is_empty() {
                 summary.push_str(&format!(
                     " (held roles: {})",

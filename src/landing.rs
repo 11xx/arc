@@ -188,6 +188,7 @@ impl Landings {
                     production: debt.production.clone(),
                     ineligible: None,
                     replayed: debt.replayed.clone(),
+                    extent: None,
                 };
                 derived.push(event);
             }

@@ -102,6 +102,7 @@ mod review;
 mod review3_fixes_cost;
 mod review4_fixes_cost;
 mod review_clearance;
+mod review_extents;
 mod review_fixes_cost;
 mod review_fixes_native_child;
 mod review_fixes_span_split;

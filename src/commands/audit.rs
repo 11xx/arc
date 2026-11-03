@@ -235,6 +235,7 @@ pub fn declare_debt(
     reason: String,
     kind: Option<DebtMissing>,
     inputs: &IneligibleInputs,
+    extent: Option<&crate::extent::ExtentInput>,
 ) -> Result<()> {
     let reason = reason.trim();
     if reason.is_empty() {
@@ -244,7 +245,9 @@ pub fn declare_debt(
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
     let st = store.state(&change_id)?;
-    declare_debt_locked(ctx, &store, &st, reason, kind, inputs).map(|_| ())
+    plan_debt_with(ctx, &store, &st, reason, kind, inputs, extent)?
+        .declare(&store)
+        .map(|_| ())
 }
 
 /// What a debt declaration observed about its event: the event, and whether
@@ -338,13 +341,27 @@ pub(super) fn plan_debt(
     kind: Option<DebtMissing>,
     inputs: &IneligibleInputs,
 ) -> Result<DebtPlan> {
+    plan_debt_with(ctx, store, st, reason, kind, inputs, None)
+}
+
+/// [`plan_debt`] for an obligation that names what the owed review must
+/// cover: `extent` resolved against the patchset the debt binds to.
+fn plan_debt_with(
+    ctx: &Ctx,
+    store: &Store,
+    st: &ChangeState,
+    reason: &str,
+    kind: Option<DebtMissing>,
+    inputs: &IneligibleInputs,
+    extent: Option<&crate::extent::ExtentInput>,
+) -> Result<DebtPlan> {
     if kind == Some(DebtMissing::ReplayedUnread) {
         bail!(
             "replayed-unread is derived, never declared: `arc land --debt` records it for an \
              approved member it replayed onto a base the approval did not read"
         );
     }
-    plan_debt_of(ctx, store, st, reason, kind, inputs, None)
+    plan_debt_of(ctx, store, st, reason, kind, inputs, None, extent)
 }
 
 /// The `replayed-unread` debt a landing derives for a member whose exact
@@ -364,9 +381,11 @@ pub(super) fn plan_replayed_debt(
         Some(DebtMissing::ReplayedUnread),
         &IneligibleInputs::default(),
         Some(replayed),
+        None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn plan_debt_of(
     ctx: &Ctx,
     store: &Store,
@@ -375,6 +394,7 @@ fn plan_debt_of(
     kind: Option<DebtMissing>,
     inputs: &IneligibleInputs,
     replayed: Option<crate::model::ReplayedRead>,
+    extent: Option<&crate::extent::ExtentInput>,
 ) -> Result<DebtPlan> {
     let reason = reason.trim();
     if reason.is_empty() {
@@ -399,6 +419,22 @@ fn plan_debt_of(
         let implementers = range_implementers(ctx, subject);
         st.debt_production_for(subject, implementers)
     });
+    let extent = match extent {
+        None => None,
+        Some(input) => {
+            let subject = subject.with_context(|| {
+                format!(
+                    "{change_id} has no patchset, so there is no subject to resolve the extent                      against; run `arc snapshot` first"
+                )
+            })?;
+            Some(crate::extent::resolve(
+                &ctx.cwd,
+                input,
+                &subject.base,
+                &subject.head,
+            )?)
+        }
+    };
     // The caller's kind wins: arc reads the ledger, and the ledger cannot
     // distinguish a merge resolution from a repair.
     let ineligible = inputs.resolve(st, subject, kind)?;
@@ -431,6 +467,7 @@ fn plan_debt_of(
         production,
         ineligible: ineligible.clone(),
         replayed,
+        extent,
     };
     ensure_append_allowed(st, &payload)?;
     let event = ctx.event(store, change_id, payload)?;
@@ -611,6 +648,10 @@ pub struct AuditArgs {
     pub assessed: Option<crate::assessment::Assessment>,
     /// Findings already read, recorded when `findings_json` names none.
     pub findings: Vec<InlineFinding>,
+    /// What the auditor read, resolved against the shipped patchset before
+    /// anything is written. `None` records an audit whose extent is not
+    /// established.
+    pub extent: Option<crate::extent::ExtentInput>,
 }
 
 /// Record a review performed after integration, discharging any debt.
@@ -649,6 +690,18 @@ pub(super) fn record_audit(
     };
 
     let revision = integrated_revision(&st)?;
+    let extent = match &args.extent {
+        None => None,
+        Some(input) => {
+            let (base, revision) = st.extent_subject().with_context(|| {
+                format!(
+                    "{change_id} records no shipped range, so there is no subject to resolve \
+                     the extent against"
+                )
+            })?;
+            Some(crate::extent::resolve(&ctx.cwd, input, base, revision)?)
+        }
+    };
     let implementers = audited_implementers(ctx, &st);
     refuse_self_audit(ctx, &st, args.verdict)?;
     let inline = match args.findings_json.as_deref() {
@@ -724,6 +777,7 @@ pub(super) fn record_audit(
             .map(|admitted| admitted.dispositions.clone())
             .unwrap_or_default(),
         receipt: admitted.map(|admitted| admitted.reference),
+        extent,
     };
     ensure_append_allowed(&st, &payload)?;
     let mut event = ctx.event(&store, &change_id, payload)?;

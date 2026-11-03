@@ -1418,6 +1418,7 @@ fn record(
                     assessment: None,
                     assessed,
                     findings,
+                    extent: None,
                 },
                 Some(&guard),
             )

@@ -729,16 +729,30 @@ pub struct Debt {
     /// every other kind.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replayed: Option<crate::model::ReplayedRead>,
+    /// What the owed review must cover, as declared. Absent, the
+    /// obligation's extent is not established.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extent: Option<crate::extent::Extent>,
     /// Under `review_clearance = "assessed"`, the reads since the
     /// declaration that find without clearing, listed beside the obligation
     /// and never counted against it.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub findings_reads: Vec<FindingsRead>,
+    /// The reads since the declaration that would discharge the obligation
+    /// but for their extent: listed beside it as partial coverage, never
+    /// combined, never counted against it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub partial_coverage: Vec<PartialCoverage>,
     /// The first verdict or audit no [`DischargeBar`] bars, when one exists.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discharged_by: Option<DebtCoverage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discharged_by_event_id: Option<String>,
+    /// How the discharging read covers the obligation: `covered` when its
+    /// extent covers the obligation's, `not-established` when neither
+    /// recorded one. Absent while nothing discharges it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discharge_extent: Option<&'static str>,
     /// Where the obligation stands, read from the closure and the discharge
     /// predicate once every event is in. `discharged_by` is the discharger
     /// only when this is [`DebtStanding::Discharged`].
@@ -829,6 +843,46 @@ impl FindingsRead {
     }
 }
 
+/// A read that would discharge an obligation but for its extent: a scoped
+/// read of a whole obligation, a read of another subject, or one whose
+/// entries leave part of the obligation unread.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PartialCoverage {
+    /// Always `partial`: the kind of coverage this read gives.
+    pub kind: &'static str,
+    pub event_id: String,
+    /// `verdict` or `audit`.
+    pub source: &'static str,
+    pub verdict: Verdict,
+    pub reviewer: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// What the read covered. Absent, its extent is not established.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extent: Option<crate::extent::Extent>,
+    /// Why it does not cover the obligation, a stable name.
+    pub reason: &'static str,
+    /// The obligation paths the read leaves uncovered or excludes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+}
+
+impl PartialCoverage {
+    /// One line naming the read and what it leaves uncovered.
+    pub fn label(&self) -> String {
+        let model = self.model.as_deref().unwrap_or("model unrecorded");
+        let extent = self
+            .extent
+            .as_ref()
+            .map(crate::extent::Extent::label)
+            .unwrap_or_else(|| "extent not established".into());
+        format!(
+            "partial coverage {} ({} {:?} by {} ({model}); {extent}): {}",
+            self.event_id, self.source, self.verdict, self.reviewer, self.reason
+        )
+    }
+}
+
 /// An audit recorded against an `ineligible-review` debt that did not clear
 /// it: listed beside the obligation, never counted against it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -871,6 +925,7 @@ impl Debt {
             production,
             ineligible,
             replayed,
+            extent,
         } = &event.payload
         else {
             return false;
@@ -883,6 +938,7 @@ impl Debt {
             && self.production == *production
             && self.ineligible.as_ref().map(|read| &read.record) == ineligible.as_ref()
             && self.replayed == *replayed
+            && self.extent == *extent
             && self.actor == event.actor
             && self.on_behalf_of == event.on_behalf_of
     }
@@ -952,6 +1008,9 @@ pub struct AuditVerdictEntry {
     /// The receipt item this audit was ingested from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt: Option<crate::model::ReceiptReference>,
+    /// What the auditor read. Absent, its extent is not established.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extent: Option<crate::extent::Extent>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -1868,6 +1927,19 @@ impl ChangeState {
         }
         for audit in &mut self.audit_verdicts {
             rewrites.advance(&mut audit.revision)?;
+        }
+        // An extent names what was read, so it follows only the rewrites an
+        // approval follows: a successor that changed content is not what
+        // either side covered.
+        let extents = self
+            .audit_verdicts
+            .iter_mut()
+            .filter_map(|audit| audit.extent.as_mut())
+            .chain(self.debt.as_mut().and_then(|debt| debt.extent.as_mut()));
+        for extent in extents {
+            for revision in extent.subject.revisions_mut() {
+                *revision = rewrites.approved_successor(revision)?;
+            }
         }
         for verification in &mut self.verifications {
             rewrites.advance(&mut verification.revision)?;
@@ -3101,9 +3173,12 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     production: None,
                     ineligible: None,
                     replayed: None,
+                    extent: None,
                     findings_reads: Vec::new(),
+                    partial_coverage: Vec::new(),
                     discharged_by: None,
                     discharged_by_event_id: None,
+                    discharge_extent: None,
                     standing: DebtStanding::Declared,
                 });
             }
@@ -3115,6 +3190,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 production,
                 ineligible,
                 replayed,
+                extent,
             } => {
                 state.debt = Some(Debt {
                     origin_replica_id: ev.repository_id.clone(),
@@ -3142,9 +3218,12 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                         later_reads: Vec::new(),
                     }),
                     replayed: replayed.clone(),
+                    extent: extent.clone(),
                     findings_reads: Vec::new(),
+                    partial_coverage: Vec::new(),
                     discharged_by: None,
                     discharged_by_event_id: None,
+                    discharge_extent: None,
                     standing: DebtStanding::Declared,
                 });
             }
@@ -3158,6 +3237,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 held_roles,
                 dispositions,
                 receipt,
+                extent,
             } => {
                 for inline in findings {
                     state.audit_findings.insert(
@@ -3196,6 +3276,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     on_behalf_of: ev.on_behalf_of.clone(),
                     actor_source: ev.actor_source,
                     receipt: receipt.clone(),
+                    extent: extent.clone(),
                     created_at: ev.created_at,
                 });
                 apply_inline_dispositions(
@@ -4915,6 +4996,10 @@ impl ChangeState {
         let discharged_by = self.debt_discharge(&debt);
         let standing = self.debt_standing().expect("held debt");
         let findings_reads = self.findings_reads(&debt);
+        let partial_coverage = self.partial_coverage(&debt);
+        let discharge_extent = discharged_by
+            .as_ref()
+            .and_then(|(event_id, _)| self.discharge_extent(&debt, event_id));
         let read = debt.ineligible.as_ref().map(|read| {
             let reviewer = self
                 .verdicts
@@ -4979,6 +5064,8 @@ impl ChangeState {
             production.integrator = Some(integrator);
         }
         current.findings_reads = findings_reads;
+        current.partial_coverage = partial_coverage;
+        current.discharge_extent = discharge_extent;
         current.discharged_by_event_id = discharged_by.as_ref().map(|(id, _)| id.clone());
         current.discharged_by = discharged_by.map(|(_, coverage)| coverage);
         current.ineligible = read;
@@ -5088,6 +5175,95 @@ impl ChangeState {
             .collect()
     }
 
+    /// The audits, then the verdicts on the shipped patchset, that `debt`
+    /// bars only because their extent does not cover it. Each is listed on
+    /// its own: several partial reads never combine into coverage.
+    fn partial_coverage(&self, debt: &Debt) -> Vec<PartialCoverage> {
+        let Some(shipped) = self.closure_shipped_patchset() else {
+            return Vec::new();
+        };
+        let audits = self
+            .audit_verdicts
+            .iter()
+            .map(|audit| ("audit", Read::audit(audit)));
+        let verdicts = self
+            .verdicts
+            .iter()
+            .filter(|verdict| verdict.patchset_id == shipped.id)
+            .map(|verdict| ("verdict", Read::verdict(verdict)));
+        audits
+            .chain(verdicts)
+            .filter_map(
+                |(source, read)| match self.discharge_bar(debt, shipped, &read) {
+                    Some(DischargeBar::ExtentUncovered(gap)) => Some(PartialCoverage {
+                        kind: "partial",
+                        event_id: read.event_id.to_string(),
+                        source,
+                        verdict: read.verdict,
+                        reviewer: read.author.to_string(),
+                        model: read.model.map(str::to_string),
+                        extent: read.extent.cloned(),
+                        reason: gap.as_str(),
+                        paths: gap.paths().to_vec(),
+                    }),
+                    _ => None,
+                },
+            )
+            .collect()
+    }
+
+    /// Whether `read` covers what `debt` requires: the debt's extent, else
+    /// the whole [`extent_subject`](Self::extent_subject).
+    fn coverage_of(
+        &self,
+        debt: &Debt,
+        read: Option<&crate::extent::Extent>,
+    ) -> crate::extent::Coverage {
+        let obligation = match (&debt.extent, self.extent_subject()) {
+            (Some(extent), _) => crate::extent::Obligation::Extent(extent),
+            (None, Some((base, revision))) => {
+                crate::extent::Obligation::Unestablished { base, revision }
+            }
+            // A replayed obligation whose landed range was not recorded has
+            // no subject a stated extent could cover.
+            (None, None) if read.is_some() => {
+                return crate::extent::Coverage::Gap(crate::extent::CoverageGap::Revision)
+            }
+            (None, None) => return crate::extent::Coverage::NotEstablished,
+        };
+        crate::extent::covers(read, obligation)
+    }
+
+    /// The range an extent is resolved against, as `(base, revision)`: the
+    /// shipped patchset's, or for a `replayed-unread` obligation the range
+    /// the landing replayed it as, from the composed parent to the
+    /// integrated revision, which is the context that obligation owes a read
+    /// of. `None` when there is no such range.
+    pub fn extent_subject(&self) -> Option<(&str, &str)> {
+        if let Some(replayed) = self.debt.as_ref().and_then(|debt| debt.replayed.as_ref()) {
+            let closure = self.closure.as_ref()?;
+            let base = closure.range_base.as_deref().unwrap_or(&replayed.parent);
+            return Some((base, closure.integrated_commit.as_deref()?));
+        }
+        self.debt_subject_patchset()
+            .map(|patchset| (patchset.base.as_str(), patchset.head.as_str()))
+    }
+
+    /// Whether the read `event_id` discharges `debt` by an extent that
+    /// covers it, or where neither side established an extent.
+    fn discharge_extent(&self, debt: &Debt, event_id: &str) -> Option<&'static str> {
+        let extent = self
+            .audit_verdicts
+            .iter()
+            .find(|audit| audit.event_id == event_id)
+            .and_then(|audit| audit.extent.as_ref());
+        match self.coverage_of(debt, extent) {
+            crate::extent::Coverage::Covered => Some("covered"),
+            crate::extent::Coverage::NotEstablished => Some("not-established"),
+            crate::extent::Coverage::Gap(_) => None,
+        }
+    }
+
     /// Why the audit `event_id` leaves the held debt owed, or `None` when it
     /// discharges it or there is no such audit or debt.
     pub fn audit_discharge_bar(&self, event_id: &str) -> Option<DischargeBar> {
@@ -5103,13 +5279,24 @@ impl ChangeState {
     }
 
     /// Why `read` does not discharge `debt` on the work `shipped` carries.
-    /// The first bar that applies is the one named.
+    /// The first bar that applies is the one named; whether the read covers
+    /// the obligation's extent is asked last, of a read that otherwise
+    /// discharges it.
     fn discharge_bar(
         &self,
         debt: &Debt,
         shipped: &Patchset,
         read: &Read<'_>,
     ) -> Option<DischargeBar> {
+        self.reader_bar(debt, shipped, read)
+            .or_else(|| match self.coverage_of(debt, read.extent) {
+                crate::extent::Coverage::Covered | crate::extent::Coverage::NotEstablished => None,
+                crate::extent::Coverage::Gap(gap) => Some(DischargeBar::ExtentUncovered(gap)),
+            })
+    }
+
+    /// Why `read`, by who read it and when, does not discharge `debt`.
+    fn reader_bar(&self, debt: &Debt, shipped: &Patchset, read: &Read<'_>) -> Option<DischargeBar> {
         if !self.review_eligible(read.event_id, read.origin) {
             return Some(DischargeBar::NoReviewAuthority);
         }
@@ -5176,6 +5363,8 @@ struct Read<'a> {
     author_assumed: bool,
     author: &'a str,
     model: Option<&'a str>,
+    /// What the read covered. A verdict records no extent.
+    extent: Option<&'a crate::extent::Extent>,
 }
 
 impl<'a> Read<'a> {
@@ -5197,6 +5386,7 @@ impl<'a> Read<'a> {
             author_assumed: audit.author_assumed(),
             author: audit.effective_author(),
             model: audit.model.as_deref(),
+            extent: audit.extent.as_ref(),
         }
     }
 
@@ -5210,6 +5400,7 @@ impl<'a> Read<'a> {
             author_assumed: verdict.author_assumed(),
             author: verdict.effective_author(),
             model: verdict.model.as_deref(),
+            extent: None,
         }
     }
 }
@@ -5342,6 +5533,8 @@ pub enum DischargeBar {
     FindingsRead(FindingsReason),
     /// The shipped range has no ledger authorship to compare against.
     NoAuthorshipRecord,
+    /// The read's extent does not cover the obligation's.
+    ExtentUncovered(crate::extent::CoverageGap),
 }
 
 impl DischargeBar {
@@ -5357,6 +5550,7 @@ impl DischargeBar {
             Self::Authored(_) => "authored",
             Self::FindingsRead(_) => "findings-read",
             Self::NoAuthorshipRecord => "no-authorship-record",
+            Self::ExtentUncovered(_) => "extent-uncovered",
         }
     }
 
@@ -5391,6 +5585,11 @@ impl DischargeBar {
             Self::NoAuthorshipRecord => {
                 "cannot be compared with authorship: the shipped range has no ledger record".into()
             }
+            Self::ExtentUncovered(gap) => format!(
+                "is partial coverage ({}): it {}",
+                gap.as_str(),
+                gap.reason()
+            ),
             Self::FindingsRead(why) => format!(
                 "is a findings read: it {}; review_clearance = \"assessed\" clears only a bound \
                  assessment from `{CLEARANCE_REMEDY}` that says it clears",
@@ -5424,6 +5623,7 @@ mod tests {
                 production: Some(test_production()),
                 ineligible: None,
                 replayed: None,
+                extent: None,
             },
         );
         for audit in [false, true] {
@@ -5440,6 +5640,7 @@ mod tests {
                         route_version: None,
                         assessment: None,
                         held_roles: Vec::new(),
+                        extent: None,
                     },
                 )
             } else {
@@ -6402,6 +6603,7 @@ mod tests {
                 route_version: None,
                 assessment,
                 held_roles: Vec::new(),
+                extent: None,
             },
         );
         audit.actor = "reader".into();
@@ -6437,6 +6639,7 @@ mod tests {
                 production: Some(test_production()),
                 ineligible: None,
                 replayed: None,
+                extent: None,
             },
         )
     }
@@ -6524,6 +6727,7 @@ mod tests {
                     assessment: AssessmentBasis::Declared,
                 }),
                 replayed: None,
+                extent: None,
             },
         );
         let mut review = verdict("fix", "ps-01", None);
@@ -6559,6 +6763,7 @@ mod tests {
                     base: "b0".into(),
                     parent: "p1".into(),
                 }),
+                extent: None,
             },
         );
         let mut review = verdict("fix", "ps-01", None);
@@ -6662,6 +6867,7 @@ mod tests {
                         production: Some(test_production()),
                         ineligible: None,
                         replayed: None,
+                        extent: None,
                     },
                 )
             };
@@ -6681,6 +6887,159 @@ mod tests {
                 Some(DebtStanding::Discharged),
                 "{missing:?}"
             );
+        }
+    }
+
+    /// An obligation over `p` from `b0b0b0b0b0` to `a1a1a1a1a1`, declared on
+    /// `ps-01`, which integrated at `a1a1a1a1a1`.
+    fn extent_fixture() -> Vec<Event> {
+        let patch = ev(
+            "fix",
+            serde_json::from_value(serde_json::json!({
+                "event_type": "patchset-added", "patchset_id": "ps-01", "base": "b0b0b0b0b0", "head": "a1a1a1a1a1"
+            }))
+            .unwrap(),
+        );
+        let debt = ev(
+            "fix",
+            Payload::DebtDeclared {
+                reason: "review owed".into(),
+                patchset_id: Some("ps-01".into()),
+                missing: DebtMissing::IndependentReview,
+                coverage: Vec::new(),
+                production: Some(test_production()),
+                ineligible: None,
+                replayed: None,
+                extent: Some(scoped_extent("b0b0b0b0b0", "a1a1a1a1a1")),
+            },
+        );
+        let integrated = ev(
+            "fix",
+            Payload::ChangeIntegrated {
+                authority_grant_event_id: None,
+                provisional_resolutions: Vec::new(),
+                integrated_commit: "a1a1a1a1a1".into(),
+                source_patchset_id: "ps-01".into(),
+                source_head: "a1a1a1a1a1".into(),
+                target_branch: "master".into(),
+                target_before: "b0b0b0b0b0".into(),
+                authorization: None,
+                already_contained: false,
+                shape: None,
+                started_at: None,
+                landing: None,
+            },
+        );
+        vec![opened("fix"), patch, debt, integrated]
+    }
+
+    /// `p` at blob `aa` in the diff from `base` to `revision`.
+    fn scoped_extent(base: &str, revision: &str) -> crate::extent::Extent {
+        crate::extent::Extent {
+            subject: crate::extent::ExtentSubject::Diff {
+                base: base.into(),
+                revision: revision.into(),
+            },
+            scope: Some(crate::extent::ExtentScope {
+                entries: vec![crate::extent::ExtentEntry {
+                    path: "p".into(),
+                    content: crate::extent::EntryContent::Blob("aa".into()),
+                }],
+                exclusions: Vec::new(),
+            }),
+        }
+    }
+
+    fn extent_audit(extent: crate::extent::Extent) -> Event {
+        let mut audit = ev(
+            "fix",
+            Payload::AuditVerdictRecorded {
+                dispositions: Vec::new(),
+                receipt: None,
+                revision: "a1a1a1a1a1".into(),
+                verdict: Verdict::Approved,
+                body: None,
+                findings: vec![],
+                route_version: None,
+                assessment: None,
+                held_roles: Vec::new(),
+                extent: Some(extent),
+            },
+        );
+        audit.actor = "reader".into();
+        audit
+    }
+
+    /// Claim: an audit listing the same final path and blob as the
+    /// obligation, read from another base, does not discharge it and is
+    /// listed as partial coverage; the same audit from the obligation's base
+    /// does. Rejects coverage judged by the final inventory alone.
+    #[test]
+    fn identical_inventories_from_another_base_do_not_discharge() {
+        let mut events = extent_fixture();
+        let other_base = extent_audit(scoped_extent("b1b1b1b1b1", "a1a1a1a1a1"));
+        let other_id = other_base.event_id.clone();
+        events.push(other_base);
+        let state = reduce(&events).unwrap();
+        let debt = state.debt.as_ref().unwrap();
+        assert_eq!(debt.standing, DebtStanding::Owed, "{debt:?}");
+        assert_eq!(debt.partial_coverage.len(), 1, "{debt:?}");
+        assert_eq!(debt.partial_coverage[0].event_id, other_id);
+        assert_eq!(debt.partial_coverage[0].reason, "base-mismatch");
+
+        let same_base = extent_audit(scoped_extent("b0b0b0b0b0", "a1a1a1a1a1"));
+        let same_id = same_base.event_id.clone();
+        events.push(same_base);
+        let state = reduce(&events).unwrap();
+        let debt = state.debt.as_ref().unwrap();
+        assert_eq!(debt.standing, DebtStanding::Discharged, "{debt:?}");
+        assert_eq!(
+            debt.discharged_by_event_id.as_deref(),
+            Some(same_id.as_str())
+        );
+        assert_eq!(debt.discharge_extent, Some("covered"));
+    }
+
+    /// Claim: an audit of a signature-only successor of the obligation's
+    /// revision, from the same base, covers it, and an audit of a successor
+    /// that changed content does not. Rejects an extent following a content
+    /// rewrite to vouch for what nobody read.
+    #[test]
+    fn an_extent_follows_only_a_signature_only_successor() {
+        for (signature_only, discharged) in [(true, true), (false, false)] {
+            let mut events = extent_fixture();
+            events.push(extent_audit(scoped_extent("b0b0b0b0b0", "a2a2a2a2a2")));
+            let rewrite = ev(
+                crate::store::Store::REPOSITORY_SCOPE,
+                Payload::HistoryRewritten {
+                    mapping: std::collections::BTreeMap::from([(
+                        "a1a1a1a1a1".to_string(),
+                        Some("a2a2a2a2a2".to_string()),
+                    )]),
+                    reason: "sign".into(),
+                    tool: None,
+                    signature_only: if signature_only {
+                        vec!["a1a1a1a1a1".into()]
+                    } else {
+                        Vec::new()
+                    },
+                    role_additions: Vec::new(),
+                    refs: std::collections::BTreeMap::new(),
+                    retained: std::collections::BTreeMap::new(),
+                },
+            );
+            let rewrites = RewriteMap::from_events(std::iter::once(&rewrite)).unwrap();
+            let mut state = reduce_following(&events, &rewrites).unwrap();
+            state.settle_debt();
+            let debt = state.debt.as_ref().unwrap();
+            assert_eq!(
+                debt.standing == DebtStanding::Discharged,
+                discharged,
+                "signature-only {signature_only}: {debt:?}"
+            );
+            if !discharged {
+                assert_eq!(debt.partial_coverage[0].reason, "revision-mismatch");
+            }
         }
     }
 }

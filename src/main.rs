@@ -16,6 +16,7 @@ mod coordinate;
 mod custody;
 mod declarations;
 mod explain;
+mod extent;
 mod forge;
 mod forge_observation;
 mod forge_round_trip;
@@ -2873,6 +2874,11 @@ enum Cmd {
     /// orchestrator and integrator. It also keeps the `Implemented-by` values
     /// of the commits in the range verbatim as a projection for comparison; a
     /// range naming none records an empty list. Trailers never decide a role.
+    ///
+    /// With `--extent` or `--extent-paths` the debt names what the owed
+    /// review must cover, resolved against the patchset it binds to. Only a
+    /// read whose extent covers it discharges it; any other read is listed
+    /// beside it as partial coverage (`arc guide debt-obligations`).
     Debt {
         /// Change that owes the review
         change: String,
@@ -2917,6 +2923,36 @@ enum Cmd {
         /// Recorded as a coordinate and nothing else
         #[arg(long = "route-version", value_name = "VERSION")]
         route_version: Option<String>,
+        /// What the owed review must cover: the whole subject, which is the
+        /// patchset the debt binds to, in the domain `--extent-domain` names.
+        /// With neither this nor `--extent-paths`, the obligation's extent is
+        /// not established, and a read naming one discharges it only when
+        /// whole
+        #[arg(
+            long = "extent",
+            value_enum,
+            value_name = "whole",
+            conflicts_with = "extent_paths"
+        )]
+        extent: Option<crate::extent::WholeExtent>,
+        /// What the owed review must cover: the entries of the subject these
+        /// path globs match (`**` spans directories, `*` stops at one, a
+        /// trailing `/` names a subtree). Each glob resolves, before anything is written,
+        /// to every matching path with its blob at the subject's revision,
+        /// and in the diff domain to each deletion with its blob at the base.
+        /// The glob is never stored. A glob matching nothing is refused
+        #[arg(long = "extent-paths", value_name = "GLOB", num_args = 1..)]
+        extent_paths: Vec<String>,
+        /// Entries `--extent-paths` leaves out, as globs resolved the same
+        /// way and recorded as the extent's exclusions. A glob matching
+        /// nothing, or exclusions leaving no entry, is refused
+        #[arg(long = "extent-exclude", value_name = "GLOB", num_args = 1.., requires = "extent_paths")]
+        extent_exclude: Vec<String>,
+        /// The extent's domain: `diff`, the change from its patchset's base
+        /// to its head (the default), or `tree`, the candidate tree at that
+        /// head. A read of one domain never covers an obligation of the other
+        #[arg(long = "extent-domain", value_enum, value_name = "DOMAIN")]
+        extent_domain: Option<crate::extent::Domain>,
     },
     /// Record a review performed after integration (never a late verdict)
     ///
@@ -2977,6 +3013,14 @@ enum Cmd {
     /// contributor match gets. Such a read never discharges review debt, regardless of self-approval policy: permission to approve does not
     /// establish independent coverage. `--verdict changes-requested` is
     /// open to anyone.
+    ///
+    /// With `--extent` or `--extent-paths` the audit records what it read,
+    /// resolved against the patchset the change shipped, or for a
+    /// `replayed-unread` debt the range the landing replayed it as. It
+    /// discharges a
+    /// debt only when that extent covers the debt's, and is otherwise listed
+    /// beside the obligation as partial coverage, as is an audit naming no
+    /// extent against a debt that names one (`arc guide debt-obligations`).
     Audit {
         /// Change whose integrated revision was reviewed
         #[arg(required_unless_present = "receipt")]
@@ -3016,6 +3060,36 @@ enum Cmd {
         /// assessment
         #[arg(long = "assessment", value_name = "FILE")]
         assessment: Option<PathBuf>,
+        /// What the auditor read: the whole subject, which is the patchset
+        /// the change shipped (for a `replayed-unread` debt, the range the
+        /// landing replayed it as), in the domain `--extent-domain` names. With
+        /// neither this nor `--extent-paths`, the audit's extent is not
+        /// established, and it discharges no obligation that names one
+        #[arg(
+            long = "extent",
+            value_enum,
+            value_name = "whole",
+            conflicts_with = "extent_paths"
+        )]
+        extent: Option<crate::extent::WholeExtent>,
+        /// What the auditor read: the entries of the subject these path globs
+        /// match (`**` spans directories, `*` stops at one, a trailing `/`
+        /// names a subtree). Each glob resolves, before anything is written,
+        /// to every matching path with its blob at the subject's revision,
+        /// and in the diff domain to each deletion with its blob at the base.
+        /// The glob is never stored. A glob matching nothing is refused
+        #[arg(long = "extent-paths", value_name = "GLOB", num_args = 1..)]
+        extent_paths: Vec<String>,
+        /// Entries `--extent-paths` leaves out, as globs resolved the same
+        /// way and recorded as the extent's exclusions. A glob matching
+        /// nothing, or exclusions leaving no entry, is refused
+        #[arg(long = "extent-exclude", value_name = "GLOB", num_args = 1.., requires = "extent_paths")]
+        extent_exclude: Vec<String>,
+        /// The extent's domain: `diff`, the change from its patchset's base
+        /// to its head (the default), or `tree`, the candidate tree at that
+        /// head. A read of one domain never covers an obligation of the other
+        #[arg(long = "extent-domain", value_enum, value_name = "DOMAIN")]
+        extent_domain: Option<crate::extent::Domain>,
         /// Record every audit item of an `arc-review-receipt/1` file from
         /// `arc receipt template --audit`, each on its own integrated change,
         /// for the reviewer the receipt names (`arc receipt --help` has the
@@ -3026,7 +3100,7 @@ enum Cmd {
         /// refused; the others still record
         #[arg(long, value_name = "FILE", conflicts_with_all = [
             "change", "verdict", "body", "body_file", "findings_json", "route_version",
-            "assessment",
+            "assessment", "extent", "extent_paths", "extent_exclude", "extent_domain",
         ])]
         receipt: Option<PathBuf>,
         /// With --receipt, emit `arc-receipt-result/1`
@@ -7410,6 +7484,10 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             assessment,
             qualifiers,
             route_version,
+            extent,
+            extent_paths,
+            extent_exclude,
+            extent_domain,
         } => {
             let inputs = commands::IneligibleInputs {
                 read,
@@ -7417,7 +7495,13 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 qualifiers,
                 route_version,
             };
-            commands::declare_debt(&ctx, &change, reason, kind, &inputs)?;
+            let extent = crate::extent::ExtentInput::from_flags(
+                extent.is_some(),
+                extent_paths,
+                extent_exclude,
+                extent_domain,
+            )?;
+            commands::declare_debt(&ctx, &change, reason, kind, &inputs, extent.as_ref())?;
             Ok(0)
         }
         Cmd::Audit {
@@ -7428,6 +7512,10 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             findings_json,
             route_version,
             assessment,
+            extent,
+            extent_paths,
+            extent_exclude,
+            extent_domain,
             receipt,
             json,
         } => {
@@ -7458,6 +7546,12 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     assessment,
                     assessed: None,
                     findings: Vec::new(),
+                    extent: crate::extent::ExtentInput::from_flags(
+                        extent.is_some(),
+                        extent_paths,
+                        extent_exclude,
+                        extent_domain,
+                    )?,
                 },
             )?;
             Ok(0)

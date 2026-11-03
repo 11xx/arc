@@ -1831,3 +1831,59 @@ fn a_contracted_cycle_makes_a_landing_unsplittable() {
         assert!(status(&repo, change)["closure"].is_null());
     }
 }
+
+/// Claim: an audit of a replayed member resolves its extent against the
+/// range the landing replayed it as, from the composed parent to the
+/// integrated revision, so a whole audit of that range discharges
+/// `replayed-unread` and a scoped one stays partial coverage. Rejects
+/// resolving the extent against the original patchset, whose base the
+/// approval already read and whose diff is not the context the debt owes.
+#[test]
+fn an_extent_of_a_replayed_member_is_the_range_it_landed_as() {
+    let repo = gated_repo();
+    let ((first, _, first_head), (second, _, _)) = independent(&repo);
+    repo.arc(&repo.root)
+        .args(["land", &first, &second, "--debt", "context unread"])
+        .assert()
+        .success();
+    let after = git_out(&repo.root, &["rev-parse", "master"]);
+    let audit = |extent: &[&str]| -> String {
+        let output = stdout(
+            repo.arc(&repo.root)
+                .env("ARC_ACTOR", "auditor")
+                .args(["audit", &second, "--verdict", "approved"])
+                .args(extent),
+        );
+        output
+            .lines()
+            .find_map(|line| line.strip_prefix("event: "))
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+    let extent_of = |event: &str| {
+        change_events(&repo, &second)
+            .into_iter()
+            .find(|recorded| recorded["event_id"] == event)
+            .unwrap()["extent"]
+            .clone()
+    };
+
+    let scoped = audit(&["--extent-paths", "second.txt"]);
+    let report = status(&repo, &second);
+    assert_eq!(report["debt_standing"], "owed", "{report}");
+    assert_eq!(
+        report["debt"]["partial_coverage"][0]["reason"], "obligation-extent-not-established",
+        "{report}"
+    );
+    assert_eq!(extent_of(&scoped)["base"], first_head.as_str());
+
+    let whole = audit(&["--extent", "whole"]);
+    let extent = extent_of(&whole);
+    assert_eq!(extent["base"], first_head.as_str(), "{extent}");
+    assert_eq!(extent["revision"], after.as_str(), "{extent}");
+    let report = status(&repo, &second);
+    assert_eq!(report["debt_standing"], "discharged", "{report}");
+    assert_eq!(report["debt"]["discharged_by_event_id"], whole.as_str());
+    assert_eq!(report["debt"]["discharge_extent"], "covered", "{report}");
+}

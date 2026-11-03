@@ -1932,6 +1932,14 @@ impl Store {
             {
                 Some(7)
             }
+            // An older reader ignores an extent and reads the obligation as
+            // discharged by a read that does not cover it.
+            Payload::DebtDeclared {
+                extent: Some(_), ..
+            }
+            | Payload::AuditVerdictRecorded {
+                extent: Some(_), ..
+            } => Some(7),
             Payload::ChangeProvisionallyIntegrated { .. }
             | Payload::ProvisionalIntegrationResolved { .. } => Some(7),
             Payload::VerdictRecorded {
@@ -2025,6 +2033,13 @@ impl Store {
                     .and_then(|value| value.get("dispositions"))
                     .and_then(serde_json::Value::as_array)
                     .is_some_and(|dispositions| !dispositions.is_empty()) =>
+            {
+                Some(7)
+            }
+            Some("debt-declared") | Some("audit-verdict-recorded")
+                if value
+                    .and_then(|value| value.get("extent"))
+                    .is_some_and(|extent| !extent.is_null()) =>
             {
                 Some(7)
             }
@@ -3846,6 +3861,75 @@ mod tests {
             ),
             (
                 serde_json::json!({"event_type": "audit-verdict-recorded", "revision": "r", "verdict": "approved"}),
+                1,
+            ),
+        ];
+        let mut mismatches = Vec::new();
+        for (value, expected) in fixtures {
+            let payload: Payload = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&payload).unwrap(), value);
+            for path in ["typed", "raw-change", "raw-repository"] {
+                let dir = tempfile::tempdir().unwrap();
+                let config = StoreConfig {
+                    schema_version: 1,
+                    repository_id: "repo".into(),
+                    created_at: chrono::Utc::now(),
+                };
+                fs::write(
+                    dir.path().join("config.json"),
+                    serde_json::to_vec(&config).unwrap(),
+                )
+                .unwrap();
+                let store = test_store(dir.path());
+                let bytes = serde_json::to_vec(&value).unwrap();
+                match path {
+                    "typed" => store.stamp_format_for(&payload).unwrap(),
+                    "raw-change" => {
+                        store.append_raw_event("change", "event", &bytes).unwrap();
+                    }
+                    _ => {
+                        store.append_raw_repository_event("event", &bytes).unwrap();
+                    }
+                }
+                let stored: StoreConfig =
+                    serde_json::from_slice(&fs::read(dir.path().join("config.json")).unwrap())
+                        .unwrap();
+                if stored.schema_version != expected {
+                    mismatches.push(format!(
+                        "{value} {path}: {} (expected {expected})",
+                        stored.schema_version
+                    ));
+                }
+                if expected > 6 {
+                    let refused = ensure_readable_format_at(stored.schema_version, 6);
+                    if refused.is_ok() {
+                        mismatches.push(format!("{value} {path}: a format-6 reader opens it"));
+                    }
+                }
+            }
+        }
+        assert!(mismatches.is_empty(), "{}", mismatches.join("; "));
+    }
+
+    /// Claim: a debt or audit carrying an extent stamps format 7 on every
+    /// append path, so a reader at format 6, which would ignore the extent
+    /// and read the obligation as discharged by a read that does not cover
+    /// it, refuses the store. The same events without an extent stamp
+    /// nothing.
+    #[test]
+    fn extents_stamp_seven_on_every_path() {
+        let extent = serde_json::json!({"domain": "diff", "base": "b0", "revision": "r1"});
+        let fixtures = [
+            (
+                serde_json::json!({"event_type": "debt-declared", "reason": "owed", "missing": "independent-review", "coverage": [], "extent": extent}),
+                7,
+            ),
+            (
+                serde_json::json!({"event_type": "audit-verdict-recorded", "revision": "r", "verdict": "approved", "extent": extent}),
+                7,
+            ),
+            (
+                serde_json::json!({"event_type": "debt-declared", "reason": "owed", "missing": "independent-review", "coverage": []}),
                 1,
             ),
         ];

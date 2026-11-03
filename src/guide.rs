@@ -2688,6 +2688,40 @@ REVIEW COVERAGE AND DEBT
   all, and `arc check` says so rather than reporting that nobody reviewed it.
   The same shape a contested finding has, for the same reason.
 
+  EXTENTS. A debt and an audit may name an extent: what the owed review
+  must cover, and what the auditor read. `--extent whole` names the whole
+  subject; `--extent-paths <glob>...`, with `--extent-exclude <glob>...`,
+  names the entries the globs match. The subject is the patchset the debt
+  binds to, or the one the change shipped, in the domain `--extent-domain`
+  names: `diff` (the default), the change from its base to its head, or
+  `tree`, the candidate tree at its head. An audit of a change owing
+  `replayed-unread` reads the range the landing replayed it as instead,
+  from the composed parent to the integrated revision: the context that
+  debt owes a read of. Globs resolve before anything is
+  written, to each matching path with its blob at the head and, in a diff,
+  each deletion with its blob at the base; a glob matching nothing, or
+  exclusions leaving nothing, is refused, and no glob is stored. The extent
+  is kept as `domain`, `revision`, and `base` (diff) or `tree` (tree), with
+  `scope.entries` and `scope.exclusions` when scoped. An event carrying one
+  stamps store format 7.
+
+  A read covers an obligation only at the same domain, the same base and
+  the same revision, or a signature-only or role-addition successor of it
+  (`arc guide rewrites-evidence`); then:
+
+    whole read     covers the whole subject and any scope of it
+    scoped read    covers a scoped obligation when it lists every one of
+                   its entries at the same blob, deletions included, and
+                   excludes none; never a whole one
+    no extent      covers no obligation that names one; beside one that
+                   names none, the rule without extents decides, shown as
+                   `extent: not established`
+
+  A tree read never covers a diff obligation, nor the reverse. An obligation
+  naming no extent is covered by a whole read of what shipped, never by a
+  scoped one. Scoped reads never combine: each is judged alone. `arc guide
+  debt-recovery` says how coverage enters discharge.
+
   Debt and a provisional verdict are the same obligation at two distances:
   debt says no review happened, provisional says one happened and is not yet
   trusted. Corroboration is a second judgment, not one particular command: an
@@ -2750,6 +2784,21 @@ REVIEW COVERAGE AND DEBT
   `assessment-without-clearance`, `not-clearing`, `unbound`,
   `effort-unrecorded`), and the remedy `agent-routing assess --purpose
   clearance --json`. A `comment-only` read stays a read that judged nothing.
+
+  Coverage is judged last: a read that every rule above lets discharge the
+  debt discharges it only when its extent covers the obligation's (`arc
+  guide debt-obligations`). Otherwise it is partial coverage: the debt stays
+  owed, and `arc status`, `arc show` and `arc check` list the read beside the
+  obligation as `debt.partial_coverage` (`debt_partial_coverage` in `arc
+  check --json`), with kind `partial`, its extent, the reason
+  (`read-extent-not-established`, `obligation-extent-not-established`,
+  `domain-mismatch`, `base-mismatch`, `revision-mismatch`, `scoped-read`,
+  `entries-excluded`, `entries-missing`) and the obligation paths it leaves
+  unread. A discharged debt says how in `debt.discharge_extent`: `covered`,
+  or `not-established` where neither side named an extent. A
+  `changes-requested` read within its extent discharges as any read does;
+  its findings carry what remains. A verdict records no extent, so only an
+  audit discharges an obligation that names one.
 
   An audit is a separate event from the verdict that shipped, so attaching one
   never rewrites what shipped with what review. An approving audit must come

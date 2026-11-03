@@ -1502,6 +1502,11 @@ pub enum Payload {
         /// completion derives.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         replayed: Option<ReplayedRead>,
+        /// What the owed review must cover. Absent, the obligation's extent
+        /// is not established: only a read without one, or a whole read of
+        /// what shipped, discharges it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        extent: Option<crate::extent::Extent>,
     },
     /// Dirty-tree evidence allowed to count, for one revision.
     ///
@@ -1550,6 +1555,10 @@ pub enum Payload {
         /// The receipt item this audit was ingested from.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         receipt: Option<ReceiptReference>,
+        /// What the auditor read. Absent, the audit's extent is not
+        /// established, and it discharges no obligation that names one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        extent: Option<crate::extent::Extent>,
     },
     /// A finding raised by a post-integration audit. An audit that could only
     /// say approved-or-not would be a rubber stamp.
