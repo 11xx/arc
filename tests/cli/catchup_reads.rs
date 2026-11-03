@@ -189,6 +189,54 @@ fn catchup_reduces_each_change_once_however_many_changes() {
     }
 }
 
+/// The change event files the ledger holds.
+fn change_events_held(repo: &Repo) -> u64 {
+    fs::read_dir(repo.root.join(".git/arc/changes"))
+        .unwrap()
+        .map(|change| {
+            fs::read_dir(change.unwrap().path().join("events"))
+                .map(|events| events.count() as u64)
+                .unwrap_or(0)
+        })
+        .sum()
+}
+
+/// Claim: `catchup`, in text and JSON, types each change event at most once
+/// however many changes the ledger holds: recent sessions take each change's
+/// writers from the read that reduced it. The writers still rank: the
+/// ledger's session is listed. Rejects recent sessions decoding every
+/// change's events again after the ledger sections reduced them.
+#[test]
+fn catchup_types_each_change_event_once_however_many_changes() {
+    let repo = ledger(1);
+    for extra in [0, 3] {
+        for index in 0..extra {
+            begin_without_checkout(&repo, &format!("more-{index}"), &[]);
+        }
+        let held = change_events_held(&repo);
+        for args in [&["catchup"][..], &["catchup", "--json"][..]] {
+            let (record, _, code) = super::landing_reads::traced(&repo, &repo.root, args);
+            assert_eq!(code, Some(0), "arc {args:?}: {record}");
+            let typed = record["ledger"]["change"]["typed"].as_u64().unwrap();
+            assert!(
+                typed <= held,
+                "arc {args:?} typed {typed} change events of {held}: {record}"
+            );
+        }
+        let output = stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
+        let catchup: Value = serde_json::from_str(&output).unwrap();
+        assert!(
+            catchup["recent_sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["harness"] == "test" && row["session"] == "session-a"),
+            "{}",
+            catchup["recent_sessions"]
+        );
+    }
+}
+
 /// Write a Claude and a Codex recording of session `index`, each made in the
 /// repository's checkout.
 fn record_sessions(repo: &Repo, index: usize) {

@@ -6469,8 +6469,8 @@ pub(crate) fn recent_sessions_from(
         target.observe(row.last_activity, row.model.as_deref());
     }
     let store = ctx.store()?;
-    let mut ledger = match store.load_repository_events() {
-        Ok(events) => events,
+    let mut writers = match store.load_repository_events() {
+        Ok(events) => crate::store::SessionWriter::of(&events),
         Err(error) => {
             unavailable.push(format!("repository events: {error:#}"));
             Vec::new()
@@ -6478,23 +6478,20 @@ pub(crate) fn recent_sessions_from(
     };
     let read = store.read()?;
     for change in read.change_ids()? {
-        match read.events(&change) {
-            Ok(events) => ledger.extend(events),
+        match read.writers(&change) {
+            Ok(held) => writers.extend(held),
             Err(error) => unavailable.push(format!("change {change}: {error:#}")),
         }
     }
-    for event in ledger {
-        let (Some(harness), Some(session)) = (event.harness.as_deref(), event.session.as_deref())
-        else {
-            continue;
-        };
+    for writer in writers {
+        let (harness, session) = (writer.harness.as_str(), writer.session.as_str());
         if present(session).is_none() || present(harness).is_none() {
             continue;
         }
         let row = rows
             .entry((harness.to_string(), session.to_string()))
             .or_insert_with(|| RecentSession::new(harness, session));
-        row.observe(Some(event.created_at), event.model.as_deref());
+        row.observe(Some(writer.created_at), writer.model.as_deref());
     }
     let (dir, events) =
         match resolve_dir(&ctx.cwd).and_then(|dir| read_events(&dir).map(|events| (dir, events))) {

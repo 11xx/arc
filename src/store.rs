@@ -235,9 +235,50 @@ impl LedgerRead<'_> {
     pub fn state(&self, change_id: &str) -> Result<crate::state::ChangeState> {
         self.store.shared_state(change_id, || {
             let events = self.events(change_id)?;
+            self.store
+                .hold_writers(change_id, || SessionWriter::of(&events));
             self.rewrites()?;
             self.project(&events)
         })
+    }
+
+    /// The session behind each of a change's events, in event order. While
+    /// the process shares reads they come from the read that reduced the
+    /// change, so its events are typed once.
+    pub fn writers(&self, change_id: &str) -> Result<Vec<SessionWriter>> {
+        if let Some(held) = self.store.held_writers(change_id) {
+            return Ok(held);
+        }
+        let writers = SessionWriter::of(&self.events(change_id)?);
+        self.store.hold_writers(change_id, || writers.clone());
+        Ok(writers)
+    }
+}
+
+/// The session that wrote one event: its harness and session, when it wrote
+/// it, and the model it recorded.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionWriter {
+    pub harness: String,
+    pub session: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub model: Option<String>,
+}
+
+impl SessionWriter {
+    /// The writer of each event that names both a harness and a session.
+    pub fn of(events: &[Event]) -> Vec<Self> {
+        events
+            .iter()
+            .filter_map(|event| {
+                Some(Self {
+                    harness: event.harness.clone()?,
+                    session: event.session.clone()?,
+                    created_at: event.created_at,
+                    model: event.model.clone(),
+                })
+            })
+            .collect()
     }
 }
 
@@ -306,8 +347,9 @@ pub struct ImportBatch {
 /// What one process reads from a ledger once and shares across every store
 /// handle it opens. A command that only reads, and never watches the ledger
 /// move, turns sharing on at start with `share_reads`. Each event file, the
-/// import batches, the privilege scope, each change's state, the readable
-/// states and the replica events are then read once per process. Any ledger write the process makes forgets everything
+/// import batches, the privilege scope, each change's state and event
+/// writers, the readable states and the replica events are then read once
+/// per process. Any ledger write the process makes forgets everything
 /// shared, so a later read sees it, and a failed read is never held.
 mod shared {
     use super::{ImportBatch, PrivilegeScope};
@@ -399,6 +441,8 @@ mod shared {
         /// The readable states, and the warning naming each unreadable one.
         pub states: Option<(BTreeMap<String, crate::state::ChangeState>, Vec<String>)>,
         pub replica_events: Option<Vec<crate::replica::ReplicaEvent>>,
+        /// Each change's event writers, taken from the read that typed its events.
+        pub change_writers: HashMap<String, Vec<super::SessionWriter>>,
     }
 
     static ENABLED: AtomicBool = AtomicBool::new(false);
@@ -2075,6 +2119,29 @@ impl Store {
                 .insert(change_id.to_string(), state.clone())
         });
         Ok(state)
+    }
+
+    /// The writers held for a change while this handle shares reads.
+    fn held_writers(&self, change_id: &str) -> Option<Vec<SessionWriter>> {
+        if !self.shares_reads() {
+            return None;
+        }
+        let held = shared::with(&self.root, |memo| {
+            memo.change_writers.get(change_id).cloned()
+        });
+        crate::perf::cache("change_writers", held.is_some());
+        held
+    }
+
+    /// Hold a change's writers while this handle shares reads.
+    fn hold_writers(&self, change_id: &str, writers: impl FnOnce() -> Vec<SessionWriter>) {
+        if !self.shares_reads() {
+            return;
+        }
+        let writers = writers();
+        shared::with(&self.root, |memo| {
+            memo.change_writers.insert(change_id.to_string(), writers)
+        });
     }
 
     /// What the receiver permits, derived from the ledger as it stands.
