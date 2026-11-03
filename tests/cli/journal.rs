@@ -18477,3 +18477,51 @@ fn journal_show_resolves_a_topic_to_its_newest_artifact() {
         .failure()
         .stderr(predicates::str::contains("no live artifact under topic"));
 }
+
+/// A title correction is what every view prints for the artifact afterwards:
+/// memories, catchup's memory list, list and latest all show the corrected
+/// title, as the queue views already do. A view reading the file's first
+/// heading would keep printing the title the correction replaced.
+#[test]
+fn every_view_prints_a_corrected_title() {
+    let repo = Repo::new();
+    let memory = filed_artifact(&repo, "memory", "kept-fact", "# Filed title\n\nThe fact.\n");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "correct",
+            &memory,
+            "--target",
+            "artifact",
+            "--field",
+            "title",
+            "--value",
+            "Corrected title",
+        ])
+        .assert()
+        .success();
+    let wanted = serde_json::json!("# Corrected title");
+    let memories = json_stdout(repo.arc(&repo.root).args(["journal", "memories", "--json"]));
+    assert_eq!(memories["memories"][0]["heading"], wanted, "{memories:#}");
+    let catchup = json_stdout(repo.arc(&repo.root).args(["journal", "catchup", "--json"]));
+    assert_eq!(catchup["memories"][0]["heading"], wanted, "{catchup:#}");
+    let list = json_stdout(repo.arc(&repo.root).args(["journal", "list", "--json"]));
+    let listed = list["artifacts"]
+        .as_array()
+        .or_else(|| list["files"].as_array())
+        .or_else(|| list.as_array())
+        .unwrap_or_else(|| panic!("{list:#}"))
+        .iter()
+        .find(|row| row["file"] == memory.as_str())
+        .cloned()
+        .unwrap_or_else(|| panic!("{list:#}"));
+    assert_eq!(listed["heading"], wanted, "{list:#}");
+    let latest =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "latest", "kept-fact", "--json"]),
+        );
+    assert_eq!(latest["heading"], wanted, "{latest:#}");
+    let text = stdout(repo.arc(&repo.root).args(["journal", "memories"]));
+    assert!(text.contains("Corrected title"), "{text}");
+}

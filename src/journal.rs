@@ -12155,7 +12155,7 @@ pub(crate) fn context_for_change(
                 continue;
             }
             let item = ContextJournalItem {
-                heading: first_heading(&dir.join(&name)),
+                heading: amended_heading(&events, &dir, &name),
                 file: name,
                 topic: topic.clone(),
                 kind,
@@ -12345,7 +12345,7 @@ fn live_memories(dir: &Path) -> Result<Vec<ArtifactEntry>> {
             Some(ArtifactEntry {
                 filed_at: filed_at_of(&timestamp),
                 timestamp_status: TimestampStatus::classify(&timestamp).as_str(),
-                heading: first_heading(&dir.join(&name)),
+                heading: amended_heading(&journal, dir, &name),
                 file: name,
                 timestamp,
                 topic,
@@ -14175,7 +14175,7 @@ fn list(ctx: &Ctx, kind: Option<String>, json: bool) -> Result<i32> {
                 continue;
             }
         }
-        let heading = first_heading(&dir.join(&name));
+        let heading = amended_heading(&events, &dir, &name);
         let consumed = consumption(&events, &name);
         artifacts.push(ListEntry {
             file: name,
@@ -14702,7 +14702,7 @@ fn latest(ctx: &Ctx, topic: &str, kind: Option<&str>, json: bool) -> Result<i32>
         }
         let resolved = LatestArtifact {
             schema: "arc-journal-latest/1",
-            heading: first_heading(&path),
+            heading: amended_heading(&events, dir, &found.name),
             consumed: consumption(&events, &found.name),
             file: found.name,
             dir: dir.display().to_string(),
