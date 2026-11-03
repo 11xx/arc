@@ -810,9 +810,19 @@ fn an_imported_second_evidence_event_for_one_candidate_is_refused_before_anythin
         .find(|event| event["event_type"] == "candidate-evidence-received")
         .unwrap()
         .clone();
-    let mut id = second["event_id"].as_str().unwrap().to_string();
-    let last = if id.ends_with('Z') { 'Y' } else { 'Z' };
-    id.replace_range(id.len() - 1.., &last.to_string());
+    // ULIDs minted in one millisecond differ only in their last digits, so
+    // the replacement is one no event in the bundle already carries.
+    let original = second["event_id"].as_str().unwrap().to_string();
+    let taken: Vec<&str> = events
+        .iter()
+        .filter_map(|event| event["event_id"].as_str())
+        .collect();
+    let stem = &original[..original.len() - 1];
+    let id = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+        .chars()
+        .map(|digit| format!("{stem}{digit}"))
+        .find(|candidate| !taken.contains(&candidate.as_str()))
+        .unwrap();
     second["event_id"] = json!(id);
     events.push(second);
     fs::write(&bundle, serde_json::to_vec_pretty(&parsed).unwrap()).unwrap();
