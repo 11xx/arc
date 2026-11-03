@@ -1430,6 +1430,24 @@ fn validate_import_candidate(
             .filter_map(|event| event.typed.clone()),
     );
     candidate.sort_by(|a, b| a.event_id.cmp(&b.event_id));
+    // `replayed-unread` names a replay arc performed, so only a landing's
+    // completion carries it; no change ledger holds it as a declaration.
+    if let Some(declared) = candidate.iter().find(|event| {
+        matches!(
+            event.payload,
+            Payload::DebtDeclared {
+                missing: crate::model::DebtMissing::ReplayedUnread,
+                ..
+            }
+        )
+    }) {
+        bail!(
+            "bundled event {} declares replayed-unread on {}: that debt is derived from a \
+             landing's completion, never declared; nothing was imported",
+            declared.event_id,
+            validated.bundle.change_id
+        );
+    }
     let admission_history = if validated.bundle.since.is_none() {
         validated
             .events

@@ -2142,6 +2142,76 @@ fn a_completion_confers_integration_never_rewrite_authority() {
     );
 }
 
+/// Claim: `replayed-unread` arrives only inside a landing's completion. A
+/// change ledger declaring it is refused on import, naming the event, with
+/// nothing imported; the same member's derived debt travels with its
+/// completion. Rejects an import publishing a replay arc never performed.
+#[test]
+fn an_imported_declaration_of_replayed_unread_is_refused() {
+    let repo = gated_repo();
+    let ((first, _, _), (second, _, _)) = independent(&repo);
+    repo.arc(&repo.root)
+        .args(["land", &first, &second, "--debt", "context unread"])
+        .assert()
+        .success();
+    let derived = status(&repo, &second)["debt"].clone();
+    assert_eq!(derived["missing"], "replayed-unread", "{derived}");
+    let bundle = export_to(&repo, &second, "second.json");
+
+    let mut value: Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    let mut forged = value["events"][0].clone();
+    let object = forged.as_object_mut().unwrap();
+    object.retain(|key, _| {
+        matches!(
+            key.as_str(),
+            "schema_version"
+                | "event_id"
+                | "repository_id"
+                | "change_id"
+                | "actor"
+                | "created_at"
+                | "harness"
+                | "session"
+        )
+    });
+    object.insert("event_id".into(), json!("ZZZZ-forged-replayed"));
+    object.insert("event_type".into(), json!("debt-declared"));
+    object.insert("reason".into(), json!("a replay nobody performed"));
+    object.insert("patchset_id".into(), json!("ps-01"));
+    object.insert("missing".into(), json!("replayed-unread"));
+    value["events"].as_array_mut().unwrap().push(forged);
+    value["event_count"] = json!(value["events"].as_array().unwrap().len());
+    refresh_bundle_checksum(&mut value);
+    let forged_bundle = repo.home.join("forged.json");
+    fs::write(&forged_bundle, serde_json::to_vec(&value).unwrap()).unwrap();
+
+    let recipient = Repo::new();
+    deliver_git_objects(&repo, &recipient);
+    let refused = recipient
+        .arc(&recipient.root)
+        .args(["import", forged_bundle.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        stderr_of(&refused).contains("ZZZZ-forged-replayed")
+            && stderr_of(&refused).contains("replayed-unread"),
+        "{}",
+        stderr_of(&refused)
+    );
+    assert!(!recipient.root.join(".git/arc/changes").exists());
+
+    let imported = recipient
+        .arc(&recipient.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(imported.status.success(), "{}", stderr_of(&imported));
+    let arrived = status(&recipient, &second)["debt"].clone();
+    assert_eq!(arrived["missing"], "replayed-unread", "{arrived}");
+    assert_eq!(arrived["replayed"], derived["replayed"], "{arrived}");
+}
+
 /// Claim: an audit of a replayed member resolves its extent against the
 /// range the landing replayed it as, from the composed parent to the
 /// integrated revision, so a whole audit of that range discharges

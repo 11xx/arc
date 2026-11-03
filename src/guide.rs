@@ -2588,10 +2588,11 @@ REVIEW COVERAGE AND DEBT
   the caller can say a resolution was what went unread, because the ledger
   sees a repair and a merge resolution the same way.
 
-  `replayed-unread` is derived, never declared. `arc land --debt` records it
-  for a member when all three hold: an eligible approval read its exact
-  original patchset, arc replayed that patchset without conflict, and the
-  base it was recorded on differs from the composed parent it landed on.
+  `replayed-unread` is derived, never declared, and an import refuses a
+  change ledger declaring it. `arc land --debt` records it for a member
+  when all three hold: an eligible approval read its exact original
+  patchset, arc replayed that patchset without conflict, and the base it
+  was recorded on differs from the composed parent it landed on.
   The record names the approval, the recorded base and the parent
   (`replayed` beside the debt). The edit was read and the context it landed
   in was not, so only an audit of the integrated revision discharges it; a
