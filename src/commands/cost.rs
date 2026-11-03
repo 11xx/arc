@@ -529,19 +529,85 @@ pub(super) struct CostView {
     pub report: Value,
     pub runs: Vec<ExecutorRun>,
     pub acting: Vec<Acting>,
+    /// The report's entries, held while it is.
+    _held: Held,
 }
 
-/// Print the read-only cost view of a change or a journal artifact.
+/// Print the read-only cost view of a change or a journal artifact. Each
+/// work-item and session entry is rendered as it is written, so the view
+/// never holds every entry at once; the table renders from the report's
+/// frame alone.
 pub fn show_cost(ctx: &Ctx, query: &CostQuery, json: bool, detail: bool) -> Result<()> {
-    let view = read_query(ctx, query)?;
+    use std::io::Write;
+    let assembled = assemble(ctx, query)?;
+    let view = assembled.view();
+    let render = Render::new(&assembled, &view);
+    let frame = render.frame();
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
     if json {
-        println!("{}", serde_json::to_string_pretty(&view.report)?);
+        serde_json::to_writer_pretty(
+            &mut out,
+            &Document {
+                render: &render,
+                frame: &frame,
+            },
+        )?;
+        writeln!(out)?;
     } else if detail {
-        print!("{}", report_text(&view.report));
+        render.write_detail(&mut out, &frame)?;
     } else {
-        print!("{}", super::cost_table::table_text(&view.report));
+        out.write_all(super::cost_table::table_text(&frame).as_bytes())?;
     }
+    out.flush()?;
     Ok(())
+}
+
+/// A report written as one document: the frame's parts in order, with the
+/// `work` and `sessions` entries each rendered as it is written.
+struct Document<'r, 'a> {
+    render: &'r Render<'a>,
+    frame: &'r Value,
+}
+
+impl serde::Serialize for Document<'_, '_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let parts = self.frame.as_object().into_iter().flatten();
+        let mut map = serializer.serialize_map(self.frame.as_object().map(serde_json::Map::len))?;
+        let items = &self.render.selection.items;
+        for (key, value) in parts {
+            match key.as_str() {
+                "work" => map.serialize_entry(
+                    key,
+                    &Entries(items.len(), |index| self.render.work_entry(&items[index])),
+                )?,
+                "sessions" => map.serialize_entry(
+                    key,
+                    &Entries(self.render.sessions.len(), |index| {
+                        self.render.session_entry(index)
+                    }),
+                )?,
+                _ => map.serialize_entry(key, value)?,
+            }
+        }
+        map.end()
+    }
+}
+
+/// A count of entries, each rendered by its index as it is serialized and
+/// dropped once written.
+struct Entries<F>(usize, F);
+
+impl<F: Fn(usize) -> Value> serde::Serialize for Entries<F> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = serializer.serialize_seq(Some(self.0))?;
+        for index in 0..self.0 {
+            let _held = Held::new(1);
+            seq.serialize_element(&(self.1)(index))?;
+        }
+        seq.end()
+    }
 }
 
 /// Write the evidence the sessions' figures of a query rest on to standard
@@ -816,7 +882,7 @@ impl Assembled {
 
     /// The whole report, and the facts that map a role to its sessions.
     fn into_view(self) -> Result<CostView> {
-        let report = {
+        let (report, held) = {
             let view = self.view();
             Render::new(&self, &view).report()
         };
@@ -878,6 +944,7 @@ impl Assembled {
             report,
             runs: executor_runs,
             acting,
+            _held: held,
         })
     }
 }
@@ -5047,6 +5114,34 @@ impl Members<'_> {
     }
 }
 
+/// Report entries rendered and not yet written, and the most held at once.
+static ENTRIES_HELD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static ENTRIES_HELD_MOST: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The most work-item and session entries of a cost report this process
+/// held rendered and unwritten at once.
+pub(crate) fn entries_held_most() -> usize {
+    ENTRIES_HELD_MOST.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Report entries held from rendering until they are written or dropped.
+struct Held(usize);
+
+impl Held {
+    fn new(entries: usize) -> Self {
+        use std::sync::atomic::Ordering::Relaxed;
+        let held = ENTRIES_HELD.fetch_add(entries, Relaxed) + entries;
+        ENTRIES_HELD_MOST.fetch_max(held, Relaxed);
+        Self(entries)
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        ENTRIES_HELD.fetch_sub(self.0, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// An undivided session counts whole for these items when they hold every
 /// work item it acted on, and for a participant when that membership is
 /// complete. A divided session always joins by its items' shares: its
@@ -5062,7 +5157,7 @@ fn counted(row: &SessionRow, keys: &[&WorkKey]) -> bool {
 
 /// What renders one read's report: [`Render::frame`] is every part but the
 /// work-item and session entries, and each entry renders on its own from
-/// the sessions.
+/// the sessions, so a report can be written without holding every entry.
 struct Render<'a> {
     selection: &'a Selection,
     runs: &'a Runs,
@@ -5096,8 +5191,9 @@ impl<'a> Render<'a> {
         }
     }
 
-    /// The whole report.
-    fn report(&self) -> Value {
+    /// The whole report, and the entries it holds.
+    fn report(&self) -> (Value, Held) {
+        let held = Held::new(self.selection.items.len() + self.sessions.len());
         let mut report = self.frame();
         report["work"] = self
             .selection
@@ -5108,7 +5204,7 @@ impl<'a> Render<'a> {
         report["sessions"] = (0..self.sessions.len())
             .map(|index| self.session_entry(index))
             .collect();
-        report
+        (report, held)
     }
 
     fn unbound_in(&self, key: &WorkKey) -> Vec<String> {
@@ -6314,6 +6410,34 @@ fn write_report(out: &mut String, report: &Value) {
         write_session(out, session);
     }
     write_coverage(out, &report["coverage"]);
+}
+
+impl Render<'_> {
+    /// The `--detail` text of the report `frame` heads, each work-item and
+    /// session entry rendered as its section is written.
+    fn write_detail(&self, out: &mut impl std::io::Write, frame: &Value) -> std::io::Result<()> {
+        let mut text = String::new();
+        let mut flush = |text: &mut String| {
+            let written = out.write_all(text.as_bytes());
+            text.clear();
+            written
+        };
+        write_heading(&mut text, &frame["target"]);
+        for item in &self.selection.items {
+            let _held = Held::new(1);
+            write_work(&mut text, &self.work_entry(item));
+            flush(&mut text)?;
+        }
+        write_union(&mut text, &frame["union"]);
+        emit!(text, "sessions");
+        for index in 0..self.sessions.len() {
+            let _held = Held::new(1);
+            write_session(&mut text, &self.session_entry(index));
+            flush(&mut text)?;
+        }
+        write_coverage(&mut text, &frame["coverage"]);
+        flush(&mut text)
+    }
 }
 
 fn write_heading(out: &mut String, target: &Value) {

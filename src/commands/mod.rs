@@ -73,6 +73,7 @@ pub use claims::{claim, release_claim, stage, take};
 use clap::ValueEnum;
 pub use config_cmd::check_writable;
 pub(crate) use cost::backend_sets as cost_backend_sets;
+pub(crate) use cost::entries_held_most as cost_entries_held_most;
 pub use cost::{
     export_evidence as export_cost_evidence, retain_cost, show_cost, Allocation as CostAllocation,
     CostQuery, GROUPINGS as COST_GROUPINGS,
