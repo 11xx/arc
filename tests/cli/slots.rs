@@ -852,3 +852,38 @@ fn gates_after_a_warm_reuse_the_warmed_build() {
         "the gate rebuilt what the warm built: {fresh:?}"
     );
 }
+
+/// Claim: `arc slots status` before the pool exists reports the declared
+/// pool as not yet created and succeeds. Rejects failing on the absent root.
+#[test]
+fn status_before_the_pool_exists_reports_it_declared() {
+    let repo = pool(2, "");
+    let out = stdout(repo.arc(&repo.root).args(["slots", "status"]));
+    assert!(out.contains("declared and not yet created"), "{out}");
+    let json = status(&repo);
+    assert_eq!(json["created"], false);
+    assert_eq!(json["size"], 2);
+}
+
+/// Claim: a change's slot is named by `arc status` and `arc show`, and
+/// `arc slots status` names the change holding each lease with its state.
+/// Rejects a kept checkout that reads like an ordinary worktree.
+#[test]
+fn status_and_show_name_the_slot_and_its_holder() {
+    let repo = pool(1, "");
+    let (change, _) = begin(&repo, "named");
+    let report = json_stdout(repo.arc(&repo.root).args(["status", &change, "--json"]));
+    assert_eq!(report["slot"]["slot"], "slot-01");
+    assert_eq!(report["slot"]["released"], false);
+    let shown = stdout(repo.arc(&repo.root).args(["show", &change]));
+    assert!(shown.contains("- Slot: slot-01"), "{shown}");
+    let slots = stdout(repo.arc(&repo.root).args(["slots", "status"]));
+    assert!(
+        slots.contains(&format!("by change {change} (named, open)")),
+        "{slots}"
+    );
+    assert_eq!(status(&repo)["slots"][0]["holder"]["state"], "open");
+    close_abandoned(&repo, &change);
+    let shown = stdout(repo.arc(&repo.root).args(["show", &change]));
+    assert!(shown.contains("(released)"), "{shown}");
+}

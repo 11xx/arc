@@ -23,9 +23,54 @@ fn holds_its_slot(change: &ChangeState) -> bool {
     change.closure.is_none()
 }
 
+fn holder(store: Option<&Store>, change_id: &str) -> slots::Holder {
+    let state = store.and_then(|store| leased_change(store, change_id).ok().flatten());
+    slots::Holder {
+        change_id: change_id.into(),
+        slug: state.as_ref().map(|state| state.slug.clone()),
+        state: match &state {
+            None => "absent".into(),
+            Some(state) => match &state.closure {
+                None => "open".into(),
+                Some(closure) => serde_json::to_value(closure.outcome)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_string))
+                    .unwrap_or_else(|| "closed".into()),
+            },
+        },
+    }
+}
+
 pub fn status(ctx: &Ctx, json: bool) -> Result<()> {
     let declaration = declaration(ctx)?;
-    let pool = pool(ctx, &declaration)?;
+    let root = slots::declared_root(&ctx.cwd, &declaration)?;
+    if !root.exists() {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "schema": slots::STATUS_SCHEMA,
+                    "root": root,
+                    "created": false,
+                    "pool": null,
+                    "size": declaration.size,
+                    "default": declaration.default,
+                    "warm": declaration.warm,
+                    "target": null,
+                    "slots": [],
+                }))?
+            );
+        } else {
+            println!(
+                "slot pool {} (size {}) is declared and not yet created; \
+                 `arc begin --slot` or `arc slots warm` creates it",
+                root.display(),
+                declaration.size
+            );
+        }
+        return Ok(());
+    }
+    let pool = Pool::existing(&ctx.cwd, &root)?;
     let top = gitio::toplevel(&ctx.cwd)?;
     let identity = slots::identity(&top, &declaration).ok();
     let target = gitio::primary_worktree_branch(&ctx.cwd)
@@ -36,19 +81,30 @@ pub fn status(ctx: &Ctx, json: bool) -> Result<()> {
                 .ok()
                 .map(|head| (branch, head))
         });
-    let views = slots::view(
+    let mut views = slots::view(
         &pool,
         &ctx.cwd,
         &declaration,
         identity.as_deref(),
         target.as_ref().map(|(_, head)| head.as_str()),
     );
+    let store = ctx.store().ok();
+    for view in &mut views {
+        if let Some(change_id) = view
+            .lease
+            .as_ref()
+            .and_then(|lease| lease.change_id.as_deref())
+        {
+            view.holder = Some(holder(store.as_ref(), change_id));
+        }
+    }
     if json {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "schema": slots::STATUS_SCHEMA,
                 "root": pool.root,
+                "created": true,
                 "pool": pool.id,
                 "size": pool.size,
                 "default": declaration.default,
@@ -77,25 +133,26 @@ pub fn status(ctx: &Ctx, json: bool) -> Result<()> {
     }
     for view in views {
         let mut line = format!("{}  ", view.name);
-        match (&view.error, &view.lease) {
-            (Some(error), _) => line.push_str(&format!("unreadable: {error}")),
-            (None, Some(lease)) => line.push_str(&match &lease.change_id {
-                Some(change_id) => format!(
-                    "{} by {change_id} on {} since {} token {}",
-                    view.phase.as_deref().unwrap_or("leased"),
-                    lease.branch.as_deref().unwrap_or("?"),
-                    lease.leased_at,
-                    lease.token
-                ),
-                None => format!(
-                    "{} for a warm at {} since {} token {}",
-                    view.phase.as_deref().unwrap_or("leased"),
-                    render::short_sha(&lease.target),
-                    lease.leased_at,
-                    lease.token
-                ),
-            }),
-            (None, None) => line.push_str(view.phase.as_deref().unwrap_or("free")),
+        match (&view.error, &view.lease, &view.holder) {
+            (Some(error), _, _) => line.push_str(&format!("unreadable: {error}")),
+            (None, Some(lease), Some(holder)) => line.push_str(&format!(
+                "{} by change {} ({}, {}) on {} since {} token {}",
+                view.phase.as_deref().unwrap_or("leased"),
+                holder.change_id,
+                holder.slug.as_deref().unwrap_or("?"),
+                holder.state,
+                lease.branch.as_deref().unwrap_or("?"),
+                lease.leased_at,
+                lease.token
+            )),
+            (None, Some(lease), None) => line.push_str(&format!(
+                "{} for a warm at {} since {} token {}",
+                view.phase.as_deref().unwrap_or("leased"),
+                render::short_sha(&lease.target),
+                lease.leased_at,
+                lease.token
+            )),
+            (None, None, _) => line.push_str(view.phase.as_deref().unwrap_or("free")),
         }
         line.push_str(&format!("  checkout {}", view.checkout));
         if let Some(head) = &view.head {

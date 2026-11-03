@@ -3300,10 +3300,11 @@ enum ReplicaAuthorityCmd {
 
 #[derive(Subcommand)]
 enum SlotsCmd {
-    /// Show each slot: lease and holder, checkout HEAD, built revision and
-    /// identity match, rank for the primary checkout's branch, and whether a
-    /// command still runs in it. Tokens are shown for release and recovery.
-    /// JSON uses arc-slots/1. Records no events
+    /// Show each slot: lease, the change holding it and that change's state,
+    /// checkout HEAD, built revision and identity match, rank for the primary
+    /// checkout's branch, and whether a command still runs in it. Tokens are
+    /// shown for release and recovery. A declared pool not yet created is
+    /// reported as such. JSON uses arc-slots/1. Records no events
     Status {
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]

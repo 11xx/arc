@@ -682,6 +682,11 @@ pub struct StatusReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fork: Option<String>,
     pub worktree: Option<String>,
+    /// The pool slot whose checkout the change uses, and whether its lease
+    /// has ended; absent for a change that never leased one. Additive in
+    /// `arc-status/27`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slot: Option<crate::state::SlotRecord>,
     pub opened_by: String,
     pub opened_harness: Option<String>,
     pub tags: Vec<String>,
@@ -2149,6 +2154,7 @@ fn build_report(
         base: state.base.clone(),
         fork,
         worktree: state.worktree.clone(),
+        slot: state.slot.clone(),
         opened_by: state.opened_by.clone(),
         opened_harness: state.opened_harness.clone(),
         from_fork: state.from_fork.clone(),

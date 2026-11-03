@@ -1469,7 +1469,18 @@ pub struct SlotView {
     pub built: Option<Built>,
     pub identity_matches: Option<bool>,
     pub rank: Option<String>,
+    /// The change a lease names, as the ledger knows it.
+    pub holder: Option<Holder>,
     pub error: Option<String>,
+}
+
+/// The change holding a lease: `state` is `open`, its closure outcome, or
+/// `absent` when the ledger does not hold it.
+#[derive(Serialize)]
+pub struct Holder {
+    pub change_id: String,
+    pub slug: Option<String>,
+    pub state: String,
 }
 
 pub fn view(
@@ -1515,6 +1526,7 @@ pub fn view(
                     checkout,
                     in_use,
                     built: state.built,
+                    holder: None,
                     error: None,
                 },
                 Err(error) => SlotView {
@@ -1528,6 +1540,7 @@ pub fn view(
                     built: None,
                     identity_matches: None,
                     rank: None,
+                    holder: None,
                     error: Some(format!("{error:#}")),
                 },
             }

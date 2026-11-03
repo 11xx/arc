@@ -327,6 +327,15 @@ pub fn markdown(
     if let Some(wt) = &state.worktree {
         let _ = writeln!(w, "- Worktree: `{wt}`");
     }
+    if let Some(slot) = &state.slot {
+        let _ = writeln!(
+            w,
+            "- Slot: {} of the pool at `{}` ({})",
+            slot.slot,
+            slot.root,
+            if slot.held() { "leased" } else { "released" }
+        );
+    }
     if let Some(file) = &state.journal_ref {
         let digest = state
             .journal_ref_digest
