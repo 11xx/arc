@@ -1474,8 +1474,8 @@ pub struct SlotView {
     pub error: Option<String>,
 }
 
-/// The change holding a lease: `state` is `open`, its closure outcome, or
-/// `absent` when the ledger does not hold it.
+/// The change holding a lease: `state` is `open`, its closure outcome,
+/// `absent` when the ledger does not hold it, or `unreadable`.
 #[derive(Serialize)]
 pub struct Holder {
     pub change_id: String,

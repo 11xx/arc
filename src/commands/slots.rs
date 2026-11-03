@@ -24,13 +24,17 @@ fn holds_its_slot(change: &ChangeState) -> bool {
 }
 
 fn holder(store: Option<&Store>, change_id: &str) -> slots::Holder {
-    let state = store.and_then(|store| leased_change(store, change_id).ok().flatten());
+    let state = store.map(|store| leased_change(store, change_id));
     slots::Holder {
         change_id: change_id.into(),
-        slug: state.as_ref().map(|state| state.slug.clone()),
+        slug: match &state {
+            Some(Ok(Some(state))) => Some(state.slug.clone()),
+            _ => None,
+        },
         state: match &state {
-            None => "absent".into(),
-            Some(state) => match &state.closure {
+            None | Some(Err(_)) => "unreadable".into(),
+            Some(Ok(None)) => "absent".into(),
+            Some(Ok(Some(state))) => match &state.closure {
                 None => "open".into(),
                 Some(closure) => serde_json::to_value(closure.outcome)
                     .ok()
@@ -133,26 +137,33 @@ pub fn status(ctx: &Ctx, json: bool) -> Result<()> {
     }
     for view in views {
         let mut line = format!("{}  ", view.name);
-        match (&view.error, &view.lease, &view.holder) {
-            (Some(error), _, _) => line.push_str(&format!("unreadable: {error}")),
-            (None, Some(lease), Some(holder)) => line.push_str(&format!(
-                "{} by change {} ({}, {}) on {} since {} token {}",
-                view.phase.as_deref().unwrap_or("leased"),
-                holder.change_id,
-                holder.slug.as_deref().unwrap_or("?"),
-                holder.state,
-                lease.branch.as_deref().unwrap_or("?"),
-                lease.leased_at,
-                lease.token
-            )),
-            (None, Some(lease), None) => line.push_str(&format!(
-                "{} for a warm at {} since {} token {}",
-                view.phase.as_deref().unwrap_or("leased"),
-                render::short_sha(&lease.target),
-                lease.leased_at,
-                lease.token
-            )),
-            (None, None, _) => line.push_str(view.phase.as_deref().unwrap_or("free")),
+        match (&view.error, &view.lease) {
+            (Some(error), _) => line.push_str(&format!("unreadable: {error}")),
+            (None, Some(lease)) => line.push_str(&match &lease.change_id {
+                Some(change_id) => format!(
+                    "{} by change {change_id}{} on {} since {} token {}",
+                    view.phase.as_deref().unwrap_or("leased"),
+                    view.holder
+                        .as_ref()
+                        .map(|holder| format!(
+                            " ({}, {})",
+                            holder.slug.as_deref().unwrap_or("?"),
+                            holder.state
+                        ))
+                        .unwrap_or_default(),
+                    lease.branch.as_deref().unwrap_or("?"),
+                    lease.leased_at,
+                    lease.token
+                ),
+                None => format!(
+                    "{} for a warm at {} since {} token {}",
+                    view.phase.as_deref().unwrap_or("leased"),
+                    render::short_sha(&lease.target),
+                    lease.leased_at,
+                    lease.token
+                ),
+            }),
+            (None, None) => line.push_str(view.phase.as_deref().unwrap_or("free")),
         }
         line.push_str(&format!("  checkout {}", view.checkout));
         if let Some(head) = &view.head {

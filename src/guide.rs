@@ -4834,10 +4834,10 @@ SLOTS
 
   `arc slots status [--json]` (`arc-slots/1`) shows each slot's phase, lease
   and token, the change holding the lease with its slug and state (`open`,
-  its closure outcome, or `absent`), checkout `HEAD`, built revision and
-  identity match, rank for the primary checkout's branch, and whether it is
-  in use. Before the pool exists it reports the declared pool as not yet
-  created (`created: false`) and succeeds. A change's slot also appears in
+  its closure outcome, `absent`, or `unreadable`), checkout `HEAD`, built
+  revision and identity match, rank for the primary checkout's branch, and
+  whether it is in use. Before the pool exists it reports the declared pool
+  as not yet created (`created: false`) and succeeds. A change's slot also appears in
   `arc status` (`slot`), `arc show` and each `arc stats --round-trip`
   landing. `arc slots release
   <slot> --token <t>` frees a lease whose change is closed or absent.
