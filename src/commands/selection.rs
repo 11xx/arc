@@ -173,6 +173,7 @@ fn patchset_admitted(st: &ChangeState) -> Result<()> {
             journal_refs: Vec::new(),
             thread: None,
             candidate: None,
+            rebase_started_at: None,
         },
     )
 }
@@ -754,6 +755,7 @@ fn record_patchset(
             candidate_id: selection.candidate_id.clone(),
             selection: selection.event_id.clone(),
         }),
+        rebase_started_at: None,
     };
     super::ensure_append_allowed(st, &payload)?;
     let mut event = ctx.event(store, &st.change_id, payload)?;

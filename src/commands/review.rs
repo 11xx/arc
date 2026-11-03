@@ -459,6 +459,8 @@ pub(super) struct SnapshotRequest {
     /// author by asking for one and nothing read back from the project's refs
     /// can invent one.
     replay: Option<Replay>,
+    /// When the `arc rebase` recording this snapshot started.
+    rebase_started_at: Option<chrono::DateTime<chrono::Utc>>,
     pin_brief: bool,
     journal_refs: Vec<JournalArtifactRef>,
     thread: Option<ExternalThreadRef>,
@@ -481,6 +483,7 @@ impl SnapshotRequest {
         Self {
             contributors,
             replay: None,
+            rebase_started_at: None,
             pin_brief: false,
             journal_refs: Vec::new(),
             thread: None,
@@ -500,6 +503,7 @@ impl SnapshotRequest {
         Self {
             contributors,
             replay: Some(Replay { patchset, tip }),
+            rebase_started_at: None,
             pin_brief: false,
             journal_refs: Vec::new(),
             thread: None,
@@ -512,6 +516,7 @@ impl SnapshotRequest {
         Self {
             contributors: Some(contributors),
             replay: None,
+            rebase_started_at: None,
             pin_brief: true,
             journal_refs: Vec::new(),
             thread: None,
@@ -541,10 +546,20 @@ impl SnapshotRequest {
         Ok(Self {
             contributors,
             replay: None,
+            rebase_started_at: None,
             pin_brief: false,
             journal_refs: resolve_journal_refs(ctx, journal_refs)?,
             thread,
         })
+    }
+
+    /// The same request, recorded by an `arc rebase` that started at
+    /// `started_at`.
+    pub(super) fn rebased_at(self, started_at: chrono::DateTime<chrono::Utc>) -> Self {
+        Self {
+            rebase_started_at: Some(started_at),
+            ..self
+        }
     }
 
     fn links_supplied(&self) -> bool {
@@ -604,6 +619,7 @@ pub(super) fn snapshot_holding(
     let SnapshotRequest {
         contributors: requested_contributors,
         replay,
+        rebase_started_at,
         pin_brief,
         journal_refs: flagged_refs,
         thread,
@@ -743,6 +759,7 @@ pub(super) fn snapshot_holding(
         journal_refs,
         thread,
         candidate: None,
+        rebase_started_at,
     };
     ensure_append_allowed(&st, &payload)?;
     if let Some(patchset_id) = unchanged_patchset {

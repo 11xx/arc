@@ -1236,6 +1236,10 @@ pub enum Payload {
         /// selection that permitted it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         candidate: Option<PatchsetCandidate>,
+        /// When the `arc rebase` that replayed this head started. Present
+        /// only on a patchset a rebase recorded without stopping.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rebase_started_at: Option<DateTime<Utc>>,
     },
     /// An explicit contributor declaration for one patchset. The patchset's
     /// contributor set may change only before its first verdict.
@@ -1764,6 +1768,10 @@ pub enum Payload {
         /// already-contained, false means merge.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         shape: Option<IntegrationShape>,
+        /// When the `arc integrate` that recorded this event started on the
+        /// change. Absent on events written before arc recorded it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at: Option<DateTime<Utc>>,
     },
     /// An integration somebody performed elsewhere and asserted afterwards.
     /// Deliberately carries no authorization: arc did not guard this merge and

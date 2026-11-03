@@ -1855,6 +1855,7 @@ pub fn rebase(
     contributors: Option<Vec<String>>,
     solo: bool,
 ) -> Result<i32> {
+    let started_at = chrono::Utc::now();
     let requested_contributors = super::review::contributor_declaration(ctx, contributors, solo)?;
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
@@ -1964,7 +1965,8 @@ pub fn rebase(
                     )
                 }
                 _ => super::review::SnapshotRequest::attributed(requested_contributors),
-            };
+            }
+            .rebased_at(started_at);
             let patchset_id = super::review::snapshot_holding(
                 ctx,
                 &store,
@@ -3723,6 +3725,7 @@ fn integrate_one(
     closed_behavior: ClosedBehavior,
     options: SingleOptions,
 ) -> Result<i32> {
+    let started_at = chrono::Utc::now();
     let SingleOptions {
         cleanup_checkout,
         debt,
@@ -3938,6 +3941,7 @@ fn integrate_one(
             authorization: Some(authorization),
             already_contained,
             shape: Some(actual_shape),
+            started_at: Some(started_at),
         },
     )?;
     let merged = (|| -> Result<String> {

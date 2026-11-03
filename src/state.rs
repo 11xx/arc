@@ -2409,6 +2409,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 thread,
                 candidate,
                 inherited_authors,
+                rebase_started_at: _,
             } => {
                 if let Some(claim_id) = claim_id {
                     crate::ids::validate_id_component(claim_id)?;
@@ -3547,6 +3548,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 authorization,
                 already_contained,
                 shape,
+                started_at: _,
             } => {
                 let mut closure = integrated_closure(
                     ev,
@@ -4957,6 +4959,7 @@ mod tests {
                     authorization: None,
                     already_contained: false,
                     shape: None,
+                    started_at: None,
                 },
             );
             let state = reduce(&[
@@ -5230,6 +5233,7 @@ mod tests {
                     authorization: None,
                     already_contained: contained,
                     shape,
+                    started_at: None,
                 },
             );
             let json = serde_json::to_value(&integrated).unwrap();
@@ -5278,6 +5282,7 @@ mod tests {
                 authorization: None,
                 already_contained: false,
                 shape: None,
+                started_at: None,
             },
         )
     }
@@ -5866,6 +5871,7 @@ mod tests {
                     authorization: None,
                     already_contained: false,
                     shape: None,
+                    started_at: None,
                 },
             ));
         }

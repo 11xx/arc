@@ -450,14 +450,16 @@ fn provenance(store: &Store, change_ids: &[String], json: bool) -> Result<()> {
     Ok(())
 }
 
-/// One landing: the integrated patchset's recording to the integration event.
+/// One landing: the integrated patchset's recording, or the start of the
+/// `arc rebase` that recorded it, to the integration event.
 ///
-/// The phases partition that window. `gates` is the union of the arc-observed
-/// gate runs recorded inside it, each run spanning its `duration_ms` back from
+/// The phases partition that window. `rebase` runs from the recorded rebase
+/// start to the patchset. `gates` is the union of the arc-observed gate runs
+/// recorded after the patchset, each run spanning its `duration_ms` back from
 /// its own event, so concurrent runs count once. `integration` runs from the
-/// last event before the integration event to that event. `waiting` is the
-/// rest. A rebase and a reuse take no time here: the rebase's replayed head is
-/// the patchset that opens the window, and a reuse runs nothing.
+/// recorded start of `arc integrate`, or without one from the last event
+/// before the integration event, to that event. `waiting` is the rest. A
+/// reuse runs nothing and takes no time.
 #[derive(Serialize, Debug, PartialEq)]
 struct Landing {
     change_id: String,
@@ -470,9 +472,15 @@ struct Landing {
     /// The opening patchset's base differs from the base recorded before it.
     rebased: bool,
     round_trip_seconds: u64,
+    /// Null unless the opening patchset records when its `arc rebase`
+    /// started.
+    rebase_seconds: Option<u64>,
     gate_seconds: u64,
     waiting_seconds: u64,
     integration_seconds: u64,
+    /// `recorded` when the integration event records when `arc integrate`
+    /// started; `last-event` when the phase opens at the last event before it.
+    integration_start: &'static str,
     /// Each gate's own observed run time inside the window, keyed by gate
     /// name, or by command for an unnamed run. Concurrent runs overlap, so
     /// these may sum above `gate_seconds`.
@@ -480,7 +488,8 @@ struct Landing {
     gate_runs: usize,
     /// `verification-reused` events inside the window. Counted, never timed.
     reused: usize,
-    /// The longest of gates, waiting and integration; the first on a tie.
+    /// The longest of gates, waiting, integration and rebase; the first on a
+    /// tie.
     dominant_phase: &'static str,
 }
 
@@ -546,7 +555,10 @@ fn landing(change_id: &str, slug: &str, events: &[Event]) -> Option<Landing> {
             _ => false,
         })?;
     let Payload::PatchsetAdded {
-        patchset_id, base, ..
+        patchset_id,
+        base,
+        rebase_started_at,
+        ..
     } = &events[start].payload
     else {
         unreachable!("the window opens on a patchset");
@@ -559,14 +571,24 @@ fn landing(change_id: &str, slug: &str, events: &[Event]) -> Option<Landing> {
             _ => None,
         });
 
-    let opened = events[start].created_at.timestamp_millis();
-    let closed = events[end].created_at.timestamp_millis().max(opened);
-    let last_before = if end > start + 1 {
-        events[end - 1].created_at.timestamp_millis()
-    } else {
-        opened
-    }
-    .clamp(opened, closed);
+    let recorded = events[start].created_at.timestamp_millis();
+    let opened = rebase_started_at.map_or(recorded, |at| at.timestamp_millis().min(recorded));
+    let closed = events[end].created_at.timestamp_millis().max(recorded);
+    let integrate_started = match &events[end].payload {
+        Payload::ChangeIntegrated {
+            started_at: Some(at),
+            ..
+        } => Some(at.timestamp_millis().clamp(recorded, closed)),
+        _ => None,
+    };
+    let integration_from = integrate_started.unwrap_or_else(|| {
+        if end > start + 1 {
+            events[end - 1].created_at.timestamp_millis()
+        } else {
+            recorded
+        }
+        .clamp(recorded, closed)
+    });
 
     let mut gates: BTreeMap<String, i64> = BTreeMap::new();
     let mut spans: Vec<(i64, i64)> = Vec::new();
@@ -580,9 +602,9 @@ fn landing(change_id: &str, slug: &str, events: &[Event]) -> Option<Landing> {
                 attested: false,
                 ..
             } => {
-                let recorded = event.created_at.timestamp_millis();
-                let from = (recorded - *duration_ms as i64).clamp(opened, last_before);
-                let to = recorded.clamp(opened, last_before);
+                let ran_until = event.created_at.timestamp_millis();
+                let from = (ran_until - *duration_ms as i64).clamp(recorded, integration_from);
+                let to = ran_until.clamp(recorded, integration_from);
                 *gates
                     .entry(gate.clone().unwrap_or_else(|| command.clone()))
                     .or_default() += to - from;
@@ -595,7 +617,7 @@ fn landing(change_id: &str, slug: &str, events: &[Event]) -> Option<Landing> {
     let gate_runs = spans.len();
     spans.sort_unstable();
     let mut busy = 0;
-    let mut covered = opened;
+    let mut covered = recorded;
     for (from, to) in spans {
         let from = from.max(covered);
         if to > from {
@@ -606,15 +628,18 @@ fn landing(change_id: &str, slug: &str, events: &[Event]) -> Option<Landing> {
 
     let seconds = |millis: i64| (millis / 1000) as u64;
     let round_trip_seconds = seconds(closed - opened);
+    let rebase_seconds = rebase_started_at.map(|_| seconds(recorded - opened));
     let gate_seconds = seconds(busy);
-    let integration_seconds = seconds(closed - last_before);
+    let integration_seconds = seconds(closed - integration_from);
     // Flooring each phase separately can only lose time to the remainder, so
     // the phases still sum to the round trip.
-    let waiting_seconds = round_trip_seconds - gate_seconds - integration_seconds;
+    let waiting_seconds =
+        round_trip_seconds - rebase_seconds.unwrap_or(0) - gate_seconds - integration_seconds;
     let dominant_phase = [
         ("gates", gate_seconds),
         ("waiting", waiting_seconds),
         ("integration", integration_seconds),
+        ("rebase", rebase_seconds.unwrap_or(0)),
     ]
     .into_iter()
     .rev()
@@ -630,9 +655,15 @@ fn landing(change_id: &str, slug: &str, events: &[Event]) -> Option<Landing> {
         integration_event_id: events[end].event_id.clone(),
         rebased: prior_base.is_some_and(|prior| prior != base),
         round_trip_seconds,
+        rebase_seconds,
         gate_seconds,
         waiting_seconds,
         integration_seconds,
+        integration_start: if integrate_started.is_some() {
+            "recorded"
+        } else {
+            "last-event"
+        },
         gates: gates
             .into_iter()
             .map(|(gate, millis)| (gate, seconds(millis)))
@@ -688,14 +719,17 @@ fn round_trips(store: &Store, change_ids: &[String], json: bool) -> Result<()> {
         return Ok(());
     }
     println!(
-        "{:<28} {:>10} {:>8} {:>8} {:>8} {:>6} {:>7} dominant",
-        "change", "round-trip", "gates", "waiting", "integ", "reused", "rebased"
+        "{:<28} {:>10} {:>8} {:>8} {:>8} {:>8} {:>6} {:>7} dominant",
+        "change", "round-trip", "rebase", "gates", "waiting", "integ", "reused", "rebased"
     );
     for landing in &landings {
         println!(
-            "{:<28} {:>10} {:>8} {:>8} {:>8} {:>6} {:>7} {}",
+            "{:<28} {:>10} {:>8} {:>8} {:>8} {:>8} {:>6} {:>7} {}",
             truncate(&landing.slug, 28),
             format_duration(landing.round_trip_seconds),
+            landing
+                .rebase_seconds
+                .map_or_else(|| "-".to_string(), format_duration),
             format_duration(landing.gate_seconds),
             format_duration(landing.waiting_seconds),
             format_duration(landing.integration_seconds),
@@ -1391,6 +1425,7 @@ mod tests {
                     journal_refs: Vec::new(),
                     thread: None,
                     candidate: None,
+                    rebase_started_at: None,
                 },
             ),
             event(
@@ -1522,6 +1557,20 @@ mod tests {
     }
 
     fn patchset(id: &str, seconds: i64, patchset_id: &str, base: &str) -> Event {
+        rebased_patchset(id, seconds, patchset_id, base, None)
+    }
+
+    fn at(seconds: i64) -> DateTime<Utc> {
+        DateTime::<Utc>::from_timestamp(1_000_000 + seconds, 0).unwrap()
+    }
+
+    fn rebased_patchset(
+        id: &str,
+        seconds: i64,
+        patchset_id: &str,
+        base: &str,
+        rebase_started: Option<i64>,
+    ) -> Event {
         event(
             id,
             seconds,
@@ -1542,6 +1591,7 @@ mod tests {
                 journal_refs: Vec::new(),
                 thread: None,
                 candidate: None,
+                rebase_started_at: rebase_started.map(at),
             },
         )
     }
@@ -1597,6 +1647,15 @@ mod tests {
     }
 
     fn integrated(id: &str, seconds: i64, patchset_id: &str) -> Event {
+        integrated_from(id, seconds, patchset_id, None)
+    }
+
+    fn integrated_from(
+        id: &str,
+        seconds: i64,
+        patchset_id: &str,
+        integrate_started: Option<i64>,
+    ) -> Event {
         event(
             id,
             seconds,
@@ -1611,6 +1670,7 @@ mod tests {
                 authorization: None,
                 already_contained: false,
                 shape: None,
+                started_at: integrate_started.map(at),
             },
         )
     }
@@ -1694,6 +1754,70 @@ mod tests {
         assert_eq!(landing.waiting_seconds, 20);
         assert_eq!(landing.dominant_phase, "integration");
         assert!(landing.rebased, "ps-02 moved its base from b to b2");
+    }
+
+    /// Claim: a patchset recorded by `arc rebase` opens the window at the
+    /// rebase's recorded start and reports the replay as its own phase.
+    /// Rejects opening the window at the patchset, which drops the 40-second
+    /// replay from the round trip and reports no rebase phase.
+    #[test]
+    fn a_recorded_rebase_start_times_the_rebase_phase() {
+        let events = vec![
+            patchset("1", 0, "ps-01", "b"),
+            rebased_patchset("2", 100, "ps-02", "b2", Some(60)),
+            gate_run("3", 130, "build", 30),
+            integrated("4", 150, "ps-02"),
+        ];
+        let landing = landing("c", "s", &events).expect("an integrated change lands");
+        assert_eq!(landing.rebase_seconds, Some(40));
+        assert_eq!(landing.round_trip_seconds, 90);
+        assert_eq!(landing.gate_seconds, 30);
+        assert_eq!(landing.integration_seconds, 20);
+        assert_eq!(landing.waiting_seconds, 0);
+        assert_eq!(landing.dominant_phase, "rebase");
+        assert!(landing.rebased);
+    }
+
+    /// Claim: an integration event that records when `arc integrate` started
+    /// times the integration phase from that start, so the wait before the
+    /// command was invoked counts as waiting. Rejects timing it from the last
+    /// event before the integration, which charges the 300 seconds between
+    /// the verdict and the command to integration.
+    #[test]
+    fn a_recorded_integrate_start_separates_the_wait_before_it() {
+        let events = vec![
+            patchset("1", 0, "ps-01", "b"),
+            gate_run("2", 30, "build", 30),
+            integrated_from("3", 340, "ps-01", Some(330)),
+        ];
+        let landing = landing("c", "s", &events).expect("an integrated change lands");
+        assert_eq!(landing.integration_seconds, 10);
+        assert_eq!(landing.integration_start, "recorded");
+        assert_eq!(landing.waiting_seconds, 300);
+        assert_eq!(landing.gate_seconds, 30);
+        assert_eq!(landing.round_trip_seconds, 340);
+        assert_eq!(landing.rebase_seconds, None);
+    }
+
+    /// Claim: a landing whose events record neither start reads exactly as
+    /// the derivation without them: the window opens at the patchset and
+    /// integration opens at the last event before it. Rejects treating an
+    /// absent start as the window's opening, which charges the whole landing
+    /// to integration.
+    #[test]
+    fn a_landing_without_recorded_starts_keeps_the_derived_phases() {
+        let events = vec![
+            patchset("1", 0, "ps-01", "b"),
+            gate_run("2", 30, "build", 30),
+            integrated("3", 340, "ps-01"),
+        ];
+        let landing = landing("c", "s", &events).expect("an integrated change lands");
+        assert_eq!(landing.integration_start, "last-event");
+        assert_eq!(landing.rebase_seconds, None);
+        assert_eq!(landing.round_trip_seconds, 340);
+        assert_eq!(landing.gate_seconds, 30);
+        assert_eq!(landing.integration_seconds, 310);
+        assert_eq!(landing.waiting_seconds, 0);
     }
 
     /// Claim: only an integration makes a landing. Rejects a zero-length row

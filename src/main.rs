@@ -723,20 +723,25 @@ enum Cmd {
         ///
         /// The round trip runs from the `patchset-added` event of the patchset
         /// the last integration event names (or, on a legacy close, the last
-        /// one before it) to that integration event. Gates: the union of every
-        /// arc-observed `verification-recorded` run inside the window, each
+        /// one before it) to that integration event. A patchset `arc rebase`
+        /// recorded carries `rebase_started_at`, and the window then opens
+        /// there instead. Rebase: from `rebase_started_at` to the patchset;
+        /// null when the patchset records none. Gates: the union of every
+        /// arc-observed `verification-recorded` run after the patchset, each
         /// spanning its `duration_ms` back from its event and clamped to the
-        /// window, so concurrent runs count once; per gate, each gate's own run
-        /// time. Integration: from the last event before the integration event
-        /// to it. Waiting: the remainder, so the three sum to the round trip.
-        /// Reuse: `verification-reused` events inside the window, counted and
-        /// never timed. Rebased: the patchset's base differs from the base
-        /// recorded before it.
+        /// time before integration, so concurrent runs count once; per gate,
+        /// each gate's own run time. Integration: from the `started_at` the
+        /// integration event records (`integration_start: recorded`), or
+        /// without one from the last event before it (`last-event`), to the
+        /// integration event. Waiting: the remainder, so the phases sum to the
+        /// round trip. Reuse: `verification-reused` events inside the window,
+        /// counted and never timed. Rebased: the patchset's base differs from
+        /// the base recorded before it.
         ///
-        /// Not recorded, so not reported: how long a rebase took (it ends where
-        /// the window opens), when `arc integrate` started, and build versus
-        /// test inside one gate command. Attested evidence carries no observed
-        /// duration and counts as waiting.
+        /// Not recorded, so not reported: how long a rebase that stopped on a
+        /// conflict took, and build versus test inside one gate command.
+        /// Attested evidence carries no observed duration and counts as
+        /// waiting.
         #[arg(long = "round-trip")]
         round_trip: bool,
         /// Emit the machine-readable JSON view instead of text
@@ -2191,8 +2196,10 @@ enum Cmd {
     /// actor's live claim, a rebase without --contributors or --solo refuses before the
     /// branch moves. The change stays locked from that check until the replayed head is
     /// recorded, so a command acting on the change during the replay reports the lock busy.
-    /// The gates the replayed head owes are named after it is recorded; a failure to
-    /// evaluate them is a warning, and the rebase still succeeds
+    /// The recorded patchset carries when the rebase started (`rebase_started_at`), which
+    /// `arc stats --round-trip` reports as the landing's rebase phase. The gates the
+    /// replayed head owes are named after it is recorded; a failure to evaluate them is a
+    /// warning, and the rebase still succeeds
     Rebase {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -2412,8 +2419,10 @@ enum Cmd {
     /// integrated: in this checkout or the change's worktree when either holds
     /// it clean, otherwise in a checkout made for it and removed before the
     /// merge or the refusal.
-    /// The integrated revision and closure event are printed before retention
-    /// cleanup. A retention cleanup failure, including a ref lock or a hook
+    /// The integration event records when the command started on the change
+    /// (`started_at`), which `arc stats --round-trip` times its integration
+    /// phase from. The integrated revision and closure event are printed
+    /// before retention cleanup. A retention cleanup failure, including a ref lock or a hook
     /// rejecting deletion, warns with the ref prefixes that may still hold
     /// pins and does not fail the recorded integration.
     /// Style and history constraints are validated under the target and change

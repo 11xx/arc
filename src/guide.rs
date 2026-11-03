@@ -478,8 +478,9 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          facts, changes with read records — each count beside
                          what it counts in.
   arc stats --round-trip Each integrated change's final landing, from its
-                         patchset's recording to the integration event, split
-                         into gates, waiting and integration, with reuses
+                         patchset's recording (or the start of the rebase that
+                         recorded it) to the integration event, split into
+                         rebase, gates, waiting and integration, with reuses
                          counted; the median, the worst and the five slowest.
 
   Work waiting for this project lives in two places. The ledger holds changes

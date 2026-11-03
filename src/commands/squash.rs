@@ -53,6 +53,7 @@ pub fn squash(
             journal_refs: Vec::new(),
             thread: None,
             candidate: None,
+            rebase_started_at: None,
         },
     )?;
     let worktree = gitio::worktree_for_branch(&ctx.cwd, &st.branch)?.with_context(|| {

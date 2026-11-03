@@ -691,6 +691,72 @@ fn round_trip_reports_integrated_changes_only() {
     assert!(open["aggregate"]["median_seconds"].is_null());
 }
 
+/// A landing `arc rebase` and `arc integrate` produced reports a rebase
+/// phase and an integration phase opened at integrate's recorded start, with
+/// the four phases summing to the round trip. Rejects a ledger that records
+/// neither start, whose landing has no rebase phase and an integration phase
+/// derived from the last event before it.
+#[test]
+fn round_trip_times_a_rebase_and_integrate_from_their_recorded_starts() {
+    let repo = Repo::new();
+    let begun = stdout(repo.arc(&repo.root).args(["begin", "replayed"]));
+    let change_id = opened_change_id(&begun);
+    let wt = repo.home.join(".worktrees").join("repo-replayed");
+    repo.commit(&wt, "branch.txt", "branch\n", "feat: branch work");
+    stdout(repo.arc(&wt).args(["snapshot", "replayed"]));
+    repo.commit(&repo.root, "README.md", "target\n", "feat: move target");
+    stdout(repo.arc(&wt).args(["rebase", "replayed"]));
+    integrate(&repo, "replayed");
+
+    let events: Vec<serde_json::Value> = fs::read_dir(event_dir(&repo, &change_id))
+        .unwrap()
+        .map(|entry| serde_json::from_slice(&fs::read(entry.unwrap().path()).unwrap()).unwrap())
+        .collect();
+    let replayed = events
+        .iter()
+        .find(|event| event["event_type"] == "patchset-added" && event["patchset_id"] == "ps-02")
+        .expect("the rebase records the replayed head");
+    let integrated = events
+        .iter()
+        .find(|event| event["event_type"] == "change-integrated")
+        .expect("integrate records the integration");
+    let started = |value: &serde_json::Value| {
+        chrono::DateTime::parse_from_rfc3339(value.as_str().expect("a recorded start")).unwrap()
+    };
+    let recorded = |event: &serde_json::Value| started(&event["created_at"]);
+    assert!(
+        started(&replayed["rebase_started_at"]) <= recorded(replayed),
+        "{replayed:#}"
+    );
+    assert!(
+        started(&integrated["started_at"]) <= recorded(integrated),
+        "{integrated:#}"
+    );
+
+    let report = json_stdout(repo.arc(&repo.root).args([
+        "stats",
+        "--round-trip",
+        "--json",
+        "--change",
+        "replayed",
+    ]));
+    let landing = &report["landings"][0];
+    assert_eq!(landing["patchset_id"], "ps-02", "{report:#}");
+    assert_eq!(landing["integration_start"], "recorded", "{landing:#}");
+    let phase = |name: &str| {
+        landing[name]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{name} is reported: {landing:#}"))
+    };
+    assert_eq!(
+        phase("rebase_seconds")
+            + phase("gate_seconds")
+            + phase("waiting_seconds")
+            + phase("integration_seconds"),
+        phase("round_trip_seconds")
+    );
+}
+
 #[test]
 fn round_trip_is_exclusive_with_the_other_views() {
     let repo = Repo::new();
