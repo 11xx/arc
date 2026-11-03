@@ -1651,10 +1651,13 @@ fn range_targets(
             bail!("--footprint {harness}:{session} names a native child no binding records");
         }
     }
+    // A map that does not load leaves every change replaying at its recorded
+    // revisions; one that needs the map then reads as a selection gap.
+    let rewrites = crate::rewrite::RewriteMap::from_events(events.iter()).unwrap_or_default();
     for id in &ids {
         let change_events = read.events(id);
         let tagged = !query.tags.is_empty()
-            && match crate::state::reduce(&change_events) {
+            && match crate::state::reduce_with_rewrites(&change_events, &rewrites) {
                 Ok(state) => query.tags.iter().all(|tag| state.tags.contains(tag)),
                 Err(_) => {
                     gaps.push(json!({"record": id, "reason": "change state unreadable, so its tags are unknown", "work": []}));

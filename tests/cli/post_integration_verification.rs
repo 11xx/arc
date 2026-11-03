@@ -11,6 +11,11 @@ struct Fixture {
 /// A change gated by `unit`, self-approved, and integrated under a debt
 /// waiver, so it ships owing an independent review.
 fn integrated_owing_review() -> Fixture {
+    integrated_owing_review_opened_with(&[])
+}
+
+/// The same fixture, its change opened with `begin`'s extra arguments.
+fn integrated_owing_review_opened_with(begin: &[&str]) -> Fixture {
     let repo = Repo::new();
     fs::create_dir_all(repo.root.join(".arc")).unwrap();
     fs::write(
@@ -25,7 +30,9 @@ fn integrated_owing_review() -> Fixture {
     .unwrap();
     git(&repo.root, &["add", "."]);
     git(&repo.root, &["commit", "-m", "policy and gates"]);
-    let change_id = opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", WORK])));
+    let change_id = opened_change_id(&stdout(
+        repo.arc(&repo.root).args(["begin", WORK]).args(begin),
+    ));
     let worktree = repo.home.join(".worktrees").join(format!("repo-{WORK}"));
     repo.commit(&worktree, "marker", "", "feat: work");
     stdout(
@@ -521,4 +528,35 @@ fn a_receipt_no_map_ever_resolved_still_refuses_replay() {
         .stderr(predicates::str::contains(format!(
             "names {unrelated}, but change"
         )));
+}
+
+/// Claim: `cost show --tag` selects a tagged change whose receipt after
+/// integration names the integrated commit's successor under an active map.
+/// Rejects: tag selection replaying the change without the store's rewrite
+/// map, which refuses the receipt, reports the change's tags as unknown and
+/// leaves it out of the selection.
+#[test]
+fn tag_selection_reads_a_change_whose_receipt_names_a_rewritten_successor() {
+    let fixture = integrated_owing_review_opened_with(&["--tag", "shipped-work"]);
+    let repo = &fixture.repo;
+    let (successor, _) = reword_integrated(&fixture);
+    stdout(&mut receipt(repo, "unit", "pass", &successor));
+
+    let view =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["cost", "show", "--json", "--tag", "shipped-work"]),
+        );
+    let selected = view["work"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["kind"] == "change")
+        .map(|item| item["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(selected, [fixture.change_id.as_str()], "{view}");
+    assert!(
+        !view.to_string().contains("tags are unknown"),
+        "the change's tags read as unknown: {view}"
+    );
 }
