@@ -900,9 +900,6 @@ fn observed_gate_runs(events: &[Event]) -> Vec<(String, u64)> {
         .iter()
         .filter_map(|event| match &event.payload {
             Payload::VerificationRecorded {
-                tested_tree: None,
-                worktree_dirty: None,
-                tree_moved: false,
                 gate: Some(gate),
                 duration_ms: Some(duration_ms),
                 attested: false,

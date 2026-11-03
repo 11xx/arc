@@ -702,3 +702,32 @@ fn round_trip_is_exclusive_with_the_other_views() {
             .stderr(predicates::str::contains("cannot be used with"));
     }
 }
+
+/// A gate run arc observed counts toward the change's gate seconds and the
+/// aggregate gate percentiles. Every run arc executes now records the tree it
+/// ran against, and a count that skipped such runs reported no gate time for
+/// any change verified since.
+#[test]
+fn an_observed_gate_run_counts_toward_gate_seconds() {
+    let repo = Repo::new();
+    repo.declare_gates_locally("[gates.slow]\ncommand = \"sleep 1.1\"\n");
+    let (_id, wt, _head) = change_with_patchset(&repo, "timed");
+    repo.arc(&wt)
+        .args(["verify", "timed", "--all"])
+        .write_stdin("")
+        .assert()
+        .success();
+
+    let report = json_stdout(
+        repo.arc(&repo.root)
+            .args(["stats", "--change", "timed", "--json"]),
+    );
+    let change = &report["changes"][0];
+    assert!(
+        change["gate_seconds"]["slow"]
+            .as_u64()
+            .is_some_and(|seconds| seconds >= 1),
+        "{change:#}"
+    );
+    assert!(!report["aggregate"]["gate"]["slow"].is_null(), "{report:#}");
+}
