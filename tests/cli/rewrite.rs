@@ -2,6 +2,7 @@
 //! history without stranding anything the ledger recorded about it.
 
 use crate::common::*;
+use crate::role_carry::{raw_commit, write_commit};
 use std::collections::BTreeMap;
 
 /// A throwaway signing key in a keyring of its own, so the suite never reads
@@ -769,6 +770,27 @@ fn a_commit_carrying_another_header_keeps_it() {
         fsck.status.success(),
         "git fsck rejected the rewritten objects: {}",
         String::from_utf8_lossy(&fsck.stderr)
+    );
+}
+
+/// Recreating a commit unsigned spells a carried header back byte for byte,
+/// a trailing carriage return included.
+#[test]
+fn recreating_a_header_ending_in_a_carriage_return_reproduces_it_exactly() {
+    let repo = Repo::new();
+    let raw = raw_commit(&repo.root, "HEAD");
+    let at = raw.windows(2).position(|pair| pair == b"\n\n").unwrap() + 1;
+    let odd = write_commit(
+        &repo.root,
+        &[&raw[..at], b"x-extra value\r\nx-tail end\n", &raw[at..]].concat(),
+    );
+    git(&repo.root, &["reset", "-q", "--hard", &odd]);
+
+    stdout(repo.arc(&repo.root).args(["rewrite", "sign", "--no-sign"]));
+    assert_eq!(
+        repo.head(&repo.root),
+        odd,
+        "an unsigned recreation is the commit it recreated"
     );
 }
 

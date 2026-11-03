@@ -270,6 +270,36 @@ fn a_changed_committer_resets_the_approval() {
     }));
 }
 
+/// A carried header's bytes are part of the approved commit, a carriage
+/// return ending one included. Rejects a header comparison that drops it and
+/// so judges a successor without it signature-only, or a role addition when
+/// role entries are appended too.
+#[test]
+fn a_dropped_header_carriage_return_resets_the_approval() {
+    let without_return = |raw: &[u8]| -> Vec<u8> {
+        let at = raw
+            .windows(15)
+            .position(|window| window == b"x-extra value\r\n")
+            .unwrap();
+        [&raw[..at + 13], &raw[at + 14..]].concat()
+    };
+    for entries in [&b""[..], format!("{REVIEWER}\n").as_bytes()] {
+        let repo = repo_with_gates();
+        let worktree = approved_commit(&repo, "alpha", b"x-extra value\r\nx-tail end\n", BLOCK);
+        let old = repo.head(&worktree);
+        let new = write_commit(
+            &worktree,
+            &appending(&without_return(&raw_commit(&worktree, &old)), entries),
+        );
+        assert!(
+            !rewritten(&repo, &worktree, "alpha", &[(old, new)]),
+            "the approval followed a successor whose header lost its carriage return, \
+             appending {:?}",
+            String::from_utf8_lossy(entries)
+        );
+    }
+}
+
 /// A header the old commit did not carry resets. Rejects comparing only the
 /// headers arc interprets.
 #[test]

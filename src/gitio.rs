@@ -857,7 +857,9 @@ pub fn read_commits(cwd: &Path, revisions: &[&str]) -> Result<Vec<RawCommit>> {
 /// Every header is kept verbatim, in the order the object holds them, so a
 /// commit is recreated with the headers it had rather than with the ones arc
 /// knows about. The exceptions are the signature headers, which describe an
-/// object that a recreation replaces.
+/// object that a recreation replaces. A header line ends at a line feed
+/// alone, as Git reads it, so a carriage return before one is part of the
+/// header's bytes.
 fn parse_commit_object(raw: &[u8]) -> Result<RawCommit> {
     let split = raw
         .windows(2)
@@ -875,7 +877,7 @@ fn parse_commit_object(raw: &[u8]) -> Result<RawCommit> {
     // travel with it. Only a signature is dropped, and its continuation lines
     // go with it.
     let mut keeping = false;
-    for line in headers.lines() {
+    for line in headers.split('\n') {
         if line.starts_with(' ') {
             if keeping {
                 let header = kept.last_mut().expect("a kept header to extend");
@@ -1125,7 +1127,7 @@ fn parse_tag_object(raw: &[u8]) -> Result<RawTag> {
     let mut kind = None;
     let mut name = None;
     let mut carried: Vec<String> = Vec::new();
-    for line in headers.lines() {
+    for line in headers.split('\n') {
         if line.starts_with(' ') {
             if let Some(block) = carried.last_mut() {
                 block.push('\n');
