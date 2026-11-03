@@ -240,9 +240,23 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     }
     // --attest records evidence arc did not observe (so it needs the caller's
     // --result); without it arc runs the command and observing --result is a bug.
+    if attest {
+        let missing: Vec<&str> = [
+            (result.is_none(), "--result pass|fail"),
+            (tested_revision.is_none(), "--tested-revision <REV>"),
+            (execution_host.is_none(), "--execution-host <VALUE>"),
+            (runner.is_none(), "--runner <VALUE>"),
+        ]
+        .into_iter()
+        .filter_map(|(absent, flag)| absent.then_some(flag))
+        .collect();
+        if !missing.is_empty() {
+            bail!("--attest requires {}", missing.join(", "));
+        }
+    }
     let attested_result = match (attest, result) {
         (true, Some(result)) => Some(result),
-        (true, None) => bail!("--attest requires --result pass|fail"),
+        (true, None) => unreachable!("checked with the other attestation fields"),
         (false, Some(_)) => bail!("--result is only valid with --attest"),
         (false, None) => None,
     };
@@ -618,7 +632,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         }
         (None, Some(c)) => (c, None, None),
         (Some(_), Some(_)) => bail!("--gate and --command are mutually exclusive"),
-        (None, None) => bail!("provide --gate <name> or --command <cmd>"),
+        (None, None) => bail!("{}", missing_selector(ctx, &st)),
     };
     if !attest {
         crate::warm_worktree::prepare(&run_ctx.cwd)?;
@@ -2398,6 +2412,23 @@ fn append_verifications(
         println!("event: {}", ev.event_id);
     }
     Ok(())
+}
+
+/// The refusal for a verify that names nothing to run, with the choices that
+/// would have run something and the declared gates `--all` covers.
+fn missing_selector(ctx: &Ctx, st: &state::ChangeState) -> String {
+    let declared = ctx
+        .declarations(st)
+        .map(|declarations| declarations.gates.gates.keys().cloned().collect::<Vec<_>>());
+    let gates = match declared {
+        Ok(names) if names.is_empty() => "no gates are declared".to_string(),
+        Ok(names) => format!("declared gates: {}", names.join(", ")),
+        Err(_) => "the declared gates could not be read".to_string(),
+    };
+    format!(
+        "nothing to run: pass --all for every declared gate, --gate <name> for one, or \
+         --command <cmd> for an ad hoc check ({gates})"
+    )
 }
 
 fn nonempty_attestation_value(value: Option<String>, flag: &str) -> Result<String> {

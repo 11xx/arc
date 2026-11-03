@@ -4367,3 +4367,75 @@ fn snapshot_verify_reuses_green_tree_evidence_and_reruns_failed_gates() {
     );
     assert_eq!(fs::read_to_string(&runs).unwrap().lines().count(), 3);
 }
+
+/// Claim: one `--attest` refusal names every required field it lacks. Rejects
+/// naming only the first, which cost callers one refused retry per field.
+#[test]
+fn an_attestation_refusal_names_every_missing_field() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "attest-all", "--no-worktree"]),
+    );
+    let head = repo.head(&repo.root);
+    repo.arc(&repo.root)
+        .args([
+            "verify",
+            "attest-all",
+            "--command",
+            "true",
+            "--attest",
+            "--result",
+            "pass",
+        ])
+        .args(["--tested-revision", &head])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "--attest requires --execution-host <VALUE>, --runner <VALUE>",
+        ));
+    let events = stdout(
+        repo.arc(&repo.root)
+            .args(["events", "--change", "attest-all"]),
+    );
+    assert!(!events.contains("verification"), "{events}");
+}
+
+/// Claim: a verify naming nothing to run says `--all` and lists the declared
+/// gates, and with none declared says so, running nothing either way. Rejects
+/// a refusal that offers only `--gate` and `--command`.
+#[test]
+fn a_verify_without_a_selector_names_all_and_the_declared_gates() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "no-selector", "--no-worktree"]),
+    );
+    repo.arc(&repo.root)
+        .args(["verify", "no-selector"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "pass --all for every declared gate",
+        ))
+        .stderr(predicates::str::contains("no gates are declared"));
+
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.lint]\ncommand = 'true'\n[gates.smoke]\ncommand = 'true'\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "declare gates"]);
+    repo.arc(&repo.root)
+        .args(["verify", "no-selector"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("declared gates: lint, smoke"));
+    let events = stdout(
+        repo.arc(&repo.root)
+            .args(["events", "--change", "no-selector"]),
+    );
+    assert!(!events.contains("verification"), "{events}");
+}

@@ -1984,11 +1984,12 @@ enum Cmd {
         /// Revision actually tested; required with --attest
         #[arg(long)]
         tested_revision: Option<String>,
-        /// Host or environment that executed the attested command. Local runs
-        /// record the hostname, or `unknown` when it cannot be read
+        /// Host or environment that executed the attested command; required
+        /// with --attest. Local runs record the hostname, or `unknown` when
+        /// it cannot be read
         #[arg(long)]
         execution_host: Option<String>,
-        /// Stable identity of the external runner or job
+        /// Stable identity of the external runner or job; required with --attest
         #[arg(long)]
         runner: Option<String>,
         /// Environment identity the attested evidence applies to, as the
