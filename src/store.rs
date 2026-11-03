@@ -53,9 +53,10 @@ candidate_format_barrier! {
 /// a loaded machine it can outlast a second. A holder past this budget is
 /// stuck or is an arc re-entered beneath its own lock, and is refused.
 pub(crate) const LOCK_TIMEOUT: Duration = Duration::from_secs(15);
-// The target lock is legitimately held across a real merge, so waiters get a
-// budget sized to an integration rather than to a state append.
-const TARGET_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+/// The target lock is legitimately held across a real merge, so waiters get a
+/// budget sized to an integration rather than to a state append. The
+/// replica-state lock an integration holds around that wait shares it.
+pub(crate) const TARGET_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 /// A wait longer than this is announced on stderr, naming the lock.
 const LOCK_NOTICE_AFTER: Duration = Duration::from_secs(1);
 /// The lock a writer holds to issue and publish an event ID.

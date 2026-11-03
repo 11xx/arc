@@ -3733,8 +3733,9 @@ RULES THAT CHANGE WHAT YOU DO
     another worktree's command holds. Ledger, journal and operator policy
     publication locks are waited for up to 15 seconds, and a wait past one
     second prints a stderr line naming the lock. A lock still held after that
-    refuses the command, naming the lock and asking for a retry; an integration
-    target lock waits up to 30 seconds. A verification whose gates ran but whose
+    refuses the command, naming the lock and asking for a retry. An integration
+    target lock, and the replica-state lock an integration holds around it,
+    wait up to 30 seconds. A verification whose gates ran but whose
     evidence could not be recorded prints each such result as `not recorded:`
     and exits non-zero; that result is not evidence until a rerun records it.
   - An executor's first act is `arc config --check-writable`; a nonzero exit

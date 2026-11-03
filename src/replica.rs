@@ -16,14 +16,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::thread;
-use std::time::{Duration, Instant};
 
 const EVENT_SCHEMA: &str = "arc-replica-event/3";
 const BUNDLE_SCHEMA: &str = "arc-replica-bundle/3";
 const IMPORT_SCHEMA: &str = "arc-replica-import/3";
-const STATE_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
-const STATE_LOCK_RETRY: Duration = Duration::from_millis(10);
 pub const INTEGRATION_AUTHORITY_EXIT_CODE: i32 = 17;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -242,6 +238,10 @@ pub(crate) fn forget_held_events() {
 }
 
 /// Serialize every operation whose result depends on local replica state.
+///
+/// An integration holds this lock across its whole target-lock wait and
+/// merge, so a waiter gets the target lock's budget: a shorter one gives up on
+/// a sibling integration that is still inside its own.
 pub fn lock(store: &Store) -> Result<ReplicaLock> {
     let lock_dir = store.root.join("locks");
     create_private_dir_all(&lock_dir)?;
@@ -253,31 +253,18 @@ pub fn lock(store: &Store) -> Result<ReplicaLock> {
         .truncate(false)
         .open(&path)
         .with_context(|| format!("cannot open replica-state lock {}", path.display()))?;
-    let deadline = Instant::now() + STATE_LOCK_TIMEOUT;
-    loop {
-        match file.try_lock() {
-            Ok(()) => {
-                held::acquire(&store.root);
-                return Ok(ReplicaLock {
-                    file,
-                    root: store.root.clone(),
-                });
-            }
-            Err(std::fs::TryLockError::WouldBlock) => {
-                if Instant::now() >= deadline {
-                    bail!(
-                        "replica-state lock {} is busy; retry the command",
-                        path.display()
-                    );
-                }
-                thread::sleep(STATE_LOCK_RETRY);
-            }
-            Err(std::fs::TryLockError::Error(error)) => {
-                return Err(error)
-                    .with_context(|| format!("cannot lock replica-state file {}", path.display()));
-            }
-        }
-    }
+    crate::store::wait_for_lock(
+        &file,
+        &path,
+        "replica-state",
+        crate::store::TARGET_LOCK_TIMEOUT,
+        crate::store::LockMode::Exclusive,
+    )?;
+    held::acquire(&store.root);
+    Ok(ReplicaLock {
+        file,
+        root: store.root.clone(),
+    })
 }
 
 pub fn id(store: &Store) -> ReplicaId {

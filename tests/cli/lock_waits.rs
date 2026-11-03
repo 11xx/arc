@@ -296,6 +296,73 @@ fn a_held_publication_lock_is_waited_for_within_a_bound() {
     );
 }
 
+/// The wait budget an `integrate` of `slug` announces while `held`, the lock
+/// named `lock_name`, keeps it waiting; once the lock comes free the
+/// integration must succeed.
+fn announced_integration_wait(repo: &Repo, slug: &str, held: fs::File, lock_name: &str) -> String {
+    let mut child = spawn_arc_keeping_stderr(
+        repo,
+        &repo.root,
+        &["integrate", "--shape", "no-ff", slug],
+        "integrator",
+    );
+    let notice = format!("waiting for {lock_name} lock");
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let mut seen = String::new();
+    let budget = loop {
+        let start = seen.len();
+        if stderr.read_line(&mut seen).unwrap() == 0 {
+            drop(held);
+            wait_for_exit(&mut child);
+            panic!("integrate {slug} gave up on the {lock_name} lock without waiting: {seen}");
+        }
+        if let Some((_, budget)) = seen[start..]
+            .split_once(&notice)
+            .and_then(|(_, rest)| rest.rsplit_once("(up to "))
+        {
+            break budget.trim_end().trim_end_matches(')').to_string();
+        }
+    };
+    drop(held);
+    stderr.read_to_string(&mut seen).unwrap();
+    let status = wait_for_exit(&mut child);
+    assert!(status.success(), "integrate {slug} exited {status}: {seen}");
+    budget
+}
+
+/// Claim: an integration waits for the replica-state lock as long as for its
+/// target lock. A sibling integration holds the replica-state lock across its
+/// whole target-lock wait and merge, so a shorter wait gives up on a sibling
+/// still inside its own budget. Rejects: refusing with "replica-state lock ...
+/// is busy" before the target-lock budget has passed.
+#[test]
+fn an_integration_waits_for_the_replica_state_lock_as_long_as_for_its_target() {
+    let repo = Repo::new();
+    for slug in ["replica-wait", "target-wait"] {
+        let (_, worktree, _) = change_with_patchset(&repo, slug);
+        repo.arc(&worktree)
+            .args(["review", slug, "--verdict", "approved"])
+            .assert()
+            .success();
+    }
+    let replica = announced_integration_wait(
+        &repo,
+        "replica-wait",
+        hold_named_lock(&repo, "replica-state.lock"),
+        "replica-state",
+    );
+    let target = announced_integration_wait(
+        &repo,
+        "target-wait",
+        hold_target_lock(&repo, "master"),
+        "integration target",
+    );
+    assert_eq!(
+        replica, target,
+        "the replica-state wait budget differs from the target-lock budget"
+    );
+}
+
 fn hold_named_lock_at(path: &Path) -> fs::File {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let file = fs::OpenOptions::new()
