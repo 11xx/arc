@@ -203,18 +203,18 @@ fn integration_reads(extra: usize) -> (Value, Value, u64) {
 }
 
 /// Claim: `arc integrate` reads the repository events once per read of the
-/// ledger it makes, however many changes the ledger holds: the change before
-/// the locks, once to resolve the style and once to judge it, the confirming
-/// re-read under them, the readiness report and the confirmation. Rejects a
-/// change read that materializes the repository events once for its rewrites
-/// and again for its projection.
+/// ledger it makes, however many changes the ledger holds: the change once
+/// before the locks, the confirming re-read under them, the readiness report
+/// and the confirmation. Rejects a change read that materializes the
+/// repository events once for its rewrites and again for its projection, and
+/// a landing that reads the change a second time before the locks.
 #[test]
 fn integrate_reads_the_ledger_once_per_read_however_many_changes() {
     let (few, few_counts, few_changes) = integration_reads(1);
     let (many, many_counts, many_changes) = integration_reads(5);
     for (record, counts) in [(&few, &few_counts), (&many, &many_counts)] {
         assert_eq!(
-            record["counts"]["repository_materializations"], 5,
+            record["counts"]["repository_materializations"], 4,
             "{record} {counts}"
         );
         assert_eq!(record["counts"]["status_reports"], 2, "{record}");
@@ -236,6 +236,45 @@ fn integrate_reads_the_ledger_once_per_read_however_many_changes() {
         "{few} {many}"
     );
 }
+
+/// The trace record of a queue that lands one tagged, approved change in a
+/// ledger holding `extra` more changes.
+fn queued_integration_reads(extra: usize) -> Value {
+    let repo = ledger_with_import();
+    add_changes(&repo, 0, extra);
+    let (landing, worktree, _) = change_with_patchset(&repo, "queued");
+    repo.arc(&worktree)
+        .args(["review", "queued", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["metadata", &landing, "--tag", "#queued"])
+        .assert()
+        .success();
+    let (record, _, code) = traced(&repo, &repo.root, &["integrate", "--tag", "#queued"]);
+    assert_eq!(code, Some(0), "{record}");
+    record
+}
+
+/// Claim: a queued landing reads the change once between its readiness turn
+/// and the locks, however many changes the ledger holds: the queue's
+/// selection, the turn's state, its readiness report and its last state
+/// before the merge, then the re-read under the locks, the readiness report
+/// and the confirmation. Rejects a merge step that reads the change again
+/// before taking the locks.
+#[test]
+fn a_queued_landing_reads_its_change_once_before_the_locks() {
+    for extra in [1, 4] {
+        let record = queued_integration_reads(extra);
+        assert_eq!(
+            record["counts"]["repository_materializations"], QUEUED_MATERIALIZATIONS,
+            "{record}"
+        );
+    }
+}
+
+/// The repository materializations a one-member queue makes.
+const QUEUED_MATERIALIZATIONS: u64 = 9;
 
 /// Open a change on `base` blocked by `blocked_by`, commit to it, snapshot
 /// and approve it.

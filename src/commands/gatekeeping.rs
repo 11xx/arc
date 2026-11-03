@@ -3008,7 +3008,7 @@ pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Resul
             }
             integrate_one(
                 ctx,
-                reference,
+                state,
                 into,
                 message,
                 cleanup,
@@ -3324,7 +3324,7 @@ fn queue_step(
 
     let code = integrate_one(
         ctx,
-        change_id,
+        st,
         None,
         None,
         cleanup,
@@ -3709,13 +3709,14 @@ fn name_first_few(paths: &[String], limit: usize) -> String {
     named
 }
 
-/// Integrate one already-selected change. Tagged integration reuses this
-/// guarded path for every open member so each merge gets the normal target,
-/// approval, gate, and dependency checks.
+/// Integrate one already-selected change, starting from the state its caller
+/// read before taking any lock. Tagged integration reuses this guarded path
+/// for every open member so each merge gets the normal target, approval,
+/// gate, and dependency checks.
 #[allow(clippy::too_many_arguments)]
 fn integrate_one(
     ctx: &Ctx,
-    reference: &str,
+    initial: ChangeState,
     into: Option<String>,
     message: Option<String>,
     cleanup: CleanupStyle,
@@ -3732,7 +3733,7 @@ fn integrate_one(
         mut expect_basis,
     } = options;
     let store = ctx.store()?;
-    let change_id = store.resolve_change(reference)?;
+    let change_id = initial.change_id.clone();
     if let Some(expected) = &expect_basis {
         if expected.change_id != change_id {
             bail!(
@@ -3741,7 +3742,6 @@ fn integrate_one(
             );
         }
     }
-    let initial = store.state(&change_id)?;
     if initial.iterating && debt.is_none() {
         eprintln!(
             "change declares it is iterating; clear it with arc iterating {} --off",
