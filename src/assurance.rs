@@ -55,8 +55,9 @@ struct ReadView {
     #[serde(skip_serializing_if = "Option::is_none")]
     route_version: Option<String>,
     /// Whether the read can clear the change: an approval of the shipped
-    /// patchset, or an approving audit, whose `coverage` counts and that
-    /// under `review_clearance = "assessed"` also clears.
+    /// patchset of a change that did not land by replay, or an approving
+    /// audit, whose `coverage` counts and that under
+    /// `review_clearance = "assessed"` also clears.
     counts: bool,
     /// Under `review_clearance = "assessed"`, `clearing` or `findings`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -66,9 +67,10 @@ struct ReadView {
     findings_reason: Option<&'static str>,
     /// How much of the shipped subject the read covered: `whole`, a whole
     /// read of it that also covers the debt's extent; `partial`, an extent
-    /// short of that; `not-established`, no extent. Only a `whole` read, or
-    /// a `not-established` one where the debt names no extent either,
-    /// counts.
+    /// short of that; `not-established`, no extent; `edit-only`, a verdict
+    /// on a change that landed by replay, which read the edit and never the
+    /// range that landed. Only a `whole` read, or a `not-established` one
+    /// where the debt names no extent either, counts.
     coverage: &'static str,
 }
 
@@ -217,6 +219,10 @@ fn clearance_of(
     }
 }
 
+/// The coverage of a verdict on a change that landed by replay: it read the
+/// original patchset, never the range that landed.
+const EDIT_ONLY: &str = "edit-only";
+
 /// How much of the change's subject (`ChangeState::extent_subject`) a read
 /// with `extent` covered, and whether that lets it count toward the
 /// change's assurance.
@@ -236,6 +242,10 @@ fn coverage_of(state: &ChangeState, extent: Option<&Extent>) -> (&'static str, b
 }
 
 fn reads_of(state: &ChangeState, shipped: Option<&Patchset>) -> Vec<ReadView> {
+    let replayed = state
+        .debt
+        .as_ref()
+        .is_some_and(|debt| debt.replayed.is_some());
     let mut reads = Vec::new();
     for verdict in &state.verdicts {
         let (read_kind, findings_reason) = clearance_of(
@@ -244,7 +254,11 @@ fn reads_of(state: &ChangeState, shipped: Option<&Patchset>) -> Vec<ReadView> {
             verdict.model.as_deref(),
             verdict.assessment.as_ref(),
         );
-        let (coverage, covers_whole) = coverage_of(state, None);
+        let (coverage, covers_whole) = if replayed {
+            (EDIT_ONLY, false)
+        } else {
+            coverage_of(state, None)
+        };
         reads.push(ReadView {
             event: verdict.event_id.clone(),
             kind: ReadKind::Verdict,

@@ -2540,3 +2540,76 @@ fn an_extent_of_a_replayed_member_is_the_range_it_landed_as() {
     assert_eq!(coverage_of(&scoped), "partial", "{row}");
     assert_eq!(coverage_of(&whole), "whole", "{row}");
 }
+
+/// Claim: an approval of a replayed member's original patchset read the edit,
+/// never the context it landed in, so assurance lists it with
+/// `counts: false` and coverage `edit-only` and the member stays `owed`
+/// until an audit of what landed counts; a member that landed where its
+/// approval read it keeps counting that approval. Rejects a landed member
+/// reading as assured on an approval nobody made of the landed range, and
+/// rejects refusing the approval of a member that was not replayed.
+#[test]
+fn an_approval_of_a_replayed_members_edit_does_not_count_toward_its_assurance() {
+    let repo = gated_repo();
+    let ((first, _, _), (second, _, _)) = independent(&repo);
+    repo.arc(&repo.root)
+        .args(["land", &first, &second, "--debt", "context unread"])
+        .assert()
+        .success();
+    let approval = verdict_of(&repo, &second);
+    let kept = verdict_of(&repo, &first);
+    let row_of = |report: &Value, change: &str| -> Value {
+        report["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["change_id"] == change)
+            .unwrap_or_else(|| panic!("no row for {change} in {report}"))
+            .clone()
+    };
+    let read_of = |row: &Value, event: &str| -> Value {
+        row["reads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|read| read["event"] == event)
+            .unwrap_or_else(|| panic!("no read {event} in {row}"))
+            .clone()
+    };
+    let assurance = |extra: &[&str]| {
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["query", "--assurance", "--json"])
+                .args(extra),
+        )
+    };
+
+    let report = assurance(&["--stale"]);
+    let row = row_of(&report, &second);
+    let read = read_of(&row, &approval);
+    assert_eq!(read["counts"], false, "{row}");
+    assert_eq!(read["coverage"], "edit-only", "{row}");
+    assert_eq!(row["assurance"]["standing"], "owed", "{row}");
+
+    let read = read_of(&row_of(&assurance(&[]), &first), &kept);
+    assert_eq!(read["counts"], true, "{read}");
+    assert_eq!(read["coverage"], "not-established", "{read}");
+
+    let audited = stdout(repo.arc(&repo.root).env("ARC_ACTOR", "auditor").args([
+        "audit",
+        &second,
+        "--verdict",
+        "approved",
+    ]));
+    let audit = audited
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap()
+        .trim()
+        .to_string();
+    let row = row_of(&assurance(&[]), &second);
+    let read = read_of(&row, &audit);
+    assert_eq!(read["counts"], true, "{row}");
+    assert_eq!(read["coverage"], "not-established", "{row}");
+    assert_eq!(read_of(&row, &approval)["counts"], false, "{row}");
+}
