@@ -610,55 +610,13 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         println!("gates: {passed}/{total} pass");
         return Ok(if passed == total { 0 } else { 1 });
     }
-    let (cmd, timeout, declared_environment) = match (&gate, command) {
-        (Some(name), None) => {
-            let gates = ctx.declarations(&st)?.gates;
-            let declared = match gates.gates.get(name) {
-                Some(declared) => declared,
-                // A gate and a probe are different objects run by adjacent
-                // flags. When the miss is a probe the brief already declares,
-                // the error knows the right flag and should say it.
-                None if brief_declares_probe(&st, name) => bail!(
-                    "gate {name:?} not declared in .arc/gates.toml; the current brief declares \
-                     acceptance probe {name:?} — run `arc verify --probe {name}`"
-                ),
-                None => bail!("gate {name:?} not declared in .arc/gates.toml"),
-            };
-            (
-                declared.command.clone(),
-                declared.timeout,
-                declared.environment.clone(),
-            )
-        }
-        (None, Some(c)) => (c, None, None),
-        (Some(_), Some(_)) => bail!("--gate and --command are mutually exclusive"),
-        (None, None) => bail!("{}", missing_selector(ctx, &st)),
-    };
+    let (cmd, timeout, declared_environment) = declared_check(ctx, &st, gate.as_deref(), command)?;
     if !attest {
         crate::warm_worktree::prepare(&run_ctx.cwd)?;
     }
-    // An attested run happened where arc cannot observe an environment, so
-    // the caller states the identity. A run arc performs reads it from the
-    // gate's declared probe; a declaration with no probe has nothing for an
-    // identity to be compared against, so one is refused rather than kept as
-    // unreferenced metadata.
     let environment_identity = match (attest, &declared_environment) {
-        (true, Some(_)) => Some(environment.with_context(|| {
-            format!(
-                "--attest for gate {:?} requires --environment <IDENTITY>: the gate declares an \
-                 environment probe",
-                gate.as_deref().unwrap_or_default()
-            )
-        })?),
-        (true, None) => {
-            if environment.is_some() {
-                bail!(
-                    "--environment applies only to a gate whose declaration has an environment \
-                     probe"
-                );
-            }
-            None
-        }
+        (true, declared) => attested_environment(gate.as_deref(), declared.is_some(), environment)?,
+        // A run arc performs reads the identity from the gate's declared probe.
         (false, Some(probe)) => {
             let run = gates::environment_probe(&run_ctx.cwd, probe, timeout)?;
             if let Some(failure) = &run.failure {
@@ -5422,6 +5380,64 @@ fn release_retention_refs(ctx: &Ctx, change_id: &str, integrated: Option<&str>) 
         }
     }
     Ok(())
+}
+
+/// The command, timeout and environment probe a `--gate` or `--command`
+/// selection names.
+fn declared_check(
+    ctx: &Ctx,
+    st: &state::ChangeState,
+    gate: Option<&str>,
+    command: Option<String>,
+) -> Result<(String, Option<u64>, Option<String>)> {
+    match (gate, command) {
+        (Some(name), None) => {
+            let gates = ctx.declarations(st)?.gates;
+            let declared = match gates.gates.get(name) {
+                Some(declared) => declared,
+                // A gate and a probe are different objects run by adjacent
+                // flags. When the miss is a probe the brief already declares,
+                // the error knows the right flag and should say it.
+                None if brief_declares_probe(st, name) => bail!(
+                    "gate {name:?} not declared in .arc/gates.toml; the current brief declares \
+                     acceptance probe {name:?} — run `arc verify --probe {name}`"
+                ),
+                None => bail!("gate {name:?} not declared in .arc/gates.toml"),
+            };
+            Ok((
+                declared.command.clone(),
+                declared.timeout,
+                declared.environment.clone(),
+            ))
+        }
+        (None, Some(command)) => Ok((command, None, None)),
+        (Some(_), Some(_)) => bail!("--gate and --command are mutually exclusive"),
+        (None, None) => bail!("{}", missing_selector(ctx, st)),
+    }
+}
+
+/// An attested run happened where arc cannot observe an environment, so the
+/// caller states the identity. A declaration with no probe has nothing for an
+/// identity to be compared against, so one is refused rather than kept as
+/// unreferenced metadata.
+fn attested_environment(
+    gate: Option<&str>,
+    declares_probe: bool,
+    environment: Option<String>,
+) -> Result<Option<String>> {
+    if declares_probe {
+        return environment.map(Some).with_context(|| {
+            format!(
+                "--attest for gate {:?} requires --environment <IDENTITY>: the gate declares an \
+                 environment probe",
+                gate.unwrap_or_default()
+            )
+        });
+    }
+    if environment.is_some() {
+        bail!("--environment applies only to a gate whose declaration has an environment probe");
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
