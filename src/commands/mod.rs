@@ -158,6 +158,7 @@ pub(crate) const SHARED_READ_COMMANDS: &[&str] = &[
     "workspace backlog",
     "workspace report",
     "journal catchup",
+    "journal open",
 ];
 
 pub(crate) const READ_ONLY_COMMANDS: &[&str] = &[

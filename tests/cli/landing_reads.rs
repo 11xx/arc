@@ -1,5 +1,6 @@
-//! `arc check`, which every landing runs, reads the ledger a fixed number of
-//! times however many changes it holds. Counts come from the `ARC_TRACE` record and
+//! `arc check`, which every landing runs, and `arc journal open`, the queue a
+//! lead reads beside it, read the ledger a fixed number of times however many
+//! changes it holds. Counts come from the `ARC_TRACE` record and
 //! from the file `ARC_TEST_LEDGER_READS` names.
 
 use super::common::*;
@@ -163,4 +164,24 @@ fn check_reads_the_ledger_once_however_many_changes() {
     for change in [open.as_str(), "landed"] {
         assert_read_once(&repo, &["check", change]);
     }
+}
+
+/// Claim: `arc journal open` reads the ledger once however many changes it
+/// holds. Rejects a queue that materializes the repository events, the
+/// import batches or the scope once per inventory pass.
+#[test]
+fn journal_open_reads_the_ledger_once_however_many_changes() {
+    let repo = ledger_with_import();
+    change_with_patchset(&repo, "open");
+    repo.arc(&repo.root)
+        .args(["journal", "todo", "follow-up"])
+        .write_stdin("Follow up.\n")
+        .args(["--body-file", "-"])
+        .assert()
+        .success();
+    add_changes(&repo, 0, 2);
+    assert_read_once(&repo, &["journal", "open"]);
+    add_changes(&repo, 2, 3);
+    assert_read_once(&repo, &["journal", "open"]);
+    assert_read_once(&repo, &["journal", "open", "--json"]);
 }
