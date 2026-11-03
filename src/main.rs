@@ -2780,7 +2780,8 @@ enum Cmd {
     ///
     /// Under `[policy] review_clearance = "assessed"` an audit discharges a
     /// debt of any kind only when it clears: a person's audit by the
-    /// authorship rule alone; an agent's only when it records a model with an
+    /// authorship rule alone (an `ineligible-review` debt still needs an
+    /// eligible, bound assessment); an agent's only when it records a model with an
     /// effort and its `--assessment` (`agent-routing-assessment/2`) says
     /// `clears: true` and is `bound`. Any other audit is a findings read:
     /// recorded with its verdict and findings, listed beside the obligation

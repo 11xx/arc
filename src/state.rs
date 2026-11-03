@@ -4990,6 +4990,16 @@ impl ChangeState {
             if let Some(why) = read.findings_only() {
                 return Some(DischargeBar::FindingsRead(why));
             }
+            // The policy only tightens: a person clears on authorship, but an
+            // `ineligible-review` debt still needs routing's eligible, bound
+            // word, which a clearing agent read already carries.
+            let eligible = read.assessment.is_some_and(|assessment| {
+                assessment.independence == Independence::Eligible
+                    && assessment.binding == Some(AuditorBinding::Bound)
+            });
+            if debt.missing == Some(DebtMissing::IneligibleReview) && !eligible {
+                return Some(DischargeBar::NoEligibleAssessment);
+            }
             if read.author_assumed {
                 return Some(DischargeBar::AuthorAssumed);
             }

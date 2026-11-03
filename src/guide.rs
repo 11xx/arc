@@ -2305,7 +2305,9 @@ REVIEW COVERAGE AND DEBT
 
   CLEARANCE. `[policy] review_clearance = "assessed"`, in either policy file,
   makes clearing a routing answer. A person's read (`Name <email>`) is judged
-  by authorship alone, because routing seats no people. An agent's read
+  by authorship alone, because routing seats no people, and an
+  `ineligible-review` debt still needs routing's eligible, bound assessment
+  as it does without the key. An agent's read
   clears only when it records a model with an effort and carries a bound
   assessment (`arc review --assessment`, `arc audit --assessment`) from
   `agent-routing assess --purpose clearance --json` whose `clears` is true.
@@ -2315,7 +2317,7 @@ REVIEW COVERAGE AND DEBT
   findings read gates no integration, so `arc integrate` refuses unless
   `--debt`, which then derives `ineligible-review` naming that read; an
   `arc external verdict` carries no assessment and is one. A waiver never
-  lifts a refusal, a contested verdict, a blocking finding or a failed gate.
+  lifts a refusal at the head, a blocking finding or a failed gate.
   A findings read discharges no debt, and assurance counts only clearing
   reads. `arc status --json` and `arc check --json` give each verdict a
   `kind`, `clearing` or `findings`, and a `findings_reason`. Discharge is

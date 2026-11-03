@@ -174,6 +174,30 @@ fn a_person_audit_is_judged_by_authorship_alone() {
     assert!(output.contains("debt discharged"), "{output}");
 }
 
+/// Claim: the policy only tightens: a person's audit, which clears ordinary
+/// debt on authorship, still leaves an `ineligible-review` debt owed, as it
+/// does without the policy. Rejects the policy discharging what the legacy
+/// rule kept open.
+#[test]
+fn a_person_audit_leaves_an_ineligible_review_debt_owed() {
+    let repo = assessed_repo();
+    snapshotted(&repo, "pdebt");
+    approve(&repo, "pdebt", None);
+    repo.arc(&repo.root)
+        .args([
+            "integrate",
+            "pdebt",
+            "--debt",
+            "a findings seat approved it",
+        ])
+        .assert()
+        .success();
+    assert_eq!(debt_of(&repo, "pdebt")["missing"], "ineligible-review");
+    let output = audit(&repo, "pdebt", "Pat Reviewer <pat@example.com>", None, None);
+    assert!(!output.contains("debt discharged"), "{output}");
+    assert_eq!(debt_of(&repo, "pdebt")["standing"], "owed");
+}
+
 /// Claim: a comment-only audit by a clearing seat still discharges nothing,
 /// and a changes-requested one by the same seat fulfils the review without
 /// approving it. Rejects clearance turning a comment into a discharge.
