@@ -610,6 +610,15 @@ impl ReviewClearance {
     pub fn is_assessed(self) -> bool {
         self == Self::Assessed
     }
+
+    /// The stricter of two readings.
+    pub fn stricter(self, other: Self) -> Self {
+        if self.is_assessed() || other.is_assessed() {
+            Self::Assessed
+        } else {
+            Self::Legacy
+        }
+    }
 }
 
 /// The values a policy file may give `review_clearance`.

@@ -1312,6 +1312,9 @@ pub struct ReviewArgs {
     /// The routing version that selected the reviewer, as the caller declared
     /// it. `None` records an unrouted review.
     pub route_version: Option<String>,
+    /// An `agent-routing assess --json` file for the reviewer, bound as
+    /// `arc audit --assessment` binds one.
+    pub assessment: Option<PathBuf>,
 }
 
 pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
@@ -1328,6 +1331,7 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
         contributors,
         solo,
         route_version,
+        assessment,
     } = args;
     causes.sort_unstable();
     causes.dedup();
@@ -1367,6 +1371,10 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
     if snapshot_first && patchset.is_some() {
         bail!("--snapshot cannot be combined with --patchset");
     }
+    let assessed = assessment
+        .as_deref()
+        .map(crate::assessment::read)
+        .transpose()?;
     let requested_contributors = if snapshot_first {
         contributor_declaration(ctx, contributors, solo)?
     } else {
@@ -1467,6 +1475,19 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
         .collect();
 
     let finding_ids: Vec<String> = inline.iter().map(|f| f.finding_id.clone()).collect();
+    let assessment = assessed.map(|assessed| {
+        let implementers = st
+            .patchsets
+            .iter()
+            .find(|candidate| candidate.id == patchset_id)
+            .and_then(|reviewed| super::audit::range_implementers(ctx, reviewed));
+        super::audit::bind_assessment(ctx, assessed, implementers.as_deref())
+    });
+    let unbound = assessment.as_ref().and_then(|assessed| {
+        assessed
+            .binding
+            .and_then(|binding| binding.failure_note(&assessed.uncovered_authors))
+    });
     if let Some(relation) = relation.as_ref() {
         println!("relation: {}", relation.description());
     }
@@ -1488,6 +1509,7 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
         relation,
         provisional: provisional.clone(),
         route_version,
+        assessment,
     };
     ensure_append_allowed(&st, &payload)?;
     let mut ev = ctx.event(&store, &change_id, payload)?;
@@ -1500,6 +1522,9 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
         println!("finding: {id}");
     }
     println!("event: {}", ev.event_id);
+    if let Some(note) = unbound {
+        println!("assessment {note}");
+    }
     // Everything below is advice about a verdict that already stands, so a
     // failure to evaluate it is a warning and never the review's result.
     //

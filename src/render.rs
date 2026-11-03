@@ -2405,11 +2405,7 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
                     .map(|read| format!(
                         "; read {} ({}; {})",
                         read.read,
-                        read.qualifiers
-                            .iter()
-                            .map(|qualifier| qualifier.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", "),
+                        read.reasons(),
                         read.assessment.as_str()
                     ))
                     .unwrap_or_default()

@@ -662,6 +662,9 @@ pub enum AssessmentBasis {
     Assessed,
     /// The caller named the qualifiers; nothing corroborates them.
     Declared,
+    /// arc derived the record from a findings read that carried no
+    /// assessment, so routing named no qualifier.
+    Unassessed,
 }
 
 impl AssessmentBasis {
@@ -669,6 +672,7 @@ impl AssessmentBasis {
         match self {
             Self::Assessed => "assessed",
             Self::Declared => "declared",
+            Self::Unassessed => "unassessed",
         }
     }
 }
@@ -697,15 +701,39 @@ impl Independence {
 /// read time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IneligibleRead {
-    /// The verdict, or post-integration audit, event the read recorded.
+    /// The verdict, post-integration audit, or external verdict event the
+    /// read recorded.
     pub read: String,
-    /// Never empty.
+    /// Empty only on a findings read routing did not qualify, whose
+    /// `findings` says why it does not clear.
     pub qualifiers: Vec<ReviewQualifier>,
+    /// Why the read does not clear under `review_clearance = "assessed"`,
+    /// when arc derived this record from a findings read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub findings: Option<String>,
     /// The routing version that assessed the read, as a coordinate and
     /// nothing else.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_version: Option<String>,
     pub assessment: AssessmentBasis,
+}
+
+impl IneligibleRead {
+    /// Why the read does not count, for a line that lists it: its
+    /// qualifiers, or the findings reason when routing named none.
+    pub fn reasons(&self) -> String {
+        let qualifiers = self
+            .qualifiers
+            .iter()
+            .map(|qualifier| qualifier.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        match (&self.findings, qualifiers.is_empty()) {
+            (Some(findings), true) => format!("findings read: {findings}"),
+            (Some(findings), false) => format!("findings read: {findings} ({qualifiers})"),
+            (None, _) => qualifiers,
+        }
+    }
 }
 
 /// Whether an assessment describes the auditor that recorded it: the audit
@@ -1399,6 +1427,12 @@ pub enum Payload {
         /// mean holding the roster.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         route_version: Option<String>,
+        /// Routing's assessment of this reviewer against the patchset's
+        /// authors, when the caller supplied one. Under
+        /// `review_clearance = "assessed"` an agent's verdict clears only
+        /// with one that is bound and says it clears.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assessment: Option<AuditAssessment>,
     },
     /// A verdict copied from a decision made outside Arc, with its source and
     /// exact revision kept apart from witnessed review.

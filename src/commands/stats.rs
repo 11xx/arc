@@ -1443,6 +1443,7 @@ mod tests {
                     relation: None,
                     provisional: None,
                     route_version: None,
+                    assessment: None,
                 },
             ),
         ];

@@ -915,6 +915,13 @@ pub struct VerdictAssessment {
     pub gating_eligible: bool,
     pub selected_authorizing_event: bool,
     pub rejection_reason: Option<String>,
+    /// Under `review_clearance = "assessed"`, `clearing` or `findings`: whether
+    /// the verdict clears the work or only records what it found.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<&'static str>,
+    /// Why a `findings` verdict does not clear.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub findings_reason: Option<&'static str>,
 }
 
 pub fn verdict_assessments(
@@ -927,10 +934,18 @@ pub fn verdict_assessments(
     let selected = state
         .latest_verdict()
         .map(|verdict| verdict.event_id.as_str());
+    let assessed = policy
+        .policy
+        .review_clearance
+        .stricter(state.review_clearance)
+        .is_assessed();
     state
         .verdicts
         .iter()
         .map(|verdict| {
+            let gap = assessed
+                .then(|| state.verdict_clearance_gap(verdict))
+                .flatten();
             let patchset = state
                 .patchsets
                 .iter()
@@ -959,6 +974,14 @@ pub fn verdict_assessments(
                                     .map_or(&[][..], Vec::as_slice),
                             )
                         })
+                })
+                .or_else(|| {
+                    gap.as_ref()
+                        .filter(|_| {
+                            verdict.verdict == Verdict::Approved
+                                && !state.debt_waives_latest_patchset()
+                        })
+                        .map(crate::approval::findings_rejection)
                 });
             let eligible = reason.is_none();
             VerdictAssessment {
@@ -987,6 +1010,12 @@ pub fn verdict_assessments(
                     && selected == Some(verdict.event_id.as_str())
                     && verdict.verdict == Verdict::Approved,
                 rejection_reason: reason,
+                kind: assessed.then_some(if gap.is_some() {
+                    "findings"
+                } else {
+                    "clearing"
+                }),
+                findings_reason: gap.as_ref().map(|why| why.as_str()),
             }
         })
         .collect()
@@ -1485,6 +1514,10 @@ fn build_report(
             .as_ref()
             .and_then(|patchset| reviewed_only_by_brief_author(state, patchset)),
         debt_outstanding: state.debt_outstanding(),
+        review_clearance: policy
+            .policy
+            .review_clearance
+            .stricter(state.review_clearance),
     });
     if !approval.approval_valid && approval.approval_rejection_reason.is_none() {
         let origins: BTreeSet<_> = state

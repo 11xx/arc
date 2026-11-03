@@ -126,6 +126,7 @@ impl IneligibleInputs {
         Ok(Some(IneligibleRead {
             read,
             qualifiers,
+            findings: None,
             route_version,
             assessment,
         }))
@@ -163,15 +164,28 @@ fn audited_implementers(ctx: &Ctx, st: &ChangeState) -> Option<Vec<String>> {
 }
 
 /// The assessment at `path`, kept as the read the invoking context records
-/// will keep it: bound to the represented reader's model, and to every
-/// author coordinate of `implementers`, the range's `Implemented-by` values,
-/// or `None` when they could not be read.
-pub(super) fn read_assessment(
+/// will keep it; see [`bind_assessment`].
+fn read_assessment(
     ctx: &Ctx,
     path: &Path,
     implementers: Option<&[String]>,
 ) -> Result<AuditAssessment> {
-    let assessed = crate::assessment::read(path)?;
+    Ok(bind_assessment(
+        ctx,
+        crate::assessment::read(path)?,
+        implementers,
+    ))
+}
+
+/// `assessed` as a read keeps it: bound to the model the invoking context
+/// records for the represented reader, and to every author coordinate of
+/// `implementers`, the range's `Implemented-by` values, or `None` when they
+/// could not be read.
+pub(super) fn bind_assessment(
+    ctx: &Ctx,
+    assessed: crate::assessment::Assessment,
+    implementers: Option<&[String]>,
+) -> AuditAssessment {
     let mut binding = assessed.bind(ctx.resolve_model().model.as_deref());
     let mut uncovered_authors = Vec::new();
     if binding == AuditorBinding::Bound {
@@ -191,7 +205,7 @@ pub(super) fn read_assessment(
             }
         }
     }
-    Ok(AuditAssessment {
+    AuditAssessment {
         independence: assessed.independence,
         findings: assessed.findings,
         clears: assessed.clears,
@@ -199,7 +213,7 @@ pub(super) fn read_assessment(
         qualifiers: assessed.qualifiers,
         route_version: assessed.route_version,
         uncovered_authors,
-    })
+    }
 }
 
 /// Record the obligation. Allowed while open (declared at integration time)
@@ -338,8 +352,28 @@ pub(super) fn plan_debt(
     });
     // The caller's kind wins: arc reads the ledger, and the ledger cannot
     // distinguish a merge resolution from a repair.
-    let missing = kind.unwrap_or_else(|| st.derive_debt_missing(subject));
     let ineligible = inputs.resolve(st, subject, kind)?;
+    // Under the clearance policy an approval that only finds is the read the
+    // obligation names, so the review it did not supply is owed as
+    // `ineligible-review`.
+    let findings = match (kind, subject) {
+        (None, Some(subject))
+            if st
+                .review_clearance
+                .stricter(ctx.declarations(st)?.policy.policy.review_clearance)
+                .is_assessed() =>
+        {
+            st.findings_approval(subject)
+        }
+        _ => None,
+    };
+    let (missing, ineligible) = match findings {
+        Some(read) => (DebtMissing::IneligibleReview, Some(read)),
+        None => (
+            kind.unwrap_or_else(|| st.derive_debt_missing(subject)),
+            ineligible,
+        ),
+    };
     let payload = Payload::DebtDeclared {
         reason: reason.to_string(),
         patchset_id: patchset_id.clone(),

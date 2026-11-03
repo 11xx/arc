@@ -65,6 +65,8 @@ pub struct ApprovalFacts<'a> {
     pub reviewed_only_by_brief_author: Option<&'a str>,
     /// A review obligation recorded at integration is not discharged.
     pub debt_outstanding: bool,
+    /// What a read must show before its approval gates.
+    pub review_clearance: crate::policy::ReviewClearance,
 }
 
 /// What the facts decide about the change's approval.
@@ -142,6 +144,18 @@ pub(crate) fn self_approval_rejection(
     verdict_assumed.then(|| UNDECLARED_APPROVAL_REASON.to_string())
 }
 
+/// Why an approval that only finds does not gate under the clearance policy.
+pub(crate) fn findings_rejection(why: &crate::state::FindingsReason) -> String {
+    format!(
+        "approval is a findings read: it {}; review_clearance = \"assessed\" gates only on a \
+         clearing approval, a person's or an agent's bound assessment from `{}` that says it \
+         clears (`arc review --assessment`); or record the review owed with \
+         `arc integrate --debt`",
+        why.reason(),
+        crate::state::CLEARANCE_REMEDY
+    )
+}
+
 fn short_revision(revision: &str) -> &str {
     &revision[..revision.len().min(8)]
 }
@@ -153,7 +167,10 @@ pub fn decide(facts: &ApprovalFacts) -> ApprovalOutcome {
     // approval and never supplies one, whatever policy says of self-approval.
     // A repository that declares no danger paths has none; its uniform gate
     // refuses an external approval alone only where independence is owed.
+    // An external verdict carries no assessment, so under the clearance
+    // policy it is a findings read and never supplies an approval alone.
     let external_approval_needs_local = requires_independent_review
+        || facts.review_clearance.is_assessed()
         || (facts.danger.dangerous && facts.danger.rule != DangerRule::NotDeclared);
     let debt_waives_current_head =
         facts.head_matches && facts.approved_head_matches && facts.debt_waives_latest_patchset;
@@ -183,6 +200,25 @@ pub fn decide(facts: &ApprovalFacts) -> ApprovalOutcome {
     // can find it when no independent reviewer is reachable.
     let would_reject_self_approval = requires_independent_review && self_rejection.is_some();
     let rejected_self_approval = would_reject_self_approval && !debt_waives_current_head;
+    // Under the clearance policy an approval that only finds is a review that
+    // happened, not one that clears: it gates nothing, and a waiver lets it
+    // land with the review it did not supply recorded as owed.
+    let clearance_gap = facts
+        .latest_verdict
+        .filter(|verdict| {
+            facts.review_clearance.is_assessed()
+                && verdict.verdict == Verdict::Approved
+                && names_latest_patchset(&verdict.patchset_id).is_some()
+        })
+        .and_then(|verdict| {
+            crate::state::clearance_gap(
+                verdict.effective_author(),
+                verdict.model.as_deref(),
+                verdict.assessment.as_ref(),
+            )
+        });
+    let would_reject_findings = clearance_gap.is_some();
+    let rejected_findings = would_reject_findings && !debt_waives_current_head;
 
     let verdict = facts.latest_verdict.map(|v| VerdictStatus {
         event_id: v.event_id.clone(),
@@ -197,7 +233,8 @@ pub fn decide(facts: &ApprovalFacts) -> ApprovalOutcome {
         valid_for_current_head: v.verdict == Verdict::Approved
             && names_latest_patchset(&v.patchset_id).is_some()
             && facts.approved_head_matches
-            && !rejected_self_approval,
+            && !rejected_self_approval
+            && !rejected_findings,
     });
     let local_approval_valid = verdict
         .as_ref()
@@ -211,7 +248,7 @@ pub fn decide(facts: &ApprovalFacts) -> ApprovalOutcome {
     let waiver_authorized_approval = facts
         .latest_verdict
         .is_some_and(|v| v.verdict == Verdict::Approved)
-        && would_reject_self_approval
+        && (would_reject_self_approval || would_reject_findings)
         && debt_waives_current_head;
     let local_verdict_refuses_this_head = facts.latest_verdict.is_some_and(|verdict| {
         verdict.verdict != Verdict::Approved
@@ -298,11 +335,13 @@ pub fn decide(facts: &ApprovalFacts) -> ApprovalOutcome {
         if verdict.valid_for_current_head
             || verdict.verdict != Verdict::Approved
             || debt_waives_current_head
-            || !requires_independent_review
         {
             return None;
         }
-        self_rejection.clone()
+        requires_independent_review
+            .then(|| self_rejection.clone())
+            .flatten()
+            .or_else(|| clearance_gap.as_ref().map(findings_rejection))
     });
     let external_approval_rejection_reason =
         current_external_verdict.and_then(|external| match external.verdict {
@@ -324,6 +363,19 @@ pub fn decide(facts: &ApprovalFacts) -> ApprovalOutcome {
                     || debt_waives_current_head =>
             {
                 None
+            }
+            ExternalVerdict::Approved
+                if facts.review_clearance.is_assessed() && !requires_independent_review =>
+            {
+                Some(format!(
+                    "external approval by {} at {} (reference {}) is a findings read: it carries \
+                     no assessment, and review_clearance = \"assessed\" gates only on a \
+                     clearing approval; record one with `arc review --assessment`, or record \
+                     the review owed with `arc integrate --debt`",
+                    external.decided_by,
+                    short_revision(&external.revision),
+                    external.reference
+                ))
             }
             ExternalVerdict::Approved if requires_independent_review => Some(format!(
                 "external approval by {} at {} (reference {}) cannot satisfy the independent-review rule on this dangerous patchset; Arc cannot verify the external identity (declared by {})",
@@ -549,6 +601,7 @@ mod tests {
             session: None,
             provisional: None,
             route_version: None,
+            assessment: None,
             actor: actor.into(),
             on_behalf_of: None,
             actor_source: Some(ActorSource::Flag),
@@ -608,6 +661,7 @@ mod tests {
             provisional_approval_reason: None,
             reviewed_only_by_brief_author: None,
             debt_outstanding: false,
+            review_clearance: Default::default(),
         }
     }
 

@@ -424,6 +424,9 @@ pub struct VerdictEntry {
     /// The routing version that selected the reviewer. Absent means unrouted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_version: Option<String>,
+    /// Routing's assessment of the reviewer, when the verdict carried one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assessment: Option<AuditAssessment>,
     pub actor: String,
     /// Subject the verdict was cast for, when a lead reviewed on behalf of one.
     pub on_behalf_of: Option<String>,
@@ -723,12 +726,7 @@ impl DebtRead {
         };
         let mut line = format!(
             "ineligible read: {}; reviewer {reviewer}; {}",
-            self.record
-                .qualifiers
-                .iter()
-                .map(|qualifier| qualifier.as_str())
-                .collect::<Vec<_>>()
-                .join(", "),
+            self.record.reasons(),
             self.record.assessment.as_str()
         );
         if let Some(version) = &self.record.route_version {
@@ -2861,6 +2859,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 findings,
                 relation,
                 route_version,
+                assessment,
             } => {
                 for inline in findings {
                     state.findings.insert(
@@ -2898,6 +2897,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     session: ev.session.clone(),
                     provisional: provisional.clone(),
                     route_version: route_version.clone(),
+                    assessment: assessment.clone(),
                     actor: ev.actor.clone(),
                     on_behalf_of: ev.on_behalf_of.clone(),
                     actor_source: ev.actor_source,
@@ -4349,6 +4349,71 @@ impl ChangeState {
         DebtMissing::IndependentReview
     }
 
+    /// Why `verdict` is a findings read under `review_clearance =
+    /// "assessed"`, or `None` when it clears.
+    pub fn verdict_clearance_gap(&self, verdict: &VerdictEntry) -> Option<FindingsReason> {
+        clearance_gap(
+            verdict.effective_author(),
+            verdict.model.as_deref(),
+            verdict.assessment.as_ref(),
+        )
+    }
+
+    /// The approval of `subject` that, under `review_clearance =
+    /// "assessed"`, finds without clearing, as the `ineligible-review` record
+    /// a debt declared for it names: the sole approving verdict tip on
+    /// `subject` when it does not clear, else, with no verdict tip on
+    /// `subject`, the newest external approval of its head, which carries no
+    /// assessment. `None` when a clearing approval stands or nothing
+    /// approves.
+    pub fn findings_approval(&self, subject: &Patchset) -> Option<IneligibleRead> {
+        let tips = self.eligible_verdict_tips();
+        let on_subject: Vec<_> = tips
+            .iter()
+            .filter(|verdict| verdict.patchset_id == subject.id)
+            .collect();
+        if let [verdict] = on_subject.as_slice() {
+            if verdict.verdict != Verdict::Approved {
+                return None;
+            }
+            let why = self.verdict_clearance_gap(verdict)?;
+            let assessment = verdict.assessment.as_ref();
+            return Some(IneligibleRead {
+                read: verdict.event_id.clone(),
+                qualifiers: assessment
+                    .map(|assessed| assessed.qualifiers.clone())
+                    .unwrap_or_default(),
+                findings: Some(why.as_str().to_string()),
+                route_version: assessment
+                    .and_then(|assessed| assessed.route_version.clone())
+                    .or_else(|| verdict.route_version.clone()),
+                assessment: if assessment.is_some() {
+                    AssessmentBasis::Assessed
+                } else {
+                    AssessmentBasis::Unassessed
+                },
+            });
+        }
+        if !on_subject.is_empty() {
+            return None;
+        }
+        self.external_verdicts
+            .iter()
+            .rev()
+            .find(|external| {
+                external.verdict == crate::model::ExternalVerdict::Approved
+                    && (external.revision == subject.head
+                        || external.revision == subject.approved_head)
+            })
+            .map(|external| IneligibleRead {
+                read: external.event_id.clone(),
+                qualifiers: Vec::new(),
+                findings: Some(FindingsReason::NoAssessment.as_str().to_string()),
+                route_version: None,
+                assessment: AssessmentBasis::Unassessed,
+            })
+    }
+
     /// Every verdict recorded on one patchset, at the coordinates it was cast
     /// at.
     pub fn debt_coverage_for(&self, subject: &Patchset) -> Vec<DebtCoverage> {
@@ -4948,7 +5013,7 @@ struct Read<'a> {
     origin: &'a str,
     created_at: chrono::DateTime<chrono::Utc>,
     verdict: Verdict,
-    /// Only an audit carries one.
+    /// Routing's assessment of the reader, when the read recorded one.
     assessment: Option<&'a AuditAssessment>,
     author_assumed: bool,
     author: &'a str,
@@ -4983,7 +5048,7 @@ impl<'a> Read<'a> {
             origin: &verdict.origin_replica_id,
             created_at: verdict.created_at,
             verdict: verdict.verdict,
-            assessment: None,
+            assessment: verdict.assessment.as_ref(),
             author_assumed: verdict.author_assumed(),
             author: verdict.effective_author(),
             model: verdict.model.as_deref(),
@@ -5596,6 +5661,7 @@ mod tests {
                 relation,
                 provisional: None,
                 route_version: None,
+                assessment: None,
             },
         )
     }
@@ -6267,6 +6333,7 @@ mod tests {
                 ineligible: Some(IneligibleRead {
                     read: "01READ".into(),
                     qualifiers: vec![ReviewQualifier::SameFamily],
+                    findings: None,
                     route_version: None,
                     assessment: AssessmentBasis::Declared,
                 }),

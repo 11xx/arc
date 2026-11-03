@@ -2303,6 +2303,27 @@ REVIEW COVERAGE AND DEBT
   `arc policy show` includes each gate's command, profiles, timeout, and
   environment probe.
 
+  CLEARANCE. `[policy] review_clearance = "assessed"`, in either policy file,
+  makes clearing a routing answer. A person's read (`Name <email>`) is judged
+  by authorship alone, because routing seats no people. An agent's read
+  clears only when it records a model with an effort and carries a bound
+  assessment (`arc review --assessment`, `arc audit --assessment`) from
+  `agent-routing assess --purpose clearance --json` whose `clears` is true.
+  Every other read is a findings read: no recorded model, no assessment, an
+  `agent-routing-assessment/1`, `clears: false`, or a binding that failed.
+  Its verdict and findings stand and it clears nothing. An approval that is a
+  findings read gates no integration, so `arc integrate` refuses unless
+  `--debt`, which then derives `ineligible-review` naming that read; an
+  `arc external verdict` carries no assessment and is one. A waiver never
+  lifts a refusal, a contested verdict, a blocking finding or a failed gate.
+  A findings read discharges no debt, and assurance counts only clearing
+  reads. `arc status --json` and `arc check --json` give each verdict a
+  `kind`, `clearing` or `findings`, and a `findings_reason`. Discharge is
+  judged where the ledger is read, so declaring the key re-judges every debt
+  and `arc doctor` lists those it leaves owed; a recorded integration's
+  authorization is never rewritten. Absent, independence and authorship
+  decide, and an assessment's `clears` is kept unread.
+
   Work sent to a repository you do not own is decided by its receiver.
   `arc external verdict <change> --verdict <v> --decided-by <who>
   --reference <ref> --revision <rev>` records that decision beside, never as,
@@ -2443,8 +2464,8 @@ REVIEW COVERAGE AND DEBT
   named beside it) or `authors-unread` (the range's authors could not be read). An
   audit without an assessment, with an `ineligible` one, or
   whose binding is not `bound` is recorded, says why, and is listed beside the
-  obligation, which stays open; a verdict recorded since carries no
-  assessment and does not clear it.
+  obligation, which stays open; a verdict recorded since clears it only with
+  an eligible, bound assessment of its own (`arc review --assessment`).
   `arc query --debt`, `arc catchup`, `arc inbox`, the workspace backlog, the
   debt advisory, `arc show` and `arc explain` show the qualifiers, the read's
   reviewer and model as its verdict recorded them, whether the assessment

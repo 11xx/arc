@@ -1836,6 +1836,13 @@ enum Cmd {
     /// recorded. Such a read never discharges review debt, regardless of
     /// self-approval policy: permission to approve does not establish
     /// independent coverage. Planning and orchestrating never refuse.
+    ///
+    /// Under `[policy] review_clearance = "assessed"` an approval gates only
+    /// when it clears: a person's by authorship alone, an agent's only with a
+    /// recorded model and effort and a bound `--assessment` whose `clears` is
+    /// true. Any other approval is a findings read; the review says so,
+    /// integration refuses it unless `--debt`, and the debt it derives is
+    /// `ineligible-review` naming the read.
     #[command(group(clap::ArgGroup::new("snapshot_attribution").args(["contributors", "solo"]).requires("snapshot")))]
     /// Verdicts retain observed publication authority.
     ///
@@ -1928,6 +1935,17 @@ enum Cmd {
         /// reads no quality from it. Omitted, the review is unrouted
         #[arg(long = "route-version", value_name = "VERSION")]
         route_version: Option<String>,
+        /// Routing's assessment of this reviewer: an `agent-routing assess
+        /// --json` file, validated, kept and bound to the reviewer's recorded
+        /// model and to the reviewed patchset's `Implemented-by` coordinates
+        /// exactly as `arc audit --assessment` binds one; a binding that
+        /// fails is recorded and said. Under `[policy] review_clearance =
+        /// "assessed"` an agent's verdict clears only with a bound
+        /// `agent-routing-assessment/2` that says `clears: true`; any other
+        /// agent verdict is a findings read: its findings stand, an approval
+        /// satisfies no integration gate, and it discharges no debt
+        #[arg(long = "assessment", value_name = "FILE", requires = "verdict")]
+        assessment: Option<PathBuf>,
     },
     /// Record a review decision made outside the local ledger
     External {
@@ -6678,6 +6696,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             findings_json,
             provisional,
             route_version,
+            assessment,
         } => {
             let change = infer(change.as_deref())?;
             if start {
@@ -6703,6 +6722,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                         solo: attribution.solo,
                         provisional,
                         route_version,
+                        assessment,
                     },
                 )?;
             } else {

@@ -225,3 +225,192 @@ fn an_unknown_clearance_value_is_refused() {
         .failure()
         .stderr(predicates::str::contains("review_clearance"));
 }
+
+/// The head of `slug`'s change branch.
+fn change_head(repo: &Repo, slug: &str) -> String {
+    let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+    repo.head(&worktree)
+}
+
+fn event_line(output: &str) -> String {
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap_or_else(|| panic!("no event line in {output}"))
+        .trim()
+        .to_string()
+}
+
+/// An approving verdict on `slug` by Reviewer at `fixture-other#high`, under
+/// the assessment at `file` when one is given.
+fn approve(repo: &Repo, slug: &str, file: Option<&Path>) -> String {
+    let mut command = repo.arc(&repo.root);
+    command
+        .env("ARC_ACTOR", "Reviewer")
+        .args(["--model", "fixture-other#high"])
+        .args(["review", slug, "--verdict", "approved"]);
+    if let Some(file) = file {
+        command.arg("--assessment").arg(file);
+    }
+    event_line(&stdout(&mut command))
+}
+
+fn status_of(repo: &Repo, slug: &str) -> serde_json::Value {
+    json_stdout(repo.arc(&repo.root).args(["status", slug, "--json"]))
+}
+
+/// Claim: under the policy an approval that does not clear satisfies no
+/// integration gate, and `--debt` lands it owing an `ineligible-review` debt
+/// that names the read. Rejects a findings seat approving a landing that owes
+/// nothing.
+#[test]
+fn a_findings_only_approval_cannot_integrate_without_debt() {
+    let repo = assessed_repo();
+    snapshotted(&repo, "findings");
+    let read = approve(&repo, "findings", None);
+    let status = status_of(&repo, "findings");
+    let reason = status["approval_rejection_reason"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(reason.contains("findings read"), "{status}");
+    let check = json_stdout_any_status(repo.arc(&repo.root).args(["check", "findings", "--json"]));
+    let assessed = &check["verdict_assessments"][0];
+    assert_eq!(assessed["kind"], "findings", "{check}");
+    assert_eq!(assessed["findings_reason"], "no-assessment", "{check}");
+    repo.arc(&repo.root)
+        .args(["integrate", "findings"])
+        .assert()
+        .failure();
+
+    repo.arc(&repo.root)
+        .args([
+            "integrate",
+            "findings",
+            "--debt",
+            "a findings seat approved it",
+        ])
+        .assert()
+        .success();
+    let debt = debt_of(&repo, "findings");
+    assert_eq!(debt["missing"], "ineligible-review", "{debt}");
+    assert_eq!(debt["ineligible"]["read"], read.as_str(), "{debt}");
+    assert_eq!(debt["ineligible"]["findings"], "no-assessment", "{debt}");
+    assert_eq!(debt["standing"], "owed", "{debt}");
+}
+
+/// Claim: an external verdict carries no assessment, so under the policy it
+/// is a findings read: it lands only with `--debt`, which names it. Rejects
+/// an external approval supplying a clearance-free, debt-free landing.
+#[test]
+fn an_external_approval_cannot_integrate_without_debt() {
+    // Without `forbid_self_approval`, an external approval alone gates this
+    // surface; only the clearance policy can refuse it.
+    let repo = repo_with_policy("[policy]\nreview_clearance = \"assessed\"\n");
+    snapshotted(&repo, "external");
+    let head = change_head(&repo, "external");
+    let read = event_line(&stdout(repo.arc(&repo.root).args([
+        "external",
+        "verdict",
+        "external",
+        "--verdict",
+        "approved",
+        "--decided-by",
+        "Upstream Maintainer",
+        "--reference",
+        "https://example.invalid/pr/1",
+        "--revision",
+        &head,
+    ])));
+    let status = status_of(&repo, "external");
+    assert_eq!(status["has_valid_approval"], false, "{status}");
+    repo.arc(&repo.root)
+        .args(["integrate", "external"])
+        .assert()
+        .failure();
+
+    repo.arc(&repo.root)
+        .args(["integrate", "external", "--debt", "decided upstream"])
+        .assert()
+        .success();
+    let debt = debt_of(&repo, "external");
+    assert_eq!(debt["missing"], "ineligible-review", "{debt}");
+    assert_eq!(debt["ineligible"]["read"], read.as_str(), "{debt}");
+}
+
+/// Claim: a waiver never lifts a refusal under the policy. Rejects `--debt`
+/// landing a change whose current verdict requests changes.
+#[test]
+fn a_debt_never_lands_over_a_refusal() {
+    let repo = assessed_repo();
+    snapshotted(&repo, "refused");
+    approve(&repo, "refused", None);
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Pat Reviewer <pat@example.com>")
+        .args(["review", "refused", "--verdict", "changes-requested"])
+        .args(["--cause", "executor"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", "refused", "--debt", "owed anyway"])
+        .assert()
+        .failure();
+    assert_eq!(status_of(&repo, "refused")["state"], "open");
+}
+
+/// Claim: a bound clearing verdict recorded with `arc review --assessment`
+/// gates integration under the policy and leaves nothing owed; so does a
+/// person's approval, judged by authorship alone. Rejects a policy that
+/// leaves no way to land without debt.
+#[test]
+fn a_clearing_approval_integrates_without_debt() {
+    let repo = assessed_repo();
+    snapshotted(&repo, "cleared");
+    let file = assessment_v2(&repo, "cleared.json", "eligible", true, &[]);
+    approve(&repo, "cleared", Some(&file));
+    let status = status_of(&repo, "cleared");
+    assert_eq!(status["has_valid_approval"], true, "{status}");
+    assert_eq!(
+        status["verdict_assessments"][0]["kind"], "clearing",
+        "{status}"
+    );
+    repo.arc(&repo.root)
+        .args(["integrate", "cleared"])
+        .assert()
+        .success();
+    assert!(debt_of(&repo, "cleared").is_null());
+
+    snapshotted(&repo, "person");
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Pat Reviewer <pat@example.com>")
+        .args(["review", "person", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", "person"])
+        .assert()
+        .success();
+}
+
+/// Claim: `arc review --assessment` validates the file before writing and
+/// keeps the clearance answer on the verdict. Rejects a malformed assessment
+/// recorded as a verdict nobody can bind.
+#[test]
+fn review_keeps_and_validates_its_assessment() {
+    let repo = assessed_repo();
+    snapshotted(&repo, "kept");
+    let bad = repo.home.join("bad.json");
+    fs::write(&bad, "{}").unwrap();
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Reviewer")
+        .args(["review", "kept", "--verdict", "approved", "--assessment"])
+        .arg(&bad)
+        .assert()
+        .failure();
+    assert_eq!(status_of(&repo, "kept")["verdict"], serde_json::Value::Null);
+    let file = assessment_v2(&repo, "kept.json", "eligible", false, &["below-clearance"]);
+    approve(&repo, "kept", Some(&file));
+    let status = status_of(&repo, "kept");
+    let kept = &status["verdict_assessments"][0];
+    assert_eq!(kept["kind"], "findings", "{status}");
+    assert_eq!(kept["findings_reason"], "not-clearing", "{status}");
+}

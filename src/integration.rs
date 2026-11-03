@@ -361,15 +361,10 @@ impl PlannedDebt {
             _ => format!("would declare debt{subject} ({kind}): {}", self.reason),
         }];
         if let Some(read) = &self.ineligible {
-            let qualifiers = read
-                .qualifiers
-                .iter()
-                .map(|qualifier| qualifier.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
             let mut line = format!(
-                "  names read {}: {qualifiers}; {}",
+                "  names read {}: {}; {}",
                 read.read,
+                read.reasons(),
                 read.assessment.as_str()
             );
             if let Some(version) = &read.route_version {
