@@ -1883,7 +1883,12 @@ pub fn later_read_label(later: &crate::state::LaterRead) -> String {
         "audit `{}` by {} ({})",
         later.event_id,
         later.reviewer,
-        later.model.as_deref().unwrap_or("model unrecorded")
+        crate::coordinate::display_model(
+            None,
+            later.model.as_deref(),
+            later.session.as_deref(),
+            crate::coordinate::ModelStyle::Coordinate,
+        )
     );
     match later.independence {
         Some(independence) => {
@@ -3034,6 +3039,31 @@ pub fn verdict_assessments(assessments: &[crate::status::VerdictAssessment]) {
 #[cfg(test)]
 mod recorded_model_tests {
     use super::*;
+
+    /// Claim: a later audit's label shows only a model a write may record.
+    /// Rejects printing a historical placeholder or the audit's own session id
+    /// as the model an audit was read under.
+    #[test]
+    fn later_read_label_shows_no_defective_model() {
+        let later = |model: &str| crate::state::LaterRead {
+            event_id: "01EXAMPLE".into(),
+            reviewer: "reviewer".into(),
+            model: Some(model.into()),
+            model_recorded: None,
+            session: Some("019a0000-0000-7000-8000-000000000001".into()),
+            independence: None,
+            qualifiers: Vec::new(),
+            route_version: None,
+            binding: None,
+            uncovered_authors: Vec::new(),
+        };
+        for defective in ["unknown", "019a0000-0000-7000-8000-000000000001"] {
+            let label = later_read_label(&later(defective));
+            assert!(label.contains("(model not recorded)"), "{label}");
+            assert!(!label.contains(defective), "{label}");
+        }
+        assert!(later_read_label(&later("gpt-6.1-sol#high")).contains("(gpt-6.1-sol#high)"));
+    }
 
     #[test]
     fn coverage_session_relative_model_is_unrecorded() {

@@ -754,8 +754,15 @@ impl DebtRead {
 pub struct LaterRead {
     pub event_id: String,
     pub reviewer: String,
+    /// The model the audit recorded, kept raw; `model_recorded` is `false`
+    /// beside it when it is missing, a placeholder or the audit's session id.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_recorded: Option<bool>,
+    /// The audit's session, which a model is judged against.
+    #[serde(skip)]
+    pub session: Option<String>,
     /// Routing's reading, when the audit carried an assessment.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub independence: Option<Independence>,
@@ -4406,6 +4413,12 @@ impl ChangeState {
                         event_id: audit.event_id.clone(),
                         reviewer: audit.effective_author().to_string(),
                         model: audit.model.clone(),
+                        model_recorded: (!crate::coordinate::model_recorded(
+                            audit.model.as_deref(),
+                            audit.session.as_deref(),
+                        ))
+                        .then_some(false),
+                        session: audit.session.clone(),
                         independence: audit.assessment.as_ref().map(|a| a.independence),
                         qualifiers: audit
                             .assessment
