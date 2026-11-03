@@ -2514,7 +2514,11 @@ enum Cmd {
     /// cleanup setting: after recording, arc detaches the clean slot at the
     /// landed commit, deletes the merged branch with git branch -d, records
     /// slot-released and frees the lease; a slot in use or holding work keeps
-    /// its lease and the output names the release command.
+    /// its lease and the output names the release command. With [slots]
+    /// warm_after_integrate = true, a successful integration then starts one
+    /// detached `arc slots warm --limit 1` when no slot's use lock is held,
+    /// writing its output to warm.log in the pool root; it never blocks or
+    /// fails the integration, and the output says what it started or why not.
     #[command(
         group(clap::ArgGroup::new("integration_json_mode").args(["dry_run", "provisional"]).multiple(true)),
         after_help = "Arc exits 11 when --shape ff-only encounters a diverged target; run arc rebase <change> --verify and provide fresh review or declared debt. When --into selects a different destination, arc rebase cannot select it: run git rebase <destination> in the change checkout, then arc snapshot <change> --verify and obtain fresh review or debt. Arc exits 17 when a paired replica does not hold integration authority; the refusal names the holder or an offer in flight."

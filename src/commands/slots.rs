@@ -4,6 +4,8 @@
 use super::*;
 use crate::slots::{self, Finished, Phase, Pool};
 use crate::state::ChangeState;
+use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::process::CommandExt;
 
 fn declaration(ctx: &Ctx) -> Result<slots::Declaration> {
     crate::warm_worktree::slot_declaration(&gitio::toplevel(&ctx.cwd)?, true)?
@@ -450,4 +452,61 @@ fn deprioritize() {
             std::io::Error::last_os_error()
         );
     }
+}
+
+/// After a successful integration, start one detached
+/// `arc slots warm --limit 1` when `[slots] warm_after_integrate` asks for
+/// it and no slot of the pool is in use. Reports what it did; never fails.
+pub(crate) fn warm_after_integration(ctx: &Ctx) {
+    match start_warm(ctx) {
+        Ok(Some(report)) => println!("slots: {report}"),
+        Ok(None) => {}
+        Err(error) => println!("slots: no warm started: {error:#}"),
+    }
+}
+
+fn start_warm(ctx: &Ctx) -> Result<Option<String>> {
+    let top = gitio::toplevel(&ctx.cwd)?;
+    let Some(declaration) = crate::warm_worktree::slot_declaration(&top, false)? else {
+        return Ok(None);
+    };
+    if !declaration.warm_after_integrate {
+        return Ok(None);
+    }
+    let root = slots::declared_root(&ctx.cwd, &declaration)?;
+    if !root.exists() {
+        return Ok(Some(format!(
+            "no warm started: the pool at {} is not created yet",
+            root.display()
+        )));
+    }
+    let pool = Pool::existing(&ctx.cwd, &root)?;
+    if let Some(name) = pool.names().into_iter().find(|name| pool.in_use(name)) {
+        return Ok(Some(format!(
+            "no warm started: {name} is in use by a running command"
+        )));
+    }
+    let checkout = gitio::primary_worktree(&ctx.cwd).unwrap_or(top);
+    let log = pool.root.join("warm.log");
+    let output = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&log)
+        .with_context(|| format!("cannot open {}", log.display()))?;
+    let child = std::process::Command::new(std::env::current_exe().context("cannot locate arc")?)
+        .args(["slots", "warm", "--limit", "1"])
+        .current_dir(&checkout)
+        .stdin(std::process::Stdio::null())
+        .stdout(output.try_clone()?)
+        .stderr(output)
+        .process_group(0)
+        .spawn()
+        .context("cannot start arc slots warm")?;
+    Ok(Some(format!(
+        "started `arc slots warm --limit 1` (pid {}); its output is in {}",
+        child.id(),
+        log.display()
+    )))
 }

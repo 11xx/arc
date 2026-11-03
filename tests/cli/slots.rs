@@ -723,6 +723,73 @@ fn warm_without_a_command_refuses_naming_the_key() {
         .stderr(predicates::str::contains("`warm` in [slots]"));
 }
 
+/// Claim: with `warm_after_integrate`, a successful integration starts one
+/// detached warm when no slot is in use and none while a slot's use lock is
+/// held; without the key it starts none. Rejects warming beside a running
+/// gate, warming unasked, and starting more than one warm.
+#[test]
+fn warm_after_integrate_starts_one_warm_only_when_no_slot_is_in_use() {
+    let warm = "warm = 'printf x >> \"$HOME/warm-runs\"'\n";
+    let repo = pool(2, warm);
+    let (change, worktree) = begin(&repo, "unasked");
+    integrate(&repo, &change, &worktree, &[]);
+    thread::sleep(Duration::from_secs(1));
+    assert!(
+        !repo.home.join("warm-runs").exists(),
+        "a warm started unasked"
+    );
+
+    let repo = pool(2, &format!("{warm}warm_after_integrate = true\n"));
+    let root = repo.home.join(".worktrees/repo-slots");
+    let (change, worktree) = begin(&repo, "busy");
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join("slot-02.use.lock"))
+        .unwrap();
+    // SAFETY: the test owns this regular file descriptor.
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_SH) }, 0);
+    repo.commit(&worktree, "busy.txt", "busy\n", "feat: busy");
+    stdout(repo.arc(&worktree).args(["snapshot", &change]));
+    repo.arc(&worktree)
+        .args(["review", &change, "--verdict", "approved"])
+        .assert()
+        .success();
+    let out = stdout(repo.arc(&repo.root).args(["integrate", &change]));
+    assert!(out.contains("no warm started: slot-02 is in use"), "{out}");
+    thread::sleep(Duration::from_secs(1));
+    assert!(
+        !repo.home.join("warm-runs").exists(),
+        "a warm started beside a running command"
+    );
+    drop(lock);
+
+    let (change, worktree) = begin(&repo, "idle");
+    repo.commit(&worktree, "idle.txt", "idle\n", "feat: idle");
+    stdout(repo.arc(&worktree).args(["snapshot", &change]));
+    repo.arc(&worktree)
+        .args(["review", &change, "--verdict", "approved"])
+        .assert()
+        .success();
+    let out = stdout(repo.arc(&repo.root).args(["integrate", &change]));
+    assert_eq!(
+        out.matches("started `arc slots warm --limit 1`").count(),
+        1,
+        "{out}"
+    );
+    let log = root.join("warm.log");
+    wait_until("the started warm finishes", || {
+        fs::read_to_string(&log).is_ok_and(|text| text.contains("warmed slot-"))
+    });
+    assert_eq!(
+        fs::read_to_string(repo.home.join("warm-runs")).unwrap(),
+        "x",
+        "more than one warm ran"
+    );
+}
+
 /// Claim: a gate in a slot after a warm reuses the warmed build: every unit
 /// of a fixture workspace is fresh, so warming filled the storage the gate
 /// consumes. Rejects a warm that builds anywhere but the slot's own build.

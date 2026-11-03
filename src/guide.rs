@@ -4733,12 +4733,14 @@ SLOTS
     invalidate = "<command>"    # discards outputs on an identity change
     default = true              # begin uses a slot for worktree checkouts
     warm = "<command>"          # what `arc slots warm` builds a slot with
+    warm_after_integrate = true # integrate starts one warm (default false)
 
   A pattern without `/` matches a file name at any depth, one with `/`
   matches from the checkout root, and `*` and `?` stay within one path
   component. A project without `[slots]` sees no change; a malformed
-  `[slots]` table refuses every command that reads it. The identity command
-  is bounded at 120 s and must exit 0; `invalidate` is bounded at 600 s.
+  `[slots]` table refuses every command that reads it, as does
+  `warm_after_integrate` without `warm`. The identity command is bounded at
+  120 s and must exit 0; `invalidate` is bounded at 600 s.
 
   The root holds `pool.json` (the repository's canonical Git common
   directory and a random pool id), `pool.lock`, and per slot `slot-NN.json`
@@ -4820,6 +4822,12 @@ SLOTS
   frees it. A running warm's slot is leased, so begin skips it. Warming
   takes one slot at a time; `--limit` (default 1) bounds how many. Without
   `warm`, it refuses naming the key.
+
+  With `warm_after_integrate = true`, a successful `arc integrate` starts one
+  detached `arc slots warm --limit 1`, its output in `warm.log` in the pool
+  root, but only when the pool exists and no slot's use lock is held, so no
+  gate or begin of this repository is running in a slot. It never blocks or
+  fails the integration and says what it started or why it started none.
 
   `arc slots status [--json]` (`arc-slots/1`) shows each slot's phase, lease
   and token, checkout `HEAD`, built revision and identity match, rank for the

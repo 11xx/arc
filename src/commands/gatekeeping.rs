@@ -4156,6 +4156,7 @@ fn integrate_one(
             println!("kept branch {}: cleanup could not complete", st.branch);
         }
     }
+    super::slots::warm_after_integration(ctx);
     Ok(0)
 }
 

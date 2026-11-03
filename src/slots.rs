@@ -57,6 +57,9 @@ pub struct Declaration {
     pub default: bool,
     /// What `arc slots warm` runs in a stale free slot.
     pub warm: Option<String>,
+    /// Whether a successful integration starts one detached warm.
+    #[serde(default)]
+    pub warm_after_integrate: bool,
 }
 
 fn default_documentation() -> Vec<String> {
@@ -77,6 +80,9 @@ impl Declaration {
             if value.as_ref().is_some_and(|value| value.trim().is_empty()) {
                 bail!("[slots] {key} is empty");
             }
+        }
+        if self.warm_after_integrate && self.warm.is_none() {
+            bail!("[slots] warm_after_integrate needs a warm command");
         }
         for pattern in self.documentation.iter().chain(&self.retain) {
             if pattern.is_empty()
