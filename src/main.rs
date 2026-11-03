@@ -2334,6 +2334,10 @@ enum Cmd {
     /// target revision that holds it, without a merge commit. When no checkout
     /// holds the target, integration takes over the change's own checkout if it
     /// still holds the change branch and leaves it on the target.
+    /// A gate's declared environment probe runs against the content being
+    /// integrated: in this checkout or the change's worktree when either holds
+    /// it clean, otherwise in a checkout made for it and removed before the
+    /// merge or the refusal.
     /// The integrated revision and closure event are printed before retention
     /// cleanup. A retention cleanup failure, including a ref lock or a hook
     /// rejecting deletion, warns with the ref prefixes that may still hold

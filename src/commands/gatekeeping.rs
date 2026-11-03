@@ -732,6 +732,12 @@ impl ScratchWorktree {
     }
 }
 
+impl status::EvaluationCheckout for ScratchWorktree {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 impl Drop for ScratchWorktree {
     fn drop(&mut self) {
         let display = self.path.display().to_string();
@@ -2986,7 +2992,7 @@ fn queue_step(
             reason: "target diverged; rebase and fresh review or declared debt required".into(),
         });
     }
-    let mut report = ctx.report_for_integration(&store, &st, &st.target_branch, shape)?;
+    let mut report = ctx.report_evaluating_integration(&store, &st, &st.target_branch, shape)?;
     if let Some(blocker) = report.blockers().iter().find(|blocker| {
         !matches!(
             blocker,
@@ -3010,7 +3016,7 @@ fn queue_step(
             });
         }
         let st = store.state(change_id)?;
-        report = ctx.report_for_integration(&store, &st, &st.target_branch, shape)?;
+        report = ctx.report_evaluating_integration(&store, &st, &st.target_branch, shape)?;
     }
 
     // Only where nothing has answered for the content that would ship: a
@@ -3035,7 +3041,7 @@ fn queue_step(
             GateEvent::Integration,
         )?;
         let st = store.state(change_id)?;
-        report = ctx.report_for_integration(&store, &st, &st.target_branch, shape)?;
+        report = ctx.report_evaluating_integration(&store, &st, &st.target_branch, shape)?;
         if code != 0 {
             let failed = report
                 .gates
@@ -3548,7 +3554,7 @@ fn integrate_one(
         if let Some(prior) = &expect_basis {
             if let Ok(report) = ctx.report_for_integration(&store, &st, &target, shape) {
                 let outcome = integration::decide(
-                    integration_facts(ctx, &store, &st, &report, &target, &selection),
+                    integration_facts(ctx, &store, &st, &report, &target, &selection, false),
                     Some(prior),
                 );
                 if let Some(moved) = integration::describe_moved(&outcome.moved) {
@@ -3581,7 +3587,7 @@ fn integrate_one(
     if let Some(worktree) = st.worktree.as_deref() {
         crate::journal::promote_worktree_spool(ctx, Path::new(worktree));
     }
-    let report = ctx.report_for_integration(&store, &st, &target, shape)?;
+    let report = ctx.report_evaluating_integration(&store, &st, &target, shape)?;
     if let Some(claim) = &st.claim {
         let timing = state::claim_timing_at(claim, chrono::Utc::now());
         let caller = super::claims::command_identity(ctx).ok();
@@ -3597,7 +3603,7 @@ fn integrate_one(
         }
     }
     advise_role_trailers(&report);
-    let facts = integration_facts(ctx, &store, &st, &report, &target, &selection);
+    let facts = integration_facts(ctx, &store, &st, &report, &target, &selection, true);
     let outcome = integration::decide(facts, expect_basis.as_ref());
     let moved = integration::describe_moved(&outcome.moved);
     let plan = match outcome.decision {
@@ -4597,7 +4603,11 @@ fn refuse_divergence(st: &ChangeState, target: &str, recorded_target: &str) -> i
 }
 
 /// Observe everything the integration decision follows from, reading the
-/// change and its target once each. Nothing is written.
+/// change and its target once each. Nothing is recorded.
+///
+/// `evaluating` builds the confirming report the way `report` was built: one
+/// that may evaluate in a checkout of its own and remove it, or one that only
+/// observes.
 fn integration_facts(
     ctx: &Ctx,
     store: &Store,
@@ -4605,6 +4615,7 @@ fn integration_facts(
     report: &crate::status::StatusReport,
     target: &str,
     selection: &IntegrationStyle,
+    evaluating: bool,
 ) -> IntegrationFacts {
     let shape = selection.shape;
     let approved = st.latest_patchset().map(|patchset| integration::Approved {
@@ -4621,20 +4632,23 @@ fn integration_facts(
         .and_then(|_| authorization_basis(ctx, store, st, report, &patchset_id, target, selection));
     // Read after the first basis: agreement between the two is the evidence
     // that the configuration held still across the decision.
-    let confirmation = ctx
-        .report_for_integration(store, st, target, shape)
-        .map(|confirmation| integration::Confirmation {
-            ready: confirmation.integrate_ready(),
-            basis: authorization_basis(
-                ctx,
-                store,
-                st,
-                &confirmation,
-                &patchset_id,
-                target,
-                selection,
-            ),
-        });
+    let confirmation = if evaluating {
+        ctx.report_evaluating_integration(store, st, target, shape)
+    } else {
+        ctx.report_for_integration(store, st, target, shape)
+    }
+    .map(|confirmation| integration::Confirmation {
+        ready: confirmation.integrate_ready(),
+        basis: authorization_basis(
+            ctx,
+            store,
+            st,
+            &confirmation,
+            &patchset_id,
+            target,
+            selection,
+        ),
+    });
     let checkout = target_checkout(ctx, st, target);
     let unobserved = || anyhow::anyhow!("the target checkout could not be resolved");
     let tracked_dirt = match &checkout {
@@ -4777,7 +4791,7 @@ fn integrate_dry_run_json(
     let st = &projected;
     let report = ctx.report_for_integration(store, st, target, shape)?;
     advise_role_trailers(&report);
-    let facts = integration_facts(ctx, store, st, &report, target, selection);
+    let facts = integration_facts(ctx, store, st, &report, target, selection, false);
     let plan = match integration::decide(facts, None).decision {
         Decision::Refused(Refusal::Diverged) => {
             return Ok(refuse_divergence(st, target, &recorded_target))

@@ -3418,9 +3418,12 @@ RULES THAT CHANGE WHAT YOU DO
     behind its target, else the head's. It runs in the invoking checkout when
     that holds the content clean, else in the change's worktree when that
     does, so a change editing a probe's script, or adding a gate with the
-    script its probe runs, is judged by its own copy. With neither, the
-    probe runs nowhere and counts no receipt: the gate reports
-    `needs_evaluation`. Readiness counts the evidence only when the two identities agree; a receipt from another
+    script its probe runs, is judged by its own copy. With neither, a report
+    that only observes, such as `status`, `check` or `integrate --dry-run`,
+    runs the probe nowhere and counts no receipt: the gate reports
+    `needs_evaluation`. `integrate` runs it in a checkout made for the
+    content and removes that before merging or refusing. Readiness counts
+    the evidence only when the two identities agree; a receipt from another
     environment is reported inapplicable, naming both identities, and a
     receipt with no identity is reported unknown. A probe that yields no
     identity leaves every receipt for the gate not-green. Evidence that

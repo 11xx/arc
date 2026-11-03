@@ -827,6 +827,37 @@ impl Ctx {
         self.integration_report_with_declarations(store, &selected, shape, declarations, None)
     }
 
+    /// The report an integration decides on. A declared environment probe
+    /// that no clean checkout of the evaluated content can run is run in a
+    /// checkout made for it, removed before this returns.
+    pub(crate) fn report_evaluating_integration(
+        &self,
+        store: &Store,
+        state: &ChangeState,
+        target: &str,
+        shape: crate::integration::Shape,
+    ) -> Result<StatusReport> {
+        let mut selected = state.clone();
+        selected.target_branch = target.to_string();
+        let declarations = crate::declarations::for_change(&self.cwd, &selected)?;
+        let slug = selected.slug.clone();
+        let create = |tree: &str| -> Result<Box<dyn status::EvaluationCheckout>> {
+            let commit =
+                gitio::commit_tree_with_parents(&self.cwd, tree, &[], "arc probe checkout")?;
+            let path = lifecycle::worktree_path_for(&self.cwd, &format!("{slug}-probe"))?;
+            Ok(Box::new(gatekeeping::ScratchWorktree::create(
+                &self.cwd, path, &commit,
+            )?))
+        };
+        self.integration_report_with_declarations(
+            store,
+            &selected,
+            shape,
+            declarations,
+            Some(&create),
+        )
+    }
+
     /// Queue authorization uses destination declarations at the projected revision.
     /// An unresolved destination retains review facts without policy constraints.
     pub(crate) fn report_for_queue(

@@ -294,11 +294,13 @@ impl GateStatus {
                 return Some(match &self.evaluated_tree {
                     Some(tree) => format!(
                         "no clean checkout holds the merged tree {tree}, so the declared \
-                         environment probe ran nowhere"
+                         environment probe ran nowhere; arc integrate evaluates it in a \
+                         checkout of its own"
                     ),
                     None => "no clean checkout holds the head's tree, so the declared \
                              environment probe ran nowhere; run this from the change's worktree \
-                             with its head checked out and clean"
+                             with its head checked out and clean, or arc integrate evaluates it \
+                             in a checkout of its own"
                         .into(),
                 });
             }

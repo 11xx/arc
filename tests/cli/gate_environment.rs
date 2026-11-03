@@ -765,6 +765,46 @@ fn integration_probes_a_script_the_change_adds() {
     assert!(repo.root.join("probe.sh").exists());
 }
 
+/// Claim: evaluating the candidate content keeps stale evidence stale, and
+/// an owned evaluation checkout leaves nothing behind. Rejects counting a
+/// pass whose environment the candidate's probe no longer yields, and
+/// rejects a refusal or a landing that keeps its evaluation checkout.
+#[test]
+fn integration_refuses_evidence_the_candidate_probe_does_not_yield() {
+    let repo = Repo::new();
+    write_script_probe_gate(&repo, "v1");
+    let worktree = verified_change(&repo, |worktree| {
+        fs::write(worktree.join("probe.sh"), probe_script("v2")).unwrap();
+    });
+    let before = registered_worktrees(&repo);
+    git(
+        &repo.root,
+        &["worktree", "remove", "--force", worktree.to_str().unwrap()],
+    );
+    let refused = repo
+        .arc(&repo.root)
+        .env("ARC_TEST_ENV", "B")
+        .args(["integrate", "env-gate"])
+        .assert()
+        .code(5);
+    let stderr = String::from_utf8_lossy(&refused.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("evidence was produced in environment"),
+        "{stderr}"
+    );
+    assert_eq!(registered_worktrees(&repo), before - 1);
+    repo.arc(&repo.root)
+        .env("ARC_TEST_ENV", "A")
+        .args(["integrate", "env-gate"])
+        .assert()
+        .success();
+    assert_eq!(registered_worktrees(&repo), before - 1);
+    assert_eq!(
+        fs::read_to_string(repo.root.join("probe.sh")).unwrap(),
+        probe_script("v2")
+    );
+}
+
 /// Claim: a read-only report probes only a clean checkout holding the
 /// evaluated content, and with none it counts nothing. Rejects probing the
 /// invoking checkout's content instead, and rejects reading "cannot observe"
