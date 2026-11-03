@@ -1810,7 +1810,9 @@ impl Store {
             | Payload::ContextCaptureReported { .. } => Some(7),
             Payload::HistoryRewriteWithdrawn { .. }
             | Payload::ChangeRolesAsserted { .. }
-            | Payload::ChangeCheckoutBound { .. } => Some(7),
+            | Payload::ChangeCheckoutBound { .. }
+            | Payload::SlotLeased { .. }
+            | Payload::SlotReleased { .. } => Some(7),
             // An older reader skips a post-integration disposition and reports
             // the finding with no disposition after it shipped.
             Payload::PostIntegrationDispositionRecorded { .. } => Some(7),

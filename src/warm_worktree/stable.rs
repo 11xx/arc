@@ -6,6 +6,14 @@ const OWNER: &str = "owner";
 const LEASE: &str = "lease";
 const INCOMPLETE: &str = "incomplete";
 
+pub(super) fn lease_path(build: &Path) -> Result<PathBuf> {
+    control_path(build, LEASE)
+}
+
+pub(super) fn incomplete_path(build: &Path) -> Result<PathBuf> {
+    control_path(build, INCOMPLETE)
+}
+
 fn control_path(build: &Path, kind: &str) -> Result<PathBuf> {
     let parent = build
         .parent()
@@ -100,9 +108,12 @@ impl Storage {
         }
     }
 
-    fn prepare(&mut self, path: &Path, source: &Source, hook: &Hook, timeout: u64) -> Result<()> {
+    /// Run the preparation command, if one is declared, reporting whether
+    /// it ran and succeeded.
+    fn prepare(&mut self, path: &Path, source: &Source, hook: &Hook, timeout: u64) -> Result<bool> {
         let Some(command) = hook.command.as_deref() else {
-            return self.require_complete();
+            self.require_complete()?;
+            return Ok(false);
         };
         let cache_lease = lease(&self.cache)?;
         self.guard.files.push(cache_lease);
@@ -137,7 +148,7 @@ impl Storage {
         // The stable lease spans preparation and its caller; the cache is
         // protected only while the hook can write it.
         self.guard.files.pop();
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -175,29 +186,35 @@ fn resolve_directory(path: &Path) -> Result<PathBuf> {
     Ok(resolved)
 }
 
-pub(super) fn prepare(path: &Path, (hook, timeout): &(Hook, u64)) -> Result<()> {
+/// Prepare stable storage, reporting whether a preparation command ran and
+/// succeeded.
+pub(super) fn prepare(path: &Path, (hook, timeout): &(Hook, u64)) -> Result<bool> {
     let source = Source::observe(path)?;
     let mut storage = Storage::open(path, hook, *timeout)?;
-    storage.prepare(path, &source, hook, *timeout)?;
+    let prepared = storage.prepare(path, &source, hook, *timeout)?;
     eprintln!(
         "worktree preparation: path-stable storage {}",
         storage.build.display()
     );
-    Ok(())
+    Ok(prepared)
 }
 
 pub(super) fn configure(
     command: &mut Command,
     path: &Path,
     (hook, timeout): &(Hook, u64),
-    prepare_first: bool,
+    usage: Use,
 ) -> Result<CommandLease> {
     let source = Source::observe(path)?;
     let mut storage = Storage::open(path, hook, *timeout)?;
-    if prepare_first {
-        storage.prepare(path, &source, hook, *timeout)?;
-    } else {
-        storage.require_complete()?;
+    match usage {
+        Use::Gate => {
+            if storage.prepare(path, &source, hook, *timeout)? {
+                crate::slots::record_built(path)?;
+            }
+        }
+        Use::Probe => storage.require_complete()?,
+        Use::Invalidate => {}
     }
     storage.configure(command, path, &source);
     Ok(storage.guard)

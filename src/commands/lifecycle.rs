@@ -16,6 +16,7 @@ pub fn begin(
     branch: Option<String>,
     worktree: Option<Option<String>>,
     no_worktree: bool,
+    slot: bool,
     adopt: Option<String>,
     blocked_by: Vec<String>,
     tags: Vec<String>,
@@ -73,6 +74,7 @@ pub fn begin(
         None
     };
     let mut open_change_branches: Vec<String> = Vec::new();
+    let mut open_change_worktrees: Vec<(PathBuf, String)> = Vec::new();
     let mut closed_in_place_target: Option<(String, String)> = None;
     let read = store.read()?;
     read.rewrites()?;
@@ -98,6 +100,9 @@ pub fn begin(
             bail!(
                 "open change {existing} already uses slug {slug:?}; continue it or close it first"
             );
+        }
+        if let Some(worktree) = &st.worktree {
+            open_change_worktrees.push((crate::config::resolved(Path::new(worktree)), existing));
         }
         open_change_branches.push(st.branch);
     }
@@ -143,6 +148,23 @@ pub fn begin(
             ..Default::default()
         },
     )?;
+    // A declared pool is read only by a begin that may use it, so a
+    // malformed file never blocks a begin that asks for no slot.
+    let slot_declaration = if slot
+        || (adopt.is_none()
+            && worktree.is_none()
+            && !no_worktree
+            && style.checkout() == crate::style::Checkout::Worktree)
+    {
+        crate::warm_worktree::slot_declaration(&gitio::toplevel(&ctx.cwd)?, slot)?
+    } else {
+        None
+    };
+    let slot_declaration = match slot_declaration {
+        Some(declaration) if slot || declaration.default => Some(declaration),
+        None if slot => bail!("--slot needs a [slots] pool declared in .arc/worktrees.toml"),
+        _ => None,
+    };
     let target_head = gitio::branch_head(&ctx.cwd, &target_branch)?;
     // Read the promotion source before anything is created: a `--from-fork`
     // naming no fork refuses by name, and the record is the fork as it stood
@@ -158,6 +180,7 @@ pub fn begin(
     let adopting = adopt.is_some();
     let mut worktree_owner_token = None;
     let mut worktree_admin = None;
+    let mut slot_lease = None;
 
     let (branch_name, base_rev, worktree_path) = if let Some(adopted) = adopt {
         if !gitio::branch_exists(&ctx.cwd, &adopted) {
@@ -195,7 +218,41 @@ pub fn begin(
             Some(b) => gitio::rev_parse(&ctx.cwd, &b)?,
             None => target_head.clone(),
         };
-        let wt = if style.checkout() == crate::style::Checkout::InPlace {
+        let wt = if let Some(declaration) = &slot_declaration {
+            let root = crate::slots::declared_root(&ctx.cwd, declaration)?;
+            if let Some(prefix) = ctx.excluded_by_sandbox(&root)? {
+                bail!(
+                    "slot pool {} is outside the sandbox at {}",
+                    root.display(),
+                    prefix.display()
+                );
+            }
+            let pool = crate::slots::Pool::declared(&ctx.cwd, declaration)?;
+            let leased = crate::slots::lease(
+                &ctx.cwd,
+                pool,
+                declaration,
+                &crate::slots::LeaseRequest {
+                    change_id: &change_id,
+                    branch: &branch_name,
+                    target: &base_rev,
+                    actor: Some(&ctx.actor),
+                    session: ctx.session.as_deref(),
+                },
+            )?;
+            let path = crate::config::resolved(&leased.path);
+            let open_change = open_change_worktrees
+                .iter()
+                .find(|(worktree, _)| *worktree == path)
+                .map(|(_, change)| change.as_str());
+            if let Err(error) = leased.switch(&ctx.cwd, declaration, &base_rev, open_change) {
+                return Err(error.context(leased.kept()));
+            }
+            let path = leased.path.display().to_string();
+            println!("slot: {} at {path}", leased.name);
+            slot_lease = Some(leased);
+            Some(path)
+        } else if style.checkout() == crate::style::Checkout::InPlace {
             let path = gitio::toplevel(&ctx.cwd)?;
             // Git creates the branch only if the checkout succeeds, preserving
             // tracked, untracked, and ignored work or refusing an overwrite atomically.
@@ -375,6 +432,22 @@ pub fn begin(
         },
     )?;
     store.append_local_event(&mut ev)?;
+    if let Some(leased) = &slot_lease {
+        let mut event = ctx.event(
+            &store,
+            &change_id,
+            Payload::SlotLeased {
+                root: leased.pool.root.display().to_string(),
+                slot: leased.name.clone(),
+                path: leased.path.display().to_string(),
+                token: leased.token.clone(),
+            },
+        )?;
+        store
+            .append_local_event(&mut event)
+            .with_context(|| leased.kept())?;
+        leased.recorded().with_context(|| leased.kept())?;
+    }
     super::roles::append(
         ctx,
         &store,

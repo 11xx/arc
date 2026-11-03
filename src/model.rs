@@ -1123,6 +1123,19 @@ pub enum Payload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         worktree_owner_token: Option<String>,
     },
+    /// The change's checkout is slot `slot` of the pool at `root`, leased
+    /// under `token` until a `slot-released` names it.
+    SlotLeased {
+        root: String,
+        slot: String,
+        path: String,
+        token: String,
+    },
+    /// The slot lease `token` ended; the checkout stays for the next change.
+    SlotReleased {
+        slot: String,
+        token: String,
+    },
     ChangeRolesAsserted {
         asserted: BTreeMap<String, Vec<String>>,
         withdrawn: BTreeMap<String, Vec<String>>,
@@ -2614,6 +2627,8 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         | Payload::ForgeProjection { .. } => AppendPermission::OpenOnly,
         Payload::ChangeProvisionallyIntegrated { .. }
         | Payload::ProvisionalIntegrationResolved { .. }
+        | Payload::SlotLeased { .. }
+        | Payload::SlotReleased { .. }
         | Payload::Message { .. }
         | Payload::ClaimReleased { .. }
         | Payload::ContextKept { .. }

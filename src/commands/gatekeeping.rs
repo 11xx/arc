@@ -9,7 +9,7 @@ use crate::integration::{
     self, Decision, IntegrationFacts, IntegrationPlan, Refusal, TargetCheckout,
 };
 use crate::operation_println as println;
-use crate::process_group::{join_before_deadline, OwnedGroup};
+use crate::process_group::join_before_deadline;
 use std::collections::BTreeMap;
 use std::os::unix::process::CommandExt;
 use std::process::{ExitStatus, Stdio};
@@ -1919,6 +1919,7 @@ pub fn rebase(
         chrono::Utc::now(),
     )?;
 
+    let _slot_use = crate::slots::exclusive_in(&wt)?;
     match gitio::replay(&wt, &st.branch, &target_head, &head)? {
         gitio::ReplayOutcome::Stopped => {
             let conflicts = gitio::unmerged_paths(&wt)?;
@@ -2752,7 +2753,8 @@ pub(super) fn run_gate(
     output_root: &Path,
     producing_store: &str,
 ) -> Result<GateRun> {
-    let mut command = std::process::Command::new("sh");
+    let mut shell = crate::slots::shell(cwd)?;
+    let command = &mut shell.command;
     command
         .arg("-c")
         .arg(format!("exec 2>&1\n{cmd}"))
@@ -2760,7 +2762,7 @@ pub(super) fn run_gate(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0);
-    let _preparation = crate::warm_worktree::prepare_command(&mut command, cwd)?;
+    let _preparation = crate::warm_worktree::prepare_command(command, cwd)?;
     let started = Instant::now();
     let deadline = timeout_seconds
         .map(|seconds| {
@@ -2771,7 +2773,7 @@ pub(super) fn run_gate(
         .transpose()?;
     let _watch = crate::interruption::Watch::start().context("cannot watch for interruption")?;
     crate::interruption::check()?;
-    let mut child = OwnedGroup::spawn(&mut command).context("failed to run gate command")?;
+    let mut child = shell.spawn().context("failed to run gate command")?;
     let stdout = child
         .child()
         .stdout
@@ -4117,6 +4119,7 @@ fn integrate_one(
         &format!("integrated {change_id} at {merged}"),
     );
     advise_plan_promotions(&store, &st);
+    super::slots::release_change_slot(ctx, &store, &st, Some(&merged), Some(&st.branch));
 
     if selection.cleanup.enabled {
         let checkout = cleanup_checkout.as_deref().unwrap_or(&ctx.cwd);
@@ -4138,6 +4141,12 @@ fn cleanup_integrated_change(
     checkout: &Path,
     style: &CleanupStyle,
 ) -> Result<()> {
+    // A slot's checkout and branch belong to the slot's release, which
+    // detaches the checkout and deletes the merged branch.
+    if let Some(record) = &st.slot {
+        println!("kept slot checkout {}", record.path);
+        return Ok(());
+    }
     if let Some(wt_path) = &st.worktree {
         let path = PathBuf::from(wt_path);
         if path.exists() {
@@ -5456,6 +5465,7 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
     }
     crate::journal::auto_log(ctx, &st.slug, &format!("closed change {change_id}"));
     advise_plan_promotions(&store, &st);
+    super::slots::release_change_slot(ctx, &store, &st, None, None);
     Ok(())
 }
 

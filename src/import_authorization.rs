@@ -165,6 +165,8 @@ pub fn required_roles(payload: &Payload) -> Option<Vec<Vec<Role>>> {
         | ChangeClosed { .. }
         | ReadyToSend { .. } => vec![vec![Integration]],
         ChangeCheckoutBound { .. }
+        | SlotLeased { .. }
+        | SlotReleased { .. }
         | ChangeOpened { .. }
         | ChangeRolesAsserted { .. }
         | MetadataUpdated { .. }

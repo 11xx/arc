@@ -1208,6 +1208,7 @@ fn every_read_only_command_reads_past_a_broken_policy() {
         vec!["mangen", manual_dir],
         vec!["fork", "list", "--json"],
         vec!["fork", "thread", "missing"],
+        vec!["slots", "status", "--json"],
         vec!["history", "resolve", &merged],
         vec!["candidate", "show", "missing", "--json"],
         vec!["candidate", "list", "--json"],

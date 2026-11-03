@@ -43,6 +43,7 @@ pub struct SignArgs {
 pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
     let cwd = ctx.cwd.clone();
     let store = ctx.store()?;
+    let _slot_use = crate::slots::exclusive_in(&ctx.cwd)?;
     let branch = match open(ctx, &store)? {
         Opened::Finished(code) => return Ok(code),
         Opened::Branch(branch) => branch,
@@ -201,6 +202,7 @@ pub fn trailers(ctx: &Ctx, args: TrailerArgs) -> Result<i32> {
     }
     let cwd = ctx.cwd.clone();
     let store = ctx.store()?;
+    let _slot_use = crate::slots::exclusive_in(&ctx.cwd)?;
     let branch = match open(ctx, &store)? {
         Opened::Finished(code) => return Ok(code),
         Opened::Branch(branch) => branch,

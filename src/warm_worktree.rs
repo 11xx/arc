@@ -11,7 +11,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 mod stable;
@@ -21,7 +21,8 @@ const CONFIG: &str = ".arc/worktrees.toml";
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Configuration {
-    prepare: Hook,
+    prepare: Option<Hook>,
+    slots: Option<crate::slots::Declaration>,
 }
 
 #[derive(Deserialize)]
@@ -163,7 +164,8 @@ pub fn prepare(path: &Path) -> Result<()> {
         Err(error) => return Err(error).context("cannot read .arc/worktrees.toml"),
     };
     let hook = match configuration(&text) {
-        Ok(hook) => hook,
+        Ok(Some(hook)) => hook,
+        Ok(None) => return Ok(()),
         Err(error) => {
             if explicit_mode(&text)? {
                 return Err(error);
@@ -174,7 +176,10 @@ pub fn prepare(path: &Path) -> Result<()> {
     };
     let path = fs::canonicalize(path).context("cannot resolve preparation checkout")?;
     if hook.0.mode == Mode::PathStable {
-        return stable::prepare(&path, &hook);
+        if stable::prepare(&path, &hook)? {
+            crate::slots::record_built(&path)?;
+        }
+        return Ok(());
     }
     let before = Source::observe(&path)?;
     let outcome = run(&path, &before, &hook);
@@ -186,8 +191,70 @@ pub fn prepare(path: &Path) -> Result<()> {
         cold(&format!("{error:#}"));
     } else {
         eprintln!("worktree preparation: prepared source tree {}", before.tree);
+        crate::slots::record_built(&path)?;
     }
     Ok(())
+}
+
+/// Where a checkout's prepared outputs live, for a slot whose toolchain
+/// identity changed.
+pub(crate) enum Storage {
+    /// Outputs live in the checkout or arc-owned storage keyed by it.
+    Owned,
+    /// A project directory outside the checkout that arc does not own.
+    External(PathBuf),
+}
+
+/// Classify the storage `.arc/worktrees.toml` in `path` declares.
+pub(crate) fn storage(path: &Path) -> Result<Storage> {
+    let text = match fs::read_to_string(path.join(CONFIG)) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Storage::Owned),
+        Err(error) => return Err(error).context("cannot read .arc/worktrees.toml"),
+    };
+    Ok(match configuration(&text)? {
+        Some((hook, _)) if hook.mode == Mode::PathStable => match &hook.directory {
+            Some(directory) => Storage::External(directory.clone()),
+            None => Storage::Owned,
+        },
+        _ => Storage::Owned,
+    })
+}
+
+/// Remove the arc-owned prepared outputs keyed by checkout `path`: its
+/// source-bound receipts and builds, and its path-stable storage under the
+/// Git common directory. A busy path-stable lease refuses.
+pub(crate) fn clear_owned_storage(path: &Path) -> Result<Vec<PathBuf>> {
+    let mut removed = Vec::new();
+    let admin = gitio::worktree_admin_dir(path)?;
+    for name in ["arc-warm-build", "arc-cold-build"] {
+        let directory = admin.join(name);
+        if fs::symlink_metadata(&directory).is_ok() {
+            fs::remove_dir_all(&directory)
+                .with_context(|| format!("cannot remove {}", directory.display()))?;
+            removed.push(directory);
+        }
+    }
+    let common = fs::canonicalize(gitio::common_dir(path)?)?;
+    let build = common
+        .join("arc/cache/path-stable-worktrees")
+        .join(source_path_key(&fs::canonicalize(path)?));
+    if fs::symlink_metadata(&build).is_ok() {
+        let _lease = acquire_lease(&stable::lease_path(&build)?, "path-stable build")?;
+        fs::remove_dir_all(&build).with_context(|| format!("cannot remove {}", build.display()))?;
+        let incomplete = stable::incomplete_path(&build)?;
+        if fs::symlink_metadata(&incomplete).is_ok() {
+            fs::remove_file(&incomplete)?;
+        }
+        removed.push(build);
+    }
+    Ok(removed)
+}
+
+/// Configure a slot's invalidation command with the gate environment,
+/// without preparing or requiring complete preparation.
+pub(crate) fn configure_invalidation(command: &mut Command, path: &Path) -> Result<CommandLease> {
+    configure(command, path, Use::Invalidate)
 }
 
 fn explicit_mode(text: &str) -> Result<bool> {
@@ -198,34 +265,63 @@ fn explicit_mode(text: &str) -> Result<bool> {
         .is_some_and(|mode| mode.as_str() != Some("source-bound")))
 }
 
-fn configuration(text: &str) -> Result<(Hook, u64)> {
+/// The slot pool `.arc/worktrees.toml` in `checkout` declares, if any. A
+/// declared `[slots]` table that is malformed refuses: a pool is never
+/// guessed. A file that is not TOML at all refuses only when `strict`.
+pub fn slot_declaration(
+    checkout: &Path,
+    strict: bool,
+) -> Result<Option<crate::slots::Declaration>> {
+    let text = match fs::read_to_string(checkout.join(CONFIG)) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("cannot read .arc/worktrees.toml"),
+    };
+    let value: toml::Value = match toml::from_str(&text) {
+        Ok(value) => value,
+        Err(error) if strict => {
+            return Err(error).context("invalid .arc/worktrees.toml");
+        }
+        Err(_) => return Ok(None),
+    };
+    if value.get("slots").is_none() {
+        return Ok(None);
+    }
+    let config: Configuration = toml::from_str(&text).context("invalid .arc/worktrees.toml")?;
+    config
+        .slots
+        .map(crate::slots::Declaration::validated)
+        .transpose()
+}
+
+fn configuration(text: &str) -> Result<Option<(Hook, u64)>> {
     let config: Configuration = toml::from_str(text).context("invalid .arc/worktrees.toml")?;
-    if config
-        .prepare
+    let Some(prepare) = config.prepare else {
+        return Ok(None);
+    };
+    if prepare
         .command
         .as_ref()
         .is_some_and(|command| command.trim().is_empty())
     {
         bail!("worktree preparation command is empty");
     }
-    if config.prepare.mode == Mode::SourceBound {
-        if config.prepare.command.is_none() {
+    if prepare.mode == Mode::SourceBound {
+        if prepare.command.is_none() {
             bail!("source-bound worktree preparation requires a command");
         }
-        if config.prepare.directory.is_some() {
+        if prepare.directory.is_some() {
             bail!("worktree preparation directory requires path-stable mode");
         }
     }
-    if config
-        .prepare
+    if prepare
         .directory
         .as_ref()
         .is_some_and(|directory| directory.as_os_str().is_empty())
     {
         bail!("worktree preparation directory is empty");
     }
-    let timeout = config
-        .prepare
+    let timeout = prepare
         .timeout
         .as_deref()
         .map(crate::commands::parse_duration)
@@ -234,7 +330,7 @@ fn configuration(text: &str) -> Result<(Hook, u64)> {
     if timeout == 0 {
         bail!("worktree preparation timeout must be positive");
     }
-    Ok((config.prepare, timeout))
+    Ok(Some((prepare, timeout)))
 }
 
 fn cold(reason: &str) {
@@ -243,15 +339,27 @@ fn cold(reason: &str) {
 
 /// Prepare and configure a gate while retaining its build-directory lease.
 pub fn prepare_command(command: &mut Command, path: &Path) -> Result<CommandLease> {
-    configure(command, path, true)
+    configure(command, path, Use::Gate)
 }
 
 /// Configure a probe without running preparation, retaining its storage lease.
 pub fn configure_command(command: &mut Command, path: &Path) -> Result<CommandLease> {
-    configure(command, path, false)
+    configure(command, path, Use::Probe)
 }
 
-fn configure(command: &mut Command, path: &Path, prepare_first: bool) -> Result<CommandLease> {
+/// What a configured command does with prepared storage.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Use {
+    /// Prepare first, then use the outputs.
+    Gate,
+    /// Use outputs only when preparation completed.
+    Probe,
+    /// Discard outputs, whatever their state.
+    Invalidate,
+}
+
+fn configure(command: &mut Command, path: &Path, usage: Use) -> Result<CommandLease> {
+    let prepare_first = usage == Use::Gate;
     let text = match fs::read_to_string(path.join(CONFIG)) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -260,7 +368,8 @@ fn configure(command: &mut Command, path: &Path, prepare_first: bool) -> Result<
         Err(error) => return Err(error).context("cannot read .arc/worktrees.toml"),
     };
     let (hook, timeout) = match configuration(&text) {
-        Ok(configuration) => configuration,
+        Ok(Some(configuration)) => configuration,
+        Ok(None) => return Ok(CommandLease::default()),
         Err(error) => {
             if explicit_mode(&text)? {
                 return Err(error);
@@ -271,7 +380,7 @@ fn configure(command: &mut Command, path: &Path, prepare_first: bool) -> Result<
     };
     let path = fs::canonicalize(path)?;
     if hook.mode == Mode::PathStable {
-        return stable::configure(command, &path, &(hook, timeout), prepare_first);
+        return stable::configure(command, &path, &(hook, timeout), usage);
     }
     if prepare_first {
         prepare(&path)?;
@@ -478,38 +587,6 @@ fn acquire_lease(path: &Path, kind: &str) -> Result<File> {
     Ok(file)
 }
 
-struct PreparationChild(Child);
-
-impl Drop for PreparationChild {
-    fn drop(&mut self) {
-        let _ = process_group::kill_process_group(self.0.id());
-        let _ = self.0.wait();
-    }
-}
-
-fn exit_without_reaping(child: &Child) -> Result<Option<bool>> {
-    let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
-    // SAFETY: waitid initializes `info`. WNOWAIT keeps the leader's PID
-    // reserved until the process group is stopped and the leader is reaped.
-    if unsafe {
-        libc::waitid(
-            libc::P_PID,
-            child.id(),
-            info.as_mut_ptr(),
-            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-        )
-    } != 0
-    {
-        return Err(std::io::Error::last_os_error()).context("cannot observe worktree preparation");
-    }
-    // SAFETY: waitid returned success and initialized the zeroed structure.
-    let info = unsafe { info.assume_init() };
-    // SAFETY: waitid's successful WEXITED result supplies these child fields.
-    Ok(unsafe {
-        (info.si_pid() != 0).then(|| info.si_code == libc::CLD_EXITED && info.si_status() == 0)
-    })
-}
-
 fn run(path: &Path, source: &Source, (hook, timeout): &(Hook, u64)) -> Result<()> {
     let key = cache_key(hook, *timeout);
     let common = gitio::common_dir(path)?;
@@ -562,7 +639,8 @@ fn run_hook(
     let deadline = Instant::now()
         .checked_add(Duration::from_secs(timeout))
         .context("worktree preparation timeout is too large")?;
-    let mut command = Command::new("sh");
+    let mut shell = crate::slots::shell(path)?;
+    let command = &mut shell.command;
     command
         .args(["-c", hook_command])
         .current_dir(build)
@@ -579,18 +657,15 @@ fn run_hook(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
-    lease.inherit(&mut command);
-    let child = command
-        .counted_spawn()
-        .context("cannot start worktree preparation")?;
-    let mut child = PreparationChild(child);
+    lease.inherit(command);
+    let mut child = shell.spawn().context("cannot start worktree preparation")?;
     let stdout = child
-        .0
+        .child()
         .stdout
         .take()
         .context("preparation stdout unavailable")?;
     let stderr = child
-        .0
+        .child()
         .stderr
         .take()
         .context("preparation stderr unavailable")?;
@@ -600,23 +675,26 @@ fn run_hook(
     let err = std::thread::spawn(move || {
         process_group::read_tail(stderr, process_group::STDERR_TAIL_BYTES)
     });
-    let mut status = None;
+    let mut exited = false;
     let mut timed_out = false;
     loop {
-        if status.is_none() {
-            status = exit_without_reaping(&child.0)?;
+        if !exited {
+            exited = child
+                .leader_exited()
+                .context("cannot observe worktree preparation")?;
         }
-        if status.is_some() && out.is_finished() && err.is_finished() {
+        if exited && out.is_finished() && err.is_finished() {
             break;
         }
         if Instant::now() >= deadline {
-            process_group::kill_process_group(child.0.id())
-                .context("cannot stop overrunning worktree preparation")?;
             timed_out = true;
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+    let status = child
+        .stop()
+        .context("cannot stop worktree preparation's process group")?;
     let out =
         process_group::join_before_deadline(out, Some(deadline), "preparation stdout reader")?
             .transpose()?
@@ -628,10 +706,9 @@ fn run_hook(
     if timed_out {
         bail!("preparation exceeded {timeout}s; its process group was stopped");
     }
-    if status != Some(true) {
+    if !(exited && status.success()) {
         bail!("preparation failed: {}{}", out.trim(), err.trim());
     }
-    drop(child);
     let after = Source::observe(path)?;
     if after != *source {
         bail!(

@@ -1342,7 +1342,8 @@ RUN A CHANGE
   Any other shape keeps the refusal naming the missing target checkout.
 
   `integration.cleanup` governs branch and worktree cleanup after integration
-  (built-in false). `integrate --cleanup` enables it; `--no-cleanup` overrides
+  (built-in false). A slot checkout is never removed; its release detaches it
+  and deletes the merged branch (arc guide slots). `integrate --cleanup` enables it; `--no-cleanup` overrides
   a configured true. `integration.discard` selects `"artifacts"` (built-in) or
   `"ignored"`. `integrate --discard <artifacts|ignored>` overrides that scope,
   implies cleanup, and conflicts with `--no-cleanup` for single changes and
@@ -4538,11 +4539,10 @@ FILES
   `directory` is a literal absolute path or a path relative to the source
   checkout. Without it, storage under the Git common directory is keyed by
   the canonical checkout path, independently of its tree or administrative
-  allocation. Stable storage survives `integrate --cleanup`. Project slot
-  drivers can recreate a fixed `--worktree` source path beside `../build`;
-  Arc does not allocate a source-slot pool or relocate compiler outputs.
-  The slot driver owns source allocation and drains its external writers
-  before checkout cleanup.
+  allocation. Stable storage survives `integrate --cleanup`. `[slots]`
+  declares arc's pool of fixed-path checkouts (arc guide slots). A project
+  driver recreating a fixed `--worktree` path beside `../build` owns that
+  allocation and drains its external writers before checkout cleanup.
   Keeping only the build path fixed cannot stabilize changing source paths.
 
   A stable directory is available without a per-tree preparation receipt.
@@ -4595,6 +4595,99 @@ FILES
   Export and import preserve the tested objects and pin identity. Integration cleanup keeps these refs while the
   publication history cites them; an operator may release one deliberately
   with `git update-ref -d`.
+
+SLOTS
+  `[slots]` in `.arc/worktrees.toml` declares a pool of fixed-path checkouts
+  kept across changes, so a change starts from the previous change's build:
+
+    [slots]
+    size = 3                    # 1..=32, fixed once the pool exists
+    root = "~/.worktrees/x"     # default <worktrees_dir>/<repo>-slots
+    documentation = ["*.md"]    # paths ranking ignores (the default)
+    identity = "rustc -vV"      # toolchain identity; its stdout is digested
+    retain = ["target"]         # ignored paths a slot carries between changes
+    invalidate = "<command>"    # discards outputs on an identity change
+    default = true              # begin uses a slot for worktree checkouts
+    warm = "<command>"          # parsed and reported; arc runs nothing with it
+
+  A pattern without `/` matches a file name at any depth, one with `/`
+  matches from the checkout root, and `*` and `?` stay within one path
+  component. A project without `[slots]` sees no change; a malformed
+  `[slots]` table refuses every command that reads it. The identity command
+  is bounded at 120 s and must exit 0; `invalidate` is bounded at 600 s.
+
+  The root holds `pool.json` (the repository's canonical Git common
+  directory and a random pool id), `pool.lock`, and per slot `slot-NN.json`
+  (its state), `slot-NN.use.lock` and the checkout `slot-NN`. A root another
+  repository owns refuses, as does a nonempty directory that is not a pool.
+  The pool lock is innermost: held only around reading and writing slot
+  state, with nothing acquired under it. A slot is reused only when its
+  checkout is registered to this repository at that path with the
+  administrative directory and owner record arc wrote when creating it;
+  unknown ownership refuses reuse.
+
+  `arc begin <slug> --slot`, or any worktree checkout without --worktree,
+  --no-worktree or --adopt when `default = true`, leases the best-ranked free
+  slot under the pool lock and releases the lock. Ranking uses the slot's
+  `built` record (revision and identity digest, set only by a successful
+  preparation in that slot, never by a gate) when its identity matches the
+  identity command's digest in the checkout running begin: known distances
+  first, by paths changed from the built revision to the target outside
+  `documentation`; then built revisions that cannot be compared; then cold
+  slots (no matching build, or no checkout). Ties keep slot order. A slot
+  whose state cannot be read is never handed out, and a free slot still in
+  use is skipped. Exhaustion refuses with the slot table.
+
+  An absent checkout is created with `git worktree add`. A present one must
+  be owned, clean, detached, hold no open change and carry no ignored path
+  outside `retain`, as Git's status lists ignored paths (an emptied outbox
+  is exempt). Otherwise begin refuses naming the slot and the path, and keeps
+  the lease for inspection with the `arc slots recover` command to run once
+  resolved. Begin then runs `git switch -c <branch> <target>` and the
+  identity command in the slot. On a digest change it runs `invalidate` with
+  the gate environment; without one it removes the `retain` paths and the
+  arc-owned storage keyed by the checkout (source-bound builds and receipts,
+  path-stable storage under the Git common directory). Path-stable storage in
+  a project `directory` without `invalidate` refuses the change. Preparation
+  follows. The change records the slot as its worktree, with a `slot-leased`
+  event carrying the lease token. The slot state's phase (`leasing`,
+  `switching`, `recorded`, `detaching`, `releasing`) lets `recover` resume
+  an interrupted operation.
+
+  Gates, environment probes and preparation in a slot hold its use lock
+  shared, waiting for an operation that changes the checkout. Begin's
+  switch, integrate's and close's detach, release, recover, `rebase` replay
+  and `rewrite` in a slot checkout hold it exclusively without waiting and
+  refuse while it is held. One arc process holds a slot's lock once; nested
+  work shares that hold. A command in a slot runs under an arc holder that
+  leads its process group and inherits the lock. The holder is a child
+  subreaper: it reports the command's exit and keeps the lock until `wait`
+  reports no child left, so a descendant that detaches or closes its
+  descriptors keeps the slot in use after the arc that launched it is
+  killed. Arc's completion and timeout handling still stop the whole process
+  group, holder included; an escaped descendant then holds the slot only
+  while it keeps the inherited descriptor. Outside slots no holder runs.
+
+  A slot checkout is never removed by `--cleanup` or `[integration] cleanup`.
+  After recording an integration, arc detaches the clean slot at the landed
+  commit, deletes the merged branch with `git branch -d`, records
+  `slot-released` on the change and frees the lease. `close`, whatever its
+  outcome, detaches a clean slot at its `HEAD`, keeps the branch, records
+  `slot-released` and frees it. A slot in use, with uncommitted or untracked
+  work, or failing ownership keeps its lease, and the command prints the
+  release command to run once resolved.
+
+  `arc slots status [--json]` (`arc-slots/1`) shows each slot's phase, lease
+  and token, checkout `HEAD`, built revision and identity match, rank for the
+  primary checkout's branch, and whether it is in use. `arc slots release
+  <slot> --token <t>` frees a lease whose change is closed or absent.
+  `arc slots recover <slot> --token <t>` resumes a phase: a begin whose
+  change exists records the lease on it; one that opened no change is
+  undone, deleting its branch only while it still points at the target;
+  later phases finish the release. Both refuse an obsolete token, a busy
+  slot and a dirty checkout. Leases never expire; tokens appear only in
+  status and recovery output. Compiler freshness after a switch stays with
+  the project's build, as for path-stable storage.
 
 SCHEMAS
   Every structured surface carries a `schema` string `<name>/<n>`. A shape
@@ -4654,6 +4747,7 @@ SCHEMAS
     `arc-forks/3`                    arc fork list --json
     `arc-run-list/1`                 arc run list --json
     `arc-doctor/6`                   arc doctor --json
+    `arc-slots/1`                    arc slots status --json
     `arc-perf/1`                     ARC_TRACE=1, one line on stderr at exit
     `arc-workspace/2`                arc workspace list|inbox --json
     `arc-workspace-backlog/19`       arc workspace backlog --json
@@ -4721,6 +4815,7 @@ SCHEMAS
     `arc-replica-import/3`           receipt of an imported replica bundle
     `arc-journal-exchange-import/1`  receipt of an imported journal bundle
     `arc-sandbox/2`                  .arc-sandbox.json
+    `arc-slot-pool/1`, `arc-slot/1`  a slot pool's pool.json and slot-NN.json
     assurance blame cache            <ledger>/cache/assurance/<change>.json
     Codex model checkpoint format 1  <ai-home>/arc/cache/model-lookups/<key>.json
     `journal-binding/1`              bindings.jsonl
@@ -4961,7 +5056,7 @@ GO DEEPER
   Topics: overview identity workspace orient sandbox questions change delivery
   replicas journal ending profiles forge debt assurance repair contributions
   rewrites history candidates context rules cost probes cleanup exit-codes files
-  schemas boundaries
+  slots schemas boundaries
 "#;
 
 pub fn print() {
@@ -5078,6 +5173,7 @@ const SECTIONS: &[Section] = &[
     Section { name: "rules-rounds", family: "rules", title: "Round endings and execution roles", start: "  - A bounded round records what it deliberately left, so the next round" },
     Section { name: "exit-codes", family: "exit-codes", title: "Exit codes and blocker precedence", start: "EXIT CODES" },
     Section { name: "files", family: "files", title: "Configuration, gates, build storage and retention", start: "FILES" },
+    Section { name: "slots", family: "slots", title: "Leased fixed-path checkouts kept across changes", start: "SLOTS" },
     Section { name: "schemas", family: "schemas", title: "Versioned surfaces", start: "SCHEMAS" },
     Section { name: "boundaries", family: "boundaries", title: "Authority and effect boundaries", start: "WHAT ARC WILL NOT DO" },
 ];

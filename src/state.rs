@@ -1426,6 +1426,24 @@ fn captured_coverage(
         .collect()
 }
 
+/// A change's lease on a pool slot. The checkout at `path` outlives the
+/// change; `released` records that the lease ended.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct SlotRecord {
+    pub root: String,
+    pub slot: String,
+    pub path: String,
+    pub token: String,
+    pub released: bool,
+}
+
+impl SlotRecord {
+    /// The lease, while it holds.
+    pub fn held(&self) -> bool {
+        !self.released
+    }
+}
+
 /// The current state of one change, derived by replaying its events in
 /// ULID order. The event ledger is authoritative; this is a view.
 #[derive(Debug, Clone, Serialize)]
@@ -1461,6 +1479,9 @@ pub struct ChangeState {
     pub worktree_created: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_owner_token: Option<String>,
+    /// The slot lease the change's checkout holds or held.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<SlotRecord>,
     pub opened_by: String,
     pub opened_on_behalf_of: Option<String>,
     pub opened_harness: Option<String>,
@@ -2138,6 +2159,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     worktree: worktree.clone(),
                     worktree_created: *worktree_created,
                     worktree_owner_token: worktree_owner_token.clone(),
+                    slot: None,
                     opened_by: ev.actor.clone(),
                     opened_on_behalf_of: ev.on_behalf_of.clone(),
                     opened_harness: ev.harness.clone(),
@@ -2261,6 +2283,29 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 state.worktree = Some(worktree.clone());
                 state.worktree_created = *worktree_created;
                 state.worktree_owner_token = worktree_owner_token.clone();
+            }
+            Payload::SlotLeased {
+                root,
+                slot,
+                path,
+                token,
+            } => {
+                state.slot = Some(SlotRecord {
+                    root: root.clone(),
+                    slot: slot.clone(),
+                    path: path.clone(),
+                    token: token.clone(),
+                    released: false,
+                });
+            }
+            Payload::SlotReleased { slot, token } => {
+                if let Some(record) = state
+                    .slot
+                    .as_mut()
+                    .filter(|record| &record.slot == slot && &record.token == token)
+                {
+                    record.released = true;
+                }
             }
             Payload::ChangeRolesAsserted {
                 asserted,

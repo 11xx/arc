@@ -1673,8 +1673,16 @@ pub fn add_worktree_new_branch(cwd: &Path, path: &Path, branch: &str, start: &st
     Ok(())
 }
 
-/// Populate an allocated worktree; checkout hooks run after its files are written.
+/// Populate an allocated worktree; checkout hooks run after its files are
+/// written, and preparation after the hooks.
 pub fn populate_worktree(path: &Path) -> Result<()> {
+    populate_checkout(path)?;
+    crate::warm_worktree::prepare(path)?;
+    Ok(())
+}
+
+/// Write an allocated worktree's files and run its checkout hooks.
+pub fn populate_checkout(path: &Path) -> Result<()> {
     git(path, &["read-tree", "--reset", "-u", "HEAD"])?;
     let format = git(path, &["rev-parse", "--show-object-format"])?;
     let null_oid = match format.as_str() {
@@ -1696,7 +1704,6 @@ pub fn populate_worktree(path: &Path) -> Result<()> {
             "1",
         ],
     )?;
-    crate::warm_worktree::prepare(path)?;
     Ok(())
 }
 

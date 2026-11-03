@@ -8,7 +8,7 @@ use crate::commands::parse_duration;
 use crate::model::{DeltaSelection, GateEvent};
 use crate::perf::Counted;
 use crate::process_group::{
-    join_before_deadline, kill_process_group, read_tail, OwnedGroup, STDERR_TAIL_BYTES,
+    join_before_deadline, kill_process_group, read_tail, STDERR_TAIL_BYTES,
 };
 use anyhow::{bail, Context, Result};
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
@@ -233,7 +233,20 @@ pub fn environment_probe(cwd: &Path, probe: &str, timeout: Option<u64>) -> Resul
     let deadline = Instant::now()
         .checked_add(Duration::from_secs(timeout))
         .context("environment probe timeout is too large")?;
-    let mut command = Command::new("sh");
+    let mut shell = match crate::slots::shell(cwd) {
+        Ok(shell) => shell,
+        Err(error) => {
+            return Ok(ProbeRun {
+                identity: None,
+                failure: Some(ProbeFailure {
+                    exit_code: None,
+                    timed_out: false,
+                    detail: format!("slot unavailable: {error:#}"),
+                }),
+            });
+        }
+    };
+    let command = &mut shell.command;
     command
         .arg("-c")
         .arg(probe)
@@ -241,7 +254,7 @@ pub fn environment_probe(cwd: &Path, probe: &str, timeout: Option<u64>) -> Resul
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
-    let _preparation = match crate::warm_worktree::configure_command(&mut command, cwd) {
+    let _preparation = match crate::warm_worktree::configure_command(command, cwd) {
         Ok(lease) => lease,
         Err(error) => {
             return Ok(ProbeRun {
@@ -256,7 +269,7 @@ pub fn environment_probe(cwd: &Path, probe: &str, timeout: Option<u64>) -> Resul
     };
     let _watch = crate::interruption::Watch::start().context("cannot watch for interruption")?;
     crate::interruption::check()?;
-    let mut child = match OwnedGroup::spawn(&mut command) {
+    let mut child = match shell.spawn() {
         Ok(child) => child,
         Err(error) => {
             return Ok(ProbeRun {

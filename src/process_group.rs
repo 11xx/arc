@@ -47,9 +47,16 @@ pub fn kill_process_group(pid: u32) -> std::io::Result<()> {
 /// remaining members leave the group, the kernel may give that number to an
 /// unrelated process, and a kill sent to it would reach a group arc never
 /// started. Dropping the guard stops the group.
+///
+/// A leader that holds the group's resources on a command's behalf (a slot's
+/// use holder) reports the command's exit through a pipe and keeps running
+/// until its own descendants end. Its report counts as the leader's exit,
+/// and its status as the group's.
 pub(crate) struct OwnedGroup {
     child: Child,
     status: Option<ExitStatus>,
+    report: Option<std::fs::File>,
+    reported: Option<ExitStatus>,
 }
 
 impl OwnedGroup {
@@ -58,15 +65,55 @@ impl OwnedGroup {
         Ok(Self {
             child: command.counted_spawn()?,
             status: None,
+            report: None,
+            reported: None,
         })
+    }
+
+    /// Take the command's exit from the leader's report on `pipe`.
+    pub(crate) fn report_through(&mut self, pipe: std::os::fd::OwnedFd) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+        // SAFETY: fcntl reads and sets flags on a descriptor `pipe` owns.
+        unsafe {
+            let flags = libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL);
+            if flags < 0
+                || libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) < 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        self.report = Some(std::fs::File::from(pipe));
+        Ok(())
     }
 
     pub(crate) fn child(&mut self) -> &mut Child {
         &mut self.child
     }
 
-    /// Whether the leader has exited. Its PID stays reserved either way.
-    pub(crate) fn leader_exited(&self) -> std::io::Result<bool> {
+    /// Whether the command has exited: the leader's report when it makes
+    /// one, else the leader's own exit. Its PID stays reserved either way.
+    pub(crate) fn leader_exited(&mut self) -> std::io::Result<bool> {
+        if self.reported.is_some() {
+            return Ok(true);
+        }
+        if let Some(report) = self.report.as_mut() {
+            use std::os::unix::process::ExitStatusExt;
+            let mut bytes = [0_u8; 4];
+            match report.read(&mut bytes) {
+                Ok(4) => {
+                    self.reported = Some(ExitStatus::from_raw(i32::from_le_bytes(bytes)));
+                    return Ok(true);
+                }
+                Ok(_) => self.report = None,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+        }
+        self.leader_finished()
+    }
+
+    fn leader_finished(&self) -> std::io::Result<bool> {
         let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
         // SAFETY: waitid initializes `info`; WNOWAIT leaves the leader
         // unreaped, so its PID stays reserved until `stop`.
@@ -87,14 +134,15 @@ impl OwnedGroup {
     }
 
     /// Kill whatever remains in the group, then reap the leader and return
-    /// its exit status: the leader's own status when it had exited, SIGKILL
-    /// otherwise.
+    /// the command's exit status: the leader's report when it made one, the
+    /// leader's own status when it had exited, SIGKILL otherwise.
     pub(crate) fn stop(&mut self) -> std::io::Result<ExitStatus> {
         if let Some(status) = self.status {
             return Ok(status);
         }
         kill_process_group(self.child.id())?;
         let status = self.child.wait()?;
+        let status = self.reported.unwrap_or(status);
         self.status = Some(status);
         Ok(status)
     }

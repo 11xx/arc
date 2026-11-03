@@ -46,6 +46,7 @@ mod retention;
 mod rewrite;
 mod selection;
 mod session_store;
+mod slots;
 mod state;
 mod status;
 mod store;
@@ -316,6 +317,12 @@ enum Cmd {
     /// Optional .arc/worktrees.toml preparation runs after population. A
     /// project can combine a fixed --worktree path with path-stable build
     /// storage; compiler freshness remains the project's responsibility.
+    /// --slot leases a checkout of the declared [slots] pool instead: the
+    /// best-ranked free slot is switched to a new branch at the target, its
+    /// retained build kept unless the toolchain identity changed. A slot that
+    /// is not owned, clean, detached and free of unlisted ignored paths
+    /// refuses and keeps its lease; an exhausted pool refuses with its table
+    /// (arc guide slots).
     ///
     /// Without --base, the change derives its base from the local target:
     /// its head, or under --adopt the adopted branch's merge base with it.
@@ -374,6 +381,11 @@ enum Cmd {
         /// opening a change
         #[arg(long)]
         no_worktree: bool,
+        /// Lease a slot of the [slots] pool in .arc/worktrees.toml and open
+        /// the change's branch in its fixed checkout (see arc guide slots).
+        /// [slots] default = true makes this the default for worktree checkouts
+        #[arg(long, conflicts_with_all = ["worktree", "no_worktree", "adopt"])]
+        slot: bool,
         /// Track an existing branch instead of creating one
         #[arg(long)]
         adopt: Option<String>,
@@ -2365,6 +2377,16 @@ enum Cmd {
         /// then from the worktree the command runs in
         change: Option<String>,
     },
+    /// Leased fixed-path checkouts kept across changes, declared by [slots]
+    /// in .arc/worktrees.toml (see arc guide slots).
+    ///
+    /// begin --slot leases a slot; integrate and close release it. These
+    /// commands show the pool and release or recover a lease whose holder is
+    /// gone. Leases never expire: the operator decides.
+    Slots {
+        #[command(subcommand)]
+        command: SlotsCmd,
+    },
     /// Fork this repository: a worktree on a fork/<slug> branch, outside the change
     /// lifecycle.
     ///
@@ -2459,6 +2481,11 @@ enum Cmd {
     /// inspect publication and durability before retrying. An active claim
     /// warns as foreign unless the caller supplies a complete matching actor,
     /// harness, and session; absent or empty coordinates cannot match its owner.
+    /// A change in a slot (arc guide slots) keeps its checkout under any
+    /// cleanup setting: after recording, arc detaches the clean slot at the
+    /// landed commit, deletes the merged branch with git branch -d, records
+    /// slot-released and frees the lease; a slot in use or holding work keeps
+    /// its lease and the output names the release command.
     #[command(
         group(clap::ArgGroup::new("integration_json_mode").args(["dry_run", "provisional"]).multiple(true)),
         after_help = "Arc exits 11 when --shape ff-only encounters a diverged target; run arc rebase <change> --verify and provide fresh review or declared debt. When --into selects a different destination, arc rebase cannot select it: run git rebase <destination> in the change checkout, then arc snapshot <change> --verify and obtain fresh review or debt. Arc exits 17 when a paired replica does not hold integration authority; the refusal names the holder or an offer in flight."
@@ -2802,7 +2829,10 @@ enum Cmd {
     /// The change and closure event are printed before retention cleanup.
     /// A retention cleanup failure, including a ref lock or a hook rejecting
     /// deletion, warns with the ref prefixes that may still hold pins; the
-    /// recorded closure succeeds.
+    /// recorded closure succeeds. A change in a slot (arc guide slots) has a
+    /// clean checkout detached at its HEAD, its branch kept, slot-released
+    /// recorded and the lease freed; a slot in use, or holding uncommitted or
+    /// untracked work, keeps its lease and the output says so.
     Close {
         /// Change to close
         change: String,
@@ -3165,6 +3195,42 @@ enum ReplicaAuthorityCmd {
     },
     /// Relinquish an offered grant after importing its reclaim request
     ConfirmReturn,
+}
+
+#[derive(Subcommand)]
+enum SlotsCmd {
+    /// Show each slot: lease and holder, checkout HEAD, built revision and
+    /// identity match, rank for the primary checkout's branch, and whether a
+    /// command still runs in it. Tokens are shown for release and recovery.
+    /// JSON uses arc-slots/1. Records no events
+    Status {
+        /// Emit the machine-readable JSON view instead of text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Free a slot whose holder is gone. Refuses an obsolete token, a lease
+    /// whose change is still open (integrate or close it instead), a slot in
+    /// use and a checkout with uncommitted or untracked work; leaves the
+    /// checkout detached and records slot-released on a closed change
+    Release {
+        /// The slot: slot-NN, or its number
+        slot: String,
+        /// The lease's current token, as `arc slots status` shows it
+        #[arg(long)]
+        token: String,
+    },
+    /// Resume an interrupted lease phase. A begin whose change exists records
+    /// the lease on it; one that opened no change is undone, deleting the
+    /// branch it made only while it holds no commits. Detaching and releasing
+    /// phases, and leases of closed changes, finish their release. Refuses an
+    /// obsolete token
+    Recover {
+        /// The slot: slot-NN, or its number
+        slot: String,
+        /// The lease's current token, as `arc slots status` shows it
+        #[arg(long)]
+        token: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -5516,6 +5582,9 @@ fn main() {
     unsafe {
         signal(SIGPIPE, SIG_DFL);
     }
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new(slots::HOLDER)) {
+        slots::holder_main();
+    }
     perf::start();
 
     let (cli, reads_only) = match parse_cli() {
@@ -5802,6 +5871,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             branch,
             worktree,
             no_worktree,
+            slot,
             adopt,
             blocked_by,
             tag,
@@ -5820,6 +5890,7 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                 branch,
                 worktree,
                 no_worktree,
+                slot,
                 adopt,
                 blocked_by,
                 tag,
@@ -6809,6 +6880,14 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             context::prompt(&ctx, select(change)?.as_deref())?;
             Ok(0)
         }
+        Cmd::Slots { command } => {
+            match command {
+                SlotsCmd::Status { json } => commands::slots::status(&ctx, json)?,
+                SlotsCmd::Release { slot, token } => commands::slots::release(&ctx, &slot, &token)?,
+                SlotsCmd::Recover { slot, token } => commands::slots::recover(&ctx, &slot, &token)?,
+            }
+            Ok(0)
+        }
         Cmd::Fork { command } => match command {
             ForkCmd::Begin { slug, from } => fork::begin(&ctx, &slug, from.as_deref()),
             ForkCmd::Adopt {
@@ -7661,6 +7740,8 @@ mod tests {
     fn every_leaf_command_has_an_io_classification() {
         const WRITING_COMMANDS: &[&str] = &[
             "accept",
+            "slots release",
+            "slots recover",
             "begin",
             "roles",
             "brief",

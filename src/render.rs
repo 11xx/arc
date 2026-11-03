@@ -2177,6 +2177,8 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             format!("{branch} at {worktree} (owned: {worktree_created})"),
         ),
         Payload::ChangeOpened { slug, title, .. } => ("change-opened", format!("{slug}: {title}")),
+        Payload::SlotLeased { slot, path, .. } => ("slot-leased", format!("{slot} at {path}")),
+        Payload::SlotReleased { slot, .. } => ("slot-released", slot.clone()),
         Payload::ChangeRolesAsserted {
             asserted,
             withdrawn,

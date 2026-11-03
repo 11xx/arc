@@ -110,6 +110,7 @@ mod sandbox;
 mod schemas;
 mod selection;
 mod skip_green;
+mod slots;
 mod stats;
 mod take;
 mod timeline;

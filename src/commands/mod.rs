@@ -44,6 +44,7 @@ pub mod run;
 pub(crate) mod sandbox;
 pub(crate) mod scaffold;
 pub(crate) mod selection;
+pub(crate) mod slots;
 mod squash;
 pub(crate) use scaffold::{
     available as scaffolds_available, default_for_kind as scaffold_default_for_kind,
@@ -194,6 +195,7 @@ pub(crate) const READ_ONLY_COMMANDS: &[&str] = &[
     "resume",
     "prompt",
     "fork list",
+    "slots status",
     "fork thread",
     "history resolve",
     "candidate show",
@@ -1519,6 +1521,7 @@ mod tests {
             worktree: None,
             worktree_created: false,
             worktree_owner_token: None,
+            slot: None,
             opened_by: "tester".into(),
             opened_on_behalf_of: None,
             opened_harness: Some("test".into()),
