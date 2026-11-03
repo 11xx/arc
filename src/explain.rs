@@ -371,6 +371,21 @@ pub enum Detail {
         finding_id: String,
         status: String,
     },
+    /// A check observed after integration. It sits here rather than in
+    /// evaluation, which holds only what the integration counted.
+    PostIntegrationVerification {
+        event_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        gate: Option<String>,
+        command: String,
+        revision: String,
+        tree: String,
+        integrated_commit: String,
+        result: String,
+        hostname: String,
+        runner: String,
+        producer: String,
+    },
     DebtDeclared {
         event_id: String,
         debt_reason: String,
@@ -1533,6 +1548,31 @@ fn later_knowledge(events: &[Event], discharge: Option<&Discharge>, at: Option<&
                     status: kebab(status),
                 },
             )),
+            Payload::PostIntegrationVerificationRecorded {
+                gate,
+                command,
+                revision,
+                tree,
+                integrated_commit,
+                result,
+                hostname,
+                runner,
+                ..
+            } => rows.push(row(
+                Standing::declared("its producer reported the result; arc did not run the command"),
+                Detail::PostIntegrationVerification {
+                    event_id: event.event_id.clone(),
+                    gate: gate.clone(),
+                    command: command.clone(),
+                    revision: revision.clone(),
+                    tree: tree.clone(),
+                    integrated_commit: integrated_commit.clone(),
+                    result: kebab(result),
+                    hostname: hostname.clone(),
+                    runner: runner.clone(),
+                    producer: reviewer.clone(),
+                },
+            )),
             Payload::DebtDeclared {
                 reason, missing, ..
             } => rows.push(row(
@@ -1987,6 +2027,23 @@ fn describe(detail: &Detail) -> String {
             finding_id,
             status,
         } => format!("audit disposition {status} on {finding_id} `{event_id}`"),
+        Detail::PostIntegrationVerification {
+            event_id,
+            gate,
+            command,
+            revision,
+            tree,
+            integrated_commit,
+            result,
+            hostname,
+            runner,
+            producer,
+        } => format!(
+            "verification after integration {result}: {} `{command}` at `{revision}` (tree \
+             `{tree}`, integrated commit `{integrated_commit}`) on {hostname} by {runner}, \
+             reported by {producer} `{event_id}`",
+            gate.as_deref().unwrap_or("(ad hoc)")
+        ),
         Detail::DebtDeclared {
             event_id,
             debt_reason,

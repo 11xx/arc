@@ -591,8 +591,8 @@ enum Cmd {
     /// environment digest, timeout, reuse, and falsification), coverage at
     /// acceptance (the verdicts, waiver, and debt the integration event's
     /// authorization recorded), and later knowledge (audits, audit findings
-    /// and dispositions, debts, and debt discharges recorded after the
-    /// integration).
+    /// and dispositions, debts, debt discharges, and verification receipts
+    /// recorded after the integration).
     ///
     /// Every row carries a standing: `recorded` (an event records it),
     /// `declared` (somebody stated it and arc did not check it), `inferred`

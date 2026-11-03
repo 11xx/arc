@@ -206,10 +206,20 @@ fn a_receipt_leaves_the_authorization_basis_as_it_was() {
     assert_eq!(shown["verifications"], shown_before["verifications"]);
     assert_eq!(shown["closure"], shown_before["closure"]);
 
+    // The unbounded view places it in later knowledge, never in evaluation.
     let now = json_stdout(repo.arc(&repo.root).args(["explain", WORK, "--json"]));
     for slot in ["contract", "evaluation", "coverage_at_acceptance"] {
         assert_eq!(now[slot], unbounded_before[slot], "{slot}");
     }
+    let later = now["later_knowledge"]["rows"].as_array().unwrap();
+    assert!(
+        later
+            .iter()
+            .any(|row| row["item"] == "post-integration-verification"
+                && row["result"] == "fail"
+                && row["standing"] == "declared"),
+        "{later:?}"
+    );
 }
 
 /// Claim: a receipt discharges no review debt.

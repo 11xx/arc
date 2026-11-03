@@ -1267,9 +1267,10 @@ RUN A CHANGE
   and the gate's declared timeout, the result, host, runner, producer, and
   when it was recorded. `show` lists it under `Verification after
   integration`; `show --json` and `status --json` carry it in
-  `post_integration_verifications` with `after_integration: true`. It
-  changes no authorization basis, discharges no debt, and satisfies no gate.
-  On an open change the form is refused, naming the ordinary attestation.
+  `post_integration_verifications` with `after_integration: true`; `explain`
+  lists it as later knowledge, `declared` because arc ran nothing. It changes
+  no authorization basis, discharges no debt, and satisfies no gate. On an
+  open change the form is refused, naming the ordinary attestation.
 
   The decision is one function of facts observed under the target and change
   locks: a plan naming the target revision, the approved head, the tree the
