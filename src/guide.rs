@@ -4838,7 +4838,8 @@ SLOTS
   identity match, rank for the primary checkout's branch, and whether it is
   in use. Before the pool exists it reports the declared pool as not yet
   created (`created: false`) and succeeds. A change's slot also appears in
-  `arc status` (`slot`) and `arc show`. `arc slots release
+  `arc status` (`slot`), `arc show` and each `arc stats --round-trip`
+  landing. `arc slots release
   <slot> --token <t>` frees a lease whose change is closed or absent.
   `arc slots recover <slot> --token <t>` resumes a phase: a begin whose
   change exists records the lease on it; one that opened no change is

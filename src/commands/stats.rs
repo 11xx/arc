@@ -471,6 +471,9 @@ struct Landing {
     integration_event_id: String,
     /// The opening patchset's base differs from the base recorded before it.
     rebased: bool,
+    /// The pool slot whose kept checkout the change used, when it leased
+    /// one before its integration; null for an ordinary checkout.
+    slot: Option<String>,
     round_trip_seconds: u64,
     /// Null unless the opening patchset records when its `arc rebase`
     /// started.
@@ -563,6 +566,13 @@ fn landing(change_id: &str, slug: &str, events: &[Event]) -> Option<Landing> {
     else {
         unreachable!("the window opens on a patchset");
     };
+    let slot = events[..end]
+        .iter()
+        .rev()
+        .find_map(|event| match &event.payload {
+            Payload::SlotLeased { slot, .. } => Some(slot.clone()),
+            _ => None,
+        });
     let prior_base = events[..start]
         .iter()
         .rev()
@@ -654,6 +664,7 @@ fn landing(change_id: &str, slug: &str, events: &[Event]) -> Option<Landing> {
         start_event_id: events[start].event_id.clone(),
         integration_event_id: events[end].event_id.clone(),
         rebased: prior_base.is_some_and(|prior| prior != base),
+        slot,
         round_trip_seconds,
         rebase_seconds,
         gate_seconds,
@@ -720,12 +731,12 @@ fn round_trips(store: &Store, change_ids: &[String], json: bool) -> Result<()> {
         return Ok(());
     }
     println!(
-        "{:<28} {:>10} {:>8} {:>8} {:>8} {:>8} {:>6} {:>7} dominant",
-        "change", "round-trip", "rebase", "gates", "waiting", "integ", "reused", "rebased"
+        "{:<28} {:>10} {:>8} {:>8} {:>8} {:>8} {:>6} {:>7} {:>7} dominant",
+        "change", "round-trip", "rebase", "gates", "waiting", "integ", "reused", "rebased", "slot"
     );
     for landing in &landings {
         println!(
-            "{:<28} {:>10} {:>8} {:>8} {:>8} {:>8} {:>6} {:>7} {}",
+            "{:<28} {:>10} {:>8} {:>8} {:>8} {:>8} {:>6} {:>7} {:>7} {}",
             truncate(&landing.slug, 28),
             format_duration(landing.round_trip_seconds),
             landing
@@ -736,6 +747,7 @@ fn round_trips(store: &Store, change_ids: &[String], json: bool) -> Result<()> {
             format_duration(landing.integration_seconds),
             landing.reused,
             if landing.rebased { "yes" } else { "no" },
+            landing.slot.as_deref().unwrap_or("-"),
             landing.dominant_phase
         );
     }
@@ -1829,6 +1841,37 @@ mod tests {
 
     /// Claim: only an integration makes a landing. Rejects a zero-length row
     /// for a change that was snapshotted and verified but never integrated.
+    /// Claim: a landing names the slot its change leased, so a kept checkout
+    /// reads apart from an ordinary one; a change that leased none names
+    /// nothing. Rejects a round trip that cannot tell the two apart.
+    #[test]
+    fn a_landing_names_the_slot_its_change_leased() {
+        let leased = event(
+            "0",
+            -10,
+            Payload::SlotLeased {
+                root: "/pool".into(),
+                slot: "slot-02".into(),
+                path: "/pool/slot-02".into(),
+                token: "t".into(),
+            },
+        );
+        let mut events = vec![
+            leased,
+            patchset("1", 0, "ps-01", "b"),
+            integrated("2", 20, "ps-01"),
+        ];
+        let landing = landing("c", "s", &events).expect("an integrated change lands");
+        assert_eq!(landing.slot.as_deref(), Some("slot-02"));
+        events.remove(0);
+        let landing = landing_without_slot(&events);
+        assert_eq!(landing, None, "a change without a lease named a slot");
+    }
+
+    fn landing_without_slot(events: &[Event]) -> Option<String> {
+        landing("c", "s", events).and_then(|landing| landing.slot)
+    }
+
     #[test]
     fn an_unintegrated_change_has_no_round_trip() {
         let events = vec![

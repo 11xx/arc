@@ -749,7 +749,9 @@ enum Cmd {
         /// integration event. Waiting: the remainder, so the phases sum to the
         /// round trip. Reuse: `verification-reused` events inside the window,
         /// counted and never timed. Rebased: the patchset's base differs from
-        /// the base recorded before it.
+        /// the base recorded before it. Slot: the pool slot the change leased
+        /// before its integration (`slot`, null for an ordinary checkout), so
+        /// a landing in a kept, warm checkout reads apart from a fresh one.
         ///
         /// Not recorded, so not reported: how long a rebase that stopped on a
         /// conflict took, and build versus test inside one gate command.
