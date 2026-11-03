@@ -622,6 +622,9 @@ pub enum ReviewQualifier {
     FloorUnknown,
     /// The reviewer holds no seated review tier, so no floor can place it.
     ReviewerUnseated,
+    /// The reviewer's review tier at its effort is below the clearance
+    /// floor: its read may find defects but does not clear.
+    BelowClearance,
 }
 
 impl ReviewQualifier {
@@ -632,12 +635,13 @@ impl ReviewQualifier {
             Self::BelowFloor => "below-floor",
             Self::FloorUnknown => "floor-unknown",
             Self::ReviewerUnseated => "reviewer-unseated",
+            Self::BelowClearance => "below-clearance",
         }
     }
 
     /// Every name the closed set accepts, for refusals that list them.
     pub const NAMES: &'static str =
-        "same-model, same-family, below-floor, floor-unknown, reviewer-unseated";
+        "same-model, same-family, below-floor, floor-unknown, reviewer-unseated, below-clearance";
 
     /// A qualifier list as a record keeps it: deduplicated, in set order.
     pub fn normalized(qualifiers: impl IntoIterator<Item = ReviewQualifier>) -> Vec<Self> {
@@ -719,9 +723,9 @@ pub enum AuditorBinding {
     ModelUnrecorded,
     /// The assessment lists no model strings for its reviewer.
     IdentitiesUnstated,
-    /// The assessment's authors do not include the model of every
-    /// `Implemented-by` line in the audited range; the audit lists the ones
-    /// it leaves out.
+    /// The assessment's authors do not answer for the model and effort of
+    /// every `Implemented-by` line in the audited range; the audit lists the
+    /// coordinates it leaves out.
     AuthorsUncovered,
     /// The audited range's `Implemented-by` lines could not be established:
     /// the production record kept no list and the range did not read. Never
@@ -744,9 +748,9 @@ impl AuditorBinding {
             Self::IdentitiesUnstated => {
                 Some("the assessment names no model identities for its reviewer")
             }
-            Self::AuthorsUncovered => {
-                Some("the assessment's authors omit a model the range's Implemented-by lines name")
-            }
+            Self::AuthorsUncovered => Some(
+                "the assessment's authors omit a coordinate the range's Implemented-by lines name",
+            ),
             Self::AuthorsUnread => Some(
                 "the range's Implemented-by lines could not be read, so its authors are unknown",
             ),
@@ -773,12 +777,21 @@ impl AuditorBinding {
     }
 }
 
-/// The slice of a routing assessment an audit keeps: enough to tell whether
-/// the auditor counts as independent and whether the assessment describes it,
-/// never the tiers behind the answer.
+/// The slice of a routing assessment a read keeps: enough to tell whether
+/// the reader counts as independent, whether its read clears, and whether the
+/// assessment describes it, never the tiers behind the answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditAssessment {
     pub independence: Independence,
+    /// Whether the reader may record findings against the authors. Absent
+    /// on a read assessed by `agent-routing-assessment/1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub findings: Option<Independence>,
+    /// Whether the read clears the authors' work. Absent on a read assessed
+    /// by `agent-routing-assessment/1`, which never clears under
+    /// `review_clearance = "assessed"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clears: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub qualifiers: Vec<ReviewQualifier>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -786,8 +799,9 @@ pub struct AuditAssessment {
     /// Absent on an assessment recorded without one, which binds nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding: Option<AuditorBinding>,
-    /// The models of the range's `Implemented-by` lines that no author of the
-    /// assessment answers to. Empty unless the binding is `authors-uncovered`.
+    /// The `model[#effort]` coordinates of the range's `Implemented-by`
+    /// lines that no author of the assessment answers for. Empty unless the
+    /// binding is `authors-uncovered`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub uncovered_authors: Vec<String>,
 }

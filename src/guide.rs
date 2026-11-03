@@ -2392,13 +2392,19 @@ REVIEW COVERAGE AND DEBT
                  once integrated its latest audit. Refused when there is none
     qualifiers   why it does not count, from the closed set same-model,
                  same-family, below-floor, floor-unknown, reviewer-unseated
-                 (a reviewer holding no seated review tier)
+                 (a reviewer holding no seated review tier), below-clearance
+                 (a tier below the clearance floor)
     assessment   `assessed` when `--assessment <file>` supplied them,
                  `declared` when `--qualifier <q>` flags did
     route_version  `--route-version`, or the assessment's, as a coordinate
 
   The assessment file is `agent-routing assess --json` output, schema
-  `agent-routing-assessment/1`. arc keeps its `independence`, `qualifiers`
+  `agent-routing-assessment/1` or `/2`. `/2` keeps `independence` with its
+  `/1` meaning and adds `findings` (`eligible` or `ineligible`) and `clears`
+  (true or false); arc stores both beside `independence`, and a `/1` file
+  leaves them absent. A `/2` file that clears is eligible on both answers,
+  names no qualifier and names its reviewer's effort; one that does not
+  clear names a qualifier. arc keeps its `independence`, `qualifiers`
   and `route_version`, never a tier or a model string (an audit's binding
   to its auditor is the one comparison made, below), and validates shape only: qualifier
   names from the closed set, a one-token route version, qualifiers present
@@ -2413,9 +2419,12 @@ REVIEW COVERAGE AND DEBT
   `independence: eligible`, by an auditor who is also independent of the
   contributors and whom the assessment describes, and whose assessment
   covers the work: the `authors` it lists answer, through their `identities`,
-  to the model of every `Implemented-by` line in the integrated range. An
+  to the model of every `Implemented-by` line in the integrated range, at
+  that line's effort. An author entry without an `effort` covers its model at
+  any effort; a line that names no effort is covered only by such an entry. An
   assessment that omits one is recorded with binding `authors-uncovered` and
-  the omitted models in `uncovered_authors`, and leaves the debt open;
+  the omitted `model[#effort]` coordinates in `uncovered_authors`, and leaves
+  the debt open;
   readers list them beside the obligation. A range read and found to have no
   `Implemented-by` line asks nothing of the authors; a range whose lines
   cannot be established (no list kept with the production record, and the
@@ -2428,8 +2437,8 @@ REVIEW COVERAGE AND DEBT
   `effort`. arc keeps only the outcome on the audit's assessment: `bound`,
   `model-mismatch`, `effort-mismatch`, `model-unrecorded` (an audit by a
   person records no model), `identities-unstated` (the file lists none) or
-  `authors-uncovered` (the authors it lists omit a model of the range, named
-  beside it) or `authors-unread` (the range's authors could not be read). An
+  `authors-uncovered` (the authors it lists omit a coordinate of the range,
+  named beside it) or `authors-unread` (the range's authors could not be read). An
   audit without an assessment, with an `ineligible` one, or
   whose binding is not `bound` is recorded, says why, and is listed beside the
   obligation, which stays open; a verdict recorded since carries no

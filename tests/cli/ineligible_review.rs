@@ -100,6 +100,46 @@ fn assessment_for(
     path
 }
 
+/// An `agent-routing-assessment/2` of `fixture-other#high`, the reviewer
+/// [`audit_v2`] records, with the given answers.
+pub(super) fn assessment_v2(
+    repo: &Repo,
+    name: &str,
+    independence: &str,
+    clears: bool,
+    qualifiers: &[&str],
+) -> PathBuf {
+    let path = repo.home.join(name);
+    fs::write(
+        &path,
+        serde_json::json!({
+            "schema": "agent-routing-assessment/2",
+            "independence": independence,
+            "findings": "eligible",
+            "clears": clears,
+            "qualifiers": qualifiers,
+            "route_version": "2026.11.3",
+            "reviewer": {"identities": ["fixture-other"], "effort": "high"},
+            "authors": [{"identities": ["fixture-opus"], "effort": null}],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    path
+}
+
+/// An approving audit of `slug` by Auditor at `fixture-other#high` under the
+/// assessment at `file`.
+pub(super) fn audit_v2(repo: &Repo, slug: &str, file: &Path) -> String {
+    stdout(
+        repo.arc(&repo.root)
+            .env("ARC_ACTOR", "Auditor")
+            .args(["--model", "fixture-other#high"])
+            .args(["audit", slug, "--verdict", "approved", "--assessment"])
+            .arg(file),
+    )
+}
+
 fn files_mentioning(dir: &Path, needle: &str) -> usize {
     fs::read_dir(dir)
         .unwrap()
@@ -465,6 +505,31 @@ fn an_audit_with_an_eligible_assessment_discharges_the_debt() {
     // Only the outcome is kept, never the identities routing listed.
     assert!(!status.to_string().contains("other-alias"), "{status}");
     assert!(!stdout(repo.arc(&repo.root).args(["query", "--debt"])).contains("cleared"));
+}
+
+/// Claim: without `review_clearance`, a `/2` assessment is judged by its
+/// `independence`, as a `/1` one is. Rejects a reader that refuses `/2`, or
+/// that reads `clears: false` as a bar where no policy asks for clearance.
+#[test]
+fn without_the_policy_a_second_schema_assessment_discharges_by_independence() {
+    let repo = repo_forbidding_self_approval();
+    owed_change(&repo, "second");
+    let file = assessment_v2(
+        &repo,
+        "second.json",
+        "eligible",
+        false,
+        &["below-clearance"],
+    );
+    let output = audit_v2(&repo, "second", &file);
+    assert!(output.contains("debt discharged"), "{output}");
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "second", "--json"]));
+    assert_eq!(status["debt_outstanding"], false, "{status}");
+    let kept = &status["audit_verdicts"][0]["assessment"];
+    assert_eq!(kept["independence"], "eligible", "{status}");
+    assert_eq!(kept["findings"], "eligible", "{status}");
+    assert_eq!(kept["clears"], false, "{status}");
+    assert_eq!(kept["binding"], "bound", "{status}");
 }
 
 #[test]

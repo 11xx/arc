@@ -162,6 +162,46 @@ fn audited_implementers(ctx: &Ctx, st: &ChangeState) -> Option<Vec<String>> {
     })
 }
 
+/// The assessment at `path`, kept as the read the invoking context records
+/// will keep it: bound to the represented reader's model, and to every
+/// author coordinate of `implementers`, the range's `Implemented-by` values,
+/// or `None` when they could not be read.
+pub(super) fn read_assessment(
+    ctx: &Ctx,
+    path: &Path,
+    implementers: Option<&[String]>,
+) -> Result<AuditAssessment> {
+    let assessed = crate::assessment::read(path)?;
+    let mut binding = assessed.bind(ctx.resolve_model().model.as_deref());
+    let mut uncovered_authors = Vec::new();
+    if binding == AuditorBinding::Bound {
+        // A list nobody could read is not an empty list: with no authors
+        // established, nothing was covered.
+        match implementers {
+            None => binding = AuditorBinding::AuthorsUnread,
+            Some(values) => {
+                uncovered_authors = assessed.uncovered(
+                    values
+                        .iter()
+                        .filter_map(|value| crate::trailers::coordinate_model_effort(value)),
+                );
+                if !uncovered_authors.is_empty() {
+                    binding = AuditorBinding::AuthorsUncovered;
+                }
+            }
+        }
+    }
+    Ok(AuditAssessment {
+        independence: assessed.independence,
+        findings: assessed.findings,
+        clears: assessed.clears,
+        binding: Some(binding),
+        qualifiers: assessed.qualifiers,
+        route_version: assessed.route_version,
+        uncovered_authors,
+    })
+}
+
 /// Record the obligation. Allowed while open (declared at integration time)
 /// and after integration (discovered later).
 pub fn declare_debt(
@@ -493,36 +533,8 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
     let assessment = args
         .assessment
         .as_deref()
-        .map(crate::assessment::read)
-        .transpose()?
-        .map(|assessed| {
-            let mut binding = assessed.bind(ctx.resolve_model().model.as_deref());
-            let mut uncovered_authors = Vec::new();
-            if binding == AuditorBinding::Bound {
-                // A list nobody could read is not an empty list: with no
-                // authors established, nothing was covered.
-                match implementers.as_deref() {
-                    None => binding = AuditorBinding::AuthorsUnread,
-                    Some(values) => {
-                        uncovered_authors = assessed.uncovered(
-                            values
-                                .iter()
-                                .filter_map(|value| crate::trailers::coordinate_model(value)),
-                        );
-                        if !uncovered_authors.is_empty() {
-                            binding = AuditorBinding::AuthorsUncovered;
-                        }
-                    }
-                }
-            }
-            AuditAssessment {
-                independence: assessed.independence,
-                binding: Some(binding),
-                qualifiers: assessed.qualifiers,
-                route_version: assessed.route_version,
-                uncovered_authors,
-            }
-        });
+        .map(|path| read_assessment(ctx, path, implementers.as_deref()))
+        .transpose()?;
     let binding = assessment.as_ref().and_then(|assessed| assessed.binding);
     let uncovered_authors = assessment
         .as_ref()

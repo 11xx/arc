@@ -453,7 +453,7 @@ fn an_assessment_covering_one_of_two_implementers_leaves_the_debt_open() {
     assert_eq!(later["binding"], "authors-uncovered", "{debt}");
     assert_eq!(
         later["uncovered_authors"],
-        serde_json::json!(["claude-sonnet-5-5"]),
+        serde_json::json!(["claude-sonnet-5-5#high"]),
         "{debt}"
     );
     let status = json_stdout(repo.arc(&repo.root).args(["status", "pair", "--json"]));
@@ -472,6 +472,72 @@ fn an_assessment_covering_one_of_two_implementers_leaves_the_debt_open() {
     assert!(output.contains("debt discharged"), "{output}");
     let status = json_stdout(repo.arc(&repo.root).args(["status", "pair", "--json"]));
     assert_eq!(status["debt_outstanding"], false, "{status}");
+}
+
+/// An eligible assessment of `fixture-other` against one author, given as
+/// routing writes it: its identities and the effort it was assessed at.
+fn assessment_against(
+    repo: &Repo,
+    name: &str,
+    identities: &[&str],
+    effort: Option<&str>,
+) -> PathBuf {
+    let path = eligible_assessment(repo, name, &[identities]);
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    value["authors"][0]["effort"] = serde_json::json!(effort);
+    fs::write(&path, value.to_string()).unwrap();
+    path
+}
+
+/// Claim: an assessment's author entry covers a recorded author only at the
+/// same effort, or when it names none. Rejects: an assessment computed
+/// against `gpt-6-astra#low`, whose floor is lower, covering a
+/// `gpt-6-astra#high` author and discharging its debt.
+#[test]
+fn an_assessment_against_a_lower_effort_author_leaves_the_debt_open() {
+    let repo = repo_forbidding_self_approval();
+    owed_change(&repo, "efforts", &[&["codex:gpt-6-astra#high"]]);
+
+    let low = assessment_against(&repo, "low.json", &["gpt-6-astra"], Some("low"));
+    let output = audit_assessed(&repo, "efforts", &low);
+    assert!(output.contains("still owes"), "{output}");
+    let debt = debt_of(&repo, "efforts");
+    assert!(debt["discharged_by"].is_null(), "{debt}");
+    let later = &debt["ineligible"]["later_reads"][0];
+    assert_eq!(later["binding"], "authors-uncovered", "{debt}");
+    assert_eq!(
+        later["uncovered_authors"],
+        serde_json::json!(["gpt-6-astra#high"]),
+        "{debt}"
+    );
+
+    let high = assessment_against(&repo, "high.json", &["gpt-6-astra"], Some("high"));
+    let output = audit_assessed(&repo, "efforts", &high);
+    assert!(output.contains("debt discharged"), "{output}");
+}
+
+/// Claim: an author recorded without an effort is covered only by an
+/// assessment that names none either, which routing reads at the model's
+/// highest floor. Rejects: an assessment at one effort covering an author
+/// whose effort nobody recorded.
+#[test]
+fn an_author_without_an_effort_is_covered_only_by_an_effortless_entry() {
+    let repo = repo_forbidding_self_approval();
+    owed_change(&repo, "bare", &[&["codex:gpt-6-astra"]]);
+
+    let low = assessment_against(&repo, "bare-low.json", &["gpt-6-astra"], Some("low"));
+    let output = audit_assessed(&repo, "bare", &low);
+    assert!(output.contains("still owes"), "{output}");
+    let later = &debt_of(&repo, "bare")["ineligible"]["later_reads"][0];
+    assert_eq!(
+        later["uncovered_authors"],
+        serde_json::json!(["gpt-6-astra"])
+    );
+
+    let any = assessment_against(&repo, "bare-any.json", &["gpt-6-astra"], None);
+    let output = audit_assessed(&repo, "bare", &any);
+    assert!(output.contains("debt discharged"), "{output}");
 }
 
 #[test]

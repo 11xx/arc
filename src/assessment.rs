@@ -2,9 +2,10 @@
 //!
 //! Arc validates the shape and keeps the answer. It never computes a family,
 //! a tier or a floor, and it never stores the numbers the assessment carries:
-//! what survives is the independence verdict, the qualifier names, the route
+//! what survives is the independence verdict, the findings and clearance
+//! answers where the schema carries them, the qualifier names, the route
 //! version, whether the reviewer it describes is the auditor that recorded
-//! it, and which models of a range its authors leave out.
+//! it, and which author coordinates of a range its authors leave out.
 
 use crate::model::{
     model_effort, validate_route_version, AuditorBinding, Independence, ReviewQualifier,
@@ -13,27 +14,55 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::path::Path;
 
-/// The schema this reader accepts.
+/// The schema whose answer is `independence` alone.
 pub const SCHEMA: &str = "agent-routing-assessment/1";
+/// The schema that adds `findings` and `clears` beside `independence`, which
+/// keeps its `/1` meaning.
+pub const SCHEMA_V2: &str = "agent-routing-assessment/2";
 
 /// What arc keeps of one assessment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Assessment {
     pub independence: Independence,
-    /// Empty exactly when the reviewer is eligible.
+    /// Whether the reviewer may record findings against the authors; absent
+    /// on a `/1` assessment.
+    pub findings: Option<Independence>,
+    /// Whether the reviewer's read clears the authors' work; absent on a
+    /// `/1` assessment.
+    pub clears: Option<bool>,
+    /// Empty when the reviewer is eligible and, on `/2`, clears.
     pub qualifiers: Vec<ReviewQualifier>,
     pub route_version: Option<String>,
     reviewer: Reviewer,
-    /// Every model string routing accepts for each author it assessed against.
-    author_identities: Vec<String>,
+    authors: Vec<Author>,
 }
 
 /// An author an assessment was made against, as far as arc compares it with
-/// the models a range names. Never stored.
+/// the coordinates a range names. Never stored.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 struct Author {
+    /// Every model string routing accepts for the author.
     #[serde(default)]
     identities: Vec<String>,
+    /// The effort the author was assessed at. Absent, routing read the
+    /// model's highest floor, which covers the model at any effort.
+    #[serde(default)]
+    effort: Option<String>,
+}
+
+impl Author {
+    /// Whether this entry answers for `coordinate`, a `model[#effort]`: the
+    /// model is among its identities, and its effort is the coordinate's or
+    /// unnamed. A coordinate without an effort is covered only by an entry
+    /// that names none.
+    fn covers(&self, coordinate: &str) -> bool {
+        let (model, _) = coordinate.split_once('#').unwrap_or((coordinate, ""));
+        self.identities.iter().any(|identity| identity == model)
+            && match self.effort.as_deref() {
+                None => true,
+                Some(assessed) => model_effort(coordinate) == Some(assessed),
+            }
+    }
 }
 
 /// The reviewer an assessment describes, as far as arc compares it with an
@@ -48,18 +77,15 @@ struct Reviewer {
 }
 
 impl Assessment {
-    /// The `models` that no author of this assessment answers to, in the order
-    /// given and without repeats.
-    pub fn uncovered<'a>(&self, models: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    /// The `model[#effort]` coordinates that no author of this assessment
+    /// answers for, in the order given and without repeats.
+    pub fn uncovered<'a>(&self, coordinates: impl IntoIterator<Item = &'a str>) -> Vec<String> {
         let mut uncovered = Vec::<String>::new();
-        for model in models {
-            if !self
-                .author_identities
-                .iter()
-                .any(|identity| identity == model)
-                && !uncovered.iter().any(|seen| seen == model)
+        for coordinate in coordinates {
+            if !self.authors.iter().any(|author| author.covers(coordinate))
+                && !uncovered.iter().any(|seen| seen == coordinate)
             {
-                uncovered.push(model.to_string());
+                uncovered.push(coordinate.to_string());
             }
         }
         uncovered
@@ -99,6 +125,10 @@ struct Raw {
     schema: String,
     independence: Independence,
     #[serde(default)]
+    findings: Option<Independence>,
+    #[serde(default)]
+    clears: Option<bool>,
+    #[serde(default)]
     qualifiers: Vec<String>,
     #[serde(default)]
     route_version: Option<String>,
@@ -116,9 +146,11 @@ pub fn read(path: &Path) -> Result<Assessment> {
 
 pub fn parse(text: &str) -> Result<Assessment> {
     let raw: Raw = serde_json::from_str(text).context("not an agent-routing assessment")?;
-    if raw.schema != SCHEMA {
-        bail!("schema {:?} is not {SCHEMA}", raw.schema);
-    }
+    let second = match raw.schema.as_str() {
+        SCHEMA => false,
+        SCHEMA_V2 => true,
+        other => bail!("schema {other:?} is neither {SCHEMA} nor {SCHEMA_V2}"),
+    };
     let mut qualifiers = Vec::new();
     for name in &raw.qualifiers {
         let qualifier =
@@ -131,29 +163,77 @@ pub fn parse(text: &str) -> Result<Assessment> {
         qualifiers.push(qualifier);
     }
     let qualifiers = ReviewQualifier::normalized(qualifiers);
-    match (raw.independence, qualifiers.is_empty()) {
-        (Independence::Eligible, false) => {
-            bail!("an eligible assessment names no qualifiers, but it lists some")
+    let (findings, clears) = if second {
+        let findings = raw
+            .findings
+            .context("an agent-routing-assessment/2 names findings: eligible or ineligible")?;
+        let clears = raw
+            .clears
+            .context("an agent-routing-assessment/2 names clears: true or false")?;
+        check_second(
+            raw.independence,
+            findings,
+            clears,
+            &qualifiers,
+            &raw.reviewer,
+        )?;
+        (Some(findings), Some(clears))
+    } else {
+        if raw.findings.is_some() || raw.clears.is_some() {
+            bail!("findings and clears belong to {SCHEMA_V2}, not {SCHEMA}");
         }
-        (Independence::Ineligible, true) => {
-            bail!("an ineligible assessment must name at least one qualifier")
+        match (raw.independence, qualifiers.is_empty()) {
+            (Independence::Eligible, false) => {
+                bail!("an eligible assessment names no qualifiers, but it lists some")
+            }
+            (Independence::Ineligible, true) => {
+                bail!("an ineligible assessment must name at least one qualifier")
+            }
+            _ => {}
         }
-        _ => {}
-    }
+        (None, None)
+    };
     if let Some(version) = &raw.route_version {
         validate_route_version(version)?;
     }
     Ok(Assessment {
         independence: raw.independence,
+        findings,
+        clears,
         qualifiers,
         route_version: raw.route_version,
         reviewer: raw.reviewer,
-        author_identities: raw
-            .authors
-            .into_iter()
-            .flat_map(|author| author.identities)
-            .collect(),
+        authors: raw.authors,
     })
+}
+
+/// The answers a `/2` assessment may give together. A read that clears is
+/// eligible on every answer, names no qualifier, and names the effort its
+/// reviewer was assessed at; every refusal names why.
+fn check_second(
+    independence: Independence,
+    findings: Independence,
+    clears: bool,
+    qualifiers: &[ReviewQualifier],
+    reviewer: &Reviewer,
+) -> Result<()> {
+    if clears {
+        if independence == Independence::Ineligible || findings == Independence::Ineligible {
+            bail!("an assessment that clears is eligible for independence and findings");
+        }
+        if !qualifiers.is_empty() {
+            bail!("an assessment that clears names no qualifiers, but it lists some");
+        }
+        if reviewer.effort.is_none() {
+            bail!("an assessment that clears names the effort its reviewer was assessed at");
+        }
+    } else if qualifiers.is_empty() {
+        bail!("an assessment that does not clear must name at least one qualifier");
+    }
+    if independence == Independence::Ineligible && qualifiers.is_empty() {
+        bail!("an ineligible assessment must name at least one qualifier");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -219,6 +299,78 @@ mod tests {
             bound_to("[]", "null").bind(None),
             AuditorBinding::IdentitiesUnstated
         );
+    }
+
+    fn second(independence: &str, findings: &str, clears: bool, qualifiers: &str) -> String {
+        format!(
+            r#"{{"schema":"agent-routing-assessment/2","independence":"{independence}",
+            "findings":"{findings}","clears":{clears},"qualifiers":{qualifiers},
+            "reviewer":{{"identities":["m"],"effort":"high"}},"authors":[]}}"#
+        )
+    }
+
+    /// Claim: `/2` keeps `independence` with its `/1` meaning beside
+    /// `findings` and `clears`, and `/1` leaves both absent. Rejects a reader
+    /// that drops the clearance answer or invents one for `/1`.
+    #[test]
+    fn the_second_schema_keeps_findings_and_clears_beside_independence() {
+        let findings_only = parse(&second(
+            "eligible",
+            "eligible",
+            false,
+            r#"["below-clearance"]"#,
+        ))
+        .unwrap();
+        assert_eq!(findings_only.independence, Independence::Eligible);
+        assert_eq!(findings_only.findings, Some(Independence::Eligible));
+        assert_eq!(findings_only.clears, Some(false));
+        assert_eq!(findings_only.qualifiers, [ReviewQualifier::BelowClearance]);
+        let clearing = parse(&second("eligible", "eligible", true, "[]")).unwrap();
+        assert_eq!(clearing.clears, Some(true));
+        let first = parse(&text("eligible", "[]")).unwrap();
+        assert_eq!((first.findings, first.clears), (None, None));
+    }
+
+    /// Claim: a `/2` answer that contradicts itself is refused, never read as
+    /// clearing. Rejects a clearing read that is ineligible, qualified, or
+    /// names no reviewer effort, and a refusal that says no reason.
+    #[test]
+    fn the_second_schema_refuses_contradictory_answers() {
+        for refused in [
+            second("ineligible", "eligible", true, r#"["same-family"]"#),
+            second("eligible", "ineligible", true, "[]"),
+            second("eligible", "eligible", true, r#"["below-clearance"]"#),
+            second("eligible", "eligible", false, "[]"),
+            second("eligible", "eligible", true, "[]").replace(r#","effort":"high""#, ""),
+            second("eligible", "eligible", true, "[]").replace(r#""clears":true,"#, ""),
+            second("eligible", "eligible", true, "[]").replace(r#""findings":"eligible","#, ""),
+            text("eligible", "[]").replace(r#""qualifiers""#, r#""clears":true,"qualifiers""#),
+        ] {
+            assert!(parse(&refused).is_err(), "{refused}");
+        }
+    }
+
+    fn against(identities: &str, effort: &str) -> Assessment {
+        parse(&text("eligible", "[]").replace(
+            r#""authors":[{"author_floor":3}]"#,
+            &format!(r#""authors":[{{"identities":{identities},"effort":{effort}}}]"#),
+        ))
+        .unwrap()
+    }
+
+    /// Claim: an author entry covers a coordinate at its own effort, or at
+    /// any effort when it names none. Rejects coverage by model name alone.
+    #[test]
+    fn an_author_entry_covers_its_model_at_its_effort() {
+        let low = against(r#"["gpt-6-astra"]"#, r#""low""#);
+        assert!(low.uncovered(["gpt-6-astra#low"]).is_empty());
+        assert_eq!(low.uncovered(["gpt-6-astra#high"]), ["gpt-6-astra#high"]);
+        assert_eq!(low.uncovered(["gpt-6-astra"]), ["gpt-6-astra"]);
+        let any = against(r#"["gpt-6-astra"]"#, "null");
+        assert!(any
+            .uncovered(["gpt-6-astra#high", "gpt-6-astra"])
+            .is_empty());
+        assert_eq!(any.uncovered(["other#high"]), ["other#high"]);
     }
 
     #[test]

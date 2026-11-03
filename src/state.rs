@@ -6130,6 +6130,8 @@ mod tests {
     fn an_ineligible_assessment_discharges_no_kind_of_debt() {
         let ineligible = AuditAssessment {
             independence: Independence::Ineligible,
+            findings: None,
+            clears: None,
             qualifiers: vec![ReviewQualifier::SameModel, ReviewQualifier::SameFamily],
             route_version: None,
             binding: Some(AuditorBinding::Bound),
