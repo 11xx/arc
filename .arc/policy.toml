@@ -60,6 +60,12 @@ paths = [
   # a second copy of the ledger and journal. A defect deletes recorded state or
   # leaves a duplicate of it that reads as the original.
   "src/commands/sandbox.rs",
+  # Slots create, switch, detach and release retained checkouts, delete merged
+  # branches, and run every gate in a slot under a holder whose report becomes
+  # the gate's exit status. A defect takes another change's checkout or
+  # records a gate result its command never produced.
+  "src/slots.rs",
+  "src/commands/slots.rs",
   # Integrate and merge: the only path that writes to a shared branch.
   "src/gitio.rs",
   # Batched answers `gitio` takes before running Git itself: ancestry,
