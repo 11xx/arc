@@ -9,7 +9,7 @@ use crate::integration::{
     self, Decision, IntegrationFacts, IntegrationPlan, Refusal, TargetCheckout,
 };
 use crate::operation_println as println;
-use crate::process_group::{join_before_deadline, kill_process_group};
+use crate::process_group::{join_before_deadline, OwnedGroup};
 use std::collections::BTreeMap;
 use std::os::unix::process::CommandExt;
 use std::process::{ExitStatus, Stdio};
@@ -2505,8 +2505,9 @@ pub(super) fn run_gate(
                 .context("gate timeout is too large")
         })
         .transpose()?;
-    let mut child = command.spawn().context("failed to run gate command")?;
+    let mut child = OwnedGroup::spawn(&mut command).context("failed to run gate command")?;
     let stdout = child
+        .child()
         .stdout
         .take()
         .context("gate output pipe unavailable")?;
@@ -2518,12 +2519,12 @@ pub(super) fn run_gate(
         })
     });
 
-    let mut status = None;
+    let mut exited = false;
     let mut reader_done = false;
     let timed_out = loop {
-        if status.is_none() {
-            status = child
-                .try_wait()
+        if !exited {
+            exited = child
+                .leader_exited()
                 .context("failed to wait for gate command")?;
         }
         if !reader_done {
@@ -2532,30 +2533,23 @@ pub(super) fn run_gate(
                 Err(TryRecvError::Empty) => false,
             };
         }
-        if status.is_some() && reader_done {
+        if exited && reader_done {
             break false;
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            kill_process_group(child.id())
-                .context("failed to kill timed-out gate process group")?;
-            if status.is_none() {
-                status = Some(
-                    child
-                        .wait()
-                        .context("failed to reap timed-out gate command")?,
-                );
-            }
             break true;
         }
         thread::sleep(Duration::from_millis(10));
     };
+    let status = child
+        .stop()
+        .context("failed to stop the gate's process group")?;
 
     let (output, output_artifact) = join_before_deadline(reader, deadline, "gate output reader")?
         .transpose()
         .context("failed to read gate output")?
         .map(|(output, artifact)| (output, Some(artifact)))
         .unwrap_or_default();
-    let status = status.context("gate leader exited without an observed status")?;
     let output_tail = (!output.is_empty()).then(|| String::from_utf8_lossy(&output).into_owned());
     Ok(GateRun {
         status,
@@ -5425,5 +5419,60 @@ mod pipe_deadline_tests {
         assert!(run.status.success());
         assert!(run.timed_out);
         assert!(run.output_artifact.is_none());
+    }
+
+    /// A gate that passes must not leave a descendant running: arc stops the
+    /// whole group it started before it returns the result. Rejects returning
+    /// as soon as the shell exits and its pipe closes while a redirected
+    /// background process lives on.
+    #[test]
+    fn a_passing_gate_leaves_no_descendant_running() {
+        use crate::process_group::test_support::{ends_within, kill, read_pid};
+        let cwd = tempfile::tempdir().unwrap();
+        let run = run_gate(
+            "sleep 30 >/dev/null 2>&1 & echo $! > descendant.pid",
+            cwd.path(),
+            Some(5),
+            cwd.path(),
+            "fixture",
+        )
+        .unwrap();
+        let descendant = read_pid(cwd.path(), "descendant.pid");
+        let ended = ends_within(descendant, Duration::from_secs(2));
+        if !ended {
+            kill(descendant);
+        }
+        assert!(run.status.success());
+        assert!(!run.timed_out);
+        assert!(ended, "gate descendant {descendant} outlived the gate");
+    }
+
+    /// The gate's group ID stays reserved by its unreaped leader until arc
+    /// has signalled the group. Rejects reaping the leader as soon as it
+    /// exits: with the group's only other member escaped into its own
+    /// session, the reaped ID is free for reuse, and the deadline's kill
+    /// would reach whatever process group next takes that number.
+    #[test]
+    fn the_gate_leader_stays_reserved_until_its_group_is_stopped() {
+        let cwd = tempfile::tempdir().unwrap();
+        let path = cwd.path().to_owned();
+        let gate = thread::spawn(move || {
+            run_gate(
+                "echo $$ > leader.pid; setsid sh -c 'echo $$ > escaped.pid; exec sleep 6' &",
+                &path,
+                Some(3),
+                &path,
+                "fixture",
+            )
+        });
+        let observation = crate::process_group::test_support::LeaderObservation::new(cwd.path());
+        let reserved = observation.reserved_after_exit();
+        let run = gate.join().unwrap().unwrap();
+        observation.kill_escaped();
+        assert!(
+            reserved,
+            "gate leader was reaped while its group could still be signalled"
+        );
+        assert!(run.timed_out);
     }
 }

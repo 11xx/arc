@@ -4426,6 +4426,9 @@ FILES
   holding a pipe after the leader exits still times out; arc kills the
   process group and returns without waiting on an escaped descendant. An
   unfinished output reader supplies no tail or environment identity.
+  Whether a gate or probe finishes or overruns, arc kills its process group
+  before recording the result, so a background process it left behind does
+  not outlive it.
 
   Every patchset's resolved head is pinned by `refs/arc/keep/<change>/<patchset>`
   so Git's garbage collection cannot take it. Pins follow recorded rewrites

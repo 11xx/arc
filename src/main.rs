@@ -1916,7 +1916,8 @@ enum Cmd {
     /// Baselines run in scratch checkouts. Declared timeouts also bound output-pipe cleanup
     /// after the shell exits. Arc kills the process group and does not wait for escaped
     /// descendants; unfinished readers supply no output tail, diagnostic artifact or
-    /// environment identity. Executed gates capture combined stdout and stderr as private
+    /// environment identity. A gate's process group is killed when it ends, so nothing
+    /// left in it outlives the run. Executed gates capture combined stdout and stderr as private
     /// local artifacts: the first 16 MiB per run, retaining 16 completed captures. Events
     /// and status carry the producing store, relative path, retained and observed SHA-256
     /// digests and sizes, and truncation or capture errors. Exports carry metadata only;
