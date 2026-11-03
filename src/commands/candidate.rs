@@ -1062,10 +1062,7 @@ fn render(document: &CandidateDocument) {
             render_received(received);
         }
         for evaluation in &candidate.evaluations {
-            let result = match evaluation.result {
-                VerifyResult::Pass => "pass",
-                _ => "fail",
-            };
+            let result = evaluation.result.as_str();
             let environment = evaluation
                 .environment
                 .as_deref()

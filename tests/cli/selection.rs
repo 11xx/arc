@@ -865,3 +865,24 @@ fn reused_supplier_retirement_refuses_when_content_ancestry_roots_it() {
         );
     }
 }
+
+/// A candidate gate whose command exits 75 was not admitted: nothing ran, so
+/// the evaluation records `not-admitted` and reports it as unrun rather than
+/// as a failing gate.
+#[test]
+fn a_candidate_gate_exiting_75_records_not_admitted() {
+    let f = fixture(None, &[], false);
+    let repo = &f.repo;
+    declare(repo, &GATES.replace("test -f answer.txt", "exit 75"), None);
+    let out = repo
+        .arc(&repo.root)
+        .args(["candidate", "verify", "alice"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{text}");
+    assert!(text.contains("gate build: not-admitted"), "{text}");
+    let recorded = repository_events(repo, "candidate-verified");
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0]["result"], "not-admitted");
+}

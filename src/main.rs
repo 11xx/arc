@@ -4158,7 +4158,10 @@ enum CandidateCmd {
     /// Diagnostic capture follows verify: private combined stdout and stderr,
     /// 16 MiB per file and 16 completed files, with digests, sizes and explicit
     /// truncation or capture errors in the event. Exports carry metadata only.
-    /// Exits 0 when every gate run passes and 1 otherwise. Refused:
+    /// A gate command that exits 75 records `not-admitted`, as a change gate
+    /// does: nothing ran, so it is no passing evaluation and is reported as
+    /// unrun rather than failed. Exits 0 when every gate run passes and 1
+    /// otherwise. Refused:
     /// `unknown-candidate`; `unknown-gate` for a --gate the change is not
     /// required to pass; `target-unreadable` when the target cannot be read
     Verify {
