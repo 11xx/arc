@@ -1740,7 +1740,7 @@ fn write_local_event(store: &Store, event: &mut ReplicaEvent) -> Result<()> {
     let mut bytes = serde_json::to_vec_pretty(event)?;
     bytes.push(b'\n');
     write_exclusive(&path, &bytes)
-        .with_context(|| format!("replica event {} already exists", event.event_id))
+        .with_context(|| format!("cannot append replica event {}", event.event_id))
 }
 
 fn create_private_dir_all(path: &Path) -> Result<()> {

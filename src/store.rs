@@ -898,7 +898,7 @@ impl Store {
         let mut body = serde_json::to_vec_pretty(event)?;
         body.push(b'\n');
         write_exclusive(&path, &body)
-            .with_context(|| format!("event {} already exists", event.event_id))
+            .with_context(|| format!("cannot append event {}", event.event_id))
     }
 
     pub(crate) fn ensure_repository_event_allowed(&self, event: &Event) -> Result<()> {
@@ -1806,7 +1806,7 @@ impl Store {
         let mut body = serde_json::to_vec_pretty(event)?;
         body.push(b'\n');
         write_exclusive(&path, &body)
-            .with_context(|| format!("event {} already exists", event.event_id))
+            .with_context(|| format!("cannot append event {}", event.event_id))
     }
 
     /// Check the exact event after an append error, including a directory
@@ -3005,8 +3005,7 @@ impl Store {
         create_private_dir_all(&dir)?;
         let path = dir.join(format!("{event_id}.json"));
         self.advance_event_id(event_id)?;
-        write_exclusive(&path, bytes)
-            .with_context(|| format!("event {event_id} already exists during import"))
+        write_exclusive(&path, bytes).with_context(|| format!("cannot import event {event_id}"))
     }
 }
 
@@ -3146,8 +3145,13 @@ fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<()> {
         // A same-directory hard link atomically publishes the fully written
         // inode while preserving create-new collision behavior. Temporary
         // names do not end in .json, so readers ignore a file left by a crash.
-        fs::hard_link(&temporary, path)
-            .with_context(|| format!("cannot create {}", path.display()))?;
+        fs::hard_link(&temporary, path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                anyhow::anyhow!("{} already exists", path.display())
+            } else {
+                anyhow::Error::new(error).context(format!("cannot create {}", path.display()))
+            }
+        })?;
         let dir = path
             .parent()
             .context("exclusive-write path has no parent directory")?;
@@ -3434,6 +3438,46 @@ mod tests {
         let mut different = event.clone();
         different.actor = "other".into();
         assert_eq!(store.publication_after_failed_append(&different), "unknown");
+    }
+
+    /// An append error names its cause: a failed directory sync never reads
+    /// as a colliding event, and a collision says so.
+    #[test]
+    fn an_append_error_names_its_cause() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = StoreConfig {
+            schema_version: 1,
+            repository_id: "repo".into(),
+            created_at: chrono::Utc::now(),
+        };
+        fs::write(
+            dir.path().join("config.json"),
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        let store = test_store(dir.path());
+        let event: Event = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "event_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "repository_id": "repo",
+            "change_id": "change",
+            "actor": "tester",
+            "created_at": chrono::Utc::now(),
+            "event_type": "candidate-retired",
+            "candidate_id": "candidate",
+        }))
+        .unwrap();
+        FAIL_DIRECTORY_SYNC.set(true);
+        let unsynced = format!("{:#}", store.append_event(&event).unwrap_err());
+        FAIL_DIRECTORY_SYNC.set(false);
+        assert!(
+            !unsynced.contains("already exists"),
+            "a sync failure read as a collision: {unsynced}"
+        );
+        assert!(unsynced.contains("syncing"), "{unsynced}");
+
+        let collided = format!("{:#}", store.append_event(&event).unwrap_err());
+        assert!(collided.contains("already exists"), "{collided}");
     }
 
     #[test]
