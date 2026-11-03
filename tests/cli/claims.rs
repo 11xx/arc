@@ -1108,7 +1108,13 @@ fn transition_lock_serializes_hold_against_integrate() {
         .success();
 }
 
+/// Claim: integrations of one target run one at a time behind its target
+/// lock: one waits on the held target lock, the other waits behind it, and
+/// both integrate once the lock comes free. Rejects an integration that
+/// merges without the target lock, and one that gives up on a sibling still
+/// inside its own target-lock wait.
 #[test]
+#[cfg(debug_assertions)]
 fn concurrent_integrations_serialize_on_the_target_branch_lock() {
     let repo = Repo::new();
     let (_, first_worktree, _) = change_with_patchset(&repo, "target-race-a");
@@ -1123,19 +1129,23 @@ fn concurrent_integrations_serialize_on_the_target_branch_lock() {
         .success();
 
     let target_lock = hold_target_lock(&repo, "master");
-    let mut first = spawn_arc_keeping_stderr(
+    let mut first = spawn_arc_paused_on_target_lock(
         &repo,
         &repo.root,
         &["integrate", "--shape", "no-ff", "target-race-a"],
-        "integrator-a",
+        "master",
     );
-    let mut second = spawn_arc_keeping_stderr(
+    release_lock_wait(&mut first);
+    // The first integration holds the replica-state lock while it waits on
+    // the target, so the second queues behind it there.
+    let mut second = spawn_arc_paused_on_lock(
         &repo,
         &repo.root,
         &["integrate", "--shape", "no-ff", "target-race-b"],
-        "integrator-b",
+        "replica-state",
+        &[],
     );
-    assert_waiting_on_transition_lock(&mut [&mut first, &mut second]);
+    release_lock_wait(&mut second);
     target_lock.unlock().unwrap();
 
     for (slug, child) in [
