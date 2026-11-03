@@ -2549,6 +2549,10 @@ pub struct NormalizedGate {
     pub profiles: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
+    /// Absent for a tree-bound gate, so a basis recorded before gates could
+    /// bind to a commit reads as the tree-bound basis it was.
+    #[serde(default, skip_serializing_if = "crate::gates::Binding::is_tree")]
+    pub binds: crate::gates::Binding,
     #[serde(default)]
     pub declared_by: Vec<String>,
 }

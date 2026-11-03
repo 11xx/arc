@@ -4623,6 +4623,7 @@ pub(super) fn normalized_declarations(
                     selector: gate.selector.clone(),
                     profiles: gate.profiles.clone(),
                     timeout: gate.timeout,
+                    binds: gate.binds,
                     declared_by: gate.declared_by.clone(),
                 },
             )

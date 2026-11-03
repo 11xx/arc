@@ -1331,7 +1331,9 @@ RUN A CHANGE
   names what moved since — the approved head, the target revision, the gate
   or policy declarations, the approval, or provisional routing and prerequisites
   — in one line beside a refusal, or
-  as a warning when the integration still proceeds.
+  as a warning when the integration still proceeds. A gate's declaration in
+  the basis carries `binds: "commit"` when it binds to a commit and omits the
+  key when it binds to a tree, so a binding changed since the plan is a move.
 
   When no checkout holds the target, `integrate` takes over the change's own
   checkout if it still holds the change branch, checks the target out there,

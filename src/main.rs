@@ -2577,8 +2577,9 @@ enum Cmd {
         /// Compare the fresh decision with a plan an earlier
         /// `--dry-run --json` printed. The fresh readiness evaluation alone
         /// decides; the file never changes the decision. When the approved
-        /// head, the target revision, the gate or policy declarations, or the
-        /// approval moved since, a refusal adds one line naming what moved.
+        /// head, the target revision, the gate or policy declarations
+        /// (a gate's `binds` among them), or the approval moved since, a
+        /// refusal adds one line naming what moved.
         /// A permitted integration proceeds with a warning naming what moved.
         /// Provisional plans also compare recipient and prerequisite references.
         /// An unchanged basis adds nothing. One change only

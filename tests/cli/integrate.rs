@@ -1573,6 +1573,66 @@ fn expected_basis_names_what_moved() {
         .stderr(predicates::str::contains("the expected basis describes"));
 }
 
+/// Claim: a gate's `binds` is part of the declaration basis a dry-run plan
+/// records, so `--expect-basis` names a binding changed since the plan, and
+/// the plan carries `binds` only for a commit-bound gate.
+/// Rejects: a basis that leaves `binds` out, which lets the binding change
+/// between the dry run and the integration without anything naming it.
+#[test]
+fn expected_basis_names_a_changed_gate_binding() {
+    let repo = repo_with_gates();
+    let operator = |binds: &str| {
+        repo.declare_gates_locally(&format!(
+            "[gates.smoke]\ncommand = \"test -f README.md\"\n{binds}"
+        ))
+    };
+    operator("");
+    approved_change(&repo, "rebinds", "rebinds.txt", "rebinds\n");
+    let plan_path = repo.root.join("../rebinds-plan.json");
+    let plan_text = stdout(repo.arc(&repo.root).args([
+        "integrate",
+        "--shape",
+        "no-ff",
+        "rebinds",
+        "--dry-run",
+        "--json",
+    ]));
+    let plan: serde_json::Value = serde_json::from_str(&plan_text).unwrap();
+    assert_eq!(plan["schema"], "arc-integration-plan/1");
+    assert!(
+        plan["authorization"]["gates"]["smoke"]
+            .get("binds")
+            .is_none(),
+        "a tree-bound gate carries no binding: {plan}"
+    );
+    fs::write(&plan_path, plan_text).unwrap();
+
+    operator("binds = \"commit\"\n");
+    let rebound: serde_json::Value = json_stdout(repo.arc(&repo.root).args([
+        "integrate",
+        "--shape",
+        "no-ff",
+        "rebinds",
+        "--dry-run",
+        "--json",
+    ]));
+    let landed = repo
+        .arc(&repo.root)
+        .args(["integrate", "--shape", "no-ff", "rebinds", "--expect-basis"])
+        .arg(&plan_path)
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&landed.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("warning: the gate declarations you checked changed: smoke"),
+        "a changed binding went unnamed: {stderr}"
+    );
+    assert_eq!(
+        rebound["authorization"]["gates"]["smoke"]["binds"], "commit",
+        "{rebound}"
+    );
+}
+
 /// A change whose only reviewer left a comment-only verdict: green, and
 /// refused for want of an approval.
 fn comment_only_change(repo: &Repo, slug: &str) -> PathBuf {

@@ -11,7 +11,7 @@ use crate::process_group::{
     join_before_deadline, kill_process_group, read_tail, OwnedGroup, STDERR_TAIL_BYTES,
 };
 use anyhow::{bail, Context, Result};
-use serde::{de::Error as _, Deserialize, Deserializer};
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -73,7 +73,7 @@ pub struct Gate {
 }
 
 /// What a gate's pass answers for.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Binding {
     /// The tree it ran against, whichever commit holds that tree.
@@ -82,6 +82,12 @@ pub enum Binding {
     /// The commit it ran on, for a command that reads commit messages or
     /// history, which a commit with the same tree need not share.
     Commit,
+}
+
+impl Binding {
+    pub fn is_tree(&self) -> bool {
+        *self == Binding::Tree
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -225,7 +225,7 @@ pub fn authorization_basis(basis: &crate::model::AuthorizationBasis) -> String {
     for (name, gate) in &basis.gates {
         let _ = writeln!(
             out,
-            "    gate declaration {name}: {}{}{} (declared by {})",
+            "    gate declaration {name}: {}{}{}{} (declared by {})",
             gate.command,
             gate.timeout
                 .map(|timeout| format!(" (timeout {timeout}s)"))
@@ -234,6 +234,11 @@ pub fn authorization_basis(basis: &crate::model::AuthorizationBasis) -> String {
                 String::new()
             } else {
                 format!(" (profiles: {})", gate.profiles.join(", "))
+            },
+            if gate.binds.is_tree() {
+                ""
+            } else {
+                " (binds commit)"
             },
             source_list(&gate.declared_by)
         );

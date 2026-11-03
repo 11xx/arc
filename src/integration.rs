@@ -825,6 +825,7 @@ mod tests {
                 command: "make build".to_string(),
                 profiles: Vec::new(),
                 timeout: None,
+                binds: crate::gates::Binding::Tree,
                 declared_by: vec!["project".to_string()],
             },
         )])
@@ -1151,6 +1152,7 @@ mod tests {
                 command: "make lint".to_string(),
                 profiles: Vec::new(),
                 timeout: None,
+                binds: crate::gates::Binding::Tree,
                 declared_by: Vec::new(),
             },
         );
@@ -1176,6 +1178,28 @@ mod tests {
                 },
                 Moved::Policy,
             ]
+        );
+    }
+
+    /// Claim: a gate whose binding alone changed since the plan is named as
+    /// moved. Rejects a comparison that reads every gate as tree-bound.
+    #[test]
+    fn a_changed_gate_binding_is_named() {
+        let mut rebound = gates();
+        rebound.get_mut("build").unwrap().binds = crate::gates::Binding::Commit;
+        let facts = IntegrationFacts {
+            declarations: Ok(Declarations {
+                gates: rebound,
+                policy: policy(),
+            }),
+            ..ready()
+        };
+        let outcome = decide(facts, Some(&prior()));
+        assert_eq!(
+            outcome.moved,
+            vec![Moved::Gates {
+                changed: vec!["build".to_string()],
+            }]
         );
     }
 
