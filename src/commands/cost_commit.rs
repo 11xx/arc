@@ -11,7 +11,9 @@
 //! the truth, and a refresh replaces the note with a newer read. arc never
 //! pushes the notes ref or adds it to a refspec.
 
-use super::cost::{emit, read_cost, report_text, write_totals, Acting, CostView, TAPES_READER};
+use super::cost::{
+    emit, read_cost, report_text, write_totals, Acting, Backends, CostView, TAPES_READER,
+};
 use super::*;
 use crate::model::portable_cost_metadata;
 use crate::state::ChangeState;
@@ -516,7 +518,7 @@ fn commit_view(ctx: &Ctx, revision: &str, prices: Option<&std::path::Path>) -> R
     let changes = Changes::read(ctx)?;
     let mut view = match locate(ctx, &changes, &commit)? {
         Some(located) => {
-            let cost = read_cost(ctx, &located.state.change_id, prices)?;
+            let cost = read_cost(ctx, &located.state.change_id, prices, &Backends::default())?;
             view_of(ctx, &commit, &located, &cost)?
         }
         None => json!({
@@ -734,9 +736,11 @@ enum Noted {
 }
 
 /// Note each change's commits from one read of its cost view, dropped before
-/// the next change's is read, recording what noting each commit did.
+/// the next change's is read, recording what noting each commit did. Every
+/// change's view is read through the one set of tapes backends.
 fn note_changes<'a>(
     ctx: &Ctx,
+    backends: &Backends,
     by_change: &BTreeMap<&str, Vec<&'a str>>,
     jobs: &BTreeMap<String, (String, bool, bool)>,
     states: &BTreeMap<String, ChangeState>,
@@ -744,7 +748,7 @@ fn note_changes<'a>(
     outcomes: &mut BTreeMap<&'a str, Noted>,
 ) -> Result<()> {
     for (change_id, commits) in by_change {
-        let cost = read_cost(ctx, change_id, None)?;
+        let cost = read_cost(ctx, change_id, None, backends)?;
         let state = &states[*change_id];
         let patchset = patchset_commits(ctx, state);
         for commit in commits {
@@ -849,7 +853,15 @@ pub fn note_cost(ctx: &Ctx, target: Option<&str>, all: bool) -> Result<()> {
         by_change.entry(change_id).or_default().push(commit);
     }
     let mut outcomes = BTreeMap::new();
-    let noting = note_changes(ctx, &by_change, &jobs, &states, held.get(), &mut outcomes);
+    let noting = note_changes(
+        ctx,
+        &Backends::default(),
+        &by_change,
+        &jobs,
+        &states,
+        held.get(),
+        &mut outcomes,
+    );
     // Outcomes are reported in commit order, including those noted before
     // a failure.
     let mut refused = 0usize;

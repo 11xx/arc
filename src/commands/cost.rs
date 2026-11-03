@@ -539,7 +539,7 @@ pub(super) struct CostView {
 /// frame alone.
 pub fn show_cost(ctx: &Ctx, query: &CostQuery, json: bool, detail: bool) -> Result<()> {
     use std::io::Write;
-    let assembled = assemble(ctx, query)?;
+    let assembled = assemble(ctx, query, &Backends::default())?;
     let view = assembled.view();
     let render = Render::new(&assembled, &view);
     let frame = render.frame();
@@ -622,7 +622,7 @@ pub fn export_evidence(
     if let Some(dir) = output_dir {
         evidence::vacant(dir)?;
     }
-    let assembled = assemble(ctx, query)?;
+    let assembled = assemble(ctx, query, &Backends::default())?;
     let producer = format!("arc/{}", env!("CARGO_PKG_VERSION"));
     let written = evidence::render(ctx, &assembled.evidence, &producer, chrono::Utc::now())?;
     let division = evidence::divide(&written.text)?;
@@ -640,20 +640,17 @@ pub fn export_evidence(
     Ok(())
 }
 
-/// Read the cost view of a change or a journal artifact.
+/// Read the cost view of a change or a journal artifact through `backends`,
+/// which a command reading several shares across its reads.
 pub(super) fn read_cost(
     ctx: &Ctx,
     target: &str,
     prices: Option<&std::path::Path>,
+    backends: &Backends,
 ) -> Result<CostView> {
     let mut query = CostQuery::target(target);
     query.prices = prices.map(std::path::Path::to_path_buf);
-    read_query(ctx, &query)
-}
-
-/// Read the cost view of the work a query selects.
-fn read_query(ctx: &Ctx, query: &CostQuery) -> Result<CostView> {
-    assemble(ctx, query)?.into_view()
+    assemble(ctx, &query, backends)?.into_view()
 }
 
 /// What one read of a query holds once its sessions are measured: every
@@ -676,13 +673,12 @@ struct Assembled {
 }
 
 /// Read the ledger and measure every session a query selects.
-fn assemble(ctx: &Ctx, query: &CostQuery) -> Result<Assembled> {
+fn assemble(ctx: &Ctx, query: &CostQuery, backends: &Backends) -> Result<Assembled> {
     let prices = agent_tapes_core::pricing::lookup(query.prices.as_deref())?;
     let store = ctx.store()?;
     let mut read = CostRead::new(&store);
     let events = read.events(Store::REPOSITORY_SCOPE);
-    let backends = std::cell::OnceCell::new();
-    let subjects = Subjects::read(&mut read, &events, &backends);
+    let subjects = Subjects::read(&mut read, &events, backends);
     let mut selection = select_query(ctx, &mut read, query, &events, &subjects)?;
     qualify_ledger(&mut selection, &read.gaps);
     let assigned = assign(ctx, &mut selection, &events);
@@ -698,6 +694,7 @@ fn assemble(ctx: &Ctx, query: &CostQuery) -> Result<Assembled> {
     } = assigned;
     let plans = span_plans(&sessions, &ledger);
     let mut fresh = read_all(
+        backends,
         sessions
             .keys()
             .chain(ledger.participants().map(|(key, _)| key))
@@ -718,7 +715,7 @@ fn assemble(ctx: &Ctx, query: &CostQuery) -> Result<Assembled> {
             .remove(&(harness.to_string(), session.to_string()))
             .unwrap_or_else(|| {
                 read_fresh(
-                    backends.get_or_init(Backends::new),
+                    backends,
                     harness,
                     session,
                     plan_of(harness, session),
@@ -843,6 +840,7 @@ fn assemble(ctx: &Ctx, query: &CostQuery) -> Result<Assembled> {
     let evidence = evidence::collect(&sessions, &ledger, &outside);
     selection.ledger_gaps = read.gaps;
     let mut children = read_all(
+        backends,
         unbound_spawned(&sessions, &bound),
         &BTreeMap::new(),
         query.idle_ms(),
@@ -1323,7 +1321,8 @@ pub fn retain_cost(ctx: &Ctx, target: &str) -> Result<()> {
     let store = ctx.store()?;
     let mut read = CostRead::new(&store);
     let events = read.events(Store::REPOSITORY_SCOPE);
-    let subjects = Subjects::read(&mut read, &events, &std::cell::OnceCell::new());
+    let backends = Backends::default();
+    let subjects = Subjects::read(&mut read, &events, &backends);
     let mut selection = select(ctx, &mut read, target, &events)?;
     qualify_ledger(&mut selection, &read.gaps);
     let assigned = assign(ctx, &mut selection, &events);
@@ -1345,7 +1344,7 @@ pub fn retain_cost(ctx: &Ctx, target: &str) -> Result<()> {
     let (unlocated, keys): (BTreeSet<_>, BTreeSet<_>) = keys
         .into_iter()
         .partition(|key| subjects.unlocated.contains(key));
-    let mut reads = read_all(keys, &plans, DEFAULT_IDLE_MS);
+    let mut reads = read_all(&backends, keys, &plans, DEFAULT_IDLE_MS);
     reads.extend(
         unlocated
             .into_iter()
@@ -2098,6 +2097,7 @@ fn retained_for<'a>(
 /// Read every session's source, several at once: each read is independent,
 /// and a lineage read can scan a whole harness store.
 fn read_all(
+    backends: &Backends,
     keys: BTreeSet<(String, String)>,
     plans: &BTreeMap<(String, String), Plan>,
     idle_ms: u64,
@@ -2110,21 +2110,18 @@ fn read_all(
     let reads = std::sync::Mutex::new(BTreeMap::new());
     std::thread::scope(|scope| {
         for _ in 0..workers.min(keys.len()) {
-            scope.spawn(|| {
-                let backends = Backends::new();
-                loop {
-                    let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let Some((harness, session)) = keys.get(index) else {
-                        break;
-                    };
-                    let empty = Plan::default();
-                    let plan = plans
-                        .get(&(harness.clone(), session.clone()))
-                        .unwrap_or(&empty);
-                    let read = read_fresh(&backends, harness, session, plan, idle_ms);
-                    if let Ok(mut reads) = reads.lock() {
-                        reads.insert((harness.clone(), session.clone()), read);
-                    }
+            scope.spawn(|| loop {
+                let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some((harness, session)) = keys.get(index) else {
+                    break;
+                };
+                let empty = Plan::default();
+                let plan = plans
+                    .get(&(harness.clone(), session.clone()))
+                    .unwrap_or(&empty);
+                let read = read_fresh(backends, harness, session, plan, idle_ms);
+                if let Ok(mut reads) = reads.lock() {
+                    reads.insert((harness.clone(), session.clone()), read);
                 }
             });
         }
@@ -2305,27 +2302,32 @@ pub(crate) fn backend_sets() -> usize {
     BACKEND_SETS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// The tapes backends one reader reads every session through, by harness.
-/// Built once per reader, so a store's walk, its catalog and its lineage
-/// index serve every session the reader reads; the sessions a held
+/// The tapes backends one cost command reads every session through, by
+/// harness, built at its first read. Every worker thread and every change
+/// the command reads shares them, so a store's walk, its catalog and its
+/// lineage index serve every session the command reads; the sessions a held
 /// backend lists are those its walk found.
-struct Backends(BTreeMap<String, Vec<Box<dyn agent_tapes_core::backend::Backend>>>);
+#[derive(Default)]
+pub(super) struct Backends(
+    std::sync::OnceLock<BTreeMap<String, Vec<Box<dyn agent_tapes_core::backend::Backend>>>>,
+);
 
 impl Backends {
-    fn new() -> Self {
-        BACKEND_SETS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut by_harness: BTreeMap<String, Vec<_>> = BTreeMap::new();
-        for backend in agent_tapes_core::backend::backends() {
-            by_harness
-                .entry(backend.harness().to_string())
-                .or_default()
-                .push(backend);
-        }
-        Self(by_harness)
-    }
-
     fn of(&self, harness: &str) -> &[Box<dyn agent_tapes_core::backend::Backend>] {
-        self.0.get(harness).map_or(&[], Vec::as_slice)
+        self.0
+            .get_or_init(|| {
+                BACKEND_SETS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let mut by_harness: BTreeMap<String, Vec<_>> = BTreeMap::new();
+                for backend in agent_tapes_core::backend::backends() {
+                    by_harness
+                        .entry(backend.harness().to_string())
+                        .or_default()
+                        .push(backend);
+                }
+                by_harness
+            })
+            .get(harness)
+            .map_or(&[], Vec::as_slice)
     }
 }
 
@@ -3859,11 +3861,7 @@ struct Subjects {
 }
 
 impl Subjects {
-    fn read(
-        read: &mut CostRead<'_>,
-        repository: &[Event],
-        backends: &std::cell::OnceCell<Backends>,
-    ) -> Self {
+    fn read(read: &mut CostRead<'_>, repository: &[Event], backends: &Backends) -> Self {
         let mut candidates: BTreeSet<(String, String)> = repository
             .iter()
             .filter_map(subject_of)
@@ -3882,7 +3880,7 @@ impl Subjects {
             unlocated: BTreeSet::new(),
         };
         for (harness, id) in candidates {
-            let stores = backends.get_or_init(Backends::new).of(&harness);
+            let stores = backends.of(&harness);
             let located = !retained_for(repository, &harness, &id).is_empty()
                 || stores.iter().any(|backend| {
                     // A join that expects misses: no store is walked twice.

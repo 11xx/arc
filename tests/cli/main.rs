@@ -19,6 +19,7 @@ mod common;
 mod context;
 mod contribution;
 mod cost;
+mod cost_backend_sets;
 mod cost_completeness;
 mod cost_evidence_export;
 mod cost_lineage_whole;
