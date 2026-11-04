@@ -138,7 +138,8 @@ fn command_output(command: &mut Command) -> Result<Output> {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
-        wait_for_output(command.spawn()?, deadline)
+        let group = crate::process_group::OwnedGroup::adopt(command.spawn()?);
+        Ok(wait_for_output(group, deadline, None)?.0)
     })
 }
 
@@ -152,42 +153,46 @@ fn drain_output(
     })
 }
 
+/// What a piped child's input writer reports.
+type Written = std::io::Result<()>;
+
 /// Drain both pipes while waiting, so a full output buffer cannot hide exit
-/// or keep a deadline-bound Git process alive.
-fn wait_for_output(mut child: std::process::Child, deadline: Instant) -> Result<Output> {
+/// or keep a deadline-bound Git process alive. The leader stays unreaped
+/// until its group has been killed, so no kill sent for the probe can reach
+/// a process group that took its number after it.
+fn wait_for_output(
+    mut group: crate::process_group::OwnedGroup,
+    deadline: Instant,
+    writer: Option<thread::JoinHandle<Written>>,
+) -> Result<(Output, Written)> {
+    let child = group.child();
     let stdout = drain_output(child.stdout.take().context("child has no stdout")?);
     let stderr = drain_output(child.stderr.take().context("child has no stderr")?);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) if Instant::now() < deadline => {
-                thread::sleep(
-                    deadline
-                        .saturating_duration_since(Instant::now())
-                        .min(Duration::from_millis(10)),
-                );
-            }
-            answer => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break match answer {
-                    Err(error) => Err(error.into()),
-                    _ => Err(anyhow::anyhow!("git probe timed out")),
-                };
-            }
+    while !group.leader_exited()? {
+        if Instant::now() >= deadline {
+            bail!("git probe timed out");
         }
-    };
-    let output = (|| {
-        Ok(Output {
-            status: status?,
-            stdout: join_before_deadline(stdout, Some(deadline), "stdout reader")??,
-            stderr: join_before_deadline(stderr, Some(deadline), "stderr reader")??,
-        })
-    })();
-    if output.is_err() {
-        crate::process_group::kill_process_group(child.id())?;
+        thread::sleep(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(10)),
+        );
     }
-    output
+    let stdout = join_before_deadline(stdout, Some(deadline), "stdout reader")??;
+    let stderr = join_before_deadline(stderr, Some(deadline), "stderr reader")??;
+    let written = match writer {
+        Some(writer) => join_before_deadline(writer, Some(deadline), "input writer")?,
+        None => Ok(()),
+    };
+    let status = group.stop()?;
+    Ok((
+        Output {
+            status,
+            stdout,
+            stderr,
+        },
+        written,
+    ))
 }
 
 fn join_before_deadline<T>(
@@ -1344,25 +1349,31 @@ fn piped_output_with(
     let mut child = command
         .counted_spawn()
         .with_context(|| format!("cannot run {program}"))?;
-    let child_id = child.id();
     let mut stdin = child
         .stdin
         .take()
         .with_context(|| format!("{program} has no stdin"))?;
     let input = input.to_vec();
     let writer = thread::spawn(move || crate::process_group::write_input(&mut stdin, &input));
-    let output = match deadline {
-        Some(deadline) => wait_for_output(child, deadline),
-        None => child.wait_with_output().map_err(anyhow::Error::from),
-    };
-    let out = output.with_context(|| format!("{program} failed"))?;
-    let written = join_before_deadline(writer, deadline, &format!("{program} writer"));
-    if written.is_err() && deadline.is_some() {
-        crate::process_group::kill_process_group(child_id)?;
+    let (out, written) = match deadline {
+        Some(deadline) => wait_for_output(
+            crate::process_group::OwnedGroup::adopt(child),
+            deadline,
+            Some(writer),
+        ),
+        None => child
+            .wait_with_output()
+            .map_err(anyhow::Error::from)
+            .and_then(|out| {
+                let written = writer
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("{program} writer panicked"))?;
+                Ok((out, written))
+            }),
     }
+    .with_context(|| format!("{program} failed"))?;
     // A child that failed before reading all of its input leaves the write a
     // broken pipe; its own stderr says why.
-    let written = written?;
     if !out.status.success() {
         bail!(
             "{program} {} failed: {}",
@@ -3607,6 +3618,46 @@ mod tests {
                 format!("{error:#}").contains("refused"),
                 "deadline {deadline:?}: {error:#}"
             );
+        }
+    }
+
+    /// A deadline-bound probe's group ID stays reserved by its unreaped
+    /// leader until arc has signalled the group. Rejects reaping the leader
+    /// as soon as it exits: with the group's only other member escaped into
+    /// its own session, the reaped ID is free for reuse, and the kill sent
+    /// when the probe's pipes outlive the deadline would reach whatever
+    /// process group next takes that number.
+    #[test]
+    fn a_probe_leader_stays_reserved_until_its_group_is_stopped() {
+        const SCRIPT: &str = "echo $$ > leader.pid; \
+             setsid sh -c 'echo $$ > escaped.pid; exec sleep 6' &";
+        for piped in [false, true] {
+            let cwd = tempfile::tempdir().unwrap();
+            let path = cwd.path().to_owned();
+            let probe = thread::spawn(move || {
+                with_deadline(Some(Instant::now() + Duration::from_secs(3)), || {
+                    if piped {
+                        piped_output("sh", &["-c".into(), SCRIPT.into()], b"input", |command| {
+                            command.current_dir(&path);
+                        })
+                        .map(drop)
+                    } else {
+                        let mut command = Command::new("sh");
+                        command.args(["-c", SCRIPT]).current_dir(&path);
+                        command_output(&mut command).map(drop)
+                    }
+                })
+            });
+            let observation =
+                crate::process_group::test_support::LeaderObservation::new(cwd.path());
+            let reserved = observation.reserved_after_exit();
+            let result = probe.join().unwrap();
+            observation.kill_escaped();
+            assert!(
+                reserved,
+                "probe leader (piped: {piped}) was reaped while its group could still be signalled"
+            );
+            assert!(format!("{:#}", result.unwrap_err()).contains("timed out"));
         }
     }
 
