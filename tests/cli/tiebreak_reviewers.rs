@@ -181,14 +181,13 @@ fn tiebreak_approval_gates_open_mixed_work() {
     let repo = Repo::new();
     policy(&repo, ENTRY, false);
     let (_, worktree) = subject(&repo, OPUS);
-    reader(&repo, &worktree, "review", SOL)
-        .assert()
-        .success()
-        .stderr(predicates::str::contains("not that it was independent").not());
+    let read = reader(&repo, &worktree, "review", SOL).output().unwrap();
+    assert!(read.status.success(), "{read:?}");
     repo.arc(&worktree)
         .args(["check", "mixed"])
         .assert()
         .success();
+    assert!(!String::from_utf8_lossy(&read.stderr).contains("not that it was independent"));
     assert!(stdout(repo.arc(&worktree).args(["show", "mixed"]))
         .contains("tie-break reviewer gpt-6.1-sol#xhigh (policy since 2026-11-04"));
     repo.arc(&worktree)

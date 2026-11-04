@@ -1581,7 +1581,7 @@ fn build_report(
         }))
     {
         advisories.push(Advisory {
-            code: "tiebreak-reviewer".into(),
+            code: "tiebreak-reviewer",
             detail: format!("read {event}: {}", entry.label()),
         });
     }
