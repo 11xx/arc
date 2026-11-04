@@ -901,9 +901,9 @@ pub(super) fn record_audit(
                 _ if after
                     .review_context
                     .as_ref()
-                    .is_some_and(|context| context.accepted.assessed() == Some(true)) =>
+                    .is_some_and(|context| context.registry(true).assessed() == Some(true)) =>
                 {
-                    "a clearing read under the accepted review ladder"
+                    "a clearing read under the applicable review ladder"
                 }
                 _ if after.has_assessed_clearance() => {
                     "a clearing read: an audit by a person, or by an agent with --assessment \

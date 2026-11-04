@@ -701,3 +701,280 @@ fn an_observed_lower_effort_cannot_borrow_the_declared_effort_rank() {
     assert!(value["debt"]["discharged_by"].is_null());
     assert_eq!(judgment(&value)["reason"], "below-floor");
 }
+
+fn ladder_candidate() -> (Repo, PathBuf, String) {
+    ladder_candidate_with_policy(true)
+}
+
+fn ladder_candidate_with_policy(assessed: bool) -> (Repo, PathBuf, String) {
+    let repo = repo(assessed, true, None);
+    let mut lower = table();
+    lower["version"][0]["model"][1]["efforts"][1]["rank"] = json!(1);
+    fs::write(
+        repo.root.join(".arc/review-ladder.toml"),
+        toml::to_string(&lower).unwrap(),
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/review-ladder.toml"]);
+    git(&repo.root, &["commit", "-m", "test: prior ladder"]);
+    let before = repo.head(&repo.root);
+    let wt = subject(&repo, "ladder-debt", Some(SOL), "");
+    fs::write(
+        wt.join(".arc/review-ladder.toml"),
+        toml::to_string(&table()).unwrap(),
+    )
+    .unwrap();
+    git(&wt, &["add", ".arc/review-ladder.toml"]);
+    git(&wt, &["commit", "-m", "test: proposed reader promotion"]);
+    repo.arc(&wt)
+        .env("ARC_ACTOR", "Writer")
+        .args(["--model", SOL, "snapshot", "ladder-debt"])
+        .assert()
+        .success();
+    (repo, wt, before)
+}
+
+fn integrated_ladder_change() -> (Repo, PathBuf, String) {
+    let (repo, wt, before) = ladder_candidate();
+    repo.arc(&wt)
+        .args([
+            "integrate",
+            "ladder-debt",
+            "--debt",
+            "fixture ladder unread",
+        ])
+        .assert()
+        .success();
+    (repo, wt, before)
+}
+
+/// A ladder edit cannot promote the reader whose audit discharges that edit.
+/// Rejects the integrated table becoming its own clearance authority.
+#[test]
+fn reviewed_ladder_change_audit_uses_the_prechange_registry() {
+    let (repo, _, before) = integrated_ladder_change();
+    audit(&repo, "ladder-debt", Some(FABLE), None);
+    let value = show(&repo, "ladder-debt");
+    assert_eq!(value["debt"]["standing"], "owed");
+    assert!(value["debt"]["discharged_by"].is_null());
+    assert_eq!(value["review_context"]["authorizing"]["revision"], before);
+    assert_eq!(judgment(&value)["clears"], false);
+    assert_eq!(judgment(&value)["reason"], "below-floor");
+}
+
+fn assert_checkout_clearance_is_not_loosened(commit_policy: bool) {
+    for ladder in [false, true] {
+        let repo = repo(false, ladder, None);
+        let wt = owed(&repo, "checkout-clearance", Some(SOL), "");
+        fs::write(
+            wt.join(".arc/policy.toml"),
+            "[policy]\nforbid_self_approval = true\nreview_clearance = \"assessed\"\n",
+        )
+        .unwrap();
+        if commit_policy {
+            git(&wt, &["add", ".arc/policy.toml"]);
+            git(&wt, &["commit", "-m", "test: awaiting clearance policy"]);
+        }
+        repo.arc(&wt)
+            .env("ARC_ACTOR", "Reader")
+            .args([
+                "--model",
+                FABLE,
+                "audit",
+                "checkout-clearance",
+                "--verdict",
+                "approved",
+            ])
+            .assert()
+            .success();
+        let value = json_stdout(repo.arc(&wt).args(["show", "checkout-clearance", "--json"]));
+        assert_eq!(
+            value["debt"]["standing"], "owed",
+            "ladder={ladder}, committed={commit_policy}"
+        );
+        assert!(value["debt"]["discharged_by"].is_null());
+        assert!(value["debt"]["findings_reads"]
+            .to_string()
+            .contains("no-assessment"));
+        let status = json_stdout(
+            repo.arc(&wt)
+                .args(["status", "checkout-clearance", "--json"]),
+        );
+        assert_eq!(status["debt_outstanding"], true);
+        let query = stdout(repo.arc(&wt).args(["query", "--debt"]));
+        assert!(query.contains("checkout-clearance"), "{query}");
+        let inbox = json_stdout(repo.arc(&wt).args(["inbox", "--json"]));
+        assert!(
+            inbox["debt-owed"]
+                .to_string()
+                .contains("checkout-clearance"),
+            "{inbox}"
+        );
+        let catchup = json_stdout(repo.arc(&wt).args(["catchup", "--json"]));
+        assert!(
+            catchup["ledger"]["debt-owed"]
+                .to_string()
+                .contains("checkout-clearance"),
+            "{catchup}"
+        );
+    }
+}
+
+/// A target table with legacy policy cannot lower the checkout recording rule.
+#[test]
+fn reviewed_checkout_clearance_stays_assessed_with_an_uncommitted_policy() {
+    assert_checkout_clearance_is_not_loosened(false);
+}
+
+#[test]
+fn reviewed_checkout_clearance_stays_assessed_with_an_awaiting_policy() {
+    assert_checkout_clearance_is_not_loosened(true);
+}
+
+/// Missing target refs do not create a ladder context or author scans when
+/// the repository has no ladder file. Every no-ladder JSON view omits the key.
+#[test]
+fn reviewed_missing_target_without_a_ladder_omits_context_in_every_view() {
+    let repo = repo(false, false, None);
+    git(&repo.root, &["branch", "release"]);
+    repo.arc(&repo.root)
+        .args(["begin", "missing-target", "--target", "release"])
+        .assert()
+        .success();
+    let wt = repo.home.join(".worktrees/repo-missing-target");
+    repo.commit(&wt, "work.txt", "work", "test: subject");
+    repo.arc(&wt)
+        .args(["--model", SOL, "snapshot", "missing-target"])
+        .assert()
+        .success();
+    git(&repo.root, &["branch", "-d", "release"]);
+    let mut unexpected = Vec::new();
+    for command in ["show", "status", "review", "check"] {
+        let value =
+            json_stdout_any_status(repo.arc(&wt).args([command, "missing-target", "--json"]));
+        if value.get("review_context").is_some() {
+            unexpected.push(command);
+        }
+    }
+    assert!(
+        unexpected.is_empty(),
+        "no-ladder views gained context: {unexpected:?}"
+    );
+}
+
+/// A historical closure without its pre-change revision cannot authorize
+/// itself through today's table. Rejects silently substituting the target head.
+#[test]
+fn reviewed_ladder_change_without_a_closure_basis_stays_unestablished() {
+    let (repo, _, _) = integrated_ladder_change();
+    let id = show(&repo, "ladder-debt")["change_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    rewrite_event(&repo, &id, "change-integrated", |event| {
+        event["event_type"] = json!("change-closed");
+        event["outcome"] = json!("integrated");
+        event.as_object_mut().unwrap().remove("target_before");
+    });
+    audit(&repo, "ladder-debt", Some(FABLE), None);
+    let value = show(&repo, "ladder-debt");
+    assert_eq!(value["debt"]["standing"], "owed");
+    assert_eq!(judgment(&value)["kind"], "not-established");
+    assert!(judgment(&value)["details"]
+        .to_string()
+        .contains("target_before"));
+}
+
+/// A subdirectory invocation must select the same frozen registry as the root.
+/// Rejects cwd-relative path detection that misses the ladder edit.
+#[test]
+fn reviewed_ladder_change_keeps_its_registry_from_a_subdirectory() {
+    let (repo, _, _) = integrated_ladder_change();
+    audit(&repo, "ladder-debt", Some(FABLE), None);
+    let shown = show(&repo, "ladder-debt");
+    let event = shown["audit_verdicts"].as_array().unwrap().last().unwrap()["event_id"]
+        .as_str()
+        .unwrap();
+    let nested = repo.root.join("nested");
+    fs::create_dir(&nested).unwrap();
+    let status = json_stdout(repo.arc(&nested).args(["status", "ladder-debt", "--json"]));
+    assert_eq!(
+        status["review_context"]["judgments"][event]["clears"],
+        false
+    );
+    assert_eq!(status["debt_outstanding"], true);
+}
+
+/// A replayed ladder edit cannot rejudge its earlier verdict or debt audit
+/// through the table it landed. Rejects accepted-head authority after replay.
+#[test]
+fn reviewed_replayed_ladder_change_keeps_verdict_and_audit_under_prior_authority() {
+    let (repo, wt, _) = ladder_candidate();
+    repo.arc(&wt)
+        .env("ARC_ACTOR", "Reader")
+        .args([
+            "--model",
+            FABLE,
+            "review",
+            "ladder-debt",
+            "--verdict",
+            "approved",
+        ])
+        .assert()
+        .success();
+    repo.redeclare_gates("[gates.smoke]\ncommand = \"true\"\n");
+    let before = repo.head(&repo.root);
+    repo.arc(&wt)
+        .args(["verify", "ladder-debt", "--all"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["land", "ladder-debt", "--debt", "fixture ladder unread"])
+        .assert()
+        .success();
+    audit(&repo, "ladder-debt", Some(FABLE), None);
+    let value = show(&repo, "ladder-debt");
+    assert_eq!(value["debt"]["standing"], "owed");
+    assert_eq!(value["closure"]["target_before"], before);
+    assert_ne!(
+        value["closure"]["source_head"],
+        value["closure"]["integrated_commit"]
+    );
+    let verdict = value["verdicts"].as_array().unwrap().last().unwrap()["event_id"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        value["review_context"]["judgments"][verdict]["clears"],
+        false
+    );
+    assert_eq!(judgment(&value)["clears"], false);
+}
+
+/// An unavailable historical basis cannot switch a legacy policy to assessed.
+/// Rejects a ladder file adding a clearance bar when neither policy requires it.
+#[test]
+fn a_missing_basis_does_not_activate_clearance_for_legacy_policy() {
+    let (repo, wt, _) = ladder_candidate_with_policy(false);
+    repo.arc(&wt)
+        .args([
+            "integrate",
+            "ladder-debt",
+            "--debt",
+            "fixture ladder unread",
+        ])
+        .assert()
+        .success();
+    let id = show(&repo, "ladder-debt")["change_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    rewrite_event(&repo, &id, "change-integrated", |event| {
+        event["event_type"] = json!("change-closed");
+        event["outcome"] = json!("integrated");
+        event.as_object_mut().unwrap().remove("target_before");
+    });
+    audit(&repo, "ladder-debt", Some(FABLE), None);
+    let value = show(&repo, "ladder-debt");
+    assert_eq!(value["debt"]["standing"], "discharged");
+    assert!(value["review_context"]["judgments"].is_null());
+}

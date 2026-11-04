@@ -583,8 +583,8 @@ enum Cmd {
     /// against their recorded sessions. A read recorded from a receipt names the receipt
     /// item's key and the file's digest, and each finding disposition it published inside
     /// its own event.
-    /// Registry bindings and author facts appear as `review_context`; see
-    /// `arc guide debt-clearance`.
+    /// With a registry file, bindings and author facts appear as
+    /// `review_context`; see `arc guide debt-clearance`.
     Show {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1174,8 +1174,8 @@ enum Cmd {
     /// intent and recovery command. Recorded producer models that are missing, placeholders
     /// or session ids print as model not recorded. JSON production identities and review
     /// coverage retain raw values with model_recorded: false; valid models omit the flag.
-    /// Registry bindings and author facts appear as `review_context`; see
-    /// `arc guide debt-clearance`.
+    /// With a registry file, bindings and author facts appear as
+    /// `review_context`; see `arc guide debt-clearance`.
     Status {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1566,8 +1566,8 @@ enum Cmd {
     ///
     /// Human blocker reports name the guide topics owning their recovery rules.
     #[command(after_help = blockers::exit_status_help())]
-    /// Registry bindings and author facts appear as `review_context`; see
-    /// `arc guide debt-clearance`.
+    /// With a registry file, bindings and author facts appear as
+    /// `review_context`; see `arc guide debt-clearance`.
     Check {
         /// Evaluate explicit unsigned staging preparation and local provisional prerequisites.
         /// An authority offer in flight reports an integrate --provisional --dry-run
@@ -1904,8 +1904,8 @@ enum Cmd {
     /// authority transfer. Clearing it requires applicable explicit supersession; event-ID
     /// order and wall clock cannot make an earlier approval supersede an unobserved
     /// refusal. Scoped admission, trust and independence determine review eligibility.
-    /// Registry bindings and author facts appear as `review_context`; see
-    /// `arc guide debt-clearance`.
+    /// With a registry file, bindings and author facts appear as
+    /// `review_context`; see `arc guide debt-clearance`.
     /// Under assessed policy with a target ladder, arc decides capability
     /// from rank, author floors and families. Assessments remain binding
     /// evidence; their capability opinion cannot override the ladder. The
@@ -3120,8 +3120,10 @@ enum Cmd {
     /// extent against a debt that names one (`arc guide debt-obligations`).
     /// Under assessed ladder policy, a clearing agent discharges debt without
     /// an assessment. A person auditing ineligible-review still needs an
-    /// eligible bound assessment. The accepted registry is the destination
-    /// head; `arc guide debt-clearance` defines the complete rule and cutoff.
+    /// eligible bound assessment. Audits of a ladder-changing range use its
+    /// pre-integration registry; other audits use the destination head. Read-time
+    /// debt projection keeps the stricter checkout or target clearance policy.
+    /// `arc guide debt-clearance` defines the complete rule and cutoff.
     Audit {
         /// Change whose integrated revision was reviewed
         #[arg(required_unless_present = "receipt")]

@@ -2925,9 +2925,21 @@ REVIEW CLEARANCE
   own ladder never supplies the judgment that approves it. The accepted
   registry is the recorded destination branch's current head. It judges
   audits and other reads recorded after integration, ordered by event id.
-  Candidate and dirty checkout files supply neither source. A foreign
-  closure supplies no local ladder authority: the receiver judges its reads
-  with the accepted registry at their basis times.
+  If the change's shipped or landed range touches `.arc/review-ladder.toml`,
+  the authorizing registry judges every read of that change, including its
+  debt's audits after integration. It stays at closure's `target_before`.
+  Under assessed clearance, an integrated change without that revision
+  is not established and names `target_before`. An unread range
+  cannot establish that the change left the ladder untouched. Candidate and
+  dirty checkout files supply neither source. A foreign closure supplies no
+  local ladder authority for other changes: the receiver judges their reads
+  with its accepted registry at their basis times.
+
+  Read-time debt projections (`show`, `status`, `catchup`, `query --debt`
+  and the inbox) use assessed clearance when either the invoking checkout's
+  policy or the applicable target registry requires it. A target registry
+  under legacy policy cannot loosen an assessed checkout: the assessment-only
+  rule applies there. Integration uses the destination's committed policy.
 
   With no applicable ladder file, an agent clears only with its recorded
   model and effort and a bound `agent-routing-assessment/2` whose `clears`
@@ -3040,10 +3052,10 @@ REVIEW CLEARANCE
   change, or the repository default identifies the target. A missing
   target, ambiguous change, invalid registry, or absent file refuses with a
   diagnostic. Candidate and dirty checkout files supply no accepted table.
-  State, status, review and check JSON expose `review_context` when a
-  registry exists or its source is unavailable. Its `authorizing` and
-  `accepted` readings name the target, revision and version ids, or an
-  `unavailable` diagnostic. The authorization reading shares policy's
+  State, status, review and check JSON expose `review_context` only when
+  an authorizing or accepted source has a registry file. A missing target
+  alone adds no context. Its `authorizing` and `accepted` readings name the
+  target, revision and version ids, or an `unavailable` diagnostic. The authorization reading shares policy's
   closure basis and explicit projected destination revision; the accepted
   reading follows the recorded integration destination's current head.
   Candidate and dirty checkout files do not supply either reading.

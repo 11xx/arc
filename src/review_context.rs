@@ -33,6 +33,8 @@ pub struct ReviewContext {
     pub landed_authors: Option<crate::review_authors::Authors>,
     pub authorizing: Registry,
     pub accepted: Registry,
+    #[serde(skip)]
+    authorizing_reads: bool,
 }
 
 pub fn load(
@@ -40,7 +42,7 @@ pub fn load(
     state: &ChangeState,
     target_revision: Option<&str>,
 ) -> Option<ReviewContext> {
-    let authorizing = Registry::read(
+    let mut authorizing = Registry::read(
         cwd,
         if target_revision.is_some() {
             &state.target_branch
@@ -55,12 +57,22 @@ pub fn load(
         accepted_target,
         crate::gitio::branch_head(cwd, accepted_target),
     );
-    if authorizing.ladder.is_none()
-        && accepted.ladder.is_none()
-        && authorizing.unavailable.is_none()
-        && accepted.unavailable.is_none()
-    {
+    if !authorizing.has_file && !accepted.has_file {
         return None;
+    }
+    let authorizing_reads = modifies_ladder(cwd, state);
+    if authorizing_reads
+        && target_revision.is_none()
+        && state.closure.as_ref().is_some_and(|closure| {
+            closure.outcome == crate::model::Closure::Integrated && closure.target_before.is_none()
+        })
+    {
+        authorizing.revision = None;
+        authorizing.version_ids.clear();
+        authorizing.ladder = None;
+        authorizing.unavailable =
+            Some("pre-change review ladder not established: closure has no target_before".into());
+        authorizing.has_file = true;
     }
     let authors = state
         .patchsets
@@ -87,9 +99,36 @@ pub fn load(
         accepted,
         authors,
         landed_authors,
+        authorizing_reads,
     };
     context.judge_reads(state);
     Some(context)
+}
+
+fn modifies_ladder(cwd: &Path, state: &ChangeState) -> bool {
+    let shipped = state
+        .debt_subject_patchset()
+        .map(|patchset| (patchset.base.as_str(), patchset.head.as_str()));
+    shipped
+        .into_iter()
+        .chain(state.landed_range())
+        .any(|(base, head)| {
+            crate::gitio::git(
+                cwd,
+                &[
+                    "log",
+                    "--format=%H",
+                    "--max-count=1",
+                    "--full-history",
+                    "--no-renames",
+                    &format!("{base}..{head}"),
+                    "--",
+                    &format!(":(top,literal){}", crate::review_ladder::FILE),
+                ],
+            )
+            .map(|commits| !commits.is_empty())
+            .unwrap_or(true)
+        })
 }
 
 impl Registry {
@@ -180,7 +219,7 @@ pub fn after_integration(state: &ChangeState, event: &str, audit: bool) -> bool 
 
 impl ReviewContext {
     pub fn registry(&self, after_integration: bool) -> &Registry {
-        if after_integration {
+        if after_integration && !self.authorizing_reads {
             &self.accepted
         } else {
             &self.authorizing
@@ -220,7 +259,7 @@ impl ReviewContext {
             self.judgments.insert(verdict.event_id.clone(), judgment);
         }
         for audit in &state.audit_verdicts {
-            let source = &self.accepted;
+            let source = self.registry(true);
             if source.assessed() != Some(true) {
                 continue;
             }

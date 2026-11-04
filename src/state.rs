@@ -4639,10 +4639,11 @@ impl ChangeState {
     }
 
     pub fn has_assessed_clearance(&self) -> bool {
-        self.review_context
-            .as_ref()
-            .and_then(|context| context.registry(self.is_closed()).assessed())
-            .unwrap_or(self.review_clearance.is_assessed())
+        self.review_clearance.is_assessed()
+            || self
+                .review_context
+                .as_ref()
+                .is_some_and(|context| context.registry(self.is_closed()).assessed() == Some(true))
     }
 
     pub fn set_review_context(&mut self, context: Option<crate::review_context::ReviewContext>) {
@@ -4655,9 +4656,8 @@ impl ChangeState {
         read: &Read<'_>,
         fallback: crate::policy::ReviewClearance,
     ) -> bool {
-        self.review_context
-            .as_ref()
-            .and_then(|context| {
+        fallback.is_assessed()
+            || self.review_context.as_ref().is_some_and(|context| {
                 context
                     .registry(crate::review_context::after_integration(
                         self,
@@ -4665,8 +4665,8 @@ impl ChangeState {
                         read.audit,
                     ))
                     .assessed()
+                    == Some(true)
             })
-            .unwrap_or(fallback.is_assessed())
     }
 
     fn read_clearance_gap(&self, read: &Read<'_>) -> Option<FindingsReason> {
@@ -4684,7 +4684,7 @@ impl ChangeState {
         ));
         let assessed = source.assessed()?;
         if !assessed {
-            return Some(LadderClearance { gap: None });
+            return None;
         }
         let judgment = context.judgments.get(read.event_id);
         let gap = if !self.review_eligible(read.event_id, read.origin) {
