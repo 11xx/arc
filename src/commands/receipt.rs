@@ -588,9 +588,13 @@ impl ItemGuard {
             }
             let recorded_reviewer = event.on_behalf_of.as_deref().unwrap_or(&event.actor);
             let reviewer = ctx.on_behalf_of.as_deref().unwrap_or(&ctx.actor);
+            let submitted_model = ctx.resolve_model().model;
+            let recorded_binding = event.observed_model().or_else(|| event.model.clone());
+            let submitted_binding = super::audit::binding_model(ctx);
             if recorded.item_digest == self.item_digest
                 && recorded_reviewer == reviewer
-                && event.model == ctx.resolve_model().model
+                && event.model == submitted_model
+                && recorded_binding == submitted_binding
             {
                 return Ok(Admission::Published(event.event_id.clone()));
             }
@@ -599,14 +603,16 @@ impl ItemGuard {
                 format!(
                     "item {} was recorded as {} with item digest {}; this item's digest is {}. \
                      A changed reading or reviewer needs a fresh template \
-                     (recorded reviewer {recorded_reviewer}, model {:?}; \
-                     submitted reviewer {reviewer}, model {:?})",
+                     (recorded reviewer {recorded_reviewer}, model {:?}, binding model {:?}; \
+                     submitted reviewer {reviewer}, model {:?}, binding model {:?})",
                     self.key,
                     event.event_id,
                     recorded.item_digest,
                     self.item_digest,
                     event.model,
-                    ctx.resolve_model().model
+                    recorded_binding,
+                    submitted_model,
+                    submitted_binding
                 ),
             ));
         }

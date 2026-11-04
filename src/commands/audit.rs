@@ -212,7 +212,7 @@ pub(super) fn bind_assessment(
 /// The model a read binds to: the one the reader's session store observed
 /// wherever the store has one, else the declared model. A declared model the
 /// store contradicts is recorded beside the observed one and binds nothing.
-fn binding_model(ctx: &Ctx) -> Option<String> {
+pub(super) fn binding_model(ctx: &Ctx) -> Option<String> {
     let attribution = ctx.resolve_model();
     match attribution.provenance.model_disagreement {
         Some(disagreement) => Some(disagreement.observed),

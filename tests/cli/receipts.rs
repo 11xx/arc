@@ -647,6 +647,82 @@ fn a_reviewer_model_the_session_store_contradicts_is_recorded() {
     );
 }
 
+/// Claim: retry identity includes the model the session store binds the read
+/// to, even when the receipt's declared model stays the same. Rejects claiming
+/// another observed model's published event without recording a new read.
+fn receipt_retry_refuses_another_binding(initial_observed: Option<&str>) {
+    for (kind, command) in [("verdict", "review"), ("audit", "audit")] {
+        let repo = Repo::new();
+        if kind == "audit" {
+            owed(&repo, "binding", None);
+        } else {
+            snapshotted(&repo, "binding");
+        }
+        if let Some(model) = initial_observed {
+            codex_recording(&repo, REVIEWER_SESSION, model);
+        }
+        let receipt = filled(template(&repo, kind, &["binding"]), "comment-only");
+        let path = write_receipt(&repo, "binding.json", &receipt);
+        let record = || {
+            let output = repo
+                .arc(&repo.root)
+                .env("CODEX_HOME", repo.home.join("codex-state"))
+                .args([command, "--receipt"])
+                .arg(&path)
+                .arg("--json")
+                .output()
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+                .unwrap_or_else(|error| panic!("{error}: {output:?}"));
+            (output.status.code().unwrap(), value)
+        };
+        let (code, first) = record();
+        assert_eq!(code, 0, "{first:#}");
+        assert_eq!(item(&first, 0)["outcome"], "recorded", "{first:#}");
+        let reads = receipt_reads(&repo, "binding");
+        assert_eq!(reads.len(), 1);
+        assert_eq!(reads[0]["model"], REVIEWER_MODEL);
+        let first_binding = initial_observed
+            .map(|model| format!("{model}#high"))
+            .unwrap_or_else(|| REVIEWER_MODEL.to_string());
+        if initial_observed.is_some() {
+            assert_eq!(reads[0]["model_disagreement"]["observed"], first_binding);
+        }
+        let before = events(&repo, "binding");
+        let (code, retry) = record();
+        assert_eq!(code, 0, "{retry:#}");
+        assert_eq!(item(&retry, 0)["outcome"], "already-recorded", "{retry:#}");
+        assert_eq!(item(&retry, 0)["event"], item(&first, 0)["event"]);
+
+        codex_recording(&repo, REVIEWER_SESSION, "fixture-newly-observed");
+        let (code, retry) = record();
+        assert_eq!(
+            code, 1,
+            "a different observed model reused the event: {retry:#}"
+        );
+        assert_eq!(item(&retry, 0)["code"], "key-conflict", "{retry:#}");
+        let reason = item(&retry, 0)["reason"].as_str().unwrap();
+        for model in [
+            &first_binding,
+            REVIEWER_MODEL,
+            "fixture-newly-observed#high",
+        ] {
+            assert!(reason.contains(model), "{reason}");
+        }
+        assert_eq!(events(&repo, "binding"), before);
+    }
+}
+
+#[test]
+fn receipt_retries_refuse_a_changed_observed_model() {
+    receipt_retry_refuses_another_binding(Some("fixture-original-observed"));
+}
+
+#[test]
+fn receipt_retries_refuse_a_newly_located_observed_model() {
+    receipt_retry_refuses_another_binding(None);
+}
+
 const SEVERITIES: [&str; 4] = ["critical", "major", "minor", "note"];
 
 /// Claim: the severities a receipt finding accepts are named where a reader

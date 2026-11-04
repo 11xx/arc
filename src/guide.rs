@@ -3098,9 +3098,11 @@ RECEIPTS
   publish inside the read's own event, which stamps store format 7. Rerunning
   a receipt prints the event of each identical item published by the same
   represented reviewer and model and writes nothing for it, so an interrupted
-  batch resumes; changed content or reviewer identity under a published key
-  is refused. `arc receipt --help` holds
-  the shape and the refusal codes.
+  batch resumes. Both the declared model and the binding model must match:
+  the session store's observed model where present, otherwise the declared
+  model. A retry with changed content, reviewer identity or either model is
+  refused, naming the recorded and submitted coordinates. `arc receipt --help`
+  holds the shape and the refusal codes.
 
 CONTRIBUTION TRAILERS
     arc roles <change> --planned-by [<value>] --orchestrated-by [<value>]
