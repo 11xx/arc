@@ -1865,9 +1865,11 @@ enum Cmd {
     /// recorded. Such a read never discharges review debt, regardless of
     /// self-approval policy: permission to approve does not establish
     /// independent coverage. Planning and orchestrating never refuse. The
-    /// warning also compares the model the reviewer's session store observed
-    /// where it contradicts the declared one, and names which model matched,
-    /// with the declared model beside an observed one.
+    /// warning, the gate and debt discharge judge the verdict under the model
+    /// it records and, where the reviewer's session store observed another,
+    /// the observed one: either matching counts, and the warning or rejection
+    /// names which model matched, with the recorded model beside an observed
+    /// one.
     ///
     /// Under `[policy] review_clearance = "assessed"` an approval gates only
     /// when it clears: a person's by authorship alone, an agent's only with a
@@ -3053,12 +3055,12 @@ enum Cmd {
     /// Where `forbid_self_approval` is on it is refused, with the remedy a
     /// contributor match gets. Such a read never discharges review debt, regardless of self-approval policy: permission to approve does not
     /// establish independent coverage. `--verdict changes-requested` is
-    /// open to anyone. The warning, the refusal, and the planner and
-    /// orchestrator roles the audit records its auditor holding compare the
-    /// model the audit records and, where the auditor's session store
-    /// observed another, the observed one: either matching counts, and the
-    /// warning or refusal names which model matched, with the declared model
-    /// beside an observed one.
+    /// open to anyone. The warning, the refusal, debt discharge, and the
+    /// planner and orchestrator roles the audit records its auditor holding
+    /// compare the model the audit records and, where the auditor's session
+    /// store observed another, the observed one: either matching counts, and
+    /// the warning, refusal or discharge bar names which model matched, with
+    /// the declared model beside an observed one.
     ///
     /// With `--extent` or `--extent-paths` the audit records what it read,
     /// resolved against what the change shipped: its patchset, or for a

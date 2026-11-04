@@ -412,29 +412,7 @@ fn ensure_append_allowed(state: &ChangeState, payload: &Payload) -> Result<()> {
     }
 }
 
-/// A model a reader's independence is judged under: the model its read
-/// records, or, with `declared`, the one its session store observed where the
-/// read declared `declared`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ReaderModel {
-    pub model: String,
-    pub declared: Option<String>,
-}
-
-impl ReaderModel {
-    /// The model, and for an observed one what was declared instead, as the
-    /// subject of a sentence.
-    pub(crate) fn described(&self) -> String {
-        match &self.declared {
-            None => format!("model {:?}", self.model),
-            Some(declared) => format!(
-                "model {:?}, which the reader's session store observed where {declared:?} was \
-                 declared,",
-                self.model
-            ),
-        }
-    }
-}
+pub(crate) use crate::model::ReaderModel;
 
 impl Ctx {
     /// The ledger handle every path of this invocation reads and appends
@@ -744,24 +722,14 @@ impl Ctx {
     /// an observation naming the declared model at another effort adds none.
     pub(crate) fn reader_models(&self) -> Vec<ReaderModel> {
         let attribution = self.resolve_model();
-        let mut models: Vec<ReaderModel> = attribution
-            .model
-            .map(|model| ReaderModel {
-                model,
-                declared: None,
-            })
-            .into_iter()
-            .collect();
-        if let Some(disagreement) = attribution.provenance.model_disagreement {
-            let named = |model: &str| model.split('#').next().unwrap_or(model).trim().to_string();
-            if named(&disagreement.observed) != named(&disagreement.declared) {
-                models.push(ReaderModel {
-                    model: disagreement.observed,
-                    declared: Some(disagreement.declared),
-                });
-            }
-        }
-        models
+        ReaderModel::judged(
+            attribution.model.as_deref(),
+            attribution
+                .provenance
+                .model_disagreement
+                .as_ref()
+                .map(|disagreement| disagreement.observed.as_str()),
+        )
     }
 
     /// Say so when a verdict is recorded under, or its reader's session store

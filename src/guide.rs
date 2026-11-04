@@ -2465,7 +2465,10 @@ REVIEW COVERAGE AND DEBT
   declared a different name is independent of it, before the merge and in an
   audit after it alike. Two assumed identities are refused, since neither side
   claimed anything. Authorship is also a model identity: a read under the model,
-  at any effort, of the ledger's implementer is a self-review. Where
+  at any effort, of the ledger's implementer is a self-review. A read is under
+  the model it records and, where its event records that the reader's session
+  store observed another, the observed model too; either one matching makes
+  it a self-review, and the rejection names the observed model. Where
   self-approval is forbidden the gate rejects the approval as it rejects a
   contributor match, and `arc audit` refuses to record it;
   `--verdict changes-requested` is open to anyone. Models compare as strings
@@ -2873,8 +2876,8 @@ REVIEW COVERAGE AND DEBT
   integrating somebody else's work is not contributing to it. An auditor is
   compared with the authors, planners and orchestrators under the model its
   audit records and, where its session store observed another, the observed
-  model too: either matching refuses, warns or holds the role, and the
-  message names the model that matched.
+  model too: either matching refuses, warns, holds the role or leaves the
+  debt owed, and the message names the model that matched.
 
   A review finding the change shipped unresolved, whether open, still-open,
   disputed, or contested, stays that way in what shipped. `arc resolve` on
@@ -2900,8 +2903,8 @@ REVIEW COVERAGE AND DEBT
   declaring it. Such a
   verdict is a review that happened, not an independent one, and it leaves an
   independent-review debt owed. A read under a model the ledger credits as
-  implementer leaves the debt owed at any effort, regardless of
-  `forbid_self_approval`. Where the ledger records no model for the implementer,
+  implementer, recorded or observed, leaves the debt owed at any effort,
+  regardless of `forbid_self_approval`. Where the ledger records no model for the implementer,
   the read is judged by the actor, session and harness it records; commit
   trailers are declared text and never supply the missing model.
   That policy governs approval authority, not independent coverage.

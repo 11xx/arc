@@ -115,7 +115,9 @@ pub struct ApprovalOutcome {
 ///
 /// A reviewer whose model, at any effort, is a model the ledger records for
 /// an implementer of the patchset's range is the author reading its own work,
-/// whatever identity it is recorded under.
+/// whatever identity it is recorded under. The verdict is judged under each of
+/// `verdict_models`: the model it records and the one its reviewer's session
+/// store observed where that contradicted the record.
 ///
 /// Provenance recorded before arc kept it is *unknown*, not assumed, and is
 /// compared by name as it always was — otherwise upgrading arc would strand
@@ -124,7 +126,7 @@ pub(crate) fn self_approval_rejection(
     patchset: &Patchset,
     verdict_author: &str,
     verdict_assumed: bool,
-    verdict_model: Option<&str>,
+    verdict_models: &[crate::model::ReaderModel],
     implementers: &[String],
 ) -> Option<String> {
     // Naming the contributor is the more specific fact, so it is the one
@@ -134,12 +136,18 @@ pub(crate) fn self_approval_rejection(
             "{SELF_APPROVAL_REASON}: reviewer matches contributor {contributor}"
         ));
     }
-    if let Some((model, value)) = verdict_model.and_then(|model| {
-        crate::trailers::naming_model(implementers, model).map(|value| (model, value))
+    if let Some((reader, value)) = verdict_models.iter().find_map(|reader| {
+        crate::trailers::naming_model(implementers, &reader.model).map(|value| (reader, value))
     }) {
-        return Some(format!(
-            "{SELF_APPROVAL_REASON}: reviewer's model {model} matches the ledger implementer's model {value}"
-        ));
+        let model = &reader.model;
+        return Some(match &reader.declared {
+            None => format!(
+                "{SELF_APPROVAL_REASON}: reviewer's model {model} matches the ledger implementer's model {value}"
+            ),
+            Some(declared) => format!(
+                "{SELF_APPROVAL_REASON}: reviewer's session store observed model {model} where the verdict records {declared}, and it matches the ledger implementer's model {value}"
+            ),
+        });
     }
     verdict_assumed.then(|| UNDECLARED_APPROVAL_REASON.to_string())
 }
@@ -190,7 +198,7 @@ pub fn decide(facts: &ApprovalFacts) -> ApprovalOutcome {
                 patchset,
                 verdict.effective_author(),
                 verdict.author_assumed(),
-                verdict.model.as_deref(),
+                &verdict.judged_models(),
                 facts.implementers,
             )
         })
@@ -599,6 +607,7 @@ mod tests {
             causes: Vec::new(),
             body: None,
             model: None,
+            observed_model: None,
             session: None,
             provisional: None,
             route_version: None,

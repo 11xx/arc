@@ -415,6 +415,11 @@ pub struct VerdictEntry {
     /// Model identity recorded on the verdict event, when one was declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The model the reviewer's session store observed where it
+    /// contradicted the recorded one. Independence judges the verdict under
+    /// both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_model: Option<String>,
     /// The originating session used to validate the recorded model.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
@@ -448,6 +453,11 @@ impl VerdictEntry {
     /// behalf of one, otherwise the invoker.
     pub fn effective_author(&self) -> &str {
         self.on_behalf_of.as_deref().unwrap_or(&self.actor)
+    }
+
+    /// The models independence judges this verdict under.
+    pub fn judged_models(&self) -> Vec<crate::model::ReaderModel> {
+        crate::model::ReaderModel::judged(self.model.as_deref(), self.observed_model.as_deref())
     }
 
     /// Whether arc invented the identity this verdict is attributed to. A
@@ -986,6 +996,10 @@ pub struct AuditVerdictEntry {
     /// Model identity recorded on the audit event, when one was declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The model the auditor's session store observed where it contradicted
+    /// the recorded one. Independence judges the audit under both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_model: Option<String>,
     /// The originating session used to validate the recorded model.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
@@ -1016,6 +1030,11 @@ pub struct AuditVerdictEntry {
 impl AuditVerdictEntry {
     pub fn effective_author(&self) -> &str {
         self.on_behalf_of.as_deref().unwrap_or(&self.actor)
+    }
+
+    /// The models independence judges this audit under.
+    pub fn judged_models(&self) -> Vec<crate::model::ReaderModel> {
+        crate::model::ReaderModel::judged(self.model.as_deref(), self.observed_model.as_deref())
     }
 
     /// Whether arc invented the identity this audit is attributed to rather
@@ -3066,6 +3085,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     causes: causes.clone(),
                     body: body.clone(),
                     model: ev.model.clone(),
+                    observed_model: ev.observed_model(),
                     session: ev.session.clone(),
                     provisional: provisional.clone(),
                     route_version: route_version.clone(),
@@ -3273,6 +3293,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     verdict: *verdict,
                     body: body.clone(),
                     model: ev.model.clone(),
+                    observed_model: ev.observed_model(),
                     session: ev.session.clone(),
                     route_version: route_version.clone(),
                     assessment: assessment.clone(),
@@ -4896,9 +4917,11 @@ impl ChangeState {
         unique
     }
 
-    /// How an approving read under `actor` at `model` is authorship of
-    /// `patchset`, when it is. Authorship refuses; planning, orchestrating
-    /// and integrating somebody else's work do not.
+    /// How an approving read under `actor`, judged under each of `models`,
+    /// is authorship of `patchset`, when it is: the author it names, and the
+    /// observed model that named it when the recorded one did not.
+    /// Authorship refuses; planning, orchestrating and integrating somebody
+    /// else's work do not.
     ///
     /// Only ledger identities decide this. A model the ledger did not record
     /// for an author is not established by commit text, so a read is judged
@@ -4908,14 +4931,27 @@ impl ChangeState {
         patchset: &Patchset,
         production: Option<&DebtProduction>,
         actor: &str,
-        model: Option<&str>,
-    ) -> Option<String> {
-        for identity in self.authoring_identities(patchset, production) {
-            if identity.effective_actor() == actor {
-                return Some(identity.effective_actor().to_string());
-            }
-            if model.is_some() && identity_names(&identity, actor, model.as_slice()) {
-                return Some(identity.effective_actor().to_string());
+        models: &[crate::model::ReaderModel],
+    ) -> Option<Authorship> {
+        let identities = self.authoring_identities(patchset, production);
+        if let Some(identity) = identities
+            .iter()
+            .find(|identity| identity.effective_actor() == actor)
+        {
+            return Some(Authorship {
+                identity: identity.effective_actor().to_string(),
+                observed: None,
+            });
+        }
+        for reader in models {
+            if let Some(identity) = identities
+                .iter()
+                .find(|identity| identity_names(identity, actor, &[reader.model.as_str()]))
+            {
+                return Some(Authorship {
+                    identity: identity.effective_actor().to_string(),
+                    observed: reader.declared.is_some().then(|| reader.clone()),
+                });
             }
         }
         None
@@ -5358,7 +5394,7 @@ impl ChangeState {
                 return Some(DischargeBar::AuthorAssumed);
             }
             return self
-                .authorship_match(shipped, debt.production.as_ref(), read.author, read.model)
+                .authorship_match(shipped, debt.production.as_ref(), read.author, &read.judged)
                 .map(DischargeBar::Authored);
         }
         if let Some(assessment) = read
@@ -5381,9 +5417,17 @@ impl ChangeState {
         if read.author_assumed {
             return Some(DischargeBar::AuthorAssumed);
         }
-        self.authorship_match(shipped, debt.production.as_ref(), read.author, read.model)
+        self.authorship_match(shipped, debt.production.as_ref(), read.author, &read.judged)
             .map(DischargeBar::Authored)
     }
+}
+
+/// The author the ledger credits that a read is by, and the observed model
+/// that named it where the read's recorded model did not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Authorship {
+    pub identity: String,
+    pub observed: Option<crate::model::ReaderModel>,
 }
 
 /// A recorded verdict or audit, as the discharge rule reads it.
@@ -5397,6 +5441,8 @@ struct Read<'a> {
     author_assumed: bool,
     author: &'a str,
     model: Option<&'a str>,
+    /// The models independence judges the read under.
+    judged: Vec<crate::model::ReaderModel>,
     /// What the read covered. A verdict records no extent.
     extent: Option<&'a crate::extent::Extent>,
 }
@@ -5420,6 +5466,7 @@ impl<'a> Read<'a> {
             author_assumed: audit.author_assumed(),
             author: audit.effective_author(),
             model: audit.model.as_deref(),
+            judged: audit.judged_models(),
             extent: audit.extent.as_ref(),
         }
     }
@@ -5434,6 +5481,7 @@ impl<'a> Read<'a> {
             author_assumed: verdict.author_assumed(),
             author: verdict.effective_author(),
             model: verdict.model.as_deref(),
+            judged: verdict.judged_models(),
             extent: None,
         }
     }
@@ -5561,7 +5609,7 @@ pub enum DischargeBar {
     /// arc assumed the reader's identity; nobody declared it.
     AuthorAssumed,
     /// The reader is this identity the ledger credits with the work.
-    Authored(String),
+    Authored(Authorship),
     /// Under `review_clearance = "assessed"`, the read finds but does not
     /// clear.
     FindingsRead(FindingsReason),
@@ -5613,9 +5661,19 @@ impl DischargeBar {
                 "carries no eligible assessment bound to the model it recorded".into()
             }
             Self::AuthorAssumed => "is by an identity arc assumed rather than one declared".into(),
-            Self::Authored(identity) => {
-                format!("is by {identity}, whom the ledger credits with the work")
-            }
+            Self::Authored(Authorship {
+                identity,
+                observed: None,
+            }) => format!("is by {identity}, whom the ledger credits with the work"),
+            Self::Authored(Authorship {
+                identity,
+                observed: Some(reader),
+            }) => format!(
+                "is by {identity}, whom the ledger credits with the work: the reader's session \
+                 store observed model {} where the read records {}",
+                reader.model,
+                reader.declared.as_deref().unwrap_or_default()
+            ),
             Self::NoAuthorshipRecord => {
                 "cannot be compared with authorship: the shipped range has no ledger record".into()
             }

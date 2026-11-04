@@ -2214,3 +2214,60 @@ fn an_audit_records_roles_its_observed_model_holds() {
         "{after}"
     );
 }
+
+/// Claim: under `forbid_self_approval`, the review gate rejects an approval
+/// whose reviewer's session store observed the ledger implementer's model,
+/// though the verdict records another declared model; integration refuses,
+/// and the rejection names the observed and the recorded model. Rejects a
+/// gate that judges the stored verdict by its declaration alone, so a
+/// self-approval lands by declaring a model its session did not run.
+#[test]
+fn the_gate_rejects_an_approval_whose_observed_model_is_the_implementers() {
+    let repo = policy(true);
+    implemented_for_a(&repo, "gate-observed", None, false);
+    let reader = reader_observed_as(&repo, "gpt-6.1-sol");
+    let output = read_by(&repo, "review", "gate-observed", &reader);
+    assert!(output.status.success(), "{output:?}");
+
+    let state = status(&repo, "gate-observed");
+    let reason = state["verdict_assessments"][0]["rejection_reason"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the approval was not rejected: {state}"));
+    for named in [
+        "self-approval",
+        "observed model gpt-6.1-sol#high",
+        READER_DECLARED,
+        "implementer's model codex:gpt-6.1-sol#xhigh",
+    ] {
+        assert!(reason.contains(named), "{named}: {reason}");
+    }
+    let refused = repo
+        .arc(&repo.root)
+        .env("ARC_ACTOR", REVIEWER_B)
+        .args(["integrate", "gate-observed"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success(), "{refused:?}");
+    assert_eq!(status(&repo, "gate-observed")["state"], "open");
+}
+
+/// Claim: a recorded audit whose auditor's session store observed the
+/// ledger implementer's model discharges no review debt, though it records
+/// another declared model, and the debt names that read and the observed
+/// model. Rejects discharge that judges the stored read by its declaration
+/// alone, so the implementer's model answers its own review obligation.
+#[test]
+fn an_audit_whose_observed_model_is_the_implementers_discharges_no_debt() {
+    let repo = policy(false);
+    implemented_for_a(&repo, "discharge-observed", None, true);
+    let reader = reader_observed_as(&repo, "gpt-6.1-sol");
+    let output = read_by(&repo, "audit", "discharge-observed", &reader);
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(!text.contains("debt discharged"), "{text}");
+    assert!(text.contains("observed model gpt-6.1-sol#high"), "{text}");
+
+    let after = debt(&repo, "discharge-observed");
+    assert_eq!(after["standing"], "owed", "{after}");
+    assert!(after["discharged_by"].is_null(), "{after}");
+}

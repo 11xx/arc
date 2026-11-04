@@ -984,7 +984,7 @@ anyone independent looked at {}.\n\
         );
     }
     if state
-        .authorship_match(patchset, production, auditor, None)
+        .authorship_match(patchset, production, auditor, &[])
         .is_some()
     {
         bail!(

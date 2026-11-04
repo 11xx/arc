@@ -979,7 +979,7 @@ pub fn verdict_assessments(
                                 patchset,
                                 verdict.effective_author(),
                                 verdict.author_assumed(),
-                                verdict.model.as_deref(),
+                                &verdict.judged_models(),
                                 implementers
                                     .get(&patchset.id)
                                     .map_or(&[][..], Vec::as_slice),

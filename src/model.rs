@@ -339,6 +339,65 @@ pub struct Event {
     pub payload: Payload,
 }
 
+impl Event {
+    /// The model the session store observed where it contradicted the model
+    /// this event records.
+    pub fn observed_model(&self) -> Option<String> {
+        self.model_provenance
+            .model_disagreement
+            .as_ref()
+            .map(|disagreement| disagreement.observed.clone())
+    }
+}
+
+/// A model a read's independence is judged under: the model the read
+/// records, or, with `declared`, the one its reader's session store observed
+/// where the read recorded `declared`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReaderModel {
+    pub model: String,
+    pub declared: Option<String>,
+}
+
+impl ReaderModel {
+    /// The models a read recording `recorded`, whose reader's session store
+    /// observed `observed` where it contradicted the record, is judged under.
+    /// Models compare without effort, so an observation naming the recorded
+    /// model at another effort adds none.
+    pub fn judged(recorded: Option<&str>, observed: Option<&str>) -> Vec<ReaderModel> {
+        let named = |model: &str| model.split('#').next().unwrap_or(model).trim().to_string();
+        let mut models: Vec<ReaderModel> = recorded
+            .map(|model| ReaderModel {
+                model: model.to_string(),
+                declared: None,
+            })
+            .into_iter()
+            .collect();
+        if let (Some(recorded), Some(observed)) = (recorded, observed) {
+            if named(observed) != named(recorded) {
+                models.push(ReaderModel {
+                    model: observed.to_string(),
+                    declared: Some(recorded.to_string()),
+                });
+            }
+        }
+        models
+    }
+
+    /// The model, and for an observed one what was declared instead, as the
+    /// subject of a sentence.
+    pub fn described(&self) -> String {
+        match &self.declared {
+            None => format!("model {:?}", self.model),
+            Some(declared) => format!(
+                "model {:?}, which the reader's session store observed where {declared:?} was \
+                 declared,",
+                self.model
+            ),
+        }
+    }
+}
+
 /// Model identity and the evidence observed when an event was written.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelAttribution {
