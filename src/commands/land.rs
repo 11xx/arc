@@ -2059,6 +2059,7 @@ fn commit(
                         missing,
                         coverage,
                         production,
+                        ineligible,
                         replayed,
                         ..
                     } => Some(crate::model::LandedDebt {
@@ -2070,6 +2071,7 @@ fn commit(
                         missing: *missing,
                         coverage: coverage.clone(),
                         production: production.clone(),
+                        ineligible: ineligible.clone(),
                         replayed: replayed.clone(),
                     }),
                     _ => None,

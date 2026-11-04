@@ -2844,6 +2844,9 @@ pub struct LandedDebt {
     pub coverage: Vec<DebtCoverage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub production: Option<DebtProduction>,
+    /// The findings read that leaves an `ineligible-review` obligation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ineligible: Option<IneligibleRead>,
     /// Present exactly when `missing` is `replayed-unread`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replayed: Option<ReplayedRead>,

@@ -241,7 +241,7 @@ impl Landings {
                     missing: debt.missing,
                     coverage: debt.coverage.clone(),
                     production: debt.production.clone(),
-                    ineligible: None,
+                    ineligible: debt.ineligible.clone(),
                     replayed: debt.replayed.clone(),
                     extent: None,
                 };

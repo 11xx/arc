@@ -1392,8 +1392,9 @@ RUN A CHANGE
   the member carries `replayed-unread`, naming that approval, its base and
   the parent it landed on (`arc guide debt-obligations`). With `--debt`, a
   member no approval covers carries the debt `integrate --debt` would
-  declare. Each debt is carried inside the completion. A target that
-  integrates with no-ff or receives contributions refuses, and
+  declare. Each debt is carried inside the completion, including an
+  ineligible read's event, findings reason, qualifiers and assessment basis.
+  A target that integrates with no-ff or receives contributions refuses, and
   `integration.history = squash` refuses more than one commit. `--dry-run`
   prints the plan, as `arc-landing-plan/1` with `--json`: the shape, the
   members and their pins (patchset, base, head, whether it is replayed and

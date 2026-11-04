@@ -330,6 +330,68 @@ fn a_findings_only_approval_cannot_integrate_without_debt() {
     assert_eq!(debt["standing"], "owed", "{debt}");
 }
 
+/// Claim: a findings-only approval waived by a landing keeps the same read,
+/// reason, qualifiers and assessment basis as `integrate --debt`. Rejects a
+/// completion that keeps the debt kind but drops the read that caused it.
+#[test]
+fn a_landing_keeps_the_same_ineligible_read_as_integrate_debt() {
+    for assessed in [false, true] {
+        let mut debts = Vec::new();
+        for command in ["integrate", "land"] {
+            let repo = assessed_repo();
+            repo.redeclare_gates("[gates.smoke]\ncommand = \"true\"\n");
+            snapshotted(&repo, "findings");
+            let file = assessed.then(|| {
+                assessment_v2(&repo, "read.json", "eligible", false, &["below-clearance"])
+            });
+            let read = approve(&repo, "findings", file.as_deref());
+            repo.arc(&repo.root)
+                .args(["verify", "findings", "--all"])
+                .assert()
+                .success();
+            repo.arc(&repo.root)
+                .args([
+                    command,
+                    "findings",
+                    "--debt",
+                    "findings read needs clearance",
+                ])
+                .assert()
+                .success();
+            let debt = debt_of(&repo, "findings");
+            assert_eq!(debt["missing"], "ineligible-review", "{command}: {debt}");
+            assert_eq!(debt["ineligible"]["read"], read, "{command}: {debt}");
+            let mut ineligible = debt["ineligible"].clone();
+            ineligible.as_object_mut().unwrap().remove("read");
+            debts.push(ineligible);
+        }
+        assert_eq!(debts[0], debts[1]);
+        assert_eq!(
+            debts[1]["findings"],
+            if assessed {
+                "not-clearing"
+            } else {
+                "no-assessment"
+            }
+        );
+        assert_eq!(
+            debts[1]["assessment"],
+            if assessed { "assessed" } else { "unassessed" }
+        );
+        assert_eq!(
+            debts[1]["qualifiers"],
+            if assessed {
+                serde_json::json!(["below-clearance"])
+            } else {
+                serde_json::json!([])
+            }
+        );
+        if assessed {
+            assert_eq!(debts[1]["route_version"], "2026.11.3");
+        }
+    }
+}
+
 /// Claim: an external verdict carries no assessment, so under the policy it
 /// is a findings read: it lands only with `--debt`, which names it. Rejects
 /// an external approval supplying a clearance-free, debt-free landing.
