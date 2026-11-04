@@ -174,7 +174,9 @@ paths = [
   "src/review_clearance.rs",
   "src/review_authors.rs",
   "src/commands/review_ladder.rs",
-  ".arc/review-ladder.toml",
+  # The review ladder decides integration authorization once it exists; the
+  # wildcard covers its first import while no file is there yet.
+  ".arc/review-ladder*.toml",
   # Artifact storage operations move the only copy of journal history.
   "src/journal.rs",
   # Bundle import writes foreign artifact bodies and events into the journal.
