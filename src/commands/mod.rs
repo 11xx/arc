@@ -913,6 +913,7 @@ impl Ctx {
                 policy: crate::policy::PolicyFile::default(),
                 notes: Vec::new(),
                 target_unreadable: false,
+                review_context: None,
             },
         };
         self.integration_report_with_declarations(
@@ -932,6 +933,9 @@ impl Ctx {
         declarations: crate::declarations::Declarations,
         evaluate: Option<status::CreateEvaluationCheckout<'_>>,
     ) -> Result<StatusReport> {
+        let mut selected = state.clone();
+        selected.review_context = declarations.review_context.clone();
+        let state = &selected;
         let states = store.readable_states()?;
         let mut report = status::build_at_with_shape(
             state,
@@ -1547,6 +1551,7 @@ mod tests {
             provisional_resolutions: Vec::new(),
             privilege_scope: None,
             review_clearance: Default::default(),
+            review_context: None,
             schema: crate::state::CHANGE_STATE_SCHEMA,
             model_attributions: BTreeMap::new(),
             contribution_roles: BTreeMap::new(),

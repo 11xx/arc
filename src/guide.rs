@@ -2569,6 +2569,8 @@ REVIEW COVERAGE AND DEBT
   The table has dated versions with unique ids, RFC 3339 `effective_from`
   strictly increasing by instant, a nonempty source, and either a nonempty
   model table or `gap = true`.
+  Each model row's efforts list declares its complete effort set for that
+  version.
   Gaps omit the model table. Each model names its canonical id, identities,
   family, superseded flag, and a nonempty list of unique effort rows with
   positive integer rank and floor. Identities, including canonical model ids,
@@ -2604,6 +2606,14 @@ REVIEW COVERAGE AND DEBT
   change, or the repository default identifies the target. A missing
   target, ambiguous change, invalid registry, or absent file refuses with a
   diagnostic. Candidate and dirty checkout files supply no accepted table.
+  State, status, review and check JSON expose `review_context` when a
+  registry exists or its source is unavailable. Its `authorizing` and
+  `accepted` readings name the target, revision and version ids, or an
+  `unavailable` diagnostic. The authorization reading shares policy's
+  closure basis and explicit projected destination revision; the accepted
+  reading follows the recorded integration destination's current head.
+  Candidate and dirty checkout files do not supply either reading.
+
   Import reports the authorizing registry read at the destination revision
   that also governs policy. Table publication and inspection confer no
   clearance; CLEARANCE defines the review requirements. Repositories that

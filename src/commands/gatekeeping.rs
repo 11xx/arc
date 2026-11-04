@@ -32,6 +32,8 @@ pub fn check_selection(
 
 #[derive(serde::Serialize)]
 struct CheckOutput<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_context: Option<&'a crate::review_context::ReviewContext>,
     verdict_assessments: &'a [crate::status::VerdictAssessment],
     selected_authorizing_event: Option<&'a str>,
     schema: &'static str,
@@ -5816,6 +5818,7 @@ fn check(
             }
         }
         let output = CheckOutput {
+            review_context: report.review_context.as_ref(),
             schema: "arc-check/4",
             verdict_assessments: &report.verdict_assessments,
             selected_authorizing_event: report

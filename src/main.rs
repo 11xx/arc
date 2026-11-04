@@ -46,6 +46,7 @@ mod relations;
 mod render;
 mod replica;
 mod retention;
+mod review_context;
 mod review_ladder;
 mod rewrite;
 mod selection;
@@ -580,6 +581,7 @@ enum Cmd {
     /// against their recorded sessions. A read recorded from a receipt names the receipt
     /// item's key and the file's digest, and each finding disposition it published inside
     /// its own event.
+    /// Registry bindings appear as `review_context`; see `arc guide debt-review`.
     Show {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1169,6 +1171,7 @@ enum Cmd {
     /// intent and recovery command. Recorded producer models that are missing, placeholders
     /// or session ids print as model not recorded. JSON production identities and review
     /// coverage retain raw values with model_recorded: false; valid models omit the flag.
+    /// Registry bindings appear as `review_context`; see `arc guide debt-review`.
     Status {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1559,6 +1562,7 @@ enum Cmd {
     ///
     /// Human blocker reports name the guide topics owning their recovery rules.
     #[command(after_help = blockers::exit_status_help())]
+    /// Registry bindings appear as `review_context`; see `arc guide debt-review`.
     Check {
         /// Evaluate explicit unsigned staging preparation and local provisional prerequisites.
         /// An authority offer in flight reports an integrate --provisional --dry-run
@@ -1896,6 +1900,7 @@ enum Cmd {
     /// authority transfer. Clearing it requires applicable explicit supersession; event-ID
     /// order and wall clock cannot make an earlier approval supersede an unobserved
     /// refusal. Scoped admission, trust and independence determine review eligibility.
+    /// Registry bindings appear as `review_context`; see `arc guide debt-review`.
     Review {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in

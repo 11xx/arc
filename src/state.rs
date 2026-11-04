@@ -1667,6 +1667,8 @@ impl SlotRecord {
 /// ULID order. The event ledger is authoritative; this is a view.
 #[derive(Debug, Clone, Serialize)]
 pub struct ChangeState {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_context: Option<crate::review_context::ReviewContext>,
     #[serde(skip)]
     pub privilege_scope: Option<std::sync::Arc<crate::import_authorization::PrivilegeScope>>,
     /// The clearance rule this projection judged reads by: the policy in
@@ -2393,6 +2395,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     provisional_resolutions: Vec::new(),
                     privilege_scope: None,
                     review_clearance: Default::default(),
+                    review_context: None,
                     schema: CHANGE_STATE_SCHEMA,
                     model_attributions: BTreeMap::new(),
                     contribution_roles: BTreeMap::new(),

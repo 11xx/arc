@@ -19,6 +19,7 @@ use std::path::Path;
 /// What readiness, verification and integration require of one change.
 #[derive(Debug)]
 pub struct Declarations {
+    pub review_context: Option<crate::review_context::ReviewContext>,
     pub gates: GatesFile,
     pub policy: PolicyFile,
     /// One line per way the declarations in play disagree, so a refusal never
@@ -67,6 +68,7 @@ pub(crate) fn for_change_at(
             policy: PolicyFile::default(),
             notes: Vec::new(),
             target_unreadable: true,
+            review_context: crate::review_context::load(cwd, state, target_revision),
         });
     };
     let target = &state.target_branch;
@@ -89,6 +91,7 @@ pub(crate) fn for_change_at(
         policy: policy::load_at(cwd, &target_head)?,
         notes,
         target_unreadable: false,
+        review_context: crate::review_context::load(cwd, state, target_revision),
     })
 }
 
@@ -143,7 +146,7 @@ fn checkout_notes(
 }
 
 /// Integration authority is frozen at a recorded closure's destination basis.
-fn authorizing_revision(
+pub(crate) fn authorizing_revision(
     cwd: &Path,
     state: &ChangeState,
     target_revision: Option<&str>,
@@ -288,6 +291,21 @@ mod ladder_tests {
                 .version[0]
                 .id,
             "after"
+        );
+        let selected = for_change_at(cwd, &closed, Some(&before)).unwrap();
+        assert_eq!(
+            selected
+                .review_context
+                .as_ref()
+                .map(|context| context.authorizing.version_ids.clone()),
+            Some(vec!["before".to_string()])
+        );
+        assert_eq!(
+            selected
+                .review_context
+                .as_ref()
+                .map(|context| context.accepted.version_ids.clone()),
+            Some(vec!["after".to_string()])
         );
     }
 }

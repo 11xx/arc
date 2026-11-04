@@ -11,6 +11,8 @@ use std::collections::BTreeSet;
 
 #[derive(Serialize)]
 struct ReviewView<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_context: Option<&'a crate::review_context::ReviewContext>,
     schema: &'static str,
     verdict_assessments: &'a [crate::status::VerdictAssessment],
     change_id: &'a str,
@@ -87,6 +89,7 @@ pub fn read_review(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
     let (_, state) = ctx.load_state(&store, reference)?;
     let report = ctx.report(&store, &state)?;
     let view = ReviewView {
+        review_context: report.review_context.as_ref(),
         schema: "arc-review/5",
         verdict_assessments: &report.verdict_assessments,
         change_id: &state.change_id,

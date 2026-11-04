@@ -653,6 +653,8 @@ impl Serialize for Readiness {
 
 #[derive(Debug, Serialize)]
 pub struct StatusReport {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_context: Option<crate::review_context::ReviewContext>,
     pub integration_mode: crate::integration::Mode,
     pub integration_mode_refusal: Option<String>,
     pub provisional_integrations: Vec<crate::provisional::Obligation>,
@@ -1183,6 +1185,9 @@ pub fn build(
     blocks: Vec<String>,
     fork: Option<String>,
 ) -> Result<StatusReport> {
+    let mut selected = state.clone();
+    selected.review_context = declarations.review_context.clone();
+    let state = &selected;
     let mut report = build_at(
         state,
         cwd,
@@ -2113,6 +2118,7 @@ fn build_report(
     };
 
     Ok(StatusReport {
+        review_context: state.review_context.clone(),
         obsolete_provisional_ancestry: Vec::new(),
         provisional_prerequisites: Vec::new(),
         provisional_staging_destination: None,

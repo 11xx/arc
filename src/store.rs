@@ -2341,6 +2341,15 @@ impl Store {
         };
         let mut state = crate::state::reduce_following(events, rewrites)?;
         state.review_clearance = self.review_clearance;
+        if let Some(git_dir) = self
+            .operator_policy_path
+            .as_deref()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .filter(|directory| directory.join("HEAD").is_file())
+        {
+            state.review_context = crate::review_context::load(git_dir, &state, None);
+        }
         if let Some(change_id) = change_id.as_deref() {
             state.lands_with = landings.partners(change_id);
             state.pending_landing = landings.pending(change_id).map(str::to_string);
