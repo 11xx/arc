@@ -1,5 +1,10 @@
 [policy]
 forbid_self_approval = true
+# OpenAI and Anthropic are the only accessible frontier labs for this election.
+# The operator elects Sol 6.1 xhigh to break mixed-lab review ties.
+tiebreak_reviewers = [
+  { model = "gpt-6.1-sol#xhigh", since = "2026-11-04T00:00:00Z" },
+]
 
 [provenance]
 git_identity = "shared"
