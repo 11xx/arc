@@ -795,7 +795,7 @@ fn reuse_named_gate(
 /// Record that `gate` was judged not to need its run at the change's head.
 ///
 /// The gate's declaration must name `bypass`, which says what qualifies; the
-/// reason says why this head does. Only a later passing run at this head
+/// reason says why this head does. Only a later run green at this head
 /// answers a failure; an unrun attempt or a judgement cannot overrule it.
 fn bypass_gate(ctx: &Ctx, reference: &str, gate: &str, reason: &str) -> Result<i32> {
     let reason = reason.trim();
@@ -828,7 +828,8 @@ fn bypass_gate(ctx: &Ctx, reference: &str, gate: &str, reason: &str) -> Result<i
     let st = store.state(&change_id)?;
     if let Some(failed) = st
         .gate_evidence_at_matching(gate, &revision, |evidence| {
-            matches!(evidence.result, VerifyResult::Pass | VerifyResult::Fail)
+            evidence.result == VerifyResult::Fail
+                || evidence.green_at_head(st.eligible_dirty_tree_waiver())
         })
         .filter(|evidence| evidence.result == VerifyResult::Fail)
     {

@@ -1066,9 +1066,11 @@ RUN A CHANGE
   `verification-bypassed` with the actor, the change's head and tree, the
   reason and the declared qualification, and no command, exit code or
   duration. Any other gate refuses, as do an empty or placeholder reason and
-  an unresolved failure recorded at that head. Only a later passing run at
-  that head answers the failure. A change's own declaration cannot add
-  `bypass` to a gate its target declares, and one that omits it withdraws it.
+  an unresolved failure recorded at that head. Only a later run green at
+  that head answers the failure; a pass on an unwaived dirty tree or a tree
+  that moved during the run cannot answer it. A change's own declaration
+  cannot add `bypass` to a gate its target declares, and one that omits it
+  withdraws it.
   The bypass meets that gate's integration requirement at its immutable
   recorded head alone, while its declaration still names `bypass`; every new
   head, including a recorded rewrite holding the same tree, or a merged tree,

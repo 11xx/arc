@@ -312,7 +312,7 @@ fn a_same_tree_trailer_rewrite_requires_a_new_bypass() {
     repo.arc(&wt).args(["check"]).assert().success();
 }
 
-/// Claim: only a successful run at the head answers its unresolved failure;
+/// Claim: only a run green at the head answers its unresolved failure;
 /// not-admitted retries leave bypass refusal and the event ledger intact.
 /// Rejects an unrun attempt making a failed gate eligible for bypass.
 #[test]
@@ -380,4 +380,99 @@ bypass = "documentation or comments only"
         .args(["verify", "--gate", "docs", "--bypass", "comment-only edit"])
         .assert()
         .success();
+}
+
+fn a_non_green_pass_cannot_clear_failure_for_bypass(mutate_during_run: bool) {
+    let repo = declaring(
+        r#"[gates.docs]
+command = 'if test -f "$HOME/move-tree"; then touch fix; fi; test -f fix'
+bypass = "documentation or comments only"
+"#,
+    );
+    let (id, wt, head) = change_with_patchset(&repo, "non-green-answer");
+    repo.arc(&wt)
+        .args(["verify", "--gate", "docs"])
+        .assert()
+        .code(1);
+    let failed = events(&repo, &wt, &id, "verification-recorded");
+    assert_eq!(failed[0]["result"], "fail");
+    assert_eq!(failed[0]["worktree_dirty"], false);
+
+    if mutate_during_run {
+        fs::write(repo.home.join("move-tree"), "move\n").unwrap();
+    } else {
+        fs::write(wt.join("fix"), "uncommitted fix\n").unwrap();
+    }
+    repo.arc(&wt)
+        .args(["verify", "--gate", "docs", "--rerun"])
+        .assert()
+        .success();
+    let recorded = events(&repo, &wt, &id, "verification-recorded");
+    let passed = &recorded[1];
+    assert_eq!(passed["result"], "pass");
+    assert_eq!(passed["revision"], head);
+    if mutate_during_run {
+        assert_eq!(passed["tree_moved"], true, "{passed}");
+        fs::remove_file(repo.home.join("move-tree")).unwrap();
+    } else {
+        assert_eq!(passed["worktree_dirty"], true, "{passed}");
+        assert_ne!(passed["tested_tree"], failed[0]["tested_tree"]);
+    }
+    fs::remove_file(wt.join("fix")).unwrap();
+    let status = json_stdout(repo.arc(&wt).args(["status"]));
+    assert_eq!(gate(&status, "docs")["result"], "pass", "{status}");
+    assert_eq!(gate(&status, "docs")["green_at_head"], false, "{status}");
+
+    let before = stdout(repo.arc(&wt).args(["events", "--change", &id]));
+    repo.arc(&wt)
+        .args(["verify", "--gate", "docs", "--bypass", "comment-only edit"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "a judgement does not overrule a run",
+        ))
+        .stderr(predicates::str::contains(
+            failed[0]["event_id"].as_str().unwrap(),
+        ));
+    assert_eq!(
+        stdout(repo.arc(&wt).args(["events", "--change", &id])),
+        before,
+        "a non-green pass must not authorize a bypass or append an event"
+    );
+    let status = json_stdout(repo.arc(&wt).args(["status"]));
+    assert_eq!(gate(&status, "docs")["green_at_head"], false, "{status}");
+
+    fs::write(wt.join("fix"), "uncommitted fix\n").unwrap();
+    repo.arc(&wt)
+        .args([
+            "verify",
+            "--gate",
+            "docs",
+            "--rerun",
+            "--waive-dirty",
+            "the uncommitted fixture is the intended tested content",
+        ])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&wt).args(["status"]));
+    assert_eq!(gate(&status, "docs")["green_at_head"], true, "{status}");
+    fs::remove_file(wt.join("fix")).unwrap();
+    repo.arc(&wt)
+        .args(["verify", "--gate", "docs", "--bypass", "comment-only edit"])
+        .assert()
+        .success();
+}
+
+/// Claim: a pass on an unwaived dirty tree cannot answer a clean failure at
+/// the head. Rejects a bypass that treats uncommitted fixes as committed.
+#[test]
+fn a_dirty_pass_cannot_clear_a_head_failure_for_bypass() {
+    a_non_green_pass_cannot_clear_failure_for_bypass(false);
+}
+
+/// Claim: a pass whose tree moved cannot answer a clean failure at the head.
+/// Rejects a bypass authorized by evidence for no single reproducible tree.
+#[test]
+fn a_tree_moved_pass_cannot_clear_a_head_failure_for_bypass() {
+    a_non_green_pass_cannot_clear_failure_for_bypass(true);
 }
