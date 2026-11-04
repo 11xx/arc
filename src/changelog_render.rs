@@ -9,8 +9,7 @@
 //! `MAX_OUTPUT_BYTES`, or it prints bytes that are not UTF-8 — is a refusal
 //! carrying the tail of its stderr, and the caller writes nothing.
 
-use crate::perf::Counted;
-use crate::process_group::{kill_process_group, read_tail, STDERR_TAIL_BYTES};
+use crate::process_group::{read_tail, OwnedGroup, STDERR_TAIL_BYTES};
 use anyhow::{Context, Result};
 use std::fmt;
 use std::io::Read;
@@ -87,16 +86,16 @@ pub fn run(
     let deadline = Instant::now()
         .checked_add(timeout)
         .context("changelog renderer timeout is too large")?;
-    let mut child = match Command::new(program)
-        .args(arguments)
-        .current_dir(cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .counted_spawn()
-    {
-        Ok(child) => child,
+    let mut group = match OwnedGroup::spawn(
+        Command::new(program)
+            .args(arguments)
+            .current_dir(cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0),
+    ) {
+        Ok(group) => group,
         Err(error) => {
             return Ok(Err(Refusal {
                 cause: Cause::Start(error),
@@ -104,6 +103,7 @@ pub fn run(
             }))
         }
     };
+    let child = group.child();
     let mut stdin = child
         .stdin
         .take()
@@ -139,14 +139,14 @@ pub fn run(
         tail
     });
 
-    let mut status = None;
+    let mut exited = false;
     let (mut stdout_finished, mut stderr_finished) = (false, false);
     let mut timed_out = false;
     let mut drain_until = None;
     loop {
-        if status.is_none() {
-            status = child
-                .try_wait()
+        if !exited {
+            exited = group
+                .leader_exited()
                 .context("failed to wait for changelog renderer")?;
         }
         while let Ok(stream) = done_rx.try_recv() {
@@ -155,22 +155,16 @@ pub fn run(
                 Stream::Stderr => stderr_finished = true,
             }
         }
-        if status.is_some() && stdout_finished && stderr_finished {
+        if exited && stdout_finished && stderr_finished {
             break;
         }
         if drain_until.is_some_and(|until| Instant::now() >= until) {
             break;
         }
         if drain_until.is_none() && Instant::now() >= deadline {
-            kill_process_group(child.id())
+            group
+                .kill()
                 .context("failed to kill overrunning changelog renderer")?;
-            if status.is_none() {
-                status = Some(
-                    child
-                        .wait()
-                        .context("failed to reap overrunning changelog renderer")?,
-                );
-            }
             timed_out = true;
             drain_until = Some(Instant::now() + DRAIN_GRACE);
         }
@@ -201,7 +195,7 @@ pub fn run(
     if oversized {
         return refuse(Cause::Oversized);
     }
-    let status = status.context("changelog renderer exited without an observed status")?;
+    let status = group.stop().context("failed to reap changelog renderer")?;
     if !status.success() {
         return refuse(Cause::Exit(status.code()));
     }
@@ -266,5 +260,69 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(200));
             },
         );
+    }
+
+    /// A renderer that answers leaves nothing running in its process group.
+    /// Rejects reaping a renderer that exited and leaving the descendants it
+    /// started in its group running after `arc changelog` returns.
+    #[test]
+    fn a_renderer_that_answers_leaves_nothing_in_its_group() {
+        let cwd = tempfile::tempdir().unwrap();
+        let answer = run(
+            &[
+                "sh".into(),
+                "-c".into(),
+                "sleep 30 >/dev/null 2>&1 & echo $! > descendant.pid; printf rendered".into(),
+            ],
+            cwd.path(),
+            b"",
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        let descendant = crate::process_group::test_support::read_pid(cwd.path(), "descendant.pid");
+        let ended =
+            crate::process_group::test_support::ends_within(descendant, Duration::from_secs(2));
+        if !ended {
+            crate::process_group::test_support::kill(descendant);
+        }
+        assert_eq!(answer.unwrap(), "rendered");
+        assert!(
+            ended,
+            "renderer descendant {descendant} outlived the renderer"
+        );
+    }
+
+    /// The renderer's group ID stays reserved by its unreaped leader until
+    /// arc has signalled the group. Rejects reaping the leader as soon as it
+    /// exits: with the group's only other member escaped into its own
+    /// session, the reaped ID is free for reuse, and the deadline's kill
+    /// would reach whatever process group next takes that number.
+    #[test]
+    fn the_renderer_leader_stays_reserved_until_its_group_is_stopped() {
+        let cwd = tempfile::tempdir().unwrap();
+        let path = cwd.path().to_owned();
+        let render = std::thread::spawn(move || {
+            run(
+                &[
+                    "sh".into(),
+                    "-c".into(),
+                    "echo $$ > leader.pid; \
+                     setsid sh -c 'echo $$ > escaped.pid; exec sleep 6' &"
+                        .into(),
+                ],
+                &path,
+                b"",
+                Duration::from_secs(3),
+            )
+        });
+        let observation = crate::process_group::test_support::LeaderObservation::new(cwd.path());
+        let reserved = observation.reserved_after_exit();
+        let answer = render.join().unwrap().unwrap();
+        observation.kill_escaped();
+        assert!(
+            reserved,
+            "renderer leader was reaped while its group could still be signalled"
+        );
+        assert!(matches!(answer.unwrap_err().cause, Cause::TimedOut(_)));
     }
 }

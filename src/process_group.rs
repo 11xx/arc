@@ -174,6 +174,15 @@ impl OwnedGroup {
         Ok(unsafe { info.assume_init().si_pid() } != 0)
     }
 
+    /// Kill whatever remains in the group and leave the leader unreaped, so
+    /// its group ID stays reserved until [`OwnedGroup::stop`].
+    pub(crate) fn kill(&mut self) -> std::io::Result<()> {
+        if self.status.is_some() {
+            return Ok(());
+        }
+        kill_process_group(self.child.id())
+    }
+
     /// Kill whatever remains in the group, then reap the leader and return
     /// the command's exit status: the leader's report when it made one, the
     /// leader's own status when it had exited, SIGKILL otherwise.

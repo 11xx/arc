@@ -1598,7 +1598,8 @@ RUN A CHANGE
   changelog`, reads an `arc-changelog-render-request/1` document on stdin,
   and answers on stdout: the rendering for a read, and for `--write` the
   complete replacement file, written atomically after it exits 0. It may
-  answer without reading the whole request.
+  answer without reading the whole request. Its process group is killed when
+  it ends.
   The request's projection is the text-side view: each entry's recorded
   session is null and its id is masked as [session] in the other recorded
   values, with or without --provenance.
