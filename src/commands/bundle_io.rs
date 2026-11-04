@@ -1360,7 +1360,7 @@ fn plan_repository_events(
         .collect();
     // Parent carry can cross new events. Each pass uses receiver judgments
     // from the preceding pass, never the sender's claims.
-    loop {
+    stabilize_rewrite_judgments(|| {
         let mut changed = false;
         for event in &mut combined {
             if held.contains(&event.event_id) || withdrawn.contains(&event.event_id) {
@@ -1389,10 +1389,27 @@ fn plan_repository_events(
             *role_additions = added;
         }
         if !changed {
-            break;
+            return Ok(None);
         }
         rewrites = crate::rewrite::RewriteMap::from_events(combined.iter())?;
-    }
+        Ok(Some(
+            combined
+                .iter()
+                .filter_map(|event| {
+                    if let Payload::HistoryRewritten {
+                        signature_only,
+                        role_additions,
+                        ..
+                    } = &event.payload
+                    {
+                        Some((signature_only.clone(), role_additions.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>(),
+        ))
+    })?;
     for event in &combined {
         if held.contains(&event.event_id) || withdrawn.contains(&event.event_id) {
             continue;
@@ -1425,6 +1442,17 @@ fn plan_repository_events(
     }
     incoming.retain(|id, _| !held.contains(id));
     Ok(incoming)
+}
+
+/// Each pass returns changed judgments, or `None` when they are stable.
+fn stabilize_rewrite_judgments<T: Ord>(mut pass: impl FnMut() -> Result<Option<T>>) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    while let Some(judged) = pass()? {
+        if !seen.insert(judged) {
+            bail!("rewrite judgments do not stabilize; nothing was imported");
+        }
+    }
+    Ok(())
 }
 
 fn classify_import_events(root: &Path, validated: &ValidatedBundle) -> Result<ImportEventPlan> {
@@ -1695,5 +1723,29 @@ fn print_import_report(
     );
     if dry_run {
         println!("dry-run: no events or refs written");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Rejudging must refuse a cycle instead of waiting for stability forever.
+    /// The fixture supplies the carry/removal cycle at the production pass boundary.
+    #[test]
+    fn oscillating_rewrite_judgments_refuse_import() {
+        let states = [vec!["X", "Y"], vec!["X"], vec![], vec!["Y"]];
+        let mut passes = 0;
+        let result = stabilize_rewrite_judgments(|| {
+            assert!(passes < 5, "rejudging continued after a judgment state repeated instead of refusing the import");
+            let state = states[passes % states.len()].clone();
+            passes += 1;
+            Ok(Some(state))
+        });
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "rewrite judgments do not stabilize; nothing was imported"
+        );
+        assert_eq!(passes, 5, "the first repeated non-stable state refuses");
     }
 }

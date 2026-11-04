@@ -3452,7 +3452,9 @@ HISTORY REWRITES
   rewrite events are judged together until receiver-derived parent carry is
   stable. Their approval carry matches dependency-ordered single-event imports,
   regardless of event-ID or bundle order; only held judgments and judgments
-  established against local objects supply that carry.
+  established against local objects supply that carry. A cycle of changed
+  judgment states refuses before any import events or refs are written:
+  `rewrite judgments do not stabilize; nothing was imported`.
 
 THE HISTORY MODEL
   Git is the accepted history and the object store; arc records what the
