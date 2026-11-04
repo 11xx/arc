@@ -124,6 +124,7 @@ class SelectionClaims(unittest.TestCase):
             answer = json.loads(output.getvalue())
             self.assertEqual(answer["schema"], "arc-gate-selection/1")
             self.assertTrue(answer["complete"])
+            self.assertEqual(answer["request"], request)
             self.assertEqual(answer["gates"], affected)
 
     def test_a_dangerous_path_runs_the_full_suite_beside_a_matching_module(self):

@@ -243,6 +243,80 @@ fn preparation_refuses_source_index_and_untracked_path_mutations() {
     }
 }
 
+fn merged_preparation_fixture(mode: &str, command: &str) -> (Repo, PathBuf, PathBuf) {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.check]\ncommand='true'\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(
+        &repo.root,
+        &["commit", "-m", "test: declare merged-tree gate"],
+    );
+    let (_, worktree) = begin(&repo, "prepare-merge");
+    repo.commit(
+        &worktree,
+        ".arc/worktrees.toml",
+        &format!("[prepare]\nmode={mode:?}\ncommand={command:?}\ntimeout='5s'\n"),
+        "test: declare merged-tree preparation",
+    );
+    repo.arc(&worktree).args(["snapshot"]).assert().success();
+    let scratch = repo.home.join(".worktrees").join(format!(
+        "{}-prepare-merge-against",
+        worktree.file_name().unwrap().to_str().unwrap()
+    ));
+    (repo, worktree, scratch)
+}
+
+/// Claim: a preparation error removes the merged-tree evaluation checkout
+/// and its registration. Rejects a registered scratch checkout after refusal.
+#[test]
+fn merged_tree_preparation_error_removes_its_checkout() {
+    let (repo, worktree, scratch) = merged_preparation_fixture("path-stable", "exit 7");
+    let before = git_out(&repo.root, &["worktree", "list", "--porcelain"]);
+    repo.arc(&worktree)
+        .args(["verify", "--against", "master"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("path-stable preparation failed"));
+    assert!(
+        !scratch.exists(),
+        "failed preparation retained {}",
+        scratch.display()
+    );
+    assert_eq!(
+        git_out(&repo.root, &["worktree", "list", "--porcelain"]),
+        before
+    );
+}
+
+/// Claim: preparation that changes source preserves the checkout for
+/// inspection in both storage modes. Rejects cleanup that destroys that source.
+#[test]
+fn merged_tree_preparation_source_mutation_keeps_checkout_for_inspection() {
+    for mode in ["source-bound", "path-stable"] {
+        let (repo, worktree, scratch) =
+            merged_preparation_fixture(mode, "printf changed > \"$ARC_WORKTREE_PATH/README.md\"");
+        repo.arc(&worktree)
+            .args(["verify", "--against", "master"])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("keeping checkout for inspection"));
+        assert_eq!(
+            fs::read_to_string(scratch.join("README.md")).unwrap(),
+            "changed"
+        );
+        assert!(
+            git_out(&repo.root, &["worktree", "list", "--porcelain"])
+                .contains(scratch.to_str().unwrap()),
+            "source-mutated scratch checkout was unregistered"
+        );
+    }
+}
+
 /// Two checkouts of one Cargo package must execute their own source after
 /// preparation; a complete shared target directory cannot stand in for it.
 #[test]

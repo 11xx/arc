@@ -141,7 +141,7 @@ impl Storage {
         );
         let after = Source::observe(path)?;
         if after != *source {
-            bail!("worktree preparation changed source, index, HEAD or untracked source paths; keeping checkout for inspection: {}", source.changed_fields(&after));
+            return Err(SourceMutation(source.changed_fields(&after)).into());
         }
         outcome.context("path-stable preparation failed; retained outputs are unavailable")?;
         fs::remove_file(incomplete)?;

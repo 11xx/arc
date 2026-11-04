@@ -1339,6 +1339,28 @@ fn valid_delta_selection(delta: &crate::model::DeltaSelection) -> bool {
     delta.output.len() <= 65536
         && answer.get("schema").and_then(serde_json::Value::as_str) == Some("arc-gate-selection/1")
         && answer.get("complete").and_then(serde_json::Value::as_bool) == Some(true)
+        && answer.get("request").is_some_and(|request| {
+            request.get("schema").and_then(serde_json::Value::as_str) == Some("arc-gate-delta/1")
+                && request
+                    .get("source_tree")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(delta.source_tree.as_str())
+                && request
+                    .get("target_tree")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(delta.target_tree.as_str())
+                && request.get("paths") == Some(&serde_json::json!(delta.changed_paths))
+                && request
+                    .get("gates")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|gates| {
+                        gates.iter().all(serde_json::Value::is_string)
+                            && delta
+                                .selected_gates
+                                .iter()
+                                .all(|gate| gates.contains(&serde_json::json!(gate)))
+                    })
+        })
         && selected.as_deref() == Some(delta.selected_gates.as_slice())
         && delta.output_sha256
             == format!(

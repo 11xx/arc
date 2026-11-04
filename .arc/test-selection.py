@@ -117,7 +117,11 @@ def selector():
         ):
             raise ValueError("invalid gate delta")
         markdown = select(request["paths"])[0] == "markdown"
-        answer = {"complete": True, "gates": [] if markdown else request["gates"]}
+        answer = {
+            "complete": True,
+            "request": request,
+            "gates": [] if markdown else request["gates"],
+        }
     except (KeyError, TypeError, ValueError):
         answer = {"complete": False, "gates": []}
     print(json.dumps({"schema": "arc-gate-selection/1", **answer}, sort_keys=True))

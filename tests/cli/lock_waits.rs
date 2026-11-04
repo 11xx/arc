@@ -277,7 +277,8 @@ fn a_held_publication_lock_is_waited_for_within_a_bound() {
         &["policy", "write", "--body-file", policy.to_str().unwrap()],
         &[("ARC_TEST_LOCK_BUDGET_MS", "200")],
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // Release binaries use the production 15s budget, ignoring the test override.
+    let deadline = Instant::now() + Duration::from_secs(30);
     while child.try_wait().unwrap().is_none() {
         if Instant::now() >= deadline {
             child.kill().unwrap();

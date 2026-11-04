@@ -891,22 +891,22 @@ fn bypass_gate(ctx: &Ctx, reference: &str, gate: &str, reason: &str) -> Result<i
 /// A detached checkout that lives only as long as one evaluation.
 ///
 /// A synthesized merge is on no branch, so gating it needs a tree of its own.
-/// Removal happens however the run ends, including a gate that fails or
-/// errors: the checkout holds content nothing else refers to, and one left
-/// behind makes the next evaluation refuse.
+/// Removal covers preparation errors and failing gates. Preparation that
+/// changes source preserves the checkout for inspection.
 pub(super) struct ScratchWorktree {
     repo: PathBuf,
     pub(super) path: PathBuf,
+    preserve: bool,
 }
 
 impl ScratchWorktree {
     pub(super) fn create(repo: &Path, path: PathBuf, revision: &str) -> Result<Self> {
-        Self::populate(repo, &path, revision)?;
-        crate::warm_worktree::prepare(&path)?;
-        Ok(Self {
-            repo: repo.to_path_buf(),
-            path,
-        })
+        let mut scratch = Self::create_for_probe(repo, path, revision)?;
+        if let Err(error) = crate::warm_worktree::prepare(&scratch.path) {
+            scratch.preserve = error.is::<crate::warm_worktree::SourceMutation>();
+            return Err(error);
+        }
+        Ok(scratch)
     }
 
     /// Environment probes observe source without running build preparation.
@@ -915,6 +915,7 @@ impl ScratchWorktree {
         Ok(Self {
             repo: repo.to_path_buf(),
             path,
+            preserve: false,
         })
     }
 
@@ -946,6 +947,9 @@ impl status::EvaluationCheckout for ScratchWorktree {
 
 impl Drop for ScratchWorktree {
     fn drop(&mut self) {
+        if self.preserve {
+            return;
+        }
         let display = self.path.display().to_string();
         if let Err(error) = gitio::git(&self.repo, &["worktree", "remove", "--force", &display]) {
             eprintln!("warning: could not remove the scratch worktree {display} ({error:#})");

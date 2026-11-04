@@ -794,6 +794,18 @@ fn an_original_evidence_request_can_retry_custody_without_duplicate_events() {
 
 #[test]
 fn an_imported_second_evidence_event_for_one_candidate_is_refused_before_anything_is_written() {
+    second_evidence_is_refused(false);
+}
+
+/// Claim: duplicate evidence is refused for duplication even when the next
+/// event ID rolls into another prefix. Rejects testing evidence before its
+/// registration and mistaking that unrelated refusal for duplicate detection.
+#[test]
+fn duplicate_evidence_is_refused_when_event_ids_roll_over_the_last_digit() {
+    second_evidence_is_refused(true);
+}
+
+fn second_evidence_is_refused(rollover: bool) {
     let f = Fixture::new();
     f.registered("once", &f.report.commit, &f.evidence());
     let bundle = f.repo.home.join("bundle.json");
@@ -805,27 +817,41 @@ fn an_imported_second_evidence_event_for_one_candidate_is_refused_before_anythin
     ]));
     let mut parsed: Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
     let events = parsed["repository_events"].as_array_mut().unwrap();
+    if rollover {
+        let registration = ulid::Ulid::from(u128::MAX - 33).to_string();
+        let evidence = ulid::Ulid::from(u128::MAX - 32).to_string();
+        assert!(registration.ends_with('Y'));
+        assert!(evidence.ends_with('Z'));
+        for event in events.iter_mut() {
+            match event["event_type"].as_str().unwrap() {
+                "candidate-registered" => event["event_id"] = json!(registration),
+                "candidate-evidence-received" => event["event_id"] = json!(evidence),
+                _ => {}
+            }
+        }
+    }
     let mut second = events
         .iter()
         .find(|event| event["event_type"] == "candidate-evidence-received")
         .unwrap()
         .clone();
-    // ULIDs minted in one millisecond differ only in their last digits, so
-    // the replacement is one no event in the bundle already carries, and the
-    // highest such digit, so the copy still sorts after the registration the
-    // evidence names.
-    let original = second["event_id"].as_str().unwrap().to_string();
+    let original = second["event_id"]
+        .as_str()
+        .unwrap()
+        .parse::<ulid::Ulid>()
+        .unwrap();
     let taken: Vec<&str> = events
         .iter()
         .filter_map(|event| event["event_id"].as_str())
         .collect();
-    let stem = &original[..original.len() - 1];
-    let id = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-        .chars()
-        .rev()
-        .map(|digit| format!("{stem}{digit}"))
-        .find(|candidate| !taken.contains(&candidate.as_str()))
-        .unwrap();
+    let mut next = u128::from(original);
+    let id = loop {
+        next = next.checked_add(1).expect("fixture has no later ULID");
+        let candidate = ulid::Ulid::from(next).to_string();
+        if !taken.contains(&candidate.as_str()) {
+            break candidate;
+        }
+    };
     second["event_id"] = json!(id);
     events.push(second);
     fs::write(&bundle, serde_json::to_vec_pretty(&parsed).unwrap()).unwrap();

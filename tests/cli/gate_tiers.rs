@@ -7,6 +7,10 @@ fn arc(repo: &Repo, cwd: &Path) -> AssertCommand {
     }
 }
 
+fn empty_selection() -> &'static str {
+    "python3 -c 'import json,sys; request=json.load(sys.stdin); print(json.dumps(dict(schema=\"arc-gate-selection/1\", complete=True, request=request, gates=[])))'"
+}
+
 fn declaring(text: &str) -> Repo {
     let repo = Repo::new();
     fs::create_dir_all(repo.root.join(".arc")).unwrap();
@@ -77,10 +81,10 @@ fn publication_does_not_reuse_integration_passes() {
 /// the selection that made it applicable.
 #[test]
 fn project_selection_records_delta_lineage_and_avoids_a_rerun() {
-    let selector = "cat >/dev/null; printf '%s' '{\"schema\":\"arc-gate-selection/1\",\"complete\":true,\"gates\":[]}'";
+    let selector = empty_selection();
     let repo = declaring(&format!(
         "[gates.check]\ncommand='true'\nselector={}\n",
-        serde_json::to_string(selector).unwrap()
+        serde_json::to_string(&selector).unwrap()
     ));
     let wt = change(&repo, "selected");
     arc(&repo, &wt).args(["verify", "--all"]).assert().success();
@@ -140,6 +144,46 @@ fn incomplete_or_unknown_project_selection_runs_the_gate() {
             .success()
             .stdout(predicates::str::contains("skipped").not());
     }
+}
+
+/// Claim: an empty answer for a short delta must acknowledge the complete
+/// request. Rejects treating bytes queued in stdin as bytes the selector read.
+#[test]
+fn a_short_unread_delta_cannot_skip_a_gate() {
+    let selector = "sleep 0.05; printf '%s' '{\"schema\":\"arc-gate-selection/1\",\"complete\":true,\"gates\":[]}'";
+    let repo = declaring(&format!(
+        "[gates.check]\ncommand='true'\nselector={}\n",
+        serde_json::to_string(&selector).unwrap()
+    ));
+    let wt = change(&repo, "short-unread");
+    arc(&repo, &wt).args(["verify", "--all"]).assert().success();
+    repo.commit(&wt, "feature", "two\n", "feat: short delta");
+    arc(&repo, &wt).args(["snapshot"]).assert().success();
+    arc(&repo, &wt)
+        .args(["verify", "--all", "--skip-green"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("skipped").not());
+}
+
+/// Claim: reading stdin does not authorize an answer for different paths.
+/// Rejects an empty selection whose echoed request omits the changed path.
+#[test]
+fn a_selection_for_different_paths_cannot_skip_a_gate() {
+    let selector = empty_selection().replace("request=request", "request=dict(request, paths=[])");
+    let repo = declaring(&format!(
+        "[gates.check]\ncommand='true'\nselector={}\n",
+        serde_json::to_string(&selector).unwrap()
+    ));
+    let wt = change(&repo, "wrong-request");
+    arc(&repo, &wt).args(["verify", "--all"]).assert().success();
+    repo.commit(&wt, "feature", "two\n", "feat: changed paths");
+    arc(&repo, &wt).args(["snapshot"]).assert().success();
+    arc(&repo, &wt)
+        .args(["verify", "--all", "--skip-green"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("skipped").not());
 }
 
 /// A local publication guard checks the target's exact content in a scratch
@@ -228,10 +272,10 @@ fn publication_reuses_a_commit_bound_pass_only_at_its_own_revision() {
 /// than paying a full gate when the project maps that delta to no checks.
 #[test]
 fn project_selection_applies_to_the_synthesized_merge_tree() {
-    let selector = "cat >/dev/null; printf '%s' '{\"schema\":\"arc-gate-selection/1\",\"complete\":true,\"gates\":[]}'";
+    let selector = empty_selection();
     let repo = declaring(&format!(
         "[gates.check]\ncommand='true'\nselector={}\n",
-        serde_json::to_string(selector).unwrap()
+        serde_json::to_string(&selector).unwrap()
     ));
     let wt = change(&repo, "merge-selection");
     arc(&repo, &wt).args(["verify", "--all"]).assert().success();
@@ -262,10 +306,10 @@ fn project_selection_applies_to_the_synthesized_merge_tree() {
 /// with the observed dirty-tree evidence.
 #[test]
 fn a_selector_cannot_create_green_evidence_after_mutating_the_source() {
-    let selector = "cat >/dev/null; printf dirty > feature; printf '%s' '{\"schema\":\"arc-gate-selection/1\",\"complete\":true,\"gates\":[]}'";
+    let selector = format!("printf dirty > feature; {}", empty_selection());
     let repo = declaring(&format!(
         "[gates.check]\ncommand='true'\nselector={}\n",
-        serde_json::to_string(selector).unwrap()
+        serde_json::to_string(&selector).unwrap()
     ));
     let wt = change(&repo, "dirty-selection");
     arc(&repo, &wt).args(["verify", "--all"]).assert().success();
@@ -438,7 +482,10 @@ fn publication_rechecks_declarations_and_environment_before_passing() {
 fn selector_descendants_stop_before_source_stability_is_checked() {
     for redirect in [true, false] {
         let redirection = if redirect { ">/dev/null 2>&1 " } else { "" };
-        let selector = format!("(sleep 0.3; printf dirty > feature) {redirection}& cat >/dev/null; printf '%s' '{{\"schema\":\"arc-gate-selection/1\",\"complete\":true,\"gates\":[]}}'");
+        let selector = format!(
+            "(sleep 0.3; printf dirty > feature) {redirection}& {}",
+            empty_selection()
+        );
         let repo = declaring(&format!(
             "[gates.check]\ncommand='true'\nselector={}\n",
             serde_json::to_string(&selector).unwrap()

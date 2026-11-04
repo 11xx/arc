@@ -620,17 +620,17 @@ pub fn select_delta(
         .filter(|item| !item.is_empty())
         .map(str::to_owned)
         .collect();
-    let input = serde_json::json!({
+    let request = serde_json::json!({
         "schema": "arc-gate-delta/1", "source_tree": source_tree,
         "target_tree": target_tree, "paths": paths, "gates": declared_gates,
-    })
-    .to_string();
-    let output = selector_output(cwd, selector, &input, gate.timeout)
+    });
+    let output = selector_output(cwd, selector, &request.to_string(), gate.timeout)
         .ok()
         .flatten()?;
     let answer: serde_json::Value = serde_json::from_slice(&output).ok()?;
     if answer.get("schema")?.as_str()? != "arc-gate-selection/1"
         || !answer.get("complete")?.as_bool()?
+        || answer.get("request")? != &request
     {
         return None;
     }
@@ -765,8 +765,8 @@ fn selector_output(
     }
     let output =
         join_before_deadline(reader, Some(deadline), "gate selector stdout")?.transpose()?;
-    // A selector that closed its input before reading the whole delta did
-    // not answer for that delta.
+    // A successful write can queue unread bytes; select_delta also requires
+    // the answer to acknowledge the complete request.
     let written = join_before_deadline(writer, Some(deadline), "gate selector stdin")?;
     let _ = join_before_deadline(errors, Some(deadline), "gate selector stderr")?.transpose()?;
     match output {

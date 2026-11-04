@@ -4923,15 +4923,15 @@ FILES
   request and installs no hook implicitly. A failed publication names the integrations since the
   most recent successful publication pass.
 
-  A gate's optional `selector` command reads `arc-gate-delta/1` JSON with
-  `source_tree`, `target_tree`, `paths` and `gates`. It answers
-  `arc-gate-selection/1` with `complete: true` and the gate names affected by
-  that delta. Missing, failed, malformed, incomplete or unknown selections,
-  and a selector that exits without reading its whole delta, run the
-  required checks. Delta selection applies to integration; publication
-  checks every required gate on a changed tree. A reuse receipt retains the
-  passing source tree, target tree, selector and declarations; it grants no result to another
-  event or environment.
+  A gate's `selector` reads `arc-gate-delta/1` JSON: `source_tree`,
+  `target_tree`, `paths` and `gates`. Its `arc-gate-selection/1` answer
+  includes `complete: true`, `request` equal to the complete input object,
+  and `gates` naming affected checks. A successful stdin write does not prove
+  consumption. Missing, failed, malformed, incomplete, unknown or mismatched
+  answers run the required checks. Selection applies to integration;
+  publication checks every required gate on a changed tree. Reuse receipts
+  retain the passing source tree, target tree, selector and declarations;
+  they grant no result to another event or environment.
 
   `.arc/worktrees.toml` declares optional build preparation:
 
@@ -4949,8 +4949,10 @@ FILES
   Build outputs belong in the build directory and reusable compiler data in
   the cache. An inherited `CARGO_TARGET_DIR` is removed. A busy cache or failed
   preparation continues cold; changed source, index, HEAD or untracked source
-  paths refuses the checkout. The timeout covers output pipes and cleanup of
-  the hook's process group. Preparation is never gate evidence.
+  paths refuses the checkout and keeps it for inspection. Evaluation
+  checkouts are removed on other preparation errors. The timeout covers
+  output pipes and cleanup of the hook's process group. Preparation is never
+  gate evidence.
   Gate commands and environment probes receive the same build/source/cache
   variables. A project selects its prepared output explicitly, such as
   `CARGO_TARGET_DIR="$ARC_WORKTREE_BUILD/target"`. An administrative receipt
