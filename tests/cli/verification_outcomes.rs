@@ -311,3 +311,73 @@ fn a_same_tree_trailer_rewrite_requires_a_new_bypass() {
         .success();
     repo.arc(&wt).args(["check"]).assert().success();
 }
+
+/// Claim: only a successful run at the head answers its unresolved failure;
+/// not-admitted retries leave bypass refusal and the event ledger intact.
+/// Rejects an unrun attempt making a failed gate eligible for bypass.
+#[test]
+fn not_admitted_retries_do_not_erase_an_unresolved_gate_failure() {
+    let repo = declaring(
+        r#"[gates.docs]
+command = 'exit "$(cat "$HOME/gate-exit")"'
+bypass = "documentation or comments only"
+"#,
+    );
+    let (id, wt, _) = change_with_patchset(&repo, "unresolved-failure");
+    let outcome = repo.home.join("gate-exit");
+    fs::write(&outcome, "0").unwrap();
+    repo.arc(&wt)
+        .args(["verify", "--gate", "docs"])
+        .assert()
+        .success();
+    fs::write(&outcome, "1").unwrap();
+    repo.arc(&wt)
+        .args(["verify", "--gate", "docs", "--rerun"])
+        .assert()
+        .code(1);
+    let failed = events(&repo, &wt, &id, "verification-recorded");
+    assert_eq!(failed[1]["result"], "fail");
+
+    fs::write(&outcome, "75").unwrap();
+    for _ in 0..2 {
+        repo.arc(&wt)
+            .args(["verify", "--gate", "docs"])
+            .assert()
+            .code(1)
+            .stdout(predicates::str::contains("verification: NotAdmitted at"));
+        let before = stdout(repo.arc(&wt).args(["events", "--change", &id]));
+        repo.arc(&wt)
+            .args(["verify", "--gate", "docs", "--bypass", "comment-only edit"])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(
+                "a judgement does not overrule a run",
+            ))
+            .stderr(predicates::str::contains(
+                failed[1]["event_id"].as_str().unwrap(),
+            ));
+        assert_eq!(
+            stdout(repo.arc(&wt).args(["events", "--change", &id])),
+            before,
+            "refusing the bypass must not append any event"
+        );
+    }
+    assert!(events(&repo, &wt, &id, "verification-bypassed").is_empty());
+    let status = json_stdout(repo.arc(&wt).args(["status"]));
+    assert_eq!(gate(&status, "docs")["green_at_head"], false, "{status}");
+
+    fs::write(&outcome, "0").unwrap();
+    repo.arc(&wt)
+        .args(["verify", "--gate", "docs"])
+        .assert()
+        .success();
+    fs::write(&outcome, "75").unwrap();
+    repo.arc(&wt)
+        .args(["verify", "--gate", "docs", "--rerun"])
+        .assert()
+        .code(1);
+    repo.arc(&wt)
+        .args(["verify", "--gate", "docs", "--bypass", "comment-only edit"])
+        .assert()
+        .success();
+}

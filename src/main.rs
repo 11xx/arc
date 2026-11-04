@@ -2295,7 +2295,8 @@ enum Cmd {
         /// needs a run or a new bypass. It is shown as `bypassed`, never as a
         /// pass: it is never reused, it never satisfies a
         /// publication gate, and it discharges no review debt. A failure
-        /// recorded at this head is not overruled by one.
+        /// recorded at this head must be answered by a later passing run there
+        /// before a bypass is allowed; not-admitted attempts leave it unresolved.
         #[arg(long, value_name = "REASON")]
         bypass: Option<String>,
     },

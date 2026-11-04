@@ -1058,14 +1058,16 @@ RUN A CHANGE
   not green; `status`, `check` and `show` say it did not run and should be
   rerun, `verify` reruns it rather than reuse an older pass, acceptance
   refuses it as unobserved, and a publication guard that ran no failing gate
-  records `not-admitted` and exits 1. A project whose commands never exit 75 sees nothing change.
+  records `not-admitted` and exits 1. A not-admitted attempt cannot answer
+  an earlier failure.
 
   A gate whose declaration names `bypass` may be skipped on a judgement:
   `arc verify <change> --gate <name> --bypass <reason>` records
   `verification-bypassed` with the actor, the change's head and tree, the
   reason and the declared qualification, and no command, exit code or
   duration. Any other gate refuses, as do an empty or placeholder reason and
-  a failure recorded at that head. A change's own declaration cannot add
+  an unresolved failure recorded at that head. Only a later passing run at
+  that head answers the failure. A change's own declaration cannot add
   `bypass` to a gate its target declares, and one that omits it withdraws it.
   The bypass meets that gate's integration requirement at its immutable
   recorded head alone, while its declaration still names `bypass`; every new
