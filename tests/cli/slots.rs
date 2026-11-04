@@ -301,6 +301,122 @@ fn integration_takeover_refuses_shared_slot_use_without_changing_checkout_or_tar
     assert!(lease_of(&repo, 0).is_null());
 }
 
+/// Exercise an interrupted begin both before and after its lease event.
+/// A refused recovery must preserve the event set and the entire slot state.
+fn refused_open_recovery(reason: &str) {
+    for (phase, recorded) in [("leasing", false), ("switching", false), ("recorded", true)] {
+        let repo = pool(1, "");
+        let (change, worktree) = begin(&repo, "interrupted");
+        let events = repo
+            .root
+            .join(".git/arc/changes")
+            .join(&change)
+            .join("events");
+        if !recorded {
+            for entry in fs::read_dir(&events).unwrap() {
+                let path = entry.unwrap().path();
+                let event: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                if event["event_type"] == "slot-leased" {
+                    fs::remove_file(path).unwrap();
+                }
+            }
+            assert!(!stdout(repo.arc(&repo.root).args(["log", &change])).contains("slot-leased"));
+        }
+        let state_path = worktree.with_extension("json");
+        let mut state: serde_json::Value =
+            serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        state["phase"] = phase.into();
+        let owner = state["owner"].clone();
+        if reason == "ownership" {
+            state["owner"]["token"] = "foreign-owner".into();
+        }
+        fs::write(&state_path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(worktree.with_extension("use.lock"))
+            .unwrap();
+        if reason == "in use" {
+            // SAFETY: the test owns this regular file descriptor.
+            assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_SH) }, 0);
+        } else if reason == "uncommitted" {
+            fs::write(worktree.join("README.md"), "unfinished work\n").unwrap();
+        } else if reason == "branch" {
+            git(&worktree, &["switch", "--detach"]);
+        }
+        let before = fs::read(&state_path).unwrap();
+        let event_count = fs::read_dir(&events).unwrap().count();
+        let head = repo.head(&worktree);
+        let dirt = git_out(&worktree, &["status", "--porcelain"]);
+        repo.arc(&repo.root)
+            .args([
+                "slots",
+                "recover",
+                "1",
+                "--token",
+                state["lease"]["token"].as_str().unwrap(),
+            ])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(reason));
+        assert_eq!(fs::read(&state_path).unwrap(), before);
+        assert_eq!(fs::read_dir(&events).unwrap().count(), event_count);
+        assert_eq!(repo.head(&worktree), head);
+        assert_eq!(git_out(&worktree, &["status", "--porcelain"]), dirt);
+        drop(held);
+        state["owner"] = owner;
+        fs::write(&state_path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+        if reason == "uncommitted" {
+            git(&worktree, &["restore", "README.md"]);
+        } else if reason == "branch" {
+            git(&worktree, &["switch", "arc/interrupted"]);
+        }
+        for _ in 0..2 {
+            stdout(repo.arc(&repo.root).args([
+                "slots",
+                "recover",
+                "1",
+                "--token",
+                state["lease"]["token"].as_str().unwrap(),
+            ]));
+            assert_eq!(status(&repo)["slots"][0]["phase"], "recorded");
+            assert_eq!(
+                fs::read_dir(&events).unwrap().count(),
+                event_count + usize::from(!recorded)
+            );
+        }
+    }
+}
+
+/// Claim: open-change recovery refuses shared use before recording a lease.
+/// Rejects appending an event or advancing the phase while a command runs.
+#[test]
+fn open_change_recovery_refuses_busy_checkout_without_bookkeeping() {
+    refused_open_recovery("in use");
+}
+
+/// Claim: open-change recovery requires a clean checkout before bookkeeping.
+/// Rejects finalizing an interrupted begin over uncommitted source edits.
+#[test]
+fn open_change_recovery_refuses_dirty_checkout_without_bookkeeping() {
+    refused_open_recovery("uncommitted");
+}
+
+/// Claim: open-change recovery requires the checkout's recorded owner.
+/// Rejects finalizing a lease for a checkout whose owner token disagrees.
+#[test]
+fn open_change_recovery_refuses_unowned_checkout_without_bookkeeping() {
+    refused_open_recovery("ownership");
+}
+
+/// Claim: recovery requires the checkout to hold the open change's branch.
+/// Rejects recording a lease merely because its path matches the change.
+#[test]
+fn open_change_recovery_refuses_wrong_branch_without_bookkeeping() {
+    refused_open_recovery("branch");
+}
+
 /// Claim: abandoning a change with source edits keeps its slot leased and
 /// begin skips it, while a clean abandoned slot is detached and free.
 /// Rejects releasing a slot that holds uncommitted work.

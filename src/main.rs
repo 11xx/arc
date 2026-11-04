@@ -3622,8 +3622,11 @@ enum SlotsCmd {
     /// the lease on it; one that opened no change is undone, deleting the
     /// branch it made only while it holds no commits. Detaching and releasing
     /// phases, leases of closed changes and warms finish their release.
-    /// Refuses an obsolete token and a lease held by a pending landing
-    /// attempt, which `arc land --recover` ends
+    /// Takes exclusive slot use before lease or phase bookkeeping. An open
+    /// change requires an owned, clean checkout holding its branch at its
+    /// recorded worktree path, even when its lease event already exists.
+    /// Refuses a busy slot, dirty or unowned checkout, an obsolete token and
+    /// a lease held by a pending landing attempt, which `arc land --recover` ends
     Recover {
         /// The slot: slot-NN, or its number
         slot: String,

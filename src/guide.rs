@@ -5130,10 +5130,13 @@ SLOTS
   while the attempt is pending, naming `arc land --recover <attempt>`,
   which frees the slot itself.
   `arc slots recover <slot> --token <t>` resumes a phase: a begin whose
-  change exists records the lease on it; one that opened no change is
-  undone, deleting its branch only while it still points at the target;
-  later phases and warms finish the release. Both refuse an obsolete token, a busy
-  slot and a dirty checkout. Leases never expire; tokens appear only in
+  change exists records the lease on it only when the owned, clean checkout
+  still holds that change's branch at its recorded worktree path, including
+  when the lease event already exists. It takes exclusive use before checking
+  or recording the lease or phase. A begin that opened no change is undone,
+  deleting its branch only while it still points at the target; later phases
+  and warms finish the release. Both refuse an obsolete token, a busy slot,
+  a dirty checkout and unknown ownership. Leases never expire; tokens appear only in
   status and recovery output. Compiler freshness after a switch stays with
   the project's build, as for path-stable storage.
 

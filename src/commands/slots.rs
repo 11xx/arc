@@ -422,10 +422,13 @@ pub fn recover(ctx: &Ctx, slot: &str, token: &str) -> Result<()> {
     let declaration = declaration(ctx)?;
     let pool = pool(ctx, &declaration)?;
     let name = pool.name_of(slot)?;
+    let path = pool.checkout(&name);
+    let _use = slots::UseLease::exclusive(&path)?.with_context(|| {
+        format!("{name} is in use by a running command; retry when it finishes")
+    })?;
     let state = pool.read(&name)?;
     let lease = current_lease(&state, token)?.clone();
     let store = ctx.store()?;
-    let path = pool.checkout(&name);
     let Some(change_id) = &lease.change_id else {
         // A warm records nothing on any change: finishing it detaches the
         // checkout where it stands and frees the slot.
@@ -447,14 +450,27 @@ pub fn recover(ctx: &Ctx, slot: &str, token: &str) -> Result<()> {
             let holds = change.worktree.as_deref().is_some_and(|worktree| {
                 crate::config::resolved(Path::new(worktree)) == crate::config::resolved(&path)
             });
+            pool.require_owned(&ctx.cwd, &state)
+                .with_context(|| format!("cannot establish ownership of {name}"))?;
+            if !gitio::is_clean(&path)? {
+                bail!(
+                    "{} has uncommitted or untracked work; {name} keeps its lease",
+                    path.display()
+                );
+            }
+            if !holds {
+                bail!(
+                    "change {} does not record {} as its checkout; inspect it before recording its lease",
+                    change.change_id,
+                    path.display()
+                );
+            }
+            if lease.branch.as_deref() != Some(change.branch.as_str())
+                || gitio::current_branch(&path)?.as_deref() != Some(change.branch.as_str())
+            {
+                bail!("{name} does not hold change {} on branch {}; inspect it before recording its lease", change.change_id, change.branch);
+            }
             if !recorded {
-                if !holds {
-                    bail!(
-                        "change {} does not record {} as its checkout; inspect it before releasing",
-                        change.change_id,
-                        path.display()
-                    );
-                }
                 let mut event = ctx.event(
                     &store,
                     &change.change_id,
