@@ -2019,8 +2019,10 @@ enum Cmd {
     /// own event.
     ///
     /// Recording, by `arc review --receipt` or `arc audit --receipt`, keeps
-    /// the receipt's bytes in the ledger's custody under their sha256 and
-    /// refuses the whole receipt, writing nothing, for an unreadable file, a
+    /// the receipt's bytes in the ledger's custody under their sha256, which
+    /// each read records with their length so an export's custody sidecar
+    /// carries them, and refuses the whole receipt, writing nothing, for an
+    /// unreadable file, a
     /// wrong schema, a missing `issued_at`, mixed kinds, or a reviewer whose
     /// session is not a full native id (claude, codex and pi ids are UUIDs,
     /// opencode ids start `ses_`; a prefix, a delegate handle or another
@@ -3296,7 +3298,11 @@ enum Cmd {
     /// `unretained-commit`, with the `git
     /// update-ref` that holds it. A custody file whose bytes do not hash to its name is the
     /// advice `custody-content-mismatch`, and a temporary file an interrupted custody write
-    /// left over an hour ago is the advice `custody-temp-orphaned`; neither is removed. An
+    /// left over an hour ago is the advice `custody-temp-orphaned`; neither is removed. A
+    /// receipt a read cites whose bytes custody does not hold is the advice
+    /// `receipt-unavailable`, one whose held bytes fail verification `receipt-corrupt`,
+    /// and a receipt reference that records no byte length `receipt-length-unrecorded`;
+    /// each names the read, its change, the receipt key and digest. An
     /// unreadable custody directory, or one that is a symlink, is the problem
     /// `custody-unreadable`. A failed reachability walk is the problem
     /// `retention-reachability-failed`; the report retains all findings collected before

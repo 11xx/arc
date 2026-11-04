@@ -773,3 +773,191 @@ fn a_read_binds_the_model_its_session_store_observed_on_every_path() {
         }
     }
 }
+
+/// `arc import` of `bundle` into `repo` from a publisher admitted for the
+/// facts and reads the bundle carries, with the sidecar at `custody`.
+fn import_with_custody(repo: &Repo, bundle: &Path, custody: &Path) -> std::process::Output {
+    let bytes = fs::read(bundle).unwrap();
+    let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let source = parsed["source_replica_id"].as_str().unwrap();
+    repo.declare_gates_locally(&format!(
+        "[[replica.publishers]]\nprincipal='fixture-change'\nsource_replica_id='{source}'\n\
+         [[replica.publishers.origins]]\nreplica_id='{source}'\n\
+         roles=['facts','rewrite','review-input']\nactors=[]\n"
+    ));
+    repo.arc(&repo.root)
+        .arg("import")
+        .arg(bundle)
+        .args(["--publisher", "fixture-change", "--received-sha256"])
+        .arg(hex_digest(&bytes))
+        .arg("--custody-dir")
+        .arg(custody)
+        .output()
+        .unwrap()
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+fn doctor_findings(repo: &Repo, code: &str) -> Vec<String> {
+    let report = json_stdout_any_status(repo.arc(&repo.root).args(["doctor", "--json"]));
+    ["problems", "advice"]
+        .iter()
+        .flat_map(|kind| report[kind].as_array().cloned().unwrap_or_default())
+        .filter(|finding| finding["code"] == code)
+        .map(|finding| finding["detail"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Claim: the receipt a read cites travels with the read. The read records
+/// the receipt's byte length; an export with a custody sidecar carries the
+/// receipt's bytes; an import elsewhere verifies and keeps them; an import
+/// whose sidecar lacks them or holds other bytes is refused as for any
+/// custody bytes; and `arc doctor` names a cited receipt whose bytes the
+/// ledger does not hold. Rejects an export that leaves the receipt behind,
+/// so the importing ledger cites bytes it never received, and a doctor
+/// silent about a cited receipt that is gone.
+#[test]
+fn a_cited_receipt_travels_in_custody_and_doctor_names_it_missing() {
+    let source = Repo::new();
+    snapshotted(&source, "carried");
+    let receipt = filled(template(&source, "verdict", &["carried"]), "approved");
+    let path = write_receipt(&source, "carried.json", &receipt);
+    let bytes = fs::read(&path).unwrap();
+    let digest = hex_digest(&bytes);
+    let (code, result) = ingest(&source, "review", &path);
+    assert_eq!(code, 0, "{result:#}");
+    let read = &receipt_reads(&source, "carried")[0];
+    assert_eq!(read["receipt"]["receipt_digest"], digest);
+    assert_eq!(read["receipt"]["receipt_byte_length"], bytes.len());
+    let key = read["receipt"]["key"].as_str().unwrap().to_string();
+
+    let bundle = source.home.join("carried.bundle.json");
+    let sidecar = source.home.join("carried.custody");
+    let exported = stdout(
+        source
+            .arc(&source.root)
+            .args(["export", "carried", "--output"])
+            .arg(&bundle)
+            .arg("--custody-dir")
+            .arg(&sidecar),
+    );
+    assert!(
+        exported.contains("custody: 1 entries, 1 available, 0 unavailable"),
+        "{exported}"
+    );
+    assert_eq!(
+        fs::read(sidecar.join("sha256").join(&digest)).unwrap(),
+        bytes
+    );
+
+    let refused = |label: &str, edit: &dyn Fn(&Path)| {
+        let replica = Repo::new();
+        deliver_git_objects(&source, &replica);
+        let copy = replica.home.join(label);
+        copy_tree(&sidecar, &copy);
+        edit(&copy.join("sha256").join(&digest));
+        let output = import_with_custody(&replica, &bundle, &copy);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{label}: {output:?}");
+        assert!(stderr.contains("custody sidecar"), "{label}: {stderr}");
+        assert!(stderr.contains(&digest[..12]), "{label}: {stderr}");
+        assert!(
+            !replica.root.join(".git/arc/custody").exists(),
+            "{label}: custody was published"
+        );
+        assert!(
+            !replica.root.join(".git/arc/imports").exists(),
+            "{label}: the read was imported"
+        );
+    };
+    refused("absent", &|held| fs::remove_file(held).unwrap());
+    refused("mismatched", &|held| {
+        let mut other = fs::read(held).unwrap();
+        other[0] ^= 0x20;
+        fs::write(held, other).unwrap();
+    });
+
+    let replica = Repo::new();
+    deliver_git_objects(&source, &replica);
+    let output = import_with_custody(&replica, &bundle, &sidecar);
+    assert!(output.status.success(), "{output:?}");
+    assert!(replica.root.join(".git/arc/imports").exists());
+    let imported = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        imported.contains("custody: 1 installed, 0 held, 0 unavailable"),
+        "{imported}"
+    );
+    let held = replica.root.join(".git/arc/custody/sha256").join(&digest);
+    assert_eq!(fs::read(&held).unwrap(), bytes);
+    assert!(doctor_findings(&replica, "receipt-unavailable").is_empty());
+
+    fs::remove_file(&held).unwrap();
+    let missing = doctor_findings(&replica, "receipt-unavailable");
+    assert_eq!(missing.len(), 1, "{missing:?}");
+    assert!(missing[0].contains(&key), "{missing:?}");
+    assert!(missing[0].contains(&digest), "{missing:?}");
+    assert!(missing[0].contains("carried"), "{missing:?}");
+}
+
+/// Claim: a read whose receipt reference records no byte length still
+/// reads, `arc doctor` says its bytes cannot travel, and an export lists no
+/// custody entry for it. Rejects refusing a ledger that holds such a read,
+/// and an export claiming to carry bytes it cannot verify.
+#[test]
+fn a_receipt_reference_without_a_length_reads_and_is_named() {
+    let repo = Repo::new();
+    snapshotted(&repo, "lengthless");
+    let receipt = filled(template(&repo, "verdict", &["lengthless"]), "approved");
+    let path = write_receipt(&repo, "lengthless.json", &receipt);
+    let (code, result) = ingest(&repo, "review", &path);
+    assert_eq!(code, 0, "{result:#}");
+    let event = item(&result, 0)["event"].as_str().unwrap().to_string();
+    let change = item(&result, 0)["change"].as_str().unwrap().to_string();
+    let file = repo
+        .root
+        .join(".git/arc/changes")
+        .join(&change)
+        .join("events")
+        .join(format!("{event}.json"));
+    let mut stored: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    stored["receipt"]
+        .as_object_mut()
+        .unwrap()
+        .remove("receipt_byte_length")
+        .expect("the read records the receipt's length");
+    fs::write(&file, json_file_bytes(&stored)).unwrap();
+
+    let state = json_stdout(repo.arc(&repo.root).args(["show", "lengthless", "--json"]));
+    let key = receipt["items"][0]["key"].as_str().unwrap();
+    assert_eq!(state["verdicts"][0]["receipt"]["key"], key, "{state:#}");
+    let named = doctor_findings(&repo, "receipt-length-unrecorded");
+    assert_eq!(named.len(), 1, "{named:?}");
+    assert!(
+        named[0].contains(key) && named[0].contains(&event),
+        "{named:?}"
+    );
+
+    let sidecar = repo.home.join("lengthless.custody");
+    let exported = stdout(
+        repo.arc(&repo.root)
+            .args(["export", "lengthless", "--output"])
+            .arg(repo.home.join("lengthless.bundle.json"))
+            .arg("--custody-dir")
+            .arg(&sidecar),
+    );
+    assert!(
+        exported.contains("custody: 0 entries, 0 available, 0 unavailable"),
+        "{exported}"
+    );
+}

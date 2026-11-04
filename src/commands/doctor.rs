@@ -185,6 +185,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     inspect_refs(ctx, &states, &known_patchsets, &mut advice)?;
     inspect_retention(ctx, &store, &mut problems, &mut advice)?;
     inspect_custody(&store, &mut problems, &mut advice);
+    inspect_receipts(&store, &states, &mut advice);
     inspect_candidates(ctx, &store, &mut problems, &mut advice)?;
     // Doctor diagnoses the invoking checkout, including uncommitted
     // declarations and tracked files. A change's target would hide local
@@ -772,6 +773,70 @@ fn inspect_custody(store: &Store, problems: &mut Vec<Finding>, advice: &mut Vec<
                 ),
             },
         });
+    }
+}
+
+/// The receipt each read cites against the bytes custody holds for it.
+///
+/// A missing or damaged receipt costs the read its evidence and nothing
+/// else, so, as for other custody bytes, it is advice with what restores
+/// it. A reference that records no length names bytes custody cannot
+/// verify, which no export carries.
+fn inspect_receipts(
+    store: &Store,
+    states: &BTreeMap<String, ChangeState>,
+    advice: &mut Vec<Finding>,
+) {
+    let custody = crate::custody::Custody::at(&store.root);
+    for (change_id, state) in states {
+        let reads = state
+            .verdicts
+            .iter()
+            .map(|verdict| (&verdict.event_id, verdict.receipt.as_ref()))
+            .chain(
+                state
+                    .audit_verdicts
+                    .iter()
+                    .map(|audit| (&audit.event_id, audit.receipt.as_ref())),
+            );
+        for (event_id, receipt) in reads {
+            let Some(receipt) = receipt else {
+                continue;
+            };
+            let cited = format!(
+                "read {event_id} on {change_id} cites receipt {} (sha256 {})",
+                receipt.key, receipt.receipt_digest
+            );
+            let Some(content) = receipt.content() else {
+                advice.push(Finding {
+                    code: "receipt-length-unrecorded",
+                    detail: format!(
+                        "{cited} without its byte length, so no export carries its bytes and \
+                         no import verifies them"
+                    ),
+                });
+                continue;
+            };
+            let (code, state) = match custody.availability(&content) {
+                crate::custody::Availability::Available => continue,
+                crate::custody::Availability::Unavailable => (
+                    "receipt-unavailable",
+                    "the ledger does not hold".to_string(),
+                ),
+                crate::custody::Availability::Corrupt(reason) => (
+                    "receipt-corrupt",
+                    format!("the ledger holds damaged ({reason})"),
+                ),
+            };
+            advice.push(Finding {
+                code,
+                detail: format!(
+                    "{cited}, whose bytes {state}; record the receipt file again with `arc \
+                     review --receipt` or `arc audit --receipt`, or import it with `arc import \
+                     --custody-dir` from a sidecar that carries it"
+                ),
+            });
+        }
     }
 }
 

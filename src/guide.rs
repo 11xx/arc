@@ -935,7 +935,8 @@ RUN A CHANGE
   import holds each `observed-commit` of the imported change that is here the
   same way, under the event that recorded it.
 
-  Retained forge content travels beside the bundle as an optional sidecar,
+  Retained forge content, and the receipt file each read ingested from one
+  cites by digest and length, travel beside the bundle as an optional sidecar,
   never inside it. `arc export --custody-dir <dir>` writes
   `arc-custody-bundle/1` into a new or empty directory: one `sha256/<digest>`
   file per available digest, copied once however many references share it, and
@@ -3045,9 +3046,12 @@ RECEIPTS
   `key` and `subject` unchanged. `arc review
   --receipt` records verdict items and `arc audit --receipt` audit items, each
   as the read `--verdict` records: the reader is the represented subject, the
-  invoker the writer, and the event names the receipt item, whose file the
-  ledger keeps in custody. Independence, clearance and assessment binding
-  judge an item exactly as they judge a hand-recorded read.
+  invoker the writer, and the event names the receipt item and the digest
+  and length of its file, whose bytes the ledger keeps in custody. An export's
+  custody sidecar carries them as it carries other custody bytes, and `arc
+  doctor` names a cited receipt the ledger does not hold. Independence,
+  clearance and assessment binding judge an item exactly as they judge a
+  hand-recorded read.
 
   A receipt-wide error refuses everything and writes nothing. An item error
   refuses that item alone, and the exit is 1 when any item was refused. An

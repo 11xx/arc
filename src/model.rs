@@ -3134,13 +3134,28 @@ pub struct InlineDisposition {
 
 /// Where a verdict or audit came from when it was ingested from an
 /// `arc-review-receipt/1` item: the item's key, the digest of the item's
-/// canonical content, and the digest of the whole receipt file, whose bytes
-/// the ledger keeps in custody under that digest.
+/// canonical content, and the digest and byte length of the whole receipt
+/// file, whose bytes the ledger keeps in custody under that digest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceiptReference {
     pub key: String,
     pub item_digest: String,
     pub receipt_digest: String,
+    /// The receipt file's exact length, which custody verifies its bytes
+    /// against. A reference without one names bytes no export carries and
+    /// no import can verify.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_byte_length: Option<u64>,
+}
+
+impl ReceiptReference {
+    /// The custody content this reference cites, when it records a length.
+    pub fn content(&self) -> Option<crate::custody::Content> {
+        Some(crate::custody::Content {
+            sha256: self.receipt_digest.clone(),
+            byte_length: self.receipt_byte_length?,
+        })
+    }
 }
 
 /// A finding copied from an external review record.

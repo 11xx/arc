@@ -556,7 +556,7 @@ pub(super) struct ItemGuard {
     subject_value: serde_json::Value,
     subject: Subject,
     item_digest: String,
-    receipt_digest: String,
+    receipt: crate::custody::Content,
     dispositions: Vec<RawDisposition>,
 }
 
@@ -629,7 +629,8 @@ impl ItemGuard {
             reference: ReceiptReference {
                 key: self.key.clone(),
                 item_digest: self.item_digest.clone(),
-                receipt_digest: self.receipt_digest.clone(),
+                receipt_digest: self.receipt.sha256.clone(),
+                receipt_byte_length: Some(self.receipt.byte_length),
             },
         }))
     }
@@ -942,7 +943,7 @@ fn prepare(
     kind: ItemKind,
     value: &serde_json::Value,
     issued_at: &str,
-    receipt_digest: &str,
+    receipt: &crate::custody::Content,
     receipt_dir: &Path,
 ) -> Result<Item> {
     if kind == ItemKind::Verdict && value.get("extent").is_some() {
@@ -1080,7 +1081,7 @@ fn prepare(
         subject_value: raw.subject.clone(),
         subject,
         item_digest,
-        receipt_digest: receipt_digest.to_string(),
+        receipt: receipt.clone(),
         dispositions: raw.dispositions.clone(),
     };
     Ok(Item {
@@ -1296,7 +1297,7 @@ pub fn ingest(ctx: &Ctx, kind: ItemKind, path: &Path, json: bool) -> Result<i32>
 
     let mut results = Vec::new();
     for (index, value) in envelope.items.iter().enumerate() {
-        let item = match prepare(kind, value, &issued_at, &receipt_digest, &receipt_dir) {
+        let item = match prepare(kind, value, &issued_at, &content, &receipt_dir) {
             Ok(item) => item,
             Err(error) => {
                 let mut result = ItemResult::refused(index, &error);

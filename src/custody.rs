@@ -64,6 +64,14 @@ pub fn referenced<'a>(payloads: impl Iterator<Item = &'a Payload>) -> BTreeSet<C
             } => {
                 found.insert(Content::from(&disclosure.outgoing));
             }
+            Payload::VerdictRecorded {
+                receipt: Some(receipt),
+                ..
+            }
+            | Payload::AuditVerdictRecorded {
+                receipt: Some(receipt),
+                ..
+            } => found.extend(receipt.content()),
             _ => {}
         }
     }
