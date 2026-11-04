@@ -646,9 +646,10 @@ enum Cmd {
     /// `fulfilled, not approved`. Coverage at acceptance never takes later
     /// knowledge into its values; it only points at the discharge.
     /// Recorded producer models that are missing, placeholders or session ids
-    /// print as model not recorded. JSON production identities and review coverage retain raw values
-    /// with model_recorded: false; valid models omit the flag.
-    /// Audit and verdict detail text validates models against their recorded sessions.
+    /// print as model not recorded. JSON production identities, review coverage,
+    /// and audit and verdict details retain raw model values with model_recorded:
+    /// false when missing, placeholders or session ids; valid models omit the flag.
+    /// Audit and verdict details validate models against their recorded sessions.
     /// Forge content follows change knowledge; repository and rewrite frontiers
     /// and current custody availability remain separately named reads
     Explain {

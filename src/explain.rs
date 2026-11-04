@@ -310,6 +310,8 @@ pub enum Detail {
         #[serde(skip_serializing_if = "Option::is_none")]
         model: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        model_recorded: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         session: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         provisional: Option<String>,
@@ -356,6 +358,8 @@ pub enum Detail {
         reviewer: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model_recorded: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
         session: Option<String>,
         /// Routing's assessment of the auditor, when the audit carried one.
@@ -1364,6 +1368,11 @@ fn coverage_slot(
                         patchset_id: Some(verdict.patchset_id.clone()),
                         reviewer: Some(verdict.effective_author().to_string()),
                         model: verdict.model.clone(),
+                        model_recorded: (!crate::coordinate::model_recorded(
+                            verdict.model.as_deref(),
+                            verdict.session.as_deref(),
+                        ))
+                        .then_some(false),
                         session: verdict.session.clone(),
                         provisional: authorization.verdict_provisional.clone(),
                     },
@@ -1378,6 +1387,7 @@ fn coverage_slot(
                         patchset_id: None,
                         reviewer: None,
                         model: None,
+                        model_recorded: None,
                         session: None,
                         provisional: authorization.verdict_provisional.clone(),
                     },
@@ -1392,6 +1402,7 @@ fn coverage_slot(
                 patchset_id: None,
                 reviewer: None,
                 model: None,
+                model_recorded: None,
                 session: None,
                 provisional: None,
             },
@@ -1532,6 +1543,11 @@ fn later_knowledge(events: &[Event], discharge: Option<&Discharge>, at: Option<&
                         revision: revision.clone(),
                         reviewer,
                         model: event.model.clone(),
+                        model_recorded: (!crate::coordinate::model_recorded(
+                            event.model.as_deref(),
+                            event.session.as_deref(),
+                        ))
+                        .then_some(false),
                         session: event.session.clone(),
                         assessment: assessment.clone(),
                     },
@@ -1952,6 +1968,7 @@ fn describe(detail: &Detail) -> String {
             model,
             session,
             provisional,
+            ..
         } => match event_id {
             Some(event_id) => format!(
                 "verdict {} `{event_id}` on {} by {}{}{}",
@@ -2049,6 +2066,7 @@ fn describe(detail: &Detail) -> String {
             model,
             session,
             assessment,
+            ..
         } => format!(
             "audit {verdict} `{event_id}` at {revision} by {reviewer} ({}){}",
             crate::coordinate::display_model(

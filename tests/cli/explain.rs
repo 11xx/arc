@@ -976,3 +976,59 @@ fn review_detail_text_validates_session_relative_models() {
         );
     }
 }
+
+fn assert_detail_json_marks_only_invalid_models(event_kind: &str, slot: &str, item: &str) {
+    let Fixture { repo, .. } = integrated_under_waiver();
+    audit_changes_requested(&repo, "inspect the recorded identity");
+    let change_id = explain_json(&repo, &[])["change_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for (model, recorded) in [
+        (Some("unknown"), false),
+        (Some("fixture-recording#high"), false),
+        (Some("01234567-89ab-cdef-0123-456789abcdef#high"), false),
+        (Some("m#none"), false),
+        (Some(""), false),
+        (None, false),
+        (Some("review-model#high"), true),
+        (Some("review-model"), true),
+    ] {
+        rewrite_event(&repo, &change_id, event_kind, |event| {
+            event["session"] = "fixture-recording".into();
+            event["model"] = serde_json::json!(model);
+        });
+        let explanation = explain_json(&repo, &[]);
+        let details = items(&explanation, slot, item);
+        assert_eq!(details.len(), 1, "{explanation}");
+        let detail = details[0];
+        assert_eq!(detail["model"], serde_json::json!(model), "{detail}");
+        assert_eq!(detail["session"], "fixture-recording", "{detail}");
+        if recorded {
+            assert!(detail.get("model_recorded").is_none(), "{detail}");
+        } else {
+            assert_eq!(
+                detail["model_recorded"], false,
+                "{event_kind} must flag an unrecorded model {model:?}: {detail}"
+            );
+        }
+    }
+}
+
+#[test]
+fn verdict_detail_json_flags_invalid_models_without_masking_raw_values() {
+    assert_detail_json_marks_only_invalid_models(
+        "verdict-recorded",
+        "coverage_at_acceptance",
+        "verdict",
+    );
+}
+
+#[test]
+fn audit_verdict_detail_json_flags_invalid_models_without_masking_raw_values() {
+    assert_detail_json_marks_only_invalid_models(
+        "audit-verdict-recorded",
+        "later_knowledge",
+        "audit-verdict",
+    );
+}
