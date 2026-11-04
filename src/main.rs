@@ -1987,14 +1987,17 @@ enum Cmd {
     /// Review receipts: what a delegated reader read and concluded, in one
     /// file arc records.
     ///
-    /// `arc-review-receipt/1` is a JSON object: `schema`, `issued_at` (kept
-    /// from the template), `reviewer` (`harness`, its full native `session`,
-    /// and `model` as `model#effort`), and `items`. Each item carries `key`,
+    /// `arc-review-receipt/1` is a JSON object: `schema`, `issued_at` and
+    /// `vocabulary` (kept from the template; `vocabulary` names the values a
+    /// field accepts, keyed by its path, and a changed one is refused),
+    /// `reviewer` (`harness`, its full native `session`, and `model` as
+    /// `model#effort`), and `items`. Each item carries `key`,
     /// `kind` (`verdict` or `audit`) and `subject`, copied unchanged from
     /// the template, and what the reader fills in: `verdict` (approved,
     /// changes-requested, comment-only), `causes` (with changes-requested on
     /// a verdict item, refused elsewhere), `body`, `findings` (each with
-    /// `severity`, `blocking` and `summary` required, `body` optional, and on
+    /// `severity` (`critical`, `major`, `minor` or `note`), `blocking` and
+    /// `summary` required, `body` optional, and on
     /// a verdict item an optional `path` and `line` anchoring it to the
     /// head), `dispositions` (each naming a `finding` by finding id or
     /// finding event id, a `disposition` of `fixed`, `still-open` or
@@ -3724,7 +3727,9 @@ enum ReceiptCmd {
     /// findings, and the tips of every finding's dispositions. The item's
     /// `key` hashes its kind, subject and the template's `issued_at`, so it
     /// is stable for this template. Reviewer fields and the verdict are left
-    /// null for the reader to fill; `arc receipt --help` has the shape
+    /// null for the reader to fill, and `vocabulary` names the severities a
+    /// finding accepts under `findings[].severity`; `arc receipt --help` has
+    /// the shape
     #[command(group(clap::ArgGroup::new("receipt_kind").args(["verdict", "audit"]).required(true)))]
     Template {
         /// Changes whose latest patchset a verdict item reads

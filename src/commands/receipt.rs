@@ -16,6 +16,17 @@ use std::fs;
 pub const SCHEMA: &str = "arc-review-receipt/1";
 pub const RESULT_SCHEMA: &str = "arc-receipt-result/1";
 
+/// The values a receipt field accepts, keyed by the field's path in an item,
+/// as a template prints them for the reader filling it in.
+fn vocabulary() -> serde_json::Value {
+    use clap::ValueEnum;
+    let severities: Vec<serde_json::Value> = Severity::value_variants()
+        .iter()
+        .map(|severity| serde_json::to_value(severity).expect("a severity serializes"))
+        .collect();
+    serde_json::json!({ "findings[].severity": severities })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ItemKind {
@@ -350,6 +361,7 @@ pub fn template(ctx: &Ctx, kind: ItemKind, references: &[String]) -> Result<()> 
     let template = serde_json::json!({
         "schema": SCHEMA,
         "issued_at": issued_at,
+        "vocabulary": vocabulary(),
         "reviewer": {"harness": null, "session": null, "model": null},
         "items": items,
     });
@@ -363,6 +375,8 @@ struct RawEnvelope {
     schema: String,
     #[serde(default)]
     issued_at: Option<String>,
+    #[serde(default)]
+    vocabulary: Option<serde_json::Value>,
     #[serde(default)]
     reviewer: Option<RawReviewer>,
     items: Vec<serde_json::Value>,
@@ -1241,6 +1255,13 @@ pub fn ingest(ctx: &Ctx, kind: ItemKind, path: &Path, json: bool) -> Result<i32>
         .filter(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok())
         .context("the receipt's issued_at is missing or not RFC 3339; keep the template's")?
         .to_string();
+    if envelope
+        .vocabulary
+        .as_ref()
+        .is_some_and(|named| *named != vocabulary())
+    {
+        bail!("the receipt's vocabulary is not the template's; keep the template's vocabulary");
+    }
     let subject = reviewer_subject(envelope.reviewer.as_ref())?;
     if envelope.items.is_empty() {
         bail!("the receipt holds no items");

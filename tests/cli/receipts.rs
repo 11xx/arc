@@ -621,3 +621,62 @@ fn a_reviewer_model_the_session_store_contradicts_is_recorded() {
         "{read:#}"
     );
 }
+
+const SEVERITIES: [&str; 4] = ["critical", "major", "minor", "note"];
+
+/// Claim: the severities a receipt finding accepts are named where a reader
+/// fills one in, in `arc receipt --help` beside `severity` and in the
+/// template's vocabulary, and a severity outside them is refused with a
+/// message listing them. Rejects a reader left to guess the vocabulary and
+/// writing `high`, which the receipt then refuses.
+#[test]
+fn the_severity_vocabulary_is_named_where_a_reader_fills_a_finding() {
+    let repo = Repo::new();
+    let help = stdout(repo.arc(&repo.root).args(["receipt", "--help"]));
+    let named = "`severity` (`critical`, `major`, `minor` or `note`)";
+    assert!(help.contains(named), "{help}");
+
+    snapshotted(&repo, "severity");
+    let issued = template(&repo, "verdict", &["severity"]);
+    assert_eq!(
+        issued["vocabulary"]["findings[].severity"],
+        serde_json::json!(SEVERITIES),
+        "{issued:#}"
+    );
+
+    let mut high = filled(issued.clone(), "changes-requested");
+    high["items"][0]["causes"] = serde_json::json!(["executor"]);
+    high["items"][0]["findings"] =
+        serde_json::json!([{"severity": "high", "blocking": true, "summary": "loses the flag"}]);
+    let path = write_receipt(&repo, "high.json", &high);
+    let (code, result) = ingest(&repo, "review", &path);
+    assert_eq!(code, 1, "{result:#}");
+    let refused = item(&result, 0);
+    assert_eq!(refused["code"], "invalid", "{result:#}");
+    let reason = refused["reason"].as_str().unwrap();
+    for severity in SEVERITIES {
+        assert!(reason.contains(&format!("`{severity}`")), "{reason}");
+    }
+    assert!(receipt_reads(&repo, "severity").is_empty());
+
+    let mut major = high.clone();
+    major["items"][0]["findings"][0]["severity"] = serde_json::json!("major");
+    let path = write_receipt(&repo, "major.json", &major);
+    let (code, result) = ingest(&repo, "review", &path);
+    assert_eq!(code, 0, "{result:#}");
+    assert_eq!(receipt_reads(&repo, "severity").len(), 1);
+
+    let mut edited = filled(issued, "approved");
+    edited["vocabulary"]["findings[].severity"] = serde_json::json!(["high", "low"]);
+    let path = write_receipt(&repo, "edited.json", &edited);
+    let output = repo
+        .arc(&repo.root)
+        .args(["review", "--receipt"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("vocabulary"), "{stderr}");
+    assert_eq!(receipt_reads(&repo, "severity").len(), 1);
+}
