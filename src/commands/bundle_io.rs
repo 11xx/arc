@@ -1316,7 +1316,7 @@ fn plan_repository_events(
         }
     }
     combined.sort_by(|a, b| a.event_id.cmp(&b.event_id));
-    let rewrites = crate::rewrite::RewriteMap::from_events(combined.iter())
+    let mut rewrites = crate::rewrite::RewriteMap::from_events(combined.iter())
         .context("the bundle's rewrites contradict this repository's; nothing was imported")?;
     // Candidate events are judged with the ledger they join, by every rule
     // that needs no local object: a parent or an adoption may arrive in the
@@ -1346,42 +1346,90 @@ fn plan_repository_events(
             "the bundle's candidate relations are refused: {refusal}; nothing was imported"
         )
     })?;
-    let borrowed: Vec<_> = combined.iter().collect();
-    let withdrawn = crate::rewrite::withdrawn_event_ids(&borrowed)?;
-    // Whether a successor differs from its old commit by signature alone, or
-    // by appended role entries, is this repository's judgement to make,
-    // against the objects it holds. What
-    // the sender recorded is a claim about the sender's objects, and taking it
-    // would let a bundle move an approval onto content nobody reviewed.
-    for value in &validated.bundle.repository_events {
-        let Some(event) = crate::bundle::parse_typed_event(value)? else {
-            continue;
-        };
-        let Payload::HistoryRewritten { mapping, .. } = &event.payload else {
-            continue;
-        };
-        if held.contains(&event.event_id) || withdrawn.contains(event.event_id.as_str()) {
+    let withdrawn: BTreeSet<String> = {
+        let borrowed: Vec<_> = combined.iter().collect();
+        crate::rewrite::withdrawn_event_ids(&borrowed)?
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    };
+    let extra: Vec<_> = validated
+        .events
+        .iter()
+        .filter_map(|event| event.typed.clone())
+        .collect();
+    // Parent carry can cross new events. Each pass uses receiver judgments
+    // from the preceding pass, never the sender's claims.
+    stabilize_rewrite_judgments(|| {
+        let mut changed = false;
+        for event in &mut combined {
+            if held.contains(&event.event_id) || withdrawn.contains(&event.event_id) {
+                continue;
+            }
+            let Payload::HistoryRewritten {
+                mapping,
+                signature_only,
+                role_additions,
+                ..
+            } = &mut event.payload
+            else {
+                continue;
+            };
+            let retain = |judged| {
+                crate::provisional::retain_signature_only(cwd, store, &extra, &rewrites, judged)
+            };
+            let signed = retain(crate::rewrite::signature_only_successors(
+                cwd, mapping, &rewrites,
+            ))?;
+            let added = retain(crate::rewrite::role_addition_successors(
+                cwd, mapping, &rewrites, &signed,
+            ))?;
+            changed |= *signature_only != signed || *role_additions != added;
+            *signature_only = signed;
+            *role_additions = added;
+        }
+        if !changed {
+            return Ok(None);
+        }
+        rewrites = crate::rewrite::RewriteMap::from_events(combined.iter())?;
+        Ok(Some(
+            combined
+                .iter()
+                .filter_map(|event| {
+                    if let Payload::HistoryRewritten {
+                        signature_only,
+                        role_additions,
+                        ..
+                    } = &event.payload
+                    {
+                        Some((signature_only.clone(), role_additions.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>(),
+        ))
+    })?;
+    for event in &combined {
+        if held.contains(&event.event_id) || withdrawn.contains(&event.event_id) {
             continue;
         }
-        let extra: Vec<_> = validated
-            .events
-            .iter()
-            .filter_map(|event| event.typed.clone())
-            .collect();
-        let retain = |judged| {
-            crate::provisional::retain_signature_only(cwd, store, &extra, &rewrites, judged)
+        let Payload::HistoryRewritten {
+            signature_only,
+            role_additions,
+            ..
+        } = &event.payload
+        else {
+            continue;
         };
-        let signed = retain(crate::rewrite::signature_only_successors(
-            cwd, mapping, &rewrites,
-        ))?;
-        let added = retain(crate::rewrite::role_addition_successors(
-            cwd, mapping, &rewrites, &signed,
-        ))?;
-        let mut value = value.clone();
+        let bytes = incoming
+            .get_mut(&event.event_id)
+            .expect("new rewrite has incoming bytes");
+        let mut value: serde_json::Value = serde_json::from_slice(bytes)?;
         if let Some(object) = value.as_object_mut() {
             for (field, judged) in [
-                (crate::store::SIGNATURE_ONLY_FIELD, signed),
-                (crate::store::ROLE_ADDITIONS_FIELD, added),
+                (crate::store::SIGNATURE_ONLY_FIELD, signature_only),
+                (crate::store::ROLE_ADDITIONS_FIELD, role_additions),
             ] {
                 object.remove(field);
                 if !judged.is_empty() {
@@ -1389,12 +1437,22 @@ fn plan_repository_events(
                 }
             }
         }
-        let mut bytes = serde_json::to_vec_pretty(&value)?;
+        *bytes = serde_json::to_vec_pretty(&value)?;
         bytes.push(b'\n');
-        incoming.insert(event.event_id.clone(), bytes);
     }
     incoming.retain(|id, _| !held.contains(id));
     Ok(incoming)
+}
+
+/// Each pass returns changed judgments, or `None` when they are stable.
+fn stabilize_rewrite_judgments<T: Ord>(mut pass: impl FnMut() -> Result<Option<T>>) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    while let Some(judged) = pass()? {
+        if !seen.insert(judged) {
+            bail!("rewrite judgments do not stabilize; nothing was imported");
+        }
+    }
+    Ok(())
 }
 
 fn classify_import_events(root: &Path, validated: &ValidatedBundle) -> Result<ImportEventPlan> {
@@ -1673,5 +1731,29 @@ fn print_import_report(
     );
     if dry_run {
         println!("dry-run: no events or refs written");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Rejudging must refuse a cycle instead of waiting for stability forever.
+    /// The fixture supplies the carry/removal cycle at the production pass boundary.
+    #[test]
+    fn oscillating_rewrite_judgments_refuse_import() {
+        let states = [vec!["X", "Y"], vec!["X"], vec![], vec!["Y"]];
+        let mut passes = 0;
+        let result = stabilize_rewrite_judgments(|| {
+            assert!(passes < 5, "rejudging continued after a judgment state repeated instead of refusing the import");
+            let state = states[passes % states.len()].clone();
+            passes += 1;
+            Ok(Some(state))
+        });
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "rewrite judgments do not stabilize; nothing was imported"
+        );
+        assert_eq!(passes, 5, "the first repeated non-stable state refuses");
     }
 }
