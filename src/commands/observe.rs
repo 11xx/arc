@@ -608,6 +608,18 @@ fn until_labels(until: &[WatchUntil]) -> String {
 }
 
 fn run_hook(command: &str, input: &[u8], value: &serde_json::Value) {
+    match hook_outcome(command, input, value) {
+        Ok(status) if status.success() => {}
+        Ok(status) => eprintln!("warning: event hook exited with {status}"),
+        Err(error) => eprintln!("warning: event hook failed: {error}"),
+    }
+}
+
+fn hook_outcome(
+    command: &str,
+    input: &[u8],
+    value: &serde_json::Value,
+) -> std::io::Result<std::process::ExitStatus> {
     let event_id = value
         .get("event_id")
         .and_then(serde_json::Value::as_str)
@@ -620,7 +632,7 @@ fn run_hook(command: &str, input: &[u8], value: &serde_json::Value) {
         .get("change_id")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
-    let result = std::process::Command::new("sh")
+    std::process::Command::new("sh")
         .args(["-c", command])
         .env("ARC_EVENT_ID", event_id)
         .env("ARC_EVENT_TYPE", event_type)
@@ -628,14 +640,17 @@ fn run_hook(command: &str, input: &[u8], value: &serde_json::Value) {
         .stdin(std::process::Stdio::piped())
         .counted_spawn()
         .and_then(|mut child| {
-            child.stdin.take().unwrap().write_all(input)?;
-            child.wait()
-        });
-    match result {
-        Ok(status) if status.success() => {}
-        Ok(status) => eprintln!("warning: event hook exited with {status}"),
-        Err(error) => eprintln!("warning: event hook failed: {error}"),
-    }
+            let mut stdin = child.stdin.take().unwrap();
+            let written = crate::process_group::write_input(&mut stdin, input);
+            drop(stdin);
+            let status = child.wait()?;
+            // A hook may exit without reading its payload; its exit status
+            // is its answer.
+            match written {
+                Err(error) if error.kind() != std::io::ErrorKind::BrokenPipe => Err(error),
+                _ => Ok(status),
+            }
+        })
 }
 
 /// Whether a condition holds, and the event that made it hold when one did.
@@ -782,4 +797,29 @@ fn watch_reached(
             stall: None,
         }),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An event hook that exits without reading its payload is reported by
+    /// its own exit status, and arc keeps running. Rejects the payload write
+    /// meeting the pipe the hook closed and raising SIGPIPE, which under the
+    /// disposition `main` restores ends `arc watch --exec` or
+    /// `arc events --exec` by the signal instead of its documented exit.
+    #[test]
+    fn a_hook_that_skips_its_payload_reports_its_own_exit() {
+        crate::process_group::test_support::under_default_sigpipe(
+            "commands::observe::tests::a_hook_that_skips_its_payload_reports_its_own_exit",
+            || {
+                let payload = vec![b'x'; 1024 * 1024];
+                let value = serde_json::json!({"event_type": "watch-reached"});
+                for (script, code) in [("exit 0", 0), ("exit 3", 3)] {
+                    let status = hook_outcome(script, &payload, &value).unwrap();
+                    assert_eq!(status.code(), Some(code), "hook `{script}`");
+                }
+            },
+        );
+    }
 }

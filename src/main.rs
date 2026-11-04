@@ -1230,7 +1230,8 @@ enum Cmd {
         since: Option<ulid::Ulid>,
         /// Run `sh -c <cmd>` for every emitted event, with its NDJSON line on
         /// stdin and ARC_EVENT_ID, ARC_EVENT_TYPE, and ARC_CHANGE_ID set. A
-        /// failing handler is a warning and never stops the stream
+        /// handler may exit without reading its line. A failing handler is a
+        /// warning and never stops the stream
         #[arg(long = "exec")]
         exec_command: Option<String>,
     },
@@ -1294,7 +1295,8 @@ enum Cmd {
         /// reached `arc-watch/1` document `--json` prints on stdin and
         /// ARC_EVENT_TYPE set to `watch-reached`. ARC_EVENT_ID and
         /// ARC_CHANGE_ID carry the document's values, empty where it names
-        /// none
+        /// none. The hook may exit without reading its stdin; a hook that
+        /// fails is a warning, and the watch still exits 0
         #[arg(long = "exec")]
         exec_command: Option<String>,
         /// Emit the outcome as one `arc-watch/1` JSON object: `schema`,
