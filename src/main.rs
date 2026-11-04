@@ -2321,7 +2321,11 @@ enum Cmd {
     /// entry, a merge driver, or an inherited `GIT_REFLOG_ACTION` cannot make ordinary work
     /// look replayed. A Git that cannot replay, a refusal, or a conflict falls back to `git
     /// rebase`, whose result is recorded as ordinary work; a stopped rebase leaves its
-    /// partial resolution in progress. `--contributors` and `--solo` decide the replayed
+    /// partial resolution in progress. Before either replays, each commit of the replayed
+    /// range that the ledger cites and none of the change's keep pins reaches is held under
+    /// `refs/arc/retained/<change>/<subject>/<commit>`, and each ref created is printed as
+    /// `retained: <ref> <commit>` (`arc guide rewrites-evidence`); a ref that cannot be
+    /// created refuses the rebase before anything is replayed. `--contributors` and `--solo` decide the replayed
     /// patchset's contributor set; a declared member the replay carries over keeps its
     /// recorded coordinate, and one it does not carry is credited as declared. The snapshot
     /// links the artifact the change was opened from (`via: begin`) and the plan its brief

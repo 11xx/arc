@@ -2087,6 +2087,13 @@ pub fn rebase(
     )?;
 
     let _slot_use = crate::slots::exclusive_in(&wt)?;
+    let retained = crate::retention::replayed(&ctx.cwd, &store, &change_id, &target_head, &head)?;
+    let (retentions, _) = crate::retention::creations(&ctx.cwd, &retained)?;
+    gitio::update_refs(&ctx.cwd, &retentions)
+        .context("cannot hold the cited commits the rebase replaces; nothing was replayed")?;
+    for created in &retentions {
+        println!("retained: {} {}", created.name, created.new);
+    }
     match gitio::replay(&wt, &st.branch, &target_head, &head)? {
         gitio::ReplayOutcome::Stopped => {
             let conflicts = gitio::unmerged_paths(&wt)?;

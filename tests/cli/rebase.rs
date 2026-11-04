@@ -1,4 +1,5 @@
 use super::common::*;
+use super::retention::{collect_garbage, has_object};
 
 fn commit_gates(repo: &Repo) {
     fs::create_dir_all(repo.root.join(".arc")).unwrap();
@@ -287,5 +288,158 @@ fn rebase_verify_from_another_checkout_gates_the_changes_worktree() {
         status["latest_patchset"]["head"],
         repo.head(&wt),
         "{status}"
+    );
+}
+
+fn retained(repo: &Repo) -> Vec<String> {
+    git_out(
+        &repo.root,
+        &[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/arc/retained/",
+        ],
+    )
+    .lines()
+    .filter(|line| !line.is_empty())
+    .map(str::to_string)
+    .collect()
+}
+
+fn recorded_event(output: &str) -> String {
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap_or_else(|| panic!("{output}"))
+        .to_string()
+}
+
+/// Whether the last replay went through `git rebase`, which leaves
+/// `ORIG_HEAD` behind, rather than `git replay`, which does not.
+fn rebased_by_git_rebase(wt: &Path) -> bool {
+    let orig_head = git_out(
+        wt,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "ORIG_HEAD",
+        ],
+    );
+    Path::new(&orig_head).exists()
+}
+
+/// Claim: a rebase through `git replay` holds a checkpoint revision it
+/// replaces under the checkpoint's retention ref, and holds nothing a keep
+/// pin already reaches. Rejects: a checkpoint on a commit above the recorded
+/// head, which no pin reaches once the branch moves, left to garbage
+/// collection.
+#[test]
+fn a_replayed_rebase_retains_a_checkpoint_revision_above_the_recorded_head() {
+    let repo = Repo::new();
+    let (_, wt) = diverged(&repo, "held-replay", "branch.txt", "target\n");
+    let recorded_head = repo.head(&wt);
+    repo.commit(&wt, "above.txt", "above\n", "feat: above the recorded head");
+    let tested = repo.head(&wt);
+    let event = recorded_event(&stdout(repo.arc(&repo.root).args([
+        "checkpoint",
+        "record",
+        "rc",
+        "--rev",
+        &tested,
+    ])));
+
+    stdout(repo.arc(&wt).args(["rebase", "held-replay"]));
+    assert!(!rebased_by_git_rebase(&wt), "the replay fell back");
+    assert_ne!(repo.head(&wt), tested);
+    collect_garbage(&repo.root);
+
+    assert!(
+        has_object(&repo.root, &tested),
+        "garbage collection took it"
+    );
+    assert!(has_object(&repo.root, &recorded_head));
+    assert_eq!(
+        retained(&repo),
+        [format!(
+            "refs/arc/retained/repository/{event}/{tested} {tested}"
+        )]
+    );
+}
+
+/// Claim: a rebase that falls back to `git rebase` holds a verdict revision
+/// it replaces under the verdict's retention ref. Rejects: retention only on
+/// the `git replay` path, which leaves the fallback's replaced commits to
+/// garbage collection.
+#[test]
+fn a_fallback_rebase_retains_a_verdict_revision_above_the_recorded_head() {
+    let repo = Repo::new();
+    let (change_id, wt) = diverged(&repo, "held-fallback", "branch.txt", "target\n");
+    repo.commit(&wt, "above.txt", "above\n", "feat: above the recorded head");
+    let read = repo.head(&wt);
+    let event = recorded_event(&stdout(repo.arc(&wt).args([
+        "external",
+        "verdict",
+        "held-fallback",
+        "--verdict",
+        "approved",
+        "--decided-by",
+        "Upstream Maintainer",
+        "--reference",
+        "https://example.invalid/pull/7",
+        "--revision",
+        &read,
+    ])));
+
+    stdout(
+        repo.arc(&wt)
+            .args(["rebase", "held-fallback"])
+            .env("PATH", path_without_git_replay(&repo)),
+    );
+    assert!(rebased_by_git_rebase(&wt), "the replay did not fall back");
+    git(&wt, &["update-ref", "-d", "ORIG_HEAD"]);
+    collect_garbage(&repo.root);
+
+    assert!(has_object(&repo.root, &read), "garbage collection took it");
+    assert_eq!(
+        retained(&repo),
+        [format!(
+            "refs/arc/retained/{change_id}/{event}/{read} {read}"
+        )]
+    );
+}
+
+/// Claim: a rebase that stops on a conflict has already held the cited
+/// commits it is replacing, since nothing of arc runs when it is finished by
+/// hand. Rejects: holding them only after a replay that completes.
+#[test]
+fn a_rebase_stopped_on_a_conflict_already_holds_what_it_replaces() {
+    let repo = Repo::new();
+    let (_, wt) = diverged(&repo, "held-stop", "branch.txt", "target\n");
+    repo.commit(
+        &wt,
+        "README.md",
+        "branch\n",
+        "feat: conflicts with the target",
+    );
+    let tested = repo.head(&wt);
+    let event = recorded_event(&stdout(repo.arc(&repo.root).args([
+        "checkpoint",
+        "record",
+        "rc",
+        "--rev",
+        &tested,
+    ])));
+
+    repo.arc(&wt)
+        .args(["rebase", "held-stop"])
+        .assert()
+        .failure();
+    assert!(git_out(&wt, &["status"]).contains("rebase in progress"));
+    assert_eq!(
+        retained(&repo),
+        [format!(
+            "refs/arc/retained/repository/{event}/{tested} {tested}"
+        )]
     );
 }

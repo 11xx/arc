@@ -3319,13 +3319,16 @@ HISTORY REWRITES
 
   A commit that any recorded verdict or audit read, that a patchset recorded
   as its head, that a forge fact records as the provider's own (a full
-  object ID, from an observation, link, checks or lifecycle fact), or that a
-  checkpoint names as its revision or an open change's head stays
-  reachable after any rewrite arc performs or records. Each such commit a
+  object ID, from an observation, link, checks or lifecycle fact), that a
+  candidate's received source, tested or report evidence names, that a
+  disclosure selects as Git support, or that a checkpoint names as its
+  revision or an open change's head is cited, and stays reachable after any
+  rewrite or rebase arc performs or records. Each such commit a
   rewrite replaces is held by
   `refs/arc/retained/<change>/<subject>/<commit>`: the subject is the
-  patchset the commit was the head of, or the event that recorded a verdict
-  or forge fact on it, and a change holds a commit once. A checkpoint's
+  patchset the commit was the head of, the candidate, or the event that
+  recorded a verdict, forge fact or disclosure on it, and a change holds a
+  commit once. A checkpoint's
   commits are held in the `repository` scope under its event, when nothing
   else cites them. A
   `refs/arc/keep/<change>/<patchset>` pin the rewrite moves is held the same way, whether or not a verdict cites
@@ -3347,6 +3350,14 @@ HISTORY REWRITES
   `unretained-commit`, naming the `git update-ref` that holds it.
   If Git cannot complete the reachability walk, the report retains collected
   findings and names the problem `retention-reachability-failed` with the error.
+
+  `arc rebase` records no map and moves no pin, and a pin holds its
+  patchset's head with every commit below it. Before replaying, by `git
+  replay` or by `git rebase`, a rebase holds each cited commit of the range
+  it replays that none of the change's pins reaches, under the same names,
+  and prints each ref it creates. A rebase stopped on a conflict has
+  already held them when it is finished by hand. These refs are named by no
+  event.
 
   Every ref moves in one Git transaction, so a rewrite leaves the branch and
   arc's evidence refs on one history or leaves them all alone. The map and
@@ -4956,12 +4967,10 @@ FILES
 
   Every patchset's head is pinned by `refs/arc/keep/<change>/<patchset>`
   so garbage collection cannot take it. Pins follow recorded rewrites onto
-  their successors. The commit a pin held, and any other commit the ledger
-  cites as a patchset head or a verdict's revision, is held under
-  `refs/arc/retained/<change>/<subject>/<commit>` by `arc rewrite` and
-  `arc history rewrite --map`, as is a provider-observed commit a forge fact
-  cites, a received source/tested/report commit, a checkpoint's commits, and
-  an import that holds one. A pin or a retention ref is released only once
+  their successors. The commit a pin held, and any commit the ledger cites
+  that a rewrite, rebase or import would leave unreachable, is held under
+  `refs/arc/retained/<change>/<subject>/<commit>` (`arc guide
+  rewrites-evidence`). A pin or a retention ref is released only once
   its commit is reachable from the integration commit, where history holds it;
   a replaced commit is on no branch, so its ref stays while the ledger cites
   it, and closing a change without integrating it releases nothing. Release

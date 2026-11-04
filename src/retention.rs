@@ -240,6 +240,45 @@ pub fn plan(
     Ok(plan)
 }
 
+/// What a rebase that replays `onto..head` of `change_id` retains: each
+/// commit in that range the ledger cites that none of the change's keep pins
+/// reaches.
+///
+/// A rebase moves no pin, and a pin holds its patchset's head with every
+/// commit below it, so what the replay leaves exposed is a cited commit above
+/// every recorded head. Holding it before the replay covers every way the
+/// replay can end, a rebase stopped on a conflict and finished by hand
+/// included.
+pub fn replayed(
+    cwd: &Path,
+    store: &Store,
+    change_id: &str,
+    onto: &str,
+    head: &str,
+) -> Result<BTreeMap<String, String>> {
+    let mut args = vec!["rev-list".to_string(), head.to_string(), format!("^{onto}")];
+    for (_, pin) in gitio::list_refs(cwd, &gitio::retention_prefix(change_id))? {
+        args.push(format!("^{pin}"));
+    }
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let exposed: BTreeSet<String> = gitio::git(cwd, &args)?
+        .lines()
+        .map(str::to_string)
+        .collect();
+    if exposed.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    Ok(cited(store)?
+        .into_iter()
+        .map(|cited| Cited {
+            commit: crate::rewrite::canonical_revision(&cited.commit),
+            ..cited
+        })
+        .filter(|cited| exposed.contains(&cited.commit))
+        .map(|cited| (cited.retained_ref(), cited.commit))
+        .collect())
+}
+
 /// Whether a map replaces a commit. A map may spell what the ledger holds in
 /// full as an abbreviation, which names the commit only when it is long
 /// enough to.
