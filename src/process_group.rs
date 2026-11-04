@@ -260,8 +260,8 @@ pub(crate) mod test_support {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
-    /// How long a unit test waits for a fixture process to reach a step it
-    /// is certain to reach before calling the test hung. It bounds failures,
+    /// How long a unit test waits for a fixture process or thread to reach a
+    /// step it is certain to reach before calling the test hung. It bounds failures,
     /// never a passing run, so it is as long as the CLI suite's `HANG_BOUND`.
     pub(crate) const HANG_BOUND: Duration = Duration::from_secs(120);
 

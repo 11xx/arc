@@ -22,6 +22,8 @@ static OPENING_IDS: std::sync::Mutex<BTreeMap<(PathBuf, String), String>> =
 thread_local! {
     static EVENT_ID_CANDIDATE: std::cell::Cell<Option<ulid::Ulid>> = const { std::cell::Cell::new(None) };
     static LOCAL_PUBLICATION_PAUSE: std::cell::RefCell<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>> = const { std::cell::RefCell::new(None) };
+    /// Called each time a lock wait on this thread finds its lock held.
+    static LOCK_CONTENTION: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
 }
 
 // Candidate payload variants and wire names share one format barrier.
@@ -98,6 +100,8 @@ pub(crate) fn wait_for_lock(
         match attempt {
             Ok(()) => return Ok(()),
             Err(std::fs::TryLockError::WouldBlock) => {
+                #[cfg(test)]
+                LOCK_CONTENTION.with_borrow(|report| report.as_ref().map(|report| report()));
                 // A test pauses here, once the lock is known to be held,
                 // and the pause does not count against the timeout.
                 #[cfg(debug_assertions)]
@@ -3189,7 +3193,52 @@ fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process_group::test_support::HANG_BOUND;
     use std::sync::mpsc;
+
+    /// What a thread waiting on a lock reports, in the order it happened.
+    #[derive(Debug, PartialEq)]
+    enum LockStep {
+        /// One attempt found the lock held.
+        Contended,
+        /// The wait's work finished.
+        Done,
+    }
+
+    /// Run `work` on a thread that reports each lock attempt finding its lock
+    /// held, then its own completion, on one ordered channel.
+    fn observe_lock_wait<T: Send + 'static>(
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> (mpsc::Receiver<LockStep>, std::thread::JoinHandle<T>) {
+        let (steps, observed) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let contended = steps.clone();
+            LOCK_CONTENTION.set(Some(Box::new(move || {
+                let _ = contended.send(LockStep::Contended);
+            })));
+            let value = work();
+            let _ = steps.send(LockStep::Done);
+            value
+        });
+        (observed, handle)
+    }
+
+    /// Assert the observed thread is held at its lock: it found the lock
+    /// held, retried, and found it held again, and finished nothing first.
+    fn assert_held_at_lock(observed: &mpsc::Receiver<LockStep>) {
+        for _ in 0..2 {
+            assert_eq!(
+                observed.recv_timeout(HANG_BOUND).unwrap(),
+                LockStep::Contended,
+                "the waiter finished while the lock was held"
+            );
+        }
+    }
+
+    /// Wait for the observed thread to finish once the lock is free.
+    fn await_done(observed: &mpsc::Receiver<LockStep>) {
+        while observed.recv_timeout(HANG_BOUND).unwrap() != LockStep::Done {}
+    }
 
     fn test_store(root: &Path) -> Store {
         Store::for_tests(root)
@@ -3219,8 +3268,6 @@ mod tests {
             .unwrap();
         let (issued, wait) = mpsc::channel();
         let (release, released) = mpsc::channel();
-        let (started, starting) = mpsc::channel();
-        let (published, publication) = mpsc::channel();
         let root = dir.path().to_path_buf();
         let first = std::thread::spawn(move || {
             let store = test_store(&root);
@@ -3231,29 +3278,26 @@ mod tests {
             event.event_id.clone()
         });
         let root = dir.path().to_path_buf();
-        let second = std::thread::spawn(move || {
+        // The second writer starts once the first holds an issued ID, and
+        // must wait for the first to publish it.
+        let (observed, second) = observe_lock_wait(move || {
             wait.recv().unwrap();
             let store = test_store(&root);
             let mut event = ordering_draft("second");
             EVENT_ID_CANDIDATE.set(Some(floor.increment().unwrap()));
-            started.send(()).unwrap();
             store.append_local_event(&mut event).unwrap();
-            published.send(event.event_id.clone()).unwrap();
-            assert_eq!(
-                event.event_id.parse::<ulid::Ulid>().unwrap().timestamp_ms(),
-                floor.timestamp_ms()
-            );
+            event.event_id.clone()
         });
-        starting.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(matches!(
-            publication.recv_timeout(Duration::from_millis(50)),
-            Err(mpsc::RecvTimeoutError::Timeout)
-        ));
+        assert_held_at_lock(&observed);
         release.send(()).unwrap();
         let first = first.join().unwrap();
-        let second_id = publication.recv_timeout(Duration::from_secs(1)).unwrap();
+        await_done(&observed);
+        let second_id = second.join().unwrap();
         assert!(first < second_id);
-        second.join().unwrap();
+        assert_eq!(
+            second_id.parse::<ulid::Ulid>().unwrap().timestamp_ms(),
+            floor.timestamp_ms()
+        );
     }
 
     #[test]
@@ -3340,15 +3384,12 @@ mod tests {
             .unwrap();
         assert_eq!(nested, 7);
         let held = store.lock_event_ids().unwrap();
-        let (read, received) = std::sync::mpsc::channel();
         let reader = test_store(dir.path());
-        let waiting = thread::spawn(move || {
-            reader.read_event_cursor(|| Ok(())).unwrap();
-            read.send(()).unwrap();
-        });
-        assert!(received.recv_timeout(Duration::from_millis(50)).is_err());
+        let (observed, waiting) =
+            observe_lock_wait(move || reader.read_event_cursor(|| Ok(())).unwrap());
+        assert_held_at_lock(&observed);
         drop(held);
-        received.recv_timeout(Duration::from_secs(5)).unwrap();
+        await_done(&observed);
         waiting.join().unwrap();
     }
 
@@ -3996,15 +4037,12 @@ mod tests {
         .unwrap();
         let held = test_store(dir.path()).lock_format().unwrap();
         let root = dir.path().to_path_buf();
-        let (sent, received) = mpsc::channel();
-        let writer = std::thread::spawn(move || {
-            test_store(&root).stamp_format(Some(3)).unwrap();
-            sent.send(()).unwrap();
-        });
+        let (observed, writer) =
+            observe_lock_wait(move || test_store(&root).stamp_format(Some(3)).unwrap());
 
-        assert!(received.recv_timeout(Duration::from_millis(50)).is_err());
+        assert_held_at_lock(&observed);
         drop(held);
-        received.recv_timeout(Duration::from_secs(1)).unwrap();
+        await_done(&observed);
         writer.join().unwrap();
         test_store(dir.path()).stamp_format(Some(2)).unwrap();
 
