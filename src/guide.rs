@@ -4833,8 +4833,9 @@ FILES
   A gate's optional `selector` command reads `arc-gate-delta/1` JSON with
   `source_tree`, `target_tree`, `paths` and `gates`. It answers
   `arc-gate-selection/1` with `complete: true` and the gate names affected by
-  that delta. Missing, failed, malformed, incomplete or unknown selections
-  run the required checks. Delta selection applies to integration; publication
+  that delta. Missing, failed, malformed, incomplete or unknown selections,
+  and a selector that exits without reading its whole delta, run the
+  required checks. Delta selection applies to integration; publication
   checks every required gate on a changed tree. A reuse receipt retains the
   passing source tree, target tree, selector and declarations; it grants no result to another
   event or environment.

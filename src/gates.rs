@@ -695,7 +695,6 @@ fn selector_output(
     input: &str,
     timeout: Option<u64>,
 ) -> Result<Option<Vec<u8>>> {
-    use std::io::Write;
     let deadline = Instant::now()
         .checked_add(Duration::from_secs(
             timeout.unwrap_or(DEFAULT_PROBE_TIMEOUT_SECONDS),
@@ -717,7 +716,8 @@ fn selector_output(
         .take()
         .context("gate selector stdin unavailable")?;
     let input = input.to_owned();
-    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+    let writer =
+        std::thread::spawn(move || crate::process_group::write_input(&mut stdin, input.as_bytes()));
     let mut stdout = child
         .0
         .stdout
@@ -765,11 +765,14 @@ fn selector_output(
     }
     let output =
         join_before_deadline(reader, Some(deadline), "gate selector stdout")?.transpose()?;
-    let written =
-        join_before_deadline(writer, Some(deadline), "gate selector stdin")?.transpose()?;
+    // A selector that closed its input before reading the whole delta did
+    // not answer for that delta.
+    let written = join_before_deadline(writer, Some(deadline), "gate selector stdin")?;
     let _ = join_before_deadline(errors, Some(deadline), "gate selector stderr")?.transpose()?;
     match output {
-        Some((output, false)) if written.is_some() && status == Some(true) => Ok(Some(output)),
+        Some((output, false)) if matches!(written, Some(Ok(()))) && status == Some(true) => {
+            Ok(Some(output))
+        }
         _ => Ok(None),
     }
 }
@@ -873,6 +876,32 @@ mod tests {
 #[cfg(test)]
 mod pipe_deadline_tests {
     use super::*;
+
+    /// A gate selector that exits without reading its whole delta has not
+    /// answered for that delta, so the gate runs. Rejects the input writer
+    /// meeting the pipe the selector closed and raising SIGPIPE, which under
+    /// the disposition `main` restores ends arc silently mid-integration.
+    #[test]
+    fn a_selector_that_skips_its_delta_leaves_the_gate_to_run() {
+        crate::process_group::test_support::under_default_sigpipe(
+            "gates::pipe_deadline_tests::a_selector_that_skips_its_delta_leaves_the_gate_to_run",
+            || {
+                let cwd = tempfile::tempdir().unwrap();
+                let delta = "x".repeat(1024 * 1024);
+                let output = selector_output(
+                    cwd.path(),
+                    "printf '{\"schema\":\"arc-gate-selection/1\",\"complete\":true,\"gates\":[]}'",
+                    &delta,
+                    Some(30),
+                )
+                .unwrap();
+                assert!(
+                    output.is_none(),
+                    "a selection that never read its delta was used"
+                );
+            },
+        );
+    }
 
     #[test]
     fn inherited_environment_probe_pipes_obey_the_deadline() {
