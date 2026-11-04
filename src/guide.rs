@@ -2863,7 +2863,11 @@ REVIEW COVERAGE AND DEBT
   obligation would discharge itself — though anyone may audit into
   `changes-requested`, since raising problems needs no independence. Planning
   and orchestrating are recorded as the auditor's held roles and never refuse;
-  integrating somebody else's work is not contributing to it.
+  integrating somebody else's work is not contributing to it. An auditor is
+  compared with the authors, planners and orchestrators under the model its
+  audit records and, where its session store observed another, the observed
+  model too: either matching refuses, warns or holds the role, and the
+  message names the model that matched.
 
   A review finding the change shipped unresolved, whether open, still-open,
   disputed, or contested, stays that way in what shipped. `arc resolve` on

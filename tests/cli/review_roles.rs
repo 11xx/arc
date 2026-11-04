@@ -2070,3 +2070,147 @@ fn a_replay_that_drops_an_empty_commit_still_inherits_the_replayed_author() {
         "{replayed}"
     );
 }
+
+const READER_SESSION: &str = "4c0a9d1e-2b7f-4e55-9a31-8d6f0c2e7b14";
+const READER_DECLARED: &str = "fixture-declared#high";
+
+/// A reader who declares `READER_DECLARED` in a codex session the store
+/// records as `observed`, at high effort.
+fn reader_observed_as(repo: &Repo, observed: &str) -> String {
+    codex_recording(repo, READER_SESSION, observed);
+    format!("codex:{READER_SESSION}:{READER_DECLARED}")
+}
+
+/// A change Lead-B orchestrated for `IMPLEMENTER_A` under `plan`, when one is
+/// given, reviewed by Lead-B and, with `integrate`, integrated owing a read.
+fn implemented_for_a(repo: &Repo, slug: &str, plan: Option<&str>, integrate: bool) {
+    let worktree = match plan {
+        Some(plan) => begin_with_plan(repo, slug, plan),
+        None => {
+            stdout(repo.arc(&repo.root).args(["begin", slug]));
+            repo.home.join(".worktrees").join(format!("repo-{slug}"))
+        }
+    };
+    repo.commit(&worktree, "work.txt", "work\n", "feat: work");
+    let lead = |command: &mut AssertCommand| {
+        command
+            .env("ARC_ACTOR", REVIEWER_B)
+            .env("ARC_HARNESS", "claude")
+            .env("ARC_MODEL", MODEL_B);
+    };
+    let mut snapshot = repo.arc(&worktree);
+    lead(&mut snapshot);
+    stdout(snapshot.args(["snapshot", slug, "--on-behalf-of", IMPLEMENTER_A]));
+    if integrate {
+        let mut review = repo.arc(&worktree);
+        lead(&mut review);
+        review
+            .args(["review", slug, "--verdict", "approved"])
+            .assert()
+            .success();
+        integrate_with_debt(repo, slug, REVIEWER_B, MODEL_B);
+    }
+}
+
+/// `arc <verb> <slug> --verdict approved` by `reader`, with the fixture's
+/// codex store.
+fn read_by(repo: &Repo, verb: &str, slug: &str, reader: &str) -> std::process::Output {
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Auditor-X")
+        .env("CODEX_HOME", repo.home.join("codex-state"))
+        .args([
+            verb,
+            slug,
+            "--verdict",
+            "approved",
+            "--on-behalf-of",
+            reader,
+        ])
+        .output()
+        .unwrap()
+}
+
+/// Claim: under `forbid_self_approval`, an approving audit is refused when
+/// the model the auditor's session store observed is the ledger
+/// implementer's, even though the declared model is not, and the refusal
+/// names the observed model, the declared one, and the implementer's.
+/// Rejects an auditor escaping the self-audit refusal by declaring a model
+/// other than the one its session ran.
+#[test]
+fn a_self_audit_is_refused_when_the_observed_model_is_the_implementers() {
+    let repo = policy(true);
+    implemented_for_a(&repo, "observed-self", None, true);
+    let reader = reader_observed_as(&repo, "gpt-6.1-sol");
+    let output = read_by(&repo, "audit", "observed-self", &reader);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{output:?}");
+    for named in [
+        "model \"gpt-6.1-sol#high\"",
+        "session store observed",
+        READER_DECLARED,
+        "implementer's model codex:gpt-6.1-sol#xhigh",
+        "would discharge its own obligation",
+    ] {
+        assert!(stderr.contains(named), "{named}: {stderr}");
+    }
+    let after = status(&repo, "observed-self");
+    assert!(after["audit_verdicts"].is_null(), "{after}");
+}
+
+/// Claim: an approving review or audit whose reader's session store
+/// observed the implementer's model warns, naming the observed model and the
+/// declared one, though the declared model is another. Rejects a read that
+/// is silent about not being independent because its declaration differs
+/// from what its session ran.
+#[test]
+fn a_read_warns_when_the_observed_model_is_the_implementers() {
+    let repo = policy(false);
+    implemented_for_a(&repo, "observed-warned", None, false);
+    let reader = reader_observed_as(&repo, "gpt-6.1-sol");
+    let warned = |output: &std::process::Output, verb: &str| {
+        assert!(output.status.success(), "{verb}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let warning = stderr
+            .lines()
+            .find(|line| line.contains("an implementer of the audited range"))
+            .unwrap_or_else(|| panic!("{verb}: no independence warning in {stderr}"));
+        for named in [
+            "model \"gpt-6.1-sol#high\"",
+            "session store observed",
+            READER_DECLARED,
+            "codex:gpt-6.1-sol#xhigh",
+        ] {
+            assert!(warning.contains(named), "{verb}: {named}: {warning}");
+        }
+    };
+    warned(
+        &read_by(&repo, "review", "observed-warned", &reader),
+        "review",
+    );
+    integrate_with_debt(&repo, "observed-warned", REVIEWER_B, MODEL_B);
+    warned(
+        &read_by(&repo, "audit", "observed-warned", &reader),
+        "audit",
+    );
+}
+
+/// Claim: an audit records the planner and orchestrator roles its reader
+/// holds when the reader's session store observed the model that planned
+/// and orchestrated the work, though the declared model is another.
+/// Rejects an audit that hides the roles its reader held behind a
+/// declaration its session contradicts.
+#[test]
+fn an_audit_records_roles_its_observed_model_holds() {
+    let repo = policy(true);
+    let plan = plan_naming_lead(&repo);
+    implemented_for_a(&repo, "observed-roles", Some(&plan), true);
+    let reader = reader_observed_as(&repo, "claude-opus-5-5");
+    let output = read_by(&repo, "audit", "observed-roles", &reader);
+    assert!(output.status.success(), "{output:?}");
+    let after = status(&repo, "observed-roles");
+    assert_eq!(
+        after["audit_verdicts"][0]["held_roles"],
+        serde_json::json!(["planner", "orchestrator"]),
+        "{after}"
+    );
+}

@@ -412,6 +412,30 @@ fn ensure_append_allowed(state: &ChangeState, payload: &Payload) -> Result<()> {
     }
 }
 
+/// A model a reader's independence is judged under: the model its read
+/// records, or, with `declared`, the one its session store observed where the
+/// read declared `declared`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReaderModel {
+    pub model: String,
+    pub declared: Option<String>,
+}
+
+impl ReaderModel {
+    /// The model, and for an observed one what was declared instead, as the
+    /// subject of a sentence.
+    pub(crate) fn described(&self) -> String {
+        match &self.declared {
+            None => format!("model {:?}", self.model),
+            Some(declared) => format!(
+                "model {:?}, which the reader's session store observed where {declared:?} was \
+                 declared,",
+                self.model
+            ),
+        }
+    }
+}
+
 impl Ctx {
     /// The ledger handle every path of this invocation reads and appends
     /// through. A read-only command's handle never parses the invoking
@@ -714,9 +738,35 @@ impl Ctx {
         true
     }
 
-    /// Say so when a verdict is recorded under a model the ledger credits to
-    /// an implementer of the range it judges, at any effort. Reports whether
-    /// it said anything.
+    /// The models a reader's independence is judged under: the one its read
+    /// records, and the one its session store observed where that
+    /// contradicts the declaration. Models are compared without effort, so
+    /// an observation naming the declared model at another effort adds none.
+    pub(crate) fn reader_models(&self) -> Vec<ReaderModel> {
+        let attribution = self.resolve_model();
+        let mut models: Vec<ReaderModel> = attribution
+            .model
+            .map(|model| ReaderModel {
+                model,
+                declared: None,
+            })
+            .into_iter()
+            .collect();
+        if let Some(disagreement) = attribution.provenance.model_disagreement {
+            let named = |model: &str| model.split('#').next().unwrap_or(model).trim().to_string();
+            if named(&disagreement.observed) != named(&disagreement.declared) {
+                models.push(ReaderModel {
+                    model: disagreement.observed,
+                    declared: Some(disagreement.declared),
+                });
+            }
+        }
+        models
+    }
+
+    /// Say so when a verdict is recorded under, or its reader's session store
+    /// observed, a model the ledger credits to an implementer of the range it
+    /// judges, at any effort. Reports whether it said anything.
     pub(crate) fn warn_model_not_independent(
         &self,
         implementers: &[String],
@@ -725,18 +775,23 @@ impl Ctx {
         if verdict != Verdict::Approved {
             return false;
         }
-        let Some(model) = self.resolve_model().model else {
-            return false;
-        };
-        let Some(value) = crate::trailers::naming_model(implementers, &model) else {
-            return false;
-        };
-        eprintln!(
-            "warning: recorded under model {model:?}, which the ledger records for an \
-             implementer of the audited range ({value}); this verdict shows that a review \
-             happened, not that it was independent of whoever wrote the work."
-        );
-        true
+        let mut said = false;
+        for reader in self.reader_models() {
+            let Some(value) = crate::trailers::naming_model(implementers, &reader.model) else {
+                continue;
+            };
+            let named = match &reader.declared {
+                None => format!("recorded under model {:?}, which", reader.model),
+                Some(_) => format!("{} is a model", reader.described()),
+            };
+            eprintln!(
+                "warning: {named} the ledger records for an implementer of the audited range \
+                 ({value}); this verdict shows that a review happened, not that it was \
+                 independent of whoever wrote the work."
+            );
+            said = true;
+        }
+        said
     }
 
     /// Build a local fact; publication assigns its identity under the ledger lock.

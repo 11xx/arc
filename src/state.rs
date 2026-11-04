@@ -644,22 +644,21 @@ fn identity_from_planner(planner: &PlannerIdentity) -> DebtIdentity {
     )
 }
 
-/// Whether an identity is the reviewer `actor` at `model`, compared the way
-/// independence compares identities: the actor whole, or the model without
-/// its effort.
-fn identity_names(identity: &DebtIdentity, actor: &str, model: Option<&str>) -> bool {
+/// Whether an identity is the reviewer `actor` at any of `models`, compared
+/// the way independence compares identities: the actor whole, or a model
+/// without its effort.
+fn identity_names(identity: &DebtIdentity, actor: &str, models: &[&str]) -> bool {
     if identity.effective_actor() == actor {
         return true;
     }
     let Some(recorded) = identity.model.as_deref() else {
         return false;
     };
-    let Some(model) = model else {
-        return false;
-    };
     let recorded = recorded.split('#').next().unwrap_or(recorded).trim();
-    let model = model.split('#').next().unwrap_or(model).trim();
-    !recorded.is_empty() && recorded == model
+    !recorded.is_empty()
+        && models
+            .iter()
+            .any(|model| model.split('#').next().unwrap_or(model).trim() == recorded)
 }
 
 /// Where a declared review obligation stands.
@@ -4915,7 +4914,7 @@ impl ChangeState {
             if identity.effective_actor() == actor {
                 return Some(identity.effective_actor().to_string());
             }
-            if model.is_some() && identity_names(&identity, actor, model) {
+            if model.is_some() && identity_names(&identity, actor, model.as_slice()) {
                 return Some(identity.effective_actor().to_string());
             }
         }
@@ -4951,10 +4950,10 @@ impl ChangeState {
         &self,
         subject: &Patchset,
         actor: &str,
-        model: Option<&str>,
+        models: &[&str],
     ) -> Vec<crate::model::ReviewRole> {
         let mut roles = std::collections::BTreeSet::new();
-        let names = |identity: &DebtIdentity| identity_names(identity, actor, model);
+        let names = |identity: &DebtIdentity| identity_names(identity, actor, models);
         let mut planners: Vec<DebtIdentity> = Vec::new();
         if let Some(source) = self
             .brief_for(subject)

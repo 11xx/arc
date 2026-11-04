@@ -799,11 +799,16 @@ pub(super) fn record_audit(
         }
     }
     let auditor = ctx.on_behalf_of.as_deref().unwrap_or(&ctx.actor);
-    let auditor_model = ctx.resolve_model().model;
+    let auditor_models: Vec<String> = ctx
+        .reader_models()
+        .into_iter()
+        .map(|reader| reader.model)
+        .collect();
+    let auditor_models: Vec<&str> = auditor_models.iter().map(String::as_str).collect();
     let held_roles = st
         .debt_subject_patchset()
         .or_else(|| st.latest_patchset())
-        .map(|patchset| st.held_review_roles(patchset, auditor, auditor_model.as_deref()))
+        .map(|patchset| st.held_review_roles(patchset, auditor, &auditor_models))
         .unwrap_or_default();
     let payload = Payload::AuditVerdictRecorded {
         revision: revision.clone(),
@@ -993,16 +998,17 @@ anyone independent looked at {}.\n\
         );
     }
     let authoring_models = state.authoring_model_values(patchset, production);
-    if let Some((model, value)) = ctx.resolve_model().model.and_then(|model| {
-        crate::trailers::naming_model(&authoring_models, &model).map(|value| (model, value))
+    if let Some((reader, value)) = ctx.reader_models().into_iter().find_map(|reader| {
+        crate::trailers::naming_model(&authoring_models, &reader.model).map(|value| (reader, value))
     }) {
         bail!(
-            "model {model:?} matches the ledger implementer's model {value} on the audited work; {policy_source}, so this audit \
+            "{} matches the ledger implementer's model {value} on the audited work; {policy_source}, so this audit \
              would discharge its own obligation.\n\
   If another reviewer did the pass, record it as theirs:\n\
     arc audit {} --verdict approved --actor '<reviewer>' --harness '<harness>' --model '<model>'\n\
   If you are reporting problems rather than clearing the change, \
 --verdict changes-requested is open to anyone.",
+            reader.described(),
             state.change_id
         );
     }
