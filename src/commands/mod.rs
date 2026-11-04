@@ -41,6 +41,7 @@ pub(crate) mod relations;
 mod replica;
 mod rescue;
 pub(crate) mod review;
+mod review_ladder;
 mod rewrite;
 pub(crate) mod roles;
 pub mod run;
@@ -121,6 +122,7 @@ pub use rescue::rescue;
 pub use review::{
     comment, finding, keep, read_review, reply, resolve, review, review_start, ReviewArgs,
 };
+pub use review_ladder::{import as review_ladder_import, show as review_ladder_show};
 pub use rewrite::{
     instructions_git, sign as rewrite_sign, trailers as rewrite_trailers, SignArgs, TrailerArgs,
 };
@@ -217,6 +219,7 @@ pub(crate) const READ_ONLY_COMMANDS: &[&str] = &[
     "cost evidence",
     "cost note",
     "policy show",
+    "review-ladder show",
     "policy path",
     "config",
     "sandbox diff",

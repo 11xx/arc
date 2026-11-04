@@ -168,6 +168,10 @@ paths = [
   # The binding that decides whether an audit's assessment clears an
   # `ineligible-review` debt. A defect clears a debt the auditor did not earn.
   "src/assessment.rs",
+  # Dated capability registries and their publication.
+  "src/review_ladder.rs",
+  "src/commands/review_ladder.rs",
+  ".arc/review-ladder.toml",
   # Artifact storage operations move the only copy of journal history.
   "src/journal.rs",
   # Bundle import writes foreign artifact bodies and events into the journal.

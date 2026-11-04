@@ -46,6 +46,7 @@ mod relations;
 mod render;
 mod replica;
 mod retention;
+mod review_ladder;
 mod rewrite;
 mod selection;
 mod session_store;
@@ -3298,6 +3299,16 @@ enum Cmd {
         #[command(subcommand)]
         cmd: CostCmd,
     },
+    /// Import or inspect the repository's dated review capability registry.
+    ///
+    /// `import` validates `arc-review-ladder/1` JSON or TOML and writes
+    /// `.arc/review-ladder.toml` only in the current open change's checkout.
+    /// `show` reads the target branch's committed registry, never the
+    /// candidate's file. See `arc guide debt-review` for the registry contract.
+    ReviewLadder {
+        #[command(subcommand)]
+        cmd: ReviewLadderCmd,
+    },
     /// Read or write policy kept with this repository's local Arc ledger
     Policy {
         #[command(subcommand)]
@@ -3748,6 +3759,31 @@ enum InstructionsCmd {
         /// be nonempty
         #[arg(long, value_name = "FILE")]
         check: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReviewLadderCmd {
+    /// Validate a JSON or TOML ladder and store it in the current change.
+    ///
+    /// Refuses exclusive tops, duplicate ids or identities, invalid dated
+    /// versions, empty effort sets, and corrections. Writes no other checkout;
+    /// a symlinked `.arc` directory refuses before publication.
+    Import {
+        /// File with the `arc-review-ladder/1` shape
+        file: PathBuf,
+    },
+    /// Print the target branch's accepted registry at its current head.
+    ///
+    /// `--change` selects a change's target, including a closed change's
+    /// recorded integration destination.
+    /// Otherwise the current change or repository default target is used.
+    /// Uncommitted and candidate ladder files supply no accepted registry.
+    /// Records no events.
+    Show {
+        /// Emit the registry in the shared `arc-review-ladder/1` JSON shape
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -8211,6 +8247,14 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
             }
             CostCmd::Retain { target } => commands::retain_cost(&ctx, &target).map(|_| 0),
         },
+        Cmd::ReviewLadder { cmd } => match cmd {
+            ReviewLadderCmd::Import { file } => {
+                commands::review_ladder_import(&ctx, &infer(None)?, &file)
+            }
+            ReviewLadderCmd::Show { json } => {
+                commands::review_ladder_show(&ctx, flag_change.as_deref(), json)
+            }
+        },
         Cmd::Policy { cmd } => match cmd {
             PolicyCmd::Show => commands::policy_show(&ctx),
             PolicyCmd::Path => commands::policy_path(&ctx),
@@ -8468,6 +8512,7 @@ mod tests {
             "run end",
             "cost retain",
             "policy write",
+            "review-ladder import",
             "forge observe",
             "forge declare",
             "forge link",

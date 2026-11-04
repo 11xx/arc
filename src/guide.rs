@@ -2561,6 +2561,55 @@ REVIEW COVERAGE AND DEBT
   a recorded integration's authorization is never rewritten. Absent, independence and authorship
   decide, and an assessment's `clears` is kept unread.
 
+  LADDER REGISTRY. `arc review-ladder import <file>` validates
+  `arc-review-ladder/1` JSON or TOML and writes TOML at
+  `.arc/review-ladder.toml` in the current open change's checkout. It never
+  redirects a write into the target or another change's checkout; a linked
+  `.arc` directory refuses. A refused input leaves the previous file intact.
+  The table has dated versions with unique ids, RFC 3339 `effective_from`
+  strictly increasing by instant, a nonempty source, and either a nonempty
+  model table or `gap = true`.
+  Gaps omit the model table. Each model names its canonical id, identities,
+  family, superseded flag, and a nonempty list of unique effort rows with
+  positive integer rank and floor. Identities, including canonical model ids,
+  resolve to one model in each version. Every floor must be met by a rank in
+  another family in that version. Corrections refuse as
+  `corrections-unsupported`.
+
+  A table with two families, in either encoding under the same keys:
+
+    schema = "arc-review-ladder/1"
+    [[version]]
+    id = "v2026-10-07"
+    effective_from = "2026-10-07T00:00:00Z"
+    source = "Capability judgment"
+    gap = false
+    [[version.model]]
+    model = "model-a"
+    identities = ["model-a"]
+    family = "lab-a"
+    superseded = false
+    efforts = [{ effort = "high", rank = 1, floor = 1 }]
+    [[version.model]]
+    model = "model-b"
+    identities = ["model-b"]
+    family = "lab-b"
+    superseded = false
+    efforts = [{ effort = "high", rank = 1, floor = 1 }]
+
+  `arc review-ladder show [--json]` prints the accepted registry from the
+  target branch's current committed head. `--change` selects a change's
+  target, including after closure; an integrated change uses its recorded
+  integration destination. Otherwise its branch identifies the current
+  change, or the repository default identifies the target. A missing
+  target, ambiguous change, invalid registry, or absent file refuses with a
+  diagnostic. Candidate and dirty checkout files supply no accepted table.
+  Import reports the authorizing registry read at the destination revision
+  that also governs policy. Table publication and inspection confer no
+  clearance; CLEARANCE defines the review requirements. Repositories that
+  govern ladder changes through independent review declare
+  `.arc/review-ladder.toml` in `[danger] paths`.
+
   Work sent to a repository you do not own is decided by its receiver.
   `arc external verdict <change> --verdict <v> --decided-by <who>
   --reference <ref> --revision <rev>` records that decision beside, never as,
@@ -2655,8 +2704,10 @@ REVIEW COVERAGE AND DEBT
   the list above in order, then by age, and every summary row splits its
   count by kind rather than reporting one total.
 
-  `ineligible-review` is declared, never derived: arc holds no family, tier
-  or floor, so only routing's reading can say a read does not count.
+  An `ineligible-review` declaration names a read that does not count as
+  independent. Under assessed clearance a findings approval also derives this
+  kind (CLEARANCE).
+
   `arc integrate --debt <why> --kind ineligible-review` (and `arc debt`)
   records beside the debt:
 
@@ -2693,8 +2744,9 @@ REVIEW COVERAGE AND DEBT
   It clears with an audit that approves or requests changes:
   `arc audit --assessment <file>` with `independence: eligible`, by an
   auditor who is also independent of the
-  contributors and whom the assessment describes, and whose assessment
-  covers the work: the `authors` it lists answer, through their `identities`,
+  contributors and whom the assessment describes. This eligible, bound
+  assessment is required for a person's audit too. The assessment covers the
+  work: the `authors` it lists answer, through their `identities`,
   to the model of every `Implemented-by` line in the integrated range, at
   that line's effort. An author entry without an `effort` covers its model at
   any effort; a line that names no effort is covered only by such an entry. An
@@ -5271,6 +5323,7 @@ SCHEMAS
     `arc-journal-spool/2`            .arc/outbox/<ts>-<kind>-<topic>.json
     `arc-trailer-edits/1`            arc rewrite trailers --edits
     `arc-correspondence/1`           arc close --correspondence
+    `arc-review-ladder/1`            .arc/review-ladder.toml; review-ladder import|show --json
 
   `arc cost evidence` writes `tapes-attribution-evidence/1`, a format tapes
   owns and versions; this rule counts the shapes arc defines, so that file
@@ -5521,6 +5574,7 @@ REVIEW
   Findings: arc findings <change>, with --audit after integration; arc resolve
   disposes of one.
   A read-only reviewer's reading: arc receipt template, then --receipt.
+  arc review-ladder              import or inspect dated capability tables.
 
 WORK BESIDE OTHERS
   arc claim takes work. Each writer uses its own branch or worktree.

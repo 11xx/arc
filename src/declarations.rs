@@ -57,15 +57,7 @@ pub(crate) fn for_change_at(
     } else {
         gitio::branch_head(cwd, &state.branch).ok()
     };
-    let target_head = match target_revision.map(str::to_string).or_else(|| {
-        state
-            .closure
-            .as_ref()
-            .and_then(|closure| closure.target_before.clone())
-    }) {
-        Some(recorded) => Ok(recorded),
-        None => gitio::branch_head(cwd, &state.target_branch),
-    };
+    let target_head = authorizing_revision(cwd, state, target_revision);
     let Ok(target_head) = target_head else {
         let own = change_head
             .and_then(|head| gates::inspect_at(cwd, &head).ok())
@@ -148,4 +140,154 @@ fn checkout_notes(
         }
     }
     Ok(notes)
+}
+
+/// Integration authority is frozen at a recorded closure's destination basis.
+fn authorizing_revision(
+    cwd: &Path,
+    state: &ChangeState,
+    target_revision: Option<&str>,
+) -> Result<String> {
+    match target_revision.map(str::to_string).or_else(|| {
+        state
+            .closure
+            .as_ref()
+            .and_then(|closure| closure.target_before.clone())
+    }) {
+        Some(recorded) => Ok(recorded),
+        None => gitio::branch_head(cwd, &state.target_branch),
+    }
+}
+
+/// The ladder authorizing this integration, from the same revision as policy.
+pub(crate) fn authorizing_ladder(
+    cwd: &Path,
+    state: &ChangeState,
+    target_revision: Option<&str>,
+) -> Result<Option<crate::review_ladder::Ladder>> {
+    crate::review_ladder::load_at(cwd, &authorizing_revision(cwd, state, target_revision)?)
+}
+
+/// The branch whose registry governs reads after integration.
+pub(crate) fn accepted_target(state: &ChangeState) -> &str {
+    state
+        .closure
+        .as_ref()
+        .and_then(|closure| closure.target_branch.as_deref())
+        .unwrap_or(&state.target_branch)
+}
+
+/// The accepted registry follows the destination branch even after closure.
+pub(crate) fn accepted_ladder(
+    cwd: &Path,
+    target_branch: &str,
+) -> Result<Option<crate::review_ladder::Ladder>> {
+    crate::review_ladder::load_at(cwd, &gitio::branch_head(cwd, target_branch)?)
+}
+
+#[cfg(test)]
+mod ladder_tests {
+    use super::*;
+    use crate::model::Event;
+    use serde_json::{json, Value};
+
+    fn event(id: &str, payload: Value) -> Event {
+        let mut value = json!({
+            "schema_version": crate::model::SCHEMA_VERSION,
+            "event_id": id, "repository_id": "fixture", "change_id": "registry",
+            "actor": "fixture", "created_at": "2026-10-10T00:00:00Z"
+        });
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(payload.as_object().unwrap().clone());
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn git(cwd: &Path, args: &[&str]) -> String {
+        let mut options = vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.org",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ];
+        options.extend(args);
+        gitio::git(cwd, &options).unwrap()
+    }
+
+    fn commit_gap(cwd: &Path, id: &str) -> String {
+        fs::create_dir_all(cwd.join(".arc")).unwrap();
+        fs::write(cwd.join(crate::review_ladder::FILE), format!(
+            "schema = \"arc-review-ladder/1\"\n[[version]]\nid = \"{id}\"\neffective_from = \"2026-10-07T00:00:00Z\"\nsource = \"fixture gap\"\ngap = true\n"
+        )).unwrap();
+        git(cwd, &["add", ".arc/review-ladder.toml"]);
+        git(cwd, &["commit", "-m", "test: capability gap"]);
+        git(cwd, &["rev-parse", "HEAD"]).trim().to_string()
+    }
+
+    /// Claim: authorization shares policy's closure basis, while accepted
+    /// registry reads follow the target head. Rejects either reading using
+    /// the candidate, or freezing later registry reads at closure.
+    #[test]
+    fn authorization_and_accepted_registry_use_distinct_target_revisions() {
+        let directory = tempfile::tempdir().unwrap();
+        let cwd = directory.path();
+        git(cwd, &["init", "-b", "master"]);
+        let before = commit_gap(cwd, "before");
+        let opened = event(
+            "open",
+            json!({
+                "event_type": "change-opened", "slug": "registry", "title": "Registry",
+                "profile": "local", "target_branch": "master", "branch": "arc/registry",
+                "base": before, "blocked_by": [], "tags": []
+            }),
+        );
+        let open = crate::state::reduce(std::slice::from_ref(&opened)).unwrap();
+        assert_eq!(
+            authorizing_ladder(cwd, &open, None)
+                .unwrap()
+                .unwrap()
+                .version[0]
+                .id,
+            "before"
+        );
+        let after = commit_gap(cwd, "after");
+        let integrated = event(
+            "integrated",
+            json!({
+                "event_type": "change-integrated", "integrated_commit": after,
+                "source_patchset_id": "ps-01", "source_head": before,
+                "target_branch": "master", "target_before": before
+            }),
+        );
+        let closed = crate::state::reduce(&[opened, integrated]).unwrap();
+        assert_eq!(
+            authorizing_ladder(cwd, &closed, None)
+                .unwrap()
+                .unwrap()
+                .version[0]
+                .id,
+            "before"
+        );
+        assert_eq!(
+            accepted_ladder(cwd, &closed.target_branch)
+                .unwrap()
+                .unwrap()
+                .version[0]
+                .id,
+            "after"
+        );
+        assert_eq!(
+            authorizing_ladder(cwd, &closed, Some(&after))
+                .unwrap()
+                .unwrap()
+                .version[0]
+                .id,
+            "after"
+        );
+    }
 }
