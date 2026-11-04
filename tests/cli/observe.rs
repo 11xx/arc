@@ -638,6 +638,78 @@ fn watch_reviewed_returns_on_any_verdict_including_changes_requested() {
     );
 }
 
+/// A PATH whose `git` runs `subcommand` as a process that never answers once
+/// `trigger` exists, and runs Git itself otherwise. The hang outlives the
+/// suite's hang bound, so only a kill ends it in time.
+fn path_hanging_git(repo: &Repo, subcommand: &str, trigger: &Path) -> std::ffi::OsString {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = repo.home.join(format!("bin-hang-{subcommand}"));
+    fs::create_dir_all(&bin).unwrap();
+    let real_git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|path| path.join("git"))
+        .find(|path| path.is_file())
+        .expect("git must be available on PATH");
+    let fake_git = bin.join("git");
+    fs::write(
+        &fake_git,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = {subcommand} ] && [ -e \"{}\" ]; then\n  exec sleep {}\nfi\nexec \"{}\" \"$@\"\n",
+            trigger.display(),
+            HANG_BOUND.as_secs() * 2,
+            real_git.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755)).unwrap();
+    std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap()
+}
+
+/// A watch whose deadline passes while a Git read it started never answers
+/// still exits 2 with its timeout report. Rejects a read the deadline does
+/// not bound, such as one run to completion outside `git()`, which keeps the
+/// watch waiting on that child long after its `--timeout`.
+#[test]
+fn a_watch_times_out_while_its_git_reads_hang() {
+    let repo = Repo::new();
+    let (_, worktree, _) = change_with_patchset(&repo, "watch-hung-git");
+    for subcommand in ["cat-file", "merge-base"] {
+        let trigger = repo.home.join(format!("hang-{subcommand}"));
+        let path = path_hanging_git(&repo, subcommand, &trigger);
+        let evaluated = repo.home.join("watch-evaluated");
+        let _ = fs::remove_file(&evaluated);
+        let mut child = spawn_arc_with_env(
+            &repo,
+            &worktree,
+            &[
+                "watch",
+                "watch-hung-git",
+                "--until",
+                "ready",
+                "--timeout",
+                "2",
+            ],
+            &[
+                ("PATH", Path::new(&path)),
+                ("ARC_WATCH_EVALUATED", &evaluated),
+            ],
+        );
+        // The first pass reads through Git as usual; every later read of
+        // this kind hangs.
+        await_watch_evaluation(&mut child, &evaluated);
+        fs::write(&trigger, b"").unwrap();
+        let status = wait_for_exit(&mut child);
+        assert_eq!(
+            status.code(),
+            Some(2),
+            "watch with a hung `git {subcommand}` ended with {status}"
+        );
+        assert_eq!(child_stdout(&mut child), "timeout: ready\n");
+    }
+}
+
 /// A verdict answered by a commit since is not a review of what is there now.
 /// Satisfying the wait with it would report a review of code the reviewer
 /// never saw.

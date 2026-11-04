@@ -1281,9 +1281,13 @@ enum Cmd {
         /// still working from one that answered.
         #[arg(long, value_enum, value_delimiter = ',', required = true)]
         until: Vec<commands::WatchUntil>,
-        /// Fail with exit 2 after this many seconds. Git probes and their pipe
-        /// cleanup share this deadline; unfinished pipe workers are detached
-        /// after terminating the probe process group
+        /// Fail with exit 2 after this many seconds. Each Git probe a check
+        /// runs, and any other child it waits for without a timeout of its
+        /// own, shares this deadline with its pipe cleanup: the child's
+        /// process group is killed when the deadline passes, and unfinished
+        /// pipe workers are detached. A child that dies or closes its input
+        /// mid-check fails the check, and a check failing after the deadline
+        /// reports the timeout
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         timeout: Option<u64>,
         /// Run `sh -c <cmd>` once when a condition is reached, with the

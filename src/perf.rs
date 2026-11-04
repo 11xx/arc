@@ -269,13 +269,15 @@ pub(crate) fn spawned(command: &std::process::Command) {
 
 /// Run a command to completion, counted as a child.
 pub(crate) trait Counted {
+    /// The command's output, bounded by the thread's deadline scope; see
+    /// `gitio::bounded_output`.
     fn counted_output(&mut self) -> std::io::Result<std::process::Output>;
     fn counted_spawn(&mut self) -> std::io::Result<std::process::Child>;
 }
 
 impl Counted for std::process::Command {
     fn counted_output(&mut self) -> std::io::Result<std::process::Output> {
-        child(self, std::process::Command::output)
+        child(self, crate::gitio::bounded_output)
     }
 
     fn counted_spawn(&mut self) -> std::io::Result<std::process::Child> {

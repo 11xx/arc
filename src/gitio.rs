@@ -17,8 +17,10 @@ thread_local! {
     static COMMAND_DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
-/// Scope Git subprocesses on this thread to one absolute deadline. Watch uses
-/// this so its typed timeout can kill and reap a probe instead of orphaning it.
+/// Scope the child processes this thread runs to completion to one absolute
+/// deadline: each one, piped or not, is killed with its process group once
+/// the deadline passes. Watch uses this so its typed timeout can kill and
+/// reap a probe instead of orphaning it or waiting on it.
 pub fn with_deadline<T>(deadline: Option<Instant>, f: impl FnOnce() -> Result<T>) -> Result<T> {
     COMMAND_DEADLINE.with(|slot| {
         let previous = slot.replace(deadline);
@@ -130,17 +132,26 @@ fn shared_git(cwd: &Path, args: &[&str]) -> Result<String> {
 }
 
 fn command_output(command: &mut Command) -> Result<Output> {
-    crate::perf::child(command, |command| {
-        let Some(deadline) = COMMAND_DEADLINE.get() else {
-            return Ok(command.output()?);
-        };
-        command
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0);
-        let group = crate::process_group::OwnedGroup::adopt(command.spawn()?);
-        Ok(wait_for_output(group, deadline, None)?.0)
-    })
+    Ok(command.counted_output()?)
+}
+
+/// `command`'s output, as `Command::output` gives it, bounded by the
+/// thread's [`with_deadline`] scope when it has one. A bounded child leads its
+/// own process group, with a null stdin, and the group is killed when the
+/// deadline passes.
+pub(crate) fn bounded_output(command: &mut Command) -> std::io::Result<Output> {
+    let Some(deadline) = COMMAND_DEADLINE.get() else {
+        return command.output();
+    };
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    let group = crate::process_group::OwnedGroup::adopt(command.spawn()?);
+    wait_for_output(group, deadline, None)
+        .map(|(output, _)| output)
+        .map_err(|error| std::io::Error::other(format!("{error:#}")))
 }
 
 fn drain_output(
@@ -168,15 +179,13 @@ fn wait_for_output(
     let child = group.child();
     let stdout = drain_output(child.stdout.take().context("child has no stdout")?);
     let stderr = drain_output(child.stderr.take().context("child has no stderr")?);
+    let mut pause = Duration::from_millis(1);
     while !group.leader_exited()? {
         if Instant::now() >= deadline {
             bail!("git probe timed out");
         }
-        thread::sleep(
-            deadline
-                .saturating_duration_since(Instant::now())
-                .min(Duration::from_millis(10)),
-        );
+        thread::sleep(pause.min(deadline.saturating_duration_since(Instant::now())));
+        pause = (pause * 2).min(Duration::from_millis(10));
     }
     let stdout = join_before_deadline(stdout, Some(deadline), "stdout reader")??;
     let stderr = join_before_deadline(stderr, Some(deadline), "stderr reader")??;
@@ -2379,8 +2388,6 @@ fn batch_check<'a>(
     cwd: &Path,
     revisions: impl Iterator<Item = &'a str>,
 ) -> Result<Vec<(String, String)>> {
-    use std::process::Stdio;
-
     // A revision containing a newline would become two queries and shift every
     // later answer, so those are refused rather than silently misaligned.
     let revisions: Vec<&str> = revisions
@@ -2389,41 +2396,17 @@ fn batch_check<'a>(
     if revisions.is_empty() {
         return Ok(Vec::new());
     }
-    let mut child = git_command()
-        .args(["cat-file", "--batch-check=%(objectname) %(objecttype)"])
-        .current_dir(cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .counted_spawn()
-        .context("cannot run git cat-file")?;
     let query = revisions.join("\n") + "\n";
-    let mut stdin = child.stdin.take().context("git cat-file has no stdin")?;
-    // The query goes out on its own thread so this one can drain stdout while
-    // it is still being written. `cat-file` blocks once its answer pipe fills,
-    // and a caller that only starts reading after the last query byte is sent
-    // deadlocks against it — both processes asleep writing to a full pipe.
-    let writer =
-        std::thread::spawn(move || crate::process_group::write_input(&mut stdin, query.as_bytes()));
-    let output = child.wait_with_output().context("git cat-file failed")?;
-    let wrote = writer
-        .join()
-        .map_err(|_| anyhow::anyhow!("the git cat-file writer thread panicked"))?;
-    // A git that died early makes the write fail with a broken pipe, and its
-    // own stderr says more about why than that symptom does. The write failure
-    // is worth reporting only when git itself was fine.
-    if output.status.success() {
-        wrote.context("cannot write to git cat-file")?;
-    }
-    if !output.status.success() {
-        // Reporting nothing missing because the probe failed would turn a
-        // broken repository into a clean bill of health.
-        anyhow::bail!(
-            "git cat-file failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    let answers: Vec<String> = String::from_utf8_lossy(&output.stdout)
+    // Reporting nothing missing because the probe failed would turn a broken
+    // repository into a clean bill of health, so a failed `cat-file` is an
+    // error. The query is written while the answers are read: `cat-file`
+    // blocks once its answer pipe fills.
+    let output = git_piped(
+        cwd,
+        &["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+        query.as_bytes(),
+    )?;
+    let answers: Vec<String> = String::from_utf8_lossy(&output)
         .lines()
         .map(str::to_string)
         .collect();
@@ -3659,6 +3642,21 @@ mod tests {
             );
             assert!(format!("{:#}", result.unwrap_err()).contains("timed out"));
         }
+    }
+
+    /// A child run to completion through `counted_output` under a deadline
+    /// is killed when the deadline passes. Rejects a read made outside
+    /// `git()` running unbounded, which keeps a watch waiting on it for as
+    /// long as the child takes.
+    #[test]
+    fn a_counted_child_obeys_the_deadline() {
+        let started = Instant::now();
+        let result = with_deadline(Some(started + Duration::from_millis(100)), || {
+            Ok(Command::new("sleep").arg("5").counted_output())
+        })
+        .unwrap();
+        assert!(format!("{}", result.unwrap_err()).contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]
