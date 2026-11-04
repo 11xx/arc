@@ -13,7 +13,7 @@ use crate::perf::Counted;
 use crate::process_group::{kill_process_group, read_tail, STDERR_TAIL_BYTES};
 use anyhow::{Context, Result};
 use std::fmt;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -123,7 +123,7 @@ pub fn run(
     // without reading must not stall arc.
     let request = request.to_vec();
     std::thread::spawn(move || {
-        let _ = stdin.write_all(&request);
+        let _ = crate::process_group::write_input(&mut stdin, &request);
     });
 
     let (done_tx, done_rx) = mpsc::sync_channel(2);
@@ -231,5 +231,40 @@ fn read_capped(mut reader: impl Read, limit: usize) -> std::io::Result<(Vec<u8>,
             continue;
         }
         captured.extend_from_slice(&chunk[..read]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A command renderer that answers without reading its whole request is
+    /// judged by its own exit status and output. Rejects the request writer
+    /// meeting the pipe the renderer closed and raising SIGPIPE, which under
+    /// the disposition `main` restores ends `arc changelog` silently.
+    #[test]
+    fn a_renderer_that_skips_its_request_answers_on_its_own_terms() {
+        crate::process_group::test_support::under_default_sigpipe(
+            "changelog_render::tests::a_renderer_that_skips_its_request_answers_on_its_own_terms",
+            || {
+                let cwd = tempfile::tempdir().unwrap();
+                let request = vec![b'x'; 1024 * 1024];
+                let render = |script: &str| {
+                    run(
+                        &["sh".into(), "-c".into(), script.into()],
+                        cwd.path(),
+                        &request,
+                        Duration::from_secs(30),
+                    )
+                    .unwrap()
+                };
+                assert_eq!(render("printf rendered").unwrap(), "rendered");
+                let refusal = render("exit 3").unwrap_err();
+                assert!(matches!(refusal.cause, Cause::Exit(Some(3))));
+                // The request writer is never joined; give a signal it would
+                // raise the time to land.
+                std::thread::sleep(Duration::from_millis(200));
+            },
+        );
     }
 }
