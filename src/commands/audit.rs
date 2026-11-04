@@ -481,9 +481,11 @@ fn plan_debt_of(
     // `ineligible-review`.
     let findings = match (kind, subject) {
         (None, Some(subject))
-            if st
+            if ctx
+                .declarations(st)?
+                .policy
+                .policy
                 .review_clearance
-                .stricter(ctx.declarations(st)?.policy.policy.review_clearance)
                 .is_assessed() =>
         {
             st.findings_approval(subject)

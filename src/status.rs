@@ -945,11 +945,7 @@ pub fn verdict_assessments(
     let selected = state
         .latest_verdict()
         .map(|verdict| verdict.event_id.as_str());
-    let assessed = policy
-        .policy
-        .review_clearance
-        .stricter(state.review_clearance)
-        .is_assessed();
+    let assessed = policy.policy.review_clearance.is_assessed();
     state
         .verdicts
         .iter()
@@ -1525,10 +1521,7 @@ fn build_report(
             .as_ref()
             .and_then(|patchset| reviewed_only_by_brief_author(state, patchset)),
         debt_outstanding: state.debt_outstanding(),
-        review_clearance: policy
-            .policy
-            .review_clearance
-            .stricter(state.review_clearance),
+        review_clearance: policy.policy.review_clearance,
     });
     if !approval.approval_valid && approval.approval_rejection_reason.is_none() {
         let origins: BTreeSet<_> = state

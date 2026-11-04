@@ -2592,6 +2592,8 @@ enum Cmd {
     /// Contribution trailers are advisory only: a missing asserted line, or a
     /// role line carrying a placeholder or a session id, is advice to rewrite
     /// with arc rewrite trailers before integration. Review credit stays in the ledger.
+    /// Approval clearance and debt derivation use destination plus operator policy;
+    /// the invoking checkout's unmerged clearance setting does not apply.
     /// Destination declarations are pinned to the transition's observed revision;
     /// their actor requirement and agreement with authorization are required.
     /// Configuration disagreement refuses before merging. A queue's

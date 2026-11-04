@@ -2521,8 +2521,11 @@ REVIEW COVERAGE AND DEBT
   `arc policy show` includes each gate's command, profiles, timeout, and
   environment probe.
 
-  CLEARANCE. `[policy] review_clearance = "assessed"`, in either policy file,
-  makes clearing a routing answer. A person's read (`Name <email>`) is judged
+  CLEARANCE. Integration approval and debt derivation use the destination
+  branch's committed project policy plus operator policy; an invoking
+  checkout's unmerged clearance setting does not apply. In either policy file,
+  `[policy] review_clearance = "assessed"` makes clearing a routing answer.
+  A person's read (`Name <email>`) is judged
   by authorship alone, because routing seats no people, and an
   `ineligible-review` debt still needs routing's eligible, bound assessment
   as it does without the key. An agent's read

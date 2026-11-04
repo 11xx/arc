@@ -493,3 +493,37 @@ fn doctor_lists_the_debts_the_policy_leaves_owed() {
         .collect();
     assert!(named.is_empty(), "a cleared debt is not reopened: {doctor}");
 }
+
+/// Claim: integration approval and derived debt use destination and operator
+/// clearance alone. Rejects an unmerged invoking checkout imposing assessed
+/// clearance on the same approval when the destination omits it.
+#[test]
+fn integration_clearance_is_independent_of_the_invoking_checkout() {
+    let repo = repo_with_policy("[policy]\nforbid_self_approval = true\n");
+    snapshotted(&repo, "destination");
+    approve(&repo, "destination", None);
+    let caller = repo.home.join("assessed-caller");
+    git(
+        &repo.root,
+        &["worktree", "add", "-b", "caller", caller.to_str().unwrap()],
+    );
+    repo.commit(&caller, ".arc/policy.toml", ASSESSED, "assessed caller");
+
+    let plan = |cwd: &Path, debt: bool| {
+        let mut command = repo.arc(cwd);
+        command.args(["integrate", "destination", "--dry-run", "--json"]);
+        if debt {
+            command.args(["--debt", "independent review remains owed"]);
+        }
+        json_stdout(&mut command)
+    };
+    assert_eq!(plan(&repo.root, false), plan(&caller, false));
+    let ordinary = plan(&repo.root, true);
+    assert_eq!(ordinary["debt"]["kind"], "independent-review", "{ordinary}");
+    assert_eq!(ordinary, plan(&caller, true));
+    repo.arc(&caller)
+        .args(["integrate", "destination"])
+        .assert()
+        .success();
+    assert!(debt_of(&repo, "destination").is_null());
+}
