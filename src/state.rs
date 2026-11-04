@@ -5243,19 +5243,31 @@ impl ChangeState {
         crate::extent::covers(read, obligation)
     }
 
-    /// The range an extent is resolved against, as `(base, revision)`: the
-    /// shipped patchset's, or for a `replayed-unread` obligation the range
-    /// the landing replayed it as, from the composed parent to the
-    /// integrated revision, which is the context that obligation owes a read
-    /// of. `None` when there is no such range.
+    /// The range an extent is resolved against, as `(base, revision)`: what
+    /// shipped. For a member landed by replay that is the range it landed
+    /// as, from the composed parent to the integrated revision, the commits
+    /// the target holds and the context a `replayed-unread` obligation owes
+    /// a read of; for any other change, the shipped patchset's (the latest
+    /// one while it is open). `None` when there is no such range.
     pub fn extent_subject(&self) -> Option<(&str, &str)> {
         if let Some(replayed) = self.debt.as_ref().and_then(|debt| debt.replayed.as_ref()) {
             let closure = self.closure.as_ref()?;
             let base = closure.range_base.as_deref().unwrap_or(&replayed.parent);
             return Some((base, closure.integrated_commit.as_deref()?));
         }
+        if let Some(landed) = self.replayed_range() {
+            return Some(landed);
+        }
         self.debt_subject_patchset()
             .map(|patchset| (patchset.base.as_str(), patchset.head.as_str()))
+    }
+
+    /// [`landed_range`](Self::landed_range) for a member landed by replay:
+    /// one whose integrated revision is not the source head it shipped.
+    fn replayed_range(&self) -> Option<(&str, &str)> {
+        let closure = self.closure.as_ref()?;
+        self.landed_range()
+            .filter(|(_, revision)| closure.source_head.as_deref() != Some(revision))
     }
 
     /// The range a change closed by a landing occupies on its target, as

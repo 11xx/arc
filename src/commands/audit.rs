@@ -442,17 +442,13 @@ fn plan_debt_of(
     let extent = match extent {
         None => None,
         Some(input) => {
-            let subject = subject.with_context(|| {
+            let (base, revision) = st.extent_subject().with_context(|| {
                 format!(
-                    "{change_id} has no patchset, so there is no subject to resolve the extent                      against; run `arc snapshot` first"
+                    "{change_id} has no patchset, so there is no subject to resolve the extent \
+                     against; run `arc snapshot` first"
                 )
             })?;
-            Some(crate::extent::resolve(
-                &ctx.cwd,
-                input,
-                &subject.base,
-                &subject.head,
-            )?)
+            Some(crate::extent::resolve(&ctx.cwd, input, base, revision)?)
         }
     };
     // The caller's kind wins: arc reads the ledger, and the ledger cannot

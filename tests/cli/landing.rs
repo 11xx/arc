@@ -3070,3 +3070,116 @@ fn every_commit_a_replayed_member_landed_as_locates_to_it() {
         assert!(noted.contains(commit), "{commit} is not noted: {noted}");
     }
 }
+
+/// Two independent changes, the first approved and the second never
+/// reviewed, landed composed with `--debt`: the second is replayed onto the
+/// first and owes the review nobody gave. Returns both ids, the first's
+/// head and the composed head.
+fn unapproved_replayed(repo: &Repo) -> (String, String, String, String) {
+    let (first, _, first_head) = reviewed_change(repo, "first", None);
+    let second = opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", "second"])));
+    let worktree = repo.home.join(".worktrees/repo-second");
+    repo.commit(&worktree, "second.txt", "second\n", "feat: second");
+    stdout(repo.arc(&worktree).args(["snapshot", "second"]));
+    repo.arc(&repo.root)
+        .args(["land", &first, &second, "--debt", "nobody reviewed it"])
+        .assert()
+        .success();
+    let after = git_out(&repo.root, &["rev-parse", "master"]);
+    (first, second, first_head, after)
+}
+
+fn audit_event(repo: &Repo, change: &str, extent: &[&str]) -> String {
+    stdout(
+        repo.arc(&repo.root)
+            .env("ARC_ACTOR", "auditor")
+            .args(["audit", change, "--verdict", "approved"])
+            .args(extent),
+    )
+    .lines()
+    .find_map(|line| line.strip_prefix("event: "))
+    .unwrap()
+    .trim()
+    .to_string()
+}
+
+fn extent_of(repo: &Repo, change: &str, event: &str) -> Value {
+    change_events(repo, change)
+        .into_iter()
+        .find(|recorded| recorded["event_id"] == event)
+        .unwrap()["extent"]
+        .clone()
+}
+
+/// Claim: a member landed by replay without an approval, whose debt is
+/// a missing-approval kind and names no replay, resolves an audit's extent,
+/// and an extent its debt names, against the range it landed as, from the
+/// composed parent to the integrated revision: what shipped. A whole audit
+/// of that range discharges the debt, and a debt naming a path of it is
+/// discharged by an audit reading that path there. Rejects resolving either
+/// against the original patchset, whose base the target never had, which
+/// leaves a debt declared on one range uncoverable by an audit of the other.
+#[test]
+fn an_unapproved_replayed_members_extents_resolve_against_its_landed_range() {
+    let repo = gated_repo();
+    let (_, second, first_head, after) = unapproved_replayed(&repo);
+    let report = status(&repo, &second);
+    assert_ne!(report["debt"]["missing"], "replayed-unread", "{report}");
+    assert!(report["debt"]["replayed"].is_null(), "{report}");
+
+    let scoped = audit_event(&repo, &second, &["--extent-paths", "second.txt"]);
+    let extent = extent_of(&repo, &second, &scoped);
+    assert_eq!(extent["base"], first_head.as_str(), "{extent}");
+    assert_eq!(extent["revision"], after.as_str(), "{extent}");
+    assert_eq!(status(&repo, &second)["debt_standing"], "owed");
+
+    let whole = audit_event(&repo, &second, &["--extent", "whole"]);
+    let report = status(&repo, &second);
+    assert_eq!(report["debt_standing"], "discharged", "{report}");
+    assert_eq!(report["debt"]["discharged_by_event_id"], whole.as_str());
+    assert_eq!(report["debt"]["discharge_extent"], "covered", "{report}");
+
+    // A debt declared after the landing names a path of what shipped, and
+    // an audit reading that path discharges it.
+    let repo = gated_repo();
+    let (_, second, first_head, after) = unapproved_replayed(&repo);
+    repo.arc(&repo.root)
+        .args([
+            "debt",
+            &second,
+            "--reason",
+            "second.txt needs a read",
+            "--extent-paths",
+            "second.txt",
+        ])
+        .assert()
+        .success();
+    let report = status(&repo, &second);
+    let declared = &report["debt"]["extent"];
+    assert_eq!(declared["base"], first_head.as_str(), "{report}");
+    assert_eq!(declared["revision"], after.as_str(), "{report}");
+    let scoped = audit_event(&repo, &second, &["--extent-paths", "second.txt"]);
+    let report = status(&repo, &second);
+    assert_eq!(report["debt_standing"], "discharged", "{report}");
+    assert_eq!(report["debt"]["discharged_by_event_id"], scoped.as_str());
+    assert_eq!(report["debt"]["discharge_extent"], "covered", "{report}");
+}
+
+/// Claim: a stack member, which lands as the commits it was snapshotted
+/// as, resolves an audit's extent against its patchset's `base..head`.
+/// Rejects moving a member whose landed range is its patchset's onto any
+/// other subject.
+#[test]
+fn a_stack_members_extent_is_its_patchset_range() {
+    let repo = gated_repo();
+    let ((lower, _, lower_head), (upper, worktree, upper_head)) = stack(&repo);
+    let _ = worktree;
+    repo.arc(&repo.root)
+        .args(["land", &lower, &upper])
+        .assert()
+        .success();
+    let whole = audit_event(&repo, &upper, &["--extent", "whole"]);
+    let extent = extent_of(&repo, &upper, &whole);
+    assert_eq!(extent["base"], lower_head.as_str(), "{extent}");
+    assert_eq!(extent["revision"], upper_head.as_str(), "{extent}");
+}

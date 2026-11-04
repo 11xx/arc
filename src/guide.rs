@@ -2734,12 +2734,14 @@ REVIEW COVERAGE AND DEBT
   must cover, and what the auditor read. `--extent whole` names the whole
   subject; `--extent-paths <glob>...`, with `--extent-exclude <glob>...`,
   names the entries the globs match. The subject is the patchset the debt
-  binds to, or the one the change shipped, in the domain `--extent-domain`
-  names: `diff` (the default), the change from its base to its head, or
-  `tree`, the candidate tree at its head. An audit of a change owing
-  `replayed-unread` reads the range the landing replayed it as instead,
-  from the composed parent to the integrated revision: the context that
-  debt owes a read of. Globs resolve before anything is
+  binds to, or once the change closed what it shipped, in the domain
+  `--extent-domain` names: `diff` (the default), the change from its base
+  to its head, or `tree`, the candidate tree at its head. What a member
+  landed by replay shipped is the range it landed as, from the composed
+  parent to the integrated revision: the commits its target holds, and the
+  context a `replayed-unread` debt owes a read of. A debt declared on such
+  a member and every audit of it resolve against that range, whatever the
+  debt's kind; a stack member's landed range is its patchset's. Globs resolve before anything is
   written, to each matching path with its blob at the head and, in a diff,
   each deletion with its blob at the base; a glob matching nothing, or
   exclusions leaving nothing, is refused, and no glob is stored. The extent

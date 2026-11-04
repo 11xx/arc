@@ -2895,7 +2895,9 @@ enum Cmd {
     /// range naming none records an empty list. Trailers never decide a role.
     ///
     /// With `--extent` or `--extent-paths` the debt names what the owed
-    /// review must cover, resolved against the patchset it binds to. Only a
+    /// review must cover, resolved against the patchset it binds to, or once
+    /// the change closed against what shipped: for a member landed by
+    /// replay, the range it landed as. Only a
     /// read whose extent covers it discharges it; any other read is listed
     /// beside it as partial coverage (`arc guide debt-obligations`).
     Debt {
@@ -2943,7 +2945,9 @@ enum Cmd {
         #[arg(long = "route-version", value_name = "VERSION")]
         route_version: Option<String>,
         /// What the owed review must cover: the whole subject, which is the
-        /// patchset the debt binds to, in the domain `--extent-domain` names.
+        /// patchset the debt binds to (once the change closed, what shipped;
+        /// for a member landed by replay, the range it landed as), in the
+        /// domain `--extent-domain` names.
         /// With neither this nor `--extent-paths`, the obligation's extent is
         /// not established, and a read naming one discharges it only when
         /// whole
@@ -3034,10 +3038,9 @@ enum Cmd {
     /// open to anyone.
     ///
     /// With `--extent` or `--extent-paths` the audit records what it read,
-    /// resolved against the patchset the change shipped, or for a
-    /// `replayed-unread` debt the range the landing replayed it as. It
-    /// discharges a
-    /// debt only when that extent covers the debt's, and is otherwise listed
+    /// resolved against what the change shipped: its patchset, or for a
+    /// member landed by replay the range the landing replayed it as. It
+    /// discharges a debt only when that extent covers the debt's, and is otherwise listed
     /// beside the obligation as partial coverage, as is an audit naming no
     /// extent against a debt that names one (`arc guide debt-obligations`).
     Audit {
@@ -3079,9 +3082,9 @@ enum Cmd {
         /// assessment
         #[arg(long = "assessment", value_name = "FILE")]
         assessment: Option<PathBuf>,
-        /// What the auditor read: the whole subject, which is the patchset
-        /// the change shipped (for a `replayed-unread` debt, the range the
-        /// landing replayed it as), in the domain `--extent-domain` names. With
+        /// What the auditor read: the whole subject, which is what the change
+        /// shipped (its patchset, or for a member landed by replay the range
+        /// the landing replayed it as), in the domain `--extent-domain` names. With
         /// neither this nor `--extent-paths`, the audit's extent is not
         /// established, and it discharges no obligation that names one
         #[arg(
