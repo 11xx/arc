@@ -533,6 +533,9 @@ enum Cmd {
         /// effort, verdict or audit, time, route version) and where its debt
         /// stands. Reads are derived from recorded verdict and audit events;
         /// nothing is written and no tier, price or score is ever stored.
+        /// A replayed landing's verdicts cover only the original edit and
+        /// never count, regardless of later debt declarations; audits read
+        /// the landed range.
         /// Narrow with --target, --tag, --actor or --harness
         #[arg(
             long,

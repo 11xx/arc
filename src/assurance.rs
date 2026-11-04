@@ -250,10 +250,7 @@ fn coverage_of(state: &ChangeState, extent: Option<&Extent>) -> (&'static str, b
 }
 
 fn reads_of(state: &ChangeState, shipped: Option<&Patchset>) -> Vec<ReadView> {
-    let replayed = state
-        .debt
-        .as_ref()
-        .is_some_and(|debt| debt.replayed.is_some());
+    let replayed = state.replayed_range().is_some();
     let mut reads = Vec::new();
     for verdict in &state.verdicts {
         let (read_kind, findings_reason) = clearance_of(

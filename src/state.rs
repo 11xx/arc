@@ -5299,7 +5299,7 @@ impl ChangeState {
 
     /// [`landed_range`](Self::landed_range) for a member landed by replay:
     /// one whose integrated revision is not the source head it shipped.
-    fn replayed_range(&self) -> Option<(&str, &str)> {
+    pub(crate) fn replayed_range(&self) -> Option<(&str, &str)> {
         let closure = self.closure.as_ref()?;
         self.landed_range()
             .filter(|(_, revision)| closure.source_head.as_deref() != Some(revision))

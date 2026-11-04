@@ -2953,10 +2953,11 @@ REVIEW ASSURANCE
     whole read of the shipped subject that also covers the debt's extent
     (`arc guide debt-obligations`), or `not-established`, an audit or verdict
     naming no extent beside a debt naming none. A `partial` read is listed
-    and never refreshes the change. A change that landed by replay (its debt
-    carries `replayed`, `arc guide change-landing`) lists every verdict with
-    coverage `edit-only`: the verdict read the original patchset, never the
-    range that landed, so it never counts; an audit reads that range.
+    and never refreshes the change. A change whose closure records a replayed
+    landing (`arc guide change-landing`) lists every verdict with coverage
+    `edit-only`: the verdict read the original patchset, never the range that
+    landed, so it never counts; an audit reads that range. Declaring another
+    debt does not alter which range landed or make those verdicts count.
     Standing compares tiers only, so a same-family read at the frontier tier
     still does not count: a change with no eligible read is `owed`, which its
     debt view already says, and is never `stale`.

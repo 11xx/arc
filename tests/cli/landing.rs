@@ -2537,7 +2537,8 @@ fn an_extent_of_a_replayed_member_is_the_range_it_landed_as() {
 /// until an audit of what landed counts; a member that landed where its
 /// approval read it keeps counting that approval. Rejects a landed member
 /// reading as assured on an approval nobody made of the landed range, and
-/// rejects refusing the approval of a member that was not replayed.
+/// rejects refusing the approval of a member that was not replayed. Replacing
+/// the debt preserves the replayed verdict's coverage and counting status.
 #[test]
 fn an_approval_of_a_replayed_members_edit_does_not_count_toward_its_assurance() {
     let repo = gated_repo();
@@ -2584,6 +2585,19 @@ fn an_approval_of_a_replayed_members_edit_does_not_count_toward_its_assurance() 
     let read = read_of(&row_of(&assurance(&[]), &first), &kept);
     assert_eq!(read["counts"], true, "{read}");
     assert_eq!(read["coverage"], "not-established", "{read}");
+
+    // Replacing the obligation cannot make a verdict on the original edit
+    // count as a read of the range that landed.
+    repo.arc(&repo.root)
+        .args(["debt", &second, "--reason", "landed context remains unread"])
+        .assert()
+        .success();
+    assert!(status(&repo, &second)["debt"]["replayed"].is_null());
+    let row = row_of(&assurance(&["--stale"]), &second);
+    let read = read_of(&row, &approval);
+    assert_eq!(read["counts"], false, "{row}");
+    assert_eq!(read["coverage"], "edit-only", "{row}");
+    assert_eq!(row["assurance"]["standing"], "owed", "{row}");
 
     let audited = stdout(repo.arc(&repo.root).env("ARC_ACTOR", "auditor").args([
         "audit",
