@@ -17,6 +17,10 @@ pub struct Registry {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ReviewContext {
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub authors: std::collections::BTreeMap<String, crate::review_authors::Authors>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub landed_authors: Option<crate::review_authors::Authors>,
     pub authorizing: Registry,
     pub accepted: Registry,
 }
@@ -41,15 +45,38 @@ pub fn load(
         accepted_target,
         crate::gitio::branch_head(cwd, accepted_target),
     );
-    let context = ReviewContext {
+    if authorizing.ladder.is_none()
+        && accepted.ladder.is_none()
+        && authorizing.unavailable.is_none()
+        && accepted.unavailable.is_none()
+    {
+        return None;
+    }
+    let authors = state
+        .patchsets
+        .iter()
+        .map(|patchset| {
+            (
+                patchset.id.clone(),
+                crate::review_authors::read(cwd, state, patchset, &patchset.base, &patchset.head),
+            )
+        })
+        .collect();
+    let landed_authors = state.replayed_range().and_then(|(base, revision)| {
+        Some(crate::review_authors::read(
+            cwd,
+            state,
+            state.closure_shipped_patchset()?,
+            base,
+            revision,
+        ))
+    });
+    Some(ReviewContext {
         authorizing,
         accepted,
-    };
-    (context.authorizing.ladder.is_some()
-        || context.accepted.ladder.is_some()
-        || context.authorizing.unavailable.is_some()
-        || context.accepted.unavailable.is_some())
-    .then_some(context)
+        authors,
+        landed_authors,
+    })
 }
 
 impl Registry {

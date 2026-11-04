@@ -2614,6 +2614,18 @@ REVIEW COVERAGE AND DEBT
   reading follows the recorded integration destination's current head.
   Candidate and dirty checkout files do not supply either reading.
 
+  `review_context.authors` is keyed by patchset. Each set is the union of
+  its declared contributors, else its effective author; the subject's
+  production implementer; and every `Implemented-by` coordinate in its
+  range. Production is included even outside the contributor declaration.
+  `landed_authors` reads a replayed member's landed range, excluding earlier
+  composed members. Each set names its `base`, `revision`, identities and
+  deduplicated agent `models`. Persons remain identities without adding
+  model coordinates. A missing or malformed agent model or unreadable range
+  gives `status: not-established` and names the missing evidence. `recorded`
+  means the coordinates are present; capability and clearance still require
+  their own judgment. Carried replay coordinates retain their recorded models.
+
   Import reports the authorizing registry read at the destination revision
   that also governs policy. Table publication and inspection confer no
   clearance; CLEARANCE defines the review requirements. Repositories that
@@ -5315,6 +5327,9 @@ SCHEMAS
     `arc-journal-scaffolds/1`        arc journal scaffolds --json
     `arc-checkpoint/1`               arc checkpoint show --json
     `arc-checkpoint-list/1`          arc checkpoint list --json
+
+  Read views with `review_context` carry target revisions and author
+  coordinates computed at projection time.
 
   Commitments, files:
     `arc-bundle/6`                   arc export / arc import

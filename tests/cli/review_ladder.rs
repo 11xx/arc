@@ -356,3 +356,118 @@ fn audit_context_follows_the_accepted_registry_without_moving_authorization() {
     );
     assert!(value["debt"]["discharged_by"].is_null());
 }
+
+/// Claim: ladder author facts include the patchset coordinate and every
+/// Implemented-by coordinate. Rejects collection from the recorder alone.
+#[test]
+fn author_context_unions_ledger_and_commit_coordinates() {
+    let repo = Repo::new();
+    commit_registry(&repo, "authors");
+    let worktree = open(&repo, "mixed");
+    repo.commit(
+        &worktree,
+        "mixed.txt",
+        "work",
+        "test: mixed work\n\nImplemented-by: claude:fable#high\nImplemented-by: codex:sol#xhigh",
+    );
+    repo.arc(&worktree)
+        .args(["--model", "author#high", "snapshot", "mixed"])
+        .assert()
+        .success();
+    let value = json_stdout(repo.arc(&worktree).args(["show", "mixed", "--json"]));
+    let authors = &value["review_context"]["authors"]["ps-01"];
+    assert_eq!(
+        authors["models"],
+        json!(["author#high", "fable#high", "sol#xhigh"])
+    );
+    assert_eq!(authors["status"], "recorded");
+}
+
+/// Claim: a known trailer cannot erase an unrecorded ledger author model.
+/// Rejects a union that keeps only the coordinates it can name.
+#[test]
+fn author_context_keeps_an_unrecorded_model_named() {
+    let repo = Repo::new();
+    commit_registry(&repo, "known-registry");
+    let worktree = open(&repo, "unknown");
+    repo.commit(
+        &worktree,
+        "unknown.txt",
+        "work",
+        "test: unknown recorder\n\nImplemented-by: codex:sol#xhigh",
+    );
+    repo.arc(&worktree)
+        .args(["snapshot", "unknown"])
+        .assert()
+        .success();
+    let value = json_stdout(repo.arc(&worktree).args(["show", "unknown", "--json"]));
+    let authors = &value["review_context"]["authors"]["ps-01"];
+    assert_eq!(authors["status"], "not-established");
+    assert!(authors["missing"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason.as_str().unwrap().contains("tester")));
+    assert_eq!(authors["models"], json!(["sol#xhigh"]));
+}
+
+fn reviewed_trailed_subject(repo: &Repo, slug: &str, model: &str) -> PathBuf {
+    let worktree = open(repo, slug);
+    repo.commit(
+        &worktree,
+        &format!("{slug}.txt"),
+        "work",
+        &format!("test: {slug}\n\nImplemented-by: test:{model}"),
+    );
+    repo.arc(&worktree)
+        .args(["--model", model, "snapshot", slug])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "Reader")
+        .args([
+            "--model",
+            "reader#high",
+            "review",
+            slug,
+            "--verdict",
+            "approved",
+        ])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["verify", slug, "--all"])
+        .assert()
+        .success();
+    worktree
+}
+
+/// Claim: a replayed member's author facts read its landed range, excluding
+/// authors from earlier composed members. Rejects a source-base-to-landed-head scan.
+#[test]
+fn replayed_author_context_uses_only_the_members_landed_range() {
+    let repo = Repo::new();
+    commit_registry(&repo, "replay");
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.smoke]\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "test: composition gate"]);
+    reviewed_trailed_subject(&repo, "alpha", "alpha#high");
+    let beta = reviewed_trailed_subject(&repo, "beta", "beta#high");
+    repo.arc(&repo.root)
+        .args(["land", "alpha", "beta", "--debt", "fixture context unread"])
+        .assert()
+        .success();
+    let value = json_stdout(repo.arc(&beta).args(["show", "beta", "--json"]));
+    let landed = &value["review_context"]["landed_authors"];
+    assert_eq!(landed["models"], json!(["beta#high"]));
+    assert_eq!(landed["base"], value["closure"]["range_base"]);
+    assert_eq!(landed["revision"], value["closure"]["integrated_commit"]);
+    assert_eq!(
+        value["review_context"]["authors"]["ps-01"]["models"],
+        json!(["beta#high"])
+    );
+}

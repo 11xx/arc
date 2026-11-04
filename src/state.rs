@@ -618,7 +618,7 @@ fn author_assumed(on_behalf_of: Option<&str>, source: Option<ActorSource>) -> bo
 /// A role assertion as an identity. A human value is its own actor, and an
 /// agent coordinate keeps its harness and model beside the value as the
 /// actor it was declared as.
-fn identity_from_role_value(value: &str) -> DebtIdentity {
+pub(crate) fn identity_from_role_value(value: &str) -> DebtIdentity {
     let value = value.trim();
     if !value.contains('<') {
         if let Some((harness, rest)) = value.split_once(':') {
@@ -4544,7 +4544,7 @@ impl ChangeState {
     /// patchset is the one whose head that commit is, else the latest one
     /// recorded before the closure. A change that did not integrate shipped
     /// nothing.
-    fn closure_shipped_patchset(&self) -> Option<&Patchset> {
+    pub(crate) fn closure_shipped_patchset(&self) -> Option<&Patchset> {
         let closure = self.closure.as_ref()?;
         if let Some(shipped) = closure.source_patchset_id.as_deref() {
             return self
