@@ -993,7 +993,7 @@ pub fn commit_tree_as(
     // The message goes out on its own thread for the same reason every other
     // piped Git call here does: a message larger than the pipe buffer
     // deadlocks a writer that is not being read from.
-    let writer = thread::spawn(move || stdin.write_all(&message));
+    let writer = thread::spawn(move || crate::process_group::write_input(&mut stdin, &message));
     let out = child.wait_with_output().context("git commit-tree failed")?;
     writer
         .join()
@@ -1350,7 +1350,7 @@ fn piped_output_with(
         .take()
         .with_context(|| format!("{program} has no stdin"))?;
     let input = input.to_vec();
-    let writer = thread::spawn(move || stdin.write_all(&input));
+    let writer = thread::spawn(move || crate::process_group::write_input(&mut stdin, &input));
     let output = match deadline {
         Some(deadline) => wait_for_output(child, deadline),
         None => child.wait_with_output().map_err(anyhow::Error::from),
@@ -1360,7 +1360,9 @@ fn piped_output_with(
     if written.is_err() && deadline.is_some() {
         crate::process_group::kill_process_group(child_id)?;
     }
-    written??;
+    // A child that failed before reading all of its input leaves the write a
+    // broken pipe; its own stderr says why.
+    let written = written?;
     if !out.status.success() {
         bail!(
             "{program} {} failed: {}",
@@ -1368,6 +1370,7 @@ fn piped_output_with(
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
+    written.with_context(|| format!("cannot write to {program}"))?;
     Ok(out.stdout)
 }
 
@@ -2365,7 +2368,6 @@ fn batch_check<'a>(
     cwd: &Path,
     revisions: impl Iterator<Item = &'a str>,
 ) -> Result<Vec<(String, String)>> {
-    use std::io::Write;
     use std::process::Stdio;
 
     // A revision containing a newline would become two queries and shift every
@@ -2390,7 +2392,8 @@ fn batch_check<'a>(
     // it is still being written. `cat-file` blocks once its answer pipe fills,
     // and a caller that only starts reading after the last query byte is sent
     // deadlocks against it — both processes asleep writing to a full pipe.
-    let writer = std::thread::spawn(move || stdin.write_all(query.as_bytes()));
+    let writer =
+        std::thread::spawn(move || crate::process_group::write_input(&mut stdin, query.as_bytes()));
     let output = child.wait_with_output().context("git cat-file failed")?;
     let wrote = writer
         .join()
@@ -3012,8 +3015,7 @@ impl ObjectReader {
     /// its own to report as Git does.
     fn read(&mut self, name: &str) -> Option<Object> {
         use std::io::BufRead;
-        writeln!(self.stdin, "{name}").ok()?;
-        self.stdin.flush().ok()?;
+        crate::process_group::write_input(&mut self.stdin, format!("{name}\n").as_bytes()).ok()?;
         let mut header = String::new();
         self.stdout.read_line(&mut header).ok()?;
         let header = header.strip_suffix('\n')?;
@@ -3555,6 +3557,56 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+        }
+    }
+
+    /// A deadline-bound probe killed while arc is still writing its input
+    /// times out as an error arc reports. Rejects the writer meeting the
+    /// killed probe's closed pipe and raising SIGPIPE, which under the
+    /// disposition `main` restores ends arc by the signal, so a watch whose
+    /// deadline lands there prints nothing and never exits 2.
+    #[test]
+    fn a_probe_killed_mid_input_times_out_without_a_signal() {
+        crate::process_group::test_support::under_default_sigpipe(
+            "gitio::tests::a_probe_killed_mid_input_times_out_without_a_signal",
+            || {
+                let started = Instant::now();
+                let result = with_deadline(Some(started + Duration::from_millis(100)), || {
+                    piped_output(
+                        "sh",
+                        &["-c".into(), "exec sleep 5".into()],
+                        &vec![b'x'; 1024 * 1024],
+                        |_| {},
+                    )
+                });
+                assert!(format!("{:#}", result.unwrap_err()).contains("timed out"));
+                // A writer left running after the probe's kill raises its
+                // signal on its own schedule; give it the time to.
+                thread::sleep(Duration::from_millis(200));
+                assert!(started.elapsed() < Duration::from_secs(2));
+            },
+        );
+    }
+
+    /// A piped child that fails without reading its input is reported by its
+    /// own diagnostic. Rejects reporting the broken pipe its early exit left
+    /// the input write, which names no reason the child failed.
+    #[test]
+    fn a_piped_child_that_refuses_its_input_reports_its_own_failure() {
+        for deadline in [None, Some(Instant::now() + Duration::from_secs(30))] {
+            let error = with_deadline(deadline, || {
+                piped_output(
+                    "sh",
+                    &["-c".into(), "echo refused >&2; exit 3".into()],
+                    &vec![b'x'; 1024 * 1024],
+                    |_| {},
+                )
+            })
+            .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("refused"),
+                "deadline {deadline:?}: {error:#}"
+            );
         }
     }
 

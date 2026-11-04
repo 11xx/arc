@@ -38,6 +38,41 @@ pub fn kill_process_group(pid: u32) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Write all of `bytes` to a child's input, so that a child which closed it
+/// or exited makes the write fail as a broken pipe.
+///
+/// `main` restores SIGPIPE's default disposition so that arc ends quietly
+/// when its own output's reader goes away. A write to a child's input raises
+/// the same signal, which would end arc silently in the middle of a command.
+/// The write runs with SIGPIPE blocked on the calling thread, and a SIGPIPE
+/// it raised is taken from the thread before the mask is restored.
+pub(crate) fn write_input(input: &mut impl std::io::Write, bytes: &[u8]) -> std::io::Result<()> {
+    // SAFETY: the signal set is initialized by sigemptyset before use, and
+    // pthread_sigmask and sigtimedwait only read and write the sets and
+    // timespec passed to them.
+    unsafe {
+        let mut pipe = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+        libc::sigemptyset(pipe.as_mut_ptr());
+        libc::sigaddset(pipe.as_mut_ptr(), libc::SIGPIPE);
+        let pipe = pipe.assume_init();
+        let mut previous = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+        let blocked = libc::pthread_sigmask(libc::SIG_BLOCK, &pipe, previous.as_mut_ptr());
+        if blocked != 0 {
+            return Err(std::io::Error::from_raw_os_error(blocked));
+        }
+        let written = input.write_all(bytes).and_then(|()| input.flush());
+        let now = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        while libc::sigtimedwait(&pipe, std::ptr::null_mut(), &now) == libc::SIGPIPE
+            || std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+        {}
+        libc::pthread_sigmask(libc::SIG_SETMASK, previous.as_ptr(), std::ptr::null_mut());
+        written
+    }
+}
+
 /// A child that leads its own process group, held until that group is
 /// stopped.
 ///
@@ -62,12 +97,18 @@ pub(crate) struct OwnedGroup {
 impl OwnedGroup {
     /// Spawn `command`, which must lead its own process group.
     pub(crate) fn spawn(command: &mut Command) -> std::io::Result<Self> {
-        Ok(Self {
-            child: command.counted_spawn()?,
+        Ok(Self::adopt(command.counted_spawn()?))
+    }
+
+    /// Hold `child`, spawned as the leader of its own process group and not
+    /// yet waited for.
+    pub(crate) fn adopt(child: Child) -> Self {
+        Self {
+            child,
             status: None,
             report: None,
             reported: None,
-        })
+        }
     }
 
     /// Take the command's exit from the leader's report on `pipe`.
@@ -251,6 +292,42 @@ pub(crate) mod test_support {
         }
     }
 
+    /// Run `body` in a copy of the test binary with SIGPIPE at its default
+    /// disposition, as `main` leaves it, and fail if that copy fails or ends
+    /// by a signal. `test` is the calling test's full name, which the copy
+    /// runs alone. The test harness ignores SIGPIPE, so a write that would
+    /// end arc passes unnoticed in it.
+    pub(crate) fn under_default_sigpipe(test: &str, body: impl FnOnce()) {
+        const CHILD: &str = "ARC_TEST_DEFAULT_SIGPIPE";
+        if std::env::var(CHILD).as_deref() == Ok(test) {
+            // SAFETY: restoring a default disposition takes no handler.
+            unsafe {
+                libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+            }
+            body();
+            return;
+        }
+        let copy = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--nocapture", "--test-threads", "1"])
+            .env(CHILD, test)
+            .output()
+            .unwrap();
+        use std::os::unix::process::ExitStatusExt;
+        assert!(
+            copy.status.success(),
+            "{test} under default SIGPIPE ended with {:?} (signal {:?}): {}{}",
+            copy.status.code(),
+            copy.status.signal(),
+            String::from_utf8_lossy(&copy.stdout),
+            String::from_utf8_lossy(&copy.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&copy.stdout).contains("1 passed"),
+            "{test} did not run in its copy: {}",
+            String::from_utf8_lossy(&copy.stdout)
+        );
+    }
+
     /// Kill a leftover fixture process group so a failing test leaves
     /// nothing running.
     pub(crate) fn kill(pid: u32) {
@@ -293,5 +370,28 @@ pub(crate) mod test_support {
         pub(crate) fn kill_escaped(&self) {
             kill(read_pid(&self.dir, "escaped.pid"));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Stdio;
+
+    /// A child that has closed its input fails arc's write to it as a broken
+    /// pipe. Rejects a write that raises SIGPIPE, which under the disposition
+    /// `main` restores ends arc by the signal with nothing printed.
+    #[test]
+    fn a_write_to_a_closed_child_input_is_a_broken_pipe_not_a_signal() {
+        test_support::under_default_sigpipe(
+            "process_group::tests::a_write_to_a_closed_child_input_is_a_broken_pipe_not_a_signal",
+            || {
+                let mut child = Command::new("true").stdin(Stdio::piped()).spawn().unwrap();
+                let mut input = child.stdin.take().unwrap();
+                child.wait().unwrap();
+                let error = write_input(&mut input, b"input\n").unwrap_err();
+                assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+            },
+        );
     }
 }
