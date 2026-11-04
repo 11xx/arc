@@ -89,7 +89,8 @@ pub struct GateStatus {
     /// is not the current head. A gate answers for content, so a run against
     /// another commit holding the tree being evaluated answers for this one;
     /// this says which run that was, so a green gate nobody ran at this head
-    /// is never mistaken for one that was never keyed at all.
+    /// is never mistaken for one that was never keyed at all. A bypass names
+    /// the immutable head where its judgement was recorded.
     /// Additive in `arc-status/16`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inherited_from: Option<String>,
@@ -1690,7 +1691,7 @@ fn build_report(
             e.bypass.is_some()
                 && gate.bypass.is_some()
                 && evaluated_tree.is_none()
-                && current_head.as_deref() == Some(e.revision.as_str())
+                && current_head.as_deref() == Some(e.recorded_revision.as_str())
         };
         let evidence = evidence_at(&|e| {
             bypass_counts(e)
@@ -1759,7 +1760,13 @@ fn build_report(
             declared_by: gate.declared_by.clone(),
             evaluated_tree: evaluated_tree.clone(),
             inherited_from: evidence
-                .map(|e| e.revision.clone())
+                .map(|e| {
+                    if e.bypass.is_some() {
+                        e.recorded_revision.clone()
+                    } else {
+                        e.revision.clone()
+                    }
+                })
                 .filter(|revision| Some(revision.as_str()) != current_head.as_deref()),
             result: verification_result_label(result),
             // Evidence produced on a dirty tree describes something no

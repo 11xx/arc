@@ -795,8 +795,8 @@ fn reuse_named_gate(
 /// Record that `gate` was judged not to need its run at the change's head.
 ///
 /// The gate's declaration must name `bypass`, which says what qualifies; the
-/// reason says why this head does. A failure already recorded at this head is
-/// a run somebody made, and a judgement does not overrule it.
+/// reason says why this head does. Only a later run green at this head
+/// answers a failure; an unrun attempt or a judgement cannot overrule it.
 fn bypass_gate(ctx: &Ctx, reference: &str, gate: &str, reason: &str) -> Result<i32> {
     let reason = reason.trim();
     if reason.is_empty() || crate::coordinate::is_placeholder(reason) {
@@ -826,19 +826,18 @@ fn bypass_gate(ctx: &Ctx, reference: &str, gate: &str, reason: &str) -> Result<i
     let tree = gitio::commit_tree(&ctx.cwd, &revision)?;
     let _transition = store.lock_transition(&change_id)?;
     let st = store.state(&change_id)?;
-    if let Some(failed) = st.gate_evidence_at_matching(gate, &revision, |evidence| {
-        evidence.result == VerifyResult::Fail
-    }) {
-        if st
-            .gate_evidence_at_matching(gate, &revision, |_| true)
-            .is_some_and(|newest| newest.event_id == failed.event_id)
-        {
-            bail!(
-                "gate {gate:?} failed at this head ({}); a judgement does not overrule a run. \
-                 Fix it and run the gate",
-                failed.event_id
-            );
-        }
+    if let Some(failed) = st
+        .gate_evidence_at_matching(gate, &revision, |evidence| {
+            evidence.result == VerifyResult::Fail
+                || evidence.green_at_head(st.eligible_dirty_tree_waiver())
+        })
+        .filter(|evidence| evidence.result == VerifyResult::Fail)
+    {
+        bail!(
+            "gate {gate:?} failed at this head ({}); a judgement does not overrule a run. \
+             Fix it and run the gate",
+            failed.event_id
+        );
     }
     let payload = Payload::VerificationBypassed {
         gate: gate.to_owned(),

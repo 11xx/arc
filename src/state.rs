@@ -1125,7 +1125,8 @@ pub struct VerificationEntry {
     pub timeout_seconds: Option<u64>,
     pub revision: String,
     /// The commit the evidence was recorded at. `revision` follows recorded
-    /// rewrites to the successor; this stays where the check ran.
+    /// rewrites to the successor; this stays where the run or judgement was
+    /// recorded.
     #[serde(skip)]
     pub recorded_revision: String,
     pub result: VerifyResult,
