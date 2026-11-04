@@ -2999,3 +2999,74 @@ fn assurance_reads_a_replayed_member_from_the_range_it_landed_as() {
         "{row:#}"
     );
 }
+
+/// Claim: `arc cost show --commit` locates every commit a member landed by
+/// replay installed on its target to that member, at its place among those
+/// commits, and the commits it was snapshotted as still locate to it as the
+/// commits the landing replayed. Rejects reading a replayed member's
+/// commits from its patchset's `base..head` alone, which leaves every landed
+/// commit but the integrated one recorded by no change.
+#[test]
+fn every_commit_a_replayed_member_landed_as_locates_to_it() {
+    let repo = gated_repo();
+    let (first, _, _) = reviewed_change(&repo, "first", None);
+    let second = opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", "second"])));
+    let worktree = repo.home.join(".worktrees/repo-second");
+    repo.commit(&worktree, "second-a.txt", "a\n", "feat: second a");
+    repo.commit(&worktree, "second-b.txt", "b\n", "feat: second b");
+    stdout(repo.arc(&worktree).args(["snapshot", "second"]));
+    repo.arc(&worktree)
+        .args(["review", "second", "--verdict", "approved"])
+        .assert()
+        .success();
+    let original = git_out(&worktree, &["rev-list", "--reverse", "HEAD~2..HEAD"]);
+    repo.arc(&repo.root)
+        .args(["land", &first, &second, "--debt", "context unread"])
+        .assert()
+        .success();
+    let landed = git_out(&repo.root, &["rev-list", "--reverse", "master~2..master"]);
+    let landed: Vec<&str> = landed.lines().collect();
+    assert_eq!(landed.len(), 2);
+    assert!(original.lines().all(|commit| !landed.contains(&commit)));
+
+    let located = |commit: &str| {
+        let output = repo
+            .arc(&repo.root)
+            .args(["cost", "show", "--commit", commit, "--json"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{commit}: {}", stderr_of(&output));
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    for (index, commit) in landed.iter().enumerate() {
+        let view = located(commit);
+        assert_eq!(view["change"]["id"], second.as_str(), "{view:#}");
+        assert_eq!(
+            view["position"],
+            json!({"index": index + 1, "of": 2}),
+            "{view:#}"
+        );
+        let siblings: Vec<&str> = view["commits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|sibling| sibling["sha"].as_str().unwrap())
+            .collect();
+        assert_eq!(siblings, landed, "{view:#}");
+    }
+    for commit in original.lines() {
+        let view = located(commit);
+        assert_eq!(view["change"]["id"], second.as_str(), "{view:#}");
+        assert_eq!(view["position"]["role"], "replayed", "{view:#}");
+    }
+
+    // The member's notes go on the commits it landed as.
+    repo.arc(&repo.root)
+        .args(["cost", "note", &second])
+        .assert()
+        .success();
+    let noted = git_out(&repo.root, &["notes", "--ref=arc-cost", "list"]);
+    for commit in &landed {
+        assert!(noted.contains(commit), "{commit} is not noted: {noted}");
+    }
+}

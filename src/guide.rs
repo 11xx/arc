@@ -4444,8 +4444,11 @@ RULES THAT CHANGE WHAT YOU DO
     no cost of its own. Git resolves the revision, and the commit maps to the
     change that records it: a patchset head or the integrated commit decides
     first, and otherwise a commit inside a change's current patchset range
-    belongs to that change. A commit that several changes record is refused,
-    naming them. The view embeds the change's `arc-cost/1` document
+    belongs to that change. A change closed by a landing holds the commits of
+    its landed range (`arc guide change-landing`) as its own; when it landed
+    by replay, the commits it was snapshotted as are still its own, placed
+    with the role `replayed`. A commit that several changes record is
+    refused, naming them. The view embeds the change's `arc-cost/1` document
     unchanged, adds the commit, its position ("2 of 3 commits") and its
     sibling commits, and states that the change's figures are shared by
     those commits and that none is per commit. Each role trailer on the
@@ -4540,7 +4543,9 @@ RULES THAT CHANGE WHAT YOU DO
     change is below another when it is open or integrated and its current
     patchset head, different from the other's, lies in the other's patchset
     range; a change closed without integration is below nothing, and changes
-    with one head exclude nothing from each other. Where a dispatch records
+    with one head exclude nothing from each other. For a change closed by a
+    landing, its current-patchset commits, head and range here are those of
+    its landed range. Where a dispatch records
     both the session that made it and the executor it bound, one `lineage`
     record per distinct pair is written at the earliest such dispatch, with
     the binding's handle as `label` and the work as `subject`; a native child

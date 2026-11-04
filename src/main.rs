@@ -5438,7 +5438,9 @@ enum CostCmd {
     /// revision, and the commit maps to the change that records it: a
     /// patchset head or the integrated commit decides first, and otherwise a
     /// commit inside a change's current patchset range belongs to that
-    /// change. The view embeds the change's `arc-cost/1` document unchanged
+    /// change; a change closed by a landing holds its landed range, and the
+    /// commits a replay landed it from carry the role `replayed`. The view
+    /// embeds the change's `arc-cost/1` document unchanged
     /// and adds the commit, its position ("2 of 3 commits") and its sibling
     /// commits, and states that the change's figures are shared by those
     /// commits and that none is per commit. Each role trailer on the commit
@@ -5582,8 +5584,10 @@ enum CostCmd {
     /// open or integrated and its current patchset head, different from the
     /// other's, lies in the other's patchset range; a change closed without
     /// integration is below nothing, and changes with one head exclude nothing
-    /// from each other. Where a dispatch records both the session that
-    /// dispatched it and the executor it bound, one `lineage` record per
+    /// from each other. For a change closed by a landing, its current-patchset
+    /// commits, head and range here are those of its landed range. Where a
+    /// dispatch records both the session that dispatched it and the executor
+    /// it bound, one `lineage` record per
     /// distinct pair is written, at the earliest such dispatch: tier `bound`,
     /// `at` the dispatch, `label` the binding's handle, and `subject` the
     /// change or journal artifact. A native child is linked by its recording

@@ -32,6 +32,8 @@ enum Place {
     Commit(usize),
     /// The commit that integrated the change, outside the patchset's range.
     Integration,
+    /// A commit of the patchset a landing replayed onto other commits.
+    Replayed,
     /// A commit of a patchset the change has since replaced.
     Earlier,
 }
@@ -39,22 +41,26 @@ enum Place {
 /// The change that records a commit.
 struct Located {
     state: ChangeState,
-    /// The commits of the change's current patchset, oldest first.
+    /// The change's commits, oldest first: [`commit_range`]'s.
     commits: Vec<String>,
     place: Place,
 }
 
-/// The commits `base..head` of a change's current patchset, oldest first.
-fn patchset_commits(ctx: &Ctx, state: &ChangeState) -> Vec<String> {
-    let Some((base, head)) = patchset_range(state) else {
-        return Vec::new();
-    };
+/// The commits `base..head`, oldest first; none when the range is unreadable.
+fn range_commits(ctx: &Ctx, (base, head): (&str, &str)) -> Vec<String> {
     gitio::git(
         &ctx.cwd,
         &["rev-list", "--reverse", &format!("{base}..{head}")],
     )
     .map(|listed| listed.lines().map(str::to_string).collect())
     .unwrap_or_default()
+}
+
+/// The commits of a change's [`commit_range`], oldest first.
+fn patchset_commits(ctx: &Ctx, state: &ChangeState) -> Vec<String> {
+    commit_range(state)
+        .map(|range| range_commits(ctx, range))
+        .unwrap_or_default()
 }
 
 fn integrated_commit(state: &ChangeState) -> Option<&str> {
@@ -76,10 +82,15 @@ pub(super) fn change_commits(ctx: &Ctx, state: &ChangeState) -> Vec<String> {
     commits
 }
 
-fn place_in(state: &ChangeState, commits: &[String], commit: &str) -> Place {
+fn place_in(ctx: &Ctx, state: &ChangeState, commits: &[String], commit: &str) -> Place {
     match commits.iter().position(|held| held == commit) {
         Some(index) => Place::Commit(index + 1),
         None if integrated_commit(state) == Some(commit) => Place::Integration,
+        None if replayed_range(state)
+            .is_some_and(|range| range_commits(ctx, range).iter().any(|held| held == commit)) =>
+        {
+            Place::Replayed
+        }
         None => Place::Earlier,
     }
 }
@@ -89,6 +100,25 @@ fn patchset_range(state: &ChangeState) -> Option<(&str, &str)> {
     let patchset = state.patchsets.last()?;
     let base = patchset.merge_base.as_ref().unwrap_or(&patchset.base);
     Some((base.as_str(), patchset.head.as_str()))
+}
+
+/// The range a change's commits occupy: the range a landing closed it at,
+/// else its current patchset's.
+fn commit_range(state: &ChangeState) -> Option<(&str, &str)> {
+    state.landed_range().or_else(|| patchset_range(state))
+}
+
+/// The current patchset's range of a change a landing installed as other
+/// commits, which still holds the commits it was snapshotted as.
+fn replayed_range(state: &ChangeState) -> Option<(&str, &str)> {
+    let landed = state.landed_range()?;
+    patchset_range(state).filter(|range| range.1 != landed.1)
+}
+
+/// Every range a change's commits stand in: [`commit_range`], then
+/// [`replayed_range`].
+fn ranges_of(state: &ChangeState) -> impl Iterator<Item = (&str, &str)> {
+    commit_range(state).into_iter().chain(replayed_range(state))
 }
 
 /// Every readable change's state and the commit graph its patchset ranges
@@ -143,7 +173,7 @@ pub(super) fn own_commits(ctx: &Ctx, wanted: &BTreeSet<String>) -> BTreeMap<Stri
     };
     let mut standing: BTreeMap<&str, Vec<&ChangeState>> = BTreeMap::new();
     for state in states.iter().filter(|state| stands(state)) {
-        if let Some((_, head)) = patchset_range(state) {
+        if let Some((_, head)) = commit_range(state) {
             standing.entry(head).or_default().push(state);
         }
     }
@@ -159,7 +189,7 @@ pub(super) fn own_commits(ctx: &Ctx, wanted: &BTreeSet<String>) -> BTreeMap<Stri
         .iter()
         .filter(|state| wanted.contains(&state.change_id))
     {
-        let head = patchset_range(state).map(|(_, head)| head);
+        let head = commit_range(state).map(|(_, head)| head);
         let range = range_of(state);
         let mut below: BTreeSet<String> = BTreeSet::new();
         for commit in &range {
@@ -188,7 +218,7 @@ impl Changes {
         let (states, unreadable) = read_states(ctx)?;
         let revisions = states
             .iter()
-            .filter_map(patchset_range)
+            .flat_map(ranges_of)
             .flat_map(|(base, head)| [base, head]);
         let graph = gitio::CommitGraph::reachable_from(&ctx.cwd, revisions).ok();
         Ok(Self {
@@ -237,9 +267,8 @@ impl Changes {
                 .states
                 .iter()
                 .filter(|state| {
-                    patchset_commits(ctx, state)
-                        .iter()
-                        .any(|held| held == commit)
+                    ranges_of(state)
+                        .any(|range| range_commits(ctx, range).iter().any(|held| held == commit))
                 })
                 .collect();
         };
@@ -247,7 +276,7 @@ impl Changes {
         self.states
             .iter()
             .filter(|state| {
-                patchset_range(state).is_some_and(|(base, head)| {
+                ranges_of(state).any(|(base, head)| {
                     match (graph.tips.get(base), graph.tips.get(head)) {
                         (Some(base), Some(head)) => {
                             descendants.contains(head) && !descendants.contains(base)
@@ -289,7 +318,7 @@ fn locate(ctx: &Ctx, changes: &Changes, commit: &str) -> Result<Option<Located>>
     }
     Ok(found.pop().map(|state| {
         let commits = patchset_commits(ctx, state);
-        let place = place_in(state, &commits, commit);
+        let place = place_in(ctx, state, &commits, commit);
         Located {
             state: state.clone(),
             commits,
@@ -490,6 +519,7 @@ fn view_of(ctx: &Ctx, commit: &str, located: &Located, cost: &CostView) -> Resul
     let position = match located.place {
         Place::Commit(index) => json!({"index": index, "of": of}),
         Place::Integration => json!({"index": null, "of": of, "role": "integration"}),
+        Place::Replayed => json!({"index": null, "of": of, "role": "replayed"}),
         Place::Earlier => json!({"index": null, "of": of, "role": "earlier-patchset"}),
     };
     Ok(json!({
@@ -593,6 +623,10 @@ fn view_text(view: &Value, detail: bool) -> String {
         (None, Some("integration")) => {
             emit!(out, "the integration commit of the change's {of} commits")
         }
+        (None, Some("replayed")) => emit!(
+            out,
+            "a commit a landing replayed; the change landed as {of} commits"
+        ),
         _ => emit!(
             out,
             "a commit of an earlier patchset; the change now holds {of} commits"
@@ -754,7 +788,7 @@ fn note_changes<'a>(
         for commit in commits {
             let (_, refresh, looked_up) = &jobs[*commit];
             let located = Located {
-                place: place_in(state, &patchset, commit),
+                place: place_in(ctx, state, &patchset, commit),
                 state: state.clone(),
                 commits: patchset.clone(),
             };
