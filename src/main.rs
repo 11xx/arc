@@ -2290,7 +2290,8 @@ enum Cmd {
         /// may not be a placeholder. The record names the actor, the head and
         /// its tree, and the reason, and no command, exit code or duration:
         /// nothing ran. It meets that gate's integration requirement at this
-        /// head alone, while the declaration still names `bypass`; a new head
+        /// recorded head alone, while the declaration still names `bypass`;
+        /// every new head, including a recorded rewrite holding the same tree,
         /// needs a run or a new bypass. It is shown as `bypassed`, never as a
         /// pass: it is never reused, it never satisfies a
         /// publication gate, and it discharges no review debt. A failure

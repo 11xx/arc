@@ -1066,11 +1066,12 @@ RUN A CHANGE
   reason and the declared qualification, and no command, exit code or
   duration. Any other gate refuses, as do an empty or placeholder reason and
   a failure recorded at that head. A change's own declaration cannot add
-  `bypass` to a gate its target declares, and one that omits it withdraws it. The bypass meets that gate's integration
-  requirement at that head alone, while its declaration still names `bypass`;
-  a new head, even one holding the same tree, or a merged tree, needs a run
-  or a new bypass. `status`, `check`, `show`, `explain` and their JSON name it
-  `bypassed` with its reason, never `pass`. `verify` never reuses it, no
+  `bypass` to a gate its target declares, and one that omits it withdraws it.
+  The bypass meets that gate's integration requirement at its immutable
+  recorded head alone, while its declaration still names `bypass`; every new
+  head, including a recorded rewrite holding the same tree, or a merged tree,
+  needs a run or a new bypass. `status`, `check`, `show`, `explain` and their
+  JSON name it `bypassed` with its reason, never `pass`. `verify` never reuses it, no
   publication guard reads it, it discharges no review debt, and importing one
   takes the waiver capability.
 

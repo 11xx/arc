@@ -251,3 +251,63 @@ fn a_bypass_stays_at_its_head_and_is_never_a_pass() {
         .code(1)
         .stdout(predicates::str::contains("publication gate docs: fail"));
 }
+
+/// Claim: a bypass binds the head where the judgement was recorded, even
+/// across a same-tree recorded trailer rewrite. Rejects a rewrite moving
+/// that judgement to a head nobody bypassed, without running the gate.
+#[test]
+fn a_same_tree_trailer_rewrite_requires_a_new_bypass() {
+    let repo = declaring(BYPASSABLE);
+    let (id, wt, original) = change_with_patchset(&repo, "rewritten-bypass");
+    repo.arc(&wt)
+        .args(["verify", "--gate", "docs", "--bypass", "comment-only edit"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args(["review", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&wt).args(["check"]).assert().success();
+    let tree = git_out(&wt, &["rev-parse", "HEAD^{tree}"]);
+
+    repo.arc(&wt)
+        .args([
+            "rewrite",
+            "trailers",
+            "--from",
+            &original,
+            "--no-sign",
+            "--append",
+            "Planned-by: Planner <planner@example.invalid>",
+        ])
+        .assert()
+        .success();
+    assert_ne!(repo.head(&wt), original);
+    assert_eq!(git_out(&wt, &["rev-parse", "HEAD^{tree}"]), tree);
+
+    let status = json_stdout(repo.arc(&wt).args(["status"]));
+    let docs = gate(&status, "docs");
+    assert_eq!(docs["result"], "bypassed", "{status}");
+    assert_eq!(
+        docs["green_at_head"], false,
+        "a recorded rewrite must not carry a bypass to its successor: {status}"
+    );
+    assert_eq!(docs["inherited_from"], original, "{status}");
+    repo.arc(&wt)
+        .args(["check"])
+        .assert()
+        .code(5)
+        .stdout(predicates::str::contains("not at this head"));
+    repo.arc(&repo.root)
+        .args(["integrate", &id])
+        .assert()
+        .code(5);
+    assert!(events(&repo, &wt, &id, "verification-recorded").is_empty());
+    assert_eq!(events(&repo, &wt, &id, "verification-bypassed").len(), 1);
+
+    repo.arc(&wt)
+        .args(["verify", "--gate", "docs", "--bypass", "comment-only edit"])
+        .assert()
+        .success();
+    repo.arc(&wt).args(["check"]).assert().success();
+}
