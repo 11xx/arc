@@ -279,6 +279,47 @@ pub fn replayed(
         .collect())
 }
 
+/// What an import holds once its events are published: each commit the
+/// ledger cites that the bundle `delivered`, that this repository holds, and
+/// that no ref reaches, under the name [`Cited::retained_ref`] gives it.
+///
+/// A commit is held once, whatever else cites it. A name that already stands
+/// is left as it is, and a commit the bundle did not list is never held,
+/// whatever is here.
+pub fn delivered(
+    cwd: &Path,
+    store: &Store,
+    delivered: &BTreeSet<String>,
+) -> Result<BTreeMap<String, String>> {
+    if delivered.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let candidates: Vec<Cited> = cited(store)?
+        .into_iter()
+        .map(|cited| Cited {
+            commit: crate::rewrite::canonical_revision(&cited.commit),
+            ..cited
+        })
+        .filter(|cited| delivered.contains(&cited.commit))
+        .collect();
+    let present = gitio::commits_among(cwd, candidates.iter().map(|cited| cited.commit.as_str()))?;
+    let present: Vec<&str> = present.iter().map(String::as_str).collect();
+    let unreachable = gitio::unreachable_from_refs(cwd, &present)?;
+    let mut held = BTreeSet::new();
+    let mut retain = BTreeMap::new();
+    for cited in candidates {
+        if !unreachable.contains(&cited.commit) || held.contains(&cited.commit) {
+            continue;
+        }
+        let name = cited.retained_ref();
+        if gitio::ref_value(cwd, &name)?.is_none() {
+            held.insert(cited.commit.clone());
+            retain.insert(name, cited.commit);
+        }
+    }
+    Ok(retain)
+}
+
 /// Whether a map replaces a commit. A map may spell what the ledger holds in
 /// full as an abbreviation, which names the commit only when it is long
 /// enough to.

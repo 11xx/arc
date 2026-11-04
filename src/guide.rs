@@ -932,10 +932,17 @@ RUN A CHANGE
   A bundle's rewrite events carry the retention refs the exporter created; an
   import holds each one it names for the imported change or in repository
   scope, where a checkpoint's are, under `refs/arc/retained/` when the commit
-  is here, and refuses a name that is no retention ref. A retention ref a
-  rebase created is named by no event and does not travel. Bundles whose rewrite events name none import unchanged. An
-  import holds each `observed-commit` of the imported change that is here the
-  same way, under the event that recorded it.
+  is here, and refuses a name that is no retention ref. Bundles whose rewrite
+  events name none import unchanged. An import holds each `observed-commit`
+  of the imported change that is here the same way, under the event that
+  recorded it. Once its events are published, an import also holds every
+  commit the ledger cites that the bundle's object list delivered, that is
+  here, and that no ref reaches, under the name rewrite retention gives it
+  (`arc guide rewrites-evidence`): once per commit, leaving every name that
+  already stands, and printing `retained: <ref> <commit>` for each. A
+  rebase's retention refs, which no event names, are held again this way. A
+  dry run creates none, and a bundle without an object list delivers
+  nothing to hold.
 
   Retained forge content, and the receipt file each read ingested from one
   cites by digest and length, travel beside the bundle as an optional sidecar,
@@ -3363,7 +3370,8 @@ HISTORY REWRITES
   it replays that none of the change's pins reaches, under the same names,
   and prints each ref it creates. A rebase stopped on a conflict has
   already held them when it is finished by hand. These refs are named by no
-  event.
+  event; an import holds their commits again on the receiving side (`arc
+  guide change-bundles`).
 
   Every ref moves in one Git transaction, so a rewrite leaves the branch and
   arc's evidence refs on one history or leaves them all alone. The map and

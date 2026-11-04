@@ -443,3 +443,112 @@ fn a_rebase_stopped_on_a_conflict_already_holds_what_it_replaces() {
         )]
     );
 }
+
+/// A source whose change was rebased past a checkpoint on a commit above its
+/// recorded head, exported: the bundle, the checkpoint event and the commit.
+fn rebased_past_a_checkpoint(source: &Repo) -> (PathBuf, String, String) {
+    let (_, wt) = diverged(source, "carried", "branch.txt", "target\n");
+    source.commit(&wt, "above.txt", "above\n", "feat: above the recorded head");
+    let tested = source.head(&wt);
+    let event = recorded_event(&stdout(source.arc(&source.root).args([
+        "checkpoint",
+        "record",
+        "rc",
+        "--rev",
+        &tested,
+    ])));
+    stdout(source.arc(&wt).args(["rebase", "carried"]));
+    let bundle = source.home.join("bundle.json");
+    stdout(
+        source
+            .arc(&wt)
+            .args(["export", "carried", "--output", bundle.to_str().unwrap()]),
+    );
+    (bundle, event, tested)
+}
+
+/// Deliver the source's objects and leave no ref behind them, so only what
+/// the import creates holds the delivered commits.
+fn deliver_without_refs(source: &Repo, receiver: &Repo) {
+    deliver_git_objects(source, receiver);
+    for name in git_out(
+        &receiver.root,
+        &["for-each-ref", "--format=%(refname)", "refs/delivered/"],
+    )
+    .lines()
+    {
+        git(&receiver.root, &["update-ref", "-d", name]);
+    }
+}
+
+/// Claim: an import holds every commit its events cite that arrived and no
+/// ref reaches on the receiver, and only those, so a cited commit a rebase
+/// held at the source survives garbage collection there and `arc doctor` is
+/// quiet about it; a dry run creates nothing. Rejects: a rebase's
+/// retention, which no event names, leaving the commit held by nothing once
+/// it is delivered, and a ref for a cited commit a pin already reaches.
+#[test]
+fn an_import_holds_a_cited_commit_a_rebase_held_at_its_source() {
+    let source = Repo::new();
+    let (bundle, event, tested) = rebased_past_a_checkpoint(&source);
+    let receiver = Repo::new();
+    deliver_without_refs(&source, &receiver);
+    stdout(
+        receiver
+            .arc(&receiver.root)
+            .args(["import", bundle.to_str().unwrap(), "--dry-run"]),
+    );
+    assert!(retained(&receiver).is_empty(), "a dry run created a ref");
+
+    stdout(
+        receiver
+            .arc(&receiver.root)
+            .args(["import", bundle.to_str().unwrap()]),
+    );
+    collect_garbage(&receiver.root);
+
+    assert!(
+        has_object(&receiver.root, &tested),
+        "garbage collection took it"
+    );
+    assert_eq!(
+        retained(&receiver),
+        [format!(
+            "refs/arc/retained/repository/{event}/{tested} {tested}"
+        )],
+        "only the cited commit no pin reaches is held"
+    );
+    let report = json_stdout_any_status(receiver.arc(&receiver.root).args(["doctor", "--json"]));
+    let unretained: Vec<_> = report["advice"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|finding| finding["code"] == "unretained-commit")
+        .collect();
+    assert!(unretained.is_empty(), "{unretained:?}");
+}
+
+/// Claim: an import holds only commits the bundle lists as delivered. A
+/// cited commit that is here, but that the bundle's object list leaves out,
+/// gets no ref. Rejects: holding whatever the receiver happens to have.
+#[test]
+fn an_import_holds_no_commit_its_bundle_did_not_deliver() {
+    let source = Repo::new();
+    let (bundle, _, tested) = rebased_past_a_checkpoint(&source);
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    value["objects"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|object| object["oid"] != tested.as_str());
+    fs::write(&bundle, json_file_bytes(&value)).unwrap();
+
+    let receiver = Repo::new();
+    deliver_without_refs(&source, &receiver);
+    stdout(
+        receiver
+            .arc(&receiver.root)
+            .args(["import", bundle.to_str().unwrap()]),
+    );
+    assert!(has_object(&receiver.root, &tested));
+    assert!(retained(&receiver).is_empty(), "{:?}", retained(&receiver));
+}

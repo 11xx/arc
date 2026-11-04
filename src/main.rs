@@ -1382,8 +1382,12 @@ enum Cmd {
     /// digest binds its received document and declarant. Records without that intent remain
     /// readable and importable without establishing a registration retry. A rewrite event's
     /// retention refs are held under `refs/arc/retained/` for the imported change, and in
-    /// repository scope, where the commit is here; a name that is no retention ref is refused, and events naming none
-    /// import unchanged. A projected falsification revision requires an active,
+    /// repository scope, where the commit is here; a name that is no retention ref is
+    /// refused, and events naming none import unchanged. Once the events are published,
+    /// every commit the ledger cites that the bundle's object list delivered, that is here,
+    /// and that no ref reaches is held under `refs/arc/retained/<change>/<subject>/<commit>`
+    /// once per commit, leaving every name that already stands, and printed as `retained:
+    /// <ref> <commit>`; --dry-run creates none (`arc guide change-bundles`). A projected falsification revision requires an active,
     /// uncontradicted rewrite admitted with rewrite authority. Legacy transport without an
     /// authorization receipt supplies no such identity proof. Full and delta histories
     /// replay with the same admitted proof before publication. Paired stores and receivers

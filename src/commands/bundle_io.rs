@@ -917,6 +917,27 @@ fn import_events(
             }
         })?;
     }
+    // After the pins: what they reach needs no ref of its own.
+    let delivered: BTreeSet<String> = validated
+        .bundle
+        .objects
+        .iter()
+        .flatten()
+        .map(|object| crate::rewrite::canonical_revision(&object.oid))
+        .collect();
+    let held = crate::retention::delivered(&ctx.cwd, &store, &delivered)
+        .and_then(|retain| crate::retention::creations(&ctx.cwd, &retain))
+        .and_then(|(creations, _)| {
+            gitio::update_refs(&ctx.cwd, &creations)?;
+            Ok(creations)
+        })
+        .map_err(|error| crate::model::OperationFailure {
+            published,
+            message: format!("retention-ref maintenance failed: {error:#}"),
+        })?;
+    for created in &held {
+        println!("retained: {} {}", created.name, created.new);
+    }
     // Custody is reported installed only once the events are published. Its
     // bytes are verified and content-addressed, so a failure here costs
     // nothing but the installation, which repeating the import completes.
