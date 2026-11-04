@@ -2510,7 +2510,9 @@ REVIEW COVERAGE AND DEBT
   the entry. Different models may be in force together. A successor model gets
   a new entry and the predecessor an `until`. The list is append-only in meaning: every read keeps its election
   or its absence when recorded; later date edits, additions and removals never
-  re-judge it. Reads without a recorded election have no exception. `show`
+  re-judge it. Reads without a recorded election have no exception. Unreadable
+  election policy grants none: verdicts and non-approving audits still record
+  and warn, while an approving audit requires readable policy. `show`
   and `status` identify an elected read as `tie-break reviewer model#effort
   (policy since ...)`. A model-match refusal on mixed work names
   `tiebreak_reviewers` as the operator remedy.

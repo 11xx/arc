@@ -1871,6 +1871,8 @@ enum Cmd {
     /// Once a verdict is recorded, review says whether an approval gates. That
     /// is advice about a verdict that already stands: a failure to evaluate it
     /// is a warning naming the recorded verdict, and the review still succeeds.
+    /// An unreadable tie-break election grants no exception; the verdict
+    /// records and reports the lookup failure.
     /// An implicit verdict on the latest patchset is refused if a rewrite
     /// invalidated its review head; run `arc snapshot` or use `--snapshot`.
     /// Explicit `--patchset` judgments may name historical work; they retain
@@ -3118,6 +3120,8 @@ enum Cmd {
     /// policy, never the candidate. Only mixed-model work qualifies; recorded model#effort
     /// and any observed coordinate must match an entry in force at created_at.
     /// Contributor, actor, authoring-session and assumed-identity bars remain.
+    /// Non-approving audits still record when election policy is unreadable,
+    /// retaining no exception and reporting the lookup failure.
     /// The audit retains its election or absence despite later date edits;
     /// capability and coverage requirements still apply. `--verdict changes-requested` is
     /// open to anyone. The warning, the refusal, debt discharge, and the

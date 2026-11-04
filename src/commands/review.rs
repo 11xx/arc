@@ -1541,13 +1541,18 @@ pub(super) fn record_verdict(
         println!("relation: {}", relation.description());
     }
     let recorded_at = chrono::Utc::now();
-    let tiebreak_reviewer = st
+    let tiebreak_lookup = st
         .patchsets
         .iter()
         .find(|subject| subject.id == patchset_id)
-        .map(|subject| ctx.tiebreak_reviewer(&st, subject, recorded_at))
-        .transpose()?
-        .flatten();
+        .map_or(Ok(None), |subject| {
+            ctx.tiebreak_reviewer(&st, subject, recorded_at)
+        });
+    let tiebreak_error = tiebreak_lookup
+        .as_ref()
+        .err()
+        .map(|error| format!("{error:#}"));
+    let tiebreak_reviewer = tiebreak_lookup.unwrap_or_default();
     let payload = Payload::VerdictRecorded {
         tiebreak_reviewer: tiebreak_reviewer.clone(),
         forge_sources,
@@ -1586,6 +1591,9 @@ pub(super) fn record_verdict(
         println!("finding: {id}");
     }
     println!("event: {}", ev.event_id);
+    if let Some(error) = tiebreak_error {
+        eprintln!("warning: verdict {} is recorded; tie-break election unavailable, so no exception applies: {error}", ev.event_id);
+    }
     if let Some(note) = unbound {
         println!("assessment {note}");
     }

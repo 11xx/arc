@@ -761,12 +761,21 @@ pub(super) fn record_audit(
     };
     let implementers = audited_implementers(ctx, &st);
     let recorded_at = chrono::Utc::now();
-    let tiebreak_reviewer = st
+    let tiebreak_lookup = st
         .debt_subject_patchset()
         .or_else(|| st.latest_patchset())
-        .map(|subject| ctx.tiebreak_reviewer(&st, subject, recorded_at))
-        .transpose()?
-        .flatten();
+        .map_or(Ok(None), |subject| {
+            ctx.tiebreak_reviewer(&st, subject, recorded_at)
+        });
+    let tiebreak_error = tiebreak_lookup
+        .as_ref()
+        .err()
+        .map(|error| format!("{error:#}"));
+    let tiebreak_reviewer = if args.verdict == Verdict::Approved {
+        tiebreak_lookup?
+    } else {
+        tiebreak_lookup.unwrap_or_default()
+    };
     refuse_self_audit(ctx, &st, args.verdict, tiebreak_reviewer.is_some())?;
     let inline = match args.findings_json.as_deref() {
         Some(src) => super::review::parse_inline_findings(Some(src))?,
@@ -854,6 +863,9 @@ pub(super) fn record_audit(
         println!("finding: {id}");
     }
     println!("event: {}", event.event_id);
+    if let Some(error) = tiebreak_error {
+        eprintln!("warning: audit {} is recorded; tie-break election unavailable, so no exception applies: {error}", event.event_id);
+    }
     if let Some(note) = binding.and_then(|binding| binding.failure_note(&uncovered_authors)) {
         println!("assessment {note}");
     }

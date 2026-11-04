@@ -450,3 +450,77 @@ fn tiebreak_operator_publication_and_layering_validate_elections() {
         .stderr(predicates::str::contains("tiebreak_reviewers[0]"))
         .stderr(predicates::str::contains("overlaps"));
 }
+
+/// Claim: unreadable election policy cannot grant an exception or erase a
+/// recorded review. Rejects propagating election lookup errors before append.
+#[test]
+fn tiebreak_unreadable_policy_records_the_review_without_an_exception() {
+    let repo = Repo::new();
+    policy(&repo, ENTRY, false);
+    let (change, worktree) = subject(&repo, OPUS);
+    repo.commit(
+        &repo.root,
+        ".arc/policy.toml",
+        "[policy\n",
+        "test: unreadable policy",
+    );
+    reader(&repo, &worktree, "review", SOL)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("verdict: Approved"))
+        .stderr(predicates::str::contains(
+            "is recorded; whether it gates could not be evaluated",
+        ));
+    let recorded = fs::read_dir(event_dir(&repo, &change))
+        .unwrap()
+        .map(|entry| {
+            serde_json::from_slice::<Value>(&fs::read(entry.unwrap().path()).unwrap()).unwrap()
+        })
+        .find(|event| event["event_type"] == "verdict-recorded")
+        .unwrap();
+    assert!(recorded.get("tiebreak_reviewer").is_none(), "{recorded}");
+    policy(&repo, ENTRY, false);
+    let report = json_stdout(repo.arc(&worktree).args(["status", "mixed", "--json"]));
+    assert_eq!(report["has_valid_approval"], false, "{report}");
+}
+
+/// Claim: an unavailable election cannot bar reporting audit findings or
+/// grant model independence. Rejects refusing the read or discharging debt.
+#[test]
+fn tiebreak_unreadable_policy_keeps_an_audit_findings_read() {
+    let repo = Repo::new();
+    policy(&repo, ENTRY, false);
+    let (change, worktree) = subject(&repo, OPUS);
+    ship(&repo, &worktree);
+    repo.commit(
+        &repo.root,
+        ".arc/policy.toml",
+        "[policy\n",
+        "test: unreadable policy",
+    );
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "Reader")
+        .env("ARC_SESSION", "reader-session")
+        .env("ARC_HARNESS", "codex")
+        .args([
+            "--model",
+            SOL,
+            "audit",
+            "mixed",
+            "--verdict",
+            "changes-requested",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("audit: ChangesRequested"));
+    let recorded = fs::read_dir(event_dir(&repo, &change))
+        .unwrap()
+        .map(|entry| {
+            serde_json::from_slice::<Value>(&fs::read(entry.unwrap().path()).unwrap()).unwrap()
+        })
+        .find(|event| event["event_type"] == "audit-verdict-recorded")
+        .unwrap();
+    assert!(recorded.get("tiebreak_reviewer").is_none(), "{recorded}");
+    policy(&repo, ENTRY, false);
+    assert_eq!(debt(&repo)["standing"], "owed");
+}
