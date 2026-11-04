@@ -202,6 +202,14 @@ fn shipped(state: &ChangeState) -> Option<&Patchset> {
         .or_else(|| state.latest_patchset())
 }
 
+/// The commits a change's shipped work is on its target, as `(base, tip)`:
+/// its landed range when a landing closed it, else `shipped`'s range.
+fn shipped_range<'a>(state: &'a ChangeState, shipped: &'a Patchset) -> (&'a str, &'a str) {
+    state
+        .landed_range()
+        .unwrap_or((shipped.base.as_str(), shipped.head.as_str()))
+}
+
 /// Under `review_clearance = "assessed"`, the read kind and findings reason
 /// of a read by `author` at `model` under `assessment`; nothing otherwise.
 fn clearance_of(
@@ -339,8 +347,8 @@ fn authors_of(cwd: &Path, state: &ChangeState, shipped: &Patchset) -> Vec<String
         .as_ref()
         .and_then(|debt| debt.production.as_ref())
         .and_then(|production| production.trailer_implementers.clone());
-    let values = recorded
-        .or_else(|| crate::trailers::range_implementers(cwd, &shipped.base, &shipped.head).ok());
+    let (base, tip) = shipped_range(state, shipped);
+    let values = recorded.or_else(|| crate::trailers::range_implementers(cwd, base, tip).ok());
     let mut authors = Vec::<String>::new();
     for value in values.iter().flatten() {
         if let Some(author) = crate::trailers::coordinate_model_effort(value) {
@@ -534,7 +542,7 @@ impl View<'_> {
         (combine(judged), authors)
     }
 
-    fn live_fraction(&self, change_id: &str, shipped: Option<&Patchset>) -> LiveFraction {
+    fn live_fraction(&self, state: &ChangeState, shipped: Option<&Patchset>) -> LiveFraction {
         let unknown = |reason| LiveFraction {
             fraction: None,
             added: None,
@@ -548,14 +556,8 @@ impl View<'_> {
                 SUBJECT_UNRECORDED
             });
         };
-        match live::survival(
-            self.cwd,
-            &self.cache,
-            head,
-            change_id,
-            &patchset.base,
-            &patchset.head,
-        ) {
+        let (base, tip) = shipped_range(state, patchset);
+        match live::survival(self.cwd, &self.cache, head, &state.change_id, base, tip) {
             Ok(survival @ Survival { added, live }) => LiveFraction {
                 fraction: survival.fraction(),
                 added: Some(added),
@@ -566,7 +568,7 @@ impl View<'_> {
         }
     }
 
-    fn exposure(&self, shipped: Option<&Patchset>) -> Exposure {
+    fn exposure(&self, state: &ChangeState, shipped: Option<&Patchset>) -> Exposure {
         let unknown = |reason| Exposure {
             state: ExposureState::Unknown,
             paths: None,
@@ -586,8 +588,8 @@ impl View<'_> {
         let Some(patchset) = shipped else {
             return unknown(SUBJECT_UNRECORDED);
         };
-        let Ok(changed) = crate::gitio::changed_paths(self.cwd, &patchset.base, &patchset.head)
-        else {
+        let (base, tip) = shipped_range(state, patchset);
+        let Ok(changed) = crate::gitio::changed_paths(self.cwd, base, tip) else {
             return unknown(live::RANGE_UNREADABLE);
         };
         let touched = danger.matching(changed.iter().map(String::as_str)).len();
@@ -609,7 +611,7 @@ impl View<'_> {
         reads: &[ReadView],
     ) -> Judgement {
         let (placed, authors) = self.standing(state, shipped, reads);
-        let live_fraction = self.live_fraction(&state.change_id, shipped);
+        let live_fraction = self.live_fraction(state, shipped);
         let newest = reads.iter().map(|read| read.at).max();
         // A change none of whose lines remain has nothing to refresh, whatever
         // routing seats now. Only a measured zero says so.
@@ -625,7 +627,7 @@ impl View<'_> {
             components: Components {
                 frontier_gap: placed.gap,
                 live_fraction,
-                exposure: self.exposure(shipped),
+                exposure: self.exposure(state, shipped),
                 newest_read_at: newest,
                 age_seconds: newest.map(|at| (self.now - at).num_seconds().max(0)),
             },

@@ -2948,7 +2948,12 @@ REVIEW ASSURANCE
   only fixed failure reasons.
 
   With `--stale` each row shows four components, in this order, each
-  displayed and none stored:
+  displayed and none stored. A change's diff, its commits and the range its
+  authors' `Implemented-by` values are read from are its shipped patchset's
+  `base..head`, except for a change closed by a landing, which reads its own
+  landed range (`arc guide change-landing`): for a member landed by replay,
+  the commits it landed as, which the target holds, never the commits it was
+  snapshotted as.
 
   - frontier gap: the frontier's tier minus the best eligible read's tier, as
     routing answered it now;

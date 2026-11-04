@@ -149,8 +149,28 @@ pub(super) fn range_implementers(ctx: &Ctx, patchset: &Patchset) -> Option<Vec<S
     }
 }
 
+/// The `Implemented-by` values of the commits a change shipped: its landed
+/// range when a landing closed it (for a member landed by replay, the
+/// commits it landed as), else `patchset`'s.
+fn shipped_implementers(ctx: &Ctx, st: &ChangeState, patchset: &Patchset) -> Option<Vec<String>> {
+    let Some((base, tip)) = st.landed_range() else {
+        return range_implementers(ctx, patchset);
+    };
+    match crate::trailers::range_implementers(&ctx.cwd, base, tip) {
+        Ok(values) => Some(values),
+        Err(error) => {
+            eprintln!(
+                "warning: could not read the Implemented-by trailers of {}'s landed range: \
+                 {error:#}",
+                st.change_id
+            );
+            None
+        }
+    }
+}
+
 /// The `Implemented-by` values of the work an audit judges: the list the
-/// debt's production record kept, else the shipped patchset's commits.
+/// debt's production record kept, else the shipped commits'.
 fn audited_implementers(ctx: &Ctx, st: &ChangeState) -> Option<Vec<String>> {
     let recorded = st
         .debt
@@ -160,7 +180,7 @@ fn audited_implementers(ctx: &Ctx, st: &ChangeState) -> Option<Vec<String>> {
     recorded.or_else(|| {
         st.debt_subject_patchset()
             .or_else(|| st.latest_patchset())
-            .and_then(|patchset| range_implementers(ctx, patchset))
+            .and_then(|patchset| shipped_implementers(ctx, st, patchset))
     })
 }
 
@@ -416,7 +436,7 @@ fn plan_debt_of(
         .map(|subject| st.debt_coverage_for(subject))
         .unwrap_or_default();
     let production = subject.map(|subject| {
-        let implementers = range_implementers(ctx, subject);
+        let implementers = shipped_implementers(ctx, st, subject);
         st.debt_production_for(subject, implementers)
     });
     let extent = match extent {

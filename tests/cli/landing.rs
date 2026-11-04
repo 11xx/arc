@@ -2889,3 +2889,113 @@ fn an_imported_completion_names_only_patchsets_the_receiver_holds() {
         );
     }
 }
+
+/// Claim: assurance reads a member landed by replay from the range it
+/// landed as, the composed parent to its integrated revision: its live
+/// fraction measures those commits at the target and its exposure is read
+/// from them, even when nothing holds the commits it was snapshotted as; its
+/// authors and an audit's implementers still resolve. Rejects reading the
+/// original patchset's `base..head`, whose commits the target never
+/// contains.
+#[test]
+fn assurance_reads_a_replayed_member_from_the_range_it_landed_as() {
+    let repo = gated_repo();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[danger]\npaths = [\"danger/**\"]\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "test: declare a danger path"]);
+    let (first, _, _) = reviewed_change(&repo, "first", None);
+    let second = opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", "second"])));
+    let worktree = repo.home.join(".worktrees/repo-second");
+    fs::create_dir_all(worktree.join("danger")).unwrap();
+    repo.commit(
+        &worktree,
+        "danger/second.txt",
+        "one\ntwo\nthree\n",
+        "feat: second\n\nImplemented-by: claude:claude-sonnet-5-5#high",
+    );
+    stdout(repo.arc(&worktree).args(["snapshot", "second"]));
+    repo.arc(&worktree)
+        .args(["review", "second", "--verdict", "approved"])
+        .assert()
+        .success();
+    let original = repo.head(&worktree);
+    repo.arc(&repo.root)
+        .args(["land", &first, &second, "--debt", "context unread"])
+        .assert()
+        .success();
+    assert_eq!(status(&repo, &second)["debt"]["missing"], "replayed-unread");
+
+    // Nothing holds the commits the member was snapshotted as.
+    git(
+        &repo.root,
+        &["worktree", "remove", "--force", worktree.to_str().unwrap()],
+    );
+    let holding = git_out(
+        &repo.root,
+        &[
+            "for-each-ref",
+            "--contains",
+            &original,
+            "--format=%(refname)",
+        ],
+    );
+    for name in holding.lines().filter(|name| !name.is_empty()) {
+        git(&repo.root, &["update-ref", "-d", name]);
+    }
+    git(&repo.root, &["reflog", "expire", "--expire=now", "--all"]);
+    git(&repo.root, &["gc", "--prune=now", "--quiet"]);
+    assert!(!Command::new("git")
+        .current_dir(&repo.root)
+        .args(["cat-file", "-e", &format!("{original}^{{commit}}")])
+        .status()
+        .unwrap()
+        .success());
+
+    // An audit of the landed revision counts, so assurance places the
+    // member's authors, and the audit reads them from what it judges.
+    let audited = repo
+        .arc(&repo.root)
+        .env("ARC_ACTOR", "auditor")
+        .args(["audit", &second, "--verdict", "approved"])
+        .output()
+        .unwrap();
+    assert!(audited.status.success(), "{}", stderr_of(&audited));
+    assert!(
+        !stderr_of(&audited).contains("could not read the Implemented-by trailers"),
+        "{}",
+        stderr_of(&audited)
+    );
+
+    // Routing knows no auditor model, so the member stays listed under
+    // `--stale`, the view that judges it.
+    let report =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["query", "--assurance", "--json", "--stale"]),
+        );
+    let row = report["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["change_id"] == second.as_str())
+        .unwrap_or_else(|| panic!("no row for {second} in {report}"))
+        .clone();
+    let components = &row["assurance"]["components"];
+    let live = &components["live_fraction"];
+    assert!(live["reason"].is_null(), "{row:#}");
+    assert_eq!(live["added"], 3, "{row:#}");
+    assert_eq!(live["live"], 3, "{row:#}");
+    let exposure = &components["exposure"];
+    assert_eq!(exposure["state"], "touched", "{row:#}");
+    assert_eq!(exposure["paths"], 1, "{row:#}");
+    assert_eq!(
+        row["assurance"]["authors"],
+        json!(["claude-sonnet-5-5#high"]),
+        "{row:#}"
+    );
+}

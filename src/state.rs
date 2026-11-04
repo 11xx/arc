@@ -5258,6 +5258,20 @@ impl ChangeState {
             .map(|patchset| (patchset.base.as_str(), patchset.head.as_str()))
     }
 
+    /// The range a change closed by a landing occupies on its target, as
+    /// `(base, revision)`: `range_base..integrated_commit`, which for a
+    /// member landed by replay is the commits it landed as rather than its
+    /// patchset's. `None` for any other change, whose shipped patchset's
+    /// `base..head` is that range.
+    pub fn landed_range(&self) -> Option<(&str, &str)> {
+        let closure = self.closure.as_ref()?;
+        closure.landing.as_ref()?;
+        Some((
+            closure.range_base.as_deref()?,
+            closure.integrated_commit.as_deref()?,
+        ))
+    }
+
     /// Whether the read `event_id` discharges `debt` by an extent that
     /// covers it, or where neither side established an extent.
     fn discharge_extent(&self, debt: &Debt, event_id: &str) -> Option<&'static str> {
