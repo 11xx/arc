@@ -2136,8 +2136,9 @@ enum Cmd {
         /// has neither tree nor tested_tree, and when its environment probe
         /// yields no identity. --falsified-by always runs.
         /// Integration may reuse a clean passing source across a delta when
-        /// a complete project selector excludes the gate. Its provenance is
-        /// recorded; unavailable or uncertain selection runs the gate.
+        /// a complete project selector excludes the gate and echoes the
+        /// complete input object in its response's request field. Its provenance
+        /// is recorded; unavailable, mismatched or uncertain selection runs the gate.
         /// Publication checks the complete tier on changed trees.
         #[arg(long)]
         rerun: bool,
