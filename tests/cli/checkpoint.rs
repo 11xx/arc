@@ -2,6 +2,7 @@
 //! read back against what landed, closed and was filed since.
 
 use crate::common::*;
+use crate::retention::{collect_garbage, has_object};
 use serde_json::Value;
 
 fn todo(repo: &Repo, topic: &str) -> String {
@@ -405,4 +406,78 @@ fn an_unrecorded_checkpoint_tag_refuses_with_its_recovery() {
         git_out(&repo.root, &["rev-parse", "checkpoint/rc^{commit}"]),
         revision
     );
+}
+
+fn record_untagged(repo: &Repo, name: &str, revision: &str) -> String {
+    let recorded =
+        stdout(
+            repo.arc(&repo.root)
+                .args(["checkpoint", "record", name, "--rev", revision]),
+        );
+    recorded
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap_or_else(|| panic!("{recorded}"))
+        .to_string()
+}
+
+/// Claim: a recorded rewrite that replaces a checkpoint's revision holds the
+/// revision under a retention ref, so garbage collection keeps it and `show`
+/// still judges ancestry from it. Rejects: a checkpoint recorded without
+/// `--tag` whose revision only the rewritten branch held, which the next
+/// collection takes.
+#[test]
+fn a_rewrite_retains_the_revision_an_untagged_checkpoint_names() {
+    let repo = Repo::new();
+    let (flight, worktree, _) = change_with_patchset(&repo, "flight");
+    repo.commit(&worktree, "build.txt", "one\n", "feat: tested build");
+    let tested = repo.head(&worktree);
+    let event = record_untagged(&repo, "beta", &tested);
+    git(
+        &worktree,
+        &[
+            "commit",
+            "--amend",
+            "--no-edit",
+            "--date",
+            "2020-01-01T00:00:00Z",
+        ],
+    );
+    let replacement = repo.head(&worktree);
+    assert_ne!(replacement, tested);
+    let map = repo.home.join("map");
+    std::fs::write(&map, format!("{tested} {replacement}\n")).unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "history",
+            "rewrite",
+            "--map",
+            map.to_str().unwrap(),
+            "--reason",
+            "amended after the checkpoint",
+        ])
+        .assert()
+        .success();
+
+    collect_garbage(&repo.root);
+    assert!(
+        has_object(&repo.root, &tested),
+        "garbage collection took it"
+    );
+    let held = git_out(
+        &repo.root,
+        &[
+            "rev-parse",
+            &format!("refs/arc/retained/repository/{event}/{tested}"),
+        ],
+    );
+    assert_eq!(held, tested);
+
+    let view = show(&repo, "beta");
+    assert_eq!(view["revision"], tested.as_str());
+    assert_eq!(view["current_revision"], replacement.as_str());
+    assert!(view["ancestry_unknown"].is_null(), "{view}");
+    assert!(view["landed_since"].is_array(), "{view}");
+    assert_eq!(view["changes"][0]["change_id"], flight.as_str());
+    assert_eq!(view["changes"][0]["status"], "open");
 }

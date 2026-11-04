@@ -39,7 +39,7 @@ fn retention_ref(change: &str, subject: &str, commit: &str) -> String {
     format!("refs/arc/retained/{change}/{subject}/{commit}")
 }
 
-fn has_object(cwd: &Path, commit: &str) -> bool {
+pub(crate) fn has_object(cwd: &Path, commit: &str) -> bool {
     Command::new("git")
         .args(["cat-file", "-e", commit])
         .current_dir(cwd)
@@ -52,7 +52,7 @@ fn has_object(cwd: &Path, commit: &str) -> bool {
 
 /// What Git's garbage collection does to every object nothing reaches: expire
 /// the reflogs that would otherwise hold the old commits, then prune.
-fn collect_garbage(cwd: &Path) {
+pub(crate) fn collect_garbage(cwd: &Path) {
     git(
         cwd,
         &[

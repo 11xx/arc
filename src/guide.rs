@@ -2049,6 +2049,12 @@ CHECKPOINTS (a revision handed over for testing)
   absent; an event published but not confirmed durable, or one whose
   publication cannot be told, keeps its tag and the error says which.
   The event is a plain fact: it grants and requires no authority.
+  Recording pins nothing: the revision and every change head the checkpoint
+  recorded are commits the ledger cites, so a rewrite arc performs or
+  records holds each one it replaces under
+  `refs/arc/retained/repository/<event>/<commit>` (`arc guide
+  rewrites-evidence`), with or without `--tag`. `arc doctor` advises on one
+  no ref reaches.
 
   When findings come back, `show` sorts them against the checkpoint. A
   change open at it is integrated (whether the integrated commit is inside
@@ -3304,13 +3310,16 @@ HISTORY REWRITES
   signed.
 
   A commit that any recorded verdict or audit read, that a patchset recorded
-  as its head, or that a forge fact records as the provider's own (a full
-  object ID, from an observation, link, checks or lifecycle fact) stays
+  as its head, that a forge fact records as the provider's own (a full
+  object ID, from an observation, link, checks or lifecycle fact), or that a
+  checkpoint names as its revision or an open change's head stays
   reachable after any rewrite arc performs or records. Each such commit a
   rewrite replaces is held by
   `refs/arc/retained/<change>/<subject>/<commit>`: the subject is the
   patchset the commit was the head of, or the event that recorded a verdict
-  or forge fact on it, and a change holds a commit once. A
+  or forge fact on it, and a change holds a commit once. A checkpoint's
+  commits are held in the `repository` scope under its event, when nothing
+  else cites them. A
   `refs/arc/keep/<change>/<patchset>` pin the rewrite moves is held the same way, whether or not a verdict cites
   its commit. The pin follows the successor, which is what projections and
   signature-only approvals stand on; a retention ref holds the commit that
@@ -3326,7 +3335,8 @@ HISTORY REWRITES
   withdrawn only when publication is confirmed absent; published or uncertain
   events keep them, and the error names that state. `arc doctor` reports a
   retention ref whose object is gone as the problem `retained-object-missing`,
-  and a cited commit no ref reaches as the advice `unretained-commit`, naming the `git update-ref` that holds it.
+  and a cited commit no ref reaches, a checkpoint's among them, as the advice
+  `unretained-commit`, naming the `git update-ref` that holds it.
   If Git cannot complete the reachability walk, the report retains collected
   findings and names the problem `retention-reachability-failed` with the error.
 
@@ -4935,15 +4945,15 @@ FILES
   before recording the result, so a background process it left behind does
   not outlive it.
 
-  Every patchset's resolved head is pinned by `refs/arc/keep/<change>/<patchset>`
-  so Git's garbage collection cannot take it. Pins follow recorded rewrites
-  and hold their successors. The commit a pin held, and any other commit the
-  ledger cites as a patchset head or a verdict's revision, is held under
+  Every patchset's head is pinned by `refs/arc/keep/<change>/<patchset>`
+  so garbage collection cannot take it. Pins follow recorded rewrites onto
+  their successors. The commit a pin held, and any other commit the ledger
+  cites as a patchset head or a verdict's revision, is held under
   `refs/arc/retained/<change>/<subject>/<commit>` by `arc rewrite` and
   `arc history rewrite --map`, as is a provider-observed commit a forge fact
-  cites, a received source/tested/report commit, and an import that holds one.
-  A pin or a retention ref is released
-  only once its commit is reachable from the integration commit, where history holds it;
+  cites, a received source/tested/report commit, a checkpoint's commits, and
+  an import that holds one. A pin or a retention ref is released only once
+  its commit is reachable from the integration commit, where history holds it;
   a replaced commit is on no branch, so its ref stays while the ledger cites
   it, and closing a change without integrating it releases nothing. Release
   any other with `git update-ref -d`. A registered candidate's tree is pinned by

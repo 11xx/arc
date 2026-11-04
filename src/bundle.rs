@@ -595,7 +595,7 @@ impl Bundle {
     }
 }
 
-fn valid_object_id(oid: &str) -> bool {
+pub(crate) fn valid_object_id(oid: &str) -> bool {
     matches!(oid.len(), 40 | 64) && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 

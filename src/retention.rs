@@ -9,8 +9,9 @@
 //! Which commits count is decided by the ledger, not by which ref happens to
 //! hold one: a patchset's head, the revision an external or audit verdict
 //! was recorded on, a commit a forge fact records as the provider's own,
-//! the source, tested and report commits received with a candidate, and Git
-//! support selected by a disclosure.
+//! the source, tested and report commits received with a candidate, Git
+//! support selected by a disclosure, and the revision and change heads a
+//! checkpoint recorded.
 //! A pin released at integration, or one an outside tool moved, leaves those
 //! commits as exposed as a pin the rewrite moves.
 
@@ -48,6 +49,9 @@ impl Cited {
 /// verdict recorded on some other commit is named by its own event. A
 /// provider-observed commit is named by the forge event that recorded it, and
 /// only a full object ID can be held: a ref is named for the commit it holds.
+/// A checkpoint's revision and the change heads it recorded are named by the
+/// checkpoint's event, in repository scope, unless something else already
+/// cites the commit.
 pub fn cited(store: &Store) -> Result<Vec<Cited>> {
     let mut found = Vec::new();
     let read = store.read()?;
@@ -138,7 +142,45 @@ pub fn cited(store: &Store) -> Result<Vec<Cited>> {
             }
         }
     }
+    let mut cited_commits: BTreeSet<String> =
+        found.iter().map(|cited| cited.commit.clone()).collect();
+    for event in &repository_events {
+        for (what, commit) in checkpoint_commits(&event.payload) {
+            if crate::bundle::valid_object_id(commit) && cited_commits.insert(commit.to_string()) {
+                found.push(Cited {
+                    change_id: Store::REPOSITORY_SCOPE.into(),
+                    subject: event.event_id.clone(),
+                    what,
+                    commit: commit.to_string(),
+                });
+            }
+        }
+    }
     Ok(found)
+}
+
+/// The revision a checkpoint names and the head it recorded for each open
+/// change, each with how a reader is told what cites it.
+pub(crate) fn checkpoint_commits(payload: &Payload) -> Vec<(String, &str)> {
+    let Payload::CheckpointRecorded {
+        name,
+        revision,
+        changes,
+        ..
+    } = payload
+    else {
+        return Vec::new();
+    };
+    let heads = changes.iter().filter_map(|change| {
+        let head = change.head.as_deref()?;
+        Some((
+            format!("checkpoint {name} head of {}", change.change_id),
+            head,
+        ))
+    });
+    std::iter::once((format!("checkpoint {name} revision"), revision.as_str()))
+        .chain(heads)
+        .collect()
 }
 
 /// What a rewrite is to hold, and what it cannot.
@@ -316,6 +358,69 @@ mod tests {
         assert!(replaced_by(&map(&[&sha256.to_ascii_uppercase()[..40]]))(
             &sha256
         ));
+    }
+
+    fn checkpoint(name: &str, revision: &str, heads: &[&str]) -> crate::store::LocalEvent {
+        let changes: Vec<_> = heads
+            .iter()
+            .enumerate()
+            .map(|(index, head)| {
+                serde_json::json!({
+                    "change_id": format!("change-{index}"), "slug": "slug",
+                    "state": "open", "patchset_id": "ps-01", "head": head,
+                })
+            })
+            .collect();
+        crate::store::LocalEvent::draft(
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1, "event_id": "", "repository_id": "repo",
+                "change_id": Store::REPOSITORY_SCOPE, "actor": "tester",
+                "created_at": chrono::Utc::now(), "event_type": "checkpoint-recorded",
+                "name": name, "revision": revision, "tree": "tree",
+                "changes": changes, "todos": [],
+            }))
+            .unwrap(),
+        )
+    }
+
+    /// Claim: a checkpoint cites its revision and every change head it
+    /// recorded, in repository scope under its own event, and a commit
+    /// already cited is cited once. Rejects: a checkpoint's change heads left
+    /// out, a second checkpoint at the same revision asking for a second ref,
+    /// and a recorded value that is not an object ID becoming a ref name.
+    #[test]
+    fn a_checkpoint_cites_its_revision_and_the_heads_it_recorded() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = Store::for_tests(tmp.path());
+        let (revision, head) = ("a".repeat(40), "b".repeat(64));
+        let mut first = checkpoint("beta", &revision, &[&head, "not-a-commit"]);
+        store.append_local_repository_event(&mut first).unwrap();
+        let mut second = checkpoint("beta-2", &revision, &[&revision]);
+        store.append_local_repository_event(&mut second).unwrap();
+
+        let cited: Vec<_> = cited(&store)
+            .unwrap()
+            .into_iter()
+            .map(|cited| (cited.change_id, cited.subject, cited.what, cited.commit))
+            .collect();
+        let scope = Store::REPOSITORY_SCOPE.to_string();
+        assert_eq!(
+            cited,
+            vec![
+                (
+                    scope.clone(),
+                    first.event_id.clone(),
+                    "checkpoint beta revision".to_string(),
+                    revision
+                ),
+                (
+                    scope,
+                    first.event_id.clone(),
+                    "checkpoint beta head of change-0".to_string(),
+                    head
+                ),
+            ]
+        );
     }
 
     #[test]

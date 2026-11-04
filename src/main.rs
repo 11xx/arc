@@ -3285,8 +3285,9 @@ enum Cmd {
     /// Unfinished provisional transitions report their merge, refs, event state, retained
     /// intent and exact recovery command as problems. A `refs/arc/retained` ref whose
     /// object is gone is the problem `retained-object-missing`; a commit the ledger cites
-    /// as a patchset head or a verdict's revision, or that a forge fact records as the
-    /// provider's own, that no ref reaches is the advice `unretained-commit`, with the `git
+    /// as a patchset head or a verdict's revision, that a forge fact records as the
+    /// provider's own, or that a checkpoint names, that no ref reaches is the advice
+    /// `unretained-commit`, with the `git
     /// update-ref` that holds it. A custody file whose bytes do not hash to its name is the
     /// advice `custody-content-mismatch`, and a temporary file an interrupted custody write
     /// left over an hour ago is the advice `custody-temp-orphaned`; neither is removed. An
@@ -4275,8 +4276,9 @@ enum HistoryCmd {
     /// Re-recording the actual map restores what a withdrawal set aside: falsification
     /// references that store a rewritten failure revision, and receipts after integration
     /// naming the integrated commit's successor, without editing ledger events. Moves no
-    /// refs, but holds each commit the ledger cites as a patchset head or a verdict's
-    /// revision that the map replaces and this repository still has under
+    /// refs, but holds each commit the ledger cites as a patchset head, a verdict's
+    /// revision, or a checkpoint's revision or recorded change head that the map replaces
+    /// and this repository still has under
     /// `refs/arc/retained/<change>/<subject>/<commit>`, named by the event's `retained`
     /// map; a cited commit already gone is named and cannot be held. An append error
     /// withdraws retention refs created by that attempt only when publication is confirmed
@@ -4316,10 +4318,12 @@ enum RewriteCmd {
     /// attempt's ref moves and retains its intent for retry. Published or
     /// uncertain events retain the intent and applied refs for recovery.
     ///
-    /// A commit that any recorded verdict or audit read, or that a patchset
-    /// recorded as its head, stays reachable: each one the map replaces is
-    /// held by `refs/arc/retained/<change>/<subject>/<commit>` (the subject
-    /// is the patchset, or the event that recorded the verdict), created in
+    /// A commit that any recorded verdict or audit read, that a patchset
+    /// recorded as its head, or that a checkpoint names stays reachable: each
+    /// one the map replaces is held by
+    /// `refs/arc/retained/<change>/<subject>/<commit>` (the subject is the
+    /// patchset, or the event that recorded the verdict or the checkpoint; a
+    /// checkpoint's `<change>` is `repository`), created in
     /// the transaction that moves the refs, restored with them on a failed
     /// recording, and named by the event's `retained` map. The keep pin moves
     /// to the successor; a retention ref never moves. --dry-run lists them
@@ -4382,10 +4386,12 @@ enum RewriteCmd {
     /// attempt's ref moves and retains its intent for retry. Published or
     /// uncertain events retain the intent and applied refs for recovery.
     ///
-    /// A commit that any recorded verdict or audit read, or that a patchset
-    /// recorded as its head, stays reachable: each one the map replaces is
-    /// held by `refs/arc/retained/<change>/<subject>/<commit>` (the subject
-    /// is the patchset, or the event that recorded the verdict), created in
+    /// A commit that any recorded verdict or audit read, that a patchset
+    /// recorded as its head, or that a checkpoint names stays reachable: each
+    /// one the map replaces is held by
+    /// `refs/arc/retained/<change>/<subject>/<commit>` (the subject is the
+    /// patchset, or the event that recorded the verdict or the checkpoint; a
+    /// checkpoint's `<change>` is `repository`), created in
     /// the transaction that moves the refs, restored with them on a failed
     /// recording, and named by the event's `retained` map. The keep pin moves
     /// to the successor; a retention ref never moves. --dry-run lists them
@@ -4990,7 +4996,9 @@ enum CheckpointCmd {
     ///
     /// Names are unique in this repository; a second record under a name
     /// refuses and names the first. The event grants and requires no
-    /// authority.
+    /// authority. Recording pins nothing; a rewrite arc performs or records
+    /// holds the revision and recorded change heads it replaces, with or
+    /// without --tag (`arc guide ending`).
     Record {
         /// The checkpoint's name: letters, digits, `.`, `_` and `-`
         name: String,
