@@ -1447,7 +1447,10 @@ pub(super) fn record_verdict(
     let mut st = store.project_state(&events, &store.rewrites()?)?;
     crate::replica::localize_change(&store.repository_id, &events, &mut st);
     let admitted = match receipt {
-        None => None,
+        None => {
+            super::audit::warn_model_disagreement(ctx, "the verdict");
+            None
+        }
         Some(guard) => match guard.admit(&store, &events, &st)? {
             super::receipt::Admission::Published(event_id) => {
                 println!("event: {event_id} (already recorded from this item)");
@@ -1521,11 +1524,7 @@ pub(super) fn record_verdict(
             .iter()
             .find(|candidate| candidate.id == patchset_id)
             .and_then(|reviewed| super::audit::range_implementers(ctx, reviewed));
-        super::audit::bind_assessment_to(
-            super::receipt::binding_model(ctx, receipt.is_some()).as_deref(),
-            assessed,
-            implementers.as_deref(),
-        )
+        super::audit::bind_assessment(ctx, assessed, implementers.as_deref())
     });
     let unbound = assessment.as_ref().and_then(|assessed| {
         assessed

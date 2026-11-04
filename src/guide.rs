@@ -2673,10 +2673,14 @@ REVIEW COVERAGE AND DEBT
   range does not read) is not an empty one, and its audit is recorded with
   binding `authors-unread` and leaves the debt open. No other kind has this
   rule. The
-  assessment describes the auditor when the model its audit event recorded is
-  among the reviewer's `identities` (every model string routing accepts for
-  it) and, where both name an effort, the effort equals the reviewer's
-  `effort`. arc keeps only the outcome on the audit's assessment: `bound`,
+  assessment describes the auditor when the auditor's model is among the
+  reviewer's `identities` (every model string routing accepts for it) and,
+  where both name an effort, the effort equals the reviewer's `effort`. The
+  auditor's model is the one its session store observed wherever the store
+  has one, else the one its audit event recorded; a declared model the store
+  contradicts is recorded with the observed one beside it and binds nothing,
+  for a hand-recorded read as for a receipt item, and a verdict's assessment
+  binds the same way. arc keeps only the outcome on the audit's assessment: `bound`,
   `model-mismatch`, `effort-mismatch`, `model-unrecorded` (an audit by a
   person records no model), `identities-unstated` (the file lists none) or
   `authors-uncovered` (the authors it lists omit a coordinate of the range,

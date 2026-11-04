@@ -198,21 +198,43 @@ fn read_assessment(
     ))
 }
 
-/// `assessed` as a read keeps it: bound to the model the invoking context
-/// records for the represented reader, and to every author coordinate of
-/// `implementers`, the range's `Implemented-by` values, or `None` when they
-/// could not be read.
+/// `assessed` as a read keeps it: bound to the reader's model (see
+/// [`binding_model`]), and to every author coordinate of `implementers`, the
+/// range's `Implemented-by` values, or `None` when they could not be read.
 pub(super) fn bind_assessment(
     ctx: &Ctx,
     assessed: crate::assessment::Assessment,
     implementers: Option<&[String]>,
 ) -> AuditAssessment {
-    bind_assessment_to(ctx.resolve_model().model.as_deref(), assessed, implementers)
+    bind_assessment_to(binding_model(ctx).as_deref(), assessed, implementers)
+}
+
+/// The model a read binds to: the one the reader's session store observed
+/// wherever the store has one, else the declared model. A declared model the
+/// store contradicts is recorded beside the observed one and binds nothing.
+fn binding_model(ctx: &Ctx) -> Option<String> {
+    let attribution = ctx.resolve_model();
+    match attribution.provenance.model_disagreement {
+        Some(disagreement) => Some(disagreement.observed),
+        None => attribution.model,
+    }
+}
+
+/// Say that the reader's session store contradicts the declared model, which
+/// the read records and its assessment does not bind.
+pub(super) fn warn_model_disagreement(ctx: &Ctx, declaration: &str) {
+    if let Some(disagreement) = ctx.resolve_model().provenance.model_disagreement {
+        eprintln!(
+            "warning: the reader's session store records model {}, {declaration} declares {}; \
+             the read records the disagreement, and an assessment binds the observed model",
+            disagreement.observed, disagreement.declared
+        );
+    }
 }
 
 /// `assessed` bound to the reader's `model` and to every author coordinate
 /// of `implementers`; see [`bind_assessment`].
-pub(super) fn bind_assessment_to(
+fn bind_assessment_to(
     model: Option<&str>,
     assessed: crate::assessment::Assessment,
     implementers: Option<&[String]>,
@@ -689,7 +711,10 @@ pub(super) fn record_audit(
     let _transition = store.lock_transition(&change_id)?;
     let st = store.state(&change_id)?;
     let admitted = match receipt {
-        None => None,
+        None => {
+            warn_model_disagreement(ctx, "the audit");
+            None
+        }
         Some(guard) => {
             let events = store.load_events(&change_id)?;
             match guard.admit(&store, &events, &st)? {
@@ -734,11 +759,7 @@ pub(super) fn record_audit(
     let finding_ids: Vec<String> = inline.iter().map(|f| f.finding_id.clone()).collect();
     let assessment = match (args.assessment.as_deref(), args.assessed) {
         (Some(path), _) => Some(read_assessment(ctx, path, implementers.as_deref())?),
-        (None, Some(assessed)) => Some(bind_assessment_to(
-            super::receipt::binding_model(ctx, receipt.is_some()).as_deref(),
-            assessed,
-            implementers.as_deref(),
-        )),
+        (None, Some(assessed)) => Some(bind_assessment(ctx, assessed, implementers.as_deref())),
         (None, None) => None,
     };
     let binding = assessment.as_ref().and_then(|assessed| assessed.binding);

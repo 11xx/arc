@@ -854,17 +854,6 @@ fn check_audit_subject(subject: &AuditSubject, st: &ChangeState) -> Result<()> {
     Ok(())
 }
 
-/// The model a receipt's assessment binds to: the one the reader's session
-/// store observed where it disagrees with the receipt's declaration, so a
-/// declared model the store contradicts binds nothing it did not earn.
-pub(super) fn binding_model(ctx: &Ctx, receipt: bool) -> Option<String> {
-    let attribution = ctx.resolve_model();
-    match attribution.provenance.model_disagreement {
-        Some(disagreement) if receipt => Some(disagreement.observed),
-        _ => attribution.model,
-    }
-}
-
 /// Whether `session` has the shape of a complete native session id for
 /// `harness`. A prefix, a delegate handle and an unknown harness's id are
 /// refused: arc cannot tell a whole id from part of one where it does not
@@ -1406,13 +1395,7 @@ pub fn ingest(ctx: &Ctx, kind: ItemKind, path: &Path, json: bool) -> Result<i32>
             println!("refused: {refused} of {} items", results.len());
         }
     }
-    if let Some(disagreement) = &attribution.provenance.model_disagreement {
-        eprintln!(
-            "warning: the reviewer's session store records model {}, the receipt declares {}; \
-             each read records the disagreement, and an assessment binds the observed model",
-            disagreement.observed, disagreement.declared
-        );
-    }
+    super::audit::warn_model_disagreement(&represented, "the receipt");
     Ok(if refused > 0 { 1 } else { 0 })
 }
 

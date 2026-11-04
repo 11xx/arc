@@ -680,3 +680,96 @@ fn the_severity_vocabulary_is_named_where_a_reader_fills_a_finding() {
     assert!(stderr.contains("vocabulary"), "{stderr}");
     assert_eq!(receipt_reads(&repo, "severity").len(), 1);
 }
+
+/// An assessment of a reviewer answering to `identity` at high effort.
+fn assessment_of(repo: &Repo, name: &str, identity: &str) -> PathBuf {
+    let mut assessment = clearing_assessment(true);
+    assessment["reviewer"]["identities"] = serde_json::json!([identity]);
+    assessment["authors"] = serde_json::json!([]);
+    let path = repo.home.join(name);
+    fs::write(&path, json_file_bytes(&assessment)).unwrap();
+    path
+}
+
+/// The binding and recorded disagreement of the newest read on `slug`.
+fn bound_read(repo: &Repo, slug: &str, event_type: &str) -> (serde_json::Value, String) {
+    let read = events(repo, slug)
+        .into_iter()
+        .rev()
+        .find(|event| event["event_type"] == event_type)
+        .unwrap_or_else(|| panic!("no {event_type} on {slug}"));
+    let observed = read["model_disagreement"]["observed"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no disagreement recorded: {read:#}"))
+        .to_string();
+    assert_eq!(read["model_disagreement"]["declared"], REVIEWER_MODEL);
+    (read["assessment"]["binding"].clone(), observed)
+}
+
+/// Claim: wherever the reviewer's session store observed a model that
+/// differs from the declared one, the read records the disagreement and its
+/// assessment binds the observed model, whether the read was recorded by
+/// hand with `--on-behalf-of harness:session:model` or from a receipt, and
+/// for a verdict as for an audit. Rejects a hand-recorded read that binds
+/// the declared model the store contradicts, so an assessment of the
+/// declared reviewer clears a read the store says another model made.
+#[test]
+fn a_read_binds_the_model_its_session_store_observed_on_every_path() {
+    let repo = assessed_repo();
+    codex_recording(&repo, REVIEWER_SESSION, "fixture-observed");
+    let codex_home = repo.home.join("codex-state");
+    let declared = assessment_of(&repo, "declared.json", "fixture-other");
+    let observed = assessment_of(&repo, "observed.json", "fixture-observed");
+    let cases = [
+        (&declared, serde_json::json!("model-mismatch")),
+        (&observed, serde_json::json!("bound")),
+    ];
+    for (kind, command, event_type) in [
+        ("verdict", "review", "verdict-recorded"),
+        ("audit", "audit", "audit-verdict-recorded"),
+    ] {
+        for (index, (assessment, binding)) in cases.iter().enumerate() {
+            let hand = format!("{command}-hand-{index}");
+            let carried = format!("{command}-receipt-{index}");
+            for slug in [&hand, &carried] {
+                match kind {
+                    "verdict" => snapshotted(&repo, slug),
+                    _ => owed(&repo, slug, None),
+                }
+            }
+            let output = repo
+                .arc(&repo.root)
+                .env("CODEX_HOME", &codex_home)
+                .args([command, &hand, "--verdict", "approved"])
+                .args(["--on-behalf-of", &reviewer_subject(), "--assessment"])
+                .arg(assessment)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{hand}: {output:?}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("fixture-observed"), "{hand}: {stderr}");
+            let (hand_binding, hand_observed) = bound_read(&repo, &hand, event_type);
+            assert!(
+                hand_observed.starts_with("fixture-observed"),
+                "{hand_observed}"
+            );
+            assert_eq!(&hand_binding, binding, "{hand}");
+
+            let mut receipt = filled(template(&repo, kind, &[&carried]), "approved");
+            receipt["items"][0]["assessment"] =
+                serde_json::from_slice(&fs::read(assessment).unwrap()).unwrap();
+            let path = write_receipt(&repo, &format!("{carried}.json"), &receipt);
+            let output = repo
+                .arc(&repo.root)
+                .env("CODEX_HOME", &codex_home)
+                .args([command, "--receipt"])
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{carried}: {output:?}");
+            let (carried_binding, carried_observed) = bound_read(&repo, &carried, event_type);
+            assert_eq!(carried_observed, hand_observed);
+            assert_eq!(&carried_binding, binding, "{carried}");
+        }
+    }
+}

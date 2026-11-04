@@ -1959,8 +1959,8 @@ enum Cmd {
         #[arg(long = "route-version", value_name = "VERSION")]
         route_version: Option<String>,
         /// Routing's assessment of this reviewer: an `agent-routing assess
-        /// --json` file, validated, kept and bound to the reviewer's recorded
-        /// model and to the reviewed patchset's `Implemented-by` coordinates
+        /// --json` file, validated, kept and bound to the reviewer's model
+        /// and to the reviewed patchset's `Implemented-by` coordinates
         /// exactly as `arc audit --assessment` binds one; a binding that
         /// fails is recorded and said. Under `[policy] review_clearance =
         /// "assessed"` an agent's verdict clears only with a bound
@@ -3073,8 +3073,11 @@ enum Cmd {
         /// keeps its independence, qualifiers and route version, a `/2`
         /// file's `findings` and `clears` beside them, never its tiers, and
         /// whether its reviewer `identities` (every model string routing
-        /// accepts for the reviewer) and `effort` match the model this audit
-        /// records; only that outcome is kept: `bound`, `model-mismatch`,
+        /// accepts for the reviewer) and `effort` match the auditor's model:
+        /// the one the auditor's session store observed wherever it has one,
+        /// else the one this audit records. A declared model the store
+        /// contradicts is recorded with the observed one beside it and binds
+        /// nothing. Only the outcome is kept: `bound`, `model-mismatch`,
         /// `effort-mismatch`, `model-unrecorded` (a person, for example) or
         /// `identities-unstated`. A debt of kind `ineligible-review` is
         /// discharged only by an audit whose assessment says `eligible` and
