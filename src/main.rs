@@ -2271,8 +2271,9 @@ enum Cmd {
         /// committed, and evidence at the head says nothing about it. This
         /// synthesizes that merge, checks it out on its own, runs the declared
         /// gates there, and records the result against the merged tree. The
-        /// scratch checkout is removed whatever the gates do, and is not
-        /// created at all when no gate is left to run. The evidence is spent
+        /// scratch checkout is removed after gates and preparation errors;
+        /// source-mutating preparation keeps it for inspection. It is not
+        /// created when no gate is left to run. The evidence is spent
         /// as soon as the target moves again, because that is a different
         /// merge. A gate already green at that merged tree records reuse
         /// rather than running a second time, unless --rerun is given.

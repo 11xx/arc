@@ -18,6 +18,21 @@ mod stable;
 
 const CONFIG: &str = ".arc/worktrees.toml";
 
+#[derive(Debug)]
+pub(crate) struct SourceMutation(String);
+
+impl std::fmt::Display for SourceMutation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "worktree preparation changed source, index, HEAD or untracked source paths; keeping checkout for inspection")?;
+        if !self.0.is_empty() {
+            write!(formatter, ": {}", self.0)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for SourceMutation {}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Configuration {
@@ -184,7 +199,7 @@ pub fn prepare(path: &Path) -> Result<()> {
     let before = Source::observe(&path)?;
     let outcome = run(&path, &before, &hook);
     if Source::observe(&path)? != before {
-        bail!("worktree preparation changed source, index, HEAD or untracked source paths; keeping checkout for inspection");
+        return Err(SourceMutation(String::new()).into());
     }
     if let Err(error) = outcome {
         cold_storage(&path, &before, &hook)?;

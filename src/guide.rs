@@ -4930,8 +4930,10 @@ FILES
   Build outputs belong in the build directory and reusable compiler data in
   the cache. An inherited `CARGO_TARGET_DIR` is removed. A busy cache or failed
   preparation continues cold; changed source, index, HEAD or untracked source
-  paths refuses the checkout. The timeout covers output pipes and cleanup of
-  the hook's process group. Preparation is never gate evidence.
+  paths refuses the checkout and keeps it for inspection. Evaluation
+  checkouts are removed on other preparation errors. The timeout covers
+  output pipes and cleanup of the hook's process group. Preparation is never
+  gate evidence.
   Gate commands and environment probes receive the same build/source/cache
   variables. A project selects its prepared output explicitly, such as
   `CARGO_TARGET_DIR="$ARC_WORKTREE_BUILD/target"`. An administrative receipt
