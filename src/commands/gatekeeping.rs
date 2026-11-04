@@ -6151,11 +6151,12 @@ mod pipe_deadline_tests {
 
     #[test]
     fn escaped_gate_descendant_cannot_extend_pipe_cleanup() {
+        use crate::process_group::test_support::{HANG_BOUND, OUTLIVING_SECS};
         let cwd = tempfile::tempdir().unwrap();
         let pid_file = cwd.path().join("descendant.pid");
         let started = Instant::now();
         let run = run_gate(
-            "setsid sh -c 'echo $$ > descendant.pid; sleep 5' & exit 0",
+            &format!("setsid sh -c 'echo $$ > descendant.pid; sleep {OUTLIVING_SECS}' & exit 0"),
             cwd.path(),
             Some(1),
             cwd.path(),
@@ -6167,7 +6168,7 @@ mod pipe_deadline_tests {
         if let Ok(pid) = std::fs::read_to_string(&pid_file) {
             crate::process_group::kill_process_group(pid.trim().parse().unwrap()).unwrap();
         }
-        assert!(elapsed < Duration::from_secs(3));
+        assert!(elapsed < HANG_BOUND);
         assert!(run.status.success());
         assert!(run.timed_out);
         assert!(run.output_artifact.is_none());
@@ -6179,18 +6180,21 @@ mod pipe_deadline_tests {
     /// background process lives on.
     #[test]
     fn a_passing_gate_leaves_no_descendant_running() {
-        use crate::process_group::test_support::{ends_within, kill, read_pid};
+        use crate::process_group::test_support::{ends_within, kill, read_pid, HANG_BOUND};
         let cwd = tempfile::tempdir().unwrap();
         let run = run_gate(
-            "sleep 30 >/dev/null 2>&1 & echo $! > descendant.pid",
+            &format!(
+                "sleep {} >/dev/null 2>&1 & echo $! > descendant.pid",
+                crate::process_group::test_support::OUTLIVING_SECS
+            ),
             cwd.path(),
-            Some(5),
+            Some(HANG_BOUND.as_secs()),
             cwd.path(),
             "fixture",
         )
         .unwrap();
         let descendant = read_pid(cwd.path(), "descendant.pid");
-        let ended = ends_within(descendant, Duration::from_secs(2));
+        let ended = ends_within(descendant, HANG_BOUND);
         if !ended {
             kill(descendant);
         }
@@ -6202,29 +6206,31 @@ mod pipe_deadline_tests {
     /// The gate's group ID stays reserved by its unreaped leader until arc
     /// has signalled the group. Rejects reaping the leader as soon as it
     /// exits: with the group's only other member escaped into its own
-    /// session, the reaped ID is free for reuse, and the deadline's kill
-    /// would reach whatever process group next takes that number.
+    /// session, the reaped ID is free for reuse, and a later kill of the
+    /// group would reach whatever process group next takes that number.
     #[test]
     fn the_gate_leader_stays_reserved_until_its_group_is_stopped() {
+        use crate::process_group::test_support::{leader_script, LeaderObservation, HANG_BOUND};
         let cwd = tempfile::tempdir().unwrap();
         let path = cwd.path().to_owned();
         let gate = thread::spawn(move || {
             run_gate(
-                "echo $$ > leader.pid; setsid sh -c 'echo $$ > escaped.pid; exec sleep 6' &",
+                &leader_script(),
                 &path,
-                Some(3),
+                Some(HANG_BOUND.as_secs()),
                 &path,
                 "fixture",
             )
         });
-        let observation = crate::process_group::test_support::LeaderObservation::new(cwd.path());
+        let observation = LeaderObservation::new(cwd.path());
         let reserved = observation.reserved_after_exit();
-        let run = gate.join().unwrap().unwrap();
         observation.kill_escaped();
+        let run = gate.join().unwrap().unwrap();
         assert!(
             reserved,
             "gate leader was reaped while its group could still be signalled"
         );
-        assert!(run.timed_out);
+        assert!(run.status.success());
+        assert!(!run.timed_out);
     }
 }

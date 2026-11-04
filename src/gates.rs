@@ -892,7 +892,7 @@ mod pipe_deadline_tests {
                     cwd.path(),
                     "printf '{\"schema\":\"arc-gate-selection/1\",\"complete\":true,\"gates\":[]}'",
                     &delta,
-                    Some(30),
+                    Some(crate::process_group::test_support::HANG_BOUND.as_secs()),
                 )
                 .unwrap();
                 assert!(
@@ -905,14 +905,15 @@ mod pipe_deadline_tests {
 
     #[test]
     fn inherited_environment_probe_pipes_obey_the_deadline() {
+        use crate::process_group::test_support::{HANG_BOUND, OUTLIVING_SECS};
         let cwd = tempfile::tempdir().unwrap();
         for probe in [
-            "printf identity; sleep 5 & exit 0",
-            "printf identity; sleep 5 >&2 & exit 0",
+            format!("printf identity; sleep {OUTLIVING_SECS} & exit 0"),
+            format!("printf identity; sleep {OUTLIVING_SECS} >&2 & exit 0"),
         ] {
             let started = Instant::now();
-            let run = environment_probe(cwd.path(), probe, Some(1)).unwrap();
-            assert!(started.elapsed() < Duration::from_secs(3));
+            let run = environment_probe(cwd.path(), &probe, Some(1)).unwrap();
+            assert!(started.elapsed() < HANG_BOUND);
             assert!(run.identity.is_none());
             assert!(run.failure.unwrap().timed_out);
         }
@@ -925,15 +926,18 @@ mod pipe_deadline_tests {
     #[test]
     fn a_successful_probe_leaves_no_descendant_running() {
         let cwd = tempfile::tempdir().unwrap();
+        use crate::process_group::test_support::{ends_within, read_pid, HANG_BOUND};
         let run = environment_probe(
             cwd.path(),
-            "sleep 30 >/dev/null 2>&1 & echo $! > descendant.pid; printf identity",
-            Some(5),
+            &format!(
+                "sleep {} >/dev/null 2>&1 & echo $! > descendant.pid; printf identity",
+                crate::process_group::test_support::OUTLIVING_SECS
+            ),
+            Some(HANG_BOUND.as_secs()),
         )
         .unwrap();
-        let descendant = crate::process_group::test_support::read_pid(cwd.path(), "descendant.pid");
-        let ended =
-            crate::process_group::test_support::ends_within(descendant, Duration::from_secs(2));
+        let descendant = read_pid(cwd.path(), "descendant.pid");
+        let ended = ends_within(descendant, HANG_BOUND);
         if !ended {
             crate::process_group::test_support::kill(descendant);
         }
@@ -944,28 +948,28 @@ mod pipe_deadline_tests {
     /// The probe's group ID stays reserved by its unreaped leader until arc
     /// has signalled the group. Rejects reaping the leader as soon as it
     /// exits: with the group's only other member escaped into its own
-    /// session, the reaped ID is free for reuse, and the deadline's kill
-    /// would reach whatever process group next takes that number.
+    /// session, the reaped ID is free for reuse, and a later kill of the
+    /// group would reach whatever process group next takes that number.
     #[test]
     fn the_probe_leader_stays_reserved_until_its_group_is_stopped() {
+        use crate::process_group::test_support::{leader_script, LeaderObservation, HANG_BOUND};
         let cwd = tempfile::tempdir().unwrap();
         let path = cwd.path().to_owned();
         let probe = std::thread::spawn(move || {
             environment_probe(
                 &path,
-                "echo $$ > leader.pid; \
-                 setsid sh -c 'echo $$ > escaped.pid; exec sleep 6' & printf identity",
-                Some(3),
+                &format!("{}; printf identity", leader_script()),
+                Some(HANG_BOUND.as_secs()),
             )
         });
-        let support = &crate::process_group::test_support::LeaderObservation::new(cwd.path());
-        let reserved = support.reserved_after_exit();
+        let observation = LeaderObservation::new(cwd.path());
+        let reserved = observation.reserved_after_exit();
+        observation.kill_escaped();
         let run = probe.join().unwrap().unwrap();
-        support.kill_escaped();
         assert!(
             reserved,
             "probe leader was reaped while its group could still be signalled"
         );
-        assert!(run.failure.unwrap().timed_out);
+        assert!(run.identity.is_some());
     }
 }

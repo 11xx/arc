@@ -111,6 +111,11 @@ impl Snapshot {
 }
 
 fn run(program: &std::ffi::OsStr) -> Result<String, &'static str> {
+    run_within(program, DEADLINE)
+}
+
+/// `program`'s output, if it answers within `deadline`.
+fn run_within(program: &std::ffi::OsStr, deadline: Duration) -> Result<String, &'static str> {
     let mut group = crate::process_group::OwnedGroup::spawn(
         Command::new(program)
             .stdin(Stdio::null())
@@ -127,7 +132,7 @@ fn run(program: &std::ffi::OsStr) -> Result<String, &'static str> {
             .read_to_end(&mut bytes)
             .map(|_| bytes)
     });
-    let deadline = Instant::now() + DEADLINE;
+    let deadline = Instant::now() + deadline;
     loop {
         match group.leader_exited() {
             Ok(true) => break,
@@ -166,27 +171,27 @@ mod tests {
     /// number.
     #[test]
     fn the_status_leader_stays_reserved_until_its_group_is_stopped() {
+        use crate::process_group::test_support::{leader_script, LeaderObservation, HANG_BOUND};
         use std::os::unix::fs::PermissionsExt;
         let cwd = tempfile::tempdir().unwrap();
         let program = cwd.path().join("agent-status");
         std::fs::write(
             &program,
-            "#!/bin/sh\ncd \"$(dirname \"$0\")\"\necho $$ > leader.pid\n\
-             setsid sh -c 'echo $$ > escaped.pid; exec sleep 6' &\n",
+            format!("#!/bin/sh\ncd \"$(dirname \"$0\")\"\n{}\n", leader_script()),
         )
         .unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
         let path = program.clone();
-        let status = std::thread::spawn(move || run(path.as_os_str()));
-        let observation = crate::process_group::test_support::LeaderObservation::new(cwd.path());
+        let status = std::thread::spawn(move || run_within(path.as_os_str(), HANG_BOUND));
+        let observation = LeaderObservation::new(cwd.path());
         let reserved = observation.reserved_after_exit();
-        let answer = status.join().unwrap();
         observation.kill_escaped();
+        let answer = status.join().unwrap();
         assert!(
             reserved,
             "status leader was reaped while its group could still be signalled"
         );
-        assert_eq!(answer, Err(TIMED_OUT));
+        assert_eq!(answer.as_deref(), Ok(""));
     }
 
     const OWNER: &str = r#""owner": {"pid": 1}"#;

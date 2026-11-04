@@ -379,9 +379,10 @@ mod tests {
 
     #[test]
     fn a_routing_descendant_cannot_extend_the_pipe_deadline() {
+        use crate::process_group::test_support::{HANG_BOUND, OUTLIVING_SECS};
         let mut command = Command::new("sh");
         command
-            .args(["-c", "sleep 5 & printf '{}'"])
+            .args(["-c", &format!("sleep {OUTLIVING_SECS} & printf '{{}}'")])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -389,7 +390,7 @@ mod tests {
         let started = Instant::now();
         let result = run_command(command, Duration::from_millis(100));
         assert!(matches!(result, Err(ROUTING_UNAVAILABLE)));
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(started.elapsed() < HANG_BOUND);
     }
 
     #[test]

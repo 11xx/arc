@@ -3360,7 +3360,8 @@ mod tests {
             tagged[0].message,
             read_commit(&root, "fixture-tag").unwrap().message
         );
-        with_deadline(Some(Instant::now() + Duration::from_secs(30)), || {
+        let bound = crate::process_group::test_support::HANG_BOUND;
+        with_deadline(Some(Instant::now() + bound), || {
             let repeated = read_commits(&root, &vec!["HEAD"; 20_000])?;
             assert_eq!(repeated.len(), 20_000);
             assert!(repeated
@@ -3517,13 +3518,17 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn inherited_probe_pipes_obey_the_deadline() {
-        for script in ["sleep 2 & wait", "sleep 2 & exit 0"] {
+        use crate::process_group::test_support::{HANG_BOUND, OUTLIVING_SECS};
+        for script in [
+            format!("sleep {OUTLIVING_SECS} & wait"),
+            format!("sleep {OUTLIVING_SECS} & exit 0"),
+        ] {
             let started = Instant::now();
             with_deadline(Some(started + Duration::from_millis(100)), || {
                 let mut command = Command::new("sh");
-                command.args(["-c", script]);
+                command.args(["-c", &script]);
                 let result = command_output(&mut command);
-                assert!(started.elapsed() < Duration::from_secs(1));
+                assert!(started.elapsed() < HANG_BOUND);
                 assert!(format!("{:#}", result.unwrap_err()).contains("timed out"));
                 Ok(())
             })
@@ -3534,19 +3539,20 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn inherited_piped_probe_streams_obey_the_deadline() {
+        use crate::process_group::test_support::{HANG_BOUND, OUTLIVING_SECS};
         for script in [
-            "sleep 2 & wait",
-            "sleep 2 <&0 >/dev/null 2>/dev/null & exit 0",
+            format!("sleep {OUTLIVING_SECS} & wait"),
+            format!("sleep {OUTLIVING_SECS} <&0 >/dev/null 2>/dev/null & exit 0"),
         ] {
             let started = Instant::now();
             with_deadline(Some(started + Duration::from_millis(100)), || {
                 let result = piped_output(
                     "sh",
-                    &["-c".into(), script.into()],
+                    &["-c".into(), script.clone()],
                     &vec![b'x'; 1024 * 1024],
                     |_| {},
                 );
-                assert!(started.elapsed() < Duration::from_secs(1));
+                assert!(started.elapsed() < HANG_BOUND);
                 assert!(format!("{:#}", result.unwrap_err()).contains("timed out"));
                 Ok(())
             })
@@ -3564,11 +3570,12 @@ mod tests {
         crate::process_group::test_support::under_default_sigpipe(
             "gitio::tests::a_probe_killed_mid_input_times_out_without_a_signal",
             || {
+                use crate::process_group::test_support::{HANG_BOUND, OUTLIVING_SECS};
                 let started = Instant::now();
                 let result = with_deadline(Some(started + Duration::from_millis(100)), || {
                     piped_output(
                         "sh",
-                        &["-c".into(), "exec sleep 5".into()],
+                        &["-c".into(), format!("exec sleep {OUTLIVING_SECS}")],
                         &vec![b'x'; 1024 * 1024],
                         |_| {},
                     )
@@ -3577,7 +3584,7 @@ mod tests {
                 // A writer left running after the probe's kill raises its
                 // signal on its own schedule; give it the time to.
                 thread::sleep(Duration::from_millis(200));
-                assert!(started.elapsed() < Duration::from_secs(2));
+                assert!(started.elapsed() < HANG_BOUND);
             },
         );
     }
@@ -3587,7 +3594,8 @@ mod tests {
     /// the input write, which names no reason the child failed.
     #[test]
     fn a_piped_child_that_refuses_its_input_reports_its_own_failure() {
-        for deadline in [None, Some(Instant::now() + Duration::from_secs(30))] {
+        let bound = crate::process_group::test_support::HANG_BOUND;
+        for deadline in [None, Some(Instant::now() + bound)] {
             let error = with_deadline(deadline, || {
                 piped_output(
                     "sh",
@@ -3607,40 +3615,38 @@ mod tests {
     /// A deadline-bound probe's group ID stays reserved by its unreaped
     /// leader until arc has signalled the group. Rejects reaping the leader
     /// as soon as it exits: with the group's only other member escaped into
-    /// its own session, the reaped ID is free for reuse, and the kill sent
-    /// when the probe's pipes outlive the deadline would reach whatever
-    /// process group next takes that number.
+    /// its own session, the reaped ID is free for reuse, and a later kill of
+    /// the group would reach whatever process group next takes that number.
     #[test]
     fn a_probe_leader_stays_reserved_until_its_group_is_stopped() {
-        const SCRIPT: &str = "echo $$ > leader.pid; \
-             setsid sh -c 'echo $$ > escaped.pid; exec sleep 6' &";
+        use crate::process_group::test_support::{leader_script, LeaderObservation, HANG_BOUND};
         for piped in [false, true] {
             let cwd = tempfile::tempdir().unwrap();
             let path = cwd.path().to_owned();
             let probe = thread::spawn(move || {
-                with_deadline(Some(Instant::now() + Duration::from_secs(3)), || {
+                let script = leader_script();
+                with_deadline(Some(Instant::now() + HANG_BOUND), || {
                     if piped {
-                        piped_output("sh", &["-c".into(), SCRIPT.into()], b"input", |command| {
+                        piped_output("sh", &["-c".into(), script], b"input", |command| {
                             command.current_dir(&path);
                         })
                         .map(drop)
                     } else {
                         let mut command = Command::new("sh");
-                        command.args(["-c", SCRIPT]).current_dir(&path);
+                        command.args(["-c", &script]).current_dir(&path);
                         command_output(&mut command).map(drop)
                     }
                 })
             });
-            let observation =
-                crate::process_group::test_support::LeaderObservation::new(cwd.path());
+            let observation = LeaderObservation::new(cwd.path());
             let reserved = observation.reserved_after_exit();
-            let result = probe.join().unwrap();
             observation.kill_escaped();
+            let result = probe.join().unwrap();
             assert!(
                 reserved,
                 "probe leader (piped: {piped}) was reaped while its group could still be signalled"
             );
-            assert!(format!("{:#}", result.unwrap_err()).contains("timed out"));
+            result.unwrap();
         }
     }
 
@@ -3650,39 +3656,45 @@ mod tests {
     /// long as the child takes.
     #[test]
     fn a_counted_child_obeys_the_deadline() {
+        use crate::process_group::test_support::{HANG_BOUND, OUTLIVING_SECS};
         let started = Instant::now();
         let result = with_deadline(Some(started + Duration::from_millis(100)), || {
-            Ok(Command::new("sleep").arg("5").counted_output())
+            Ok(Command::new("sleep")
+                .arg(OUTLIVING_SECS.to_string())
+                .counted_output())
         })
         .unwrap();
         assert!(format!("{}", result.unwrap_err()).contains("timed out"));
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(started.elapsed() < HANG_BOUND);
     }
 
     #[test]
     fn piped_probe_respects_the_git_deadline() {
+        use crate::process_group::test_support::{HANG_BOUND, OUTLIVING_SECS};
         let started = Instant::now();
         with_deadline(Some(started + Duration::from_millis(50)), || {
-            let error = piped_output("sleep", &["5".to_string()], &[], |_| {}).unwrap_err();
+            let error =
+                piped_output("sleep", &[OUTLIVING_SECS.to_string()], &[], |_| {}).unwrap_err();
             assert!(format!("{error:#}").contains("timed out"));
             Ok(())
         })
         .unwrap();
-        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(started.elapsed() < HANG_BOUND);
     }
 
     #[test]
     fn deadline_kills_and_reaps_a_slow_probe() {
+        use crate::process_group::test_support::{HANG_BOUND, OUTLIVING_SECS};
         let started = Instant::now();
         with_deadline(Some(started + Duration::from_millis(50)), || {
             let mut command = Command::new("sleep");
-            command.arg("5");
+            command.arg(OUTLIVING_SECS.to_string());
             let error = command_output(&mut command).unwrap_err();
             assert!(error.to_string().contains("timed out"));
             Ok(())
         })
         .unwrap();
-        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(started.elapsed() < HANG_BOUND);
     }
 
     /// A query larger than the pipe buffers on both sides must still answer.
@@ -3702,7 +3714,7 @@ mod tests {
             let _ = sender.send(answered);
         });
         let answered = receiver
-            .recv_timeout(Duration::from_secs(60))
+            .recv_timeout(crate::process_group::test_support::HANG_BOUND)
             .expect("missing_objects deadlocked against git cat-file")
             .expect("missing_objects failed");
         // Every one of them is fabricated, so every one is unresolvable.

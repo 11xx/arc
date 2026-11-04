@@ -260,10 +260,21 @@ pub(crate) mod test_support {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
+    /// How long a unit test waits for a fixture process to reach a step it
+    /// is certain to reach before calling the test hung. It bounds failures,
+    /// never a passing run, so it is as long as the CLI suite's `HANG_BOUND`.
+    pub(crate) const HANG_BOUND: Duration = Duration::from_secs(120);
+
+    /// The seconds of a fixture child that a deadline must cut short. It
+    /// outlasts [`HANG_BOUND`], so code that waits the child out instead of
+    /// killing it at its deadline fails a test that bounds its run by
+    /// [`HANG_BOUND`].
+    pub(crate) const OUTLIVING_SECS: u64 = HANG_BOUND.as_secs() * 2;
+
     /// The PID a fixture wrote to `name` under `dir`, waiting for it to appear.
     pub(crate) fn read_pid(dir: &Path, name: &str) -> u32 {
         let path = dir.join(name);
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + HANG_BOUND;
         loop {
             if let Some(pid) = std::fs::read_to_string(&path)
                 .ok()
@@ -348,9 +359,30 @@ pub(crate) mod test_support {
         }
     }
 
-    /// A fixture whose leader writes `leader.pid` and exits while a
-    /// descendant that escaped into its own session, `escaped.pid`, keeps the
-    /// leader's output pipe open.
+    /// The `sh -c` script of the fixture [`LeaderObservation`] watches, run
+    /// in its directory. The leader writes `leader.pid`, starts a descendant
+    /// that escapes into its own session, writes `escaped.pid` and holds the
+    /// leader's output open until the test kills it, and exits only once that
+    /// descendant has written its PID. A kill of the leader's group that
+    /// follows its exit cannot catch the descendant before it escapes.
+    pub(crate) fn leader_script() -> String {
+        format!(
+            "echo $$ > leader.pid; \
+             setsid sh -c 'echo $$ > escaped.pid; exec sleep {}' & \
+             while ! test -s escaped.pid; do sleep 0.01; done",
+            OUTLIVING_SECS
+        )
+    }
+
+    /// How long after the leader exits [`LeaderObservation`] checks that it
+    /// is still unreaped. Code that reaps on exit does so within its next
+    /// poll; code that holds the leader keeps it until the test releases the
+    /// escaped descendant, so this sets how promptly a reaping variant is
+    /// caught and never fails a holding one.
+    const REAP_GRACE: Duration = Duration::from_millis(200);
+
+    /// A [`leader_script`] fixture whose leader exits while its escaped
+    /// descendant keeps the leader's output pipe open.
     pub(crate) struct LeaderObservation {
         dir: PathBuf,
         leader: u32,
@@ -369,13 +401,15 @@ pub(crate) mod test_support {
         /// from being reused.
         pub(crate) fn reserved_after_exit(&self) -> bool {
             assert!(
-                ends_within(self.leader, Duration::from_secs(2)),
+                ends_within(self.leader, HANG_BOUND),
                 "fixture leader did not exit"
             );
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(REAP_GRACE);
             state(self.leader) == Some('Z')
         }
 
+        /// Kill the escaped descendant, which releases the leader's output
+        /// pipe so the code under test can finish.
         pub(crate) fn kill_escaped(&self) {
             kill(read_pid(&self.dir, "escaped.pid"));
         }

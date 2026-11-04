@@ -248,7 +248,7 @@ mod tests {
                         &["sh".into(), "-c".into(), script.into()],
                         cwd.path(),
                         &request,
-                        Duration::from_secs(30),
+                        crate::process_group::test_support::HANG_BOUND,
                     )
                     .unwrap()
                 };
@@ -267,21 +267,24 @@ mod tests {
     /// started in its group running after `arc changelog` returns.
     #[test]
     fn a_renderer_that_answers_leaves_nothing_in_its_group() {
+        use crate::process_group::test_support::{ends_within, read_pid, HANG_BOUND};
         let cwd = tempfile::tempdir().unwrap();
         let answer = run(
             &[
                 "sh".into(),
                 "-c".into(),
-                "sleep 30 >/dev/null 2>&1 & echo $! > descendant.pid; printf rendered".into(),
+                format!(
+                    "sleep {} >/dev/null 2>&1 & echo $! > descendant.pid; printf rendered",
+                    crate::process_group::test_support::OUTLIVING_SECS
+                ),
             ],
             cwd.path(),
             b"",
-            Duration::from_secs(30),
+            HANG_BOUND,
         )
         .unwrap();
-        let descendant = crate::process_group::test_support::read_pid(cwd.path(), "descendant.pid");
-        let ended =
-            crate::process_group::test_support::ends_within(descendant, Duration::from_secs(2));
+        let descendant = read_pid(cwd.path(), "descendant.pid");
+        let ended = ends_within(descendant, HANG_BOUND);
         if !ended {
             crate::process_group::test_support::kill(descendant);
         }
@@ -295,34 +298,29 @@ mod tests {
     /// The renderer's group ID stays reserved by its unreaped leader until
     /// arc has signalled the group. Rejects reaping the leader as soon as it
     /// exits: with the group's only other member escaped into its own
-    /// session, the reaped ID is free for reuse, and the deadline's kill
-    /// would reach whatever process group next takes that number.
+    /// session, the reaped ID is free for reuse, and a later kill of the
+    /// group would reach whatever process group next takes that number.
     #[test]
     fn the_renderer_leader_stays_reserved_until_its_group_is_stopped() {
+        use crate::process_group::test_support::{leader_script, LeaderObservation, HANG_BOUND};
         let cwd = tempfile::tempdir().unwrap();
         let path = cwd.path().to_owned();
         let render = std::thread::spawn(move || {
             run(
-                &[
-                    "sh".into(),
-                    "-c".into(),
-                    "echo $$ > leader.pid; \
-                     setsid sh -c 'echo $$ > escaped.pid; exec sleep 6' &"
-                        .into(),
-                ],
+                &["sh".into(), "-c".into(), leader_script()],
                 &path,
                 b"",
-                Duration::from_secs(3),
+                HANG_BOUND,
             )
         });
-        let observation = crate::process_group::test_support::LeaderObservation::new(cwd.path());
+        let observation = LeaderObservation::new(cwd.path());
         let reserved = observation.reserved_after_exit();
-        let answer = render.join().unwrap().unwrap();
         observation.kill_escaped();
+        let answer = render.join().unwrap().unwrap();
         assert!(
             reserved,
             "renderer leader was reaped while its group could still be signalled"
         );
-        assert!(matches!(answer.unwrap_err().cause, Cause::TimedOut(_)));
+        assert_eq!(answer.unwrap(), "");
     }
 }
