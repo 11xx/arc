@@ -1349,7 +1349,8 @@ RUN A CHANGE
   When no checkout holds the target, `integrate` takes over the change's own
   checkout if it still holds the change branch, checks the target out there,
   merges, and leaves the checkout on the target. The dry run says it would.
-  Any other shape keeps the refusal naming the missing target checkout.
+  Any other shape keeps the refusal naming the missing target checkout. Slot
+  use and release follow `arc guide slots`.
 
   Some changes must reach their target together or not at all. `arc metadata
   <a> --lands-with <b>` records that two open changes with one target land
@@ -5062,7 +5063,8 @@ SLOTS
 
   Gates, environment probes and preparation in a slot hold its use lock
   shared, waiting for an operation that changes the checkout. Begin's
-  switch, warming, integrate's and close's detach, release, recover,
+  switch, warming, integration's target-checkout takeover and merge,
+  integrate's and close's detach, release, recover,
   `rebase` replay and `rewrite` in a slot checkout hold it exclusively
   without waiting and refuse while it is held. One arc process holds a slot's lock once; nested
   work shares that hold. A command in a slot runs under an arc holder that

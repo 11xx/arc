@@ -258,6 +258,49 @@ fn integrate_cleanup_keeps_the_slot_detached_and_free() {
     assert!(events.contains("slot-released"), "{events}");
 }
 
+/// Claim: integration cannot take over a slot while a command uses it.
+/// Rejects switching the checkout or advancing the target under shared use.
+#[test]
+fn integration_takeover_refuses_shared_slot_use_without_changing_checkout_or_target() {
+    let repo = pool(1, "");
+    let (change, worktree) = begin(&repo, "takeover");
+    repo.commit(&worktree, "feature.txt", "feature\n", "feat: add a feature");
+    stdout(repo.arc(&worktree).args(["snapshot", &change]));
+    stdout(
+        repo.arc(&worktree)
+            .args(["review", &change, "--verdict", "approved"]),
+    );
+    git(&repo.root, &["switch", "--detach"]);
+    let target = git_out(&repo.root, &["rev-parse", "master"]);
+    let head = repo.head(&worktree);
+    let branch = git_out(&worktree, &["symbolic-ref", "HEAD"]);
+    let state_path = worktree.with_extension("json");
+    let state = fs::read(&state_path).unwrap();
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(worktree.with_extension("use.lock"))
+        .unwrap();
+    // SAFETY: the test owns this regular file descriptor.
+    assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_SH) }, 0);
+
+    repo.arc(&repo.root)
+        .args(["integrate", &change])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("in use"));
+    assert_eq!(git_out(&repo.root, &["rev-parse", "master"]), target);
+    assert_eq!(repo.head(&worktree), head);
+    assert_eq!(git_out(&worktree, &["symbolic-ref", "HEAD"]), branch);
+    assert_eq!(fs::read(&state_path).unwrap(), state);
+    assert!(!stdout(repo.arc(&repo.root).args(["log", &change])).contains("change-integrated"));
+    drop(held);
+    stdout(repo.arc(&repo.root).args(["integrate", &change]));
+    assert_eq!(git_out(&repo.root, &["rev-parse", "master"]), head);
+    assert!(detached(&worktree));
+    assert!(lease_of(&repo, 0).is_null());
+}
+
 /// Claim: abandoning a change with source edits keeps its slot leased and
 /// begin skips it, while a clean abandoned slot is detached and free.
 /// Rejects releasing a slot that holds uncommitted work.

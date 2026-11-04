@@ -2571,7 +2571,10 @@ enum Cmd {
     /// is refused by name. A head the target already contains closes at the
     /// target revision that holds it, without a merge commit. When no checkout
     /// holds the target, integration takes over the change's own checkout if it
-    /// still holds the change branch and leaves it on the target.
+    /// still holds the change branch and leaves it on the target. Integration
+    /// in a slot requires exclusive use before takeover or merge and retains
+    /// it through the slot's release; a busy slot refuses before either
+    /// checkout or target changes.
     /// A gate's declared environment probe runs against the content being
     /// integrated: in this checkout or the change's worktree when either holds
     /// it clean, otherwise in a checkout made for it and removed before the

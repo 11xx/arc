@@ -4100,6 +4100,7 @@ fn integrate_one(
     } = approved;
 
     let wt = checkout.path.clone();
+    let slot_use = crate::slots::exclusive_in(&wt)?;
     if actual_shape == crate::model::IntegrationShape::FastForward {
         refuse_initialized_gitlink_changes(&wt, &old_target, &approved_head)?;
     }
@@ -4315,6 +4316,7 @@ fn integrate_one(
             println!("kept branch {}: cleanup could not complete", st.branch);
         }
     }
+    drop(slot_use);
     super::slots::warm_after_integration(ctx);
     Ok(0)
 }
