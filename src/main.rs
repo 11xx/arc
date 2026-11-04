@@ -3122,8 +3122,8 @@ enum Cmd {
     /// policy, never the candidate. Only mixed-model work qualifies; recorded model#effort
     /// and any observed coordinate must match an entry in force at created_at.
     /// Contributor, actor, authoring-session and assumed-identity bars remain.
-    /// Non-approving audits still record when election policy is unreadable,
-    /// retaining no exception and reporting the lookup failure.
+    /// An unavailable election grants no exception; ordinary audit rules decide
+    /// whether the read can record, and a recorded audit reports the lookup failure.
     /// The audit retains its election and destination, or absence, despite later date edits;
     /// capability and coverage requirements still apply. `--verdict changes-requested` is
     /// open to anyone. The warning, the refusal, debt discharge, and the

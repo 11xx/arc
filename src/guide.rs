@@ -2515,8 +2515,8 @@ REVIEW COVERAGE AND DEBT
   a new entry and the predecessor an `until`. The list is append-only in meaning: every read keeps its election
   or its absence when recorded; later date edits, additions and removals never
   re-judge it. Reads without a recorded election have no exception. Unreadable
-  election policy grants none: verdicts and non-approving audits still record
-  and warn, while an approving audit requires readable policy. Each election
+  election policy grants none: reads that ordinary rules allow still record
+  and warn. A model-match audit remains refused where self-approval is forbidden. Each election
   binds to its recorded destination; a different `--into` cannot borrow it. `show`
   and `status` identify an elected read as `tie-break reviewer model#effort
   (policy since ...)`. A model-match refusal on mixed work names

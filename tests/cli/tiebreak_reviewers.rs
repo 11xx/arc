@@ -654,3 +654,33 @@ fn tiebreak_elections_cannot_transfer_to_another_destination() {
         "{report}"
     );
 }
+
+/// Claim: an unavailable election adds no bar to an ordinary independent
+/// audit. Rejects requiring tie-break policy when no model exception is used.
+#[test]
+fn tiebreak_unavailable_election_preserves_an_ordinary_audit() {
+    let repo = Repo::new();
+    policy(&repo, ENTRY, false);
+    let (_, worktree) = subject(&repo, OPUS);
+    ship(&repo, &worktree);
+    repo.commit(
+        &repo.root,
+        ".arc/policy.toml",
+        "[policy\n",
+        "test: unreadable policy",
+    );
+    reader(&repo, &worktree, "audit", SOL).assert().failure();
+    reader(&repo, &worktree, "audit", "independent#high")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("audit: Approved"));
+    policy(&repo, ENTRY, false);
+    assert_eq!(debt(&repo)["standing"], "discharged");
+    let report = json_stdout(repo.arc(&worktree).args(["status", "mixed", "--json"]));
+    assert!(
+        report["audit_verdicts"][0]
+            .get("tiebreak_reviewer")
+            .is_none(),
+        "{report}"
+    );
+}

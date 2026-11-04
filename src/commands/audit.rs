@@ -771,12 +771,13 @@ pub(super) fn record_audit(
         .as_ref()
         .err()
         .map(|error| format!("{error:#}"));
-    let tiebreak_reviewer = if args.verdict == Verdict::Approved {
-        tiebreak_lookup?
-    } else {
-        tiebreak_lookup.unwrap_or_default()
-    };
-    refuse_self_audit(ctx, &st, args.verdict, tiebreak_reviewer.is_some())?;
+    let tiebreak_reviewer = tiebreak_lookup.unwrap_or_default();
+    refuse_self_audit(ctx, &st, args.verdict, tiebreak_reviewer.is_some()).map_err(|error| {
+        match &tiebreak_error {
+            Some(reason) => error.context(format!("tie-break election unavailable: {reason}")),
+            None => error,
+        }
+    })?;
     let inline = match args.findings_json.as_deref() {
         Some(src) => super::review::parse_inline_findings(Some(src))?,
         None => args.findings,
