@@ -225,10 +225,58 @@ fn refuse_pending_landing(store: &Store, name: &str, id: &str) -> Result<()> {
     if landing_holder(store, id)? == Some("landing-pending") {
         bail!(
             "{name} is held by pending landing {id}; finish it with `arc land --recover {id}`, \
-             then release the slot"
+             which frees the slot"
         );
     }
     Ok(())
+}
+
+/// Free each slot a finished landing attempt leased to gate in, leaving its
+/// checkout detached where it stands. A slot leased to anything else is
+/// untouched; one still in use or left dirty keeps its lease, and the line
+/// printed names the release to run once it is resolved.
+pub(crate) fn release_landing_slots(ctx: &Ctx, attempt: &str) {
+    let outcome = (|| -> Result<()> {
+        let toplevel = gitio::toplevel(&ctx.cwd)?;
+        let Some(declaration) = crate::warm_worktree::slot_declaration(&toplevel, true)? else {
+            return Ok(());
+        };
+        let root = slots::declared_root(&ctx.cwd, &declaration)?;
+        if !root.exists() {
+            return Ok(());
+        }
+        let pool = Pool::existing(&ctx.cwd, &root)?;
+        for name in pool.names() {
+            let Some(lease) = pool.read(&name)?.lease else {
+                continue;
+            };
+            if lease.change_id.as_deref() != Some(attempt) {
+                continue;
+            }
+            let kept = |reason: String| {
+                println!(
+                    "kept slot {name} leased to landing {attempt}: {reason}; once resolved, run \
+                     `arc slots release {name} --token {}`",
+                    lease.token
+                )
+            };
+            match slots::detach(&pool, &ctx.cwd, &name, &lease.token, None, None) {
+                Ok(Finished::Detached(_use)) => match pool.free(&name, &lease.token) {
+                    Ok(()) => println!(
+                        "released slot {name}; kept checkout {} detached",
+                        pool.checkout(&name).display()
+                    ),
+                    Err(error) => kept(format!("{error:#}")),
+                },
+                Ok(Finished::Kept(reason)) => kept(reason),
+                Err(error) => kept(format!("{error:#}")),
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = outcome {
+        println!("kept any slot landing {attempt} leased: {error:#}");
+    }
 }
 
 /// Record on `state` that its lease `token` on `slot` ended, when the change

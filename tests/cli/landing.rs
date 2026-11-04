@@ -2382,9 +2382,8 @@ fn recovery_at_the_composed_crash_point_runs_twice_to_the_same_end() {
 /// Claim: a slot leased by a landing attempt names that attempt as its
 /// holder, and while the attempt is pending neither `arc slots release` nor
 /// `arc slots recover` frees it: each refuses naming the attempt and its
-/// recovery. Once the attempt is finished, the slot is released as any
-/// lease whose holder is done. Rejects treating a live attempt as an absent
-/// change and freeing the checkout its gates run in.
+/// recovery, which frees the slot. Rejects treating a live attempt as an
+/// absent change and freeing the checkout its gates run in.
 #[test]
 fn a_slot_a_pending_landing_holds_is_not_released_under_it() {
     let repo = Repo::new();
@@ -2449,15 +2448,6 @@ fn a_slot_a_pending_landing_holds_is_not_released_under_it() {
 
     repo.arc(&repo.root)
         .args(["land", "--recover", &attempt])
-        .assert()
-        .success();
-    let finished = lease(&repo);
-    assert_eq!(
-        finished["holder"]["state"], "landing-abandoned",
-        "{finished:#}"
-    );
-    repo.arc(&repo.root)
-        .args(["slots", "release", "slot-01", "--token", &token])
         .assert()
         .success();
     assert!(lease(&repo)["lease"].is_null());
@@ -2612,4 +2602,160 @@ fn an_approval_of_a_replayed_members_edit_does_not_count_toward_its_assurance() 
     assert_eq!(read["counts"], true, "{row}");
     assert_eq!(read["coverage"], "not-established", "{row}");
     assert_eq!(read_of(&row, &approval)["counts"], false, "{row}");
+}
+
+/// A repository declaring `gate` and a pool of two slots, one leased by an
+/// open change that takes no part in any landing, and two independent
+/// approved changes whose landing is composed. Returns the bystander and
+/// the two members.
+fn slotted_landing(gate: &str) -> (Repo, String, (String, String)) {
+    let repo = Repo::new();
+    repo.redeclare_gates(&format!("[gates.smoke]\ncommand = {gate:?}\n"));
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/worktrees.toml"),
+        "[slots]\nsize = 2\nretain = [\"target\"]\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", "-A"]);
+    git(&repo.root, &["commit", "-m", "test: declare a slot pool"]);
+    let bystander = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "bystander",
+        "--slot",
+    ])));
+    let ((first, _, _), (second, _, _)) = independent(&repo);
+    (repo, bystander, (first, second))
+}
+
+fn slot_views(repo: &Repo) -> Vec<Value> {
+    json_stdout(repo.arc(&repo.root).args(["slots", "status", "--json"]))["slots"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+fn slot_leased_to(repo: &Repo, holder: &str) -> Option<Value> {
+    slot_views(repo)
+        .into_iter()
+        .find(|view| view["lease"]["change_id"] == holder)
+}
+
+/// Claim: `arc land --recover` frees the slot lease its attempt holds,
+/// whether recovery abandons the attempt or publishes it, leaving that
+/// checkout detached where it stands, as integration leaves a change's slot;
+/// a slot leased to anything else keeps its lease and token. Rejects a
+/// recovered attempt that leaves its lease for the operator to release, and
+/// a recovery that frees a lease the attempt does not hold.
+#[test]
+fn recovery_frees_the_slot_its_attempt_holds_and_no_other() {
+    use std::os::fd::AsRawFd;
+    for outcome in ["abandoned", "published"] {
+        let (repo, bystander, (first, second)) = slotted_landing(
+            "touch \"$HOME/gating\"; while ! test -e \"$HOME/go\"; do sleep 0.05; done; test -f README.md",
+        );
+        let bystanding = slot_leased_to(&repo, &bystander).expect("the bystander holds a slot");
+        let land = ["land", &first, &second, "--debt", "context unread"];
+        let deadline = Instant::now() + HANG_BOUND;
+        let crash: &[(&str, &str)] = if outcome == "abandoned" {
+            &[]
+        } else {
+            &[("ARC_TEST_LANDING_CRASH", "applied")]
+        };
+        let mut lander = spawn_arc_keeping_stderr_with_env(&repo, &repo.root, &land, crash);
+        while !repo.home.join("gating").exists() {
+            assert!(Instant::now() < deadline, "the landing never gated");
+            thread::sleep(Duration::from_millis(20));
+        }
+        let attempt = prepared_attempt(&repo);
+        let held = slot_leased_to(&repo, &attempt).expect("the attempt holds its gate slot");
+        let mut composed = None;
+        if outcome == "abandoned" {
+            // The lander dies while its gate runs in the slot.
+            lander.kill().unwrap();
+            lander.wait().unwrap();
+            fs::write(repo.home.join("go"), "").unwrap();
+        } else {
+            // A command still running in the slot when the gate ends keeps
+            // the lease with the attempt through its commit; the lander then
+            // dies once the target is applied.
+            let user =
+                fs::File::open(format!("{}.use.lock", held["path"].as_str().unwrap())).unwrap();
+            // SAFETY: this test owns the descriptor until `user` drops.
+            assert_eq!(
+                unsafe { libc::flock(user.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) },
+                0
+            );
+            fs::write(repo.home.join("go"), "").unwrap();
+            let exited = wait_for_exit(&mut lander);
+            assert_eq!(exited.code(), Some(86), "{}", child_stderr(&mut lander));
+            composed = child_stdout(&mut lander)
+                .lines()
+                .find_map(|line| line.strip_prefix("composed: ").map(str::to_string));
+            assert!(composed.is_some());
+            drop(user);
+        }
+        assert_eq!(
+            slot_leased_to(&repo, &attempt).map(|view| view["name"].clone()),
+            Some(held["name"].clone()),
+            "{outcome}: the attempt still holds its slot before recovery"
+        );
+        while slot_leased_to(&repo, &attempt).unwrap()["in_use"] == true {
+            assert!(
+                Instant::now() < deadline,
+                "the orphaned gate never finished"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        let checkout = PathBuf::from(held["path"].as_str().unwrap());
+        let head_before = git_out(&checkout, &["rev-parse", "HEAD"]);
+
+        for run in 0..2 {
+            let recovered = repo
+                .arc(&repo.root)
+                .args(["land", "--recover", &attempt])
+                .output()
+                .unwrap();
+            assert!(
+                recovered.status.success(),
+                "{outcome} run {run}: {}",
+                stderr_of(&recovered)
+            );
+        }
+        let landed = !status(&repo, &second)["closure"].is_null();
+        assert_eq!(landed, outcome == "published", "{outcome}");
+        if let Some(composed) = &composed {
+            assert_eq!(&git_out(&repo.root, &["rev-parse", "master"]), composed);
+        }
+
+        let released = slot_views(&repo)
+            .into_iter()
+            .find(|view| view["name"] == held["name"])
+            .unwrap();
+        assert!(
+            released["lease"].is_null(),
+            "{outcome}: recovery left the attempt's lease: {released:#}"
+        );
+        assert!(checkout.exists(), "{outcome}: the checkout is kept");
+        assert_eq!(
+            git_out(&checkout, &["rev-parse", "HEAD"]),
+            head_before,
+            "{outcome}: the checkout stays where it stood"
+        );
+        assert!(
+            !Command::new("git")
+                .current_dir(&checkout)
+                .args(["symbolic-ref", "-q", "HEAD"])
+                .status()
+                .unwrap()
+                .success(),
+            "{outcome}: the checkout is detached"
+        );
+        let untouched = slot_leased_to(&repo, &bystander).expect("the bystander keeps its slot");
+        assert_eq!(untouched["name"], bystanding["name"], "{outcome}");
+        assert_eq!(
+            untouched["lease"]["token"], bystanding["lease"]["token"],
+            "{outcome}: another holder's lease is untouched"
+        );
+    }
 }

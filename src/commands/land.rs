@@ -2393,8 +2393,17 @@ fn attempt_locks(
 
 /// `arc land --recover <attempt>`: publish a saved, authorized completion
 /// whose applied ref exists, abandon an attempt that never moved the target,
-/// and report anything else without closing anything.
+/// and report anything else without closing anything. A finished attempt
+/// frees the slot it leased to gate in.
 fn recover(ctx: &Ctx, attempt: &str) -> Result<i32> {
+    let code = finish_attempt(ctx, attempt)?;
+    if code == 0 {
+        super::slots::release_landing_slots(ctx, attempt);
+    }
+    Ok(code)
+}
+
+fn finish_attempt(ctx: &Ctx, attempt: &str) -> Result<i32> {
     let store = ctx.store()?;
     ctx.ensure_declared_actor(&store)?;
     let _authority = crate::replica::lock(&store)?;
@@ -2481,7 +2490,7 @@ fn abandon_command(ctx: &Ctx, attempt: &str, reason: &str) -> Result<i32> {
     ctx.ensure_declared_actor(&store)?;
     let _authority = crate::replica::lock(&store)?;
     let (target, _, _, members) = attempt_facts(&store, attempt)?;
-    let _locks = attempt_locks(&store, &target, &members)?;
+    let locks = attempt_locks(&store, &target, &members)?;
     let landings = Landings::from_events(store.repository_events()?.iter());
     if landings.completion(attempt).is_some() {
         bail!("landing {attempt} completed; there is nothing to abandon");
@@ -2490,5 +2499,7 @@ fn abandon_command(ctx: &Ctx, attempt: &str, reason: &str) -> Result<i32> {
         bail!("landing {attempt} moved its target; finish it with `arc land --recover {attempt}`");
     }
     abandon_locked(ctx, &store, attempt, reason)?;
+    drop(locks);
+    super::slots::release_landing_slots(ctx, attempt);
     Ok(0)
 }

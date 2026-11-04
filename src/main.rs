@@ -2860,11 +2860,13 @@ enum Cmd {
         json: bool,
         /// Finish an interrupted attempt: publish its saved completion when its
         /// applied ref exists, abandon it when the target never moved, and
-        /// otherwise report the movement and close nothing. Running it again
-        /// changes nothing
+        /// otherwise report the movement and close nothing. A finished
+        /// attempt frees the slot it leased, its checkout left detached.
+        /// Running it again changes nothing
         #[arg(long, value_name = "ATTEMPT", conflicts_with_all = ["changes", "abandon", "debt", "dry_run"])]
         recover: Option<String>,
-        /// Abandon an attempt whose target arc did not move; needs --reason
+        /// Abandon an attempt whose target arc did not move, freeing the slot
+        /// it leased; needs --reason
         #[arg(long, value_name = "ATTEMPT", requires = "reason", conflicts_with_all = ["changes", "debt", "dry_run"])]
         abandon: Option<String>,
         /// Why the attempt is abandoned
@@ -3542,7 +3544,7 @@ enum SlotsCmd {
     },
     /// Free a slot whose holder is gone. Refuses an obsolete token, a lease
     /// whose change is still open (integrate or close it instead), a lease
-    /// held by a pending landing attempt (`arc land --recover` it first), a
+    /// held by a pending landing attempt (`arc land --recover` frees it), a
     /// slot in use and a checkout with uncommitted or untracked work; leaves
     /// the checkout detached and records slot-released on a closed change
     Release {

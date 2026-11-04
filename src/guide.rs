@@ -1405,8 +1405,8 @@ RUN A CHANGE
   checkout the attempt owns: a slot it leases when the repository declares
   `[slots]`, else a worktree of its own under the worktrees directory. The
   slot is released, or the worktree removed, once the gates have run; a
-  lease left by an interrupted attempt names the attempt and is freed with
-  `arc slots release` only once the attempt is recovered. Reuse
+  lease the attempt still holds names it, and recovering or abandoning the
+  attempt frees it, its checkout left detached. Reuse
   follows each gate's binding: a tree-bound pass by tree, a commit-bound
   pass only at the gated head's own commit. A failed gate abandons the
   attempt, closes nothing and drops the pin.
@@ -1455,7 +1455,10 @@ RUN A CHANGE
   moved; anything else it reports as movement arc did not authorize, and
   closes nothing. Run again, it changes nothing. `arc land --abandon
   <attempt> --reason <why>` abandons an attempt whose target arc did not
-  move.
+  move. Once the attempt is finished, either frees each slot leased to it,
+  leaving the checkout detached where it stands, and touches no other
+  lease; a slot still in use or left dirty keeps its lease, and arc prints
+  the `arc slots release` to run once it is resolved.
 
   A member exported alone carries every finished landing's events: a
   completion and the gate evidence it names reproduce the member's closure
@@ -5057,7 +5060,8 @@ SLOTS
   landing. `arc slots release
   <slot> --token <t>` frees a lease whose change is closed or absent, or
   whose landing attempt is finished; both it and `arc slots recover` refuse
-  while the attempt is pending, naming `arc land --recover <attempt>`.
+  while the attempt is pending, naming `arc land --recover <attempt>`,
+  which frees the slot itself.
   `arc slots recover <slot> --token <t>` resumes a phase: a begin whose
   change exists records the lease on it; one that opened no change is
   undone, deleting its branch only while it still points at the target;
