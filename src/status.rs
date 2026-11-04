@@ -982,6 +982,7 @@ pub fn verdict_assessments(
                                 implementers
                                     .get(&patchset.id)
                                     .map_or(&[][..], Vec::as_slice),
+                                state.verdict_tiebreak(verdict).is_some(),
                             )
                         })
                 })
@@ -1501,6 +1502,9 @@ fn build_report(
         .collect();
     let implementers = reviewed_patchset_implementers(state, policy);
     let mut approval = approval::decide(&ApprovalFacts {
+        tiebreak: state
+            .latest_verdict()
+            .is_some_and(|verdict| state.verdict_tiebreak(verdict).is_some()),
         ladder_clearance: state
             .latest_verdict()
             .and_then(|verdict| state.verdict_ladder_clearance(verdict)),
@@ -1562,6 +1566,26 @@ fn build_report(
     if !state.is_closed() {
         advisories.extend(missing_changelog_advisory(state, cwd));
     }
+    for (event, entry) in state
+        .verdicts
+        .iter()
+        .filter_map(|verdict| {
+            state
+                .verdict_tiebreak(verdict)
+                .map(|entry| (&verdict.event_id, entry))
+        })
+        .chain(state.audit_verdicts.iter().filter_map(|audit| {
+            state
+                .audit_tiebreak(audit)
+                .map(|entry| (&audit.event_id, entry))
+        }))
+    {
+        advisories.push(Advisory {
+            code: "tiebreak-reviewer".into(),
+            detail: format!("read {event}: {}", entry.label()),
+        });
+    }
+
     // Computed before the report takes ownership of the head it is compared
     // against. A waiver covers exactly the revision it names.
     let dirty_tree_waiver_in_force = state

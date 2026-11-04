@@ -255,6 +255,7 @@ impl ReviewContext {
                 ),
                 at: verdict.created_at,
                 assessment: verdict.assessment.as_ref(),
+                tiebreak: state.verdict_tiebreak(verdict).is_some(),
             });
             self.judgments.insert(verdict.event_id.clone(), judgment);
         }
@@ -278,6 +279,7 @@ impl ReviewContext {
                 ),
                 at: audit.created_at,
                 assessment: audit.assessment.as_ref(),
+                tiebreak: state.audit_tiebreak(audit).is_some(),
             });
             self.judgments.insert(audit.event_id.clone(), judgment);
         }

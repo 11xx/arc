@@ -1451,6 +1451,8 @@ pub enum Payload {
         supersedes: Vec<String>,
     },
     VerdictRecorded {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tiebreak_reviewer: Option<crate::policy::TiebreakReviewer>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         forge_sources: Vec<crate::forge_observation::ForgeSource>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1587,6 +1589,8 @@ pub enum Payload {
     /// review it did not have. The separation lives in the event model, where
     /// it cannot be forgotten.
     AuditVerdictRecorded {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tiebreak_reviewer: Option<crate::policy::TiebreakReviewer>,
         /// The integrated revision audited, not a patchset.
         revision: String,
         verdict: Verdict,

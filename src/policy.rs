@@ -11,6 +11,73 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// A dated election retained on a read that uses its model-match exception.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TiebreakReviewer {
+    pub model: String,
+    pub since: chrono::DateTime<chrono::Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl TiebreakReviewer {
+    pub(crate) fn validate(&self) -> Result<()> {
+        if crate::coordinate::model_defect(&self.model, None).is_some()
+            || crate::model::model_effort(&self.model).is_none()
+            || self.model.contains(':')
+            || self.model.matches('#').count() != 1
+            || self.model.chars().any(char::is_whitespace)
+            || self.model.trim() != self.model
+        {
+            anyhow::bail!("model must be a model#effort coordinate with effort");
+        }
+        if self.until.is_some_and(|until| until <= self.since) {
+            anyhow::bail!("until must be after since (exclusive end)");
+        }
+        Ok(())
+    }
+
+    fn overlaps(&self, other: &Self) -> bool {
+        self.model.split('#').next() == other.model.split('#').next()
+            && self.until.is_none_or(|until| other.since < until)
+            && other.until.is_none_or(|until| self.since < until)
+    }
+
+    pub fn label(&self) -> String {
+        format!(
+            "tie-break reviewer {} (policy since {})",
+            self.model,
+            self.since.to_rfc3339()
+        )
+    }
+}
+
+fn append_tiebreak_reviewers(
+    entries: &mut Vec<TiebreakReviewer>,
+    raw: Vec<toml::Value>,
+    source: &str,
+) -> Result<()> {
+    for (index, value) in raw.into_iter().enumerate() {
+        let name = format!("{source} policy.tiebreak_reviewers[{index}]");
+        let entry: TiebreakReviewer = value
+            .try_into()
+            .with_context(|| format!("invalid {name}"))?;
+        entry
+            .validate()
+            .with_context(|| format!("invalid {name}: {:?}", entry.model))?;
+        if let Some(previous) = entries.iter().find(|previous| entry.overlaps(previous)) {
+            anyhow::bail!(
+                "invalid {name}: {:?} overlaps tiebreak_reviewers entry since {}",
+                entry.model,
+                previous.since
+            );
+        }
+        entries.push(entry);
+    }
+    Ok(())
+}
+
 /// Effective policy declarations and the source files that supplied them.
 #[derive(Debug, Default)]
 pub struct PolicyFile {
@@ -250,6 +317,8 @@ struct PolicyLayerPolicy {
     forbid_self_approval: Option<bool>,
     review_clearance: Option<DeclaredClearance>,
     review_clearance_since: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    tiebreak_reviewers: Vec<toml::Value>,
     require_declared_actor: Option<bool>,
     debt_count_threshold: Option<usize>,
     debt_age_threshold_seconds: Option<u64>,
@@ -288,6 +357,13 @@ pub fn validate_operator_text(text: &str) -> Result<()> {
     let layer = toml::from_str::<PolicyLayer>(text).context("malformed operator policy TOML")?;
     if let Some(replica) = layer.replica {
         replica.validate()?;
+    }
+    if let Some(policy) = layer.policy {
+        append_tiebreak_reviewers(
+            &mut Vec::new(),
+            policy.tiebreak_reviewers,
+            "operator policy",
+        )?;
     }
     Ok(())
 }
@@ -419,6 +495,18 @@ fn layered_with_operator(operator: &Path, project: Option<(String, String)>) -> 
             }
         }
         if let Some(raw) = layer.policy {
+            let start = policy.tiebreak_reviewers.len();
+            append_tiebreak_reviewers(
+                &mut policy.tiebreak_reviewers,
+                raw.tiebreak_reviewers,
+                &source,
+            )?;
+            for (index, entry) in policy.tiebreak_reviewers[start..].iter().enumerate() {
+                sources.record(
+                    format!("policy.tiebreak_reviewers[{index}]={}", entry.model),
+                    &source,
+                );
+            }
             if let Some(value) = raw.forbid_self_approval {
                 policy.forbid_self_approval |= value;
                 sources.record(format!("policy.forbid_self_approval={value}"), &source);
@@ -634,6 +722,8 @@ enum DeclaredClearance {
 /// Policy that applies to every change in the repository.
 #[derive(Debug, Default, Deserialize)]
 pub struct Policy {
+    #[serde(default)]
+    pub tiebreak_reviewers: Vec<TiebreakReviewer>,
     #[serde(default)]
     pub forbid_self_approval: bool,
     /// `[policy] review_clearance`. Only `"assessed"` may be declared; the

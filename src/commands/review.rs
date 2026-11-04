@@ -1540,7 +1540,16 @@ pub(super) fn record_verdict(
     if let Some(relation) = relation.as_ref() {
         println!("relation: {}", relation.description());
     }
+    let recorded_at = chrono::Utc::now();
+    let tiebreak_reviewer = st
+        .patchsets
+        .iter()
+        .find(|subject| subject.id == patchset_id)
+        .map(|subject| ctx.tiebreak_reviewer(&st, subject, recorded_at))
+        .transpose()?
+        .flatten();
     let payload = Payload::VerdictRecorded {
+        tiebreak_reviewer: tiebreak_reviewer.clone(),
         forge_sources,
         forge_frontier: Some(
             st.forge
@@ -1566,7 +1575,6 @@ pub(super) fn record_verdict(
         receipt: admitted.map(|admitted| admitted.reference),
     };
     ensure_append_allowed(&st, &payload)?;
-    let recorded_at = chrono::Utc::now();
     crate::review_clearance::enforce_coordinate(ctx, &st, false, recorded_at)?;
     let mut ev = ctx.event_at(&store, &change_id, recorded_at, payload)?;
     store.append_local_event(&mut ev)?;
@@ -1608,7 +1616,7 @@ pub(super) fn record_verdict(
     if let Some(patchset) = st.patchsets.iter().find(|p| p.id == patchset_id) {
         let production = st.debt.as_ref().and_then(|debt| debt.production.as_ref());
         let implementers = st.authoring_model_values(patchset, production);
-        ctx.warn_model_not_independent(&implementers, verdict);
+        ctx.warn_model_not_independent(&implementers, verdict, tiebreak_reviewer.is_some());
     }
     Ok(Recorded {
         event_id: ev.event_id.clone(),

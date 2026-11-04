@@ -760,7 +760,14 @@ pub(super) fn record_audit(
         }
     };
     let implementers = audited_implementers(ctx, &st);
-    refuse_self_audit(ctx, &st, args.verdict)?;
+    let recorded_at = chrono::Utc::now();
+    let tiebreak_reviewer = st
+        .debt_subject_patchset()
+        .or_else(|| st.latest_patchset())
+        .map(|subject| ctx.tiebreak_reviewer(&st, subject, recorded_at))
+        .transpose()?
+        .flatten();
+    refuse_self_audit(ctx, &st, args.verdict, tiebreak_reviewer.is_some())?;
     let inline = match args.findings_json.as_deref() {
         Some(src) => super::review::parse_inline_findings(Some(src))?,
         None => args.findings,
@@ -823,6 +830,7 @@ pub(super) fn record_audit(
         .map(|patchset| st.held_review_roles(patchset, auditor, &auditor_models))
         .unwrap_or_default();
     let payload = Payload::AuditVerdictRecorded {
+        tiebreak_reviewer: tiebreak_reviewer.clone(),
         revision: revision.clone(),
         verdict: args.verdict,
         body: args.body,
@@ -838,7 +846,6 @@ pub(super) fn record_audit(
         extent,
     };
     ensure_append_allowed(&st, &payload)?;
-    let recorded_at = chrono::Utc::now();
     crate::review_clearance::enforce_coordinate(ctx, &st, true, recorded_at)?;
     let mut event = ctx.event_at(&store, &change_id, recorded_at, payload)?;
     store.append_local_event(&mut event)?;
@@ -860,7 +867,8 @@ pub(super) fn record_audit(
         .is_some_and(|patchset| ctx.warn_verdict_not_independent(patchset, args.verdict));
     // The model is a second identity: another actor name does not make an
     // audit independent of the model the ledger credits with the work.
-    // Authoring models come from the ledger alone; commit trailers are kept
+    // A tie-break election waives only this model match. Authoring models
+    // come from the ledger alone; commit trailers are kept
     // only as declared comparison evidence and never supply one.
     let authoring_models = st
         .debt_subject_patchset()
@@ -872,7 +880,11 @@ pub(super) fn record_audit(
             )
         })
         .unwrap_or_default();
-    let named_model = ctx.warn_model_not_independent(&authoring_models, args.verdict);
+    let named_model = ctx.warn_model_not_independent(
+        &authoring_models,
+        args.verdict,
+        tiebreak_reviewer.is_some(),
+    );
     let named_auditor = named_auditor || named_model;
     // The auditor's own identity is the stronger fact and subsumes this one.
     // An audit by a declared reviewer of work whose author arc invented is
@@ -945,7 +957,12 @@ pub(super) fn record_audit(
 ///
 /// Only approval is restricted. Raising problems needs no independence, so an
 /// author auditing its own work into `changes-requested` is useful and allowed.
-fn refuse_self_audit(ctx: &Ctx, state: &ChangeState, verdict: Verdict) -> Result<()> {
+fn refuse_self_audit(
+    ctx: &Ctx,
+    state: &ChangeState,
+    verdict: Verdict,
+    tiebreak: bool,
+) -> Result<()> {
     if verdict != Verdict::Approved {
         return Ok(());
     }
@@ -1020,18 +1037,25 @@ anyone independent looked at {}.\n\
         );
     }
     let authoring_models = state.authoring_model_values(patchset, production);
-    if let Some((reader, value)) = ctx.reader_models().into_iter().find_map(|reader| {
-        crate::trailers::naming_model(&authoring_models, &reader.model).map(|value| (reader, value))
-    }) {
+    if let Some((reader, value)) = ctx
+        .reader_models()
+        .into_iter()
+        .filter(|_| !tiebreak)
+        .find_map(|reader| {
+            crate::trailers::naming_model(&authoring_models, &reader.model)
+                .map(|value| (reader, value))
+        })
+    {
+        let remedy = crate::review_independence::remedy(&authoring_models, &reader.model);
         bail!(
             "{} matches the ledger implementer's model {value} on the audited work; {policy_source}, so this audit \
-             would discharge its own obligation.\n\
+             would discharge its own obligation.{remedy}\n\
   If another reviewer did the pass, record it as theirs:\n\
     arc audit {} --verdict approved --actor '<reviewer>' --harness '<harness>' --model '<model>'\n\
   If you are reporting problems rather than clearing the change, \
 --verdict changes-requested is open to anyone.",
             reader.described(),
-            state.change_id
+            state.change_id,
         );
     }
     Ok(())

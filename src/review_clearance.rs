@@ -33,6 +33,7 @@ pub struct Judgment {
 }
 
 pub struct Facts<'a> {
+    pub tiebreak: bool,
     pub ladder: Option<&'a Ladder>,
     pub unavailable: Option<&'a str>,
     pub authors: Option<&'a Authors>,
@@ -270,7 +271,7 @@ fn evaluate(facts: &Facts<'_>, judgment: &mut Judgment) {
     }
     for reader in &readers {
         for author in &authors {
-            if reader.model.family == author.model.family {
+            if !facts.tiebreak && reader.model.family == author.model.family {
                 findings(
                     judgment,
                     true,
@@ -433,6 +434,7 @@ mod tests {
         assessment: Option<&AuditAssessment>,
     ) -> Judgment {
         judge(Facts {
+            tiebreak: false,
             ladder: Some(table),
             unavailable: None,
             authors: Some(authors),
@@ -580,6 +582,7 @@ mod tests {
         let models = ReaderModel::judged(Some("reader#high"), None);
         let run = |time| {
             judge(Facts {
+                tiebreak: false,
                 ladder: Some(&table),
                 unavailable: None,
                 authors: Some(&a),
@@ -611,6 +614,7 @@ mod tests {
         let models = ReaderModel::judged(Some("reader#high"), None);
         let table = ladder();
         let j = judge(Facts {
+            tiebreak: false,
             ladder: Some(&table),
             unavailable: None,
             authors: Some(&a),
@@ -628,6 +632,7 @@ mod tests {
         let table = ladder();
         let models = ReaderModel::judged(Some("reader#high"), Some("bounded#high"));
         let j = judge(Facts {
+            tiebreak: false,
             ladder: Some(&table),
             unavailable: None,
             authors: Some(&a),

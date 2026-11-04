@@ -713,6 +713,14 @@ pub fn markdown(
                 let _ = writeln!(w, "- {line}");
             }
         }
+        if let Some(entry) = state
+            .verdicts
+            .iter()
+            .find(|entry| entry.event_id == v.event_id)
+            .and_then(|verdict| state.verdict_tiebreak(verdict))
+        {
+            let _ = writeln!(w, "- {}", entry.label());
+        }
         let receipt = state
             .verdicts
             .iter()
@@ -1362,6 +1370,9 @@ pub fn markdown(
             }
         }
         for audit in &report.audit_verdicts {
+            if let Some(entry) = state.audit_tiebreak(audit) {
+                let _ = writeln!(w, "- {}", entry.label());
+            }
             let disposed: Vec<String> = inline_dispositions(&state.audit_findings, &audit.event_id)
                 .map(|(finding_id, disposition)| {
                     format!("`{finding_id}` {}", disposition.status.as_str())

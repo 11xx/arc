@@ -402,6 +402,8 @@ impl FindingState {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct VerdictEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tiebreak_reviewer: Option<crate::policy::TiebreakReviewer>,
     pub forge_sources: Vec<crate::forge_observation::ForgeSource>,
     pub forge_frontier: Option<Vec<String>>,
     pub origin_replica_id: String,
@@ -987,6 +989,8 @@ pub struct KeptContext {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditVerdictEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tiebreak_reviewer: Option<crate::policy::TiebreakReviewer>,
     pub origin_replica_id: String,
     pub event_id: String,
     /// The integrated revision reviewed.
@@ -3063,6 +3067,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 });
             }
             Payload::VerdictRecorded {
+                tiebreak_reviewer,
                 forge_sources,
                 forge_frontier,
                 patchset_id,
@@ -3101,6 +3106,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     );
                 }
                 state.verdicts.push(VerdictEntry {
+                    tiebreak_reviewer: tiebreak_reviewer.clone(),
                     forge_sources: forge_sources.clone(),
                     forge_frontier: forge_frontier.clone(),
                     origin_replica_id: ev.repository_id.clone(),
@@ -3279,6 +3285,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 });
             }
             Payload::AuditVerdictRecorded {
+                tiebreak_reviewer,
                 revision,
                 verdict,
                 body,
@@ -3313,6 +3320,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     );
                 }
                 state.audit_verdicts.push(AuditVerdictEntry {
+                    tiebreak_reviewer: tiebreak_reviewer.clone(),
                     origin_replica_id: ev.repository_id.clone(),
                     event_id: ev.event_id.clone(),
                     revision: revision.clone(),
@@ -5514,6 +5522,24 @@ impl ChangeState {
         if read.verdict == Verdict::CommentOnly {
             return Some(DischargeBar::CommentOnly);
         }
+        let tiebreak = crate::review_independence::tiebreak(
+            self,
+            shipped,
+            debt.production.as_ref(),
+            &crate::review_independence::Reader {
+                actor: read.author,
+                assumed: read.author_assumed,
+                session: read.session,
+                model: read.model,
+                observed: read.observed,
+                at: read.created_at,
+            },
+            read.tiebreak_reviewer
+                .map(std::slice::from_ref)
+                .unwrap_or_default(),
+        )
+        .is_some();
+        let models = if tiebreak { &[][..] } else { &read.judged };
         if self.read_uses_assessed(read, self.review_clearance) {
             if let Some(why) = self.read_clearance_gap(read) {
                 return Some(DischargeBar::FindingsRead(why));
@@ -5533,7 +5559,7 @@ impl ChangeState {
                 return Some(DischargeBar::AuthorAssumed);
             }
             return self
-                .authorship_match(shipped, debt.production.as_ref(), read.author, &read.judged)
+                .authorship_match(shipped, debt.production.as_ref(), read.author, models)
                 .map(DischargeBar::Authored);
         }
         if let Some(assessment) = read
@@ -5556,7 +5582,7 @@ impl ChangeState {
         if read.author_assumed {
             return Some(DischargeBar::AuthorAssumed);
         }
-        self.authorship_match(shipped, debt.production.as_ref(), read.author, &read.judged)
+        self.authorship_match(shipped, debt.production.as_ref(), read.author, models)
             .map(DischargeBar::Authored)
     }
 }
@@ -5571,6 +5597,8 @@ pub struct Authorship {
 
 /// A recorded verdict or audit, as the discharge rule reads it.
 struct Read<'a> {
+    tiebreak_reviewer: Option<&'a crate::policy::TiebreakReviewer>,
+    session: Option<&'a str>,
     event_id: &'a str,
     origin: &'a str,
     created_at: chrono::DateTime<chrono::Utc>,
@@ -5580,6 +5608,7 @@ struct Read<'a> {
     author_assumed: bool,
     author: &'a str,
     model: Option<&'a str>,
+    observed: Option<&'a str>,
     /// The models independence judges the read under.
     judged: Vec<crate::model::ReaderModel>,
     /// What the read covered. A verdict records no extent.
@@ -5590,6 +5619,8 @@ struct Read<'a> {
 impl<'a> Read<'a> {
     fn audit(audit: &'a AuditVerdictEntry) -> Self {
         Self {
+            tiebreak_reviewer: audit.tiebreak_reviewer.as_ref(),
+            session: audit.session.as_deref(),
             event_id: &audit.event_id,
             origin: &audit.origin_replica_id,
             created_at: audit.created_at,
@@ -5598,6 +5629,7 @@ impl<'a> Read<'a> {
             author_assumed: audit.author_assumed(),
             author: audit.effective_author(),
             model: audit.model.as_deref(),
+            observed: audit.observed_model.as_deref(),
             judged: audit.judged_models(),
             extent: audit.extent.as_ref(),
             audit: true,
@@ -5606,6 +5638,8 @@ impl<'a> Read<'a> {
 
     fn verdict(verdict: &'a VerdictEntry) -> Self {
         Self {
+            tiebreak_reviewer: verdict.tiebreak_reviewer.as_ref(),
+            session: verdict.session.as_deref(),
             event_id: &verdict.event_id,
             origin: &verdict.origin_replica_id,
             created_at: verdict.created_at,
@@ -5614,6 +5648,7 @@ impl<'a> Read<'a> {
             author_assumed: verdict.author_assumed(),
             author: verdict.effective_author(),
             model: verdict.model.as_deref(),
+            observed: verdict.observed_model.as_deref(),
             judged: verdict.judged_models(),
             extent: None,
             audit: false,
@@ -5903,6 +5938,7 @@ mod tests {
                 ev(
                     "fix",
                     Payload::AuditVerdictRecorded {
+                        tiebreak_reviewer: None,
                         dispositions: Vec::new(),
                         receipt: None,
                         revision: "h1".into(),
@@ -6302,6 +6338,7 @@ mod tests {
         ev(
             change,
             Payload::VerdictRecorded {
+                tiebreak_reviewer: None,
                 dispositions: Vec::new(),
                 receipt: None,
                 forge_frontier: None,
@@ -6866,6 +6903,7 @@ mod tests {
         let mut audit = ev(
             "fix",
             Payload::AuditVerdictRecorded {
+                tiebreak_reviewer: None,
                 dispositions: Vec::new(),
                 receipt: None,
                 revision: "h1".into(),
@@ -7226,6 +7264,7 @@ mod tests {
         let mut audit = ev(
             "fix",
             Payload::AuditVerdictRecorded {
+                tiebreak_reviewer: None,
                 dispositions: Vec::new(),
                 receipt: None,
                 revision: "a1a1a1a1a1".into(),

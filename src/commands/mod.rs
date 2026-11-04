@@ -735,15 +735,57 @@ impl Ctx {
         )
     }
 
+    /// Elect from committed destination policy and the operator layer. New
+    /// reads of integrated work use the destination's current dated list.
+    pub(crate) fn tiebreak_reviewer(
+        &self,
+        state: &ChangeState,
+        subject: &crate::state::Patchset,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<crate::policy::TiebreakReviewer>> {
+        let target = if state.is_closed() {
+            crate::declarations::accepted_target(state)
+        } else {
+            &state.target_branch
+        };
+        let policy =
+            crate::policy::load_at(&self.cwd, &crate::gitio::branch_head(&self.cwd, target)?)?;
+        let attribution = self.resolve_model();
+        Ok(crate::review_independence::tiebreak(
+            state,
+            subject,
+            state
+                .debt
+                .as_ref()
+                .and_then(|debt| debt.production.as_ref()),
+            &crate::review_independence::Reader {
+                actor: self.on_behalf_of.as_deref().unwrap_or(&self.actor),
+                assumed: self.on_behalf_of.is_none() && self.actor_source.assumed_from().is_some(),
+                session: self.session.as_deref(),
+                model: attribution.model.as_deref(),
+                observed: attribution
+                    .provenance
+                    .model_disagreement
+                    .as_ref()
+                    .map(|value| value.observed.as_str()),
+                at,
+            },
+            &policy.policy.tiebreak_reviewers,
+        )
+        .cloned())
+    }
+
     /// Say so when a verdict is recorded under, or its reader's session store
     /// observed, a model the ledger credits to an implementer of the range it
-    /// judges, at any effort. Reports whether it said anything.
+    /// judges, at any effort, unless a tie-break election applies. Reports
+    /// whether it said anything.
     pub(crate) fn warn_model_not_independent(
         &self,
         implementers: &[String],
         verdict: Verdict,
+        tiebreak: bool,
     ) -> bool {
-        if verdict != Verdict::Approved {
+        if verdict != Verdict::Approved || tiebreak {
             return false;
         }
         let mut said = false;

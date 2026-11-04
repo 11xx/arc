@@ -2483,13 +2483,37 @@ REVIEW COVERAGE AND DEBT
   at any effort, of the ledger's implementer is a self-review. A read is under
   the model it records and, where its event records that the reader's session
   store observed another, the observed model too; either one matching makes
-  it a self-review, and the rejection names the observed model. Where
+  it a self-review unless the dated tie-break election below applies, and
+  the rejection names the observed model. Where
   self-approval is forbidden the gate rejects the approval as it rejects a
   contributor match, and `arc audit` refuses to record it;
   `--verdict changes-requested` is open to anyone. Models compare as strings
   once the effort is dropped: arc holds no alias table. `Planned-by` and
   `Orchestrated-by` never refuse a read; an audit records which of those roles
   its auditor held as dirty context for routing, and computes no score.
+
+  `[policy] tiebreak_reviewers` elects dated `model#effort` coordinates for
+  mixed-model work. The read's recorded coordinate must exactly match an
+  entry in force at its `created_at`, and any session-store observation must
+  match that complete coordinate too. The ledger's authoring models must
+  include at least one model the reader does not name; different efforts of
+  the reader's own model alone never qualify. This waives only the model-match
+  independence test. A contributor, actor or authoring-session match, an
+  assumed reviewing identity, or a contradictory observation never qualifies.
+  Every other approval, capability, authority and coverage bar still applies.
+
+  Elections come from the target branch's committed policy layered with the
+  operator policy, never the candidate's file. New audits of closed changes
+  use the target's current list. Effort and RFC 3339 `since` are required;
+  `since` is inclusive and `until` an optional exclusive end. Malformed entries
+  and overlapping intervals for the same model (at any effort) refuse, naming
+  the entry. Different models may be in force together. A successor model gets
+  a new entry and the predecessor an `until`. The list is append-only in meaning: every read keeps its election
+  or its absence when recorded; later date edits, additions and removals never
+  re-judge it. Reads without a recorded election have no exception. `show`
+  and `status` identify an elected read as `tie-break reviewer model#effort
+  (policy since ...)`. A model-match refusal on mixed work names
+  `tiebreak_reviewers` as the operator remedy.
 
   Commit trailers are a projection arc writes from the ledger. A range whose
   trailers disagree with the ledger is reported. For commits with no ledger
@@ -2909,7 +2933,8 @@ REVIEW COVERAGE AND DEBT
   verdict is a review that happened, not an independent one, and it leaves an
   independent-review debt owed. A read under a model the ledger credits as
   implementer, recorded or observed, leaves the debt owed at any effort,
-  regardless of `forbid_self_approval`. Where the ledger records no model for the implementer,
+  regardless of `forbid_self_approval`, unless the tie-break election in
+  `arc guide debt-review` applies. Where the ledger records no model for the implementer,
   the read is judged by the actor, session and harness it records; commit
   trailers are declared text and never supply the missing model.
   That policy governs approval authority, not independent coverage.
@@ -2967,7 +2992,10 @@ REVIEW CLEARANCE
   conservative evidence from a known weak coordinate.
 
   A findings-eligible agent clears only when its family differs from every
-  agent author's. A two-lab author set needs a third-lab reader or a person;
+  agent author's, unless the dated tie-break election in `arc guide
+  debt-review` applies. A tie-break replaces only this family test: its rank
+  must meet every agent author's floor, and same-model effort ordering still
+  applies. Otherwise a two-lab author set needs a third-lab reader or a person;
   several whole-change reads from the authors' labs do not combine. Both
   recorded and disagreeing observed reviewer models must satisfy the bar.
   Actor/self-review independence, observed-model assessment binding, receiver
@@ -4919,15 +4947,13 @@ EXIT CODES
     A spooled write prints `spooled: <path>` and exits 0.
 
 FILES
-  User configuration is `<ai-home>/arc/config.toml`; the AI data home is
-  `~/.local/ai/` unless ARC_AI_HOME or AI_HOME names another. ARC_WORKTREES_DIR and
-  ARC_DATA_ROOT override their keys, and ARC_DATA_DIR names one exact ledger
-  directory for one repository, above both. That directory holds the change
-  events and, under `custody/sha256/<digest>`, retained forge content.
-  `arc config` prints the resolved paths. Only a missing configuration
-  selects built-in settings. Access, filesystem and parse errors remain
-  errors for every configuration consumer; advisory consumers name their
-  fallback and the error on stderr.
+  User config is `<ai-home>/arc/config.toml`. The AI home defaults to
+  `~/.local/ai/`; ARC_AI_HOME or AI_HOME overrides it. ARC_WORKTREES_DIR and
+  ARC_DATA_ROOT override their keys; ARC_DATA_DIR selects one repository's
+  exact ledger above both. It holds events and `custody/sha256/<digest>` forge
+  content. `arc config` prints resolved paths. Only a missing configuration
+  selects built-in settings. Other read or parse errors propagate; advisory
+  consumers name their fallback and the error on stderr.
 
     worktrees_dir = "~/.worktrees"       where change worktrees are created
     data_root = "<dir>"                  ledgers at <dir>/<repo-path-slug>/
@@ -4935,10 +4961,9 @@ FILES
     [journals] dirs = { "<prefix>" = "<journal-dir>" }
                                          journal by path prefix; the longest
                                          matching prefix wins
-    [journal] auto_log = true            begin, integrate, and close append a
-                                         journal log event; a configuration
-                                         that cannot be loaded turns it off
-                                         and says why on stderr
+    [journal] auto_log = true            begin/integrate/close log to journal;
+                                         unreadable configuration disables it
+                                         and reports why on stderr
     [identity] detect = true             an undeclared harness, session, and
                                          model are read from the session store
     [provenance] git_identity = "per-actor" | "shared"
@@ -4957,6 +4982,8 @@ FILES
     [policy] debt_count_threshold = <n>          debt turns advisory past n
     [policy] debt_age_threshold_seconds = <n>    or once the oldest is older
     [policy] worktree_free_floor_bytes = <n>     `arc begin` warns below it
+    [policy] tiebreak_reviewers = [{ model = "reader#xhigh", since = "<RFC 3339>" }]
+      Dated elections: arc guide debt-review
     [policy] review_clearance = "assessed"       what clears: arc guide debt-clearance
     [danger] paths = ["<glob>"]                  `*` in a segment, `**` across
     [danger] acknowledged_safe = ["<glob>"]
@@ -5403,7 +5430,10 @@ SCHEMAS
     `arc-checkpoint-list/1`          arc checkpoint list --json
 
   Read views with `review_context` carry target revisions and author
-  coordinates computed at projection time.
+  coordinates computed at projection time. Verdict and audit entries may carry
+  `tiebreak_reviewer`, the dated policy entry elected when the read was recorded;
+  its absence grants no exception. Store format 7 accepts this optional read
+  metadata alongside records without it.
 
   Commitments, files:
     `arc-bundle/6`                   arc export / arc import

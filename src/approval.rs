@@ -29,6 +29,7 @@ pub const UNDECLARED_APPROVAL_REASON: &str =
 
 /// The facts an approval's validity follows from.
 pub struct ApprovalFacts<'a> {
+    pub tiebreak: bool,
     pub ladder_clearance: Option<crate::state::LadderClearance>,
     /// The newest patchset: the one an approval must name to count.
     pub latest_patchset: Option<&'a Patchset>,
@@ -116,8 +117,8 @@ pub struct ApprovalOutcome {
 ///
 /// A reviewer whose model, at any effort, is a model the ledger records for
 /// an implementer of the patchset's range is the author reading its own work,
-/// whatever identity it is recorded under. The verdict is judged under each of
-/// `verdict_models`: the model it records and the one its reviewer's session
+/// whatever identity it is recorded under, unless a dated tie-break election
+/// applies. The verdict is judged under each of `verdict_models`: the model it records and the one its reviewer's session
 /// store observed where that contradicted the record.
 ///
 /// Provenance recorded before arc kept it is *unknown*, not assumed, and is
@@ -129,6 +130,7 @@ pub(crate) fn self_approval_rejection(
     verdict_assumed: bool,
     verdict_models: &[crate::model::ReaderModel],
     implementers: &[String],
+    tiebreak: bool,
 ) -> Option<String> {
     // Naming the contributor is the more specific fact, so it is the one
     // reported when both hold.
@@ -137,16 +139,21 @@ pub(crate) fn self_approval_rejection(
             "{SELF_APPROVAL_REASON}: reviewer matches contributor {contributor}"
         ));
     }
-    if let Some((reader, value)) = verdict_models.iter().find_map(|reader| {
-        crate::trailers::naming_model(implementers, &reader.model).map(|value| (reader, value))
-    }) {
+    if let Some((reader, value)) = verdict_models
+        .iter()
+        .filter(|_| !tiebreak)
+        .find_map(|reader| {
+            crate::trailers::naming_model(implementers, &reader.model).map(|value| (reader, value))
+        })
+    {
         let model = &reader.model;
+        let remedy = crate::review_independence::remedy(implementers, model);
         return Some(match &reader.declared {
             None => format!(
-                "{SELF_APPROVAL_REASON}: reviewer's model {model} matches the ledger implementer's model {value}"
+                "{SELF_APPROVAL_REASON}: reviewer's model {model} matches the ledger implementer's model {value}{remedy}"
             ),
             Some(declared) => format!(
-                "{SELF_APPROVAL_REASON}: reviewer's session store observed model {model} where the verdict records {declared}, and it matches the ledger implementer's model {value}"
+                "{SELF_APPROVAL_REASON}: reviewer's session store observed model {model} where the verdict records {declared}, and it matches the ledger implementer's model {value}{remedy}"
             ),
         });
     }
@@ -204,6 +211,7 @@ pub fn decide(facts: &ApprovalFacts) -> ApprovalOutcome {
                 verdict.author_assumed(),
                 &verdict.judged_models(),
                 facts.implementers,
+                facts.tiebreak,
             )
         })
     });
@@ -601,6 +609,7 @@ mod tests {
 
     fn verdict(verdict: Verdict, actor: &str) -> VerdictEntry {
         VerdictEntry {
+            tiebreak_reviewer: None,
             receipt: None,
             forge_frontier: None,
             forge_sources: Vec::new(),
@@ -660,6 +669,7 @@ mod tests {
     /// patchset's head, with no verdict, waiver, or external decision.
     fn facts<'a>(patchset: &'a Patchset, danger: &'a DangerScope) -> ApprovalFacts<'a> {
         ApprovalFacts {
+            tiebreak: false,
             ladder_clearance: None,
             latest_patchset: Some(patchset),
             implementers: &[],

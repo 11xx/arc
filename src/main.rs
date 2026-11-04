@@ -49,6 +49,7 @@ mod retention;
 mod review_authors;
 mod review_clearance;
 mod review_context;
+mod review_independence;
 mod review_ladder;
 mod rewrite;
 mod selection;
@@ -1877,16 +1878,22 @@ enum Cmd {
     ///
     /// Authorship is read from the ledger, not from commit trailers: the
     /// patchset's declared contributors, else its effective author, and its
-    /// production record's implementer. An approval recorded under that
-    /// implementer's model, at
-    /// any effort, warns that it shows a review happened and not that it was
-    /// independent of whoever wrote the work. Where `forbid_self_approval`
+    /// production record's implementer. Unless the dated tie-break election
+    /// in `arc guide debt-review` applies, an approval under that implementer's
+    /// model, at any effort, warns that it shows a review happened and not that
+    /// it was independent of whoever wrote the work. Where `forbid_self_approval`
     /// applies, the gate rejects it as a self-approval, exactly as it rejects
     /// a reviewer matching a contributor, and says so when the verdict is
     /// recorded. Such a read never discharges review debt, regardless of
     /// self-approval policy: permission to approve does not establish
-    /// independent coverage. Planning and orchestrating never refuse. The
-    /// warning, the gate and debt discharge judge the verdict under the model
+    /// independent coverage. `[policy] tiebreak_reviewers` on the committed
+    /// target or operator layer waives only the model-match test on mixed-model
+    /// work. The recorded model#effort and any observation must exactly match
+    /// an entry in force at created_at; author actors, sessions, contributors
+    /// and assumed identities remain barred. Each read retains its election
+    /// or absence despite later policy edits. Planning and orchestrating never
+    /// refuse. The warning, the gate and debt discharge judge the verdict under
+    /// the model
     /// it records and, where the reviewer's session store observed another,
     /// the observed one: either matching counts, and the warning or rejection
     /// names which model matched, with the recorded model beside an observed
@@ -3093,7 +3100,8 @@ enum Cmd {
     /// (the production record kept none and the range does not read) the
     /// binding is `authors-unread` and the debt stays open too.
     ///
-    /// An approving audit recorded under the model of the ledger's implementer
+    /// Unless the dated tie-break election in `arc guide debt-review` applies,
+    /// an approving audit recorded under the model of the ledger's implementer
     /// of the audited range, at any effort, warns that it shows a review
     /// happened and not that it was independent of whoever wrote the work.
     /// Where the ledger records no implementer model, the audit says so and is
@@ -3103,8 +3111,15 @@ enum Cmd {
     /// including a historical integrated closure that recorded only its
     /// integrated commit.
     /// Where `forbid_self_approval` is on it is refused, with the remedy a
-    /// contributor match gets. Such a read never discharges review debt, regardless of self-approval policy: permission to approve does not
-    /// establish independent coverage. `--verdict changes-requested` is
+    /// contributor match gets. Such a read never discharges review debt,
+    /// regardless of self-approval policy: permission to approve does not
+    /// establish independent coverage. `[policy] tiebreak_reviewers` is read
+    /// from the destination's current committed policy layered with operator
+    /// policy, never the candidate. Only mixed-model work qualifies; recorded model#effort
+    /// and any observed coordinate must match an entry in force at created_at.
+    /// Contributor, actor, authoring-session and assumed-identity bars remain.
+    /// The audit retains its election or absence despite later date edits;
+    /// capability and coverage requirements still apply. `--verdict changes-requested` is
     /// open to anyone. The warning, the refusal, debt discharge, and the
     /// planner and orchestrator roles the audit records its auditor holding
     /// compare the model the audit records and, where the auditor's session
