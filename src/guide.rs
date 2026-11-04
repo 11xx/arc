@@ -2671,8 +2671,9 @@ REVIEW COVERAGE AND DEBT
   `arc query --debt`, the inbox, catchup and the workspace backlog put a
   `below-floor` read first.
 
-  Only an approving audit clears it: `arc audit --assessment <file>` with
-  `independence: eligible`, by an auditor who is also independent of the
+  It clears with an audit that approves or requests changes:
+  `arc audit --assessment <file>` with `independence: eligible`, by an
+  auditor who is also independent of the
   contributors and whom the assessment describes, and whose assessment
   covers the work: the `authors` it lists answer, through their `identities`,
   to the model of every `Implemented-by` line in the integrated range, at
@@ -2840,8 +2841,8 @@ REVIEW COVERAGE AND DEBT
   head is its integrated commit, else the latest one recorded before the
   closure. Only a range with no patchset at all has nothing to compare: its
   read is recorded, and declared trailers alone neither discharge nor refuse
-  it. The `ineligible-review` kind is the exception stated above: only an
-  approving audit with an eligible, bound assessment clears it.
+  it. The `ineligible-review` kind additionally requires
+  an audit that approves or requests changes with an eligible, bound assessment.
 
   Under `review_clearance = "assessed"` (`arc guide debt-review`) only a
   clearing read discharges a debt of any kind. Every other read since the

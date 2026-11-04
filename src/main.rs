@@ -3012,8 +3012,8 @@ enum Cmd {
     /// `comment-only` audit judged nothing: it is listed as a read and the
     /// debt stays owed. An audit whose `--assessment` says
     /// `ineligible` discharges no debt of any kind, whatever actor records
-    /// it. A debt of kind `ineligible-review` also needs routing's word that
-    /// the auditor is eligible: `--assessment <file>` with `independence:
+    /// it. For either verdict, a debt of kind `ineligible-review` also needs
+    /// routing's word that the auditor is eligible: `--assessment <file>` with `independence:
     /// eligible`. Without one, the audit is recorded and listed beside the
     /// obligation, which stays open. The assessment must also describe the
     /// auditor that records the audit: the audit's recorded model, and its

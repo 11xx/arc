@@ -890,8 +890,9 @@ pub(super) fn record_audit(
                      it clears and describes the model and effort it recorded"
                 }
                 Some(DebtMissing::IneligibleReview) => {
-                    "an eligible read: an approving audit with --assessment <file> \
-                     saying the auditor is eligible and describing the model it recorded"
+                    "an eligible read: an audit that approves or requests changes with \
+                     --assessment <file> saying the auditor is eligible and describing the \
+                     model it recorded"
                 }
                 _ => "an independent review",
             };

@@ -205,3 +205,79 @@ fn an_ineligible_review_debt_names_a_post_integration_audit() {
         second.as_str()
     );
 }
+
+/// Claim: an independent refusing audit with an eligible, bound assessment
+/// discharges ineligible-review debt, and the remedy offers that read.
+/// Rejects requiring approval after a review found defects, or accepting
+/// a comment-only, unassessed or ineligible read as its substitute.
+#[test]
+fn eligible_refusing_audit_discharges_ineligible_review() {
+    let repo = repo_forbidding_self_approval();
+    super::ineligible_review::read_change(&repo, "ineligible");
+    repo.arc(&repo.root)
+        .args([
+            "integrate",
+            "ineligible",
+            "--debt",
+            "same-model read only",
+            "--kind",
+            "ineligible-review",
+            "--qualifier",
+            "same-model",
+        ])
+        .assert()
+        .success();
+    let file =
+        super::ineligible_review::assessment_v2(&repo, "eligible.json", "eligible", true, &[]);
+    let output = audit(
+        &repo,
+        "ineligible",
+        "Auditor",
+        "comment-only",
+        &["--assessment", file.to_str().unwrap()],
+    );
+    assert_owed(&repo, "ineligible", &event_of(&output));
+    assert!(
+        output.contains("an audit that approves or requests changes"),
+        "{output}"
+    );
+    for topic in ["debt-obligations", "debt-recovery"] {
+        let guide = stdout(repo.arc(&repo.root).args(["guide", topic]));
+        assert!(
+            guide.contains("an audit that approves or requests changes"),
+            "{topic}: {guide}"
+        );
+    }
+
+    let output = audit(&repo, "ineligible", "Auditor", "changes-requested", &[]);
+    assert_owed(&repo, "ineligible", &event_of(&output));
+    let ineligible = assessment(&repo, "ineligible.json", "ineligible", &["same-model"]);
+    let output = audit(
+        &repo,
+        "ineligible",
+        "Auditor",
+        "changes-requested",
+        &["--assessment", ineligible.to_str().unwrap()],
+    );
+    assert_owed(&repo, "ineligible", &event_of(&output));
+    let output = audit(
+        &repo,
+        "ineligible",
+        "tester",
+        "changes-requested",
+        &["--assessment", file.to_str().unwrap()],
+    );
+    assert_owed(&repo, "ineligible", &event_of(&output));
+    let output = audit(
+        &repo,
+        "ineligible",
+        "Auditor",
+        "changes-requested",
+        &["--assessment", file.to_str().unwrap()],
+    );
+    assert!(output.contains("debt discharged"), "{output}");
+    let debt = debt_of(&repo, "ineligible");
+    assert_eq!(debt["standing"], "discharged", "{debt}");
+    assert_eq!(debt["discharged_by_event_id"], event_of(&output), "{debt}");
+    assert!(!stdout(repo.arc(&repo.root).args(["query", "--debt"])).contains("ineligible"));
+}
