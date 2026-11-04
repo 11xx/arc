@@ -609,10 +609,20 @@ impl DebtPlan {
                         .find(|(id, _)| id == &existing.event_id)
                         .map(|(_, value)| value)
                         .context("debt event has no backing publication")?;
-                    let published: Event = serde_json::from_value(expected.clone())?;
-                    if published.repository_id != existing.origin_replica_id
-                        || published.created_at != existing.declared_at
-                        || !existing.restated_by(&published)
+                    let mut projected: Event = serde_json::from_value(expected.clone())?;
+                    if let Payload::DebtDeclared {
+                        extent: Some(extent),
+                        ..
+                    } = &mut projected.payload
+                    {
+                        let rewrites = store.rewrites()?;
+                        for revision in extent.subject.revisions_mut() {
+                            *revision = rewrites.approved_successor(revision)?;
+                        }
+                    }
+                    if projected.repository_id != existing.origin_replica_id
+                        || projected.created_at != existing.declared_at
+                        || !existing.restated_by(&projected)
                     {
                         bail!("debt event changed before durability confirmation");
                     }

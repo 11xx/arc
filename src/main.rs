@@ -2952,8 +2952,9 @@ enum Cmd {
         change: String,
         /// What review is owed, and why it could not run. The debt already
         /// in force, declared again unchanged, is reused rather than recorded
-        /// twice. Imported obligations are reused by confirming the matching
-        /// event in its backing import batch.
+        /// twice. Extents compare at their signature-only or role-addition
+        /// successors; confirmation syncs the unchanged backing publication.
+        /// Imported obligations confirm the event in its backing import batch.
         #[arg(long)]
         reason: String,
         /// What kind of deficit this records. Omitted, arc derives it from the

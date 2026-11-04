@@ -2586,6 +2586,8 @@ REVIEW COVERAGE AND DEBT
   with `arc integrate <change> --debt "<why>"`. An equivalent declaration
   reuses the obligation by syncing its exact backing publication, whether a
   loose event file or an import batch, without copying an imported event.
+  Equivalence compares extents at their signature-only or role-addition
+  successors; durability confirmation syncs the unchanged backing publication.
   A debt already in force routes to
   integration: status says integrate beside the flagged waiver, check drops
   the review-queue advisory, and the inbox keeps one lead row — until the

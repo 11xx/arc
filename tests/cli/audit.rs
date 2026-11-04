@@ -4777,3 +4777,91 @@ fn a_bare_subject_session_does_not_take_the_invoker_model() {
         .unwrap();
     assert!(!audit.contains("claude-opus-5-5"), "{audit}");
 }
+
+/// Claim: a debt's mapped extent can be reaffirmed after a signed role
+/// addition, reusing the exact backing event. Rejects comparing persisted
+/// revisions with their mapped projection and reporting an unconfirmed receipt.
+#[test]
+fn mapped_debt_reaffirmation_confirms_the_unchanged_backing_event() {
+    let repo = Repo::new();
+    let key = super::rewrite::signing_key(&repo)
+        .expect("mapped debt acceptance requires a sandbox signing key");
+    stdout(repo.arc(&repo.root).args(["begin", "mapped-debt"]));
+    let worktree = repo.home.join(".worktrees/repo-mapped-debt");
+    repo.commit(&worktree, "work.txt", "work\n", "feat: work");
+    stdout(
+        repo.arc(&worktree)
+            .args(["snapshot", "mapped-debt", "--solo"]),
+    );
+    let args = [
+        "debt",
+        "mapped-debt",
+        "--kind",
+        "independent-review",
+        "--extent",
+        "whole",
+        "--reason",
+        "independent reader unavailable",
+    ];
+    stdout(repo.arc(&worktree).args(args));
+    let before = json_stdout(repo.arc(&worktree).args(["show", "mapped-debt", "--json"]));
+    let debt_id = before["debt"]["event_id"].as_str().unwrap();
+    let backing = repo
+        .root
+        .join(".git/arc/changes")
+        .join(before["change_id"].as_str().unwrap())
+        .join("events")
+        .join(format!("{debt_id}.json"));
+    let persisted = fs::read(&backing).unwrap();
+    let old_head = repo.head(&worktree);
+    let old_tree = git_out(&worktree, &["rev-parse", "HEAD^{tree}"]);
+    super::rewrite::arc_signing(&repo, &key, &worktree)
+        .args([
+            "rewrite",
+            "trailers",
+            "--from",
+            "HEAD",
+            "--key",
+            &key.fingerprint,
+            "--append",
+            "Orchestrated-by: codex:fixture-lead#high",
+        ])
+        .assert()
+        .success();
+    let head = repo.head(&worktree);
+    assert_ne!(head, old_head);
+    assert_eq!(git_out(&worktree, &["rev-parse", "HEAD^{tree}"]), old_tree);
+    super::rewrite::git_signing(&worktree, &key, &["verify-commit", "HEAD"]);
+    repo.arc(&worktree)
+        .args(["snapshot", "mapped-debt", "--solo"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("unchanged"));
+    let mapped = json_stdout(
+        repo.arc(&worktree)
+            .args(["status", "mapped-debt", "--json"]),
+    );
+    assert_eq!(mapped["debt_standing"], "declared", "{mapped}");
+    assert_eq!(mapped["debt"]["extent"]["revision"], head, "{mapped}");
+    assert_eq!(mapped["approval_waived_by_debt"], true, "{mapped}");
+    let events_before = stdout(
+        repo.arc(&worktree)
+            .args(["events", "--change", "mapped-debt"]),
+    );
+    for _ in 0..2 {
+        repo.arc(&worktree)
+            .args(args)
+            .assert()
+            .success()
+            .stdout(predicates::str::contains("debt already declared for ps-01"))
+            .stdout(predicates::str::contains(format!("event: {debt_id}")));
+        assert_eq!(fs::read(&backing).unwrap(), persisted);
+        assert_eq!(
+            stdout(
+                repo.arc(&worktree)
+                    .args(["events", "--change", "mapped-debt"])
+            ),
+            events_before
+        );
+    }
+}
