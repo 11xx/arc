@@ -103,7 +103,8 @@ struct Cli {
     /// Declared model and effort; see `arc guide identity-options`
     #[arg(long, global = true)]
     model: Option<String>,
-    /// Represented subject; see `arc guide identity-options`
+    /// Represented subject; an empty declared model or effort refuses;
+    /// see `arc guide identity-options`
     #[arg(long = "on-behalf-of", global = true, env = "ARC_ON_BEHALF_OF")]
     on_behalf_of: Option<String>,
     /// Execution boundary; see `arc guide identity-options`

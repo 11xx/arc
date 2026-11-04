@@ -5367,8 +5367,10 @@ const IDENTITY_OPTIONS: &str = r#"GLOBAL OPTIONS
   --on-behalf-of
     Subject a lead runs delegated ceremony for; recorded beside the
     invoker. A write refuses a placeholder or a harness:model form carrying
-    one. Recording another session's review, add --model with that session's
-    model: the event's model is what arc judges independence from
+    one. A session subject may declare harness:id:model[#effort]; an empty
+    declared model or effort refuses even with --model. Recording another
+    session's review, add --model with that session's model: the event's
+    model is what arc judges independence from
 
   --role
     Execution boundary: implementer | reviewer | lead

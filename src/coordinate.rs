@@ -28,7 +28,8 @@ const PLACEHOLDERS: [&str; 12] = [
 
 /// The harness, id and declared model of an `--on-behalf-of` subject shaped
 /// `harness:id[:model[#effort]]`, a trailing parenthesized label ignored. It
-/// says nothing about whether the id names a session.
+/// says nothing about whether the id names a session. The declared model
+/// is preserved for validation, including an empty model or effort.
 pub(crate) fn session_subject(subject: &str) -> Option<(&str, &str, Option<&str>)> {
     let subject = subject.trim();
     let subject = match subject.split_once(" (") {
@@ -40,10 +41,8 @@ pub(crate) fn session_subject(subject: &str) -> Option<(&str, &str, Option<&str>
         Some((id, model)) => (id, Some(model)),
         None => (rest, None),
     };
-    (crate::model::plain_session_id(harness)
-        && crate::model::plain_session_id(id)
-        && model.is_none_or(crate::model::portable_coordinate))
-    .then_some((harness, id, model))
+    (crate::model::plain_session_id(harness) && crate::model::plain_session_id(id))
+        .then_some((harness, id, model))
 }
 
 /// Why a value is not something a write may record.

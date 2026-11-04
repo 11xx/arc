@@ -122,6 +122,47 @@ fn placeholder_declared_identity_refuses_every_write_before_it_records() {
     assert!(git_out(&repo.root, &["branch", "--list", "arc/never-opened"]).is_empty());
 }
 
+/// Claim: a session subject with an empty declared model or effort refuses
+/// before writing. Rejects discarding the declaration and recording the
+/// invoker's model instead, even when an explicit model flag is supplied.
+#[test]
+fn malformed_subject_models_refuse_before_invoker_fallback() {
+    let repo = Repo::new();
+    let (change, _) = open(&repo, "subject-model");
+    let before = event_count(&repo, &change);
+    for model in [
+        "",
+        "#high",
+        "   #high",
+        "fixture-model#",
+        "fixture-model#  ",
+    ] {
+        for label in ["", " (executor)"] {
+            let subject = format!("codex:{UUID}:{model}{label}");
+            for flag in [false, true] {
+                let mut command = repo.arc(&repo.root);
+                command.env("ARC_MODEL", "invoker-model#high");
+                if flag {
+                    command.args(["--on-behalf-of", &subject, "--model", "invoker-model#high"]);
+                } else {
+                    command.env("ARC_ON_BEHALF_OF", &subject);
+                }
+                let stderr =
+                    refused(command.args(["roles", &change, "--planned-by", "lead:planner"]));
+                assert!(
+                    stderr.contains("--on-behalf-of/ARC_ON_BEHALF_OF declares model"),
+                    "{stderr}"
+                );
+                assert!(
+                    stderr.contains("expected harness:model[#effort]"),
+                    "{stderr}"
+                );
+                assert_eq!(event_count(&repo, &change), before);
+            }
+        }
+    }
+}
+
 #[test]
 fn placeholder_declared_identity_refuses_under_dry_run() {
     let repo = Repo::new();
