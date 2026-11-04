@@ -918,8 +918,9 @@ RUN A CHANGE
   events (only the suffix under --since) and bundled repository events.
   Roles are `patchset-base`, `patchset-head`, `evaluated-tree`,
   `retention-commit` (objects held by refs/arc/tree for exported evidence,
-  including direct tree pins, and the commits refs/arc/retained holds for the
-  exported change), `synthesized-merge` (verify --against),
+  including direct tree pins, and the commits a rewrite retained under
+  refs/arc/retained for the exported change or in repository scope),
+  `synthesized-merge` (verify --against),
   `disposition-commit`, `integration-commit`, `target-commit`, `content-tree`,
   `cited-blob`, `cited-commit`, `rewrite-source`, `rewrite-successor`, and
   `observed-commit` (a commit a forge fact records as the provider's own,
@@ -929,9 +930,10 @@ RUN A CHANGE
   bundle before announcing the result. Bundles without the objects field
   retain advisory patchset-commit checks; /6 accepts that absent field.
   A bundle's rewrite events carry the retention refs the exporter created; an
-  import holds each one it names for the imported change under
-  `refs/arc/retained/` when the commit is here, and refuses a name that is no
-  retention ref. Bundles whose rewrite events name none import unchanged. An
+  import holds each one it names for the imported change or in repository
+  scope, where a checkpoint's are, under `refs/arc/retained/` when the commit
+  is here, and refuses a name that is no retention ref. A retention ref a
+  rebase created is named by no event and does not travel. Bundles whose rewrite events name none import unchanged. An
   import holds each `observed-commit` of the imported change that is here the
   same way, under the event that recorded it.
 

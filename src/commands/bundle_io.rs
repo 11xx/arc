@@ -615,7 +615,8 @@ fn import_events(
         let Payload::HistoryRewritten { retained, .. } = &event.payload else {
             continue;
         };
-        for (name, commit) in crate::bundle::retained_for(retained, &validated.bundle.change_id) {
+        for (name, commit) in crate::bundle::retained_scopes(retained, &validated.bundle.change_id)
+        {
             if gitio::commit_exists(&ctx.cwd, &commit)? {
                 pins.push((name, commit));
             }

@@ -705,7 +705,7 @@ fn exported_objects(
                 insert_object(cwd, &mut objects, &moved.old, "rewrite-source")?;
                 insert_object(cwd, &mut objects, &moved.new, "rewrite-successor")?;
             }
-            for (_, commit) in retained_for(retained, change_id) {
+            for (_, commit) in retained_scopes(retained, change_id) {
                 insert_object(cwd, &mut objects, &commit, "retention-commit")?;
             }
         }
@@ -774,6 +774,23 @@ pub fn retained_for(
             ))
         })
         .collect()
+}
+
+/// The retention refs a rewrite event names that travel with one change's
+/// bundle: the change's own, and those in repository scope, which every
+/// bundle's repository events carry.
+pub fn retained_scopes(
+    retained: &std::collections::BTreeMap<String, String>,
+    change_id: &str,
+) -> Vec<(String, String)> {
+    let mut found = retained_for(retained, change_id);
+    if change_id != crate::store::Store::REPOSITORY_SCOPE {
+        found.extend(retained_for(
+            retained,
+            crate::store::Store::REPOSITORY_SCOPE,
+        ));
+    }
+    found
 }
 
 fn insert_object(

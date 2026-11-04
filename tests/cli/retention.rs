@@ -609,6 +609,90 @@ fn an_export_lists_the_retained_commit_and_an_import_retains_it() {
     );
 }
 
+/// Claim: a repository-scope retention ref a rewrite created, here for a
+/// checkpoint revision, is listed by export as a `retention-commit` and
+/// recreated by an import that receives the commit, as the imported change's
+/// own are. Rejects: an import that recreates only the change's own
+/// retention refs and leaves the checkpoint revision held by nothing on the
+/// receiving side.
+#[test]
+fn an_import_recreates_the_repository_scope_retention_its_rewrite_names() {
+    let source = repo_with_gates();
+    let (worktree, _) = approved_change(&source, "alpha");
+    source.commit(&worktree, "build.txt", "one\n", "feat: tested build");
+    let tested = source.head(&worktree);
+    let recorded =
+        stdout(
+            source
+                .arc(&source.root)
+                .args(["checkpoint", "record", "rc", "--rev", &tested]),
+        );
+    let event = recorded
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap();
+    git(
+        &worktree,
+        &[
+            "commit",
+            "--amend",
+            "--no-edit",
+            "--date",
+            "2020-01-01T00:00:00Z",
+        ],
+    );
+    let replacement = source.head(&worktree);
+    let map = source.home.join("map");
+    fs::write(&map, format!("{tested} {replacement}\n")).unwrap();
+    source
+        .arc(&source.root)
+        .args([
+            "history",
+            "rewrite",
+            "--map",
+            map.to_str().unwrap(),
+            "--reason",
+            "amended after the checkpoint",
+        ])
+        .assert()
+        .success();
+    let name = retention_ref("repository", event, &tested);
+    assert_eq!(retained(&source), vec![format!("{name} {tested}")]);
+
+    let bundle = source.home.join("bundle.json");
+    let objects = source.home.join("objects.json");
+    source
+        .arc(&worktree)
+        .args([
+            "export",
+            "alpha",
+            "--output",
+            bundle.to_str().unwrap(),
+            "--objects-json",
+            objects.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let listed: serde_json::Value = serde_json::from_slice(&fs::read(&objects).unwrap()).unwrap();
+    assert!(
+        listed["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|object| object["oid"] == tested.as_str() && object["role"] == "retention-commit"),
+        "{listed}"
+    );
+
+    let receiver = Repo::new();
+    deliver_git_objects(&source, &receiver);
+    receiver
+        .arc(&receiver.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    assert_eq!(retained(&receiver), vec![format!("{name} {tested}")]);
+}
+
 #[test]
 fn an_import_without_retention_still_works() {
     let source = repo_with_gates();

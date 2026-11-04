@@ -1321,7 +1321,7 @@ enum Cmd {
     /// object list derived from the exported events, including a delta's suffix and
     /// repository events. The summary counts objects by role; transports must deliver them
     /// before import. The commits a recorded rewrite replaced and retained for this change
-    /// are listed with the role `retention-commit`. A commit a forge fact records as the
+    /// or in repository scope are listed with the role `retention-commit`. A commit a forge fact records as the
     /// provider's own is listed with the role `observed-commit` only where this repository
     /// holds it; an exporter that never fetched it does not oblige the receiver to. The
     /// commits and trees the repository events' received candidate evidence names are
@@ -1381,8 +1381,8 @@ enum Cmd {
     /// pinned under `refs/arc/retained/`. A candidate's optional original evidence-request
     /// digest binds its received document and declarant. Records without that intent remain
     /// readable and importable without establishing a registration retry. A rewrite event's
-    /// retention refs are held under `refs/arc/retained/` for the imported change where the
-    /// commit is here; a name that is no retention ref is refused, and events naming none
+    /// retention refs are held under `refs/arc/retained/` for the imported change, and in
+    /// repository scope, where the commit is here; a name that is no retention ref is refused, and events naming none
     /// import unchanged. A projected falsification revision requires an active,
     /// uncontradicted rewrite admitted with rewrite authority. Legacy transport without an
     /// authorization receipt supplies no such identity proof. Full and delta histories
