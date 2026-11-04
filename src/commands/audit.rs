@@ -840,6 +840,9 @@ pub(super) fn record_audit(
         .unwrap_or_default();
     let payload = Payload::AuditVerdictRecorded {
         tiebreak_reviewer: tiebreak_reviewer.clone(),
+        tiebreak_target: tiebreak_reviewer
+            .as_ref()
+            .map(|_| crate::declarations::accepted_target(&st).to_string()),
         revision: revision.clone(),
         verdict: args.verdict,
         body: args.body,

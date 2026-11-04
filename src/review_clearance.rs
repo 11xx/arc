@@ -149,9 +149,7 @@ fn evaluate(facts: &Facts<'_>, judgment: &mut Judgment) {
         unknown(judgment, "author set not established: no subject authors");
         return;
     };
-    let version = ladder.version.iter().rev().find(|version| {
-        DateTime::parse_from_rfc3339(&version.effective_from).is_ok_and(|time| time <= facts.at)
-    });
+    let version = ladder.version_at(facts.at);
     judgment.basis_version = version.map(|version| version.id.clone());
     let self_review = authors
         .identities
@@ -270,8 +268,11 @@ fn evaluate(facts: &Facts<'_>, judgment: &mut Judgment) {
         }
     }
     for reader in &readers {
+        let mixed = authors
+            .iter()
+            .any(|author| author.model.model != reader.model.model);
         for author in &authors {
-            if !facts.tiebreak && reader.model.family == author.model.family {
+            if !(facts.tiebreak && mixed) && reader.model.family == author.model.family {
                 findings(
                     judgment,
                     true,
@@ -323,14 +324,7 @@ fn resolve<'a>(
     let (name, effort) = coordinate
         .split_once('#')
         .map_or((coordinate, None), |(name, effort)| (name, Some(effort)));
-    let model = version
-        .model
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .find(|model| {
-            model.model == name || model.identities.iter().any(|identity| identity == name)
-        });
+    let model = version.model_named(name);
     let Some(model) = model else {
         unknown(
             judgment,

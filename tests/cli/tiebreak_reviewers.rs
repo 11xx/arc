@@ -524,3 +524,133 @@ fn tiebreak_unreadable_policy_keeps_an_audit_findings_read() {
     policy(&repo, ENTRY, false);
     assert_eq!(debt(&repo)["standing"], "owed");
 }
+
+/// Claim: session independence follows the represented reader, not its writer.
+/// Rejects an author session hiding in --on-behalf-of and a writer's session
+/// barring a genuinely different represented reader.
+#[test]
+fn tiebreak_checks_the_represented_readers_authoring_session() {
+    let repo = Repo::new();
+    policy(&repo, ENTRY, false);
+    let (_, worktree) = subject(&repo, OPUS);
+    ship(&repo, &worktree);
+    reader(&repo, &worktree, "audit", SOL)
+        .args(["--on-behalf-of", &format!("codex:sol-writer:{SOL}")])
+        .assert()
+        .failure();
+    reader(&repo, &worktree, "audit", SOL)
+        .env("ARC_SESSION", "sol-writer")
+        .args(["--on-behalf-of", &format!("codex:independent-reader:{SOL}")])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("debt discharged"));
+}
+
+/// Claim: a missing harness does not turn another effort of the reader's
+/// model into mixed authorship. Rejects granting on a bare ledger coordinate.
+#[test]
+fn tiebreak_a_missing_author_harness_cannot_create_mixed_models() {
+    for second in ["gpt-6.1-sol#medium", OPUS] {
+        let repo = Repo::new();
+        policy(&repo, ENTRY, false);
+        let (change, worktree) = subject(&repo, second);
+        rewrite_event(&repo, &change, "patchset-added", |event| {
+            event["harness"] = Value::Null
+        });
+        ship(&repo, &worktree);
+        let mut audit = reader(&repo, &worktree, "audit", SOL);
+        if second == OPUS {
+            audit
+                .assert()
+                .success()
+                .stdout(predicates::str::contains("debt discharged"));
+        } else {
+            audit.assert().failure();
+            assert_eq!(debt(&repo)["standing"], "owed");
+        }
+    }
+}
+
+/// Claim: aliases of the same ladder model cannot manufacture mixed work.
+/// Rejects clearing self-authored work through a second accepted spelling.
+#[test]
+fn tiebreak_ladder_aliases_cannot_create_mixed_authorship() {
+    for assessed in [true, false] {
+        let repo = Repo::new();
+        policy(&repo, ENTRY, assessed);
+        ladder(&repo, 3);
+        let mut table: toml::Value =
+            toml::from_str(&fs::read_to_string(repo.root.join(".arc/review-ladder.toml")).unwrap())
+                .unwrap();
+        table["version"][0]["model"][0]["identities"]
+            .as_array_mut()
+            .unwrap()
+            .push(toml::Value::String("sol-alias".into()));
+        repo.commit(
+            &repo.root,
+            ".arc/review-ladder.toml",
+            &toml::to_string(&table).unwrap(),
+            "test: accepted model alias",
+        );
+        let (_, worktree) = subject(&repo, "sol-alias#xhigh");
+        reader(&repo, &worktree, "review", SOL).assert().success();
+        let report = json_stdout(repo.arc(&worktree).args(["status", "mixed", "--json"]));
+        assert_eq!(
+            report["has_valid_approval"], false,
+            "all authors resolve to the reader's model: {report}"
+        );
+        let recorded = json_stdout(repo.arc(&worktree).args(["show", "mixed", "--json"]));
+        assert!(
+            recorded["verdicts"][0].get("tiebreak_reviewer").is_none(),
+            "{recorded}"
+        );
+        if assessed {
+            let judgment = report["review_context"]["judgments"]
+                .as_object()
+                .unwrap()
+                .values()
+                .next()
+                .unwrap();
+            assert_eq!(judgment["kind"], "findings", "{report}");
+        }
+    }
+}
+
+/// Claim: an election on one destination cannot bootstrap another target's
+/// policy. Rejects carrying a frozen exemption through --into to an unelected target.
+#[test]
+fn tiebreak_elections_cannot_transfer_to_another_destination() {
+    let repo = Repo::new();
+    policy(&repo, "", false);
+    git(&repo.root, &["switch", "-c", "elected"]);
+    policy(&repo, ENTRY, false);
+    let (_, worktree) = subject(&repo, OPUS);
+    reader(&repo, &worktree, "review", SOL).assert().success();
+    let report = json_stdout(repo.arc(&worktree).args(["status", "mixed", "--json"]));
+    assert_eq!(report["has_valid_approval"], true, "{report}");
+    git(&repo.root, &["switch", "master"]);
+    repo.arc(&worktree)
+        .args(["integrate", "mixed", "--into", "master", "--dry-run"])
+        .assert()
+        .failure();
+    repo.arc(&worktree)
+        .args([
+            "integrate",
+            "mixed",
+            "--into",
+            "master",
+            "--debt",
+            "fixture destination read owed",
+        ])
+        .assert()
+        .success();
+    reader(&repo, &worktree, "audit", SOL)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("debt discharged"));
+    let report = json_stdout(repo.arc(&worktree).args(["status", "mixed", "--json"]));
+    assert_eq!(
+        report["audit_verdicts"][0]["tiebreak_target"], "master",
+        "{report}"
+    );
+}

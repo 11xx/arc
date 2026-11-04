@@ -1453,6 +1453,8 @@ pub enum Payload {
     VerdictRecorded {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tiebreak_reviewer: Option<crate::policy::TiebreakReviewer>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tiebreak_target: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         forge_sources: Vec<crate::forge_observation::ForgeSource>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1591,6 +1593,8 @@ pub enum Payload {
     AuditVerdictRecorded {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tiebreak_reviewer: Option<crate::policy::TiebreakReviewer>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tiebreak_target: Option<String>,
         /// The integrated revision audited, not a patchset.
         revision: String,
         verdict: Verdict,

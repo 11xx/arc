@@ -9,11 +9,13 @@ use chrono::{DateTime, Utc};
 
 pub struct Reader<'a> {
     pub actor: &'a str,
+    pub target: Option<&'a str>,
     pub assumed: bool,
     pub session: Option<&'a str>,
     pub model: Option<&'a str>,
     pub observed: Option<&'a str>,
     pub at: DateTime<Utc>,
+    pub after_integration: bool,
 }
 
 /// Only the model-match test is waived. A recorded election is evaluated
@@ -26,7 +28,9 @@ pub fn tiebreak<'a>(
     reader: &Reader<'_>,
     entries: &'a [TiebreakReviewer],
 ) -> Option<&'a TiebreakReviewer> {
-    if reader.assumed
+    let session = session_of(reader.actor, reader.session);
+    if reader.target != Some(crate::declarations::accepted_target(state))
+        || reader.assumed
         || crate::coordinate::is_person(reader.actor)
         || subject.contributor_match(reader.actor).is_some()
         || state
@@ -34,9 +38,10 @@ pub fn tiebreak<'a>(
             .iter()
             .any(|author| {
                 author.effective_actor() == reader.actor
-                    || reader
-                        .session
-                        .is_some_and(|session| author.session.as_deref() == Some(session))
+                    || session.is_some_and(|session| {
+                        session_of(author.effective_actor(), author.session.as_deref())
+                            == Some(session)
+                    })
             })
     {
         return None;
@@ -46,10 +51,14 @@ pub fn tiebreak<'a>(
         return None;
     }
     let authors = state.authoring_model_values(subject, production);
-    // Different efforts of one model do not establish mixed authorship.
-    if !authors.iter().any(|author| {
-        crate::trailers::naming_model(std::slice::from_ref(author), recorded).is_none()
-    }) {
+    let registry = state
+        .review_context
+        .as_ref()
+        .map(|context| context.registry(reader.after_integration));
+    let version = registry
+        .and_then(|registry| registry.ladder.as_ref())
+        .and_then(|ladder| ladder.version_at(reader.at));
+    if !mixed_authorship(&authors, recorded, version) {
         return None;
     }
     entries.iter().find(|entry| {
@@ -58,6 +67,48 @@ pub fn tiebreak<'a>(
             && reader.at >= entry.since
             && entry.until.is_none_or(|until| reader.at < until)
     })
+}
+
+fn session_of<'a>(actor: &'a str, fallback: Option<&'a str>) -> Option<&'a str> {
+    crate::coordinate::session_subject(actor)
+        .map(|(_, id, _)| id)
+        .or(fallback)
+}
+
+fn author_model(value: &str) -> Option<&str> {
+    let value = value
+        .split_once(':')
+        .map_or(value, |(_, model)| model)
+        .trim();
+    if crate::coordinate::model_defect(value, None).is_some()
+        || value.contains(':')
+        || value.matches('#').count() > 1
+        || value.chars().any(char::is_whitespace)
+    {
+        return None;
+    }
+    value.split('#').next()
+}
+
+fn canonical_model<'a>(
+    name: &'a str,
+    version: Option<&'a crate::review_ladder::Version>,
+) -> &'a str {
+    version
+        .and_then(|version| version.model_named(name))
+        .map_or(name, |model| model.model.as_str())
+}
+
+fn mixed_authorship(
+    authors: &[String],
+    reader: &str,
+    version: Option<&crate::review_ladder::Version>,
+) -> bool {
+    let reader = canonical_model(reader.split('#').next().unwrap_or(reader).trim(), version);
+    authors
+        .iter()
+        .filter_map(|author| author_model(author))
+        .any(|author| canonical_model(author, version) != reader)
 }
 
 impl ChangeState {
@@ -75,11 +126,17 @@ impl ChangeState {
             self.debt.as_ref().and_then(|debt| debt.production.as_ref()),
             &Reader {
                 actor: verdict.effective_author(),
+                target: verdict.tiebreak_target.as_deref(),
                 assumed: verdict.author_assumed(),
                 session: verdict.session.as_deref(),
                 model: verdict.model.as_deref(),
                 observed: verdict.observed_model.as_deref(),
                 at: verdict.created_at,
+                after_integration: crate::review_context::after_integration(
+                    self,
+                    &verdict.event_id,
+                    false,
+                ),
             },
             std::slice::from_ref(verdict.tiebreak_reviewer.as_ref()?),
         )
@@ -96,11 +153,13 @@ impl ChangeState {
             self.debt.as_ref().and_then(|debt| debt.production.as_ref()),
             &Reader {
                 actor: audit.effective_author(),
+                target: audit.tiebreak_target.as_deref(),
                 assumed: audit.author_assumed(),
                 session: audit.session.as_deref(),
                 model: audit.model.as_deref(),
                 observed: audit.observed_model.as_deref(),
                 at: audit.created_at,
+                after_integration: true,
             },
             std::slice::from_ref(audit.tiebreak_reviewer.as_ref()?),
         )
@@ -109,10 +168,7 @@ impl ChangeState {
 
 /// The election is an operator remedy only for mixed-model work.
 pub fn remedy(authors: &[String], reader: &str) -> &'static str {
-    if authors
-        .iter()
-        .any(|author| crate::trailers::naming_model(std::slice::from_ref(author), reader).is_none())
-    {
+    if mixed_authorship(authors, reader, None) {
         "; for mixed-model work, elect a dated model#effort in [policy] tiebreak_reviewers on the target branch or in operator policy"
     } else {
         ""

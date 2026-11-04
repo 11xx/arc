@@ -72,6 +72,12 @@ pub fn load_at(cwd: &Path, revision: &str) -> Result<Option<Ladder>> {
 }
 
 impl Ladder {
+    pub fn version_at(&self, at: chrono::DateTime<chrono::Utc>) -> Option<&Version> {
+        self.version.iter().rev().find(|version| {
+            DateTime::parse_from_rfc3339(&version.effective_from).is_ok_and(|time| time <= at)
+        })
+    }
+
     fn validate(&self) -> Result<()> {
         if self.schema != SCHEMA {
             bail!("schema: expected {SCHEMA}, got {:?}", self.schema);
@@ -106,6 +112,16 @@ impl Ladder {
 }
 
 impl Version {
+    pub fn model_named(&self, name: &str) -> Option<&Model> {
+        self.model
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .find(|model| {
+                model.model == name || model.identities.iter().any(|identity| identity == name)
+            })
+    }
+
     fn validate(&self) -> Result<()> {
         if self.gap {
             if self.model.is_some() {

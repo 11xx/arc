@@ -1447,6 +1447,7 @@ mod tests {
                 45,
                 Payload::VerdictRecorded {
                     tiebreak_reviewer: None,
+                    tiebreak_target: None,
                     dispositions: Vec::new(),
                     receipt: None,
                     forge_frontier: None,

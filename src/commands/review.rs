@@ -1555,6 +1555,9 @@ pub(super) fn record_verdict(
     let tiebreak_reviewer = tiebreak_lookup.unwrap_or_default();
     let payload = Payload::VerdictRecorded {
         tiebreak_reviewer: tiebreak_reviewer.clone(),
+        tiebreak_target: tiebreak_reviewer
+            .as_ref()
+            .map(|_| crate::declarations::accepted_target(&st).to_string()),
         forge_sources,
         forge_frontier: Some(
             st.forge

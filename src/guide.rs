@@ -2487,8 +2487,9 @@ REVIEW COVERAGE AND DEBT
   the rejection names the observed model. Where
   self-approval is forbidden the gate rejects the approval as it rejects a
   contributor match, and `arc audit` refuses to record it;
-  `--verdict changes-requested` is open to anyone. Models compare as strings
-  once the effort is dropped: arc holds no alias table. `Planned-by` and
+  `--verdict changes-requested` is open to anyone. Model-match refusals compare
+  strings after dropping effort; tie-break mixed-authorship checks also resolve
+  aliases from the read's dated ladder when one is available. `Planned-by` and
   `Orchestrated-by` never refuse a read; an audit records which of those roles
   its auditor held as dirty context for routing, and computes no score.
 
@@ -2500,6 +2501,9 @@ REVIEW COVERAGE AND DEBT
   the reader's own model alone never qualify. This waives only the model-match
   independence test. A contributor, actor or authoring-session match, an
   assumed reviewing identity, or a contradictory observation never qualifies.
+  A represented reader's session is the one its subject coordinate names;
+  otherwise the recorded session applies. A missing harness does not create
+  another model. Under a ladder, aliases of one model count as one model.
   Every other approval, capability, authority and coverage bar still applies.
 
   Elections come from the target branch's committed policy layered with the
@@ -2512,7 +2516,8 @@ REVIEW COVERAGE AND DEBT
   or its absence when recorded; later date edits, additions and removals never
   re-judge it. Reads without a recorded election have no exception. Unreadable
   election policy grants none: verdicts and non-approving audits still record
-  and warn, while an approving audit requires readable policy. `show`
+  and warn, while an approving audit requires readable policy. Each election
+  binds to its recorded destination; a different `--into` cannot borrow it. `show`
   and `status` identify an elected read as `tie-break reviewer model#effort
   (policy since ...)`. A model-match refusal on mixed work names
   `tiebreak_reviewers` as the operator remedy.
@@ -2997,7 +3002,8 @@ REVIEW CLEARANCE
   agent author's, unless the dated tie-break election in `arc guide
   debt-review` applies. A tie-break replaces only this family test: its rank
   must meet every agent author's floor, and same-model effort ordering still
-  applies. Otherwise a two-lab author set needs a third-lab reader or a person;
+  applies. An author set resolving entirely to the reader's canonical model
+  cannot use the family exception. Otherwise a two-lab author set needs a third-lab reader or a person;
   several whole-change reads from the authors' labs do not combine. Both
   recorded and disagreeing observed reviewer models must satisfy the bar.
   Actor/self-review independence, observed-model assessment binding, receiver
@@ -5433,8 +5439,9 @@ SCHEMAS
 
   Read views with `review_context` carry target revisions and author
   coordinates computed at projection time. Verdict and audit entries may carry
-  `tiebreak_reviewer`, the dated policy entry elected when the read was recorded;
-  its absence grants no exception. Store format 7 accepts this optional read
+  `tiebreak_reviewer`, the dated policy entry elected when the read was recorded,
+  and `tiebreak_target`, the destination whose policy elected it. An absent
+  entry or destination grants no exception. Store format 7 accepts this optional read
   metadata alongside records without it.
 
   Commitments, files:

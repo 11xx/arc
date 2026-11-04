@@ -1893,7 +1893,9 @@ enum Cmd {
     /// work. The recorded model#effort and any observation must exactly match
     /// an entry in force at created_at; author actors, sessions, contributors
     /// and assumed identities remain barred. Each read retains its election
-    /// or absence despite later policy edits. Planning and orchestrating never
+    /// or absence despite later policy edits. Its election binds to the recorded
+    /// destination and supplies no exception for another `--into` target.
+    /// Planning and orchestrating never
     /// refuse. The warning, the gate and debt discharge judge the verdict under
     /// the model
     /// it records and, where the reviewer's session store observed another,
@@ -3122,7 +3124,7 @@ enum Cmd {
     /// Contributor, actor, authoring-session and assumed-identity bars remain.
     /// Non-approving audits still record when election policy is unreadable,
     /// retaining no exception and reporting the lookup failure.
-    /// The audit retains its election or absence despite later date edits;
+    /// The audit retains its election and destination, or absence, despite later date edits;
     /// capability and coverage requirements still apply. `--verdict changes-requested` is
     /// open to anyone. The warning, the refusal, debt discharge, and the
     /// planner and orchestrator roles the audit records its auditor holding

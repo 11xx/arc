@@ -610,6 +610,7 @@ mod tests {
     fn verdict(verdict: Verdict, actor: &str) -> VerdictEntry {
         VerdictEntry {
             tiebreak_reviewer: None,
+            tiebreak_target: None,
             receipt: None,
             forge_frontier: None,
             forge_sources: Vec::new(),

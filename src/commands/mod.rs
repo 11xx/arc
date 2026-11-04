@@ -760,6 +760,7 @@ impl Ctx {
                 .and_then(|debt| debt.production.as_ref()),
             &crate::review_independence::Reader {
                 actor: self.on_behalf_of.as_deref().unwrap_or(&self.actor),
+                target: Some(target),
                 assumed: self.on_behalf_of.is_none() && self.actor_source.assumed_from().is_some(),
                 session: self.session.as_deref(),
                 model: attribution.model.as_deref(),
@@ -769,6 +770,7 @@ impl Ctx {
                     .as_ref()
                     .map(|value| value.observed.as_str()),
                 at,
+                after_integration: state.is_closed(),
             },
             &policy.policy.tiebreak_reviewers,
         )
