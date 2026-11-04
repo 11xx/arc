@@ -6,7 +6,42 @@ use crate::{
     review_ladder::Ladder,
 };
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+/// Judgment time and the recorder's selected ladder version. Absent time is legacy evidence.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Basis {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basis_time: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basis_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basis_version: Option<String>,
+}
+
+pub fn record_basis(
+    ctx: &crate::commands::Ctx,
+    state: &crate::state::ChangeState,
+    audit: bool,
+    recorded_at: DateTime<Utc>,
+    receipt: Option<&crate::commands::receipt::ItemGuard>,
+) -> anyhow::Result<Basis> {
+    let (at, source) = match receipt {
+        Some(receipt) => receipt.basis_time(ctx, recorded_at)?,
+        None => (recorded_at, "recorded"),
+    };
+    let version = state
+        .review_context
+        .as_ref()
+        .and_then(|context| context.registry(audit || state.is_closed()).ladder.as_ref())
+        .and_then(|ladder| ladder.version_at(at))
+        .map(|version| version.id.clone());
+    Ok(Basis {
+        basis_time: Some(at),
+        basis_source: Some(source.to_string()),
+        basis_version: version,
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Disagreement {
@@ -20,7 +55,7 @@ pub struct Judgment {
     pub findings_eligible: Option<bool>,
     pub clears: Option<bool>,
     pub basis_time: DateTime<Utc>,
-    pub basis_source: &'static str,
+    pub basis_source: String,
     pub basis_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<&'static str>,
@@ -40,6 +75,7 @@ pub struct Facts<'a> {
     pub reader: &'a str,
     pub models: &'a [ReaderModel],
     pub at: DateTime<Utc>,
+    pub basis: Option<&'a Basis>,
     pub assessment: Option<&'a AuditAssessment>,
 }
 
@@ -67,8 +103,15 @@ pub fn judge(facts: Facts<'_>) -> Judgment {
         kind: "not-established",
         findings_eligible: None,
         clears: None,
-        basis_time: facts.at,
-        basis_source: "inferred",
+        basis_time: facts
+            .basis
+            .and_then(|basis| basis.basis_time)
+            .unwrap_or(facts.at),
+        basis_source: facts
+            .basis
+            .filter(|basis| basis.basis_time.is_some())
+            .and_then(|basis| basis.basis_source.clone())
+            .unwrap_or_else(|| "inferred".to_string()),
         basis_version: None,
         reason: Some("not-established"),
         details: Vec::new(),
@@ -149,7 +192,7 @@ fn evaluate(facts: &Facts<'_>, judgment: &mut Judgment) {
         unknown(judgment, "author set not established: no subject authors");
         return;
     };
-    let version = ladder.version_at(facts.at);
+    let version = ladder.version_at(judgment.basis_time);
     judgment.basis_version = version.map(|version| version.id.clone());
     let self_review = authors
         .identities
@@ -192,7 +235,10 @@ fn evaluate(facts: &Facts<'_>, judgment: &mut Judgment) {
     let Some(version) = version else {
         unknown(
             judgment,
-            format!("basis version missing at {}", facts.at.to_rfc3339()),
+            format!(
+                "basis version missing at {}",
+                judgment.basis_time.to_rfc3339()
+            ),
         );
         return;
     };
@@ -434,6 +480,7 @@ mod tests {
             authors: Some(authors),
             reader: "Reader",
             models: &ReaderModel::judged(model, None),
+            basis: None,
             at: at("2026-10-10T00:00:00Z"),
             assessment,
         })
@@ -582,6 +629,7 @@ mod tests {
                 authors: Some(&a),
                 reader: "Reader",
                 models: &models,
+                basis: None,
                 at: at(time),
                 assessment: None,
             })
@@ -614,6 +662,7 @@ mod tests {
             authors: Some(&a),
             reader: "Author",
             models: &models,
+            basis: None,
             at: at("2026-10-10T00:00:00Z"),
             assessment: None,
         });
@@ -632,6 +681,7 @@ mod tests {
             authors: Some(&a),
             reader: "Reader",
             models: &models,
+            basis: None,
             at: at("2026-10-10T00:00:00Z"),
             assessment: None,
         });

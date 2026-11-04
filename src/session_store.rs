@@ -301,6 +301,54 @@ fn read_session_with_backends(
     SessionAnswer::Read(SessionRead { turns, bound, path })
 }
 
+/// Find an already-recorded visible judgment of this exact receipt item.
+pub fn receipt_reply_at(
+    harness: &str,
+    session: &str,
+    key: &str,
+    verdict: crate::model::Verdict,
+    issued: chrono::DateTime<chrono::Utc>,
+    ingestion: chrono::DateTime<chrono::Utc>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let backends = harness_backends(harness);
+    let resolved = resolve_exact(harness, &backends, session).ok()?;
+    let transcript = backends[resolved.backend_index]
+        .transcript(&resolved.session, usize::MAX)
+        .ok()?;
+    let expected = serde_json::to_value(verdict).ok()?;
+    let echo = format!("{key}: {}", expected.as_str()?);
+    transcript
+        .turns
+        .iter()
+        .filter(|turn| {
+            turn.role == Role::Assistant
+                && turn.kind == TurnKind::Assistant
+                && turn.text_truncated != Some(true)
+        })
+        .filter(|turn| {
+            turn.text.lines().any(|line| line.trim() == echo)
+                || serde_json::from_str::<serde_json::Value>(&turn.text)
+                    .ok()
+                    .is_some_and(|value| receipt_judgment(&value, key, &expected))
+        })
+        .filter_map(|turn| turn.ts)
+        .filter(|at| *at >= issued && *at <= ingestion)
+        .min()
+}
+
+fn receipt_judgment(value: &serde_json::Value, key: &str, verdict: &serde_json::Value) -> bool {
+    (value.get("key").and_then(|key| key.as_str()) == Some(key)
+        && value.get("verdict") == Some(verdict))
+        || value
+            .get("items")
+            .and_then(|items| items.as_array())
+            .is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|item| receipt_judgment(item, key, verdict))
+            })
+}
+
 /// Project session metadata merged from recordings and arc events.
 #[derive(Clone, Debug)]
 pub(crate) struct RecentSession {

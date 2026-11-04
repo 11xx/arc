@@ -36,7 +36,7 @@ pub use publication::publication;
 pub(crate) mod provisional;
 pub use provisional::{check_provisional, resolve as resolve_provisional};
 mod native_child;
-mod receipt;
+pub(crate) mod receipt;
 pub(crate) mod relations;
 mod replica;
 mod rescue;

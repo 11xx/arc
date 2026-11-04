@@ -978,3 +978,370 @@ fn a_missing_basis_does_not_activate_clearance_for_legacy_policy() {
     assert_eq!(value["debt"]["standing"], "discharged");
     assert!(value["review_context"]["judgments"].is_null());
 }
+
+mod basis_time {
+    use super::*;
+    const SESSION: &str = "01a12b77-6c25-7c01-b325-6e5e44523cc4";
+    const ISSUED: &str = "2026-09-01T00:00:00Z";
+    const EARLY: &str = "2026-09-02T00:00:00Z";
+    const LATE: &str = "2026-10-07T00:00:00Z";
+
+    fn dated_repo() -> Repo {
+        let repo = repo(true, true, None);
+        let mut dated = table();
+        let mut late = dated["version"][0].clone();
+        late["id"] = json!("v2");
+        late["effective_from"] = json!(LATE);
+        dated["version"][0]["model"][1]["efforts"][1]["rank"] = json!(1);
+        dated["version"].as_array_mut().unwrap().push(late);
+        fs::write(
+            repo.root.join(".arc/review-ladder.toml"),
+            toml::to_string(&dated).unwrap(),
+        )
+        .unwrap();
+        git(&repo.root, &["add", ".arc/review-ladder.toml"]);
+        git(
+            &repo.root,
+            &["commit", "-m", "test: dated capability table"],
+        );
+        repo
+    }
+    fn receipt(repo: &Repo, slug: &str, audit: bool) -> Value {
+        if audit {
+            owed(repo, slug, Some(SOL), "");
+        } else {
+            subject(repo, slug, Some(SOL), "");
+        }
+        let kind = if audit { "audit" } else { "verdict" };
+        let mut value = json_stdout(repo.arc(&repo.root).args([
+            "receipt",
+            "template",
+            &format!("--{kind}"),
+            slug,
+        ]));
+        value["issued_at"] = json!(ISSUED);
+        let subject = value["items"][0]["subject"].to_string();
+        let digest = hex::encode(Sha256::digest(
+            format!("{kind}\n{subject}\n{ISSUED}").as_bytes(),
+        ));
+        value["items"][0]["key"] = json!(format!("rk-{}", &digest[..32]));
+        value["items"][0]["verdict"] = json!("approved");
+        value["reviewer"] = json!({"harness":"codex","session":SESSION,"model":FABLE});
+        value
+    }
+    fn reply(repo: &Repo, text: &str, at: &str, role: &str) {
+        let path = codex_recording(repo, SESSION, "fable-5.1");
+        use std::io::Write;
+        let row = json!({"type":"response_item","timestamp":at,"payload":{"type":"message","role":role,"content":[{"type":"output_text","text":text}]}});
+        writeln!(
+            fs::OpenOptions::new().append(true).open(path).unwrap(),
+            "{row}"
+        )
+        .unwrap();
+    }
+    fn ingest(repo: &Repo, value: &Value, audit: bool) -> Value {
+        let path = repo.home.join("receipt.json");
+        fs::write(&path, value.to_string()).unwrap();
+        json_stdout(
+            repo.arc(&repo.root)
+                .env("CODEX_HOME", repo.home.join("codex-state"))
+                .args([
+                    if audit { "audit" } else { "review" },
+                    "--receipt",
+                    path.to_str().unwrap(),
+                    "--json",
+                ]),
+        )
+    }
+    fn read(shown: &Value, audit: bool) -> &Value {
+        shown[if audit { "audit_verdicts" } else { "verdicts" }]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+    }
+    fn judged(shown: &Value, audit: bool) -> &Value {
+        &shown["review_context"]["judgments"][read(shown, audit)["event_id"].as_str().unwrap()]
+    }
+
+    /// A matching existing reply pins the earlier capability table on both read paths.
+    /// Rejects ingestion time granting capability the reader lacked at judgment.
+    #[test]
+    fn basis_reply_before_version_survives_late_ingestion() {
+        for audit in [false, true] {
+            let repo = dated_repo();
+            let value = receipt(&repo, "reply-time", audit);
+            reply(
+                &repo,
+                &format!("{}: approved", value["items"][0]["key"].as_str().unwrap()),
+                EARLY,
+                "assistant",
+            );
+            ingest(&repo, &value, audit);
+            let shown = show(&repo, "reply-time");
+            assert_eq!(judged(&shown, audit)["clears"], false, "{shown:#}");
+            assert_eq!(judged(&shown, audit)["basis_version"], "v1");
+            assert_eq!(judged(&shown, audit)["basis_source"], "session-reply");
+            assert_eq!(read(&shown, audit)["basis_time"], EARLY);
+            assert_eq!(read(&shown, audit)["basis_version"], "v1");
+        }
+    }
+
+    /// Issuing a template does not date the read; only a matching judgment does.
+    /// Rejects issuance time and another item's or user's reply as the basis.
+    #[test]
+    fn basis_issued_template_and_unmatched_reply_do_not_backdate_a_read() {
+        let repo = dated_repo();
+        let value = receipt(&repo, "no-reply", true);
+        let key = value["items"][0]["key"].as_str().unwrap();
+        reply(
+            &repo,
+            &format!("{key}-other: approved\n{key}: changes-requested"),
+            EARLY,
+            "assistant",
+        );
+        ingest(&repo, &value, true);
+        let shown = show(&repo, "no-reply");
+        assert_eq!(judged(&shown, true)["clears"], true);
+        assert_eq!(judged(&shown, true)["basis_source"], "recorded");
+        assert_eq!(
+            read(&shown, true)["basis_time"],
+            read(&shown, true)["created_at"]
+        );
+    }
+
+    /// An active recording with no matching reply uses declared time, including
+    /// the issued boundary and the exact version instant, rather than session age.
+    #[test]
+    fn basis_active_session_uses_bounded_declaration() {
+        for audit in [false, true] {
+            for (at, version, clears) in [(ISSUED, "v1", false), (LATE, "v2", true)] {
+                let repo = dated_repo();
+                let mut value = receipt(&repo, "declared", audit);
+                value["items"][0]["judged_at"] = json!(at);
+                // A prompt echo is not the reader's judgment.
+                reply(
+                    &repo,
+                    &format!("{}: approved", value["items"][0]["key"].as_str().unwrap()),
+                    EARLY,
+                    "user",
+                );
+                ingest(&repo, &value, audit);
+                let shown = show(&repo, "declared");
+                assert_eq!(judged(&shown, audit)["clears"], clears);
+                assert_eq!(judged(&shown, audit)["basis_source"], "declared");
+                assert_eq!(judged(&shown, audit)["basis_version"], version);
+                assert_eq!(read(&shown, audit)["basis_time"], at);
+            }
+        }
+    }
+
+    /// A valid reply outranks the declaration; a template issued before a
+    /// version and judged at its effective instant uses that version.
+    #[test]
+    fn basis_reply_takes_precedence_over_declared_and_issued_times() {
+        for at in [EARLY, LATE] {
+            let repo = dated_repo();
+            let mut value = receipt(&repo, "precedence", true);
+            value["items"][0]["judged_at"] = json!(if at == EARLY { LATE } else { EARLY });
+            let text = json!({"key":value["items"][0]["key"], "verdict":"approved"}).to_string();
+            reply(&repo, &text, at, "assistant");
+            ingest(&repo, &value, true);
+            let shown = show(&repo, "precedence");
+            assert_eq!(judged(&shown, true)["basis_source"], "session-reply");
+            assert_eq!(
+                judged(&shown, true)["basis_version"],
+                if at == EARLY { "v1" } else { "v2" }
+            );
+            assert_eq!(judged(&shown, true)["clears"], at == LATE);
+        }
+    }
+
+    /// Out-of-window declarations refuse the item without a read event,
+    /// even when a matching session reply exists.
+    #[test]
+    fn basis_invalid_declarations_refuse_without_a_read() {
+        for audit in [false, true] {
+            for at in [
+                "2026-08-31T23:59:59.999999999Z",
+                "2999-01-01T00:00:00Z",
+                "not-a-time",
+            ] {
+                let repo = dated_repo();
+                let mut value = receipt(&repo, "invalid-time", audit);
+                value["items"][0]["judged_at"] = json!(at);
+                reply(
+                    &repo,
+                    &format!("{}: approved", value["items"][0]["key"].as_str().unwrap()),
+                    EARLY,
+                    "assistant",
+                );
+                let path = repo.home.join("invalid.json");
+                fs::write(&path, value.to_string()).unwrap();
+                let output = repo
+                    .arc(&repo.root)
+                    .env("CODEX_HOME", repo.home.join("codex-state"))
+                    .args([
+                        if audit { "audit" } else { "review" },
+                        "--receipt",
+                        path.to_str().unwrap(),
+                        "--json",
+                    ])
+                    .output()
+                    .unwrap();
+                assert!(!output.status.success());
+                let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(result["items"][0]["code"], "judged-at", "{result:#}");
+                let shown = show(&repo, "invalid-time");
+                assert!(
+                    shown[if audit { "audit_verdicts" } else { "verdicts" }]
+                        .as_array()
+                        .is_none_or(Vec::is_empty),
+                    "{shown:#}"
+                );
+            }
+        }
+    }
+
+    /// A reply outside the receipt's window or a judgment of another item
+    /// cannot backdate the read. An absent match never waits for session completion.
+    #[test]
+    fn basis_reply_requires_an_exact_item_judgment_in_the_window() {
+        for (text, at) in [
+            ("wrong-key", EARLY),
+            ("wrong-verdict", EARLY),
+            ("matching", "2999-01-01T00:00:00Z"),
+            ("matching", "2026-08-31T23:59:59Z"),
+        ] {
+            let repo = dated_repo();
+            let mut value = receipt(&repo, "matching", true);
+            value["items"][0]["judged_at"] = json!(LATE);
+            let key = value["items"][0]["key"].as_str().unwrap();
+            let text = match text {
+                "wrong-key" => format!("{key}-other: approved"),
+                "wrong-verdict" => format!("{key}: changes-requested"),
+                _ => format!("{key}: approved"),
+            };
+            reply(&repo, &text, at, "assistant");
+            ingest(&repo, &value, true);
+            let shown = show(&repo, "matching");
+            assert_eq!(judged(&shown, true)["basis_source"], "declared");
+            assert_eq!(judged(&shown, true)["basis_version"], "v2");
+        }
+    }
+
+    /// Transport keeps the recorder's version as evidence; the receiver applies
+    /// its own table at the persisted instant, not its current-time table.
+    #[test]
+    fn basis_transport_preserves_evidence_and_uses_receiver_history() {
+        for audit in [false, true] {
+            let source = dated_repo();
+            let value = receipt(&source, "transport-time", audit);
+            reply(
+                &source,
+                &format!("{}: approved", value["items"][0]["key"].as_str().unwrap()),
+                EARLY,
+                "assistant",
+            );
+            ingest(&source, &value, audit);
+            if !audit {
+                source
+                    .arc(&source.root)
+                    .args(["integrate", "transport-time", "--debt", "fixture unread"])
+                    .assert()
+                    .success();
+            }
+            let original = show(&source, "transport-time");
+            let bundle = source.home.join("basis-bundle.json");
+            source
+                .arc(&source.root)
+                .args(["export", "transport-time", "--output"])
+                .arg(&bundle)
+                .assert()
+                .success();
+            let value: Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+            let receiver = dated_repo();
+            let path = receiver.root.join(".arc/review-ladder.toml");
+            let mut own: Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            own["version"][0]["id"] = json!("receiver-v1");
+            own["version"][1]["id"] = json!("receiver-v2");
+            own["version"][0]["model"][1]["efforts"][1]["rank"] = json!(4);
+            own["version"][1]["model"][1]["efforts"][1]["rank"] = json!(1);
+            fs::write(&path, toml::to_string(&own).unwrap()).unwrap();
+            git(&receiver.root, &["add", ".arc/review-ladder.toml"]);
+            git(&receiver.root, &["commit", "-m", "test: receiver history"]);
+            deliver_git_objects(&source, &receiver);
+            let publisher = value["source_replica_id"]
+                .as_str()
+                .unwrap_or_else(|| value["repository_id"].as_str().unwrap());
+            let origin = value["repository_id"].as_str().unwrap();
+            let reader = format!("codex:{SESSION}:{FABLE}");
+            receiver.declare_gates_locally(&format!(
+                "[replica]\ntrusted_review_replicas=['{origin}']\n[[replica.publishers]]\nprincipal='channel'\nsource_replica_id='{publisher}'\n[[replica.publishers.origins]]\nreplica_id='{origin}'\nroles=['facts','review-authority','debt-input','integration']\nactors=['tester','Writer','{reader}']\n"));
+            let digest = hex::encode(Sha256::digest(fs::read(&bundle).unwrap()));
+            receiver
+                .arc(&receiver.root)
+                .args([
+                    "import",
+                    bundle.to_str().unwrap(),
+                    "--publisher",
+                    "channel",
+                    "--received-sha256",
+                    &digest,
+                ])
+                .assert()
+                .success();
+            let shown = show(&receiver, "transport-time");
+            for field in ["basis_time", "basis_source", "basis_version"] {
+                assert_eq!(
+                    read(&shown, audit)[field],
+                    read(&original, audit)[field],
+                    "{field}"
+                );
+            }
+            assert_eq!(read(&shown, audit)["basis_version"], "v1");
+            assert_eq!(judged(&shown, audit)["basis_version"], "receiver-v1");
+            assert_eq!(judged(&shown, audit)["clears"], true);
+        }
+    }
+
+    /// Direct reads persist their clock. Legacy events without basis fields
+    /// use created_at with an explicit inferred label and do not reread sessions.
+    #[test]
+    fn basis_direct_and_legacy_reads_distinguish_recorded_from_inferred() {
+        let repo = dated_repo();
+        owed(&repo, "legacy-time", Some(SOL), "");
+        audit(&repo, "legacy-time", Some(FABLE), None);
+        let shown = show(&repo, "legacy-time");
+        assert_eq!(judged(&shown, true)["basis_source"], "recorded");
+        assert_eq!(
+            read(&shown, true)["basis_time"],
+            read(&shown, true)["created_at"]
+        );
+        assert_eq!(read(&shown, true)["basis_version"], "v2");
+        let file = repo
+            .root
+            .join(".git/arc/changes")
+            .join(shown["change_id"].as_str().unwrap())
+            .join("events")
+            .join(format!(
+                "{}.json",
+                read(&shown, true)["event_id"].as_str().unwrap()
+            ));
+        let mut event: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        for field in ["basis_time", "basis_source", "basis_version"] {
+            event.as_object_mut().unwrap().remove(field).unwrap();
+        }
+        fs::write(&file, event.to_string()).unwrap();
+        let legacy = show(&repo, "legacy-time");
+        assert_eq!(judged(&legacy, true)["basis_source"], "inferred");
+        assert_eq!(
+            judged(&legacy, true)["basis_time"],
+            read(&shown, true)["created_at"]
+        );
+        assert_eq!(judged(&legacy, true)["basis_version"], "v2");
+        assert!(read(&legacy, true)["basis_time"].is_null());
+        let text = stdout(repo.arc(&repo.root).args(["show", "legacy-time"]));
+        assert!(text.contains("inferred, version v2"), "{text}");
+    }
+}

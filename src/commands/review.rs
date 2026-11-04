@@ -1553,7 +1553,9 @@ pub(super) fn record_verdict(
         .err()
         .map(|error| format!("{error:#}"));
     let tiebreak_reviewer = tiebreak_lookup.unwrap_or_default();
+    let basis = crate::review_clearance::record_basis(ctx, &st, false, recorded_at, receipt)?;
     let payload = Payload::VerdictRecorded {
+        basis,
         tiebreak_reviewer: tiebreak_reviewer.clone(),
         tiebreak_target: tiebreak_reviewer
             .as_ref()

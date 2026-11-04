@@ -254,6 +254,7 @@ impl ReviewContext {
                     verdict.observed_model.as_deref(),
                 ),
                 at: verdict.created_at,
+                basis: Some(&verdict.basis),
                 assessment: verdict.assessment.as_ref(),
                 tiebreak: state.verdict_tiebreak(verdict).is_some(),
             });
@@ -278,6 +279,7 @@ impl ReviewContext {
                     audit.observed_model.as_deref(),
                 ),
                 at: audit.created_at,
+                basis: Some(&audit.basis),
                 assessment: audit.assessment.as_ref(),
                 tiebreak: state.audit_tiebreak(audit).is_some(),
             });

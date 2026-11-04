@@ -1446,6 +1446,7 @@ mod tests {
                 "2",
                 45,
                 Payload::VerdictRecorded {
+                    basis: Default::default(),
                     tiebreak_reviewer: None,
                     tiebreak_target: None,
                     dispositions: Vec::new(),

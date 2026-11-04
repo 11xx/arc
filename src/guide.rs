@@ -2981,8 +2981,28 @@ REVIEW CLEARANCE
 
   With an applicable ladder, arc owns capability. At the read's basis time,
   it selects the latest version whose `effective_from` is at or before that
-  instant. A read without recorded basis metadata uses `created_at`, shown
-  as `inferred`. The judgment reports basis time, source and version. A gap
+  instant. Each verdict and audit records `basis_time`, `basis_source` and
+  the recorder's `basis_version` when its applicable ladder has one. Receipt
+  items may declare `judged_at` as an RFC 3339 instant within the inclusive
+  `issued_at`..ingestion window; an invalid or out-of-window declaration
+  refuses that item, even if a matching reply exists.
+
+  A receipt's basis is the earliest already-existing visible assistant reply
+  in the reviewer's exact session that names the item's key and its verdict,
+  within that same window. Echo `<key>: <verdict>` on its own line, or return
+  a JSON item (or receipt with `items`) containing that exact `key` and
+  `verdict`. Operator prompts, reasoning, tool calls, a different item or
+  verdict, and replies outside the window supply no basis. Without a match,
+  an active session falls back immediately to `judged_at` (`declared`), else
+  to event `created_at` (`recorded`). A matched reply is `session-reply`.
+  Direct reads use `created_at` (`recorded`). Coordinate admission and dated
+  tie-break election use recording time, independent of this judgment basis.
+
+  Export and import preserve the recorded fields. A receiver selects its own
+  applicable ladder version at the recorded basis time; the recorder's
+  version remains provenance, not authority. A read without recorded basis
+  time uses `created_at`, shown as `inferred`. The judgment reports the basis
+  time, source and locally selected version. A gap
   names `ladder-gap`; a missing version, reviewer model, model identity,
   effort or author coordinate gives `not-established` and names the missing
   piece. Retired rows remain usable. Each model row's efforts list is its
@@ -5442,7 +5462,15 @@ SCHEMAS
   `tiebreak_reviewer`, the dated policy entry elected when the read was recorded,
   and `tiebreak_target`, the destination whose policy elected it. An absent
   entry or destination grants no exception. Store format 7 accepts this optional read
-  metadata alongside records without it.
+  metadata alongside records without it. Verdict and audit entries also carry
+  optional `basis_time`, `basis_source` (`session-reply`, `declared` or
+  `recorded`) and `basis_version`, preserved in bundles and replica events.
+  `basis_version` names the recorder's applicable version; `review_context`
+  judgments name the receiver's version at that time. An absent basis time
+  is legacy evidence, inferred from `created_at`. Receipt items accept optional
+  RFC 3339 `judged_at`; its bounds and reply precedence are defined by
+  `arc guide debt-clearance`. These optional input fields leave older records
+  valid under store format 7.
 
   Commitments, files:
     `arc-bundle/6`                   arc export / arc import

@@ -347,6 +347,7 @@ pub fn template(ctx: &Ctx, kind: ItemKind, references: &[String]) -> Result<()> 
             "kind": kind.as_str(),
             "subject": subject,
             "verdict": null,
+            "judged_at": null,
             "causes": [],
             "body": null,
             "findings": [],
@@ -397,6 +398,8 @@ struct RawReviewer {
 #[serde(deny_unknown_fields)]
 struct RawItem {
     key: String,
+    #[serde(default)]
+    judged_at: Option<String>,
     kind: ItemKind,
     subject: serde_json::Value,
     #[serde(default)]
@@ -549,10 +552,12 @@ pub(super) enum Admission {
 }
 
 /// The checks a receipt item passes under the locks its read takes.
-pub(super) struct ItemGuard {
+pub(crate) struct ItemGuard {
     kind: ItemKind,
     key: String,
     issued_at: String,
+    judged_at: Option<String>,
+    verdict: Verdict,
     subject_value: serde_json::Value,
     subject: Subject,
     item_digest: String,
@@ -560,7 +565,58 @@ pub(super) struct ItemGuard {
     dispositions: Vec<RawDisposition>,
 }
 
+fn declared_judgment(
+    value: Option<&str>,
+    issued: chrono::DateTime<chrono::Utc>,
+    ingestion: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+    let declared = value
+        .map(|value| {
+            chrono::DateTime::parse_from_rfc3339(value)
+                .map(|at| at.with_timezone(&chrono::Utc))
+                .map_err(|_| refuse("judged-at", "judged_at must be RFC 3339"))
+        })
+        .transpose()?;
+    if declared.is_some_and(|at| at < issued || at > ingestion) {
+        return Err(refuse(
+            "judged-at",
+            "judged_at must be within issued_at..ingestion (inclusive)",
+        ));
+    }
+    Ok(declared)
+}
+
 impl ItemGuard {
+    pub(crate) fn basis_time(
+        &self,
+        ctx: &Ctx,
+        ingestion: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(chrono::DateTime<chrono::Utc>, &'static str)> {
+        let issued =
+            chrono::DateTime::parse_from_rfc3339(&self.issued_at)?.with_timezone(&chrono::Utc);
+        let declared = declared_judgment(self.judged_at.as_deref(), issued, ingestion)?;
+        let reviewer = ctx
+            .on_behalf_of
+            .as_deref()
+            .and_then(crate::coordinate::session_subject)
+            .map(|(harness, session, _)| (harness, session));
+        if let Some((harness, session)) = reviewer {
+            if let Some(at) = crate::session_store::receipt_reply_at(
+                harness,
+                session,
+                &self.key,
+                self.verdict,
+                issued,
+                ingestion,
+            ) {
+                return Ok((at, "session-reply"));
+            }
+        }
+        Ok(declared
+            .map(|at| (at, "declared"))
+            .unwrap_or((ingestion, "recorded")))
+    }
+
     /// Recognize an identical published item first, then revalidate the
     /// subject, the key and the frontier against `st`, then resolve the
     /// item's dispositions against the findings on the subject.
@@ -1097,6 +1153,8 @@ fn prepare(
         kind,
         key: raw.key.clone(),
         issued_at: issued_at.to_string(),
+        judged_at: raw.judged_at.clone(),
+        verdict,
         subject_value: raw.subject.clone(),
         subject,
         item_digest,
@@ -1515,6 +1573,27 @@ fn record(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both window endpoints are valid; one nanosecond beyond either refuses.
+    #[test]
+    fn declared_judgment_has_inclusive_nanosecond_bounds() {
+        let issued: chrono::DateTime<chrono::Utc> = "2026-09-01T00:00:00Z".parse().unwrap();
+        let ingestion = "2026-09-02T00:00:00Z".parse().unwrap();
+        for at in [issued, ingestion] {
+            assert_eq!(
+                declared_judgment(Some(&at.to_rfc3339()), issued, ingestion).unwrap(),
+                Some(at)
+            );
+        }
+        for at in [
+            issued - chrono::Duration::nanoseconds(1),
+            ingestion + chrono::Duration::nanoseconds(1),
+        ] {
+            assert!(declared_judgment(Some(&at.to_rfc3339()), issued, ingestion).is_err());
+        }
+        assert!(declared_judgment(Some("not-a-time"), issued, ingestion).is_err());
+        assert_eq!(declared_judgment(None, issued, ingestion).unwrap(), None);
+    }
 
     #[test]
     fn canonical_json_sorts_keys_at_every_depth() {

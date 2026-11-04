@@ -609,6 +609,7 @@ mod tests {
 
     fn verdict(verdict: Verdict, actor: &str) -> VerdictEntry {
         VerdictEntry {
+            basis: Default::default(),
             tiebreak_reviewer: None,
             tiebreak_target: None,
             receipt: None,

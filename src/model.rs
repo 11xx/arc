@@ -1451,6 +1451,8 @@ pub enum Payload {
         supersedes: Vec<String>,
     },
     VerdictRecorded {
+        #[serde(flatten)]
+        basis: crate::review_clearance::Basis,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tiebreak_reviewer: Option<crate::policy::TiebreakReviewer>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1591,6 +1593,8 @@ pub enum Payload {
     /// review it did not have. The separation lives in the event model, where
     /// it cannot be forgotten.
     AuditVerdictRecorded {
+        #[serde(flatten)]
+        basis: crate::review_clearance::Basis,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tiebreak_reviewer: Option<crate::policy::TiebreakReviewer>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

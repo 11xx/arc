@@ -2043,7 +2043,8 @@ enum Cmd {
     /// `kind` (`verdict` or `audit`) and `subject`, copied unchanged from
     /// the template, and what the reader fills in: `verdict` (approved,
     /// changes-requested, comment-only), `causes` (with changes-requested on
-    /// a verdict item, refused elsewhere), `body`, `findings` (each with
+    /// a verdict item, refused elsewhere), optional RFC 3339 `judged_at`,
+    /// `body`, `findings` (each with
     /// `severity` (`critical`, `major`, `minor` or `note`), `blocking` and
     /// `summary` required, `body` optional, and on
     /// a verdict item an optional `path` and `line` anchoring it to the
@@ -2096,7 +2097,14 @@ enum Cmd {
     /// A recorded read that clears nothing is not refused; its bar is
     /// reported. Where the reviewer's session store holds the session, the
     /// model it observed is compared with the receipt's: a difference is
-    /// recorded on each read and the assessment binds the observed model
+    /// recorded on each read and the assessment binds the observed model.
+    ///
+    /// A receipt's basis uses an existing reviewer session reply naming the
+    /// exact item key and verdict, else bounded `judged_at`, else recording
+    /// time. Echo `<key>: <verdict>` on its own line or return the JSON item
+    /// or receipt. `judged_at` outside `issued_at`..ingestion (inclusive) or
+    /// malformed refuses the item (`judged-at`). Basis fields survive transport;
+    /// the receiver judges its own ladder at that time. See `arc guide debt-clearance`.
     /// Receipt reads use the same target ladder, coordinate admission,
     /// binding, authority and coverage checks as direct reads; see
     /// `arc guide debt-clearance`.
@@ -3871,7 +3879,10 @@ enum ReceiptCmd {
     /// findings, and the tips of every finding's dispositions. The item's
     /// `key` hashes its kind, subject and the template's `issued_at`, so it
     /// is stable for this template. Reviewer fields and the verdict are left
-    /// null for the reader to fill, and `vocabulary` names the severities a
+    /// null for the reader to fill, as is optional `judged_at`. The reader
+    /// echoes `<key>: <verdict>` in its reply to establish judgment time;
+    /// otherwise `judged_at`, bounded by issuance and ingestion, supplies it.
+    /// `vocabulary` names the severities a
     /// finding accepts under `findings[].severity`; `arc receipt --help` has
     /// the shape
     #[command(group(clap::ArgGroup::new("receipt_kind").args(["verdict", "audit"]).required(true)))]

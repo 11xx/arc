@@ -402,6 +402,8 @@ impl FindingState {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct VerdictEntry {
+    #[serde(flatten)]
+    pub basis: crate::review_clearance::Basis,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tiebreak_reviewer: Option<crate::policy::TiebreakReviewer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -991,6 +993,8 @@ pub struct KeptContext {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditVerdictEntry {
+    #[serde(flatten)]
+    pub basis: crate::review_clearance::Basis,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tiebreak_reviewer: Option<crate::policy::TiebreakReviewer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3071,6 +3075,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 });
             }
             Payload::VerdictRecorded {
+                basis,
                 tiebreak_reviewer,
                 tiebreak_target,
                 forge_sources,
@@ -3111,6 +3116,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     );
                 }
                 state.verdicts.push(VerdictEntry {
+                    basis: basis.clone(),
                     tiebreak_reviewer: tiebreak_reviewer.clone(),
                     tiebreak_target: tiebreak_target.clone(),
                     forge_sources: forge_sources.clone(),
@@ -3291,6 +3297,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                 });
             }
             Payload::AuditVerdictRecorded {
+                basis,
                 tiebreak_reviewer,
                 tiebreak_target,
                 revision,
@@ -3327,6 +3334,7 @@ pub fn reduce_with_rewrites(events: &[Event], rewrites: &RewriteMap) -> Result<C
                     );
                 }
                 state.audit_verdicts.push(AuditVerdictEntry {
+                    basis: basis.clone(),
                     tiebreak_reviewer: tiebreak_reviewer.clone(),
                     tiebreak_target: tiebreak_target.clone(),
                     origin_replica_id: ev.repository_id.clone(),
@@ -5955,6 +5963,7 @@ mod tests {
                 ev(
                     "fix",
                     Payload::AuditVerdictRecorded {
+                        basis: Default::default(),
                         tiebreak_reviewer: None,
                         tiebreak_target: None,
                         dispositions: Vec::new(),
@@ -6356,6 +6365,7 @@ mod tests {
         ev(
             change,
             Payload::VerdictRecorded {
+                basis: Default::default(),
                 tiebreak_reviewer: None,
                 tiebreak_target: None,
                 dispositions: Vec::new(),
@@ -6922,6 +6932,7 @@ mod tests {
         let mut audit = ev(
             "fix",
             Payload::AuditVerdictRecorded {
+                basis: Default::default(),
                 tiebreak_reviewer: None,
                 tiebreak_target: None,
                 dispositions: Vec::new(),
@@ -7284,6 +7295,7 @@ mod tests {
         let mut audit = ev(
             "fix",
             Payload::AuditVerdictRecorded {
+                basis: Default::default(),
                 tiebreak_reviewer: None,
                 tiebreak_target: None,
                 dispositions: Vec::new(),

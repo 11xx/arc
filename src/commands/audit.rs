@@ -839,7 +839,9 @@ pub(super) fn record_audit(
         .or_else(|| st.latest_patchset())
         .map(|patchset| st.held_review_roles(patchset, auditor, &auditor_models))
         .unwrap_or_default();
+    let basis = crate::review_clearance::record_basis(ctx, &st, true, recorded_at, receipt)?;
     let payload = Payload::AuditVerdictRecorded {
+        basis,
         tiebreak_reviewer: tiebreak_reviewer.clone(),
         tiebreak_target: tiebreak_reviewer
             .as_ref()
