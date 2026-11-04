@@ -719,7 +719,7 @@ pub(super) fn record_audit(
         }
         Some(guard) => {
             let events = store.load_events(&change_id)?;
-            match guard.admit(&store, &events, &st)? {
+            match guard.admit(ctx, &store, &events, &st)? {
                 super::receipt::Admission::Published(event_id) => {
                     println!("event: {event_id} (already recorded from this item)");
                     return Ok(super::review::Recorded {

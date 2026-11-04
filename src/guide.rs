@@ -3081,9 +3081,10 @@ RECEIPTS
   itself; a contradiction is refused, never repaired by editing the report.
   A read that clears nothing is recorded and reports its bar. Dispositions
   publish inside the read's own event, which stamps store format 7. Rerunning
-  a receipt prints the event of each item an identical item already
-  published and writes nothing for it, so an interrupted batch resumes; a
-  changed item under a published key is refused. `arc receipt --help` holds
+  a receipt prints the event of each identical item published by the same
+  represented reviewer and model and writes nothing for it, so an interrupted
+  batch resumes; changed content or reviewer identity under a published key
+  is refused. `arc receipt --help` holds
   the shape and the refusal codes.
 
 CONTRIBUTION TRAILERS

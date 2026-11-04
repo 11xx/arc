@@ -2040,9 +2040,10 @@ enum Cmd {
     /// opencode ids start `ses_`; a prefix, a delegate handle or another
     /// harness is refused) or whose model names no effort. Each item is then
     /// recorded or refused on its own, under the change's locks: an item
-    /// whose key an identical item already published prints that event and
-    /// writes nothing, and one published with different content is refused
-    /// (`key-conflict`) naming both digests; a subject that no longer
+    /// whose key an identical item already published for the same represented
+    /// reviewer and model prints that event and writes nothing. Different
+    /// content or reviewer identity is refused (`key-conflict`), naming both
+    /// digests and the recorded and submitted reviewers and models; a subject that no longer
     /// matches (`subject-mismatch`: store, change, patchset, head, base,
     /// brief digest, or for an audit the closure, integrated revision,
     /// source patchset and outstanding debts), a head two patchsets record

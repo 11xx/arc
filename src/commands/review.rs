@@ -1451,7 +1451,7 @@ pub(super) fn record_verdict(
             super::audit::warn_model_disagreement(ctx, "the verdict");
             None
         }
-        Some(guard) => match guard.admit(&store, &events, &st)? {
+        Some(guard) => match guard.admit(ctx, &store, &events, &st)? {
             super::receipt::Admission::Published(event_id) => {
                 println!("event: {event_id} (already recorded from this item)");
                 return Ok(Recorded {

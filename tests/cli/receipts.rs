@@ -281,8 +281,9 @@ fn a_verdict_after_the_template_makes_the_item_stale() {
 /// writes nothing and returns the event; a batch interrupted after its first
 /// item, rerun, publishes only the rest; an item changed under its key is
 /// refused naming both digests, while its unchanged sibling in the same file
-/// is not. Rejects a retry that fails its own frontier check, a second
-/// attribution of one reading, and a conflict raised by a sibling's edit.
+/// is not. A change to only the reviewer session or model conflicts.
+/// Rejects a retry that fails its own frontier check, a second attribution
+/// of one reading, and a conflict raised by a sibling's edit.
 #[test]
 fn an_item_is_published_once_across_retries_and_interruption() {
     let repo = Repo::new();
@@ -329,6 +330,30 @@ fn an_item_is_published_once_across_retries_and_interruption() {
         [events(&repo, "first").len(), events(&repo, "second").len()],
         counts
     );
+
+    // A published key belongs to the represented reviewer and model;
+    // another reader cannot claim the original event as their retry.
+    for (field, value) in [
+        ("session", "01a12b77-6c25-7c01-b325-6e5e44523cc5"),
+        ("model", "fixture-other#xhigh"),
+    ] {
+        let mut other = receipt.clone();
+        other["reviewer"][field] = serde_json::json!(value);
+        let other_path = write_receipt(&repo, "other-reviewer.json", &other);
+        let (code, conflict) = ingest(&repo, "review", &other_path);
+        assert_eq!(code, 1, "{field}: {conflict:#}");
+        for index in 0..2 {
+            assert_eq!(
+                item(&conflict, index)["code"],
+                "key-conflict",
+                "{conflict:#}"
+            );
+        }
+        assert_eq!(
+            [events(&repo, "first").len(), events(&repo, "second").len()],
+            counts
+        );
+    }
 
     let mut edited = receipt.clone();
     edited["items"][0]["body"] = serde_json::json!("a different reading");

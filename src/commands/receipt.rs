@@ -566,6 +566,7 @@ impl ItemGuard {
     /// item's dispositions against the findings on the subject.
     pub(super) fn admit(
         &self,
+        ctx: &Ctx,
         store: &Store,
         events: &[Event],
         st: &ChangeState,
@@ -585,15 +586,27 @@ impl ItemGuard {
             if recorded.key != self.key {
                 continue;
             }
-            if recorded.item_digest == self.item_digest {
+            let recorded_reviewer = event.on_behalf_of.as_deref().unwrap_or(&event.actor);
+            let reviewer = ctx.on_behalf_of.as_deref().unwrap_or(&ctx.actor);
+            if recorded.item_digest == self.item_digest
+                && recorded_reviewer == reviewer
+                && event.model == ctx.resolve_model().model
+            {
                 return Ok(Admission::Published(event.event_id.clone()));
             }
             return Err(refuse(
                 "key-conflict",
                 format!(
                     "item {} was recorded as {} with item digest {}; this item's digest is {}. \
-                     A changed reading needs a fresh template",
-                    self.key, event.event_id, recorded.item_digest, self.item_digest
+                     A changed reading or reviewer needs a fresh template \
+                     (recorded reviewer {recorded_reviewer}, model {:?}; \
+                     submitted reviewer {reviewer}, model {:?})",
+                    self.key,
+                    event.event_id,
+                    recorded.item_digest,
+                    self.item_digest,
+                    event.model,
+                    ctx.resolve_model().model
                 ),
             ));
         }
