@@ -1175,6 +1175,73 @@ fn target_lands_every_member_on_the_named_branch() {
     }
 }
 
+/// Claim: a stack's gate union comes from its selected destination, even
+/// when its recorded target declares the opposite result. Rejects running
+/// the recorded target's gates or leaving destination gates unrun.
+#[test]
+fn a_stack_verifies_the_selected_destinations_gate_union() {
+    for destination_passes in [true, false] {
+        let repo = Repo::new();
+        repo.redeclare_gates(&format!(
+            "[gates.destination]\ncommand = \"{}\"\n",
+            if destination_passes { "true" } else { "false" }
+        ));
+        git(&repo.root, &["branch", "release", "master"]);
+        let release = git_out(&repo.root, &["rev-parse", "release"]);
+        repo.redeclare_gates(&format!(
+            "[gates.recorded]\ncommand = \"{}\"\n",
+            if destination_passes { "false" } else { "true" }
+        ));
+        let master = repo.head(&repo.root);
+        let (lower, _, lower_head) = reviewed_change(&repo, "lower", Some(&release));
+        let (upper, _, upper_head) = reviewed_change(&repo, "upper", Some(&lower_head));
+        let plan = json_stdout(repo.arc(&repo.root).args([
+            "land",
+            &lower,
+            &upper,
+            "--target",
+            "release",
+            "--dry-run",
+            "--json",
+        ]));
+        assert_eq!(plan["shape"], "stack", "{plan}");
+        let landed = repo
+            .arc(&repo.root)
+            .args(["land", &lower, &upper, "--target", "release"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            landed.status.success(),
+            destination_passes,
+            "{}",
+            stderr_of(&landed)
+        );
+        assert_eq!(git_out(&repo.root, &["rev-parse", "master"]), master);
+        assert_eq!(
+            git_out(&repo.root, &["rev-parse", "release"]),
+            if destination_passes {
+                upper_head.as_str()
+            } else {
+                release.as_str()
+            }
+        );
+        let runs: Vec<_> = change_events(&repo, &upper)
+            .into_iter()
+            .filter(|event| event["event_type"] == "verification-recorded")
+            .collect();
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        assert_eq!(runs[0]["gate"], "destination");
+        assert_eq!(runs[0]["revision"], upper_head);
+        assert!(runs[0]["landing"].is_string());
+        for change in [&lower, &upper] {
+            assert_eq!(
+                status(&repo, change)["closure"].is_null(),
+                !destination_passes
+            );
+        }
+    }
+}
+
 /// The member's own events recorded before its landing completed: the last
 /// one is a point `--at` reads the member still open at.
 fn last_event_before_landing(repo: &Repo, change: &str) -> String {

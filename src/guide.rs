@@ -1410,9 +1410,10 @@ RUN A CHANGE
   `landing-pending`, exit 20) and refuse every other terminal transition,
   naming `arc land --recover <attempt>`. The gates every member requires
   run once, with no ledger or change lock held, and their evidence carries
-  `landing: <attempt>`. A stack runs them at its top head; a gate two members
-  declare differently, `binds` included, or one the top head does not
-  declare the same way, refuses. A composed landing runs every member's
+  `landing: <attempt>`. A stack runs the planned gate union at its top head,
+  using the selected destination even when its recorded target differs;
+  a gate two members declare differently, `binds` included, or one the top
+  head does not declare the same way, refuses. A composed landing runs every member's
   gates at the composed head, recorded on its last member. They run in a
   checkout the attempt owns: a slot it leases when the repository declares
   `[slots]`, else a worktree of its own under the worktrees directory. The

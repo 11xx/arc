@@ -2847,11 +2847,12 @@ enum Cmd {
     /// carrying `replayed-unread`. A member no approval covers carries the debt
     /// `integrate --debt` would declare, including an ineligible read's event,
     /// findings reason, qualifiers and assessment basis. Every open member of
-    /// each must-land-together component is named. Each member keeps its own approval and is judged
-    /// against the destination's policy at the revision the landing starts
-    /// from. The gates every member requires run once: a stack's at its top
-    /// head, a composed landing's at its composed head in a checkout the
-    /// attempt owns (a leased slot when `[slots]` is declared, else a worktree
+    /// each must-land-together component is named. Each member keeps its own
+    /// approval and is judged against the destination's policy at the revision the landing starts
+    /// from. The gates every member requires run once: a stack's planned gate
+    /// union at its top head, using the selected destination even when the
+    /// recorded target differs; a composed landing's at its composed head in a
+    /// checkout the attempt owns (a leased slot when `[slots]` is declared, else a worktree
     /// of its own), with the attempt on their evidence; a gate two members
     /// declare differently refuses, and so, for a stack, does one the top head
     /// does not declare the same way. Under the commit guards everything

@@ -1514,7 +1514,7 @@ fn run_attempt(
     } else {
         // One gate run at the top head, with no ledger or change lock held:
         // a gate command may itself run arc.
-        let gated = super::gatekeeping::verify(
+        let gated = super::gatekeeping::verify_landing_stack(
             ctx,
             &top,
             super::gatekeeping::VerifyArgs {
@@ -1542,6 +1542,8 @@ fn run_attempt(
                 bypass: None,
                 landing: Some(attempt.clone()),
             },
+            &pinned.target_branch,
+            &gate_declarations,
         );
         let gate_code = match gated {
             Ok(code) => code,
