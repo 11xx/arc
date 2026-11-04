@@ -312,28 +312,32 @@ pub fn receipt_reply_at(
 ) -> Option<chrono::DateTime<chrono::Utc>> {
     let backends = harness_backends(harness);
     let resolved = resolve_exact(harness, &backends, session).ok()?;
-    let transcript = backends[resolved.backend_index]
-        .transcript(&resolved.session, usize::MAX)
-        .ok()?;
     let expected = serde_json::to_value(verdict).ok()?;
     let echo = format!("{key}: {}", expected.as_str()?);
-    transcript
-        .turns
-        .iter()
-        .filter(|turn| {
-            turn.role == Role::Assistant
-                && turn.kind == TurnKind::Assistant
-                && turn.text_truncated != Some(true)
-        })
-        .filter(|turn| {
-            turn.text.lines().any(|line| line.trim() == echo)
+    let mut earliest = None;
+    backends[resolved.backend_index]
+        .stream_transcript(&resolved.session, None, &mut |turn| {
+            if turn.role != Role::Assistant
+                || turn.kind != TurnKind::Assistant
+                || turn.text_truncated == Some(true)
+            {
+                return Ok(());
+            }
+            let Some(at) = turn.ts.filter(|at| *at >= issued && *at <= ingestion) else {
+                return Ok(());
+            };
+            if turn.text.lines().any(|line| line.trim() == echo)
                 || serde_json::from_str::<serde_json::Value>(&turn.text)
                     .ok()
                     .is_some_and(|value| receipt_judgment(&value, key, &expected))
+            {
+                earliest =
+                    Some(earliest.map_or(at, |prior: chrono::DateTime<chrono::Utc>| prior.min(at)));
+            }
+            Ok(())
         })
-        .filter_map(|turn| turn.ts)
-        .filter(|at| *at >= issued && *at <= ingestion)
-        .min()
+        .ok()?;
+    earliest
 }
 
 fn receipt_judgment(value: &serde_json::Value, key: &str, verdict: &serde_json::Value) -> bool {

@@ -2989,7 +2989,8 @@ REVIEW CLEARANCE
 
   A receipt's basis is the earliest already-existing visible assistant reply
   in the reviewer's exact session that names the item's key and its verdict,
-  within that same window. Echo `<key>: <verdict>` on its own line, or return
+  within that same window. Arc streams the whole recording through tapes;
+  a reply before the ordinary transcript tail remains evidence. Echo `<key>: <verdict>` on its own line, or return
   a JSON item (or receipt with `items`) containing that exact `key` and
   `verdict`. Operator prompts, reasoning, tool calls, a different item or
   verdict, and replies outside the window supply no basis. Without a match,

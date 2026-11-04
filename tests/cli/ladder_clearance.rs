@@ -1344,4 +1344,32 @@ mod basis_time {
         let text = stdout(repo.arc(&repo.root).args(["show", "legacy-time"]));
         assert!(text.contains("inferred, version v2"), "{text}");
     }
+
+    /// A matching reply anywhere in a retained recording supplies the basis.
+    /// Rejects silently falling back when the reply precedes the normal tail window.
+    #[test]
+    fn basis_reply_before_the_session_tail_still_dates_the_read() {
+        let repo = dated_repo();
+        let value = receipt(&repo, "long-session", true);
+        reply(
+            &repo,
+            &format!("{}: approved", value["items"][0]["key"].as_str().unwrap()),
+            EARLY,
+            "assistant",
+        );
+        let day = repo.home.join("codex-state/sessions/2026/07/24");
+        let path = day.join(format!("rollout-2026-07-24T00-00-00-{SESSION}.jsonl"));
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+        let row = json!({"type":"response_item","timestamp":LATE,"payload":{"type":"function_call_output","call_id":"padding","output":"x".repeat(128 * 1024)}});
+        for _ in 0..40 {
+            writeln!(file, "{row}").unwrap();
+        }
+        drop(file);
+        ingest(&repo, &value, true);
+        let shown = show(&repo, "long-session");
+        assert_eq!(judged(&shown, true)["clears"], false, "{shown:#}");
+        assert_eq!(judged(&shown, true)["basis_source"], "session-reply");
+        assert_eq!(read(&shown, true)["basis_time"], EARLY);
+    }
 }
