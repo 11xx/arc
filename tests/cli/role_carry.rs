@@ -3,7 +3,7 @@
 //! to a commit resets it.
 
 use crate::common::*;
-use crate::rewrite::{approved_change, repo_with_gates};
+use crate::rewrite::{approved_change, repo_with_gates, repository_events};
 use std::io::Write as _;
 
 const REVIEWER: &str = "Reviewed-by: Reviewer <reviewer@example.invalid>";
@@ -504,4 +504,160 @@ fn a_debt_waiver_follows_a_role_addition_and_keeps_its_record() {
         .assert()
         .success();
     assert_eq!(debt(&repo), before, "the debt reads as it was recorded");
+}
+
+/// A bundle reaches the same approval carry as dependency-ordered imports,
+/// even when event IDs and transport order put children before their parents.
+/// Rejects judging each new event against a map missing the other new judgments.
+#[test]
+fn importing_role_addition_ancestry_together_matches_sequential_imports() {
+    let repo = repo_with_gates();
+    stdout(repo.arc(&repo.root).args(["begin", "alpha"]));
+    let worktree = repo.home.join(".worktrees/repo-alpha");
+    let mut originals = Vec::new();
+    for name in ["one", "two", "three"] {
+        repo.commit(
+            &worktree,
+            &format!("{name}.txt"),
+            name,
+            &format!("feat: {name}"),
+        );
+        originals.push(repo.head(&worktree));
+    }
+    stdout(repo.arc(&worktree).args(["snapshot", "alpha"]));
+    repo.arc(&worktree)
+        .args(["verify", "alpha", "--all"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["review", "alpha", "--verdict", "approved"])
+        .assert()
+        .success();
+    assert!(approval_valid(&repo, "alpha"));
+
+    let mut mapping: Vec<(String, String)> = Vec::new();
+    for old in &originals {
+        let mut raw = String::from_utf8(raw_commit(&worktree, old)).unwrap();
+        if let Some((parent, successor)) = mapping.last() {
+            raw = raw.replace(
+                &format!("parent {parent}\n"),
+                &format!("parent {successor}\n"),
+            );
+        }
+        let new = write_commit(
+            &worktree,
+            &appending(raw.as_bytes(), format!("\n{REVIEWER}\n").as_bytes()),
+        );
+        mapping.push((old.clone(), new));
+    }
+    git(&worktree, &["reset", "--hard", &mapping.last().unwrap().1]);
+    // Recording children first makes event-ID order oppose the dependencies.
+    for (old, new) in mapping.iter().rev() {
+        repo.arc(&repo.root)
+            .args([
+                "history",
+                "rewrite",
+                "--map",
+                "-",
+                "--reason",
+                "role entries appended",
+            ])
+            .write_stdin(format!("{old} {new}\n"))
+            .assert()
+            .success();
+    }
+    let bundle_path = repo.home.join("alpha.json");
+    repo.arc(&repo.root)
+        .args(["export", "alpha", "--output", bundle_path.to_str().unwrap()])
+        .assert()
+        .success();
+    let bundle: serde_json::Value =
+        serde_json::from_slice(&fs::read(&bundle_path).unwrap()).unwrap();
+    let events = bundle["repository_events"].as_array().unwrap();
+    assert_eq!(events.len(), 3);
+    let clear = || {
+        for path in repository_events(&repo) {
+            fs::remove_file(path).unwrap();
+        }
+        let imports = repo.root.join(".git/arc/imports");
+        if imports.exists() {
+            fs::remove_dir_all(imports).unwrap();
+        }
+        assert!(!approval_valid(&repo, "alpha"));
+    };
+    let judgments = || -> Vec<serde_json::Value> {
+        let events = stdout(
+            repo.arc(&repo.root)
+                .args(["events", "--type", "history-rewritten"]),
+        );
+        events
+            .lines()
+            .map(|line| {
+                let event: serde_json::Value = serde_json::from_str(line).unwrap();
+                event["role_additions"].clone()
+            })
+            .collect()
+    };
+
+    clear();
+    let mut single = bundle.clone();
+    for event in events.iter().rev() {
+        single["repository_events"] = serde_json::json!([event]);
+        fs::write(&bundle_path, serde_json::to_vec(&single).unwrap()).unwrap();
+        repo.arc(&repo.root)
+            .args(["import", bundle_path.to_str().unwrap()])
+            .assert()
+            .success();
+    }
+    assert!(
+        approval_valid(&repo, "alpha"),
+        "sequential imports carry the approval"
+    );
+    let sequential = judgments();
+    assert_eq!(
+        sequential,
+        originals
+            .iter()
+            .rev()
+            .map(|old| serde_json::json!([old]))
+            .collect::<Vec<_>>()
+    );
+    repo.arc(&worktree)
+        .args(["check", "alpha"])
+        .assert()
+        .success();
+
+    for reverse in [false, true] {
+        clear();
+        let mut together = bundle.clone();
+        if reverse {
+            together["repository_events"]
+                .as_array_mut()
+                .unwrap()
+                .reverse();
+        }
+        fs::write(&bundle_path, serde_json::to_vec(&together).unwrap()).unwrap();
+        repo.arc(&repo.root)
+            .args(["import", bundle_path.to_str().unwrap()])
+            .assert()
+            .success();
+        assert_eq!(
+            judgments(),
+            sequential,
+            "bundle import must retain every receiver-derived parent judgment; reversed={reverse}"
+        );
+        assert!(
+            approval_valid(&repo, "alpha"),
+            "bundle import must carry the same approval as sequential imports; reversed={reverse}"
+        );
+        repo.arc(&worktree)
+            .args(["check", "alpha"])
+            .assert()
+            .success();
+        repo.arc(&repo.root)
+            .args(["import", bundle_path.to_str().unwrap()])
+            .assert()
+            .success();
+        assert_eq!(judgments(), sequential, "reimport preserves the judgments");
+    }
 }

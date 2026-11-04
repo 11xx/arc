@@ -1380,8 +1380,10 @@ enum Cmd {
     /// These checks precede event, ref and custody publication. Held received originals are
     /// pinned under `refs/arc/retained/`. A candidate's optional original evidence-request
     /// digest binds its received document and declarant. Records without that intent remain
-    /// readable and importable without establishing a registration retry. A rewrite event's
-    /// retention refs are held under `refs/arc/retained/` for the imported change, and in
+    /// readable and importable without establishing a registration retry. New rewrite
+    /// events discard sender judgments and establish dependency-consistent approval carry
+    /// against local objects (`arc guide rewrites-evidence`). A rewrite event's retention
+    /// refs are held under `refs/arc/retained/` for the imported change, and in
     /// repository scope, where the commit is here; a name that is no retention ref is
     /// refused, and events naming none import unchanged. Once the events are published,
     /// every commit the ledger cites that the bundle's object list delivered, that is here,

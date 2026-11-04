@@ -3448,7 +3448,11 @@ HISTORY REWRITES
   may record historical work, retaining that patchset's review head and its
   stale coverage. Whether a successor is signature-only or a role addition is
   judged when the map is recorded, and again by the receiver when imported
-  (the sender's judgement is dropped), never when a change is read.
+  (the sender's judgement is dropped), never when a change is read. Incoming
+  rewrite events are judged together until receiver-derived parent carry is
+  stable. Their approval carry matches dependency-ordered single-event imports,
+  regardless of event-ID or bundle order; only held judgments and judgments
+  established against local objects supply that carry.
 
 THE HISTORY MODEL
   Git is the accepted history and the object store; arc records what the
