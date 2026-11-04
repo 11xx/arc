@@ -1434,7 +1434,6 @@ mod tests {
             )
         };
         let parse = |markdown: &str| {
-            use std::io::Write;
             use std::process::{Command, Stdio};
             let mut child = Command::new("cmark-gfm")
                 .arg("--nobreaks")
@@ -1442,12 +1441,11 @@ mod tests {
                 .stdout(Stdio::piped())
                 .spawn()
                 .unwrap();
-            child
-                .stdin
-                .take()
-                .unwrap()
-                .write_all(markdown.as_bytes())
-                .unwrap();
+            crate::process_group::write_input(
+                &mut child.stdin.take().unwrap(),
+                markdown.as_bytes(),
+            )
+            .unwrap();
             let output = child.wait_with_output().unwrap();
             assert!(output.status.success());
             output.stdout
