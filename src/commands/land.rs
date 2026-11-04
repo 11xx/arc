@@ -862,6 +862,12 @@ fn plan(
         projected_states.push(selected);
         declarations_used.push(normalized);
     }
+    if union.is_empty() {
+        return refuse(
+            Blocker::GatesNotGreen.exit_code(),
+            "no required gates declared for this landing; declare an integration gate before landing",
+        );
+    }
     // A stack runs one gate set at its top head: every gate a member
     // requires must be one the top head requires, under the same
     // declaration. A composed landing runs the union at its composed head.

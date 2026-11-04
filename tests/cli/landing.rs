@@ -252,6 +252,78 @@ fn stack(repo: &Repo) -> ((String, PathBuf, String), (String, PathBuf, String)) 
     (lower, upper)
 }
 
+/// Claim: an empty required-gate union refuses both planning and execution
+/// before an attempt exists. Rejects: a prepared stack that fails late and
+/// a composed landing prepared without any required gate.
+fn empty_gate_landing_refuses_before_preparation(composed: bool) {
+    let repo = Repo::new();
+    let ((lower, _, _), (upper, _, _)) = if composed {
+        (
+            reviewed_change(&repo, "lower", None),
+            reviewed_change(&repo, "upper", None),
+        )
+    } else {
+        stack(&repo)
+    };
+    let before = repo.head(&repo.root);
+    let events_before = repository_events(&repo);
+    let args = [
+        "land",
+        &lower,
+        &upper,
+        "--debt",
+        "replayed context needs review",
+    ];
+    let dry = repo
+        .arc(&repo.root)
+        .args(args)
+        .args(["--dry-run", "--json"])
+        .output()
+        .unwrap();
+    let run = repo.arc(&repo.root).args(args).output().unwrap();
+    assert_eq!(
+        repo.head(&repo.root),
+        before,
+        "an empty gate set moved the target"
+    );
+    assert_eq!(
+        repository_events(&repo),
+        events_before,
+        "an empty gate set prepared a landing attempt: {}",
+        stderr_of(&run)
+    );
+    for output in [dry, run] {
+        assert_eq!(output.status.code(), Some(5), "{}", stderr_of(&output));
+        assert!(
+            stderr_of(&output).contains("no required gates"),
+            "{}",
+            stderr_of(&output)
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+    for change in [&lower, &upper] {
+        let report = status(&repo, change);
+        assert!(report["closure"].is_null(), "{report}");
+        assert!(report["pending_landing"].is_null(), "{report}");
+    }
+    let intents = repo.root.join(".git/arc/landing-intents");
+    assert!(!intents.exists() || fs::read_dir(intents).unwrap().next().is_none());
+}
+
+#[test]
+fn an_empty_gate_stack_refuses_before_preparing_an_attempt() {
+    empty_gate_landing_refuses_before_preparation(false);
+}
+
+#[test]
+fn an_empty_gate_composition_refuses_before_preparing_an_attempt() {
+    empty_gate_landing_refuses_before_preparation(true);
+}
+
 fn repository_events(repo: &Repo) -> Vec<Value> {
     stdout(repo.arc(&repo.root).args(["events", "--repository"]))
         .lines()

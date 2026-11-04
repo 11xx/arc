@@ -1409,6 +1409,9 @@ RUN A CHANGE
   members requiring it. A composed plan names no head: the replay that
   makes it runs only once the attempt is under way.
 
+  Both planning and execution refuse an empty required-gate union (exit 5),
+  for a stack or a composed landing, before any attempt is prepared.
+
   The intent is written to `landing-intents/<attempt>.json` in the ledger
   directory, and a `landing-prepared` event names the attempt. Until it
   finishes, its members show `pending landing <attempt>` (blocker

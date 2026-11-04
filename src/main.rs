@@ -2867,7 +2867,9 @@ enum Cmd {
     /// findings reason, qualifiers and assessment basis. Every open member of
     /// each must-land-together component is named. Each member keeps its own
     /// approval and is judged against the destination's policy at the revision the landing starts
-    /// from. The gates every member requires run once: a stack's planned gate
+    /// from. Planning and execution refuse an empty required-gate union
+    /// (exit 5) before preparing an attempt, for either shape.
+    /// The gates every member requires run once: a stack's planned gate
     /// union at its top head, using the selected destination even when the
     /// recorded target differs; a composed landing's at its composed head in a
     /// checkout the attempt owns (a leased slot when `[slots]` is declared, else a worktree
@@ -2882,7 +2884,7 @@ enum Cmd {
     /// and refuse every other terminal transition. See `arc guide
     /// change-landing`
     #[command(
-        after_help = "Exit status: 0 when the landing completed, recovered, or was abandoned as asked; a refusal before anything moved exits with its blocker's `arc check` code (3 an approval a replay would outrun without --debt, 7 prerequisite, 11 a replay that conflicts, 19 lands-with, 20 a pending landing, 5 a gate failed); 1 for any other refusal, including a field that moved during the gate or an attempt recovery cannot finish; 17 when a paired replica does not hold integration authority."
+        after_help = "Exit status: 0 when the landing completed, recovered, or was abandoned as asked; a refusal before anything moved exits with its blocker's `arc check` code (3 an approval a replay would outrun without --debt, 7 prerequisite, 11 a replay that conflicts, 19 lands-with, 20 a pending landing, 5 no required gates or a gate failed); 1 for any other refusal, including a field that moved during the gate or an attempt recovery cannot finish; 17 when a paired replica does not hold integration authority."
     )]
     Land {
         /// The changes to land; prerequisites among them come first, and the
