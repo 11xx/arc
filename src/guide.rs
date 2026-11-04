@@ -2054,7 +2054,7 @@ CHECKPOINTS (a revision handed over for testing)
   records holds each one it replaces under
   `refs/arc/retained/repository/<event>/<commit>` (`arc guide
   rewrites-evidence`), with or without `--tag`. `arc doctor` advises on one
-  no ref reaches.
+  no ref reaches and names one this repository no longer holds.
 
   When findings come back, `show` sorts them against the checkpoint. A
   change open at it is integrated (whether the integrated commit is inside
@@ -3363,7 +3363,8 @@ HISTORY REWRITES
   by the current attempt and name the command that finishes the saved intent.
 
   Recorded revisions keep saying what they said; every derived reading follows
-  them forward. `arc doctor` inspects the recorded revisions and reports
+  them forward. `arc doctor` inspects the recorded revisions, a checkpoint's
+  revision and recorded change heads among them, and reports
   `dangling-revision` for missing objects without a recorded rewrite, or
   `unresolved-revision` when a recorded successor is missing.
   Admitted rewrite proof can recover falsification identity without

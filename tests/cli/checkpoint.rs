@@ -421,6 +421,17 @@ fn record_untagged(repo: &Repo, name: &str, revision: &str) -> String {
         .to_string()
 }
 
+fn doctor_findings(repo: &Repo, list: &str, code: &str) -> Vec<String> {
+    let report = json_stdout_any_status(repo.arc(&repo.root).args(["doctor", "--json"]));
+    report[list]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|finding| finding["code"] == code)
+        .map(|finding| finding["detail"].as_str().unwrap().to_string())
+        .collect()
+}
+
 /// Claim: a recorded rewrite that replaces a checkpoint's revision holds the
 /// revision under a retention ref, so garbage collection keeps it and `show`
 /// still judges ancestry from it. Rejects: a checkpoint recorded without
@@ -480,4 +491,39 @@ fn a_rewrite_retains_the_revision_an_untagged_checkpoint_names() {
     assert!(view["landed_since"].is_array(), "{view}");
     assert_eq!(view["changes"][0]["change_id"], flight.as_str());
     assert_eq!(view["changes"][0]["status"], "open");
+}
+
+/// Claim: `arc doctor` advises on a checkpoint revision no ref reaches, and
+/// names a checkpoint whose revision is gone from the repository as a
+/// dangling recorded revision. Rejects: a checkpoint revision left out of
+/// doctor's recorded revisions, so its loss goes unreported.
+#[test]
+fn doctor_names_a_checkpoint_whose_revision_is_absent() {
+    let repo = Repo::new();
+    let tree = git_out(&repo.root, &["rev-parse", "master^{tree}"]);
+    let parent = git_out(&repo.root, &["rev-parse", "master"]);
+    let tested = git_out(
+        &repo.root,
+        &["commit-tree", &tree, "-p", &parent, "-m", "operator build"],
+    );
+    record_untagged(&repo, "lost", &tested);
+    let unretained = doctor_findings(&repo, "advice", "unretained-commit");
+    assert!(
+        unretained
+            .iter()
+            .any(|detail| detail.contains(&tested[..8])
+                && detail.contains("checkpoint lost revision")),
+        "{unretained:?}"
+    );
+
+    collect_garbage(&repo.root);
+    assert!(!has_object(&repo.root, &tested));
+    let dangling = doctor_findings(&repo, "advice", "dangling-revision");
+    assert!(
+        dangling
+            .iter()
+            .any(|detail| detail.contains(&tested[..8])
+                && detail.contains("checkpoint lost revision")),
+        "{dangling:?}"
+    );
 }

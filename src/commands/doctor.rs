@@ -260,7 +260,8 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     Ok(exit)
 }
 
-/// Recorded revisions that Git can no longer resolve.
+/// Recorded revisions that Git can no longer resolve: those a change's events
+/// record, and the revision and change heads each checkpoint recorded.
 ///
 /// A rewrite leaves the ledger intact and its evidence unreachable: every
 /// recorded SHA still says what was verified and reviewed, and none of it can
@@ -286,6 +287,13 @@ fn inspect_dangling_revisions(
                 .entry(revision)
                 .or_default()
                 .insert(format!("{change_id} {what}"));
+        }
+    }
+    // An unreadable repository event is reported by
+    // `inspect_repository_events`, and names no revision here.
+    for event in store.load_repository_events().unwrap_or_default() {
+        for (what, revision) in crate::retention::checkpoint_commits(&event.payload) {
+            wanted.entry(revision.to_string()).or_default().insert(what);
         }
     }
     if wanted.is_empty() {

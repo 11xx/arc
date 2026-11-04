@@ -3297,8 +3297,10 @@ enum Cmd {
     /// that failure. A change whose events fail to reduce is the problem
     /// `unreplayable-change`, naming the change with the reduction error. Admitted active
     /// rewrites prove falsification identity without advancing recorded revisions; dangling
-    /// revision diagnostics still inspect the recorded objects. A reference replay set aside
-    /// because only a withdrawn rewrite map carried it is the advice `set-aside-reference`,
+    /// revision diagnostics still inspect the recorded objects, a checkpoint's revision and
+    /// recorded change heads among them, each finding naming the checkpoint. A reference
+    /// replay set aside because only a withdrawn rewrite map carried it is the advice
+    /// `set-aside-reference`,
     /// naming the change, the event, both revisions and the recovery. A hold release that names no
     /// active hold is the advice `hold-release-names-no-hold`; a change already reported with
     /// a problem is not checked for one. Under `[policy] review_clearance = "assessed"`, a
