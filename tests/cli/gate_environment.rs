@@ -866,3 +866,72 @@ fn a_report_with_no_clean_candidate_checkout_probes_nothing() {
     );
     assert_eq!(runs(), before + 1);
 }
+
+/// Claim: an integration probe owns and removes its checkout on refusal,
+/// without running build preparation. Rejects a malformed preparation
+/// declaration leaking a registered checkout before the probe can run.
+#[test]
+fn integration_probe_removes_its_checkout_despite_invalid_preparation() {
+    let repo = Repo::new();
+    write_script_probe_gate(&repo, "v1");
+    stdout(repo.arc(&repo.root).args(["begin", "env-gate"]));
+    let worktree = repo.home.join(".worktrees/repo-env-gate");
+    fs::write(
+        worktree.join(".arc/worktrees.toml"),
+        "[prepare]\nmode = 'path-stable'\ncommand = ''\n",
+    )
+    .unwrap();
+    repo.commit(&worktree, "work.txt", "work\n", "test: invalid preparation");
+    stdout(repo.arc(&worktree).args(["snapshot", "env-gate"]));
+    let identity = format!("sha256:{:x}", Sha256::digest(b"v1-A"));
+    repo.arc(&worktree)
+        .args([
+            "verify",
+            "env-gate",
+            "--attest",
+            "--gate",
+            "build",
+            "--result",
+            "pass",
+            "--tested-revision",
+            "HEAD",
+            "--execution-host",
+            "fixture",
+            "--runner",
+            "fixture",
+            "--environment",
+            &identity,
+        ])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "reviewer")
+        .args(["review", "env-gate", "--verdict", "approved"])
+        .assert()
+        .success();
+    git(
+        &repo.root,
+        &["worktree", "remove", worktree.to_str().unwrap()],
+    );
+    let before = git_out(&repo.root, &["worktree", "list", "--porcelain"]);
+    let head = repo.head(&repo.root);
+    let output = repo
+        .arc(&repo.root)
+        .env("ARC_TEST_ENV", "B")
+        .args(["integrate", "env-gate"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        git_out(&repo.root, &["worktree", "list", "--porcelain"]),
+        before,
+        "refusal leaked the probe checkout: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert_eq!(output.status.code(), Some(5), "{output:?}");
+    assert_eq!(repo.head(&repo.root), head);
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("worktree preparation command is empty"),
+        "{output:?}"
+    );
+    assert_eq!(registered_worktrees(&repo), 1);
+}

@@ -882,7 +882,7 @@ impl Ctx {
             let commit =
                 gitio::commit_tree_with_parents(&self.cwd, tree, &[], "arc probe checkout")?;
             let path = lifecycle::worktree_path_for(&self.cwd, &format!("{slug}-probe"))?;
-            Ok(Box::new(gatekeeping::ScratchWorktree::create(
+            Ok(Box::new(gatekeeping::ScratchWorktree::create_for_probe(
                 &self.cwd, path, &commit,
             )?))
         };

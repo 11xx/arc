@@ -872,6 +872,24 @@ pub(super) struct ScratchWorktree {
 
 impl ScratchWorktree {
     pub(super) fn create(repo: &Path, path: PathBuf, revision: &str) -> Result<Self> {
+        Self::populate(repo, &path, revision)?;
+        crate::warm_worktree::prepare(&path)?;
+        Ok(Self {
+            repo: repo.to_path_buf(),
+            path,
+        })
+    }
+
+    /// Environment probes observe source without running build preparation.
+    pub(super) fn create_for_probe(repo: &Path, path: PathBuf, revision: &str) -> Result<Self> {
+        Self::populate(repo, &path, revision)?;
+        Ok(Self {
+            repo: repo.to_path_buf(),
+            path,
+        })
+    }
+
+    fn populate(repo: &Path, path: &Path, revision: &str) -> Result<()> {
         let display = path.display().to_string();
         // A checkout an interrupted run left behind is stale by construction:
         // it holds one revision and this run is asking for another.
@@ -887,11 +905,7 @@ impl ScratchWorktree {
                 .with_context(|| format!("cannot create {}", parent.display()))?;
         }
         gitio::git(repo, &["worktree", "add", "--detach", &display, revision])?;
-        crate::warm_worktree::prepare(&path)?;
-        Ok(Self {
-            repo: repo.to_path_buf(),
-            path,
-        })
+        Ok(())
     }
 }
 

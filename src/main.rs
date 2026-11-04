@@ -2579,7 +2579,7 @@ enum Cmd {
     /// A gate's declared environment probe runs against the content being
     /// integrated: in this checkout or the change's worktree when either holds
     /// it clean, otherwise in a checkout made for it and removed before the
-    /// merge or the refusal.
+    /// merge or the refusal. Probe-only checkouts skip build preparation.
     /// The integration event records when the command started on the change
     /// (`started_at`), which `arc stats --round-trip` times its integration
     /// phase from. The integrated revision and closure event are printed

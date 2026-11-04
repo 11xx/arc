@@ -3939,7 +3939,8 @@ RULES THAT CHANGE WHAT YOU DO
     that only observes, such as `status`, `check` or `integrate --dry-run`,
     runs the probe nowhere and counts no receipt: the gate reports
     `needs_evaluation`. `integrate` runs it in a checkout made for the
-    content and removes that before merging or refusing. Readiness counts
+    content, without build preparation, and removes that before merging or
+    refusing. Readiness counts
     the evidence only when the two identities agree; a receipt from another
     environment is reported inapplicable, naming both identities, and a
     receipt with no identity is reported unknown. A probe that yields no
