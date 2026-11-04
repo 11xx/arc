@@ -1422,7 +1422,10 @@ enum Cmd {
     /// audit or post-integration disposition before it integrated, or a post-integration
     /// disposition on a finding that was resolved, accepted-risk, or obsolete when the
     /// change shipped, or a landing completion naming a member at a patchset or source
-    /// head that member's ledger here does not hold. Nonportable cost facts or bindings
+    /// head that member's ledger here does not hold. The bundled member and held
+    /// partners follow the same combined repository history, including rewrites
+    /// arriving with the completion; a signature-only successor needs no newer
+    /// partner patchset. Nonportable cost facts or bindings
     /// refuse transport: recording
     /// locators and unclassified cost reasons are not admitted. A newly admitted candidate
     /// evidence attachment requires its registration's original requested-evidence digest
@@ -2854,12 +2857,15 @@ enum Cmd {
     /// attempt's intent alone, never as a rewrite. A replay that conflicts
     /// stops the attempt and names `arc rebase <member>`. A replayed member
     /// whose own approval read its exact patchset lands only with `--debt`,
-    /// carrying `replayed-unread`. Every open member of each must-land-together
-    /// component is named. Each member keeps its own approval and is judged
-    /// against the destination's policy at the revision the landing starts
-    /// from. The gates every member requires run once: a stack's at its top
-    /// head, a composed landing's at its composed head in a checkout the
-    /// attempt owns (a leased slot when `[slots]` is declared, else a worktree
+    /// carrying `replayed-unread`. A member no approval covers carries the debt
+    /// `integrate --debt` would declare, including an ineligible read's event,
+    /// findings reason, qualifiers and assessment basis. Every open member of
+    /// each must-land-together component is named. Each member keeps its own
+    /// approval and is judged against the destination's policy at the revision the landing starts
+    /// from. The gates every member requires run once: a stack's planned gate
+    /// union at its top head, using the selected destination even when the
+    /// recorded target differs; a composed landing's at its composed head in a
+    /// checkout the attempt owns (a leased slot when `[slots]` is declared, else a worktree
     /// of its own), with the attempt on their evidence; a gate two members
     /// declare differently refuses, and so, for a stack, does one the top head
     /// does not declare the same way. Under the commit guards everything

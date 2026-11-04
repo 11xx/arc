@@ -1511,9 +1511,8 @@ fn validate_import_candidate(
     let candidate = crate::landing::joined(&candidate, &repository_events);
     let mut projected = state::reduce_with_rewrites(&candidate, rewrites)
         .context("combined local and bundled known events are not replayable")?;
-    projected.follow_rewrites(&crate::rewrite::RewriteMap::from_events(
-        repository_events.iter(),
-    )?)?;
+    let combined_rewrites = crate::rewrite::RewriteMap::from_events(repository_events.iter())?;
+    projected.follow_rewrites(&combined_rewrites)?;
     // A completion closes a member only at a patchset that member's ledger
     // here holds: the bundle's change against every completion naming it,
     // and each other member held here against a completion this import
@@ -1535,7 +1534,16 @@ fn validate_import_candidate(
                 if member.change_id != validated.bundle.change_id
                     && held.contains(&member.change_id)
                 {
-                    landings.require_held_patchsets(&store.state(&member.change_id)?)?;
+                    let events = crate::landing::joined(
+                        &store.load_events(&member.change_id)?,
+                        &repository_events,
+                    );
+                    let mut partner =
+                        state::reduce_with_rewrites(&events, rewrites).with_context(|| {
+                            format!("held landing member {} is not replayable", member.change_id)
+                        })?;
+                    partner.follow_rewrites(&combined_rewrites)?;
+                    landings.require_held_patchsets(&partner)?;
                 }
             }
         }

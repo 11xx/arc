@@ -1397,8 +1397,9 @@ RUN A CHANGE
   the member carries `replayed-unread`, naming that approval, its base and
   the parent it landed on (`arc guide debt-obligations`). With `--debt`, a
   member no approval covers carries the debt `integrate --debt` would
-  declare. Each debt is carried inside the completion. A target that
-  integrates with no-ff or receives contributions refuses, and
+  declare. Each debt is carried inside the completion, including an
+  ineligible read's event, findings reason, qualifiers and assessment basis.
+  A target that integrates with no-ff or receives contributions refuses, and
   `integration.history = squash` refuses more than one commit. `--dry-run`
   prints the plan, as `arc-landing-plan/1` with `--json`: the shape, the
   members and their pins (patchset, base, head, whether it is replayed and
@@ -1414,9 +1415,10 @@ RUN A CHANGE
   `landing-pending`, exit 20) and refuse every other terminal transition,
   naming `arc land --recover <attempt>`. The gates every member requires
   run once, with no ledger or change lock held, and their evidence carries
-  `landing: <attempt>`. A stack runs them at its top head; a gate two members
-  declare differently, `binds` included, or one the top head does not
-  declare the same way, refuses. A composed landing runs every member's
+  `landing: <attempt>`. A stack runs the planned gate union at its top head,
+  using the selected destination even when its recorded target differs;
+  a gate two members declare differently, `binds` included, or one the top
+  head does not declare the same way, refuses. A composed landing runs every member's
   gates at the composed head, recorded on its last member. They run in a
   checkout the attempt owns: a slot it leases when the repository declares
   `[slots]`, else a worktree of its own under the worktrees directory. The
@@ -1484,8 +1486,10 @@ RUN A CHANGE
   the member's ledger there does not hold, naming the member and the
   patchset, and writes nothing: the change the bundle carries is checked
   against every completion naming it, and each other member already held
-  against a completion the bundle brings. A member exported at a later
-  patchset is imported before a partner whose bundle carries the
+  against a completion the bundle brings. Both follow the same combined
+  repository history, including rewrites arriving with that completion; a
+  signature-only successor needs no newer partner patchset. A member
+  exported at a later patchset is imported before a partner whose bundle carries the
   completion. Gate evidence
   recorded at a composed head is pinned by
   `refs/arc/tree/<change>/landing-<commit>` until the member closes, so a

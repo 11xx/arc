@@ -147,6 +147,26 @@ struct CompletedVerification {
 }
 
 pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
+    verify_with_landing(ctx, reference, args, None)
+}
+
+/// Verify a stack against the destination and gate union pinned by its plan.
+pub(crate) fn verify_landing_stack(
+    ctx: &Ctx,
+    reference: &str,
+    args: VerifyArgs,
+    target: &str,
+    gates: &[(String, gates::Gate)],
+) -> Result<i32> {
+    verify_with_landing(ctx, reference, args, Some((target, gates)))
+}
+
+fn verify_with_landing(
+    ctx: &Ctx,
+    reference: &str,
+    args: VerifyArgs,
+    landing_gates: Option<(&str, &[(String, gates::Gate)])>,
+) -> Result<i32> {
     let VerifyArgs {
         event,
         all,
@@ -362,7 +382,10 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     // Verification runs an arbitrary command whose effects outlive the
     // refusal, so the identity question is settled before anything executes.
     ctx.ensure_declared_actor(&store)?;
-    let (change_id, st) = ctx.load_state(&store, reference)?;
+    let (change_id, mut st) = ctx.load_state(&store, reference)?;
+    if let Some((target, _)) = landing_gates {
+        st.target_branch = target.to_string();
+    }
     if after_integration {
         return verify_after_integration(
             ctx,
@@ -571,7 +594,14 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         None => ensure_at_change_head(run_ctx, &st)?,
     }
     if all {
-        let gates = ctx.declarations(&st)?.gates;
+        let gates = if let Some((_, planned)) = landing_gates {
+            gates::GatesFile {
+                gates: planned.iter().cloned().collect(),
+                ..Default::default()
+            }
+        } else {
+            ctx.declarations(&st)?.gates
+        };
         let required = gates.required_for_event(&st.profile, event);
         if required.is_empty() {
             bail!("no gates declared for profile {}", st.profile);
