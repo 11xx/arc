@@ -961,3 +961,85 @@ fn a_receipt_reference_without_a_length_reads_and_is_named() {
         "{exported}"
     );
 }
+
+/// The finding `output` of a hand-recorded read reports.
+fn raised_finding(output: &str) -> String {
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix("finding: "))
+        .unwrap_or_else(|| panic!("no finding in {output}"))
+        .to_string()
+}
+
+/// Claim: `arc show` text names the receipt each read was recorded from
+/// and the dispositions it published, for the verdict as for each audit,
+/// as `arc show --json` carries them. Rejects text that renders a receipt
+/// read exactly like a hand-recorded one, so a reader of the text cannot
+/// tell which receipt to fetch or which findings the read disposed.
+#[test]
+fn show_text_names_each_reads_receipt_and_dispositions() {
+    let repo = Repo::new();
+    let findings = repo.home.join("finding.json");
+    fs::write(
+        &findings,
+        r#"[{"severity": "major", "blocking": true, "summary": "races the lock"}]"#,
+    )
+    .unwrap();
+
+    snapshotted(&repo, "shown");
+    let finding = raised_finding(&stdout(
+        repo.arc(&repo.root)
+            .env("ARC_ACTOR", "First Reviewer <first@example.com>")
+            .args(["review", "shown", "--verdict", "changes-requested"])
+            .args(["--cause", "executor", "--findings-json"])
+            .arg(&findings),
+    ));
+    let mut receipt = filled(template(&repo, "verdict", &["shown"]), "changes-requested");
+    receipt["items"][0]["causes"] = serde_json::json!(["executor"]);
+    receipt["items"][0]["dispositions"] = serde_json::json!([
+        {"finding": finding, "disposition": "still-open", "evidence": "the race is still there"},
+    ]);
+    let path = write_receipt(&repo, "shown.json", &receipt);
+    let (code, result) = ingest(&repo, "review", &path);
+    assert_eq!(code, 0, "{result:#}");
+    let key = receipt["items"][0]["key"].as_str().unwrap();
+    let text = stdout(repo.arc(&repo.root).args(["show", "shown"]));
+    let verdict = text
+        .split("\n## Verdict\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n## ").next())
+        .unwrap_or_else(|| panic!("no verdict section: {text}"));
+    assert!(verdict.contains(&format!("receipt `{key}`")), "{verdict}");
+    assert!(
+        verdict.contains(&format!("`{finding}` still-open")),
+        "{verdict}"
+    );
+    assert!(verdict.contains("the race is still there"), "{verdict}");
+
+    owed(&repo, "audited", None);
+    let audit_finding = raised_finding(&stdout(
+        repo.arc(&repo.root)
+            .env("ARC_ACTOR", "First Reviewer <first@example.com>")
+            .args(["audit", "audited", "--verdict", "changes-requested"])
+            .arg("--findings-json")
+            .arg(&findings),
+    ));
+    let mut receipt = filled(template(&repo, "audit", &["audited"]), "changes-requested");
+    receipt["items"][0]["dispositions"] = serde_json::json!([
+        {"finding": audit_finding, "disposition": "fixed"},
+    ]);
+    let path = write_receipt(&repo, "audited.json", &receipt);
+    let (code, result) = ingest(&repo, "audit", &path);
+    assert_eq!(code, 0, "{result:#}");
+    let key = receipt["items"][0]["key"].as_str().unwrap();
+    let text = stdout(repo.arc(&repo.root).args(["show", "audited"]));
+    let line = text
+        .lines()
+        .find(|line| line.contains(&format!("receipt `{key}`")))
+        .unwrap_or_else(|| panic!("no audit line names the receipt: {text}"));
+    assert!(line.starts_with("- ChangesRequested at "), "{line}");
+    assert!(
+        line.contains(&format!("`{audit_finding}` resolved")),
+        "{line}"
+    );
+}

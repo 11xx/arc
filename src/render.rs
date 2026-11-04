@@ -687,6 +687,26 @@ pub fn markdown(
                 let _ = writeln!(w, "- {line}");
             }
         }
+        let receipt = state
+            .verdicts
+            .iter()
+            .find(|entry| entry.event_id == v.event_id)
+            .and_then(|entry| entry.receipt.as_ref());
+        if let Some(receipt) = receipt {
+            let _ = writeln!(w, "- {}", receipt_label(receipt));
+        }
+        for (finding_id, disposition) in inline_dispositions(&state.findings, &v.event_id) {
+            let _ = writeln!(
+                w,
+                "- disposes `{finding_id}` {}{}",
+                disposition.status.as_str(),
+                disposition
+                    .evidence
+                    .as_deref()
+                    .map(|evidence| format!(" — {evidence}"))
+                    .unwrap_or_default()
+            );
+        }
         if let Some(body) = &v.body {
             let _ = writeln!(w, "\n{body}");
         }
@@ -1316,9 +1336,14 @@ pub fn markdown(
             }
         }
         for audit in &report.audit_verdicts {
+            let disposed: Vec<String> = inline_dispositions(&state.audit_findings, &audit.event_id)
+                .map(|(finding_id, disposition)| {
+                    format!("`{finding_id}` {}", disposition.status.as_str())
+                })
+                .collect();
             let _ = writeln!(
                 w,
-                "- {:?} at `{}` by {} ({}){}{}",
+                "- {:?} at `{}` by {} ({}){}{}{}{}",
                 audit.verdict,
                 &audit.revision[..audit.revision.len().min(8)],
                 audit.effective_author(),
@@ -1333,6 +1358,16 @@ pub fn markdown(
                     .as_ref()
                     .map(|extent| format!("; extent: {}", extent.label()))
                     .unwrap_or_default(),
+                audit
+                    .receipt
+                    .as_ref()
+                    .map(|receipt| format!("; {}", receipt_label(receipt)))
+                    .unwrap_or_default(),
+                if disposed.is_empty() {
+                    String::new()
+                } else {
+                    format!("; disposes {}", disposed.join(", "))
+                },
                 audit
                     .body
                     .as_deref()
@@ -3031,6 +3066,29 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
         Payload::ProvisionalIntegrationResolved { provisional_event_id, integration_event_id, reason, .. } => ("provisional-integration-resolved", format!("{provisional_event_id} accepted by {integration_event_id}: {reason}")),
         Payload::Unknown => ("unknown", String::new()),
     }
+}
+
+/// The receipt item a read was recorded from, and the file's digest.
+fn receipt_label(receipt: &crate::model::ReceiptReference) -> String {
+    format!(
+        "receipt `{}` (file sha256 `{}`)",
+        receipt.key,
+        short_sha(&receipt.receipt_digest)
+    )
+}
+
+/// The dispositions the read `event_id` published inside its own event.
+fn inline_dispositions<'a>(
+    findings: &'a BTreeMap<String, crate::state::FindingState>,
+    event_id: &'a str,
+) -> impl Iterator<Item = (&'a str, &'a crate::state::DispositionEntry)> {
+    findings.iter().flat_map(move |(finding_id, finding)| {
+        finding
+            .dispositions
+            .iter()
+            .filter(move |disposition| disposition.event_id == event_id)
+            .map(move |disposition| (finding_id.as_str(), disposition))
+    })
 }
 
 fn disposition_summary(

@@ -572,7 +572,9 @@ enum Cmd {
     /// that are missing, placeholders or session ids print as model not recorded. JSON
     /// production identities and review coverage retain raw values with model_recorded:
     /// false; valid models omit the flag. Audit and verdict detail text validates models
-    /// against their recorded sessions.
+    /// against their recorded sessions. A read recorded from a receipt names the receipt
+    /// item's key and the file's digest, and each finding disposition it published inside
+    /// its own event.
     Show {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
