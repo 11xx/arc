@@ -743,7 +743,8 @@ impl Ctx {
         subject: &crate::state::Patchset,
         at: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<crate::policy::TiebreakReviewer>> {
-        let target = if state.is_closed() {
+        let integrated = state.is_closed();
+        let target = if integrated {
             crate::declarations::accepted_target(state)
         } else {
             &state.target_branch
@@ -770,7 +771,7 @@ impl Ctx {
                     .as_ref()
                     .map(|value| value.observed.as_str()),
                 at,
-                after_integration: state.is_closed(),
+                after_integration: integrated,
             },
             &policy.policy.tiebreak_reviewers,
         )
