@@ -156,6 +156,61 @@ impl Landings {
         self.abandoned.get(attempt)
     }
 
+    /// Refuse a completion naming `state`'s change at a patchset its ledger
+    /// does not hold, or at a source head other than the one that patchset
+    /// records: the closure it derives would claim what the ledger cannot
+    /// show. A head is compared as `state` resolves both, rewrites followed.
+    pub fn require_held_patchsets(&self, state: &ChangeState) -> anyhow::Result<()> {
+        for completion in self.completed.values() {
+            let Payload::LandingCompleted { members, .. } = &completion.payload else {
+                continue;
+            };
+            let Some(member) = members
+                .iter()
+                .find(|member| member.change_id == state.change_id)
+            else {
+                continue;
+            };
+            let Some(patchset) = state
+                .patchsets
+                .iter()
+                .find(|patchset| patchset.id == member.source_patchset_id)
+            else {
+                anyhow::bail!(
+                    "landing completion {} names {} at patchset {}, which its ledger here does \
+                     not hold; nothing was imported",
+                    completion.event_id,
+                    state.change_id,
+                    member.source_patchset_id
+                );
+            };
+            let named = state
+                .closure
+                .as_ref()
+                .filter(|closure| {
+                    closure
+                        .landing
+                        .as_ref()
+                        .is_some_and(|landing| landing.completion_event_id == completion.event_id)
+                })
+                .and_then(|closure| closure.source_head.as_deref())
+                .unwrap_or(&member.source_head);
+            if named != patchset.head {
+                anyhow::bail!(
+                    "landing completion {} names {} at patchset {} with source head {}, but its \
+                     ledger here records {} at {}; nothing was imported",
+                    completion.event_id,
+                    state.change_id,
+                    member.source_patchset_id,
+                    member.source_head,
+                    patchset.id,
+                    patchset.head
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// The events a change's completed landings derive for it, in ID order:
     /// each member's debt, when the landing declared one, then its closure.
     pub fn derived_events(&self, change: &str) -> Vec<Event> {

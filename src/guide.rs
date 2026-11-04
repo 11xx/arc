@@ -1463,7 +1463,14 @@ RUN A CHANGE
   A member exported alone carries every finished landing's events: a
   completion and the gate evidence it names reproduce the member's closure
   via the landing wherever it is imported, with its own range. Admitting a
-  completion needs the capabilities `arc guide replicas` lists. Gate evidence
+  completion needs the capabilities `arc guide replicas` lists. Import
+  refuses a completion naming a member at a patchset, or a source head, that
+  the member's ledger there does not hold, naming the member and the
+  patchset, and writes nothing: the change the bundle carries is checked
+  against every completion naming it, and each other member already held
+  against a completion the bundle brings. A member exported at a later
+  patchset is imported before a partner whose bundle carries the
+  completion. Gate evidence
   recorded at a composed head is pinned by
   `refs/arc/tree/<change>/landing-<commit>` until the member closes, so a
   failed attempt's evidence still names content both stores can hold; no

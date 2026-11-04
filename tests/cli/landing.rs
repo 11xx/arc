@@ -2759,3 +2759,133 @@ fn recovery_frees_the_slot_its_attempt_holds_and_no_other() {
         );
     }
 }
+
+/// `bundle` with the member `change` of its one landing completion edited
+/// by `edit`, written beside it as `name`.
+fn forged_completion(
+    repo: &Repo,
+    bundle: &Path,
+    change: &str,
+    name: &str,
+    edit: impl Fn(&mut Value),
+) -> PathBuf {
+    let mut value: Value = serde_json::from_slice(&fs::read(bundle).unwrap()).unwrap();
+    let completion = value["repository_events"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|event| event["event_type"] == "landing-completed")
+        .expect("the bundle carries its completion");
+    let member = completion["members"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|member| member["change_id"] == change)
+        .unwrap();
+    edit(member);
+    refresh_bundle_checksum(&mut value);
+    let forged = repo.home.join(name);
+    fs::write(&forged, serde_json::to_vec(&value).unwrap()).unwrap();
+    forged
+}
+
+fn import(receiver: &Repo, bundle: &Path) -> std::process::Output {
+    receiver
+        .arc(&receiver.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .output()
+        .unwrap()
+}
+
+/// Claim: import refuses a landing completion that names a member at a
+/// patchset, or at a source head, the member's ledger at the receiver does
+/// not hold, naming the member and the patchset, and writes nothing. That
+/// holds for the change the bundle carries and for another member the
+/// receiver already holds. Rejects deriving a closure that claims a
+/// patchset the receiver never recorded.
+#[test]
+fn an_imported_completion_names_only_patchsets_the_receiver_holds() {
+    let repo = gated_repo();
+    let (first, second) = stack(&repo);
+    let (first, second_worktree) = (first.0, second.1.clone());
+    let second = second.0;
+    let recipient = Repo::new();
+    deliver_git_objects(&repo, &recipient);
+    let early = export_to(&repo, &second, "second-early.json");
+    let imported = import(&recipient, &early);
+    assert!(imported.status.success(), "{}", stderr_of(&imported));
+
+    // The second member moves on to a patchset the recipient never sees.
+    repo.commit(&second_worktree, "more.txt", "more\n", "feat: more");
+    stdout(repo.arc(&second_worktree).args(["snapshot", &second]));
+    repo.arc(&second_worktree)
+        .args(["review", &second, "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["land", &first, &second])
+        .assert()
+        .success();
+    let first_bundle = export_to(&repo, &first, "first.json");
+    let second_bundle = export_to(&repo, &second, "second.json");
+    let first_head = git_out(&repo.root, &["rev-parse", "master~2"]);
+
+    let fresh = Repo::new();
+    deliver_git_objects(&repo, &fresh);
+    let refusals = [
+        (
+            forged_completion(&repo, &second_bundle, &second, "patchset.json", |member| {
+                member["source_patchset_id"] = json!("ps-09")
+            }),
+            vec![second.as_str(), "ps-09"],
+        ),
+        (
+            forged_completion(&repo, &second_bundle, &second, "head.json", |member| {
+                member["source_head"] = json!(first_head)
+            }),
+            vec![second.as_str(), "ps-02", first_head.as_str()],
+        ),
+    ];
+    for (forged, named) in &refusals {
+        let refused = import(&fresh, forged);
+        assert!(!refused.status.success(), "{}", forged.display());
+        let stderr = stderr_of(&refused);
+        assert!(
+            named.iter().all(|name| stderr.contains(name)),
+            "{named:?}: {stderr}"
+        );
+        assert!(!fresh.root.join(".git/arc/changes").exists(), "{stderr}");
+    }
+
+    // The recipient holds the second member at its first patchset only: a
+    // completion closing it at its second refuses until that arrives.
+    deliver_git_objects(&repo, &recipient);
+    let refused = import(&recipient, &first_bundle);
+    assert!(!refused.status.success());
+    assert!(
+        stderr_of(&refused).contains(&second) && stderr_of(&refused).contains("ps-02"),
+        "{}",
+        stderr_of(&refused)
+    );
+    assert!(
+        !recipient
+            .arc(&recipient.root)
+            .args(["status", &first])
+            .output()
+            .unwrap()
+            .status
+            .success(),
+        "the refused import wrote the first member"
+    );
+    assert!(status(&recipient, &second)["closure"].is_null());
+    for bundle in [&second_bundle, &first_bundle] {
+        let imported = import(&recipient, bundle);
+        assert!(imported.status.success(), "{}", stderr_of(&imported));
+    }
+    for change in [&first, &second] {
+        assert_eq!(
+            status(&recipient, change)["closure"]["outcome"],
+            "integrated"
+        );
+    }
+}

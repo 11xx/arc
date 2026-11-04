@@ -1411,7 +1411,9 @@ enum Cmd {
     /// is a change history no command could have written: work after the change closed, an
     /// audit or post-integration disposition before it integrated, or a post-integration
     /// disposition on a finding that was resolved, accepted-risk, or obsolete when the
-    /// change shipped. Nonportable cost facts or bindings refuse transport: recording
+    /// change shipped, or a landing completion naming a member at a patchset or source
+    /// head that member's ledger here does not hold. Nonportable cost facts or bindings
+    /// refuse transport: recording
     /// locators and unclassified cost reasons are not admitted. A newly admitted candidate
     /// evidence attachment requires its registration's original requested-evidence digest
     /// and matching declarant. Already-held attachments without an intent stay readable as

@@ -1492,6 +1492,32 @@ fn validate_import_candidate(
     projected.follow_rewrites(&crate::rewrite::RewriteMap::from_events(
         repository_events.iter(),
     )?)?;
+    // A completion closes a member only at a patchset that member's ledger
+    // here holds: the bundle's change against every completion naming it,
+    // and each other member held here against a completion this import
+    // introduces.
+    crate::landing::Landings::from_events(repository_events.iter())
+        .require_held_patchsets(&projected)?;
+    if let Some(store) = store {
+        let introduced = repository_events
+            .iter()
+            .filter(|event| repository.contains_key(&event.event_id))
+            .collect::<Vec<_>>();
+        let held = store.list_change_ids()?;
+        let landings = crate::landing::Landings::from_events(introduced.iter().copied());
+        for event in &introduced {
+            let Payload::LandingCompleted { members, .. } = &event.payload else {
+                continue;
+            };
+            for member in members {
+                if member.change_id != validated.bundle.change_id
+                    && held.contains(&member.change_id)
+                {
+                    landings.require_held_patchsets(&store.state(&member.change_id)?)?;
+                }
+            }
+        }
+    }
     crate::provisional::validate_resolution_history(&projected, &candidate, store)?;
     // Relations on the change are judged by the rules a local write is.
     crate::relations::Relations::replay(&candidate).map_err(|refusal| {
