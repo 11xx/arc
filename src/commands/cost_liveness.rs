@@ -10,7 +10,6 @@
 //! reports nothing, or a harness agent-status does not report on. Raw output
 //! and error text never reach the view.
 
-use crate::perf::Counted;
 use std::collections::BTreeSet;
 use std::io::Read;
 use std::os::unix::process::CommandExt;
@@ -112,14 +111,15 @@ impl Snapshot {
 }
 
 fn run(program: &std::ffi::OsStr) -> Result<String, &'static str> {
-    let mut child = Command::new(program)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .counted_spawn()
-        .map_err(|_| UNAVAILABLE)?;
-    let stdout = child.stdout.take().ok_or(UNAVAILABLE)?;
+    let mut group = crate::process_group::OwnedGroup::spawn(
+        Command::new(program)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0),
+    )
+    .map_err(|_| UNAVAILABLE)?;
+    let stdout = group.child().stdout.take().ok_or(UNAVAILABLE)?;
     let reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
         stdout
@@ -128,32 +128,24 @@ fn run(program: &std::ffi::OsStr) -> Result<String, &'static str> {
             .map(|_| bytes)
     });
     let deadline = Instant::now() + DEADLINE;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => {
+    loop {
+        match group.leader_exited() {
+            Ok(true) => break,
+            Ok(false) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(10));
             }
-            Ok(None) => {
-                let _ = crate::process_group::kill_process_group(child.id());
-                let _ = child.wait();
-                return Err(TIMED_OUT);
-            }
-            Err(_) => {
-                let _ = crate::process_group::kill_process_group(child.id());
-                let _ = child.wait();
-                return Err(FAILED);
-            }
+            Ok(false) => return Err(TIMED_OUT),
+            Err(_) => return Err(FAILED),
         }
-    };
+    }
     // The group leader exited; anything it left holding the pipe goes too.
-    let _ = crate::process_group::kill_process_group(child.id());
+    let _ = group.kill();
     let bytes = crate::process_group::join_before_deadline(reader, Some(deadline), "agent-status")
         .ok()
         .flatten()
         .ok_or(TIMED_OUT)?
         .map_err(|_| UNREADABLE)?;
-    if !status.success() {
+    if !group.stop().map_err(|_| FAILED)?.success() {
         return Err(FAILED);
     }
     if bytes.len() as u64 > OUTPUT_LIMIT {
@@ -165,6 +157,37 @@ fn run(program: &std::ffi::OsStr) -> Result<String, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The status command's group ID stays reserved by its unreaped leader
+    /// until arc has signalled the group. Rejects reaping the leader as soon
+    /// as it exits: with the group's only other member escaped into its own
+    /// session, the reaped ID is free for reuse, and the kill sent to clear
+    /// the leader's pipe would reach whatever process group next takes that
+    /// number.
+    #[test]
+    fn the_status_leader_stays_reserved_until_its_group_is_stopped() {
+        use std::os::unix::fs::PermissionsExt;
+        let cwd = tempfile::tempdir().unwrap();
+        let program = cwd.path().join("agent-status");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\ncd \"$(dirname \"$0\")\"\necho $$ > leader.pid\n\
+             setsid sh -c 'echo $$ > escaped.pid; exec sleep 6' &\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = program.clone();
+        let status = std::thread::spawn(move || run(path.as_os_str()));
+        let observation = crate::process_group::test_support::LeaderObservation::new(cwd.path());
+        let reserved = observation.reserved_after_exit();
+        let answer = status.join().unwrap();
+        observation.kill_escaped();
+        assert!(
+            reserved,
+            "status leader was reaped while its group could still be signalled"
+        );
+        assert_eq!(answer, Err(TIMED_OUT));
+    }
 
     const OWNER: &str = r#""owner": {"pid": 1}"#;
 
