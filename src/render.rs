@@ -305,6 +305,32 @@ pub fn markdown(
     let _ = writeln!(w, "# {} (`{}`)", state.title, state.change_id);
     let _ = writeln!(w);
     let _ = writeln!(w, "- State: {}", report.state);
+    if let Some(context) = &state.review_context {
+        for (event, judgment) in &context.judgments {
+            let _ = writeln!(
+                w,
+                "- Ladder read `{event}`: {}; basis {} ({}, version {})",
+                judgment.kind,
+                judgment.basis_time.to_rfc3339(),
+                judgment.basis_source,
+                judgment
+                    .basis_version
+                    .as_deref()
+                    .unwrap_or("not-established")
+            );
+            for detail in judgment.details.iter().chain(&judgment.conservative_bounds) {
+                let _ = writeln!(w, "  - {detail}");
+            }
+            if let Some(disagreement) = &judgment.assessment_disagreement {
+                let _ = writeln!(
+                    w,
+                    "  - assessment-disagreement: assessment clears {}; ladder clears {:?}",
+                    disagreement.assessment_clears, disagreement.ladder_clears
+                );
+            }
+        }
+    }
+
     for transition in &report.unfinished_provisional_integrations {
         let _ = writeln!(w, "- {}", transition.describe());
     }

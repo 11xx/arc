@@ -948,11 +948,11 @@ pub fn verdict_assessments(
     let selected = state
         .latest_verdict()
         .map(|verdict| verdict.event_id.as_str());
-    let assessed = policy.policy.review_clearance.is_assessed();
     state
         .verdicts
         .iter()
         .map(|verdict| {
+            let assessed = state.verdict_uses_assessed(verdict, policy.policy.review_clearance);
             let gap = assessed
                 .then(|| state.verdict_clearance_gap(verdict))
                 .flatten();
@@ -1186,7 +1186,7 @@ pub fn build(
     fork: Option<String>,
 ) -> Result<StatusReport> {
     let mut selected = state.clone();
-    selected.review_context = declarations.review_context.clone();
+    selected.set_review_context(declarations.review_context.clone());
     let state = &selected;
     let mut report = build_at(
         state,
@@ -1501,6 +1501,9 @@ fn build_report(
         .collect();
     let implementers = reviewed_patchset_implementers(state, policy);
     let mut approval = approval::decide(&ApprovalFacts {
+        ladder_clearance: state
+            .latest_verdict()
+            .and_then(|verdict| state.verdict_ladder_clearance(verdict)),
         latest_patchset: latest_patchset.as_ref(),
         implementers: latest_patchset
             .as_ref()

@@ -838,7 +838,9 @@ pub(super) fn record_audit(
         extent,
     };
     ensure_append_allowed(&st, &payload)?;
-    let mut event = ctx.event(&store, &change_id, payload)?;
+    let recorded_at = chrono::Utc::now();
+    crate::review_clearance::enforce_coordinate(ctx, &st, true, recorded_at)?;
+    let mut event = ctx.event_at(&store, &change_id, recorded_at, payload)?;
     store.append_local_event(&mut event)?;
     println!("audit: {:?} at {revision}", args.verdict);
     for id in finding_ids {
@@ -896,7 +898,14 @@ pub(super) fn record_audit(
             .and_then(|debt| debt.discharged_by_event_id.as_deref());
         if after.debt_outstanding() {
             let owed = match after.debt.as_ref().and_then(|debt| debt.missing) {
-                _ if after.review_clearance.is_assessed() => {
+                _ if after
+                    .review_context
+                    .as_ref()
+                    .is_some_and(|context| context.accepted.assessed() == Some(true)) =>
+                {
+                    "a clearing read under the accepted review ladder"
+                }
+                _ if after.has_assessed_clearance() => {
                     "a clearing read: an audit by a person, or by an agent with --assessment \
                      <file> from `agent-routing assess --purpose clearance --json` that says \
                      it clears and describes the model and effort it recorded"

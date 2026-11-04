@@ -2341,6 +2341,7 @@ impl Store {
         };
         let mut state = crate::state::reduce_following(events, rewrites)?;
         state.review_clearance = self.review_clearance;
+        state.privilege_scope = Some(Arc::clone(scope));
         if let Some(git_dir) = self
             .operator_policy_path
             .as_deref()

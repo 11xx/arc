@@ -934,7 +934,7 @@ impl Ctx {
         evaluate: Option<status::CreateEvaluationCheckout<'_>>,
     ) -> Result<StatusReport> {
         let mut selected = state.clone();
-        selected.review_context = declarations.review_context.clone();
+        selected.set_review_context(declarations.review_context.clone());
         let state = &selected;
         let states = store.readable_states()?;
         let mut report = status::build_at_with_shape(

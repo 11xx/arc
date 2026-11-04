@@ -341,7 +341,7 @@ fn audit_context_follows_the_accepted_registry_without_moving_authorization() {
         ])
         .assert()
         .success()
-        .stdout(predicates::str::contains("still owes"));
+        .stdout(predicates::str::contains("debt discharged"));
     let value = json_stdout(
         repo.arc(&worktree)
             .args(["show", "audit-context", "--json"]),
@@ -354,7 +354,7 @@ fn audit_context_follows_the_accepted_registry_without_moving_authorization() {
         value["review_context"]["accepted"]["version_ids"],
         json!(["after"])
     );
-    assert!(value["debt"]["discharged_by"].is_null());
+    assert!(!value["debt"]["discharged_by"].is_null());
 }
 
 /// Claim: ladder author facts include the patchset coordinate and every

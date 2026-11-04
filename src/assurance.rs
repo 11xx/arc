@@ -210,18 +210,15 @@ fn shipped_range<'a>(state: &'a ChangeState, shipped: &'a Patchset) -> (&'a str,
         .unwrap_or((shipped.base.as_str(), shipped.head.as_str()))
 }
 
-/// Under `review_clearance = "assessed"`, the read kind and findings reason
-/// of a read by `author` at `model` under `assessment`; nothing otherwise.
+/// The shared clearance path's read kind and findings reason under assessed policy.
 fn clearance_of(
-    state: &ChangeState,
-    author: &str,
-    model: Option<&str>,
-    assessment: Option<&crate::model::AuditAssessment>,
+    assessed: bool,
+    gap: Option<crate::state::FindingsReason>,
 ) -> (Option<&'static str>, Option<&'static str>) {
-    if !state.review_clearance.is_assessed() {
+    if !assessed {
         return (None, None);
     }
-    match crate::state::clearance_gap(author, model, assessment) {
+    match gap {
         Some(why) => (Some("findings"), Some(why.as_str())),
         None => (Some("clearing"), None),
     }
@@ -254,10 +251,8 @@ fn reads_of(state: &ChangeState, shipped: Option<&Patchset>) -> Vec<ReadView> {
     let mut reads = Vec::new();
     for verdict in &state.verdicts {
         let (read_kind, findings_reason) = clearance_of(
-            state,
-            verdict.effective_author(),
-            verdict.model.as_deref(),
-            verdict.assessment.as_ref(),
+            state.verdict_uses_assessed(verdict, state.review_clearance),
+            state.verdict_clearance_gap(verdict),
         );
         let (coverage, covers_whole) = if replayed {
             (EDIT_ONLY, false)
@@ -287,10 +282,8 @@ fn reads_of(state: &ChangeState, shipped: Option<&Patchset>) -> Vec<ReadView> {
     }
     for audit in &state.audit_verdicts {
         let (read_kind, findings_reason) = clearance_of(
-            state,
-            audit.effective_author(),
-            audit.model.as_deref(),
-            audit.assessment.as_ref(),
+            state.audit_uses_assessed(audit),
+            state.audit_clearance_gap(audit),
         );
         let (coverage, covers_whole) = coverage_of(state, audit.extent.as_ref());
         reads.push(ReadView {

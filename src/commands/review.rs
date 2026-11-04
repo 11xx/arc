@@ -1425,6 +1425,9 @@ pub(super) fn record_verdict(
         .iter()
         .map(|f| crate::forge_observation::resolve_sources(&source_state.forge, &f.forge_sources))
         .collect::<Result<Vec<_>>>()?;
+    if snapshot_first {
+        crate::review_clearance::enforce_coordinate(ctx, &source_state, false, chrono::Utc::now())?;
+    }
     let snapshot_patchset = if snapshot_first {
         let st = store.state(&change_id)?;
         if gitio::current_branch(&ctx.cwd)?.as_deref() != Some(st.branch.as_str())
@@ -1563,7 +1566,9 @@ pub(super) fn record_verdict(
         receipt: admitted.map(|admitted| admitted.reference),
     };
     ensure_append_allowed(&st, &payload)?;
-    let mut ev = ctx.event(&store, &change_id, payload)?;
+    let recorded_at = chrono::Utc::now();
+    crate::review_clearance::enforce_coordinate(ctx, &st, false, recorded_at)?;
+    let mut ev = ctx.event_at(&store, &change_id, recorded_at, payload)?;
     store.append_local_event(&mut ev)?;
     println!("verdict: {verdict:?} on {patchset_id}");
     if let Some(reason) = &provisional {

@@ -4615,11 +4615,121 @@ impl ChangeState {
     /// Why `verdict` is a findings read under `review_clearance =
     /// "assessed"`, or `None` when it clears.
     pub fn verdict_clearance_gap(&self, verdict: &VerdictEntry) -> Option<FindingsReason> {
-        clearance_gap(
-            verdict.effective_author(),
-            verdict.model.as_deref(),
-            verdict.assessment.as_ref(),
-        )
+        self.read_clearance_gap(&Read::verdict(verdict))
+    }
+
+    pub fn audit_clearance_gap(&self, audit: &AuditVerdictEntry) -> Option<FindingsReason> {
+        self.read_clearance_gap(&Read::audit(audit))
+    }
+
+    pub fn verdict_ladder_clearance(&self, verdict: &VerdictEntry) -> Option<LadderClearance> {
+        self.ladder_clearance(&Read::verdict(verdict))
+    }
+
+    pub fn verdict_uses_assessed(
+        &self,
+        verdict: &VerdictEntry,
+        fallback: crate::policy::ReviewClearance,
+    ) -> bool {
+        self.read_uses_assessed(&Read::verdict(verdict), fallback)
+    }
+
+    pub fn audit_uses_assessed(&self, audit: &AuditVerdictEntry) -> bool {
+        self.read_uses_assessed(&Read::audit(audit), self.review_clearance)
+    }
+
+    pub fn has_assessed_clearance(&self) -> bool {
+        self.review_context
+            .as_ref()
+            .and_then(|context| context.registry(self.is_closed()).assessed())
+            .unwrap_or(self.review_clearance.is_assessed())
+    }
+
+    pub fn set_review_context(&mut self, context: Option<crate::review_context::ReviewContext>) {
+        self.review_context = context;
+        self.settle_debt();
+    }
+
+    fn read_uses_assessed(
+        &self,
+        read: &Read<'_>,
+        fallback: crate::policy::ReviewClearance,
+    ) -> bool {
+        self.review_context
+            .as_ref()
+            .and_then(|context| {
+                context
+                    .registry(crate::review_context::after_integration(
+                        self,
+                        read.event_id,
+                        read.audit,
+                    ))
+                    .assessed()
+            })
+            .unwrap_or(fallback.is_assessed())
+    }
+
+    fn read_clearance_gap(&self, read: &Read<'_>) -> Option<FindingsReason> {
+        self.ladder_clearance(read)
+            .map(|clearance| clearance.gap)
+            .unwrap_or_else(|| clearance_gap(read.author, read.model, read.assessment))
+    }
+
+    fn ladder_clearance(&self, read: &Read<'_>) -> Option<LadderClearance> {
+        let context = self.review_context.as_ref()?;
+        let source = context.registry(crate::review_context::after_integration(
+            self,
+            read.event_id,
+            read.audit,
+        ));
+        let assessed = source.assessed()?;
+        if !assessed {
+            return Some(LadderClearance { gap: None });
+        }
+        let judgment = context.judgments.get(read.event_id);
+        let gap = if !self.review_eligible(read.event_id, read.origin) {
+            Some(FindingsReason::Ladder {
+                code: "review-authority-unavailable",
+                message: "read has no receiver review authority".into(),
+            })
+        } else if read.author_assumed {
+            Some(FindingsReason::Ladder {
+                code: "reader-identity-unestablished",
+                message: "reader identity was assumed rather than declared".into(),
+            })
+        } else {
+            match judgment {
+                Some(judgment) if judgment.clears == Some(true) => read
+                    .assessment
+                    .filter(|_| !crate::coordinate::is_person(read.author))
+                    .filter(|assessment| assessment.binding != Some(AuditorBinding::Bound))
+                    .map(|assessment| FindingsReason::Ladder {
+                        code: "unbound",
+                        message: format!(
+                            "assessment does not bind the read: {}",
+                            assessment
+                                .binding
+                                .and_then(|binding| binding.failure())
+                                .unwrap_or("binding not recorded")
+                        ),
+                    }),
+                Some(judgment) => Some(FindingsReason::Ladder {
+                    code: judgment.reason.unwrap_or("not-established"),
+                    message: judgment
+                        .details
+                        .iter()
+                        .chain(&judgment.conservative_bounds)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                }),
+                None => Some(FindingsReason::Ladder {
+                    code: "not-established",
+                    message: "ladder judgment not established for the read".into(),
+                }),
+            }
+        };
+        Some(LadderClearance { gap })
     }
 
     /// The approval of `subject` that, under `review_clearance =
@@ -4643,9 +4753,13 @@ impl ChangeState {
             let assessment = verdict.assessment.as_ref();
             return Some(IneligibleRead {
                 read: verdict.event_id.clone(),
-                qualifiers: assessment
-                    .map(|assessed| assessed.qualifiers.clone())
-                    .unwrap_or_default(),
+                qualifiers: if matches!(&why, FindingsReason::Ladder { .. }) {
+                    why.qualifiers()
+                } else {
+                    assessment
+                        .map(|assessed| assessed.qualifiers.clone())
+                        .unwrap_or_default()
+                },
                 findings: Some(why.as_str().to_string()),
                 route_version: assessment
                     .and_then(|assessed| assessed.route_version.clone())
@@ -5059,7 +5173,7 @@ impl ChangeState {
     /// Settle what the ledger says of the held debt once every event is in:
     /// what discharged it, and for an `ineligible-review` debt the read it
     /// names and the audits since that left it open.
-    fn settle_debt(&mut self) {
+    pub(crate) fn settle_debt(&mut self) {
         let Some(debt) = self.debt.clone() else {
             return;
         };
@@ -5193,7 +5307,7 @@ impl ChangeState {
     /// The read that would discharge the held debt were `review_clearance`
     /// absent, when the key is in force and the debt is owed under it.
     pub fn discharged_without_clearance(&self) -> Option<String> {
-        if !self.review_clearance.is_assessed() {
+        if !self.has_assessed_clearance() {
             return None;
         }
         let debt = self.debt.as_ref()?;
@@ -5202,6 +5316,7 @@ impl ChangeState {
         }
         let mut legacy = self.clone();
         legacy.review_clearance = crate::policy::ReviewClearance::Legacy;
+        legacy.review_context = None;
         legacy.debt_discharge(debt).map(|(event_id, _)| event_id)
     }
 
@@ -5233,11 +5348,8 @@ impl ChangeState {
                         reviewer: read.author.to_string(),
                         model: read.model.map(str::to_string),
                         reason: why.as_str(),
-                        qualifiers: match why {
-                            FindingsReason::NotClearing(qualifiers) => qualifiers,
-                            _ => Vec::new(),
-                        },
-                        remedy: CLEARANCE_REMEDY,
+                        qualifiers: why.qualifiers(),
+                        remedy: why.remedy(),
                     }),
                     _ => None,
                 },
@@ -5402,18 +5514,19 @@ impl ChangeState {
         if read.verdict == Verdict::CommentOnly {
             return Some(DischargeBar::CommentOnly);
         }
-        if self.review_clearance.is_assessed() {
-            if let Some(why) = read.findings_only() {
+        if self.read_uses_assessed(read, self.review_clearance) {
+            if let Some(why) = self.read_clearance_gap(read) {
                 return Some(DischargeBar::FindingsRead(why));
             }
-            // The policy only tightens: a person clears on authorship, but an
-            // `ineligible-review` debt still needs routing's eligible, bound
-            // word, which a clearing agent read already carries.
+            // Persons retain the eligible bound assessment requirement for
+            // ineligible-review; a clearing ladder agent needs no assessment.
             let eligible = read.assessment.is_some_and(|assessment| {
                 assessment.independence == Independence::Eligible
                     && assessment.binding == Some(AuditorBinding::Bound)
             });
-            if debt.missing == Some(DebtMissing::IneligibleReview) && !eligible {
+            let ladder_agent =
+                self.ladder_clearance(read).is_some() && !crate::coordinate::is_person(read.author);
+            if debt.missing == Some(DebtMissing::IneligibleReview) && !eligible && !ladder_agent {
                 return Some(DischargeBar::NoEligibleAssessment);
             }
             if read.author_assumed {
@@ -5471,17 +5584,10 @@ struct Read<'a> {
     judged: Vec<crate::model::ReaderModel>,
     /// What the read covered. A verdict records no extent.
     extent: Option<&'a crate::extent::Extent>,
+    audit: bool,
 }
 
 impl<'a> Read<'a> {
-    /// Why this read cannot clear under `review_clearance = "assessed"`, or
-    /// `None` when it clears. A person's read is judged by authorship alone,
-    /// because routing seats no people. An agent's read clears only with a
-    /// recorded model and effort and a bound assessment saying it clears.
-    fn findings_only(&self) -> Option<FindingsReason> {
-        clearance_gap(self.author, self.model, self.assessment)
-    }
-
     fn audit(audit: &'a AuditVerdictEntry) -> Self {
         Self {
             event_id: &audit.event_id,
@@ -5494,6 +5600,7 @@ impl<'a> Read<'a> {
             model: audit.model.as_deref(),
             judged: audit.judged_models(),
             extent: audit.extent.as_ref(),
+            audit: true,
         }
     }
 
@@ -5509,11 +5616,13 @@ impl<'a> Read<'a> {
             model: verdict.model.as_deref(),
             judged: verdict.judged_models(),
             extent: None,
+            audit: false,
         }
     }
 }
 
-/// Why a read by `author` at `model` under `assessment` is a findings read
+/// The assessment-only fallback when no applicable target ladder exists: why
+/// a read by `author` at `model` under `assessment` is a findings read
 /// under `review_clearance = "assessed"`, or `None` when it clears. A person
 /// subject (`Name <email>`) clears on authorship alone; an agent clears only
 /// with a recorded `model#effort` and a bound assessment whose `clears` is
@@ -5547,10 +5656,19 @@ pub fn clearance_gap(
     None
 }
 
+#[derive(Debug, Clone)]
+pub struct LadderClearance {
+    pub gap: Option<FindingsReason>,
+}
+
 /// Why an agent's read records findings without clearing, under
 /// `review_clearance = "assessed"`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FindingsReason {
+    Ladder {
+        code: &'static str,
+        message: String,
+    },
     /// The read records no model for its agent subject.
     ModelUnrecorded,
     /// The read carries no routing assessment.
@@ -5568,9 +5686,37 @@ pub enum FindingsReason {
 }
 
 impl FindingsReason {
+    pub fn remedy(&self) -> &'static str {
+        if matches!(self, Self::Ladder { .. }) {
+            "a clearing read under the target review ladder"
+        } else {
+            CLEARANCE_REMEDY
+        }
+    }
+
+    pub fn qualifiers(&self) -> Vec<ReviewQualifier> {
+        match self {
+            Self::NotClearing(qualifiers) => qualifiers.clone(),
+            Self::Ladder {
+                code: "same-family",
+                ..
+            } => vec![ReviewQualifier::SameFamily],
+            Self::Ladder {
+                code: "below-floor",
+                ..
+            } => vec![ReviewQualifier::BelowFloor],
+            Self::Ladder {
+                code: "same-model-lower-effort",
+                ..
+            } => vec![ReviewQualifier::SameModel],
+            _ => Vec::new(),
+        }
+    }
+
     /// The stable name a projection lists beside the read.
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Ladder { code, .. } => code,
             Self::ModelUnrecorded => "model-unrecorded",
             Self::NoAssessment => "no-assessment",
             Self::FirstSchema => "assessment-without-clearance",
@@ -5583,6 +5729,9 @@ impl FindingsReason {
     /// Why the read does not clear, phrased to follow "the read".
     pub fn reason(&self) -> String {
         match self {
+            Self::Ladder { message, .. } => {
+                format!("has a ladder judgment that does not clear: {message}")
+            }
             Self::ModelUnrecorded => "records no model for its agent subject".into(),
             Self::NoAssessment => "carries no routing assessment".into(),
             Self::FirstSchema => {
@@ -5707,6 +5856,11 @@ impl DischargeBar {
                 "is partial coverage ({}): it {}",
                 gap.as_str(),
                 gap.reason()
+            ),
+            Self::FindingsRead(why) if matches!(why, FindingsReason::Ladder { .. }) => format!(
+                "is a findings read: it {}; obtain {}",
+                why.reason(),
+                why.remedy()
             ),
             Self::FindingsRead(why) => format!(
                 "is a findings read: it {}; review_clearance = \"assessed\" clears only a bound \

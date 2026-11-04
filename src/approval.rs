@@ -29,6 +29,7 @@ pub const UNDECLARED_APPROVAL_REASON: &str =
 
 /// The facts an approval's validity follows from.
 pub struct ApprovalFacts<'a> {
+    pub ladder_clearance: Option<crate::state::LadderClearance>,
     /// The newest patchset: the one an approval must name to count.
     pub latest_patchset: Option<&'a Patchset>,
     /// The authoring model coordinates the ledger records for the newest
@@ -154,6 +155,9 @@ pub(crate) fn self_approval_rejection(
 
 /// Why an approval that only finds does not gate under the clearance policy.
 pub(crate) fn findings_rejection(why: &crate::state::FindingsReason) -> String {
+    if matches!(why, crate::state::FindingsReason::Ladder { .. }) {
+        return format!("approval is a findings read: it {}; obtain {} or record the review owed with `arc integrate --debt`", why.reason(), why.remedy());
+    }
     format!(
         "approval is a findings read: it {}; review_clearance = \"assessed\" gates only on a \
          clearing approval, a person's or an agent's bound assessment from `{}` that says it \
@@ -218,12 +222,13 @@ pub fn decide(facts: &ApprovalFacts) -> ApprovalOutcome {
                 && verdict.verdict == Verdict::Approved
                 && names_latest_patchset(&verdict.patchset_id).is_some()
         })
-        .and_then(|verdict| {
-            crate::state::clearance_gap(
+        .and_then(|verdict| match &facts.ladder_clearance {
+            Some(clearance) => clearance.gap.clone(),
+            None => crate::state::clearance_gap(
                 verdict.effective_author(),
                 verdict.model.as_deref(),
                 verdict.assessment.as_ref(),
-            )
+            ),
         });
     let would_reject_findings = clearance_gap.is_some();
     let rejected_findings = would_reject_findings && !debt_waives_current_head;
@@ -655,6 +660,7 @@ mod tests {
     /// patchset's head, with no verdict, waiver, or external decision.
     fn facts<'a>(patchset: &'a Patchset, danger: &'a DangerScope) -> ApprovalFacts<'a> {
         ApprovalFacts {
+            ladder_clearance: None,
             latest_patchset: Some(patchset),
             implementers: &[],
             current_head: Some(HEAD),

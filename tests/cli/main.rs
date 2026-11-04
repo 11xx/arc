@@ -66,6 +66,7 @@ mod integrate;
 mod journal;
 mod journal_exchange;
 mod journal_staging;
+mod ladder_clearance;
 mod landing;
 mod landing_reads;
 mod lifecycle;

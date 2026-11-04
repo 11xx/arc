@@ -249,6 +249,7 @@ struct ContributionLayer {
 struct PolicyLayerPolicy {
     forbid_self_approval: Option<bool>,
     review_clearance: Option<DeclaredClearance>,
+    review_clearance_since: Option<chrono::DateTime<chrono::Utc>>,
     require_declared_actor: Option<bool>,
     debt_count_threshold: Option<usize>,
     debt_age_threshold_seconds: Option<u64>,
@@ -422,7 +423,19 @@ fn layered_with_operator(operator: &Path, project: Option<(String, String)>) -> 
                 policy.forbid_self_approval |= value;
                 sources.record(format!("policy.forbid_self_approval={value}"), &source);
             }
+            if let Some(since) = raw.review_clearance_since {
+                policy.review_clearance_since = Some(
+                    policy
+                        .review_clearance_since
+                        .map_or(since, |old| old.min(since)),
+                );
+                sources.record(
+                    format!("policy.review_clearance_since={}", since.to_rfc3339()),
+                    &source,
+                );
+            }
             if let Some(DeclaredClearance::Assessed) = raw.review_clearance {
+                policy.clearance_coordinates_always |= raw.review_clearance_since.is_none();
                 // `assessed` is the stricter reading, and it wins.
                 let value = ReviewClearance::Assessed;
                 policy.review_clearance = value;
@@ -593,9 +606,8 @@ pub enum ReviewClearance {
     /// assessment's `clears` answer is kept but not read.
     #[default]
     Legacy,
-    /// An agent's read clears only with a bound assessment whose `clears` is
-    /// true; every other agent read is a findings read. A person's read is
-    /// judged by authorship alone.
+    /// The applicable target ladder decides agent capability; without one,
+    /// a bound clearing assessment is required. Persons are judged by identity.
     Assessed,
 }
 
@@ -628,6 +640,10 @@ pub struct Policy {
     /// key absent is [`ReviewClearance::Legacy`].
     #[serde(default)]
     pub review_clearance: ReviewClearance,
+    #[serde(default)]
+    pub review_clearance_since: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip)]
+    pub clearance_coordinates_always: bool,
     /// Refuse to record an event whose effective author nobody declared.
     /// Opt-in, like `forbid_self_approval`: a local ledger cannot verify who
     /// an actor claims to be, but it can decline to invent one.
@@ -650,6 +666,14 @@ pub struct Policy {
     /// refusal — the operator decides with the number, not instead of it.
     #[serde(default)]
     pub worktree_free_floor_bytes: Option<u64>,
+}
+
+impl Policy {
+    pub fn clearance_coordinate_required(&self, at: chrono::DateTime<chrono::Utc>) -> bool {
+        self.review_clearance.is_assessed()
+            && (self.clearance_coordinates_always
+                || self.review_clearance_since.is_none_or(|since| at >= since))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -788,5 +812,31 @@ mod tests {
         let paths = danger.paths.unwrap();
         assert!(paths.contains(&".arc/gates.toml".to_string()));
         assert!(paths.contains(&".arc/policy.toml".to_string()));
+    }
+    /// The start point is inclusive; the instant before it remains legacy record admission.
+    #[test]
+    fn clearance_cutoff_is_inclusive() {
+        let at = chrono::DateTime::parse_from_rfc3339("2026-10-07T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let policy = Policy {
+            review_clearance: ReviewClearance::Assessed,
+            review_clearance_since: Some(at),
+            ..Default::default()
+        };
+        assert!(!policy.clearance_coordinate_required(at - chrono::TimeDelta::nanoseconds(1)));
+        assert!(policy.clearance_coordinate_required(at));
+    }
+    #[test]
+    fn clearance_cutoff_absent_requires_coordinates_from_enablement() {
+        let policy = Policy {
+            review_clearance: ReviewClearance::Assessed,
+            ..Default::default()
+        };
+        assert!(policy.clearance_coordinate_required(chrono::Utc::now()));
+    }
+    #[test]
+    fn clearance_cutoff_does_nothing_without_assessed_policy() {
+        assert!(!Policy::default().clearance_coordinate_required(chrono::Utc::now()));
     }
 }

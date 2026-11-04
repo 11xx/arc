@@ -876,13 +876,12 @@ impl AuditorBinding {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditAssessment {
     pub independence: Independence,
-    /// Whether the reader may record findings against the authors. Absent
+    /// The assessment's findings-eligibility opinion. Absent
     /// on a read assessed by `agent-routing-assessment/1`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub findings: Option<Independence>,
-    /// Whether the read clears the authors' work. Absent on a read assessed
-    /// by `agent-routing-assessment/1`, which never clears under
-    /// `review_clearance = "assessed"`.
+    /// The assessment's capability-clearance opinion. Absent on /1 files;
+    /// assessment-only clearance requires a /2 true answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clears: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1495,7 +1494,7 @@ pub enum Payload {
         /// Routing's assessment of this reviewer against the patchset's
         /// authors, when the caller supplied one. Under
         /// `review_clearance = "assessed"` an agent's verdict clears only
-        /// with one that is bound and says it clears.
+        /// with one that is bound and says it clears when no target ladder applies.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         assessment: Option<AuditAssessment>,
         /// Dispositions of review findings published with this verdict.

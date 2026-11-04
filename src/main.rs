@@ -47,6 +47,7 @@ mod render;
 mod replica;
 mod retention;
 mod review_authors;
+mod review_clearance;
 mod review_context;
 mod review_ladder;
 mod rewrite;
@@ -583,7 +584,7 @@ enum Cmd {
     /// item's key and the file's digest, and each finding disposition it published inside
     /// its own event.
     /// Registry bindings and author facts appear as `review_context`; see
-    /// `arc guide debt-review`.
+    /// `arc guide debt-clearance`.
     Show {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1174,7 +1175,7 @@ enum Cmd {
     /// or session ids print as model not recorded. JSON production identities and review
     /// coverage retain raw values with model_recorded: false; valid models omit the flag.
     /// Registry bindings and author facts appear as `review_context`; see
-    /// `arc guide debt-review`.
+    /// `arc guide debt-clearance`.
     Status {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1566,7 +1567,7 @@ enum Cmd {
     /// Human blocker reports name the guide topics owning their recovery rules.
     #[command(after_help = blockers::exit_status_help())]
     /// Registry bindings and author facts appear as `review_context`; see
-    /// `arc guide debt-review`.
+    /// `arc guide debt-clearance`.
     Check {
         /// Evaluate explicit unsigned staging preparation and local provisional prerequisites.
         /// An authority offer in flight reports an integrate --provisional --dry-run
@@ -1891,12 +1892,11 @@ enum Cmd {
     /// names which model matched, with the recorded model beside an observed
     /// one.
     ///
-    /// Under `[policy] review_clearance = "assessed"` an approval gates only
-    /// when it clears: a person's by authorship alone, an agent's only with a
-    /// recorded model and effort and a bound `--assessment` whose `clears` is
-    /// true. Any other approval is a findings read; the review says so,
-    /// integration refuses it unless `--debt`, and the debt it derives is
-    /// `ineligible-review` naming the read.
+    /// Under assessed policy an approval gates only when it clears. A target
+    /// ladder decides capability when present; otherwise the agent needs a
+    /// recorded model with effort and a bound assessment saying it clears.
+    /// Other approvals are findings reads. Integration requires declared debt
+    /// over such a read and derives ineligible-review; all other bars remain.
     #[command(group(clap::ArgGroup::new("snapshot_attribution").args(["contributors", "solo"]).requires("snapshot")))]
     /// Verdicts retain observed publication authority.
     ///
@@ -1905,7 +1905,11 @@ enum Cmd {
     /// order and wall clock cannot make an earlier approval supersede an unobserved
     /// refusal. Scoped admission, trust and independence determine review eligibility.
     /// Registry bindings and author facts appear as `review_context`; see
-    /// `arc guide debt-review`.
+    /// `arc guide debt-clearance`.
+    /// Under assessed policy with a target ladder, arc decides capability
+    /// from rank, author floors and families. Assessments remain binding
+    /// evidence; their capability opinion cannot override the ladder. The
+    /// complete rule and coordinate cutoff are in `arc guide debt-clearance`.
     Review {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1995,11 +1999,11 @@ enum Cmd {
         /// --json` file, validated, kept and bound to the reviewer's model
         /// and to the reviewed patchset's `Implemented-by` coordinates
         /// exactly as `arc audit --assessment` binds one; a binding that
-        /// fails is recorded and said. Under `[policy] review_clearance =
-        /// "assessed"` an agent's verdict clears only with a bound
-        /// `agent-routing-assessment/2` that says `clears: true`; any other
-        /// agent verdict is a findings read: its findings stand, an approval
-        /// satisfies no integration gate, and it discharges no debt
+        /// fails is recorded and said. With assessed ladder policy, arc
+        /// decides findings eligibility and capability clearance; the file's
+        /// opinion is retained and disagreements are named. Without a ladder,
+        /// assessed clearance requires a bound /2 file saying clears: true.
+        /// Every supplied file still has to bind the coordinate and authors
         #[arg(long = "assessment", value_name = "FILE", requires = "verdict")]
         assessment: Option<PathBuf>,
         /// Record every verdict item of an `arc-review-receipt/1` file from
@@ -2082,6 +2086,9 @@ enum Cmd {
     /// reported. Where the reviewer's session store holds the session, the
     /// model it observed is compared with the receipt's: a difference is
     /// recorded on each read and the assessment binds the observed model
+    /// Receipt reads use the same target ladder, coordinate admission,
+    /// binding, authority and coverage checks as direct reads; see
+    /// `arc guide debt-clearance`.
     Receipt {
         #[command(subcommand)]
         cmd: ReceiptCmd,
@@ -3061,7 +3068,7 @@ enum Cmd {
     /// beside the obligation, which stays open. Every other kind, read
     /// without an assessment, is judged by that authorship rule alone.
     ///
-    /// Under `[policy] review_clearance = "assessed"` an audit discharges a
+    /// Without an applicable ladder, under `[policy] review_clearance = "assessed"` an audit discharges a
     /// debt of any kind only when it clears: a person's audit by the
     /// authorship rule alone (an `ineligible-review` debt still needs an
     /// eligible, bound assessment); an agent's only when it records a model with an
@@ -3076,8 +3083,8 @@ enum Cmd {
     /// had, and otherwise what the debt still owes and why this read leaves
     /// it owed.
     ///
-    /// An `ineligible-review` debt, and under the clearance policy any debt,
-    /// is also cleared only when the assessment's authors answer for the
+    /// A supplied assessment under assessed policy, and the assessment an
+    /// ineligible-review debt otherwise requires, binds only when its authors answer for the
     /// model and effort of every `Implemented-by` line in the audited range:
     /// an author entry covers a line at its own effort, or at any effort
     /// when it names none. An assessment that omits one is recorded with
@@ -3111,6 +3118,10 @@ enum Cmd {
     /// discharges a debt only when that extent covers the debt's, and is otherwise listed
     /// beside the obligation as partial coverage, as is an audit naming no
     /// extent against a debt that names one (`arc guide debt-obligations`).
+    /// Under assessed ladder policy, a clearing agent discharges debt without
+    /// an assessment. A person auditing ineligible-review still needs an
+    /// eligible bound assessment. The accepted registry is the destination
+    /// head; `arc guide debt-clearance` defines the complete rule and cutoff.
     Audit {
         /// Change whose integrated revision was reviewed
         #[arg(required_unless_present = "receipt")]
@@ -3314,7 +3325,7 @@ enum Cmd {
     /// `import` validates `arc-review-ladder/1` JSON or TOML and writes
     /// `.arc/review-ladder.toml` only in the current open change's checkout.
     /// `show` reads the target branch's committed registry, never the
-    /// candidate's file. See `arc guide debt-review` for the registry contract.
+    /// candidate's file. See `arc guide debt-clearance` for the registry contract.
     ReviewLadder {
         #[command(subcommand)]
         cmd: ReviewLadderCmd,

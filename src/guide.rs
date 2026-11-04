@@ -2535,102 +2535,7 @@ REVIEW COVERAGE AND DEBT
   `arc policy show` includes each gate's command, profiles, timeout, and
   environment probe.
 
-  CLEARANCE. Integration approval and debt derivation use the destination
-  branch's committed project policy plus operator policy; an invoking
-  checkout's unmerged clearance setting does not apply. In either policy file,
-  `[policy] review_clearance = "assessed"` makes clearing a routing answer.
-  A person's read (`Name <email>`) is judged
-  by authorship alone, because routing seats no people, and an
-  `ineligible-review` debt still needs routing's eligible, bound assessment
-  as it does without the key. An agent's read
-  clears only when it records a model with an effort and carries a bound
-  assessment (`arc review --assessment`, `arc audit --assessment`) from
-  `agent-routing assess --purpose clearance --json` whose `clears` is true.
-  Every other read is a findings read: no recorded model, no assessment, an
-  `agent-routing-assessment/1`, `clears: false`, or a binding that failed.
-  Its verdict and findings stand and it clears nothing. An approval that is a
-  findings read gates no integration, so `arc integrate` refuses unless
-  `--debt`, which then derives `ineligible-review` naming that read; an
-  `arc external verdict` carries no assessment and is one. A waiver never
-  lifts a refusal at the head, a blocking finding or a failed gate.
-  A findings read discharges no debt, and assurance counts only clearing
-  reads. `arc status --json` and `arc check --json` give each verdict a
-  `kind`, `clearing` or `findings`, and a `findings_reason`. Discharge is
-  judged where the ledger is read, so declaring the key re-judges every debt
-  and `arc doctor` lists those it leaves owed as `clearance-keeps-debt-owed`;
-  a recorded integration's authorization is never rewritten. Absent, independence and authorship
-  decide, and an assessment's `clears` is kept unread.
-
-  LADDER REGISTRY. `arc review-ladder import <file>` validates
-  `arc-review-ladder/1` JSON or TOML and writes TOML at
-  `.arc/review-ladder.toml` in the current open change's checkout. It never
-  redirects a write into the target or another change's checkout; a linked
-  `.arc` directory refuses. A refused input leaves the previous file intact.
-  The table has dated versions with unique ids, RFC 3339 `effective_from`
-  strictly increasing by instant, a nonempty source, and either a nonempty
-  model table or `gap = true`.
-  Each model row's efforts list declares its complete effort set for that
-  version.
-  Gaps omit the model table. Each model names its canonical id, identities,
-  family, superseded flag, and a nonempty list of unique effort rows with
-  positive integer rank and floor. Identities, including canonical model ids,
-  resolve to one model in each version. Every floor must be met by a rank in
-  another family in that version. Corrections refuse as
-  `corrections-unsupported`.
-
-  A table with two families, in either encoding under the same keys:
-
-    schema = "arc-review-ladder/1"
-    [[version]]
-    id = "v2026-10-07"
-    effective_from = "2026-10-07T00:00:00Z"
-    source = "Capability judgment"
-    gap = false
-    [[version.model]]
-    model = "model-a"
-    identities = ["model-a"]
-    family = "lab-a"
-    superseded = false
-    efforts = [{ effort = "high", rank = 1, floor = 1 }]
-    [[version.model]]
-    model = "model-b"
-    identities = ["model-b"]
-    family = "lab-b"
-    superseded = false
-    efforts = [{ effort = "high", rank = 1, floor = 1 }]
-
-  `arc review-ladder show [--json]` prints the accepted registry from the
-  target branch's current committed head. `--change` selects a change's
-  target, including after closure; an integrated change uses its recorded
-  integration destination. Otherwise its branch identifies the current
-  change, or the repository default identifies the target. A missing
-  target, ambiguous change, invalid registry, or absent file refuses with a
-  diagnostic. Candidate and dirty checkout files supply no accepted table.
-  State, status, review and check JSON expose `review_context` when a
-  registry exists or its source is unavailable. Its `authorizing` and
-  `accepted` readings name the target, revision and version ids, or an
-  `unavailable` diagnostic. The authorization reading shares policy's
-  closure basis and explicit projected destination revision; the accepted
-  reading follows the recorded integration destination's current head.
-  Candidate and dirty checkout files do not supply either reading.
-
-  `review_context.authors` is keyed by patchset. Each set is the union of
-  its declared contributors, else its effective author; the subject's
-  production implementer; and every `Implemented-by` coordinate in its
-  range. Production is included even outside the contributor declaration.
-  `landed_authors` reads a replayed member's landed range, excluding earlier
-  composed members. Each set names its `base`, `revision`, identities and
-  deduplicated agent `models`. Persons remain identities without adding
-  model coordinates. A missing or malformed agent model or unreadable range
-  gives `status: not-established` and names the missing evidence. `recorded`
-  means the coordinates are present; capability and clearance still require
-  their own judgment. Carried replay coordinates retain their recorded models.
-
-  Import reports the authorizing registry read at the destination revision
-  that also governs policy. Table publication and inspection confer no
-  clearance; CLEARANCE defines the review requirements. Repositories that
-  govern ladder changes through independent review declare
-  `.arc/review-ladder.toml` in `[danger] paths`.
+  Clearance requirements and the dated registry: `arc guide debt-clearance`.
 
   Work sent to a repository you do not own is decided by its receiver.
   `arc external verdict <change> --verdict <v> --decided-by <who>
@@ -2703,8 +2608,7 @@ REVIEW COVERAGE AND DEBT
     replayed-unread          approved, then replayed by `arc land` onto a
                              base the approval did not read
     contributor-only         verdicts on the shipped patchset, all its own
-    ineligible-review        a read happened, by a reviewer routing does not
-                             count as independent of the author
+    ineligible-review        a read happened without supplying clearance
     independent-review       a read by somebody independent, unsupplied
 
   arc derives the kind from the ledger; `--kind <k>` on `arc debt` and on
@@ -2728,7 +2632,7 @@ REVIEW COVERAGE AND DEBT
 
   An `ineligible-review` declaration names a read that does not count as
   independent. Under assessed clearance a findings approval also derives this
-  kind (CLEARANCE).
+  kind (`arc guide debt-clearance`).
 
   `arc integrate --debt <why> --kind ineligible-review` (and `arc debt`)
   records beside the debt:
@@ -2762,6 +2666,10 @@ REVIEW COVERAGE AND DEBT
   as its route version and basis say, never as current. Within the kind,
   `arc query --debt`, the inbox, catchup and the workspace backlog put a
   `below-floor` read first.
+
+  Under assessed ladder policy, a clearing agent audit discharges it without
+  an assessment. Other cases retain the assessment requirements below; the
+  clearance rule and all independent bars are in `arc guide debt-clearance`.
 
   It clears with an audit that approves or requests changes:
   `arc audit --assessment <file>` with `independence: eligible`, by an
@@ -2922,9 +2830,9 @@ REVIEW COVERAGE AND DEBT
   records that no such read existed, not that one command must supply it. A
   `changes-requested` read is that review; its findings carry what remains.
   A `comment-only` read judged nothing: it is kept as a read and the debt
-  stays owed. An audit whose `--assessment` says `ineligible` discharges no debt of
-  any kind, whatever actor recorded it; a read with no assessment is judged
-  by the actor and model authorship rule alone. `arc audit` prints `debt
+  stays owed. Clearance follows `arc guide debt-clearance`. Without assessed
+  ladder policy, an ineligible assessment leaves debt owed; a read without
+  assessed policy or an assessment is judged by actor and model authorship. `arc audit` prints `debt
   discharged` only when its own read discharged the debt, and otherwise what
   the debt still owes and why this read leaves it owed.
   A debt that carries no production record still has its shipped patchset's
@@ -2934,18 +2842,20 @@ REVIEW COVERAGE AND DEBT
   head is its integrated commit, else the latest one recorded before the
   closure. Only a range with no patchset at all has nothing to compare: its
   read is recorded, and declared trailers alone neither discharge nor refuse
-  it. The `ineligible-review` kind additionally requires
-  an audit that approves or requests changes with an eligible, bound assessment.
+  it. Outside assessed ladder clearance, ineligible-review additionally
+  requires an audit that approves or requests changes with an eligible,
+  bound assessment. Persons retain that requirement
+  under ladder clearance; `arc guide debt-obligations` owns the binding rule.
 
-  Under `review_clearance = "assessed"` (`arc guide debt-review`) only a
+  Under `review_clearance = "assessed"` (`arc guide debt-clearance`) only a
   clearing read discharges a debt of any kind. Every other read since the
   declaration is a findings read: its verdict and findings stand, the debt
   stays owed, and `arc status`, `arc show` and `arc check` list it beside the
-  obligation as `debt.findings_reads`, each with kind `findings`, the reason
-  it does not clear (`model-unrecorded`, `no-assessment`,
-  `assessment-without-clearance`, `not-clearing`, `unbound`,
-  `effort-unrecorded`), and the remedy `agent-routing assess --purpose
-  clearance --json`. A `comment-only` read stays a read that judged nothing.
+  obligation as `debt.findings_reads`, with kind `findings`, its reason and
+  remedy. Ladder reasons name family, floor, explicit lower effort, binding
+  or missing evidence. Without a ladder, assessment-only reasons and the
+  `agent-routing assess --purpose clearance --json` remedy apply. A
+  `comment-only` read remains a read that judged nothing.
 
   Coverage is judged last: a read that every rule above lets discharge the
   debt discharges it only when its extent covers the obligation's (`arc
@@ -3004,6 +2914,158 @@ REVIEW COVERAGE AND DEBT
   trailers are declared text and never supply the missing model.
   That policy governs approval authority, not independent coverage.
 
+REVIEW CLEARANCE
+  Without `[policy] review_clearance = "assessed"`, identity, independence
+  and the existing assessment-independence checks decide; an assessment's
+  `clears` answer is retained without deciding clearance.
+
+  Under assessed policy, integration answers to the destination's committed
+  policy and authorizing ladder. That source is the target head while open,
+  and the target revision recorded by closure once closed. A candidate's
+  own ladder never supplies the judgment that approves it. The accepted
+  registry is the recorded destination branch's current head. It judges
+  audits and other reads recorded after integration, ordered by event id.
+  Candidate and dirty checkout files supply neither source. A foreign
+  closure supplies no local ladder authority: the receiver judges its reads
+  with the accepted registry at their basis times.
+
+  With no applicable ladder file, an agent clears only with its recorded
+  model and effort and a bound `agent-routing-assessment/2` whose `clears`
+  is true. Missing models, missing assessments, `/1` files, false answers and
+  failed bindings remain findings reads. This assessment-only rule does not
+  require a ladder producer or an external process.
+
+  With an applicable ladder, arc owns capability. At the read's basis time,
+  it selects the latest version whose `effective_from` is at or before that
+  instant. A read without recorded basis metadata uses `created_at`, shown
+  as `inferred`. The judgment reports basis time, source and version. A gap
+  names `ladder-gap`; a missing version, reviewer model, model identity,
+  effort or author coordinate gives `not-established` and names the missing
+  piece. Retired rows remain usable. Each model row's efforts list is its
+  complete effort set; an effort outside it is unknown.
+
+  Findings eligibility requires the reader rank to meet every agent author's
+  floor. Reading the same canonical model at a lower named effort is never
+  findings-eligible, even if the numbers meet the floor. Standard efforts
+  order as none, minimal, low, medium, high, xhigh, max; different unknown
+  effort labels on the same model leave their ordering not established.
+  Model aliases resolve through the selected version. With no recorded
+  effort, a reader uses its minimum row rank and an author its maximum row
+  floor. `conservative_bounds` names those missing efforts and distinguishes
+  conservative evidence from a known weak coordinate.
+
+  A findings-eligible agent clears only when its family differs from every
+  agent author's. A two-lab author set needs a third-lab reader or a person;
+  several whole-change reads from the authors' labs do not combine. Both
+  recorded and disagreeing observed reviewer models must satisfy the bar.
+  Actor/self-review independence, observed-model assessment binding, receiver
+  review authority and required extent coverage remain independent bars.
+  No ladder answer grants an imported read authority or covers an unread
+  extent. A reader matching an author identity does not clear.
+
+  An optional assessment still has to bind the read, including its observed
+  coordinate and range authors. Its capability answers do not decide the
+  ladder judgment. Where `clears` disagrees in either direction, the ladder
+  decides capability and `arc show` names `assessment-disagreement`. Binding
+  failures still bar the read even when the capability answer is clearing.
+
+  Persons are exempt from model-coordinate enforcement and capability floors;
+  their identities must remain independent of the complete author set. A
+  person's audit of ineligible-review answers the assessment requirement in
+  `arc guide debt-obligations`. A clearing ladder agent needs no assessment to discharge that
+  kind. No read before the debt declaration or without required coverage
+  discharges it. An approval that only finds cannot gate integration;
+  `arc integrate --debt` derives `ineligible-review` naming that read.
+  Changes-requested findings, failed gates and other refusals remain binding.
+
+  `[policy] review_clearance_since = "<RFC 3339>"` sets an inclusive recording
+  cutoff. At or after it, new agent reads under assessed ladder policy must
+  record a model with effort. Earlier reads may record incomplete coordinates
+  and are judged from their evidence. Without the cutoff, coordinates are
+  required from enablement onward. An assessed layer without a cutoff cannot
+  be relaxed by another layer's later cutoff; otherwise the earliest declared
+  cutoff wins. Person reads are exempt. Coordinate admission does not require
+  the model or effort to be known: unknown coordinates remain not established
+  rather than clearing. No ladder or no assessed policy adds no admission bar.
+
+  `review_context.judgments`, keyed by read event, reports findings eligibility,
+  capability clearance, reasons, missing pieces, basis and conservative bounds.
+  State, status, review and check projections share the same clearance path.
+  Debt is rejudged by the receiver's registry; a recorded integration's
+  authorization remains its recorded fact. Assurance counts only clearing
+  reads; its freshness assessment is separate from debt.
+
+  LADDER REGISTRY. `arc review-ladder import <file>` validates
+  `arc-review-ladder/1` JSON or TOML and writes TOML at
+  `.arc/review-ladder.toml` in the current open change's checkout. It never
+  redirects a write into the target or another change's checkout; a linked
+  `.arc` directory refuses. A refused input leaves the previous file intact.
+  The table has dated versions with unique ids, RFC 3339 `effective_from`
+  strictly increasing by instant, a nonempty source, and either a nonempty
+  model table or `gap = true`.
+  Each model row's efforts list declares its complete effort set for that
+  version.
+  Gaps omit the model table. Each model names its canonical id, identities,
+  family, superseded flag, and a nonempty list of unique effort rows with
+  positive integer rank and floor. Identities, including canonical model ids,
+  resolve to one model in each version. Every floor must be met by a rank in
+  another family in that version. Corrections refuse as
+  `corrections-unsupported`.
+
+  A table with two families, in either encoding under the same keys:
+
+    schema = "arc-review-ladder/1"
+    [[version]]
+    id = "v2026-10-07"
+    effective_from = "2026-10-07T00:00:00Z"
+    source = "Capability judgment"
+    gap = false
+    [[version.model]]
+    model = "model-a"
+    identities = ["model-a"]
+    family = "lab-a"
+    superseded = false
+    efforts = [{ effort = "high", rank = 1, floor = 1 }]
+    [[version.model]]
+    model = "model-b"
+    identities = ["model-b"]
+    family = "lab-b"
+    superseded = false
+    efforts = [{ effort = "high", rank = 1, floor = 1 }]
+
+  `arc review-ladder show [--json]` prints the accepted registry from the
+  target branch's current committed head. `--change` selects a change's
+  target, including after closure; an integrated change uses its recorded
+  integration destination. Otherwise its branch identifies the current
+  change, or the repository default identifies the target. A missing
+  target, ambiguous change, invalid registry, or absent file refuses with a
+  diagnostic. Candidate and dirty checkout files supply no accepted table.
+  State, status, review and check JSON expose `review_context` when a
+  registry exists or its source is unavailable. Its `authorizing` and
+  `accepted` readings name the target, revision and version ids, or an
+  `unavailable` diagnostic. The authorization reading shares policy's
+  closure basis and explicit projected destination revision; the accepted
+  reading follows the recorded integration destination's current head.
+  Candidate and dirty checkout files do not supply either reading.
+
+  `review_context.authors` is keyed by patchset. Each set is the union of
+  its declared contributors, else its effective author; the subject's
+  production implementer; and every `Implemented-by` coordinate in its
+  range. Production is included even outside the contributor declaration.
+  `landed_authors` reads a replayed member's landed range, excluding earlier
+  composed members. Each set names its `base`, `revision`, identities and
+  deduplicated agent `models`. Persons remain identities without adding
+  model coordinates. A missing or malformed agent model or unreadable range
+  gives `status: not-established` and names the missing evidence. `recorded`
+  means the coordinates are present; capability and clearance still require
+  their own judgment. Carried replay coordinates retain their recorded models.
+
+  Import reports the authorizing registry read at the destination revision
+  that also governs policy. Table publication and inspection confer no
+  clearance; CLEARANCE defines the review requirements. Repositories that
+  govern ladder changes through independent review declare
+  `.arc/review-ladder.toml` in `[danger] paths`.
+
 REVIEW ASSURANCE
   Every integrated change carries a dated assurance record: the reads it
   received, each with its model string as recorded, its effort, whether it was
@@ -3036,7 +3098,7 @@ REVIEW ASSURANCE
     when it approves the shipped patchset, an audit when it approves. An
     approval carried across a role-addition rewrite (`arc guide
     rewrites-evidence`) still approves that patchset. Under
-    `review_clearance = "assessed"` (`arc guide debt-review`) a read counts
+    `review_clearance = "assessed"` (`arc guide debt-clearance`) a read counts
     only when it also clears; every read carries `read_kind` `clearing` or
     `findings`, and a findings read its `findings_reason` and `counts: false`.
     Under any policy a read counts only when its `coverage` is `whole`, a
@@ -4883,7 +4945,7 @@ FILES
     [policy] debt_count_threshold = <n>          debt turns advisory past n
     [policy] debt_age_threshold_seconds = <n>    or once the oldest is older
     [policy] worktree_free_floor_bytes = <n>     `arc begin` warns below it
-    [policy] review_clearance = "assessed"       what clears: arc guide debt-review
+    [policy] review_clearance = "assessed"       what clears: arc guide debt-clearance
     [danger] paths = ["<glob>"]                  `*` in a segment, `**` across
     [danger] acknowledged_safe = ["<glob>"]
     [danger] source_roots = ["<dir>/"]           every file inside is classified
@@ -5727,6 +5789,7 @@ const SECTIONS: &[Section] = &[
     Section { name: "debt-review", family: "debt", title: "Review authority, independence and policy", start: "REVIEW COVERAGE AND DEBT" },
     Section { name: "debt-obligations", family: "debt", title: "Debt declarations, coverage and corroboration", start: "  A debt is declared with `arc debt <change> --reason <why>`, or at the merge" },
     Section { name: "debt-recovery", family: "debt", title: "Owed work, audits and findings after integration", start: "  Coming back to owed work:" },
+    Section { name: "debt-clearance", family: "debt", title: "Dated ladder capability and clearance", start: "REVIEW CLEARANCE" },
     Section { name: "assurance", family: "assurance", title: "Review assurance and staleness", start: "REVIEW ASSURANCE" },
     Section { name: "repair", family: "repair", title: "Finding repair and bounded rounds", start: "REVIEW AND REPAIR" },
     Section { name: "contributions", family: "contributions", title: "Contribution roles and canonical Git trailers", start: "CONTRIBUTION TRAILERS" },
