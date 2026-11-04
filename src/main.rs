@@ -1419,7 +1419,10 @@ enum Cmd {
     /// audit or post-integration disposition before it integrated, or a post-integration
     /// disposition on a finding that was resolved, accepted-risk, or obsolete when the
     /// change shipped, or a landing completion naming a member at a patchset or source
-    /// head that member's ledger here does not hold. Nonportable cost facts or bindings
+    /// head that member's ledger here does not hold. The bundled member and held
+    /// partners follow the same combined repository history, including rewrites
+    /// arriving with the completion; a signature-only successor needs no newer
+    /// partner patchset. Nonportable cost facts or bindings
     /// refuse transport: recording
     /// locators and unclassified cost reasons are not admitted. A newly admitted candidate
     /// evidence attachment requires its registration's original requested-evidence digest

@@ -1481,8 +1481,10 @@ RUN A CHANGE
   the member's ledger there does not hold, naming the member and the
   patchset, and writes nothing: the change the bundle carries is checked
   against every completion naming it, and each other member already held
-  against a completion the bundle brings. A member exported at a later
-  patchset is imported before a partner whose bundle carries the
+  against a completion the bundle brings. Both follow the same combined
+  repository history, including rewrites arriving with that completion; a
+  signature-only successor needs no newer partner patchset. A member
+  exported at a later patchset is imported before a partner whose bundle carries the
   completion. Gate evidence
   recorded at a composed head is pinned by
   `refs/arc/tree/<change>/landing-<commit>` until the member closes, so a

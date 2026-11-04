@@ -2957,6 +2957,73 @@ fn an_imported_completion_names_only_patchsets_the_receiver_holds() {
     }
 }
 
+/// Claim: a held partner's existing patchset follows signature-only rewrites
+/// arriving with another member's completion. Rejects requiring a newer
+/// partner patchset merely because its recorded head has a signed successor.
+#[test]
+fn a_held_partner_follows_rewrites_imported_with_the_completion() {
+    let repo = gated_repo();
+    let ((lower, lower_tree, old_lower), (upper, upper_tree, _)) = stack(&repo);
+    let recipient = Repo::new();
+    deliver_git_objects(&repo, &recipient);
+    let early = export_to(&repo, &lower, "lower-before-signing.json");
+    let imported = import(&recipient, &early);
+    assert!(imported.status.success(), "{}", stderr_of(&imported));
+    let held = status(&recipient, &lower);
+    assert_eq!(held["latest_patchset"]["head"], old_lower);
+
+    let key = repo.home.join("signing-key");
+    assert!(Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+        .arg(&key)
+        .status()
+        .unwrap()
+        .success());
+    git(&repo.root, &["config", "gpg.format", "ssh"]);
+    repo.arc(&upper_tree)
+        .args(["rewrite", "sign", "--include-shared", "--key"])
+        .arg(&key)
+        .assert()
+        .success();
+    let signed_lower = repo.head(&lower_tree);
+    assert_ne!(signed_lower, old_lower);
+    repo.arc(&repo.root)
+        .args(["land", &lower, &upper])
+        .assert()
+        .success();
+    let bundle = export_to(&repo, &upper, "upper-completed.json");
+    let value: Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    let completion = value["repository_events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["event_type"] == "landing-completed")
+        .unwrap();
+    let partner = completion["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["change_id"] == lower)
+        .unwrap();
+    assert_eq!(partner["source_patchset_id"], "ps-01");
+    assert_eq!(partner["source_head"], signed_lower);
+    deliver_git_objects(&repo, &recipient);
+    for _ in 0..2 {
+        let imported = import(&recipient, &bundle);
+        assert!(imported.status.success(), "{}", stderr_of(&imported));
+        for change in [&lower, &upper] {
+            assert_eq!(
+                status(&recipient, change)["closure"]["outcome"],
+                "integrated"
+            );
+        }
+        let held = status(&recipient, &lower);
+        assert_eq!(held["latest_patchset"]["head"], signed_lower);
+        assert_eq!(held["closure"]["source_patchset_id"], "ps-01");
+        assert_eq!(held["closure"]["source_head"], signed_lower);
+    }
+}
+
 /// Claim: assurance reads a member landed by replay from the range it
 /// landed as, the composed parent to its integrated revision: its live
 /// fraction measures those commits at the target and its exposure is read
