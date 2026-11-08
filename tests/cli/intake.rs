@@ -356,3 +356,33 @@ fn catchup_says_nothing_about_intake_when_none_is_configured() {
     let json = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
     assert_eq!(json["intake"], serde_json::json!([]), "{json}");
 }
+
+#[test]
+fn a_failing_catchup_leaves_no_intake_command_running() {
+    let repo = Repo::new();
+    let pid_file = repo.home.join("slow.pid");
+    configure_intakes(
+        &repo,
+        &[(
+            "slow",
+            &format!("echo $$ > '{}'; exec sleep 60", pid_file.display()),
+        )],
+    );
+    // Outside any repository catchup fails reading the ledger, after the
+    // count has started.
+    let outside = repo.home.join("not-a-repository");
+    fs::create_dir_all(&outside).unwrap();
+    repo.arc(&outside).arg("catchup").assert().failure();
+
+    let started = Instant::now();
+    while !pid_file.exists() && started.elapsed() < Duration::from_secs(10) {
+        thread::sleep(Duration::from_millis(20));
+    }
+    let pid = fs::read_to_string(&pid_file).unwrap();
+    let running = fs::read_to_string(format!("/proc/{}/stat", pid.trim()))
+        .is_ok_and(|stat| !stat.contains(") Z "));
+    if running {
+        Command::new("kill").arg(pid.trim()).status().unwrap();
+    }
+    assert!(!running, "intake command {} outlived catchup", pid.trim());
+}

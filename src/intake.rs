@@ -58,6 +58,10 @@ impl IntakeCount {
 /// Counts being taken, one thread per configured intake, so they run beside
 /// catchup's own reads and a slow intake costs at most one timeout however
 /// many are configured.
+///
+/// Dropped unread, as when catchup fails before reporting, it still waits
+/// for every count: each ends within its timeout, and an intake command left
+/// running would outlive arc in its own process group.
 pub(crate) struct Pending(Vec<(String, JoinHandle<IntakeCount>)>);
 
 /// Start counting every configured intake from `cwd`.
@@ -86,8 +90,8 @@ pub(crate) fn start(cwd: &Path) -> Pending {
 
 impl Pending {
     /// Every intake's answer, in configuration order.
-    pub(crate) fn finish(self) -> Vec<IntakeCount> {
-        self.0
+    pub(crate) fn finish(mut self) -> Vec<IntakeCount> {
+        std::mem::take(&mut self.0)
             .into_iter()
             .map(|(name, handle)| {
                 handle.join().unwrap_or_else(|_| {
@@ -95,6 +99,14 @@ impl Pending {
                 })
             })
             .collect()
+    }
+}
+
+impl Drop for Pending {
+    fn drop(&mut self) {
+        for (_, handle) in self.0.drain(..) {
+            let _ = handle.join();
+        }
     }
 }
 
