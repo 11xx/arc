@@ -1,13 +1,16 @@
-//! Runs the changelog renderer a project declares in `.arc/changelog.toml`.
+//! Runs a configured program that answers on stdout: the changelog renderer
+//! a project declares in `.arc/changelog.toml`, and the intake count commands
+//! the operator declares in arc's configuration.
 //!
-//! The renderer is the project's program, run with the invoking user's
-//! authority the way a gate is. It runs as argv, never through a shell, from
-//! the repository root, as the leader of its own process group, with the
-//! environment arc was given. It reads one request document on stdin and
-//! answers on stdout. Every way it can fail to answer — it cannot start, it
-//! exits non-zero, it overruns its deadline, it prints more than
-//! `MAX_OUTPUT_BYTES`, or it prints bytes that are not UTF-8 — is a refusal
-//! carrying the tail of its stderr, and the caller writes nothing.
+//! The program runs with the invoking user's authority the way a gate is. It
+//! runs as argv, never through a shell, from the directory its caller names,
+//! as the leader of its own process group, with the environment arc was
+//! given. It reads the request document its caller gives it on stdin, or
+//! gets a null stdin when there is none, and answers on stdout. Every way it
+//! can fail to answer — it cannot start, it exits non-zero, it overruns its
+//! deadline, it prints more than `MAX_OUTPUT_BYTES`, or it prints bytes that
+//! are not UTF-8 — is a refusal carrying the tail of its stderr, and the
+//! caller writes nothing.
 
 use crate::process_group::{read_tail, OwnedGroup, STDERR_TAIL_BYTES};
 use anyhow::{Context, Result};
@@ -19,17 +22,17 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-/// The most stdout a renderer may print. A changelog is text a person reads;
-/// anything larger is a renderer gone wrong, and holding it would cost memory
-/// without bound.
+/// The most stdout a program may print. A changelog is text a person reads
+/// and a count is a few bytes; anything larger is a program gone wrong, and
+/// holding it would cost memory without bound.
 pub const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 
-/// How long a renderer's stdout and stderr may stay open after its group was
+/// How long a program's stdout and stderr may stay open after its group was
 /// killed at the deadline. A descendant that left the group can hold a pipe
 /// open indefinitely, and the refusal must not wait on it.
 const DRAIN_GRACE: Duration = Duration::from_secs(1);
 
-/// Why a renderer produced no usable answer.
+/// Why a program produced no usable answer.
 #[derive(Debug)]
 pub enum Cause {
     Start(std::io::Error),
@@ -63,34 +66,41 @@ enum Stream {
     Stderr,
 }
 
-/// A renderer that did not answer, with what it said on stderr.
+/// A program that did not answer, with what it said on stderr.
 #[derive(Debug)]
 pub struct Refusal {
     pub cause: Cause,
     pub stderr_tail: String,
 }
 
-/// Run `argv` from `cwd` with `request` on stdin and hand back its stdout.
+/// Run `argv` from `cwd` with `request` on stdin, or a null stdin without
+/// one, and hand back its stdout. `role` names the program in arc's own
+/// supervision errors.
 ///
 /// The outer error is arc failing to supervise the child; the inner one is
-/// the renderer failing to answer.
+/// the program failing to answer.
 pub fn run(
+    role: &str,
     argv: &[String],
     cwd: &Path,
-    request: &[u8],
+    request: Option<&[u8]>,
     timeout: Duration,
 ) -> Result<std::result::Result<String, Refusal>> {
     let (program, arguments) = argv
         .split_first()
-        .context("changelog renderer command is empty")?;
+        .with_context(|| format!("{role} command is empty"))?;
     let deadline = Instant::now()
         .checked_add(timeout)
-        .context("changelog renderer timeout is too large")?;
+        .with_context(|| format!("{role} timeout is too large"))?;
     let mut group = match OwnedGroup::spawn(
         Command::new(program)
             .args(arguments)
             .current_dir(cwd)
-            .stdin(Stdio::piped())
+            .stdin(if request.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0),
@@ -104,27 +114,29 @@ pub fn run(
         }
     };
     let child = group.child();
-    let mut stdin = child
-        .stdin
-        .take()
-        .context("changelog renderer stdin pipe unavailable")?;
     let stdout = child
         .stdout
         .take()
-        .context("changelog renderer stdout pipe unavailable")?;
+        .with_context(|| format!("{role} stdout pipe unavailable"))?;
     let stderr = child
         .stderr
         .take()
-        .context("changelog renderer stderr pipe unavailable")?;
+        .with_context(|| format!("{role} stderr pipe unavailable"))?;
 
-    // A renderer may answer without reading its whole request, so a pipe it
+    // A program may answer without reading its whole request, so a pipe it
     // closed is its choice, and one that never got its request fails on its
     // own terms. The writer is never joined: a descendant holding stdin open
     // without reading must not stall arc.
-    let request = request.to_vec();
-    std::thread::spawn(move || {
-        let _ = crate::process_group::write_input(&mut stdin, &request);
-    });
+    if let Some(request) = request {
+        let mut stdin = child
+            .stdin
+            .take()
+            .with_context(|| format!("{role} stdin pipe unavailable"))?;
+        let request = request.to_vec();
+        std::thread::spawn(move || {
+            let _ = crate::process_group::write_input(&mut stdin, &request);
+        });
+    }
 
     let (done_tx, done_rx) = mpsc::sync_channel(2);
     let stdout_done = done_tx.clone();
@@ -147,7 +159,7 @@ pub fn run(
         if !exited {
             exited = group
                 .leader_exited()
-                .context("failed to wait for changelog renderer")?;
+                .with_context(|| format!("failed to wait for {role}"))?;
         }
         while let Ok(stream) = done_rx.try_recv() {
             match stream {
@@ -164,7 +176,7 @@ pub fn run(
         if drain_until.is_none() && Instant::now() >= deadline {
             group
                 .kill()
-                .context("failed to kill overrunning changelog renderer")?;
+                .with_context(|| format!("failed to kill overrunning {role}"))?;
             timed_out = true;
             drain_until = Some(Instant::now() + DRAIN_GRACE);
         }
@@ -174,8 +186,8 @@ pub fn run(
     let stderr_tail = if stderr_finished {
         stderr_reader
             .join()
-            .map_err(|_| anyhow::anyhow!("changelog renderer stderr reader panicked"))?
-            .context("failed to read changelog renderer stderr")?
+            .map_err(|_| anyhow::anyhow!("{role} stderr reader panicked"))?
+            .with_context(|| format!("failed to read {role} stderr"))?
     } else {
         String::new()
     };
@@ -190,12 +202,14 @@ pub fn run(
     }
     let (stdout, oversized) = stdout_reader
         .join()
-        .map_err(|_| anyhow::anyhow!("changelog renderer stdout reader panicked"))?
-        .context("failed to read changelog renderer stdout")?;
+        .map_err(|_| anyhow::anyhow!("{role} stdout reader panicked"))?
+        .with_context(|| format!("failed to read {role} stdout"))?;
     if oversized {
         return refuse(Cause::Oversized);
     }
-    let status = group.stop().context("failed to reap changelog renderer")?;
+    let status = group
+        .stop()
+        .with_context(|| format!("failed to reap {role}"))?;
     if !status.success() {
         return refuse(Cause::Exit(status.code()));
     }
@@ -245,9 +259,10 @@ mod tests {
                 let request = vec![b'x'; 1024 * 1024];
                 let render = |script: &str| {
                     run(
+                        "changelog renderer",
                         &["sh".into(), "-c".into(), script.into()],
                         cwd.path(),
-                        &request,
+                        Some(&request),
                         crate::process_group::test_support::HANG_BOUND,
                     )
                     .unwrap()
@@ -270,6 +285,7 @@ mod tests {
         use crate::process_group::test_support::{ends_within, read_pid, HANG_BOUND};
         let cwd = tempfile::tempdir().unwrap();
         let answer = run(
+            "changelog renderer",
             &[
                 "sh".into(),
                 "-c".into(),
@@ -279,7 +295,7 @@ mod tests {
                 ),
             ],
             cwd.path(),
-            b"",
+            Some(b""),
             HANG_BOUND,
         )
         .unwrap();
@@ -307,9 +323,10 @@ mod tests {
         let path = cwd.path().to_owned();
         let render = std::thread::spawn(move || {
             run(
+                "changelog renderer",
                 &["sh".into(), "-c".into(), leader_script()],
                 &path,
-                b"",
+                Some(b""),
                 HANG_BOUND,
             )
         });

@@ -1127,7 +1127,13 @@ fn render_with_command(
         projection: masked_projection(projection)?,
     };
     let request = serde_json::to_vec(&request)?;
-    let outcome = changelog_render::run(&command.argv, &root, &request, command.timeout)?;
+    let outcome = changelog_render::run(
+        "changelog renderer",
+        &command.argv,
+        &root,
+        Some(&request),
+        command.timeout,
+    )?;
     let consequence = if write {
         format!("{} was not written", config.target)
     } else {
