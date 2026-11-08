@@ -1175,12 +1175,16 @@ pub enum JournalCmd {
     ///
     /// The argument is an address, never a path:
     ///
-    ///   <file>                       an artifact in this project's journal
-    ///   <file>#<entry-id>            one entry of it
-    ///   <entry-id>                   an entry, wherever this journal records it
-    ///   <project>::<file>[#<id>]     another project's, by registered slug or label
-    ///   <journal-dir>::<file>[#<id>] another journal, by its absolute directory
-    ///   <project>::<entry-id>, <journal-dir>::<entry-id>
+    ///   <file>                   an artifact in this project's journal
+    ///   <entry-id>               one entry, wherever this journal records it
+    ///   <project>::<address>     either, in another project's journal, by
+    ///                            registered slug or label
+    ///   <journal-dir>::<address> either, in the journal at that absolute
+    ///                            directory
+    ///
+    /// An entry ID is unique within its journal, so it is the whole address
+    /// of an entry. `<file>#<entry-id>` also reads it, and is refused unless
+    /// that artifact records the entry.
     ///
     /// Any other argument is a topic, which shows its newest live artifact
     /// and names it on stderr. An entry ID is `pos-`, `evd-`, `q-`, `cp-`,
@@ -1222,7 +1226,7 @@ pub enum JournalCmd {
         /// `planner_status: malformed` and credits no planner.
         ///
         /// An entry address emits `arc-journal-entry/1` instead: `address` in
-        /// its canonical `<file>#<id>` spelling under the qualifier given,
+        /// its canonical `<entry-id>` spelling under the qualifier given,
         /// `journal` (hot directory), `file`, `storage` (`hot` or `cold`),
         /// `id`, `kind`, `text` (what stdout prints), `recorded_by`,
         /// `corrected` (field and value pairs in force), `retracted`,
@@ -14812,7 +14816,7 @@ fn show_entry(ctx: &Ctx, address: &JournalAddress, id: &str, json: bool) -> Resu
     };
     if let Some(named) = address.file.as_deref().filter(|named| *named != file) {
         bail!(
-            "{id} is recorded on {file}, not {named}; read it as {}{file}{ENTRY_SEPARATOR}{id}",
+            "{id} is recorded on {file}, not {named}; read it as {}{id}",
             address.prefix()
         );
     }
@@ -14857,7 +14861,7 @@ fn show_entry(ctx: &Ctx, address: &JournalAddress, id: &str, json: bool) -> Resu
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "schema": "arc-journal-entry/1",
-                "address": format!("{}{file}{ENTRY_SEPARATOR}{id}", address.prefix()),
+                "address": format!("{}{id}", address.prefix()),
                 "journal": hot.display().to_string(),
                 "file": file,
                 "storage": storage,
@@ -15122,8 +15126,10 @@ enum AddressJournal {
     Project(String),
 }
 
-/// What `journal show` reads: `[<journal-dir>::|<project>::]<file>[#<entry-id>]`
-/// or `[<journal-dir>::|<project>::]<entry-id>`.
+/// What `journal show` reads: `[<journal-dir>::|<project>::]<entry-id>` for
+/// an entry, `[<journal-dir>::|<project>::]<file>` for an artifact. An entry ID
+/// is unique within its journal; `<file>#<entry-id>` also names one, checked
+/// against the artifact that records it.
 ///
 /// A `<project>::` qualifier is a read convenience. A recorded reference names
 /// the journal directory, since a project label can stop resolving or come to

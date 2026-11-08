@@ -389,12 +389,14 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                      `arc journal discussion <file.md>` reads its stances and
                      open questions. Discovery rows print the filename, so a
                      row is copied, never rebuilt from its fields.
-    known entry      `arc journal show <entry-id>` or `<file.md>#<entry-id>`
-                     prints that one entry, its artifact on stderr.
-    another project  `<project>::<file.md>[#<entry-id>]` or
-                     `<project>::<entry-id>` reads it by registered slug or
-                     label; `<journal-dir>::` names the journal directory and
-                     is the form a recorded reference keeps.
+    known entry      `arc journal show <entry-id>` prints that one entry, its
+                     artifact on stderr; the ID alone is its address.
+                     `<file.md>#<entry-id>` also reads it, checked against
+                     the artifact that records it.
+    another project  `<project>::<entry-id>` or `<project>::<file.md>` reads
+                     it by registered slug or label; `<journal-dir>::` names
+                     the journal directory and is the form a recorded
+                     reference keeps.
     known topic      `arc journal latest <topic> [--kind <kind>]`, matched
                      exactly; `arc journal show <topic>` shows the newest
                      live one and names it on stderr.

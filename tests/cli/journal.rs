@@ -18595,7 +18595,8 @@ fn show_reads_one_entry_by_its_id() {
     assert_eq!(entry["file"], todo);
     assert_eq!(entry["kind"], "evidence");
     assert_eq!(entry["storage"], "hot");
-    assert_eq!(entry["address"], format!("{todo}#{first}"));
+    // The ID is the whole address; the checked `file#id` form is not echoed.
+    assert_eq!(entry["address"], first);
     assert_eq!(entry["entry"]["id"], first);
     assert_eq!(entry["text"], out.trim_end());
 }
@@ -18644,7 +18645,7 @@ fn show_refuses_an_entry_named_under_another_artifact() {
         .failure()
         .stdout(predicates::str::is_empty())
         .stderr(predicates::str::contains(format!(
-            "{id} is recorded on {holder}"
+            "{id} is recorded on {holder}, not {other}; read it as {id}"
         )));
 }
 
@@ -18675,6 +18676,13 @@ fn show_resolves_qualified_addresses_from_another_project() {
         assert!(out.contains("owner finding"), "{address}: {out}");
         assert!(!out.contains("owner body"), "{address}: {out}");
     }
+    let entry = json_stdout(owner.arc(&reader).args([
+        "journal",
+        "show",
+        &format!("{label}::{todo}#{id}"),
+        "--json",
+    ]));
+    assert_eq!(entry["address"], format!("{label}::{id}"));
     let body = stdout(
         owner
             .arc(&reader)
