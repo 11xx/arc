@@ -1170,19 +1170,41 @@ pub enum JournalCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Print one artifact's raw Markdown body to stdout (read-only)
+    /// Print one artifact's raw Markdown body, or one entry inside it, to
+    /// stdout (read-only)
     ///
-    /// Reads the project journal the command runs in: the hot journal first,
-    /// then its cold archive, so an archived artifact reads the same way. The
-    /// argument is a filename, never a path; `arc journal discussion <file.md>`
-    /// reads the same artifact's stances and open questions.
+    /// The argument is an address, never a path:
+    ///
+    ///   <file>                       an artifact in this project's journal
+    ///   <file>#<entry-id>            one entry of it
+    ///   <entry-id>                   an entry, wherever this journal records it
+    ///   <project>::<file>[#<id>]     another project's, by registered slug or label
+    ///   <journal-dir>::<file>[#<id>] another journal, by its absolute directory
+    ///   <project>::<entry-id>, <journal-dir>::<entry-id>
+    ///
+    /// Any other argument is a topic, which shows its newest live artifact
+    /// and names it on stderr. An entry ID is `pos-`, `evd-`, `q-`, `cp-`,
+    /// `cor-` or `ret-` followed by its ULID, and is never read as a topic.
+    /// Each journal is read the same way: the hot journal first, then its
+    /// cold archive, so an archived artifact reads as a live one does.
+    /// `arc journal discussion <file.md>` reads an artifact's stances and
+    /// open questions.
+    ///
+    /// An entry prints the sections its ID heads, verbatim, from the heading
+    /// to the next entry heading; a question's answers follow it. stderr
+    /// names the artifact, the cold archive when it lives there, each
+    /// corrected field in force and any retraction, so stdout is the text a
+    /// reader quotes. A retracted entry still prints. A bare ID this journal
+    /// does not record is refused naming each other known journal that does;
+    /// an ID recorded on a different artifact than the one named is refused
+    /// naming its artifact. A `<project>::` qualifier is a read convenience:
+    /// recorded references name the journal directory.
     /// Records no events; ledger reads do not require a parseable append policy.
     /// JSON artifact and entry recorded_by objects retain the raw model with
     /// model_recorded: false when missing, a placeholder or a session id;
     /// valid models omit the flag.
     Show {
-        /// Artifact filename inside the journal dir (a name, not a path), or a
-        /// topic, which shows its newest live artifact and says which on stderr
+        /// An artifact or entry address, or a topic
         filename: String,
         /// Emit the versioned artifact metadata projection: the body, the
         /// planners credited with `planner_status` and its sources, and
@@ -1198,6 +1220,14 @@ pub enum JournalCmd {
         /// tally reads. Corrections and retractions
         /// list typed amendment events in log order. A correction that fails validation reads
         /// `planner_status: malformed` and credits no planner.
+        ///
+        /// An entry address emits `arc-journal-entry/1` instead: `address` in
+        /// its canonical `<file>#<id>` spelling under the qualifier given,
+        /// `journal` (hot directory), `file`, `storage` (`hot` or `cold`),
+        /// `id`, `kind`, `text` (what stdout prints), `recorded_by`,
+        /// `corrected` (field and value pairs in force), `retracted`,
+        /// `retraction_note`, and `entry`: for a position or evidence, the
+        /// object `arc-journal-artifact/3` lists for it; otherwise null.
         #[arg(long)]
         json: bool,
     },
@@ -2244,9 +2274,10 @@ impl JournalEvent {
             .flatten()
     }
 
-    /// The section identity and ordering key carried by an append event.
-    pub(crate) fn exchange_block(&self) -> Option<(String, String, &str, Option<&str>)> {
-        let (heading, id) = match self.event.as_str() {
+    /// The heading label and ID of the body section an append event records.
+    /// An answer shares its question's ID.
+    fn entry_identity(&self) -> Option<(&'static str, &str)> {
+        Some(match self.event.as_str() {
             "position" => ("Position", self.position_id.as_deref()?),
             "evidence" => ("Evidence", self.evidence_id.as_deref()?),
             "question" => ("Question", self.question_id.as_deref()?),
@@ -2255,7 +2286,12 @@ impl JournalEvent {
             "retraction" => ("Retraction", self.amendment_id.as_deref()?),
             "checkpoint" => ("Work checkpoint", self.checkpoint_id.as_deref()?),
             _ => return None,
-        };
+        })
+    }
+
+    /// The section identity and ordering key carried by an append event.
+    pub(crate) fn exchange_block(&self) -> Option<(String, String, &str, Option<&str>)> {
+        let (heading, id) = self.entry_identity()?;
         let (matcher, key) = if self.event == "answer" {
             let option = self.option.as_deref()?;
             let menu = if self.off_menu == Some(true) {
@@ -4277,10 +4313,33 @@ impl Amendments {
             .or(recorded)
     }
 
+    /// Each field of `target` a correction replaced, with the value in force,
+    /// in the order the fields were first corrected.
+    fn corrected_fields(&self, target: &str) -> Vec<(&str, &str)> {
+        let mut fields: Vec<&str> = Vec::new();
+        for correction in self.corrections.iter().filter(|c| c.target == target) {
+            if !fields.contains(&correction.field.as_str()) {
+                fields.push(&correction.field);
+            }
+        }
+        fields
+            .into_iter()
+            .filter_map(|field| Some((field, self.latest(target, field)?.value.as_str())))
+            .collect()
+    }
+
+    /// The reason `target` was withdrawn, when a retraction in force names it.
+    fn retraction(&self, target: &str) -> Option<&str> {
+        self.retracted
+            .iter()
+            .find(|entry| {
+                entry.target == target && self.applies(target, entry.settlement.as_deref())
+            })
+            .map(|entry| entry.note.as_str())
+    }
+
     fn is_retracted(&self, target: &str) -> bool {
-        self.retracted.iter().any(|entry| {
-            entry.target == target && self.applies(target, entry.settlement.as_deref())
-        })
+        self.retraction(target).is_some()
     }
 
     /// The artifact's own title, when a correction replaced it.
@@ -4792,6 +4851,15 @@ struct JournalResolution {
 /// binding.
 pub fn resolve_dir(cwd: &Path) -> Result<PathBuf> {
     Ok(resolve(cwd)?.directory)
+}
+
+/// The `dir:` line above a listing of artifact rows. The operator journal's
+/// rows read only with `--global`, so its listing says so once.
+fn print_dir_header(dir: &Path) {
+    println!("dir: {}", dir.display());
+    if is_global_dir(dir).unwrap_or(false) {
+        println!("read with: arc journal show --global <file>");
+    }
 }
 
 fn is_global_dir(path: &Path) -> Result<bool> {
@@ -12407,9 +12475,8 @@ fn render_memories(memories: &[ArtifactEntry]) {
     }
     for memory in memories {
         println!(
-            "  {}  {}  {}",
-            memory.timestamp,
-            memory.topic,
+            "  {}  {}",
+            memory.file,
             memory.heading.as_deref().unwrap_or("")
         );
     }
@@ -12561,7 +12628,7 @@ fn global_memories() -> Result<Vec<ArtifactEntry>> {
 }
 
 fn render_global_memories(memories: &[ArtifactEntry]) {
-    println!("global memory:");
+    println!("global memory (read with `arc journal show --global <file>`):");
     if memories.is_empty() {
         println!("  (none)");
     }
@@ -12571,9 +12638,8 @@ fn render_global_memories(memories: &[ArtifactEntry]) {
             .map(|seconds| format!("{}d", seconds / 86400))
             .unwrap_or_else(|| "unknown age".to_string());
         println!(
-            "  {}  {}  {}  ({age})",
-            memory.timestamp,
-            memory.topic,
+            "  {}  {}  ({age})",
+            memory.file,
             memory.heading.as_deref().unwrap_or("")
         );
     }
@@ -12645,20 +12711,13 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
         if !archived {
             render_memories(&memories);
         }
-        println!("dir: {}", dir.display());
+        print_dir_header(&dir);
         println!("artifacts (newest first):");
         if files.is_empty() {
             println!("  (none)");
         }
         for f in &files {
-            let heading = f.heading.as_deref().unwrap_or("");
-            println!(
-                "  {}  {}  {}  {}",
-                f.timestamp,
-                f.topic,
-                f.kind.as_deref().unwrap_or(""),
-                heading
-            );
+            println!("  {}  {}", f.file, f.heading.as_deref().unwrap_or(""));
         }
         println!("journal tail:");
         if journal_tail.is_empty() {
@@ -13446,7 +13505,7 @@ fn open(ctx: &Ctx, kind: Option<String>, json: bool) -> Result<i32> {
             })?
         );
     } else {
-        println!("dir: {}", items.dir);
+        print_dir_header(Path::new(&items.dir));
         println!("{OPEN_TIER_LEGEND}");
         println!("open items (newest first):");
         if items.open.is_empty() {
@@ -14063,19 +14122,24 @@ A discussion argues a proposal to a decision and collects positions; \
 a feature-request is the unbuilt proposal itself. \
 Take one up with `arc begin <slug> --from-journal <file>`.";
 
-/// One `journal open` line: the creation stamp and its age, then topic, kind,
-/// heading, and any change/lane/verification annotations. Shared with the
-/// workspace backlog, so a queue reads the same whichever command printed it.
+/// One `journal open` line: the artifact's filename and age, then its heading
+/// and any change/lane/verification annotations. The filename is the one the
+/// journal holds, so `arc journal show` reads the row as printed.
 pub(crate) fn render_open_entry(f: &ArtifactEntry) {
+    render_open_entry_at(f, "");
+}
+
+/// A `journal open` line whose artifact `prefix` addresses: empty in the
+/// project's own journal, `<project>::` or `<journal-dir>::` in a view across
+/// projects, so a queue reads the same whichever command printed it.
+pub(crate) fn render_open_entry_at(f: &ArtifactEntry, prefix: &str) {
     let age = f.age_seconds.map_or_else(String::new, |seconds| {
         format!(" ({} old)", format_age(seconds))
     });
     println!(
-        "  {}{}  {}  {}  {}{}{}{}{}{}",
-        f.timestamp,
+        "  {prefix}{}{}  {}{}{}{}{}{}",
+        f.file,
         age,
-        f.topic,
-        f.kind.as_deref().unwrap_or(""),
         f.heading.as_deref().unwrap_or(""),
         render_change(f.change.as_ref()),
         render_artifact_lane(f.lane.as_ref()),
@@ -14307,7 +14371,7 @@ fn list(ctx: &Ctx, kind: Option<String>, json: bool) -> Result<i32> {
         };
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
-        println!("dir: {}", dir.display());
+        print_dir_header(&dir);
         println!("artifacts (newest first):");
         if artifacts.is_empty() {
             println!("  (none)");
@@ -14319,10 +14383,7 @@ fn list(ctx: &Ctx, kind: Option<String>, json: bool) -> Result<i32> {
                 .as_deref()
                 .map(|outcome| format!("  [consumed: {outcome}]"))
                 .unwrap_or_default();
-            println!(
-                "  {}  {}  {}  {}{}",
-                entry.timestamp, entry.topic, entry.kind, heading, consumed
-            );
+            println!("  {}  {}{}", entry.file, heading, consumed);
         }
     }
     Ok(0)
@@ -14646,28 +14707,55 @@ fn structured_entries(
     entries
 }
 
-/// Read one artifact from hot storage or its cold archive.
-fn show(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
-    if parse_artifact_name(filename).is_none() {
-        // Somebody holding a topic rather than a filename is one command from
-        // the answer, so the error names it. Teaching the grammar and stopping
-        // leaves the caller to guess which verb takes the other shape.
-        if valid_topic(filename) {
-            if let Some(newest) = newest_live_under(ctx, filename)? {
-                return show(ctx, &newest, json);
-            }
-            bail!(
-                "no live artifact under topic {filename:?}\n\
-                 tip: `arc journal latest {filename}` also searches the cold archive, \
-                 `arc journal list` browses them all"
-            );
+/// Read what an address names: one artifact from hot storage or its cold
+/// archive, or one entry inside it. An unqualified argument that is neither a
+/// filename nor an entry ID is a topic, read as its newest live artifact.
+fn show(ctx: &Ctx, argument: &str, json: bool) -> Result<i32> {
+    let Some(address) = JournalAddress::parse(argument)? else {
+        return show_topic(ctx, argument, json);
+    };
+    match (address.file.as_deref(), address.entry.as_deref()) {
+        (_, Some(id)) => show_entry(ctx, &address, id, json),
+        (Some(file), None) => {
+            let location = match address.journal {
+                AddressJournal::Own => locate_artifact(ctx, file)?,
+                _ => {
+                    let (hot, foreign) = address.locate(ctx)?;
+                    ArtifactLocation {
+                        hot,
+                        file: file.to_string(),
+                        foreign,
+                    }
+                }
+            };
+            show_artifact(&location, json)
         }
-        bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
+        (None, None) => bail!("{argument:?} names neither an artifact nor an entry"),
     }
-    let body = read_artifact_body(ctx, filename)?;
+}
+
+fn show_topic(ctx: &Ctx, topic: &str, json: bool) -> Result<i32> {
+    // Somebody holding a topic rather than a filename is one command from
+    // the answer, so the error names it. Teaching the grammar and stopping
+    // leaves the caller to guess which verb takes the other shape.
+    if valid_topic(topic) {
+        if let Some(newest) = newest_live_under(ctx, topic)? {
+            return show(ctx, &newest, json);
+        }
+        bail!(
+            "no live artifact under topic {topic:?}\n\
+             tip: `arc journal latest {topic}` also searches the cold archive, \
+             `arc journal list` browses them all"
+        );
+    }
+    bail!("{topic:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
+}
+
+fn show_artifact(location: &ArtifactLocation, json: bool) -> Result<i32> {
+    let filename = location.file.as_str();
+    let body = read_located_body(location)?;
+    let events = read_events(&location.hot)?;
     if json {
-        let hot = resolve_dir(&ctx.cwd)?;
-        let events = read_events(&hot)?;
         let metadata = planner_metadata(&body, &events, filename);
         let recorded = recorded_identity(&events, filename);
         let amendments = Amendments::collect(&events, filename);
@@ -14696,7 +14784,7 @@ fn show(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
     // Where the artifact came from is arc's record about it, not a line of the
     // Markdown anybody wrote, so it goes to the diagnostic stream: stdout stays
     // the body verbatim and `journal show <file> > <file>` still round-trips.
-    for source in artifact_sources(&read_events(&resolve_dir(&ctx.cwd)?)?, filename) {
+    for source in artifact_sources(&events, filename) {
         eprintln!(
             "source: {}{}",
             source.source.spec(),
@@ -14707,6 +14795,99 @@ fn show(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         );
     }
     print!("{body}");
+    Ok(0)
+}
+
+/// Read one entry: the sections its ID heads, verbatim on stdout, with where
+/// it lives and the amendments in force on stderr.
+fn show_entry(ctx: &Ctx, address: &JournalAddress, id: &str, json: bool) -> Result<i32> {
+    let (hot, _) = address.locate(ctx)?;
+    let events = read_events(&hot)?;
+    let Some(recording) = recorded_entry(&events, id) else {
+        let qualified = !matches!(address.journal, AddressJournal::Own);
+        return Err(missing_entry(&hot, qualified, id));
+    };
+    let Some(file) = recording.file.clone() else {
+        bail!("the event recording {id} names no artifact");
+    };
+    if let Some(named) = address.file.as_deref().filter(|named| *named != file) {
+        bail!(
+            "{id} is recorded on {file}, not {named}; read it as {}{file}{ENTRY_SEPARATOR}{id}",
+            address.prefix()
+        );
+    }
+    if let Some(refusal) = relocated_refusal(&hot, &file) {
+        return Err(refusal);
+    }
+    ensure_storage_settled(&hot, &events, &file)?;
+    let Some(path) = artifact_body_path(&hot, &file) else {
+        bail!(
+            "{file}, which records {id}, is in neither {} nor its cold archive",
+            hot.display()
+        );
+    };
+    let storage = if path.parent() == Some(hot.as_path()) {
+        "hot"
+    } else {
+        "cold"
+    };
+    let body = std::fs::read_to_string(&path)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    let sections = entry_sections(&body, &events, &file, id);
+    if sections.is_empty() {
+        bail!(
+            "{file} records {id}, but no section of its body is headed by it; \
+             `arc journal doctor` reports the detached entry"
+        );
+    }
+    let text = sections.join("\n\n");
+    let amendments = Amendments::collect(&events, &file);
+    let retraction = amendments.retraction(id);
+    if json {
+        let kind = entry_id_kind(id).unwrap_or_default();
+        let entry = matches!(kind, "position" | "evidence")
+            .then(|| {
+                let blocks = artifact_entry_blocks(&body, &events, &file);
+                structured_entries(kind, &blocks, &events, &file, &amendments)
+                    .into_iter()
+                    .find(|entry| entry["id"] == id)
+            })
+            .flatten();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema": "arc-journal-entry/1",
+                "address": format!("{}{file}{ENTRY_SEPARATOR}{id}", address.prefix()),
+                "journal": hot.display().to_string(),
+                "file": file,
+                "storage": storage,
+                "id": id,
+                "kind": kind,
+                "text": text,
+                "recorded_by": RecordedIdentity::from(recording),
+                "corrected": amendments.corrected_fields(id).into_iter()
+                    .map(|(field, value)| serde_json::json!({"field": field, "value": value}))
+                    .collect::<Vec<_>>(),
+                "retracted": retraction.is_some(),
+                "retraction_note": retraction,
+                "entry": entry,
+            }))?
+        );
+        return Ok(0);
+    }
+    let tier = if storage == "hot" {
+        ""
+    } else {
+        ", cold archive"
+    };
+    eprintln!("entry: {id} in {file}{tier}");
+    for (field, value) in amendments.corrected_fields(id) {
+        eprintln!("corrected: {field} = {value}");
+    }
+    if let Some(note) = retraction {
+        eprintln!("retracted: {note}");
+    }
+    println!("{text}");
     Ok(0)
 }
 
@@ -14903,6 +15084,298 @@ pub(crate) struct ArtifactLocation {
 pub(crate) fn split_qualified(reference: &str) -> Option<(&str, &str)> {
     let (dir, file) = reference.rsplit_once(REFERENCE_SEPARATOR)?;
     Path::new(dir).is_absolute().then_some((dir, file))
+}
+
+/// Separates an artifact filename from the entry it names in an address.
+const ENTRY_SEPARATOR: char = '#';
+
+/// Each entry ID prefix and the kind of entry it names.
+const ENTRY_ID_KINDS: [(&str, &str); 6] = [
+    ("pos-", "position"),
+    ("evd-", "evidence"),
+    ("q-", "question"),
+    ("cp-", "checkpoint"),
+    ("cor-", "correction"),
+    ("ret-", "retraction"),
+];
+
+/// The kind of entry an ID names, when the value is one: a known prefix and a
+/// lowercase ULID. Nothing shaped like an ID is ever read as a topic.
+fn entry_id_kind(value: &str) -> Option<&'static str> {
+    ENTRY_ID_KINDS.iter().find_map(|(prefix, kind)| {
+        let ulid = value.strip_prefix(prefix)?;
+        (ulid.len() == 26
+            && ulid
+                .chars()
+                .all(|c| c.is_ascii_digit() || c.is_ascii_lowercase()))
+        .then_some(*kind)
+    })
+}
+
+/// The journal a read address names.
+enum AddressJournal {
+    /// The journal of the project the command runs in.
+    Own,
+    /// The journal at an absolute hot directory.
+    Dir(PathBuf),
+    /// The journal of a registered project, by slug or label.
+    Project(String),
+}
+
+/// What `journal show` reads: `[<journal-dir>::|<project>::]<file>[#<entry-id>]`
+/// or `[<journal-dir>::|<project>::]<entry-id>`.
+///
+/// A `<project>::` qualifier is a read convenience. A recorded reference names
+/// the journal directory, since a project label can stop resolving or come to
+/// match several projects.
+struct JournalAddress {
+    journal: AddressJournal,
+    file: Option<String>,
+    entry: Option<String>,
+}
+
+impl JournalAddress {
+    /// The address `raw` spells, or `None` for an unqualified argument that is
+    /// neither an artifact filename nor an entry ID, which is a topic.
+    fn parse(raw: &str) -> Result<Option<Self>> {
+        let (journal, rest) = match raw.rsplit_once(REFERENCE_SEPARATOR) {
+            None => (AddressJournal::Own, raw),
+            Some((qualifier, rest)) => {
+                let journal = if Path::new(qualifier).is_absolute() {
+                    AddressJournal::Dir(PathBuf::from(qualifier))
+                } else if qualifier.is_empty() || qualifier.contains(['/', '\\']) {
+                    bail!(
+                        "{qualifier:?} in {raw} is neither an absolute journal directory \
+                         nor a registered project"
+                    );
+                } else {
+                    AddressJournal::Project(qualifier.to_string())
+                };
+                (journal, rest)
+            }
+        };
+        let (file, entry) = match rest.split_once(ENTRY_SEPARATOR) {
+            Some((file, entry)) => (Some(file), Some(entry)),
+            None if entry_id_kind(rest).is_some() => (None, Some(rest)),
+            None => (Some(rest), None),
+        };
+        if let Some(entry) = entry.filter(|entry| entry_id_kind(entry).is_none()) {
+            bail!(
+                "{entry:?} in {raw} is not an entry ID: pos-, evd-, q-, cp-, cor- or ret- \
+                 followed by its ULID"
+            );
+        }
+        if let Some(file) = file.filter(|file| parse_artifact_name(file).is_none()) {
+            if matches!(journal, AddressJournal::Own) && entry.is_none() {
+                return Ok(None);
+            }
+            bail!(
+                "{file:?} in {raw} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)"
+            );
+        }
+        Ok(Some(Self {
+            journal,
+            file: file.map(str::to_string),
+            entry: entry.map(str::to_string),
+        }))
+    }
+
+    /// The qualifier as spelled, with its separator, or empty for this
+    /// project's journal.
+    fn prefix(&self) -> String {
+        match &self.journal {
+            AddressJournal::Own => String::new(),
+            AddressJournal::Dir(dir) => format!("{}{REFERENCE_SEPARATOR}", dir.display()),
+            AddressJournal::Project(name) => format!("{name}{REFERENCE_SEPARATOR}"),
+        }
+    }
+
+    /// The hot directory of the journal the address names, and whether it is
+    /// another project's.
+    fn locate(&self, ctx: &Ctx) -> Result<(PathBuf, bool)> {
+        let own = resolve_dir(&ctx.cwd);
+        let hot = match &self.journal {
+            AddressJournal::Own => return Ok((own?, false)),
+            AddressJournal::Dir(dir) => {
+                if !dir.is_dir() || !looks_like_a_journal(dir).unwrap_or(false) {
+                    bail!(
+                        "{} is not a journal directory; name the path `arc journal dir` \
+                         prints in the project that owns it",
+                        dir.display()
+                    );
+                }
+                dir.clone()
+            }
+            AddressJournal::Project(name) => registered_project(name)?.journal_dir,
+        };
+        let foreign = own.ok().map(|own| canonical_dir(&own)) != Some(canonical_dir(&hot));
+        Ok((hot, foreign))
+    }
+}
+
+/// The registered project a `<project>::` qualifier names, matched by slug or
+/// label.
+pub(crate) fn registered_project(prefix: &str) -> Result<crate::registry::Project> {
+    let cfg = config::load()?;
+    let mut matches: Vec<_> = crate::registry::projects(&cfg)?
+        .into_iter()
+        .filter(|project| project.slug == prefix || project.label() == prefix)
+        .collect();
+    match matches.len() {
+        0 => bail!("no registered project matched {prefix:?} by slug or label"),
+        1 => Ok(matches.remove(0)),
+        _ => bail!(
+            "project prefix {prefix:?} matched multiple registered projects: {}",
+            matches
+                .iter()
+                .map(|project| format!("{} ({})", project.slug, project.label()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// The address prefix a row in a cross-project view names `journal_dir` by:
+/// the project's label when it resolves to exactly that journal, otherwise the
+/// directory itself.
+pub(crate) fn project_address_prefix(
+    projects: &[crate::registry::Project],
+    journal_dir: &Path,
+) -> String {
+    let journal_dir = canonical_dir(journal_dir);
+    let label = projects
+        .iter()
+        .find(|project| canonical_dir(&project.journal_dir) == journal_dir)
+        .map(crate::registry::Project::label);
+    let unique = label.as_deref().filter(|label| {
+        projects
+            .iter()
+            .filter(|project| project.slug == *label || project.label() == *label)
+            .count()
+            == 1
+    });
+    match unique {
+        Some(label) => format!("{label}{REFERENCE_SEPARATOR}"),
+        None => format!("{}{REFERENCE_SEPARATOR}", journal_dir.display()),
+    }
+}
+
+/// The event that recorded the entry `id`: its first, so a question's
+/// recording rather than an answer to it.
+fn recorded_entry<'a>(events: &'a [JournalEvent], id: &str) -> Option<&'a JournalEvent> {
+    events.iter().filter(|event| event.known()).find(|event| {
+        event
+            .entry_identity()
+            .is_some_and(|(_, recorded)| recorded == id)
+    })
+}
+
+/// The ID token after an entry heading's label, empty when it names none, or
+/// `None` for a line that opens no entry.
+fn entry_heading_token(line: &str) -> Option<&str> {
+    let line = markdown_syntax_line(line)?;
+    [
+        "### Position",
+        "### Evidence",
+        "### Question",
+        "### Answer",
+        "### Correction",
+        "### Retraction",
+        "### Work checkpoint",
+    ]
+    .iter()
+    .find_map(|label| {
+        let rest = line.strip_prefix(label)?;
+        (rest.is_empty() || rest.starts_with(char::is_whitespace))
+            .then(|| rest.split_whitespace().next().unwrap_or(""))
+    })
+}
+
+/// The sections of `body` the entry `id` heads, in body order, each from its
+/// heading line to the next entry heading. A question's answers share its ID
+/// and follow it. Quoted headings are prose, as [`artifact_entry_blocks`]
+/// reads them.
+fn entry_sections<'a>(
+    body: &'a str,
+    events: &[JournalEvent],
+    filename: &str,
+    id: &str,
+) -> Vec<&'a str> {
+    let mut sections = Vec::new();
+    let mut open = None;
+    let mut scan = EntryScan::default();
+    let mut offset = 0;
+    for line in body.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+        if quoted_entry_line(line, &mut scan, events, filename) {
+            continue;
+        }
+        let Some(token) = entry_heading_token(line) else {
+            continue;
+        };
+        if let Some(from) = open.take() {
+            sections.push(body[from..start].trim_end());
+        }
+        if token == id {
+            open = Some(start);
+        }
+    }
+    if let Some(from) = open {
+        sections.push(body[from..].trim_end());
+    }
+    sections
+}
+
+/// Every known journal other than `own` that records the entry `id`.
+fn journals_recording(own: &Path, id: &str) -> Result<Vec<PathBuf>> {
+    let journals = config::load().and_then(|cfg| crate::registry::known_journals(&cfg))?;
+    let own = canonical_dir(own);
+    Ok(journals
+        .into_iter()
+        .map(|(_, dir)| canonical_dir(&dir))
+        .filter(|dir| *dir != own)
+        .filter(|dir| {
+            read_events(dir)
+                .ok()
+                .is_some_and(|events| recorded_entry(&events, id).is_some())
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect())
+}
+
+/// The refusal for an entry ID the journal at `hot` does not record. A bare ID
+/// is named in the qualified form of each other known journal that records
+/// it; a qualified one named its journal and is refused there alone.
+fn missing_entry(hot: &Path, qualified: bool, id: &str) -> anyhow::Error {
+    let refusal = format!(
+        "no entry {id} is recorded in the journal at {}",
+        hot.display()
+    );
+    if qualified {
+        return anyhow::anyhow!(refusal);
+    }
+    match journals_recording(hot, id) {
+        Err(error) => anyhow::anyhow!("{refusal}; {}", unsearched(&error)),
+        Ok(holders) if holders.is_empty() => anyhow::anyhow!(
+            "{refusal}; an entry in another project's journal is named \
+             <project>::{id} or <journal-dir>::{id}"
+        ),
+        Ok(holders) => {
+            let projects = config::load()
+                .and_then(|cfg| crate::registry::projects(&cfg))
+                .unwrap_or_default();
+            anyhow::anyhow!(
+                "{refusal}; another project's journal records it: {}",
+                holders
+                    .iter()
+                    .map(|dir| format!("{}{id}", project_address_prefix(&projects, dir)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    }
 }
 
 /// Resolve a reference to the journal that holds it. A bare reference must
@@ -16356,33 +16829,13 @@ pub(crate) fn consume(
 
         let (decision_dir, other_project, project_label) = match project_prefix {
             Some(prefix) => {
-                let cfg = config::load()?;
-                let projects = crate::registry::projects(&cfg)?;
-                let matches: Vec<_> = projects
-                    .iter()
-                    .filter(|project| project.slug == prefix || project.label() == prefix)
-                    .collect();
-                match matches.as_slice() {
-                    [] => bail!("no registered project matched {prefix:?} by slug or label"),
-                    [project] => {
-                        let other = project.journal_dir != dir;
-                        (
-                            project.journal_dir.clone(),
-                            other.then(|| project.slug.clone()),
-                            other.then(|| project.label()),
-                        )
-                    }
-                    _ => {
-                        let candidates = matches
-                            .iter()
-                            .map(|project| format!("{} ({})", project.slug, project.label()))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        bail!(
-                            "project prefix {prefix:?} matched multiple registered projects: {candidates}"
-                        )
-                    }
-                }
+                let project = registered_project(prefix)?;
+                let other = project.journal_dir != dir;
+                (
+                    project.journal_dir.clone(),
+                    other.then(|| project.slug.clone()),
+                    other.then(|| project.label()),
+                )
             }
             None => (dir.clone(), None, None),
         };

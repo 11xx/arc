@@ -1909,6 +1909,11 @@ fn workspace_backlog(
         println!("detail: {}", selection.detail_command());
         return Ok(if partial { 16 } else { 0 });
     }
+    // Rows name each artifact by an address `arc journal show` reads from any
+    // checkout; an unreadable registry falls back to the journal directory.
+    let registered = crate::config::load()
+        .and_then(|cfg| crate::registry::projects(&cfg))
+        .unwrap_or_default();
     for project in &projects {
         println!("# {} ({})", project.project, project.anchor);
         let buckets: Vec<String> = project
@@ -2079,7 +2084,13 @@ fn workspace_backlog(
                     .chain(items.feature_requests.iter())
                     .chain(items.pending.iter())
                 {
-                    crate::journal::render_open_entry(item);
+                    crate::journal::render_open_entry_at(
+                        item,
+                        &crate::journal::project_address_prefix(
+                            &registered,
+                            std::path::Path::new(&project.journal_dir),
+                        ),
+                    );
                 }
             }
         }

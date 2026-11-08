@@ -387,7 +387,14 @@ ORIENT INSIDE A PROJECT (start here, in this order)
     known filename   `arc journal show <file.md>` reads the body, hot storage
                      first and the cold archive after it;
                      `arc journal discussion <file.md>` reads its stances and
-                     open questions.
+                     open questions. Discovery rows print the filename, so a
+                     row is copied, never rebuilt from its fields.
+    known entry      `arc journal show <entry-id>` or `<file.md>#<entry-id>`
+                     prints that one entry, its artifact on stderr.
+    another project  `<project>::<file.md>[#<entry-id>]` or
+                     `<project>::<entry-id>` reads it by registered slug or
+                     label; `<journal-dir>::` names the journal directory and
+                     is the form a recorded reference keeps.
     known topic      `arc journal latest <topic> [--kind <kind>]`, matched
                      exactly; `arc journal show <topic>` shows the newest
                      live one and names it on stderr.
@@ -5416,6 +5423,7 @@ SCHEMAS
     `arc-provisional-transition/2`   arc integrate --provisional --json
     `arc-brief/2`                    arc brief --json
     `arc-journal-artifact/3`         arc journal show --json
+    `arc-journal-entry/1`            arc journal show <entry address> --json
     `arc-journal-open/1`             arc journal open --json
     `arc-journal-inventory/6`        arc journal inventory --json
     `arc-rescue/5`                   arc rescue --json

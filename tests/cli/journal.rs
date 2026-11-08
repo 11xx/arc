@@ -1809,12 +1809,19 @@ fn journal_archive_moves_records_and_catchup_reads_cold_with_hot_journal() {
     assert!(!cold.join("events.jsonl").exists());
 
     let hot_catchup = stdout(repo.arc(&repo.root).args(["journal", "catchup"]));
-    assert!(!hot_catchup.contains("history  note"), "{hot_catchup}");
+    let row = format!("  {name}  ");
+    assert!(
+        !hot_catchup.lines().any(|line| line.starts_with(&row)),
+        "{hot_catchup}"
+    );
     let cold_catchup = stdout(
         repo.arc(&repo.root)
             .args(["journal", "catchup", "--archived"]),
     );
-    assert!(cold_catchup.contains("history  note"), "{cold_catchup}");
+    assert!(
+        cold_catchup.lines().any(|line| line.starts_with(&row)),
+        "{cold_catchup}"
+    );
     assert!(cold_catchup.contains("cold storage"), "{cold_catchup}");
     let archived = journal_events(&hot).pop().unwrap();
     assert_eq!(archived["event"], "archived");
@@ -2450,7 +2457,8 @@ fn journal_open_annotates_items_covered_by_live_lanes() {
 
     let text = stdout(repo.arc(&repo.root).args(["journal", "open"]));
     assert!(
-        text.contains("covered  todo  # Covered [lane: external-lane — test external, external]"),
+        text.lines().any(|row| row.contains("-covered-todo.md (")
+            && row.ends_with("  # Covered [lane: external-lane — test external, external]")),
         "{text}"
     );
     assert!(!text.contains("# Free [lane:"), "{text}");
@@ -5628,11 +5636,8 @@ fn journal_open_preserves_legacy_rows_without_verification_events() {
     assert!(!item.as_object().unwrap().contains_key("verification"));
 
     let text = stdout(repo.arc(&repo.root).args(["journal", "open"]));
-    let row = text
-        .lines()
-        .find(|line| line.contains("legacy  todo  # Legacy"))
-        .unwrap();
-    assert_eq!(row, "  20990101T000000Z (0s old)  legacy  todo  # Legacy");
+    let row = text.lines().find(|line| line.contains("# Legacy")).unwrap();
+    assert_eq!(row, format!("  {file} (0s old)  # Legacy"));
 }
 
 #[test]
@@ -7842,7 +7847,10 @@ fn fr_alias_files_the_same_artifact_as_journal_note() {
     assert!(filed.ends_with("-feature-request.md"), "{filed}");
 
     let open = stdout(repo.arc(&repo.root).args(["journal", "open"]));
-    assert!(open.contains("aliased-proposal  feature-request"), "{open}");
+    assert!(
+        open.contains("-aliased-proposal-feature-request.md ("),
+        "{open}"
+    );
 }
 
 #[test]
@@ -8819,7 +8827,7 @@ fn note_without_a_kind_still_writes_a_note() {
         .assert()
         .success();
     let listed = stdout(repo.arc(&repo.root).args(["journal", "list"]));
-    assert!(listed.contains("plain  note"), "{listed}");
+    assert!(listed.contains("-plain-note.md  "), "{listed}");
 }
 
 /// A discussion is argued and read far more often than created, so it keeps
@@ -8873,8 +8881,8 @@ fn the_fr_alias_matches_the_feature_request_verb() {
         let _ = topic;
     }
     let open = stdout(repo.arc(&repo.root).args(["journal", "open"]));
-    assert!(open.contains("via-alias  feature-request"), "{open}");
-    assert!(open.contains("via-verb  feature-request"), "{open}");
+    assert!(open.contains("-via-alias-feature-request.md ("), "{open}");
+    assert!(open.contains("-via-verb-feature-request.md ("), "{open}");
 }
 
 /// Somebody holding a topic rather than a filename is one command from the
@@ -14860,9 +14868,12 @@ fn catchup_global_memory_titles_have_ages_without_bodies() {
     )
     .unwrap();
     let out = stdout(repo.arc(&repo.root).args(["catchup"]));
-    assert!(out.contains("global memory:"), "{out}");
     assert!(
-        out.contains("20260101T000000Z  operator-rule  Global title  ("),
+        out.contains("global memory (read with `arc journal show --global <file>`):"),
+        "{out}"
+    );
+    assert!(
+        out.contains("20260101T000000Z-operator-rule-memory.md  Global title  ("),
         "{out}"
     );
     assert!(out.contains("d)"), "{out}");
@@ -18524,4 +18535,267 @@ fn every_view_prints_a_corrected_title() {
     assert_eq!(latest["heading"], wanted, "{latest:#}");
     let text = stdout(repo.arc(&repo.root).args(["journal", "memories"]));
     assert!(text.contains("Corrected title"), "{text}");
+}
+
+/// The ID of the newest evidence entry on `file`, as `show --json` lists it.
+fn evidence_id(repo: &Repo, cwd: &Path, file: &str) -> String {
+    let artifact = json_stdout(repo.arc(cwd).args(["journal", "show", file, "--json"]));
+    artifact["evidence"]
+        .as_array()
+        .and_then(|entries| entries.last())
+        .and_then(|entry| entry["id"].as_str())
+        .unwrap_or_else(|| panic!("no evidence on {file}: {artifact}"))
+        .to_string()
+}
+
+fn add_evidence(repo: &Repo, file: &str, body: &str) -> String {
+    repo.arc(&repo.root)
+        .args(["journal", "evidence", file, "--body-file", "-"])
+        .write_stdin(body.to_string())
+        .assert()
+        .success();
+    evidence_id(repo, &repo.root, file)
+}
+
+/// Claim: an entry ID copied from `show --json` prints exactly that entry.
+/// Rejects reading the ID as a topic, and printing the whole artifact.
+#[test]
+fn show_reads_one_entry_by_its_id() {
+    let repo = Repo::new();
+    let todo = filed_artifact(&repo, "todo", "cited-todo", "# Cited\n\nthe todo body\n");
+    let first = add_evidence(&repo, &todo, "first finding\n");
+    let second = add_evidence(&repo, &todo, "second finding\n");
+
+    let output = repo
+        .arc(&repo.root)
+        .args(["journal", "show", &first])
+        .assert()
+        .success();
+    let out = String::from_utf8_lossy(&output.get_output().stdout).to_string();
+    let err = String::from_utf8_lossy(&output.get_output().stderr).to_string();
+    assert!(out.starts_with(&format!("### Evidence {first} ")), "{out}");
+    assert!(out.contains("first finding"), "{out}");
+    assert!(!out.contains("second finding"), "{out}");
+    assert!(!out.contains("the todo body"), "{out}");
+    assert!(err.contains(&todo), "{err}");
+
+    let addressed =
+        stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "show", &format!("{todo}#{second}")]),
+        );
+    assert!(addressed.contains("second finding"), "{addressed}");
+    assert!(!addressed.contains("first finding"), "{addressed}");
+
+    let entry = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "show", &first, "--json"]),
+    );
+    assert_eq!(entry["schema"], "arc-journal-entry/1");
+    assert_eq!(entry["file"], todo);
+    assert_eq!(entry["kind"], "evidence");
+    assert_eq!(entry["storage"], "hot");
+    assert_eq!(entry["address"], format!("{todo}#{first}"));
+    assert_eq!(entry["entry"]["id"], first);
+    assert_eq!(entry["text"], out.trim_end());
+}
+
+/// Claim: an entry of an archived artifact resolves and says where it lives.
+/// Rejects resolving only the hot journal.
+#[test]
+fn show_reads_an_entry_from_the_cold_archive() {
+    let repo = Repo::new();
+    let note = filed_artifact(&repo, "note", "archived-note", "# Archived\n");
+    let id = add_evidence(&repo, &note, "kept finding\n");
+    repo.arc(&repo.root)
+        .args(["journal", "archive", &note])
+        .assert()
+        .success();
+
+    let output = repo
+        .arc(&repo.root)
+        .args(["journal", "show", &id])
+        .assert()
+        .success();
+    let out = String::from_utf8_lossy(&output.get_output().stdout).to_string();
+    let err = String::from_utf8_lossy(&output.get_output().stderr).to_string();
+    assert!(out.contains("kept finding"), "{out}");
+    assert!(err.contains("cold archive"), "{err}");
+    let entry = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "show", &id, "--json"]),
+    );
+    assert_eq!(entry["storage"], "cold");
+}
+
+/// Claim: naming an entry under the wrong artifact is refused with the
+/// artifact that records it. Rejects printing an entry another artifact holds
+/// under the name given.
+#[test]
+fn show_refuses_an_entry_named_under_another_artifact() {
+    let repo = Repo::new();
+    let holder = filed_artifact(&repo, "todo", "holder", "# Holder\n");
+    let other = filed_artifact(&repo, "todo", "other", "# Other\n");
+    let id = add_evidence(&repo, &holder, "held here\n");
+
+    repo.arc(&repo.root)
+        .args(["journal", "show", &format!("{other}#{id}")])
+        .assert()
+        .failure()
+        .stdout(predicates::str::is_empty())
+        .stderr(predicates::str::contains(format!(
+            "{id} is recorded on {holder}"
+        )));
+}
+
+/// Claim: another project's entries and artifacts resolve from this checkout
+/// by journal directory or registered project label, and a bare ID held only
+/// there is refused naming the qualified form. Rejects resolving only this
+/// project's journal, and a silent read of a foreign journal.
+#[test]
+fn show_resolves_qualified_addresses_from_another_project() {
+    let owner = Repo::new();
+    let todo = filed_artifact(&owner, "todo", "shared-todo", "# Shared\n\nowner body\n");
+    let id = add_evidence(&owner, &todo, "owner finding\n");
+    let owner_journal = journal_dir(&owner);
+    let label = owner
+        .root
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let reader = sibling_project(&owner, "reader");
+
+    for address in [
+        format!("{}::{id}", owner_journal.display()),
+        format!("{label}::{id}"),
+        format!("{label}::{todo}#{id}"),
+    ] {
+        let out = stdout(owner.arc(&reader).args(["journal", "show", &address]));
+        assert!(out.contains("owner finding"), "{address}: {out}");
+        assert!(!out.contains("owner body"), "{address}: {out}");
+    }
+    let body = stdout(
+        owner
+            .arc(&reader)
+            .args(["journal", "show", &format!("{label}::{todo}")]),
+    );
+    assert!(body.contains("owner body"), "{body}");
+
+    owner
+        .arc(&reader)
+        .args(["journal", "show", &id])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(format!("{label}::{id}")));
+    owner
+        .arc(&reader)
+        .args(["journal", "show", &format!("no-such-project::{id}")])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no registered project matched"));
+}
+
+/// Claim: every discovery row prints the filename the journal holds, so the
+/// row's text reads that exact artifact. Rejects rows a reader must rebuild
+/// from timestamp, topic and kind, which miss same-second suffixes.
+#[test]
+fn discovery_rows_print_the_held_filename() {
+    let repo = Repo::new();
+    let hot = journal_dir(&repo);
+    fs::create_dir_all(&hot).unwrap();
+    let bare = "20260101T000000Z-twins-todo.md";
+    let suffixed = "20260101T000000Z-twins-todo-2.md";
+    record_artifact(&hot, bare, "# Bare twin\n", "note", None);
+    record_artifact(&hot, suffixed, "# Suffixed twin\n", "note", None);
+    let memory = filed_artifact(&repo, "memory", "kept-fact", "# A kept fact\n");
+
+    let open = stdout(repo.arc(&repo.root).args(["journal", "open"]));
+    let list = stdout(repo.arc(&repo.root).args(["journal", "list"]));
+    let catchup = stdout(repo.arc(&repo.root).args(["journal", "catchup"]));
+    for (view, rows) in [("open", &open), ("list", &list), ("catchup", &catchup)] {
+        for file in [bare, suffixed] {
+            assert!(
+                rows.lines().any(|row| row.trim_start().starts_with(file)),
+                "{view} lacks a row opening with {file}:\n{rows}"
+            );
+        }
+    }
+    assert!(
+        catchup
+            .lines()
+            .any(|row| row.trim_start().starts_with(&memory)),
+        "{catchup}"
+    );
+    for (file, heading) in [(bare, "# Bare twin"), (suffixed, "# Suffixed twin")] {
+        let body = stdout(repo.arc(&repo.root).args(["journal", "show", file]));
+        assert_eq!(body.trim_end(), heading);
+    }
+}
+
+/// Claim: `consume --decision <project>::<file>` resolves the decision in the
+/// project the label names, and an unknown label refuses. Guards the
+/// project-prefix resolution `journal show` shares with it.
+#[test]
+fn consume_decision_resolves_a_project_prefix() {
+    let owner = Repo::new();
+    let decision = filed_artifact(&owner, "decision", "shared-call", "# Shared call\n");
+    let label = owner
+        .root
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let reader = sibling_project(&owner, "reader");
+    let filed = |topic: &str| {
+        let out = stdout(
+            owner
+                .arc(&reader)
+                .args([
+                    "journal",
+                    "note",
+                    topic,
+                    "--kind",
+                    "discussion",
+                    "--body-file",
+                    "-",
+                ])
+                .write_stdin("# Which way?\n"),
+        );
+        Path::new(out.trim())
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string()
+    };
+    let unknown = filed("unknown-way");
+    owner
+        .arc(&reader)
+        .args([
+            "journal",
+            "consume",
+            &unknown,
+            "--outcome",
+            "done",
+            "--decision",
+            &format!("no-such-project::{decision}"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no registered project matched"));
+
+    let discussion = filed("which-way");
+    owner
+        .arc(&reader)
+        .args([
+            "journal",
+            "consume",
+            &discussion,
+            "--outcome",
+            "done",
+            "--decision",
+            &format!("{label}::{decision}"),
+        ])
+        .assert()
+        .success();
 }
