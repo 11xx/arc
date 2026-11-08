@@ -62,6 +62,7 @@ mod implementer_trailers;
 mod import_authorization;
 mod ineligible_review;
 mod instructions;
+mod intake;
 mod integrate;
 mod journal;
 mod journal_exchange;

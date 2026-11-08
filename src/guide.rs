@@ -639,8 +639,11 @@ SETTLE A QUESTION (before it is work)
   arc journal <kind> <topic> --source 'harness=<h> session=<id> ts=<rfc3339>'
     --item-key <k>                     Where a distilled item came from; a
                                        repeat reports the existing item.
+  arc journal <kind> <topic> --source 'intake=<name> item=<id>' --item-key <k>
+                                       The same for an intake item.
   arc journal source --harness <h> --session <id> [--item-key <k>] [--json]
                                        What one recording already produced.
+  arc journal source --intake <name> --item <id> [--item-key <k>] [--json]
   arc journal source-attach <file> --source '<spec>' [--item-key <k>]
   arc begin <slug> --from-journal <file>
 
@@ -697,6 +700,16 @@ SETTLE A QUESTION (before it is work)
   sessions. Which project the item lands in stays the caller's choice
   through ordinary anchor resolution: a recorded session directory is
   evidence, never authority to write there.
+
+  An item a person left in an intake outside arc, such as `tray`, is a
+  source too: `--source 'intake=<name> item=<id>'`, exactly those two
+  fields, the name matching `[a-z][a-z0-9-]{0,31}` and the ID one token of
+  at most 128 bytes. Its identity is the intake and the item alone, so a
+  keyed repeat by any session, harness or model writes nothing and prints the
+  existing entry; the session that writes is still recorded as the writer.
+  `journal source --intake <name> --item <id>` lists what the item produced,
+  `source-attach` accepts the same spec, and views keyed by session never
+  read an intake item as one.
 
   An entry filed wrong is amended, never rewritten. `correct` replaces one
   field of one entry — the artifact's `title`, a position's `stance`,
@@ -5461,7 +5474,7 @@ SCHEMAS
     `arc-replica/2`                  arc replica status --json
     `arc-journal-questions/4`        arc journal questions --json
     `journal-discussion/5`           arc journal discussion --json
-    `journal-source/1`               arc journal source --json
+    `journal-source/2`               arc journal source --json
     `arc-journal-filed/1`            arc journal filed --json
     `arc-journal-latest/1`           arc journal latest --json
     `arc-journal-scaffolds/1`        arc journal scaffolds --json

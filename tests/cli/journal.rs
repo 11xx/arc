@@ -11448,7 +11448,7 @@ fn journal_source_report_shape_and_empty_answer() {
     let repo = Repo::new();
     let file = file_of(&source_write(&repo, "todo", "shaped", PROBE_SOURCE, "k1"));
     let report = source_json(&repo, "claude", "abc");
-    assert_eq!(report["schema"], "journal-source/1", "{report}");
+    assert_eq!(report["schema"], "journal-source/2", "{report}");
     assert_eq!(report["harness"], "claude", "{report}");
     assert_eq!(report["session"], "abc", "{report}");
     let item = &report["items"][0];

@@ -321,18 +321,30 @@ impl ConsumeOutcome {
     }
 }
 
-/// Where an item came from, when it was distilled out of a recorded session
-/// rather than authored here.
+/// Where an item came from, when it was distilled out of something rather
+/// than authored here: a recorded session, or an item a person left in an
+/// external intake.
 ///
-/// The coordinate only: `harness` and `session` name the recording and `ts`
-/// the moment inside it the item was read out of. `turn`, `schema`, and
-/// `coverage` are recorded only when an emitter supplies them, and none of
-/// them is inferred from the fields that are present — a turn reference
-/// invented from a timestamp would point at nothing. Transcript text,
-/// credentials, and content digests are deliberately outside the shape: the
-/// journal records where evidence lives, never a copy of it.
+/// The coordinate only. Transcript text, item bodies, credentials, and
+/// content digests are deliberately outside the shape: the journal records
+/// where evidence lives, never a copy of it. The two kinds share no field, so
+/// the fields a recorded reference carries say which kind it is.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct SourceRef {
+#[serde(untagged)]
+pub(crate) enum SourceRef {
+    Session(SessionSource),
+    Intake(IntakeSource),
+}
+
+/// A recorded session an item was read out of.
+///
+/// `harness` and `session` name the recording and `ts` the moment inside it
+/// the item was read out of. `turn`, `schema`, and `coverage` are recorded
+/// only when an emitter supplies them, and none of them is inferred from the
+/// fields that are present — a turn reference invented from a timestamp would
+/// point at nothing.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct SessionSource {
     harness: String,
     session: String,
     ts: String,
@@ -348,13 +360,41 @@ pub(crate) struct SourceRef {
     coverage: Option<String>,
 }
 
-/// The fields a `--source` spec accepts, in the order it renders them.
-const SOURCE_FIELDS: [&str; 6] = ["harness", "session", "ts", "turn", "schema", "coverage"];
+/// An item in an external intake: the intake's name and the item's ID there.
+///
+/// It names what an entry was made from, never who made it. The session that
+/// files the entry is recorded as its writer, as for any write, so the same
+/// item filed by any session is the same source.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct IntakeSource {
+    intake: String,
+    item: String,
+}
+
+/// The fields a session `--source` spec accepts, in the order it renders them.
+const SESSION_FIELDS: [&str; 6] = ["harness", "session", "ts", "turn", "schema", "coverage"];
+
+/// The fields an intake `--source` spec accepts, in the order it renders them.
+const INTAKE_FIELDS: [&str; 2] = ["intake", "item"];
+
+/// The longest intake item ID, in bytes.
+const INTAKE_ITEM_MAX_BYTES: usize = 128;
+
+/// The longest intake name, in bytes.
+const INTAKE_NAME_MAX_BYTES: usize = 32;
+
+/// Whether `name` is an intake name: `[a-z][a-z0-9-]{0,31}`.
+pub(crate) fn valid_intake_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    name.len() <= INTAKE_NAME_MAX_BYTES
+        && chars.next().is_some_and(|first| first.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
 
 /// The disposition of an item a caller judged to need no work at all.
 const NO_ACTION: &str = "no-action";
 
-const SOURCE_SCHEMA: &str = "journal-source/1";
+const SOURCE_SCHEMA: &str = "journal-source/2";
 
 impl SourceRef {
     /// Read the space-separated `key=value` spec.
@@ -362,14 +402,20 @@ impl SourceRef {
     /// The vocabulary is closed and every refusal happens here, before a write
     /// touches the journal: a spec accepted loosely records a coordinate that
     /// resolves to nothing, which is worse than no source reference at all.
+    /// Any intake field makes the spec an intake source, which then admits no
+    /// session field.
     fn parse(spec: &str) -> Result<Self> {
-        let fields_help = SOURCE_FIELDS.join(", ");
+        let fields_help = format!(
+            "{}; or {}",
+            SESSION_FIELDS.join(", "),
+            INTAKE_FIELDS.join(", ")
+        );
         let mut fields: HashMap<&str, &str> = HashMap::new();
         for pair in spec.split_whitespace() {
             let Some((key, value)) = pair.split_once('=') else {
                 bail!("source field {pair:?} is not key=value (fields: {fields_help})");
             };
-            if !SOURCE_FIELDS.contains(&key) {
+            if !SESSION_FIELDS.contains(&key) && !INTAKE_FIELDS.contains(&key) {
                 bail!("unknown source field {key:?} (fields: {fields_help})");
             }
             if value.is_empty() {
@@ -378,6 +424,20 @@ impl SourceRef {
             if fields.insert(key, value).is_some() {
                 bail!("source field {key} is given twice");
             }
+        }
+        if INTAKE_FIELDS.iter().any(|key| fields.contains_key(key)) {
+            if let Some(key) = SESSION_FIELDS.iter().find(|key| fields.contains_key(*key)) {
+                bail!(
+                    "source field {key} names a session; an intake source takes only intake= and item="
+                );
+            }
+            let required = |key: &str| -> Result<&str> {
+                fields
+                    .get(key)
+                    .copied()
+                    .with_context(|| format!("intake source needs {key}= (required: intake, item)"))
+            };
+            return IntakeSource::new(required("intake")?, required("item")?).map(Self::Intake);
         }
         let required = |key: &str| -> Result<String> {
             fields
@@ -399,50 +459,98 @@ impl SourceRef {
             ),
             None => None,
         };
-        Ok(Self {
+        Ok(Self::Session(SessionSource {
             harness,
             session,
             ts,
             turn,
             schema: fields.get("schema").map(|value| (*value).to_string()),
             coverage: fields.get("coverage").map(|value| (*value).to_string()),
-        })
+        }))
     }
 
     /// The spec that would record this reference again, so what a reader sees
     /// and what a writer types share one grammar.
     fn spec(&self) -> String {
+        let source = match self {
+            Self::Session(source) => source,
+            Self::Intake(source) => {
+                return format!("intake={} item={}", source.intake, source.item)
+            }
+        };
         let mut parts = vec![
-            format!("harness={}", self.harness),
-            format!("session={}", self.session),
-            format!("ts={}", self.ts),
+            format!("harness={}", source.harness),
+            format!("session={}", source.session),
+            format!("ts={}", source.ts),
         ];
-        if let Some(turn) = self.turn {
+        if let Some(turn) = source.turn {
             parts.push(format!("turn={turn}"));
         }
-        if let Some(schema) = &self.schema {
+        if let Some(schema) = &source.schema {
             parts.push(format!("schema={schema}"));
         }
-        if let Some(coverage) = &self.coverage {
+        if let Some(coverage) = &source.coverage {
             parts.push(format!("coverage={coverage}"));
         }
         parts.join(" ")
     }
 
-    /// Whether a recorded reference still names a recording. The journal is
+    /// Whether a recorded reference still names something. The journal is
     /// hand-writable, so an event carrying an unusable coordinate is reported
     /// by `journal doctor` rather than worked around by every derived view.
     fn well_formed(&self) -> bool {
-        !self.harness.trim().is_empty()
-            && !self.session.trim().is_empty()
-            && DateTime::parse_from_rfc3339(&self.ts).is_ok()
+        match self {
+            Self::Session(source) => {
+                !source.harness.trim().is_empty()
+                    && !source.session.trim().is_empty()
+                    && DateTime::parse_from_rfc3339(&source.ts).is_ok()
+            }
+            Self::Intake(source) => IntakeSource::new(&source.intake, &source.item).is_ok(),
+        }
     }
 
-    /// Whether two references name the same recording. The timestamp and the
-    /// optional fields describe one reading of it, so item identity ignores
-    /// them: the same item read twice out of one session is one item.
-    fn same_recording(&self, other: &SourceRef) -> bool {
-        self.harness == other.harness && self.session == other.session
+    /// Whether two references name the same origin: one recording, or one
+    /// intake item. A session's timestamp and optional fields describe one
+    /// reading of it, so item identity ignores them: the same item read twice
+    /// out of one session is one item. An intake item is the same item
+    /// whichever session filed it.
+    fn same_origin(&self, other: &SourceRef) -> bool {
+        match (self, other) {
+            (Self::Session(one), Self::Session(other)) => {
+                one.harness == other.harness && one.session == other.session
+            }
+            (Self::Intake(one), Self::Intake(other)) => one == other,
+            _ => false,
+        }
+    }
+
+    /// The harness and session of a recorded-session source. An intake item
+    /// names no session, so anything keyed by session passes it by.
+    fn recording(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::Session(source) => Some((&source.harness, &source.session)),
+            Self::Intake(_) => None,
+        }
+    }
+}
+
+impl IntakeSource {
+    /// An intake item, refused unless the intake is a name and the item one
+    /// bounded token.
+    fn new(intake: &str, item: &str) -> Result<Self> {
+        if !valid_intake_name(intake) {
+            bail!("intake {intake:?} is not a name matching [a-z][a-z0-9-]{{0,31}}");
+        }
+        if item.is_empty() || item.chars().any(char::is_whitespace) {
+            bail!("intake item {item:?} must be one token with no whitespace");
+        }
+        if item.len() > INTAKE_ITEM_MAX_BYTES {
+            bail!("intake item ID is longer than {INTAKE_ITEM_MAX_BYTES} bytes");
+        }
+        Ok(Self {
+            intake: intake.to_string(),
+            item: item.to_string(),
+        })
     }
 }
 
@@ -452,15 +560,20 @@ impl SourceRef {
 /// it indexes into rather than recorded as a bare label.
 #[derive(clap::Args, Clone)]
 pub struct SourceArgs {
-    /// Recorded session this item was distilled from, as space-separated
-    /// `key=value` pairs. `harness=<name> session=<id> ts=<rfc3339>` are
-    /// required; `turn=<n>`, `schema=<name>`, and `coverage=<state>` are
-    /// recorded only when supplied. No transcript text enters the journal
+    /// What this item was distilled from, as space-separated `key=value`
+    /// pairs naming either a recorded session or an intake item. A session
+    /// needs `harness=<name> session=<id> ts=<rfc3339>`, with `turn=<n>`,
+    /// `schema=<name>`, and `coverage=<state>` recorded only when supplied.
+    /// An intake item is exactly `intake=<name> item=<id>`: a name matching
+    /// `[a-z][a-z0-9-]{0,31}` and one token of at most 128 bytes. The two
+    /// forms never mix. No transcript text or item body enters the journal
     #[arg(long, value_name = "SPEC")]
     pub source: Option<String>,
     /// This caller's key for one item inside that source. A later write under
-    /// the same harness, session, and key records nothing and reports the
-    /// existing item's disposition instead
+    /// the same key records nothing and reports the existing item's
+    /// disposition instead. The source half of that identity is the harness
+    /// and session for a recorded session, and the intake and item for an
+    /// intake item, whichever session writes
     #[arg(long, value_name = "KEY", requires = "source")]
     pub item_key: Option<String>,
 }
@@ -666,34 +779,48 @@ pub enum JournalCmd {
         #[arg(long)]
         spool: bool,
     },
-    /// Record a second recorded session as a source of an existing artifact.
-    /// One item may be evidenced by several sessions; this appends the extra
-    /// coordinate as an event and never touches the artifact's body
+    /// Record a further source of an existing artifact: another recorded
+    /// session, or an intake item. One item may be evidenced by several
+    /// sources; this appends the extra coordinate as an event and never
+    /// touches the artifact's body
     SourceAttach {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
-        /// Recorded session to attach, as space-separated `key=value` pairs.
-        /// `harness=<name> session=<id> ts=<rfc3339>` are required;
-        /// `turn=<n>`, `schema=<name>`, and `coverage=<state>` are optional
+        /// Source to attach, in the `--source` grammar of the write verbs:
+        /// `harness=<name> session=<id> ts=<rfc3339>` with optional `turn=`,
+        /// `schema=` and `coverage=`, or `intake=<name> item=<id>`
         #[arg(long, value_name = "SPEC")]
         source: String,
         /// This caller's key for the item inside that source
         #[arg(long, value_name = "KEY")]
         item_key: Option<String>,
     },
-    /// What one recorded session already produced here: every item key filed
-    /// against it, its disposition, the artifact when one exists, and the
-    /// events behind it. This is what makes a repeated scan of the same
-    /// endings cheap — an item already filed, discharged, or judged to need
-    /// no action answers for itself instead of being distilled again
+    /// What one recorded session, or one intake item, already produced here:
+    /// every item key filed against it, its disposition, the artifact when
+    /// one exists, and the events behind it (journal-source/2). This is what
+    /// makes a repeated scan cheap — an item already filed, discharged, or
+    /// judged to need no action answers for itself instead of being
+    /// distilled again. Name a recording with `--harness` and `--session`,
+    /// or an intake item with `--intake` and `--item`.
     /// Records no events; ledger reads do not require a parseable append policy.
+    #[command(group(
+        clap::ArgGroup::new("origin")
+            .required(true)
+            .args(["harness", "intake"])
+    ))]
     Source {
         /// The recording's harness, as the source reference recorded it
-        #[arg(long)]
-        harness: String,
+        #[arg(long, requires = "session")]
+        harness: Option<String>,
         /// The native session id, as the source reference recorded it
-        #[arg(long)]
-        session: String,
+        #[arg(long, requires = "harness")]
+        session: Option<String>,
+        /// The intake's name, as `--source intake=<name>` recorded it
+        #[arg(long, requires = "item", conflicts_with_all = ["harness", "session"])]
+        intake: Option<String>,
+        /// The intake item's ID, as `--source item=<id>` recorded it
+        #[arg(long, requires = "intake", conflicts_with_all = ["harness", "session"])]
+        item: Option<String>,
         /// Report only this item key
         #[arg(long, value_name = "KEY")]
         item_key: Option<String>,
@@ -1745,9 +1872,27 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd, global: bool) -> Result<i32> {
         JournalCmd::Source {
             harness,
             session,
+            intake,
+            item,
             item_key,
             json,
-        } => source_report(ctx, &harness, &session, item_key.as_deref(), json),
+        } => {
+            // The acting identity's global `--harness` and `--session` share
+            // these ids, so their values reach an intake query too; clap has
+            // already refused a typed mix of the two forms.
+            let origin = match (intake, item, harness, session) {
+                (Some(intake), Some(item), _, _) => {
+                    SourceOrigin::Intake(IntakeSource::new(&intake, &item)?)
+                }
+                (None, None, Some(harness), Some(session)) => {
+                    SourceOrigin::Session { harness, session }
+                }
+                _ => bail!(
+                    "name a recording with --harness and --session, or an intake item with --intake and --item"
+                ),
+            };
+            source_report(ctx, &origin, item_key.as_deref(), json)
+        }
         JournalCmd::Filed {
             session,
             stale,
@@ -5229,10 +5374,11 @@ fn declared_source(args: &SourceArgs) -> Result<(Option<SourceRef>, Option<Strin
 
 /// The event that already recorded this item, if one did.
 ///
-/// Identity is the recording and the caller's key together: the same item read
-/// out of a different session is a different item, and one recording carries
-/// as many items as the caller gives it keys. Events arrive oldest first, so
-/// the first match is the one that claimed the key.
+/// Identity is the source's origin and the caller's key together: the same
+/// item read out of a different session, or keyed under a different intake
+/// item, is a different item, and one origin carries as many items as the
+/// caller gives it keys. Events arrive oldest first, so the first match is
+/// the one that claimed the key.
 fn recorded_item<'a>(
     events: &'a [JournalEvent],
     source: &SourceRef,
@@ -5243,7 +5389,7 @@ fn recorded_item<'a>(
             && event
                 .source
                 .as_ref()
-                .is_some_and(|recorded| recorded.same_recording(source))
+                .is_some_and(|recorded| recorded.same_origin(source))
     })
 }
 
@@ -6055,9 +6201,10 @@ fn log_line(
     }
 }
 
-/// Record a further recorded session as evidence behind an existing artifact.
+/// Record a further source, a recorded session or an intake item, as evidence
+/// behind an existing artifact.
 ///
-/// One item can be evidenced by several sessions, and the append is explicit
+/// One item can be evidenced by several sources, and the append is explicit
 /// because nothing may attach a source by inferring one from prose. The
 /// artifact's body is never touched: the reference is an event, and an artifact
 /// that has been consumed still accepts one, since where a record came from
@@ -6085,7 +6232,7 @@ fn source_attach(ctx: &Ctx, filename: &str, source: &str, item_key: Option<&str>
     Ok(0)
 }
 
-/// One recorded session behind one artifact.
+/// One source behind one artifact: a recorded session or an intake item.
 #[derive(Clone, Serialize)]
 pub(crate) struct ArtifactSource {
     #[serde(flatten)]
@@ -6094,8 +6241,8 @@ pub(crate) struct ArtifactSource {
     item_key: Option<String>,
 }
 
-/// Every recorded session an artifact was distilled from, in the order they
-/// were recorded. An artifact authored here carries none.
+/// Every source an artifact was distilled from, in the order they were
+/// recorded. An artifact authored here carries none.
 fn artifact_sources(events: &[JournalEvent], filename: &str) -> Vec<ArtifactSource> {
     events
         .iter()
@@ -6139,23 +6286,50 @@ struct SourceItem {
     events: Vec<SourceItemEvent>,
 }
 
+/// The origin `journal source` answers for: a recording, or an intake item.
 #[derive(Serialize)]
-struct SourceReport {
+#[serde(untagged)]
+enum SourceOrigin {
+    Session { harness: String, session: String },
+    Intake(IntakeSource),
+}
+
+impl SourceOrigin {
+    /// Whether a recorded reference names this origin.
+    fn holds(&self, source: &SourceRef) -> bool {
+        match (self, source) {
+            (Self::Session { harness, session }, _) => {
+                source.recording() == Some((harness.as_str(), session.as_str()))
+            }
+            (Self::Intake(origin), SourceRef::Intake(recorded)) => origin == recorded,
+            (Self::Intake(_), SourceRef::Session(_)) => false,
+        }
+    }
+
+    fn label(&self) -> String {
+        match self {
+            Self::Session { harness, session } => format!("{harness}/{session}"),
+            Self::Intake(origin) => format!("intake={} item={}", origin.intake, origin.item),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct SourceReport<'a> {
     schema: &'static str,
-    harness: String,
-    session: String,
+    #[serde(flatten)]
+    origin: &'a SourceOrigin,
     items: Vec<SourceItem>,
 }
 
-/// What one recorded session has already produced in this journal.
+/// What one recording or intake item has already produced in this journal.
 ///
 /// Derived from the event log rather than a store of its own: the events
 /// already carry every reference and every disposition, and a second index
 /// would be a copy that can disagree with them.
 fn source_report(
     ctx: &Ctx,
-    harness: &str,
-    session: &str,
+    origin: &SourceOrigin,
     item_key: Option<&str>,
     json: bool,
 ) -> Result<i32> {
@@ -6169,7 +6343,7 @@ fn source_report(
         let Some(source) = event.source.as_ref() else {
             continue;
         };
-        if source.harness != harness || source.session != session {
+        if !origin.holds(source) {
             continue;
         }
         if item_key.is_some_and(|wanted| event.item_key.as_deref() != Some(wanted)) {
@@ -6213,15 +6387,14 @@ fn source_report(
     if json {
         let report = SourceReport {
             schema: SOURCE_SCHEMA,
-            harness: harness.to_string(),
-            session: session.to_string(),
+            origin,
             items,
         };
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(0);
     }
     if items.is_empty() {
-        println!("no items recorded for {harness}/{session}");
+        println!("no items recorded for {}", origin.label());
         return Ok(0);
     }
     for item in &items {
@@ -6352,9 +6525,12 @@ pub(crate) fn filed_report_in(
         let sources = artifact_sources(related, file);
         if session.is_some_and(|session| {
             event.session() != Some(session)
-                && !sources
-                    .iter()
-                    .any(|source| source.source.session == session)
+                && !sources.iter().any(|source| {
+                    source
+                        .source
+                        .recording()
+                        .is_some_and(|(_, recorded)| recorded == session)
+                })
         }) {
             continue;
         }
@@ -6524,7 +6700,7 @@ fn filed(ctx: &Ctx, session: Option<&str>, stale_days: u64, json: bool) -> Resul
                         source
                             .item_key
                             .as_deref()
-                            .map(|key| format!(" item={key}"))
+                            .map(|key| format!(" item-key={key}"))
                             .unwrap_or_default()
                     );
                 }
@@ -6659,8 +6835,8 @@ pub(crate) fn recent_sessions_from(
         if let (true, Some(harness), Some(session)) = (*created, event.harness(), event.session()) {
             named.push((harness, session));
         }
-        if let Some(source) = &event.source {
-            named.push((source.harness.as_str(), source.session.as_str()));
+        if let Some(recording) = event.source.as_ref().and_then(SourceRef::recording) {
+            named.push(recording);
         }
         for (harness, session) in named {
             if present(harness).is_none() || present(session).is_none() {
@@ -8645,13 +8821,14 @@ pub(crate) struct JournalEvent {
     /// position in the log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     settlement: Option<String>,
-    /// The recorded session this entry was distilled out of, when it was
-    /// distilled rather than authored. Absent means the entry was authored
-    /// here, which is what every event written without the field means.
+    /// The recorded session or intake item this entry was distilled out of,
+    /// when it was distilled rather than authored. Absent means the entry was
+    /// authored here, which is what every event written without the field
+    /// means.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source: Option<SourceRef>,
     /// The caller's key for one item inside `source`. Its whole purpose is
-    /// identity across repeated scans of the same recording, so it is
+    /// identity across repeated scans of the same source, so it is
     /// meaningless without the source it indexes into and is never recorded
     /// alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -11978,7 +12155,7 @@ pub(crate) struct ArtifactEntry {
     /// them, and on any artifact carrying none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) amendments: Option<usize>,
-    /// The recorded sessions this item was distilled from. Absent on an item
+    /// The sources this item was distilled from. Absent on an item
     /// authored here, which is most of them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) sources: Option<Vec<ArtifactSource>>,
@@ -13162,9 +13339,11 @@ fn reattribute(
                 references.push((position, format!("records {field}={previous}")));
                 continue;
             }
-            if let Some(source) = &candidate.source {
-                let sources = (*field == "harness" && source.harness == previous)
-                    || (*field == "session" && source.session == previous);
+            if let Some((harness, session)) =
+                candidate.source.as_ref().and_then(SourceRef::recording)
+            {
+                let sources = (*field == "harness" && harness == previous)
+                    || (*field == "session" && session == previous);
                 if sources {
                     references.push((position, format!("sources {field}={previous}")));
                 }
@@ -18368,6 +18547,27 @@ fn change_annotation(changes: &[ChangeState], topic: &str, filename: &str) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An intake name is a short lowercase slug. Rejects a looser check that
+    /// would admit names `--source intake=` cannot round-trip or that a
+    /// person would not recognize as the same intake.
+    #[test]
+    fn intake_names_are_short_lowercase_slugs() {
+        for name in ["tray", "t", "a-1", &"a".repeat(32)] {
+            assert!(valid_intake_name(name), "{name}");
+        }
+        for name in [
+            "",
+            "Tray",
+            "1tray",
+            "-tray",
+            "tr ay",
+            "tr_ay",
+            &"a".repeat(33),
+        ] {
+            assert!(!valid_intake_name(name), "{name}");
+        }
+    }
 
     fn assert_producer_annotation(kind: &str) {
         for model in [
