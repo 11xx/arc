@@ -1,8 +1,11 @@
-//! Intake items as journal sources.
+//! Intake items as journal sources, and the open-intake count `catchup`
+//! reports.
 //!
 //! An intake source is identified by the intake and the item alone, so the
 //! same item filed under the same key by any session is one item, while the
-//! session that writes stays recorded as the writer.
+//! session that writes stays recorded as the writer. Catchup only counts what
+//! an intake has open, and an intake that cannot answer never costs catchup
+//! its exit code or more than the intake timeout.
 
 use super::common::*;
 
@@ -257,4 +260,99 @@ fn journal_source_answers_for_an_intake_item() {
         filed.contains("    source: intake=tray item=T1 item-key=T1\n"),
         "{filed}"
     );
+}
+
+/// Configure `[intake.<name>]` entries, each running one shell script.
+fn configure_intakes(repo: &Repo, scripts: &[(&str, &str)]) {
+    let config = repo.home.join(".local/ai/arc/config.toml");
+    let mut text = fs::read_to_string(&config).unwrap();
+    for (name, script) in scripts {
+        text.push_str(&format!(
+            "[intake.{name}]\nargv = [\"sh\", \"-c\", {}]\n",
+            toml_string(script)
+        ));
+    }
+    fs::write(config, text).unwrap();
+}
+
+fn toml_string(text: &str) -> String {
+    serde_json::to_string(text).unwrap()
+}
+
+#[test]
+fn catchup_counts_open_intake_items() {
+    let repo = Repo::new();
+    configure_intakes(
+        &repo,
+        &[(
+            "tray",
+            r#"printf '{"schema": "tray-list/1", "items": [], "total": 3}'"#,
+        )],
+    );
+    let text = stdout(repo.arc(&repo.root).arg("catchup"));
+    assert!(text.contains("\nintake: tray: 3 open items\n"), "{text}");
+    let json = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
+    assert_eq!(
+        json["intake"],
+        serde_json::json!([{"name": "tray", "open": 3}]),
+        "{json}"
+    );
+}
+
+#[test]
+fn catchup_reports_an_unanswering_intake_and_still_succeeds() {
+    let repo = Repo::new();
+    configure_intakes(
+        &repo,
+        &[
+            ("failing", "echo broken >&2; exit 4"),
+            ("garbage", "printf 'not json'"),
+            ("missing", "exec /nonexistent/intake-program"),
+            ("slow", "exec sleep 60"),
+        ],
+    );
+    let config = repo.home.join(".local/ai/arc/config.toml");
+    let mut text = fs::read_to_string(&config).unwrap();
+    text.push_str("[intake.absent]\nargv = [\"/nonexistent/intake-program\"]\n");
+    fs::write(&config, text).unwrap();
+
+    let started = Instant::now();
+    let output = repo.arc(&repo.root).arg("catchup").output().unwrap();
+    let elapsed = started.elapsed();
+    assert!(output.status.success(), "{output:?}");
+    // The slow intake is cut off at its timeout rather than waited out.
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "catchup took {elapsed:?}"
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    for (name, reason) in [
+        ("absent", "could not start"),
+        ("failing", "exited with status 4"),
+        ("garbage", "output has no integer total"),
+        ("missing", "exited with status 127"),
+        ("slow", "did not finish within 2s"),
+    ] {
+        assert!(
+            text.contains(&format!("\nintake: {name}: unavailable ({reason}")),
+            "{name}: {text}"
+        );
+    }
+
+    let json = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
+    let intake = json["intake"].as_array().unwrap();
+    assert_eq!(intake.len(), 5, "{json}");
+    for entry in intake {
+        assert!(entry.get("open").is_none(), "{entry}");
+        assert!(entry["unavailable"].is_string(), "{entry}");
+    }
+}
+
+#[test]
+fn catchup_says_nothing_about_intake_when_none_is_configured() {
+    let repo = Repo::new();
+    let text = stdout(repo.arc(&repo.root).arg("catchup"));
+    assert!(!text.contains("intake:"), "{text}");
+    let json = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
+    assert_eq!(json["intake"], serde_json::json!([]), "{json}");
 }

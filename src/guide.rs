@@ -709,7 +709,8 @@ SETTLE A QUESTION (before it is work)
   existing entry; the session that writes is still recorded as the writer.
   `journal source --intake <name> --item <id>` lists what the item produced,
   `source-attach` accepts the same spec, and views keyed by session never
-  read an intake item as one.
+  read an intake item as one. `arc catchup` counts open intake items: `arc
+  catchup --help`.
 
   An entry filed wrong is amended, never rewritten. `correct` replaces one
   field of one entry — the artifact's `title`, a position's `stance`,
@@ -5018,6 +5019,7 @@ FILES
     [identity] detect = true             an undeclared harness, session, and
                                          model are read from the session store
     [provenance] git_identity = "per-actor" | "shared"
+    [intake.<name>] argv = ["<cmd>", ..] open-item count; arc catchup --help
     [change] checkout = "in-place" | "worktree", branch_prefix = "arc/"
     [integration] shape = "ff-only" | "no-ff", cleanup = false
 
@@ -5572,8 +5574,8 @@ WHAT ARC WILL NOT DO
       tapes records `arc context read --from-tapes` is handed. On its own
       behalf arc runs `git`, the signing program Git is configured with,
       and local probes (`df`, `du`, `findmnt`, the installed `arc
-      --version`); a declared gate, renderer, or hook command is the
-      project's or its caller's.
+      --version`); a declared gate, renderer, hook, or intake command is
+      the project's or its caller's.
     arc never refuses to create a worktree over disk space.
     arc records no configuration history, only the inputs to one
       irreversible decision.

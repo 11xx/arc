@@ -45,6 +45,19 @@ pub struct ConfigFile {
     /// Git provenance behavior.
     #[serde(default)]
     pub provenance: ProvenanceBehavior,
+    /// The `[intake.<name>]` tables: commands whose open-item counts
+    /// `arc catchup` reports, keyed by intake name.
+    #[serde(default)]
+    pub intake: BTreeMap<String, IntakeCommand>,
+}
+
+/// One `[intake.<name>]` table: the command that counts an intake's open
+/// items. It runs as argv, never through a shell, and prints JSON whose
+/// top-level integer `total` is the count.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct IntakeCommand {
+    #[serde(default)]
+    pub argv: Vec<String>,
 }
 
 /// The `[journal]` table: opt-in behavior for the advisory journal.
@@ -119,6 +132,9 @@ pub struct Config {
     pub identity_detect: bool,
     /// How ledger actors relate to Git author and committer identities.
     pub provenance_git_identity: GitIdentityMode,
+    /// Intake count commands by intake name, as configured and not yet
+    /// validated: catchup reports an unusable entry rather than refusing.
+    pub intake: BTreeMap<String, IntakeCommand>,
 }
 
 /// The variable naming the sandbox prefix. The `--sandbox` flag exports it, so
@@ -309,6 +325,7 @@ pub fn load() -> Result<Config> {
         journal_auto_log: file.journal.auto_log,
         identity_detect: file.identity.detect,
         provenance_git_identity: file.provenance.git_identity,
+        intake: file.intake,
     })
 }
 

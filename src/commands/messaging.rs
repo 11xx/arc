@@ -1132,6 +1132,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
         let cwd = ctx.cwd.clone();
         std::thread::spawn(move || crate::session_store::project_sessions(&cwd))
     });
+    let intake = crate::intake::start(&ctx.cwd);
     let store = ctx.store()?;
     let replica = crate::replica::status(&store)?;
     let (mut inbox, reports) = collect_inbox_with_reports(ctx, &store, None)?;
@@ -1159,6 +1160,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
         &states,
         &crate::commands::fork::checkouts(&forks),
     );
+    let intake = intake.finish();
 
     if json {
         println!(
@@ -1180,6 +1182,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
                     .filter(|fork| fork.retired.is_none())
                     .collect::<Vec<_>>(),
                 "worktrees": worktrees,
+                "intake": intake,
             }))?
         );
         return Ok(0);
@@ -1287,6 +1290,9 @@ pub fn catchup(ctx: &Ctx, limit: usize, sessions: usize, json: bool) -> Result<i
         ),
         Err(error) => println!("filed items: unavailable ({error:#})"),
         _ => {}
+    }
+    for count in &intake {
+        println!("{}", count.line());
     }
     render_forks(&forks);
     render_waiting_spools(ctx, &states);

@@ -28,6 +28,7 @@ mod guide;
 mod ids;
 mod import_authorization;
 mod inbox;
+mod intake;
 mod integration;
 mod interruption;
 mod journal;
@@ -3514,6 +3515,14 @@ enum Cmd {
     /// missing, a placeholder or a session id; valid models omit it.
     ///
     /// Human ledger sections name guide topics for the blockers already observed.
+    ///
+    /// Each intake configured as `[intake.<name>]` in the user config adds one
+    /// line, `intake: <name>: <n> open items`, and the JSON field `intake`
+    /// lists `{name, open}` per intake. Catchup only counts: it never reads,
+    /// prints, or triages an item. A command that cannot start, exits non-zero,
+    /// overruns 2 s, or prints no top-level integer `total` gives
+    /// `intake: <name>: unavailable (<reason>)` and `{name, unavailable}`,
+    /// and leaves the exit code alone. Nothing configured prints no intake line.
     Catchup {
         /// Number of recent sessions, selected after ranking every discovered
         /// candidate by its last recorded activity rather than file modification time.
