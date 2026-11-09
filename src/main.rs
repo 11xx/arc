@@ -3969,6 +3969,29 @@ enum WorkspaceCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Pinned journal artifacts across projects: each project's standing
+    /// references as `arc journal pins` lists them, grouped by project, with
+    /// the operator journal's last when no scope narrows the view.
+    ///
+    /// It accepts the same `--under`/`--here`/`--global` scope. Retired
+    /// registrations are skipped. A journal that cannot be read is named on
+    /// stderr and the command exits 16, keeping the projects it did read.
+    /// Versioned `arc-workspace-pins/1`. Records no events.
+    Pins {
+        /// Report only projects whose canonical anchor is beneath this path
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["here", "global"])]
+        under: Option<PathBuf>,
+        /// Report only projects beneath the current directory
+        #[arg(long, conflicts_with_all = ["under", "global"])]
+        here: bool,
+        /// Report every registered project and the operator journal, the
+        /// default when no scope is set
+        #[arg(long, conflicts_with_all = ["under", "here"])]
+        global: bool,
+        /// Emit the machine-readable JSON view instead of text
+        #[arg(long)]
+        json: bool,
+    },
     /// Every artifact across the selected stores, each with why it is where it is: present,
     /// terminal, archived, or superseded.
     ///
@@ -5940,7 +5963,7 @@ fn nested_subcommand_path(typed: Option<&str>) -> Option<&'static str> {
     match typed {
         Some("dir") => Some("journal dir"),
         Some("note") => Some("journal note"),
-        Some("append") => Some("journal position"),
+        Some("append") => Some("journal append"),
         Some("memories") => Some("journal memories"),
         Some("open") => Some("journal open"),
         Some("consume") => Some("journal consume"),
@@ -5968,6 +5991,11 @@ fn nested_subcommand_path(typed: Option<&str>) -> Option<&'static str> {
         Some("suggest") => Some("journal suggest"),
         Some("position") => Some("journal position"),
         Some("evidence") => Some("journal evidence"),
+        Some("pin") => Some("journal pin"),
+        Some("unpin") => Some("journal unpin"),
+        Some("pins") => Some("journal pins"),
+        Some("render") => Some("journal render"),
+        Some("published") => Some("journal published"),
         Some("latest") => Some("journal latest"),
         Some("source") => Some("journal source"),
         Some("source-attach") => Some("journal source-attach"),
@@ -8408,6 +8436,17 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                     },
                     json,
                 ),
+                WorkspaceCmd::Pins {
+                    under,
+                    here,
+                    global: _,
+                    json,
+                } => (
+                    commands::WorkspaceView::Pins {
+                        scope: workspace_scope(under, here)?,
+                    },
+                    json,
+                ),
                 WorkspaceCmd::Inventory {
                     storage,
                     retired,
@@ -8607,6 +8646,9 @@ mod tests {
             "journal position",
             "journal evidence",
             "journal verified",
+            "journal pin",
+            "journal unpin",
+            "journal published",
             "journal question",
             "journal checkpoint",
             "journal answer",

@@ -213,6 +213,11 @@ FROM A WORKSPACE ROOT (outside a project)
                        `--under`/`--here`/`--global` scope, reports the same
                        collection manifest, exits 16 on a partial collection,
                        and is versioned `arc-workspace-inventory/2`.
+  arc workspace pins [--here|--under PATH] [--json]
+                       Each project's pinned journal artifacts, grouped by
+                       project, and the operator journal's when unscoped
+                       (arc guide journal-references). Exits 16 when a
+                       journal cannot be read. `arc-workspace-pins/1`.
   arc workspace report [--previous FILE] --json
                        The backlog classified by named rules: each artifact's
                        status (unresolved, delivered, claimed, ...), the
@@ -2009,7 +2014,9 @@ STANDING REFERENCES (what a project keeps coming back to)
                          Pinned artifacts, most recently active first: title,
                          reason, appended block count and the newest block,
                          and storage when the body is not hot. `--global`
-                         reads the operator journal.
+                         reads the operator journal; `arc workspace pins`
+                         reads every registered project and the operator
+                         journal.
   `catchup` and `journal catchup` list pins first in the journal section. A
   pinned artifact never enters `journal open`, nor the inbox, backlog and
   report tiers read from it; `journal filed` never marks it stale; `journal
@@ -2025,6 +2032,32 @@ STANDING REFERENCES (what a project keeps coming back to)
                          still keys on the ID. `journal correct --target
                          <evd-id> --field title` amends it; corrections and
                          retractions are not counted as appended blocks.
+
+  A page is the readable copy of one artifact away from the terminal:
+    arc journal render <address> [--out FILE] [--strip-private]
+                         One standalone HTML page: the corrected title, the
+                         body, each appended block under its title and
+                         anchored by its ID, and a contents list. Corrections
+                         and retractions show where they apply rather than as
+                         sections. No scripts: raw HTML shows as code, links
+                         keep http(s), mailto and in-page anchors, images load
+                         only over https. Takes the addresses `show` takes.
+                         A home-directory path, a path under a directory arc
+                         knows is local (home, arc's data home, the journal,
+                         the checkout), a private, shared or link-local
+                         address, or a `.local`, `.lan`, `.home.arpa` or
+                         `.ts.net` host refuses with each line and text;
+                         `--strip-private` replaces them in the page, and
+                         `journal redact` removes them from the artifact.
+    arc journal published <file.md> --url URL
+                         Record where a published copy lives (`published`
+                         event; the latest is in force). Arc never publishes
+                         or fetches. `render`, `pins` and `catchup` name it.
+  An artifact address in a page (`<project>::<file.md>`, a filename, an entry
+  ID, or `<file.md>#<entry-id>`) links to the target's published copy, and an
+  entry ID of a block on the same page to its anchor; anything else stays
+  text. Rendering to the same `--out` path each time lets a publisher that
+  maps a path to a copy update that copy.
 
 END A SESSION (what the next one reads)
   arc journal handoff <topic> --derive        Stopped midstream.
@@ -5505,6 +5538,7 @@ SCHEMAS
     `arc-workspace-backlog/19`       arc workspace backlog --json
     `arc-workspace-report/3`         arc workspace report --json
     `arc-workspace-inventory/2`      arc workspace inventory --json
+    `arc-workspace-pins/1`           arc workspace pins --json
     `arc-workspace-retirement/1`     arc workspace retire|restore --json
     `arc-writability/1`              arc config --check-writable --json
     `arc-sandbox-clone/1`            arc sandbox clone --json
@@ -5567,7 +5601,7 @@ SCHEMAS
   Owned claim and lane lifecycle events require their complete identities;
   an event lacking one is unsupported and cannot change ownership state.
   `journal-events/2` covers that and the `evidence`, `relocated`,
-  `redacted`, `pinned`, and `unpinned` kinds; `journal-events/1`
+  `redacted`, `pinned`, `unpinned`, and `published` kinds; `journal-events/1`
   events, which carry both keys, are read alongside it, and a value of
   `unknown` in either reads as absent. A journal bundle and a journal spool
   (`arc-journal-spool/1` or current) carry events of either version. A reader

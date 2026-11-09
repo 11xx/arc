@@ -302,3 +302,86 @@ fn global_pins_live_in_the_operator_journal() {
         "a global pin reached the project journal"
     );
 }
+
+fn sibling_project(repo: &Repo, name: &str) -> PathBuf {
+    let root = repo.root.parent().unwrap().join(name);
+    fs::create_dir_all(&root).unwrap();
+    git(&root, &["init", "-b", "master"]);
+    git(&root, &["config", "user.name", "Tester"]);
+    git(&root, &["config", "user.email", "tester@example.invalid"]);
+    git(&root, &["config", "commit.gpgsign", "false"]);
+    fs::write(root.join("README.md"), "other\n").unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-m", "init"]);
+    fs::canonicalize(root).unwrap()
+}
+
+fn pin_note(repo: &Repo, cwd: &Path, args: &[&str], topic: &str) -> String {
+    let mut write = repo.arc(cwd);
+    write
+        .arg("journal")
+        .args(args)
+        .args(["note", topic, "--title", topic]);
+    let printed = stdout(&mut write);
+    let file = Path::new(printed.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let mut pin = repo.arc(cwd);
+    pin.arg("journal").args(args).args(["pin", &file]);
+    stdout(&mut pin);
+    file
+}
+
+/// Claim: `workspace pins` lists every registered project's pins and the
+/// operator journal's, and a scope narrows it to the projects beneath a
+/// path without the operator journal. Rejects a cross-project view that
+/// misses a project or leaks pins outside its scope.
+#[test]
+fn workspace_pins_group_every_project_and_the_operator_journal() {
+    let repo = Repo::new();
+    let own = pin_note(&repo, &repo.root, &[], "own-reference");
+    let other_root = sibling_project(&repo, "other");
+    let other = pin_note(&repo, &other_root, &[], "other-reference");
+    let operator = pin_note(&repo, &repo.root, &["--global"], "operator-reference");
+
+    let all = json_stdout(repo.arc(&repo.root).args(["workspace", "pins", "--json"]));
+    assert_eq!(all["schema"], "arc-workspace-pins/1");
+    let listed: Vec<(String, String)> = all["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|project| {
+            project["pins"].as_array().unwrap().iter().map(move |pin| {
+                (
+                    project["project"].as_str().unwrap().to_string(),
+                    pin["file"].as_str().unwrap().to_string(),
+                )
+            })
+        })
+        .collect();
+    let label = repo.root.file_name().unwrap().to_string_lossy().to_string();
+    assert!(listed.contains(&(label.clone(), own.clone())), "{all}");
+    assert!(
+        listed.contains(&("other".to_string(), other.clone())),
+        "{all}"
+    );
+    assert_eq!(all["operator_journal"][0]["file"], operator.as_str());
+
+    let text = stdout(repo.arc(&repo.root).args(["workspace", "pins"]));
+    assert!(text.contains("other (1):"), "{text}");
+    assert!(text.contains("operator journal (1):"), "{text}");
+
+    let scoped = json_stdout(repo.arc(&repo.root).args([
+        "workspace",
+        "pins",
+        "--under",
+        other_root.to_str().unwrap(),
+        "--json",
+    ]));
+    let projects = scoped["projects"].as_array().unwrap();
+    assert_eq!(projects.len(), 1, "{scoped}");
+    assert_eq!(projects[0]["pins"][0]["file"], other.as_str());
+    assert_eq!(scoped["operator_journal"], serde_json::json!([]));
+}

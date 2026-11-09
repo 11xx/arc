@@ -47,6 +47,11 @@ pub(super) fn is_pinned(events: &[JournalEvent], file: &str) -> bool {
     pins(events).contains_key(file)
 }
 
+/// The pin `file` holds now, when it is pinned.
+pub(super) fn current_pin<'a>(events: &'a [JournalEvent], file: &str) -> Option<&'a JournalEvent> {
+    pins(events).remove(file)
+}
+
 /// The refusal for a storage move that would take a pinned artifact out of
 /// reach. A pin promises the artifact stays live and appendable, so the move
 /// waits for an explicit unpin.
@@ -136,6 +141,8 @@ pub(crate) struct PinRow {
     /// and are not counted.
     blocks: usize,
     last_block: Option<LastBlock>,
+    /// Where `journal published` last said a rendered copy lives.
+    published: Option<String>,
     /// When the artifact last changed: its last appended block, else its pin.
     #[serde(skip)]
     active_at: Option<DateTime<Utc>>,
@@ -219,6 +226,7 @@ fn pin_row(dir: &Path, events: &[JournalEvent], file: &str, pin: &JournalEvent) 
         consumed: is_consumed(events, file),
         blocks: appended.len(),
         last_block,
+        published: super::page::published_url(events, file).map(str::to_string),
         active_at,
     })
 }
@@ -231,41 +239,50 @@ pub(crate) fn render_pins(rows: &[PinRow], now: DateTime<Utc>) {
         println!("  (none)");
     }
     for row in rows {
-        println!("  {}  {}", row.file, row.title.as_deref().unwrap_or(""));
-        let mut facts = Vec::new();
-        if let Some(reason) = &row.reason {
-            facts.push(reason.clone());
-        }
-        facts.push(match (&row.last_block, row.blocks) {
-            (Some(last), count) => {
-                let age = DateTime::parse_from_rfc3339(&last.at)
-                    .ok()
-                    .map(|at| {
-                        let seconds = now
-                            .signed_duration_since(at.with_timezone(&Utc))
-                            .num_seconds()
-                            .max(0) as u64;
-                        format!(" {} ago", format_age(seconds))
-                    })
-                    .unwrap_or_default();
-                let noun = if count == 1 { "block" } else { "blocks" };
-                let title = last
-                    .title
-                    .as_deref()
-                    .map(|title| format!(" \"{title}\""))
-                    .unwrap_or_default();
-                format!("{count} {noun}, last {}{title}{age}", last.id)
-            }
-            (None, _) => "no appended blocks".to_string(),
-        });
-        if row.storage != "hot" {
-            facts.push(row.storage.to_string());
-        }
-        if row.consumed {
-            facts.push("consumed".to_string());
-        }
-        println!("    {}", facts.join(" · "));
+        render_pin_row(row, now);
     }
+}
+
+/// One pin row: the file and title, then the reason, the appended blocks,
+/// storage when not hot, and the published copy beneath.
+pub(crate) fn render_pin_row(row: &PinRow, now: DateTime<Utc>) {
+    println!("  {}  {}", row.file, row.title.as_deref().unwrap_or(""));
+    let mut facts = Vec::new();
+    if let Some(reason) = &row.reason {
+        facts.push(reason.clone());
+    }
+    facts.push(match (&row.last_block, row.blocks) {
+        (Some(last), count) => {
+            let age = DateTime::parse_from_rfc3339(&last.at)
+                .ok()
+                .map(|at| {
+                    let seconds = now
+                        .signed_duration_since(at.with_timezone(&Utc))
+                        .num_seconds()
+                        .max(0) as u64;
+                    format!(" {} ago", format_age(seconds))
+                })
+                .unwrap_or_default();
+            let noun = if count == 1 { "block" } else { "blocks" };
+            let title = last
+                .title
+                .as_deref()
+                .map(|title| format!(" \"{title}\""))
+                .unwrap_or_default();
+            format!("{count} {noun}, last {}{title}{age}", last.id)
+        }
+        (None, _) => "no appended blocks".to_string(),
+    });
+    if row.storage != "hot" {
+        facts.push(row.storage.to_string());
+    }
+    if row.consumed {
+        facts.push("consumed".to_string());
+    }
+    if let Some(url) = &row.published {
+        facts.push(url.clone());
+    }
+    println!("    {}", facts.join(" · "));
 }
 
 /// `arc journal pins`: the pinned artifacts of this journal, or of the

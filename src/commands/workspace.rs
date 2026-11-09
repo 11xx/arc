@@ -53,6 +53,9 @@ pub enum WorkspaceView {
         storage: StorageSelection,
         show_retired: bool,
     },
+    Pins {
+        scope: WorkspaceScope,
+    },
     Backlog {
         since: Option<String>,
         items: bool,
@@ -365,6 +368,7 @@ pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<i32> {
             storage,
             show_retired,
         } => workspace_inventory(ctx, scope, storage, show_retired, json),
+        WorkspaceView::Pins { scope } => workspace_pins(scope, json),
         WorkspaceView::Backlog {
             since,
             items,
@@ -1200,6 +1204,112 @@ fn identity_text(
 /// it is where it is. A reconciliation says what finished, what was shelved,
 /// and what a transition superseded, so a hot row's absence is never read as
 /// completion.
+/// One project's pins in `workspace pins`.
+#[derive(Serialize)]
+struct ProjectPins {
+    project: String,
+    slug: String,
+    journal_dir: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    anchor: Option<String>,
+    pins: Vec<crate::journal::PinRow>,
+}
+
+#[derive(Serialize)]
+struct PinsFailure {
+    project: String,
+    reason: String,
+}
+
+/// `arc workspace pins`: every selected project's standing references, and
+/// the operator journal's when the scope is every project.
+fn workspace_pins(scope: WorkspaceScope, json: bool) -> Result<i32> {
+    let cfg = crate::config::load()?;
+    let scope = ResolvedWorkspaceScope::resolve(scope)?;
+    let mut projects = Vec::new();
+    let mut failures = Vec::new();
+    for project in crate::registry::projects(&cfg)? {
+        if project.retired.is_some() || !scope.includes(project.anchor.as_deref()) {
+            continue;
+        }
+        match crate::journal::pin_rows(&project.journal_dir) {
+            Ok(pins) if pins.is_empty() => {}
+            Ok(pins) => projects.push(ProjectPins {
+                project: project.label(),
+                slug: project.slug.clone(),
+                journal_dir: project.journal_dir.display().to_string(),
+                anchor: project
+                    .anchor
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+                pins,
+            }),
+            Err(error) => failures.push(PinsFailure {
+                project: project.label(),
+                reason: format!("{error:#}"),
+            }),
+        }
+    }
+    let operator = match scope {
+        ResolvedWorkspaceScope::Global => {
+            match crate::config::global_journal_dir().and_then(|dir| {
+                if dir.is_dir() {
+                    crate::journal::pin_rows(&dir)
+                } else {
+                    Ok(Vec::new())
+                }
+            }) {
+                Ok(pins) => pins,
+                Err(error) => {
+                    failures.push(PinsFailure {
+                        project: "operator journal".to_string(),
+                        reason: format!("{error:#}"),
+                    });
+                    Vec::new()
+                }
+            }
+        }
+        ResolvedWorkspaceScope::Under(_) => Vec::new(),
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema": "arc-workspace-pins/1",
+                "scope": scope.view(),
+                "projects": projects,
+                "operator_journal": operator,
+                "failures": failures,
+            }))?
+        );
+    } else {
+        let now = chrono::Utc::now();
+        if projects.is_empty() && operator.is_empty() {
+            println!("pinned: (none)");
+        }
+        for project in &projects {
+            println!("{} ({}):", project.project, project.pins.len());
+            for row in &project.pins {
+                crate::journal::render_pin_row(row, now);
+            }
+        }
+        if !operator.is_empty() {
+            println!("operator journal ({}):", operator.len());
+            for row in &operator {
+                crate::journal::render_pin_row(row, now);
+            }
+        }
+    }
+    for failure in &failures {
+        eprintln!(
+            "{}: unavailable ({})",
+            failure.project,
+            failure.reason.replace(['\n', '\r'], " ")
+        );
+    }
+    Ok(if failures.is_empty() { 0 } else { 16 })
+}
+
 fn workspace_inventory(
     ctx: &Ctx,
     scope: WorkspaceScope,

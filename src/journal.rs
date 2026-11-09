@@ -34,7 +34,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
+mod page;
 mod pins;
+mod private_text;
+
+pub(crate) use pins::{pin_rows, render_pin_row, PinRow};
 
 const JOURNAL_LOCK_DIR: &str = ".locks";
 const JOURNAL_TRANSITION_LOCK: &str = "transition.lock";
@@ -953,13 +957,51 @@ pub enum JournalCmd {
     },
     /// List pinned artifacts, most recently active first: title, reason, the
     /// count of appended blocks and the newest one, and storage when the body
-    /// is not hot (arc-journal-pins/1). `--global` lists the operator
-    /// journal's pins.
+    /// is not hot, and the published copy (arc-journal-pins/1). `--global`
+    /// lists the operator journal's pins; `arc workspace pins` lists every
+    /// project's.
     /// Records no events; ledger reads do not require a parseable append policy.
     Pins {
         /// Emit structured JSON instead of text
         #[arg(long)]
         json: bool,
+    },
+    /// Render one artifact as a standalone HTML page for reading away from
+    /// the terminal: its title as corrected, its body, every appended block
+    /// under its title, and a table of contents. The page has no scripts;
+    /// raw HTML shows as code, links keep only http(s), mailto and in-page
+    /// anchors, and images load only over https. An artifact address in the
+    /// text links to that artifact's published copy, or to its block on this
+    /// page. A home-directory path, a path under a directory arc knows is
+    /// local, a private, shared or link-local address, or a private host
+    /// name refuses, naming each; `--strip-private` replaces them in the
+    /// page instead. Reads the address forms `show` takes.
+    /// Records no events; ledger reads do not require a parseable append policy.
+    Render {
+        /// Artifact address: a filename, `<project>::<file>`,
+        /// `<journal-dir>::<file>`, or a topic for its newest live artifact
+        address: String,
+        /// Write the page to this file instead of stdout. Rendering to the
+        /// same path each time lets a publisher that maps paths to copies
+        /// update the same one
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+        /// Replace each private stretch with a placeholder naming its kind,
+        /// in the page only, instead of refusing
+        #[arg(long)]
+        strip_private: bool,
+    },
+    /// Record where a rendered copy of an artifact lives and emit a typed
+    /// `published` event; the latest one is in force. `render`, `pins` and
+    /// `catchup` print it, and an address of this artifact in another page
+    /// links to it. Arc publishes nothing and never fetches the URL. The body
+    /// may be hot or archived; recording the URL in force writes nothing
+    Published {
+        /// Artifact filename inside the journal dir (a name, not a path)
+        filename: String,
+        /// The http(s) URL the publisher returned
+        #[arg(long)]
+        url: String,
     },
     /// Pose a question on a discussion that only a person can settle, and emit
     /// a typed `question` event. Placement is the design: `opening` is answered
@@ -1752,6 +1794,7 @@ impl JournalCmd {
             | JournalCmd::Catchup { .. }
             | JournalCmd::Memories { .. }
             | JournalCmd::Pins { .. }
+            | JournalCmd::Render { .. }
             | JournalCmd::Open { .. }
             | JournalCmd::List { .. }
             | JournalCmd::Inventory { .. }
@@ -1972,6 +2015,12 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd, global: bool) -> Result<i32> {
         JournalCmd::Pin { filename, reason } => pins::pin(ctx, &filename, reason.as_deref()),
         JournalCmd::Unpin { filename } => pins::unpin(ctx, &filename),
         JournalCmd::Pins { json } => pins::list(ctx, json),
+        JournalCmd::Render {
+            address,
+            out,
+            strip_private,
+        } => page::render(ctx, &address, out.as_deref(), strip_private),
+        JournalCmd::Published { filename, url } => page::record_published(ctx, &filename, &url),
         JournalCmd::Question {
             filename,
             placement,
@@ -8854,6 +8903,11 @@ pub(crate) struct JournalEvent {
     /// resolves it; it exists so the delivery can be found again outside arc.
     #[serde(skip_serializing_if = "Option::is_none")]
     handle: Option<String>,
+    /// Where a `published` event says a rendered copy of the artifact lives:
+    /// an http(s) URL the publisher gave back. Arc never fetches it; a later
+    /// render names it so the caller updates the same copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
     /// The facility a `capability` event marks the start of. A journal that
     /// has never written a kind of fact is silent about it rather than
     /// negative, so derived state needs the point at which that kind of fact
@@ -9219,6 +9273,7 @@ impl JournalEvent {
             settle_by: None,
             delivered_to: None,
             handle: None,
+            url: None,
             name: None,
             revision: None,
             position_id: None,
@@ -9389,6 +9444,7 @@ impl JournalEvent {
                     })
             }
             "unpinned" => self.artifact_file(),
+            "published" => self.artifact_file() && self.url.as_deref().is_some_and(page::valid_url),
             "position" => {
                 self.file.is_some()
                     && self
@@ -10487,6 +10543,11 @@ fn event_message(event: &JournalEvent) -> String {
                 .unwrap_or_default()
         ),
         "unpinned" => format!("unpinned {}", event.file.as_deref().unwrap_or_default()),
+        "published" => format!(
+            "published {} at {}",
+            event.file.as_deref().unwrap_or_default(),
+            event.url.as_deref().unwrap_or_default()
+        ),
         "verified" => format!(
             "verified {}{}{}{}",
             event.file.as_deref().unwrap_or_default(),

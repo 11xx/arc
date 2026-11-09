@@ -30,6 +30,7 @@ serde_json = { version = "1", features = ["raw_value"] }
 sha2 = "0.10"
 toml = "0.8"
 ulid = "1"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 
 [dev-dependencies]
 assert_cmd = "2"

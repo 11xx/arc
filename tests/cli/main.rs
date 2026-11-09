@@ -67,6 +67,7 @@ mod integrate;
 mod journal;
 mod journal_exchange;
 mod journal_living;
+mod journal_pages;
 mod journal_pins;
 mod journal_staging;
 mod ladder_clearance;
