@@ -2155,3 +2155,68 @@ fn legacy_reanswers_without_block_digests_exchange() {
     );
     assert_event_sets_equal(&a, &b, &file);
 }
+
+/// Claim: a pinned living document crosses replicas with its pin and its
+/// titled blocks, and a block appended later merges into the copy already
+/// imported. Rejects an exchange that holds back the new event kinds or
+/// fails to match a titled block heading to its event.
+#[test]
+fn a_pinned_document_with_titled_blocks_round_trips_and_grows() {
+    let source = Repo::new();
+    let recipient = Repo::new();
+    pair(&source, &recipient, "workstation", "agent-host");
+    let file = write_artifact(&source, "living-doc", "note", "# Living doc\n");
+    stdout(source.arc(&source.root).args([
+        "journal",
+        "pin",
+        &file,
+        "--reason",
+        "standing reference",
+    ]));
+    let append = |title: &str, body: &str| {
+        stdout(
+            source
+                .arc(&source.root)
+                .args([
+                    "journal",
+                    "append",
+                    &file,
+                    "--body-file",
+                    "-",
+                    "--title",
+                    title,
+                ])
+                .write_stdin(body),
+        );
+    };
+    append("First pass", "One.\n");
+    let first = bundle_file(&source, "living-first");
+    export(&source, &[&file], &first);
+    let imported = import(&recipient, &first, false);
+    assert!(imported.status.success(), "{imported:?}");
+
+    append("Second pass", "Two.\n");
+    let second = bundle_file(&source, "living-second");
+    export(&source, &[&file], &second);
+    let merged = import(&recipient, &second, false);
+    assert!(merged.status.success(), "{merged:?}");
+
+    let recipient_dir = journal_dir(&recipient);
+    let body = fs::read_to_string(recipient_dir.join(&file)).unwrap();
+    assert!(body.contains("): First pass\n"), "{body}");
+    assert!(body.contains("): Second pass\n"), "{body}");
+    let pins = json_stdout(
+        recipient
+            .arc(&recipient.root)
+            .args(["journal", "pins", "--json"]),
+    );
+    assert_eq!(pins["pins"][0]["file"], file.as_str());
+    assert_eq!(pins["pins"][0]["reason"], "standing reference");
+    assert_eq!(pins["pins"][0]["blocks"], 2);
+    assert_eq!(pins["pins"][0]["last_block"]["title"], "Second pass");
+    recipient
+        .arc(&recipient.root)
+        .args(["journal", "doctor"])
+        .assert()
+        .success();
+}

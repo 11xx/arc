@@ -4861,18 +4861,6 @@ fn a_declared_actor_authors_a_position_and_an_answer() {
 }
 
 #[test]
-fn journal_append_is_rejected_as_unknown() {
-    let repo = Repo::new();
-    repo.arc(&repo.root)
-        .args(["journal", "append"])
-        .assert()
-        .code(2)
-        .stderr(predicates::str::contains(
-            "unrecognized subcommand 'append'",
-        ));
-}
-
-#[test]
 fn journal_position_rejects_paths_missing_files_and_non_artifacts() {
     let repo = Repo::new();
     // A path, not a bare filename.

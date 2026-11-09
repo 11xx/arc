@@ -901,7 +901,9 @@ pub enum JournalCmd {
     /// refuse; fenced and indented examples are prose. Target availability is
     /// checked before reading the body and again under the transition lock.
     /// Evidence cannot be appended in cold storage;
-    /// use `journal unarchive` before appending
+    /// use `journal unarchive` before appending. `append` names the same
+    /// command for a living document that grows by sections
+    #[command(visible_alias = "append")]
     Evidence {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
@@ -909,6 +911,12 @@ pub enum JournalCmd {
         /// a tool-computed `### Evidence` heading)
         #[arg(long)]
         body_file: String,
+        /// One line naming the block, written after the heading's writer and
+        /// time and recorded on the event; a rendered page and its contents
+        /// use it in place of "Evidence". `journal correct --target <evd-id>
+        /// --field title` amends it
+        #[arg(long)]
+        title: Option<String>,
     },
     /// Record that an artifact was checked against the project's source at the
     /// current anchor revision. The revision is omitted when the anchor has no
@@ -1147,7 +1155,7 @@ pub enum JournalCmd {
         /// `title` and, on a plan, `planners` on the artifact; `stance`,
         /// `option`, `ref`, `actor`, and `model` on a position; `option`,
         /// `actor`, and `model` on an answer; `actor` and `model` on a
-        /// question or evidence block. A corrected actor, model or planner is held to what a
+        /// question; `title`, `actor`, and `model` on an evidence block. A corrected actor, model or planner is held to what a
         /// write records: a placeholder or a session id model refuses. A
         /// model is checked against the target entry's session and the invoking
         /// session; an answer target uses its latest settlement, and a
@@ -1958,7 +1966,8 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd, global: bool) -> Result<i32> {
         JournalCmd::Evidence {
             filename,
             body_file,
-        } => evidence(ctx, &filename, &body_file),
+            title,
+        } => evidence(ctx, &filename, &body_file, title.as_deref()),
         JournalCmd::Verified { filename, note } => verified(ctx, &filename, note.as_deref()),
         JournalCmd::Pin { filename, reason } => pins::pin(ctx, &filename, reason.as_deref()),
         JournalCmd::Unpin { filename } => pins::unpin(ctx, &filename),
@@ -7093,7 +7102,8 @@ fn position(
 /// rather than filing a successor. It carries no stance and no reply edge, so
 /// it never enters a stance tally; the event supplies the stable id, the
 /// activity time, and the writer.
-fn evidence(ctx: &Ctx, filename: &str, body_file: &str) -> Result<i32> {
+fn evidence(ctx: &Ctx, filename: &str, body_file: &str, title: Option<&str>) -> Result<i32> {
+    let title = title.map(block_title).transpose()?;
     // Check target availability before waiting on a body source.
     open_artifact(ctx, filename)?;
     let body = read_body_verbatim(body_file)?;
@@ -7117,18 +7127,36 @@ fn evidence(ctx: &Ctx, filename: &str, body_file: &str) -> Result<i32> {
     let evidence_id = format!("evd-{}", ulid::Ulid::new().to_string().to_ascii_lowercase());
     let (harness, _) = identity(ctx);
     let heading = format!(
-        "### Evidence {evidence_id} ({})",
-        heading_stamp(attribution(ctx, harness.as_deref()), &ts)
+        "### Evidence {evidence_id} ({}){}",
+        heading_stamp(attribution(ctx, harness.as_deref()), &ts),
+        title
+            .as_deref()
+            .map(|title| format!(": {title}"))
+            .unwrap_or_default()
     );
     append_block(&path, &heading, &body)?;
 
     let mut event = JournalEvent::base(ctx, now, &topic, "evidence");
     event.file = Some(filename.to_string());
+    event.title = title;
     event.evidence_id = Some(evidence_id);
     event.storage_at_write = Some("hot".to_string());
     append_event(ctx, &dir, &event)?;
     println!("{}", path.display());
     Ok(0)
+}
+
+/// An appended block's title: one line, since it shares the heading line
+/// whose ID every reader keys on.
+fn block_title(title: &str) -> Result<String> {
+    if title.contains(['\n', '\r']) {
+        bail!("--title must be a single line");
+    }
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        bail!("--title must name the block, or be omitted");
+    }
+    Ok(trimmed.to_string())
 }
 
 /// The syntactic half of the artifact preflight, separable because it writes
@@ -9036,7 +9064,8 @@ impl AmendTarget {
         match self {
             Self::Artifact => &["title", "planners"],
             Self::Position(_) => &["stance", "option", "actor", "model", "ref"],
-            Self::Question(_) | Self::Evidence(_) => &["actor", "model"],
+            Self::Question(_) => &["actor", "model"],
+            Self::Evidence(_) => &["title", "actor", "model"],
             Self::Answer(_) => &["option", "actor", "model"],
         }
     }
@@ -10440,8 +10469,13 @@ fn event_message(event: &JournalEvent) -> String {
             .clone()
             .unwrap_or_else(|| "wrote artifact".into()),
         "evidence" => format!(
-            "added evidence to {}",
-            event.file.as_deref().unwrap_or_default()
+            "added evidence to {}{}",
+            event.file.as_deref().unwrap_or_default(),
+            event
+                .title
+                .as_deref()
+                .map(|title| format!(": {title}"))
+                .unwrap_or_default()
         ),
         "pinned" => format!(
             "pinned {}{}",
@@ -14921,6 +14955,12 @@ fn structured_entries(
             "model": field("model", event.and_then(|event| event.model.as_deref())),
             "retracted": id.is_some_and(|id| amendments.is_retracted(id)),
         });
+        if kind == "evidence" {
+            value["title"] = serde_json::json!(field(
+                "title",
+                event.and_then(|event| event.title.as_deref())
+            ));
+        }
         if kind == "position" {
             value["stance"] = serde_json::json!(field(
                 "stance",

@@ -442,7 +442,10 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          answer, suggestion, retraction, and checkpoint writes
                          use the same two-stage target preflight.
                          Evidence cannot be appended in cold storage; use
-                         `journal unarchive` before appending.
+                         `journal unarchive` before appending. `--title`
+                         names the block after the heading's writer and
+                         time, and `journal append` is the same command
+                         (arc guide journal-references).
   arc journal verified <file> [--note <text>]
                          Record a source check at the head of the checkout it
                          was made in: the project anchor, or a fork's own
@@ -2012,6 +2015,16 @@ STANDING REFERENCES (what a project keeps coming back to)
   report tiers read from it; `journal filed` never marks it stale; `journal
   archive --consumed` keeps it and names it on stderr; an explicit `journal
   archive` or `journal relocate` refuses until it is unpinned.
+
+  A living document grows by appended sections, not by successors:
+    arc journal append <file.md> --body-file - [--title TEXT]
+                         `journal evidence` under the name that fits. The
+                         title is one line, written after the heading's
+                         writer and time (`### Evidence <id> (<who>, <ts>):
+                         <title>`) and recorded on the event, so every reader
+                         still keys on the ID. `journal correct --target
+                         <evd-id> --field title` amends it; corrections and
+                         retractions are not counted as appended blocks.
 
 END A SESSION (what the next one reads)
   arc journal handoff <topic> --derive        Stopped midstream.

@@ -132,7 +132,8 @@ pub(crate) struct PinRow {
     storage: &'static str,
     consumed: bool,
     /// Sections appended to the body: positions, evidence, questions,
-    /// answers, checkpoints, corrections, and retractions.
+    /// answers, and checkpoints. Corrections and retractions amend those
+    /// and are not counted.
     blocks: usize,
     last_block: Option<LastBlock>,
     /// When the artifact last changed: its last appended block, else its pin.
@@ -184,7 +185,10 @@ fn pin_row(dir: &Path, events: &[JournalEvent], file: &str, pin: &JournalEvent) 
     });
     let appended: Vec<(&'static str, &str, &JournalEvent)> = events
         .iter()
-        .filter(|event| event.file.as_deref() == Some(file))
+        .filter(|event| {
+            event.file.as_deref() == Some(file)
+                && !matches!(event.event.as_str(), "correction" | "retraction")
+        })
         .filter_map(|event| {
             let (label, id) = event.entry_identity()?;
             Some((label, id, event))
