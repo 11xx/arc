@@ -246,6 +246,12 @@ FROM A WORKSPACE ROOT (outside a project)
                        follows its write: failing to append fails nothing,
                        and a follower that missed notices reads again. Past
                        1 MiB the file moves to `events.jsonl.1`, replacing it.
+  arc workspace watch [--previous FILE]
+                       The report as one JSON line, then again each time a
+                       notice changes it: only the projects the feed names are
+                       read again. Requests on stdin compare with a previous
+                       report or refresh every project; it ends when stdin
+                       closes. `--help` holds the contract.
   cd <anchor>          Enter one project named by the report, then orient there.
   arc workspace retire <journal-dir|slug|anchor> --reason TEXT [--dry-run]
                        Take a registration whose project is gone (a probe,
@@ -5616,6 +5622,7 @@ SCHEMAS
     `arc-workspace-feed/1`           <ai-home>/arc/feed/events.jsonl (arc guide workspace)
     `arc-journal-spool/2`            .arc/outbox/<ts>-<kind>-<topic>.json
     `arc-trailer-edits/1`            arc rewrite trailers --edits
+    `arc-workspace-watch-request/1`  arc workspace watch, one per stdin line
     `arc-correspondence/1`           arc close --correspondence
     `arc-review-ladder/1`            .arc/review-ladder.toml; review-ladder import|show --json
 

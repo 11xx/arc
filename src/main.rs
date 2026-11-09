@@ -4118,6 +4118,52 @@ enum WorkspaceCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Emit the workspace report as one JSON line, then again each time arc
+    /// records something that changes it
+    ///
+    /// Each line is `arc-workspace-report/3` as `report --json` prints it,
+    /// on one line. The watch follows the workspace feed (`arc guide
+    /// workspace`): once the feed has been quiet for 250 ms, or 2 s after a
+    /// notice, it reads again only the projects the notices name, and emits
+    /// the report when anything but its observation times changed. Between
+    /// notices it sleeps on one inotify watch and holds no Git process.
+    ///
+    /// Only arc's own writes reach the feed. A commit made outside arc, a
+    /// moved branch, or a vanished anchor shows at the next refresh, and
+    /// ages count from the read that gave each project's row.
+    ///
+    /// Each standard input line is one `arc-workspace-watch-request/1` JSON
+    /// object carrying `"schema"` and one request: `"previous": FILE`
+    /// compares every later report with that earlier report, which must have
+    /// the same schema and scope; `"previous": null` stops comparing;
+    /// `"refresh": true` forgets every held read and reads every project
+    /// again. A request is answered at once. One that cannot be honored is
+    /// named on stderr and changes nothing.
+    ///
+    /// The watch ends, exiting 0, when its standard input closes or its
+    /// output loses its reader. A failed read is named on stderr and the
+    /// next notice or request reads again; component failures are in each
+    /// report's collection manifest, never in the exit code. The watch
+    /// writes nothing.
+    Watch {
+        /// Report only projects whose canonical anchor is beneath this path
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["here", "global"])]
+        under: Option<PathBuf>,
+        /// Report only projects beneath the current directory
+        #[arg(long, conflicts_with_all = ["under", "global"])]
+        here: bool,
+        /// Report every registered project, the default when no scope is set
+        #[arg(long, conflicts_with_all = ["under", "here"])]
+        global: bool,
+        /// An earlier `arc workspace report --json` to compare against from
+        /// the start
+        #[arg(long, value_name = "FILE")]
+        previous: Option<PathBuf>,
+        /// List retired registrations in scope. Without it they are only
+        /// counted, as `collection.retired`
+        #[arg(long)]
+        retired: bool,
+    },
     /// Retire a registration whose project is gone, recording why, so the
     /// workspace views stop observing it.
     ///
@@ -8477,6 +8523,20 @@ fn run(cli: Cli, reads_only: bool) -> Result<i32> {
                         show_retired: retired,
                     },
                     json,
+                ),
+                WorkspaceCmd::Watch {
+                    under,
+                    here,
+                    global: _,
+                    previous,
+                    retired,
+                } => (
+                    commands::WorkspaceView::Watch {
+                        scope: workspace_scope(under, here)?,
+                        previous,
+                        show_retired: retired,
+                    },
+                    true,
                 ),
                 WorkspaceCmd::Retire {
                     project,

@@ -136,6 +136,7 @@ mod verify;
 mod warm_worktrees;
 mod workspace;
 mod workspace_feed;
+mod workspace_watch;
 
 use common::{PredicateBooleanExt, Repo};
 

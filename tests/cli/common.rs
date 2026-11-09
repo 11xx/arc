@@ -80,51 +80,103 @@ impl Repo {
     }
 
     pub(crate) fn fixture_env(&self, mut cmd: AssertCommand, cwd: &Path) -> AssertCommand {
+        cmd.current_dir(cwd);
+        let (sets, removes) = self.fixture_vars();
+        cmd.envs(sets);
+        for name in removes {
+            cmd.env_remove(name);
+        }
+        cmd
+    }
+
+    /// `arc` as a child process under the fixture's environment, for a test
+    /// that talks to a command while it runs. Every stream is piped.
+    pub(crate) fn spawn_arc_piped(&self, cwd: &Path, args: &[&str]) -> Child {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_arc"));
         cmd.current_dir(cwd)
-            .env("HOME", &self.home)
-            .env("ARC_SANDBOX", &self.home)
-            .env("GIT_CONFIG_GLOBAL", self.home.join(".gitconfig"))
-            .env("XDG_CONFIG_HOME", self.home.join(".config"))
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CEILING_DIRECTORIES", self._tmp.path())
-            .env("ARC_ACTOR", "tester")
-            .env("ARC_HARNESS", "test")
-            .env("ARC_SESSION", "session-a")
-            .env("ARC_AGENT_STATUS", self.home.join(".no-agent-status"))
-            .envs(NO_EDITOR)
-            .env_remove("ARC_ROLE")
-            .env_remove("ARC_MODEL")
-            .env_remove("ARC_SESSION_LINK")
-            .env_remove("ARC_ON_BEHALF_OF")
-            .env_remove("ARC_DATA_DIR")
-            .env_remove("ARC_DATA_ROOT")
-            .env_remove("ARC_WORKTREES_DIR")
-            .env_remove("ARC_AI_HOME")
-            .env_remove("ARC_JOURNAL_DIR")
-            .env_remove("AI_HOME")
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let (sets, removes) = self.fixture_vars();
+        cmd.envs(sets);
+        for name in removes {
+            cmd.env_remove(name);
+        }
+        cmd.spawn().unwrap()
+    }
+
+    /// What every fixture command's environment sets, and what it removes.
+    fn fixture_vars(
+        &self,
+    ) -> (
+        Vec<(&'static str, std::ffi::OsString)>,
+        &'static [&'static str],
+    ) {
+        let sets = vec![
+            ("HOME", self.home.as_os_str().to_os_string()),
+            ("ARC_SANDBOX", self.home.as_os_str().to_os_string()),
+            (
+                "GIT_CONFIG_GLOBAL",
+                self.home.join(".gitconfig").as_os_str().to_os_string(),
+            ),
+            (
+                "XDG_CONFIG_HOME",
+                self.home.join(".config").as_os_str().to_os_string(),
+            ),
+            ("GIT_CONFIG_NOSYSTEM", "1".into()),
+            (
+                "GIT_CEILING_DIRECTORIES",
+                self._tmp.path().as_os_str().to_os_string(),
+            ),
+            ("ARC_ACTOR", "tester".into()),
+            ("ARC_HARNESS", "test".into()),
+            ("ARC_SESSION", "session-a".into()),
+            (
+                "ARC_AGENT_STATUS",
+                self.home
+                    .join(".no-agent-status")
+                    .as_os_str()
+                    .to_os_string(),
+            ),
+            (NO_EDITOR[0].0, NO_EDITOR[0].1.into()),
+            (NO_EDITOR[1].0, NO_EDITOR[1].1.into()),
+        ];
+        const REMOVES: &[&str] = &[
+            "ARC_ROLE",
+            "ARC_MODEL",
+            "ARC_SESSION_LINK",
+            "ARC_ON_BEHALF_OF",
+            "ARC_DATA_DIR",
+            "ARC_DATA_ROOT",
+            "ARC_WORKTREES_DIR",
+            "ARC_AI_HOME",
+            "ARC_JOURNAL_DIR",
+            "AI_HOME",
             // The suite may itself run inside a harness. Whatever session
             // variable that harness exports must not reach the binary under
             // test, or `env` detects the runner instead of the fixture.
-            .env_remove("CLAUDE_SESSION_ID")
-            .env_remove("CLAUDE_CODE_SESSION_ID")
-            .env_remove("CLAUDE_CODE_BRIDGE_SESSION_ID")
-            .env_remove("CODEX_THREAD_ID")
-            .env_remove("OPENCODE_SESSION")
-            .env_remove("OPENCODE_TERMINAL")
-            .env_remove("PI_SESSION_ID")
-            .env_remove("PI_SESSION_FILE")
-            .env_remove("PI_MODEL")
-            .env_remove("PI_REASONING_LEVEL")
+            "CLAUDE_SESSION_ID",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_CODE_BRIDGE_SESSION_ID",
+            "CODEX_THREAD_ID",
+            "OPENCODE_SESSION",
+            "OPENCODE_TERMINAL",
+            "PI_SESSION_ID",
+            "PI_SESSION_FILE",
+            "PI_MODEL",
+            "PI_REASONING_LEVEL",
             // Session lookup honours each store override before `$HOME`, so a
             // host that exports one would otherwise have the fixture read its
             // real store. A test that needs one sets it explicitly.
-            .env_remove("CODEX_HOME")
-            .env_remove("CLAUDE_CONFIG_DIR")
-            .env_remove("PI_CODING_AGENT_SESSION_DIR")
-            .env_remove("PI_CODING_AGENT_DIR")
+            "CODEX_HOME",
+            "CLAUDE_CONFIG_DIR",
+            "PI_CODING_AGENT_SESSION_DIR",
+            "PI_CODING_AGENT_DIR",
             // A price table the host names would price the fixture's figures.
-            .env_remove("TAPES_PRICES");
-        cmd
+            "TAPES_PRICES",
+        ];
+        (sets, REMOVES)
     }
 
     pub(crate) fn commit(&self, cwd: &Path, file: &str, content: &str, msg: &str) {

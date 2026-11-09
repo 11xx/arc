@@ -2,6 +2,8 @@
 //! many change ledgers. All read-only: no store is ever created while
 //! scanning, and `restack` only prints commands — arc never rewrites branches.
 
+mod watch;
+
 use super::*;
 use crate::perf::Counted;
 use anyhow::ensure;
@@ -74,6 +76,11 @@ pub enum WorkspaceView {
         rank_by: RankBasis,
     },
     Report {
+        scope: WorkspaceScope,
+        previous: Option<PathBuf>,
+        show_retired: bool,
+    },
+    Watch {
         scope: WorkspaceScope,
         previous: Option<PathBuf>,
         show_retired: bool,
@@ -402,6 +409,11 @@ pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<i32> {
             previous,
             show_retired,
         } => workspace_report(ctx, scope, previous.as_deref(), show_retired, json),
+        WorkspaceView::Watch {
+            scope,
+            previous,
+            show_retired,
+        } => watch::watch(ctx, scope, previous.as_deref(), show_retired),
         WorkspaceView::Retire {
             project,
             reason,
@@ -673,7 +685,7 @@ fn render_collection(collection: &CollectionManifest) {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct CollectionFailure {
     project: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -847,6 +859,7 @@ struct BacklogScope {
     under: Option<String>,
 }
 
+#[derive(Clone)]
 enum ResolvedWorkspaceScope {
     Global,
     Under(PathBuf),

@@ -1234,6 +1234,8 @@ fn every_read_only_command_reads_past_a_broken_policy() {
         vec!["workspace", "inventory", "--json"],
         vec!["workspace", "backlog", "--json"],
         vec!["workspace", "report", "--json"],
+        // Its input is closed, so it prints one report and ends.
+        vec!["workspace", "watch"],
         vec!["workspace", "pins", "--json"],
         vec!["restack", id, "--advise"],
         vec!["journal", "dir"],

@@ -231,6 +231,7 @@ pub(crate) const READ_ONLY_COMMANDS: &[&str] = &[
     "workspace inventory",
     "workspace backlog",
     "workspace report",
+    "workspace watch",
     "workspace pins",
     "restack",
     "journal dir",
