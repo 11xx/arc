@@ -18,6 +18,7 @@ mod custody;
 mod declarations;
 mod explain;
 mod extent;
+mod feed;
 mod forge;
 mod forge_observation;
 mod forge_round_trip;

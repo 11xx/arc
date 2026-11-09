@@ -1767,6 +1767,9 @@ pub(crate) fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<()> {
         Ok(())
     })();
     let _ = fs::remove_file(&temporary);
+    if published {
+        crate::feed::ledger_written(path);
+    }
     publish.map_err(|error| {
         crate::model::OperationFailure {
             published,

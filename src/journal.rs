@@ -3018,7 +3018,17 @@ fn exchange_refusal(hot: &Path, pending: &ExchangeTransaction, global: bool) -> 
 }
 
 /// Publish a prepared journal transaction under its participating journal locks.
+/// Commit the pending exchange in `hot`, then note the write in the
+/// workspace feed.
 fn finish_exchange_transaction(hot: &Path) -> Result<()> {
+    let finished = commit_exchange_transaction(hot);
+    if finished.is_ok() {
+        crate::feed::journal_written(hot);
+    }
+    finished
+}
+
+fn commit_exchange_transaction(hot: &Path) -> Result<()> {
     let path = exchange_pending_path(hot);
     let pending: ExchangeTransaction = serde_json::from_slice(&std::fs::read(&path)?)
         .context("cannot read pending journal exchange")?;
@@ -9260,7 +9270,9 @@ fn write_binding(dir: &Path, binding: &JournalBinding) -> Result<()> {
         .open(&path)
         .with_context(|| format!("cannot open {}", path.display()))?;
     file.write_all(line.as_bytes())
-        .with_context(|| format!("cannot append to {}", path.display()))
+        .with_context(|| format!("cannot append to {}", path.display()))?;
+    crate::feed::journal_written(dir);
+    Ok(())
 }
 
 impl JournalEvent {

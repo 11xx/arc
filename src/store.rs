@@ -3451,6 +3451,9 @@ fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<()> {
         Ok(())
     })();
     let _ = fs::remove_file(&temporary);
+    if publish.is_ok() {
+        crate::feed::ledger_written(path);
+    }
     publish
 }
 

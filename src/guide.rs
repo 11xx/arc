@@ -234,6 +234,16 @@ FROM A WORKSPACE ROOT (outside a project)
                        nullable `patchset_id`, `declared_at`, and `declared_by`.
                        `--help` lists every attention rule. Versioned
                        `arc-workspace-report/3`.
+  <ai-home>/arc/feed/events.jsonl
+                       The workspace feed: after each committed ledger or
+                       journal write, one `arc-workspace-feed/1` line. A
+                       ledger notice (`source` `ledger`) names the published
+                       `path` and, for a change event, its `change`; a journal
+                       notice (`source` `journal`) names the journal `dir`.
+                       Each carries `at`. Reads append nothing. A notice
+                       follows its write: failing to append fails nothing,
+                       and a follower that missed notices reads again. Past
+                       1 MiB the file moves to `events.jsonl.1`, replacing it.
   cd <anchor>          Enter one project named by the report, then orient there.
   arc workspace retire <journal-dir|slug|anchor> --reason TEXT [--dry-run]
                        Take a registration whose project is gone (a probe,
@@ -5601,6 +5611,7 @@ SCHEMAS
     `arc-replica-event/3`            one event inside an arc-replica-bundle
     `arc-journal-bundle/2`           arc journal export / import
     `journal-events/2`               events.jsonl, streamed by arc journal events
+    `arc-workspace-feed/1`           <ai-home>/arc/feed/events.jsonl (arc guide workspace)
     `arc-journal-spool/2`            .arc/outbox/<ts>-<kind>-<topic>.json
     `arc-trailer-edits/1`            arc rewrite trailers --edits
     `arc-correspondence/1`           arc close --correspondence
