@@ -18,8 +18,14 @@ pub(crate) const PREVIOUS: &str = "events.jsonl.1";
 const ROTATE_LOCK: &str = "rotate.lock";
 const ROTATE_AT: u64 = 1 << 20;
 
-/// The feed's directory, or `None` when the AI home cannot be resolved.
+/// The feed's directory, or `None` when the AI home cannot be resolved. The
+/// crate's own unit tests write ledgers in scratch directories under no
+/// sandbox, so they have no feed: their notices would land in the
+/// operator's.
 pub(crate) fn dir() -> Option<PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
     static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
         crate::config::ai_home()
