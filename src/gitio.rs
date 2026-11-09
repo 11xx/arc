@@ -3011,6 +3011,18 @@ struct ObjectReader {
 }
 
 impl ObjectReader {
+    /// Closing its input ends `cat-file`, which is then reaped.
+    fn close(self) {
+        let ObjectReader {
+            _child: mut child,
+            stdin,
+            stdout,
+        } = self;
+        drop(stdin);
+        drop(stdout);
+        let _ = child.wait();
+    }
+
     fn spawn(cwd: &Path) -> Option<Self> {
         let mut child = git_command()
             .args(["cat-file", "--batch"])
@@ -3130,6 +3142,114 @@ fn shared_object(cwd: &Path, name: &str) -> Option<Object> {
 /// the merge base is the base itself. Any other range is diffed on its own.
 /// A range Git cannot diff is absent.
 pub fn changed_paths_of(
+    cwd: &Path,
+    ranges: &[(String, String)],
+) -> std::collections::HashMap<(String, String), Vec<String>> {
+    if !crate::store::shares_reads() {
+        return read_changed_paths_of(cwd, ranges);
+    }
+    let held = RANGE_PATHS.get_or_init(Default::default);
+    let mut answers = std::collections::HashMap::new();
+    let mut unread = Vec::new();
+    {
+        let held = held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for range in ranges {
+            match held.get(&(cwd.to_path_buf(), range.clone())) {
+                Some(paths) => {
+                    answers.insert(range.clone(), paths.clone());
+                }
+                None => unread.push(range.clone()),
+            }
+        }
+    }
+    if unread.is_empty() {
+        return answers;
+    }
+    let read = read_changed_paths_of(cwd, &unread);
+    held.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .extend(
+            read.iter()
+                .filter(|((base, head), _)| is_object_id(base) && is_object_id(head))
+                .map(|(range, paths)| ((cwd.to_path_buf(), range.clone()), paths.clone())),
+        );
+    answers.extend(read);
+    answers
+}
+
+/// Whether `name` is a full object ID, which names one object forever,
+/// unlike a branch or an abbreviation.
+fn is_object_id(name: &str) -> bool {
+    matches!(name.len(), 40 | 64) && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// What `changed_paths_of` answered for each checkout and range of two full
+/// object IDs while the process shares its reads. Commits do not change, so
+/// such an answer holds for as long as the process does.
+static RANGE_PATHS: std::sync::OnceLock<std::sync::Mutex<RangePaths>> = std::sync::OnceLock::new();
+
+/// The paths each range touches, by the directory it was read in.
+type RangePaths = std::collections::HashMap<(PathBuf, (String, String)), Vec<String>>;
+
+/// Forget every answer held from Git that a moved branch or a changed
+/// worktree alters: objects, command output, merge and ancestry answers, and
+/// worktree cleanliness. For a reader that stays up while the repositories
+/// move.
+pub(crate) fn forget_answers() {
+    listing::forget();
+    if let Some(answers) = OBJECT_ANSWERS.get() {
+        answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+    if let Some(outputs) = SHARED_OUTPUTS.get() {
+        outputs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+}
+
+/// End every `cat-file --batch` reader the process keeps, and reap each, so
+/// a reader that stays up holds no Git process between its reads. The next
+/// lookup in a checkout starts its reader again.
+pub(crate) fn close_object_readers() {
+    let Some(readers) = OBJECT_READERS.get() else {
+        return;
+    };
+    let slots: Vec<ObjectReaderSlot> = readers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .drain()
+        .map(|(_, slot)| slot)
+        .collect();
+    for slot in slots {
+        let reader = slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(reader) = reader {
+            reader.close();
+        }
+    }
+}
+
+/// Forget the paths held for each range read in a directory `keep`
+/// refuses.
+pub(crate) fn retain_range_paths(keep: impl Fn(&Path) -> bool) {
+    if let Some(held) = RANGE_PATHS.get() {
+        let mut held = held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.retain(|(cwd, _), _| keep(cwd));
+        held.shrink_to_fit();
+    }
+}
+
+fn read_changed_paths_of(
     cwd: &Path,
     ranges: &[(String, String)],
 ) -> std::collections::HashMap<(String, String), Vec<String>> {

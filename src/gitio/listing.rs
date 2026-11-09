@@ -40,6 +40,20 @@ struct Answers {
 static ANSWERS: OnceLock<Mutex<HashMap<PathBuf, Answers>>> = OnceLock::new();
 static CLEAN: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();
 
+/// Forget every answer and cleanliness held: a branch moved or a worktree
+/// changed since they were read.
+pub(super) fn forget() {
+    if let Some(answers) = ANSWERS.get() {
+        answers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+    }
+    if let Some(clean) = CLEAN.get() {
+        clean.lock().unwrap_or_else(PoisonError::into_inner).clear();
+    }
+}
+
 fn with<T>(cwd: &Path, read: impl FnOnce(&mut Answers) -> T) -> T {
     let mut answers = ANSWERS
         .get_or_init(Default::default)

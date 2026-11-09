@@ -10502,6 +10502,28 @@ type Projected = std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<Vec<JournalEve
 
 static PROJECTED: std::sync::OnceLock<Projected> = std::sync::OnceLock::new();
 
+/// Forget the shared projection of the journal in `dir`.
+pub(crate) fn forget_projection(dir: &Path) {
+    if let Some(projected) = PROJECTED.get() {
+        let key = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        projected
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&key);
+    }
+}
+
+/// Forget the shared projection of every journal but those `keep` accepts,
+/// by canonical directory.
+pub(crate) fn retain_projections(keep: impl Fn(&Path) -> bool) {
+    if let Some(projected) = PROJECTED.get() {
+        projected
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|dir, _| keep(dir));
+    }
+}
+
 /// Forget every shared journal projection: the process wrote.
 pub(crate) fn forget_projections() {
     if let Some(projected) = PROJECTED.get() {

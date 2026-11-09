@@ -573,6 +573,9 @@ mod shared {
         pub replica_events: Option<Vec<crate::replica::ReplicaEvent>>,
         /// Each change's event writers, taken from the read that typed its events.
         pub change_writers: HashMap<String, Vec<super::SessionWriter>>,
+        /// Changes forgotten since `states` was read: the next read of the
+        /// readable states reduces these again and keeps the rest.
+        pub stale: std::collections::BTreeSet<String>,
     }
 
     static ENABLED: AtomicBool = AtomicBool::new(false);
@@ -586,6 +589,121 @@ mod shared {
 
     pub(super) fn enabled() -> bool {
         ENABLED.load(Ordering::Relaxed)
+    }
+
+    /// Every root a memo is held under that names the ledger at `root`: one
+    /// ledger opened through two spellings of its path has a memo for each.
+    fn roots_naming(root: &std::path::Path) -> Vec<PathBuf> {
+        let Some(memos) = MEMOS.get() else {
+            return Vec::new();
+        };
+        let canonical = root.canonicalize().ok();
+        memos
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keys()
+            .filter(|key| {
+                key.as_path() == root || canonical.is_some() && key.canonicalize().ok() == canonical
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Forget everything shared of the ledger at `root`.
+    pub(crate) fn forget_root(root: &std::path::Path) {
+        for key in roots_naming(root) {
+            if let Some(memos) = MEMOS.get() {
+                memos
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&key);
+            }
+            forget_files_under(&key);
+        }
+        forget_files_under(root);
+    }
+
+    /// Forget one change of the ledger at `root`. Its held state leaves the
+    /// readable states at their next read, which reduces it again.
+    pub(crate) fn forget_change(root: &std::path::Path, change_id: &str) {
+        for key in roots_naming(root) {
+            with(&key, |memo| {
+                memo.change_files.remove(change_id);
+                memo.change_events.remove(change_id);
+                memo.change_states.remove(change_id);
+                memo.change_writers.remove(change_id);
+                if memo.states.is_some() {
+                    memo.stale.insert(change_id.to_string());
+                }
+            });
+            forget_files_under(&key.join("changes").join(change_id));
+        }
+        forget_files_under(&root.join("changes").join(change_id));
+    }
+
+    fn forget_files_under(dir: &std::path::Path) {
+        if let Some(files) = FILES.get() {
+            files
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|path, _| !path.starts_with(dir));
+        }
+    }
+
+    /// Forget every ledger whose root `keep` refuses, and every held file
+    /// outside the ledgers kept.
+    pub(crate) fn retain(keep: impl Fn(&std::path::Path) -> bool) {
+        let mut kept = Vec::new();
+        if let Some(memos) = MEMOS.get() {
+            memos
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|root, _| {
+                    let keeps = keep(root);
+                    if keeps {
+                        kept.push(root.clone());
+                    }
+                    keeps
+                });
+        }
+        if let Some(files) = FILES.get() {
+            let mut files = files
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            files.retain(|path, _| kept.iter().any(|root| path.starts_with(root)));
+            files.shrink_to_fit();
+        }
+    }
+
+    /// Drop every held file and every change's events, raw or typed, and
+    /// keep what was reduced from them.
+    pub(crate) fn shed_events() {
+        if let Some(files) = FILES.get() {
+            let mut files = files
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            files.clear();
+            files.shrink_to_fit();
+        }
+        let memos: Vec<Arc<Mutex<Memo>>> = MEMOS
+            .get()
+            .map(|memos| {
+                memos
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .values()
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        for memo in memos {
+            let mut memo = memo
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            memo.change_files = HashMap::new();
+            memo.change_events = HashMap::new();
+            memo.repository_files = None;
+        }
     }
 
     /// Forget every shared read: the process wrote to a ledger.
@@ -626,8 +744,9 @@ mod shared {
 }
 
 /// Share ledger reads across the store handles this process opens for
-/// reading. Called once, at start, by a command that only reads and never
-/// watches the ledger move.
+/// reading. Called once, at start, by a command that only reads: one that
+/// renders once, or `workspace watch`, which forgets what each notice names
+/// before it reads again.
 pub fn share_reads() {
     shared::enable();
 }
@@ -691,6 +810,33 @@ pub(crate) fn write_read_counts() {
 /// Whether this process shares its ledger reads.
 pub(crate) fn shares_reads() -> bool {
     shared::enabled()
+}
+
+/// Forget what the process shares of the ledger at `root`, so its next read
+/// sees the ledger as it now stands.
+pub(crate) fn forget_ledger(root: &Path) {
+    shared::forget_root(root);
+}
+
+/// Forget what the process shares of one change. Its next read, and the next
+/// read of the ledger's readable states, reduce it again from its events;
+/// every other change keeps its held state.
+pub(crate) fn forget_change(root: &Path, change_id: &str) {
+    shared::forget_change(root, change_id);
+}
+
+/// Forget what the process shares of every ledger but those whose root
+/// `keep` accepts, under any spelling the root was opened by.
+pub(crate) fn retain_shared_reads(keep: impl Fn(&Path) -> bool) {
+    shared::retain(|root| {
+        keep(root) || root.canonicalize().is_ok_and(|canonical| keep(&canonical))
+    });
+}
+
+/// Drop the events the process holds, keeping each ledger's reduced states:
+/// what a reader that stays up keeps between reads.
+pub(crate) fn shed_events() {
+    shared::shed_events();
 }
 
 /// Forget the process's shared ledger reads after a ledger write.
@@ -2679,6 +2825,9 @@ impl Store {
     pub fn readable_states_shared(
         &self,
     ) -> Result<Arc<BTreeMap<String, crate::state::ChangeState>>> {
+        if self.shares_reads() {
+            self.refresh_stale_states()?;
+        }
         let (states, warnings) = self.shared_or(
             "states",
             |memo| &mut memo.states,
@@ -2691,6 +2840,42 @@ impl Store {
             eprintln!("{warning}");
         }
         Ok(states)
+    }
+
+    /// Reduce again each change forgotten since the readable states were held,
+    /// and put it back in place; a change gone from the ledger leaves them.
+    fn refresh_stale_states(&self) -> Result<()> {
+        let taken = shared::with(&self.root, |memo| {
+            if memo.stale.is_empty() {
+                return None;
+            }
+            let stale = std::mem::take(&mut memo.stale);
+            Some((memo.states.take()?, stale))
+        });
+        let Some(((mut states, mut warnings), stale)) = taken else {
+            return Ok(());
+        };
+        let read = self.read()?;
+        read.rewrites()?;
+        let present: BTreeSet<String> = read.change_ids()?.into_iter().collect();
+        let held = Arc::make_mut(&mut states);
+        let notes = Arc::make_mut(&mut warnings);
+        for change_id in stale {
+            let warning = format!("warning: unreadable change {change_id}:");
+            notes.retain(|note| !note.starts_with(&warning));
+            held.remove(&change_id);
+            if !present.contains(&change_id) {
+                continue;
+            }
+            match read.reduce(&change_id) {
+                Ok(state) => {
+                    held.insert(change_id, state);
+                }
+                Err(error) => notes.push(format!("{warning} {error:#}")),
+            }
+        }
+        shared::with(&self.root, |memo| memo.states = Some((states, warnings)));
+        Ok(())
     }
 
     /// Every readable change's state, and a warning naming each unreadable one.
