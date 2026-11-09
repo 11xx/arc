@@ -130,6 +130,11 @@ impl Scanner {
     /// The private stretches inside one token, as byte ranges of it.
     fn token_findings(&self, token: &str) -> Vec<(usize, usize, Kind)> {
         let mut found = Vec::new();
+        // A path holds a slash or a backslash, an address or host name a dot
+        // or a colon; most tokens are words and hold none of them.
+        if !token.contains(['/', '\\', '.', ':']) {
+            return found;
+        }
         if let Some(start) = self.local_path_start(token) {
             found.push((start, token.len(), Kind::LocalPath));
             return found;
@@ -180,23 +185,29 @@ impl Scanner {
                     .next_back()
                     .is_some_and(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
         };
-        let rooted = self.roots.iter().find_map(|root| {
-            token.match_indices(root.as_str()).find_map(|(at, _)| {
-                let after = token[at + root.len()..].chars().next();
-                (boundary(at) && after.is_none_or(|c| c == '/')).then_some(at)
-            })
-        });
-        let home = HOME_PREFIXES.iter().find_map(|prefix| {
-            token.match_indices(prefix).find_map(|(at, _)| {
-                let user = token[at + prefix.len()..].chars().next();
-                (boundary(at) && user.is_some_and(|c| c.is_ascii_alphanumeric())).then_some(at)
-            })
-        });
+        let posix = token
+            .match_indices('/')
+            .map(|(at, _)| at)
+            .filter(|&at| boundary(at))
+            .find(|&at| {
+                let rest = &token[at..];
+                let rooted = self.roots.iter().any(|root| {
+                    rest.strip_prefix(root.as_str())
+                        .is_some_and(|after| after.is_empty() || after.starts_with('/'))
+                });
+                rooted
+                    || HOME_PREFIXES.iter().any(|prefix| {
+                        rest.strip_prefix(prefix).is_some_and(|user| {
+                            user.starts_with(|c: char| c.is_ascii_alphanumeric())
+                        })
+                    })
+            });
         let windows = token
-            .to_ascii_lowercase()
-            .find(":\\users\\")
+            .contains('\\')
+            .then(|| token.to_ascii_lowercase().find(":\\users\\"))
+            .flatten()
             .and_then(|at| at.checked_sub(1));
-        [rooted, home, windows].into_iter().flatten().min()
+        [posix, windows].into_iter().flatten().min()
     }
 }
 

@@ -966,30 +966,51 @@ pub enum JournalCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Render one artifact as a standalone HTML page for reading away from
+    /// Render an artifact as a standalone HTML page for reading away from
     /// the terminal: its title as corrected, its body, every appended block
-    /// under its title, and a table of contents. The page has no scripts;
-    /// raw HTML shows as code, links keep only http(s), mailto and in-page
-    /// anchors, and images load only over https. An artifact address in the
-    /// text links to that artifact's published copy, or to its block on this
-    /// page. A home-directory path, a path under a directory arc knows is
-    /// local, a private, shared or link-local address, or a private host
-    /// name refuses, naming each; `--strip-private` replaces them in the
-    /// page instead. Reads the address forms `show` takes.
+    /// under its title, and a table of contents. The page has no scripts and
+    /// sends no referrer; raw HTML shows as code, links keep only http(s),
+    /// mailto and in-page anchors, and images load only over https. An
+    /// artifact address in the text links to that artifact's published copy,
+    /// or to its block on this page. A home-directory path, a path under a
+    /// directory arc knows is local, a private, shared or link-local address,
+    /// or a private host name refuses, naming each; `--strip-private`
+    /// replaces them in the page and `--keep-private` renders them as
+    /// written. Reads the address forms `show` takes. Several addresses
+    /// render in one run with `--json`, which reads each journal's event log
+    /// once; an address that fails is reported in its entry and the rest
+    /// still render, exiting 16.
     /// Records no events; ledger reads do not require a parseable append policy.
     Render {
         /// Artifact address: a filename, `<project>::<file>`,
-        /// `<journal-dir>::<file>`, or a topic for its newest live artifact
-        address: String,
-        /// Write the page to this file instead of stdout. Rendering to the
+        /// `<journal-dir>::<file>`, or a topic for its newest live artifact.
+        /// Several need `--json`
+        #[arg(required = true, value_name = "ADDRESS")]
+        addresses: Vec<String>,
+        /// Write the output to this file instead of stdout. Rendering to the
         /// same path each time lets a publisher that maps paths to copies
         /// update the same one
         #[arg(long, value_name = "FILE")]
         out: Option<PathBuf>,
         /// Replace each private stretch with a placeholder naming its kind,
         /// in the page only, instead of refusing
-        #[arg(long)]
+        #[arg(long, conflicts_with = "keep_private")]
         strip_private: bool,
+        /// Render private text as written, for a page that stays on its
+        /// owner's network. The count still shows on stderr and in `--json`
+        #[arg(long)]
+        keep_private: bool,
+        /// Only the page's markup (header, contents and text) for a host page
+        /// that supplies the document, the stylesheet and a footer. Carries
+        /// no render date, so the same journal gives the same bytes
+        #[arg(long)]
+        fragment: bool,
+        /// One `arc-journal-render/1` document: the stylesheet once, then per
+        /// address its journal, file, title, kind, block count, the sha256
+        /// and length of the body as read, private stretches found,
+        /// published URL and HTML, or the error that stopped it
+        #[arg(long)]
+        json: bool,
     },
     /// Record where a rendered copy of an artifact lives and emit a typed
     /// `published` event; the latest one is in force. `render`, `pins` and
@@ -2016,10 +2037,26 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd, global: bool) -> Result<i32> {
         JournalCmd::Unpin { filename } => pins::unpin(ctx, &filename),
         JournalCmd::Pins { json } => pins::list(ctx, json),
         JournalCmd::Render {
-            address,
+            addresses,
             out,
             strip_private,
-        } => page::render(ctx, &address, out.as_deref(), strip_private),
+            keep_private,
+            fragment,
+            json,
+        } => page::render(
+            ctx,
+            &addresses,
+            match (strip_private, keep_private) {
+                (true, _) => page::PrivateText::Strip,
+                (_, true) => page::PrivateText::Keep,
+                _ => page::PrivateText::Refuse,
+            },
+            page::RenderOutput {
+                out: out.as_deref(),
+                fragment,
+                json,
+            },
+        ),
         JournalCmd::Published { filename, url } => page::record_published(ctx, &filename, &url),
         JournalCmd::Question {
             filename,
@@ -15553,7 +15590,12 @@ impl JournalAddress {
     /// The hot directory of the journal the address names, and whether it is
     /// another project's.
     fn locate(&self, ctx: &Ctx) -> Result<(PathBuf, bool)> {
-        let own = resolve_dir(&ctx.cwd);
+        self.locate_from(resolve_dir(&ctx.cwd))
+    }
+
+    /// [`Self::locate`] given `own`, the journal the command runs in, as
+    /// resolved once by a caller locating many addresses.
+    fn locate_from(&self, own: Result<PathBuf>) -> Result<(PathBuf, bool)> {
         let hot = match &self.journal {
             AddressJournal::Own => return Ok((own?, false)),
             AddressJournal::Dir(dir) => {
@@ -15577,13 +15619,21 @@ impl JournalAddress {
 /// label.
 pub(crate) fn registered_project(prefix: &str) -> Result<crate::registry::Project> {
     let cfg = config::load()?;
-    let mut matches: Vec<_> = crate::registry::projects(&cfg)?
-        .into_iter()
+    registered_project_in(&crate::registry::journal_projects(&cfg)?, prefix).cloned()
+}
+
+/// [`registered_project`] among `projects`, the registry as already read.
+fn registered_project_in<'p>(
+    projects: &'p [crate::registry::Project],
+    prefix: &str,
+) -> Result<&'p crate::registry::Project> {
+    let matches: Vec<_> = projects
+        .iter()
         .filter(|project| project.slug == prefix || project.label() == prefix)
         .collect();
     match matches.len() {
         0 => bail!("no registered project matched {prefix:?} by slug or label"),
-        1 => Ok(matches.remove(0)),
+        1 => Ok(matches[0]),
         _ => bail!(
             "project prefix {prefix:?} matched multiple registered projects: {}",
             matches
@@ -15968,8 +16018,14 @@ pub fn read_artifact_body(ctx: &Ctx, reference: &str) -> Result<String> {
 }
 
 fn read_located_body(location: &ArtifactLocation) -> Result<String> {
+    read_located_body_in(location, &read_events(&location.hot)?)
+}
+
+/// [`read_located_body`] against `events`, the hot journal's log already
+/// read.
+fn read_located_body_in(location: &ArtifactLocation, events: &[JournalEvent]) -> Result<String> {
     let (hot, filename) = (&location.hot, location.file.as_str());
-    ensure_storage_settled(hot, &read_events(hot)?, filename)?;
+    ensure_storage_settled(hot, events, filename)?;
     for dir in [hot.clone(), archive_dir(hot)] {
         let path = dir.join(filename);
         if path.is_file() {

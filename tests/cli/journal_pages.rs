@@ -130,8 +130,9 @@ fn render_writes_one_page_with_contents_and_titled_blocks() {
 
 /// Claim: nothing in an artifact's Markdown makes the page run, embed or
 /// leave by an unsafe scheme: raw HTML shows as code, a `javascript:` link
-/// keeps only its text, and an image loads only over https. Rejects a page
-/// that passes raw HTML or an unsafe URL through.
+/// keeps only its text, an image loads only over https, and no request the
+/// page makes sends a referrer. Rejects a page that passes raw HTML or an
+/// unsafe URL through.
 #[test]
 fn render_never_emits_active_content() {
     let repo = Repo::new();
@@ -146,6 +147,10 @@ fn render_never_emits_active_content() {
     let (output, page) = render(&repo, &repo.root, &file, &[]);
     assert!(output.status.success(), "{output:?}");
     let html = fs::read_to_string(&page).unwrap();
+    assert!(
+        html.contains("<meta name=\"referrer\" content=\"no-referrer\">"),
+        "{html}"
+    );
     let lower = html.to_ascii_lowercase();
     assert!(!lower.contains("<script"), "{html}");
     assert!(!lower.contains("<img src=\"x\""), "{html}");
@@ -336,4 +341,179 @@ fn qualified_addresses_link_across_projects() {
     assert!(fs::read_to_string(&page)
         .unwrap()
         .contains("<h1>Shared</h1>"));
+}
+
+fn journal_dir(repo: &Repo, cwd: &Path) -> PathBuf {
+    PathBuf::from(stdout(repo.arc(cwd).args(["journal", "dir"])).trim())
+}
+
+/// Claim: `--json` renders every address in one run, in order: the
+/// stylesheet once, then per page its journal, file, title, kind, block
+/// count, the sha256 and length of the body as read, and its HTML. An address
+/// that fails carries its error, the others still render, and the run exits
+/// 16. Several addresses without `--json` refuse. Rejects a batch that stops
+/// at the first failure, or a digest of anything but the body.
+#[test]
+fn several_addresses_render_in_one_json_document() {
+    let owner = Repo::new();
+    let first = note(&owner, &owner.root, "first", "# First\n\nOne.\n");
+    append(&owner, &owner.root, &first, "Later", "Two.\n");
+    let reader = sibling_project(&owner, "reader");
+    let second = note(&owner, &reader, "second", "# Second\n\nThree.\n");
+    let owner_dir = journal_dir(&owner, &owner.root);
+    let reader_dir = journal_dir(&owner, &reader);
+    let addresses = [
+        format!("{}::{first}", owner_dir.display()),
+        format!("{}::20260101T000000Z-gone-note.md", owner_dir.display()),
+        format!("{}::{second}", reader_dir.display()),
+    ];
+
+    let output = owner
+        .arc(&owner.root)
+        .args(["journal", "render", "--json"])
+        .args(&addresses)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(16), "{output:?}");
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["schema"], "arc-journal-render/1");
+    assert!(document["style"]
+        .as_str()
+        .unwrap()
+        .contains(".block-header"));
+    let pages = document["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), 3);
+
+    let body = fs::read(owner_dir.join(&first)).unwrap();
+    assert_eq!(pages[0]["address"], addresses[0]);
+    assert_eq!(pages[0]["file"], first);
+    assert_eq!(pages[0]["title"], "First");
+    assert_eq!(pages[0]["kind"], "note");
+    assert_eq!(pages[0]["blocks"], 1);
+    assert_eq!(pages[0]["sha256"], hex::encode(Sha256::digest(&body)));
+    assert_eq!(pages[0]["bytes"], body.len());
+    assert_eq!(pages[0]["published"], serde_json::Value::Null);
+    let html = pages[0]["html"].as_str().unwrap();
+    assert!(html.starts_with("<!doctype html>"), "{html}");
+    assert!(html.contains("<h2>Later</h2>"), "{html}");
+
+    assert_eq!(pages[1]["address"], addresses[1]);
+    assert!(pages[1]["html"].is_null(), "{}", pages[1]);
+    assert!(
+        pages[1]["error"]
+            .as_str()
+            .unwrap()
+            .contains("20260101T000000Z-gone-note.md"),
+        "{}",
+        pages[1]
+    );
+
+    assert_eq!(pages[2]["file"], second);
+    assert_eq!(
+        pages[2]["journal_dir"],
+        reader_dir.display().to_string(),
+        "{}",
+        pages[2]
+    );
+    assert!(pages[2]["html"]
+        .as_str()
+        .unwrap()
+        .contains("<h1>Second</h1>"));
+
+    owner
+        .arc(&owner.root)
+        .args(["journal", "render", &first, &first])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "several addresses render only with --json",
+        ));
+}
+
+/// Claim: `--fragment` is the page's markup alone, header, contents and
+/// text, without the document shell, the stylesheet, or the footer that
+/// dates the render, so a host page supplies those and the same journal
+/// gives the same bytes. Rejects a fragment carrying a shell, a style, or
+/// the render date.
+#[test]
+fn a_fragment_is_the_markup_without_shell_style_or_date() {
+    let repo = Repo::new();
+    let file = note(
+        &repo,
+        &repo.root,
+        "fragment",
+        "# Fragment\n\n## One\n\nText.\n\n## Two\n\nMore.\n",
+    );
+    let (output, page) = render(&repo, &repo.root, &file, &["--fragment"]);
+    assert!(output.status.success(), "{output:?}");
+    let html = fs::read_to_string(&page).unwrap();
+    assert!(
+        html.starts_with("<header class=\"page-header\" id=\"top\">"),
+        "{html}"
+    );
+    assert!(html.contains("<nav class=\"contents\""), "{html}");
+    assert!(html.contains("<main>"), "{html}");
+    for shell in [
+        "<!doctype",
+        "<html",
+        "<head>",
+        "<style",
+        "<body",
+        "page-footer",
+        "Rendered by arc",
+    ] {
+        assert!(!html.contains(shell), "{shell} in {html}");
+    }
+}
+
+/// Claim: `--keep-private` renders private text as written and counts it,
+/// for a page that stays on its owner's network; it cannot be combined with
+/// `--strip-private`, and under `--json` without either a page holding
+/// private text is an error entry naming it. Rejects a keep mode that still
+/// refuses or strips.
+#[test]
+fn keep_private_renders_private_text_as_written() {
+    let repo = Repo::new();
+    let file = note(
+        &repo,
+        &repo.root,
+        "lan",
+        "# LAN\n\nThe NAS is at 192.168.1.9, notes in /home/someone/nas.md.\n",
+    );
+    let (output, page) = render(&repo, &repo.root, &file, &["--keep-private"]);
+    assert!(output.status.success(), "{output:?}");
+    let html = fs::read_to_string(&page).unwrap();
+    assert!(html.contains("192.168.1.9"), "{html}");
+    assert!(html.contains("/home/someone/nas.md"), "{html}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("2 private stretches kept"),
+        "{output:?}"
+    );
+
+    let (output, _) = render(
+        &repo,
+        &repo.root,
+        &file,
+        &["--keep-private", "--strip-private"],
+    );
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+
+    let output = repo
+        .arc(&repo.root)
+        .args(["journal", "render", "--json", &file])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(16), "{output:?}");
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let error = document["pages"][0]["error"].as_str().unwrap();
+    assert!(error.contains("private address 192.168.1.9"), "{error}");
+
+    let kept = json_stdout(repo.arc(&repo.root).args([
+        "journal",
+        "render",
+        "--json",
+        "--keep-private",
+        &file,
+    ]));
+    assert_eq!(kept["pages"][0]["private_stretches"], 2);
 }

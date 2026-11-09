@@ -2034,21 +2034,34 @@ STANDING REFERENCES (what a project keeps coming back to)
                          retractions are not counted as appended blocks.
 
   A page is the readable copy of one artifact away from the terminal:
-    arc journal render <address> [--out FILE] [--strip-private]
+    arc journal render <address> [--out FILE] [--strip-private|--keep-private]
                          One standalone HTML page: the corrected title, the
                          body, each appended block under its title and
                          anchored by its ID, and a contents list. Corrections
                          and retractions show where they apply rather than as
-                         sections. No scripts: raw HTML shows as code, links
-                         keep http(s), mailto and in-page anchors, images load
-                         only over https. Takes the addresses `show` takes.
+                         sections. No scripts and no referrer: raw HTML shows
+                         as code, links keep http(s), mailto and in-page
+                         anchors, images load only over https. Takes the
+                         addresses `show` takes.
                          A home-directory path, a path under a directory arc
                          knows is local (home, arc's data home, the journal,
                          the checkout), a private, shared or link-local
                          address, or a `.local`, `.lan`, `.home.arpa` or
                          `.ts.net` host refuses with each line and text;
-                         `--strip-private` replaces them in the page, and
-                         `journal redact` removes them from the artifact.
+                         `--strip-private` replaces them in the page,
+                         `--keep-private` renders them for a page that stays
+                         on its owner's network, and `journal redact` removes
+                         them from the artifact.
+    arc journal render <address>... --json [--fragment]
+                         Many pages in one run, each journal's log read once:
+                         `arc-journal-render/1` carries the stylesheet, then
+                         per address its file, title, kind, block count, the
+                         sha256 and length of the body as read, and its HTML,
+                         or the error that stopped it (exit 16; the rest still
+                         render). `--fragment` drops the document shell, the
+                         stylesheet and the dated footer, for a host page that
+                         draws its own around the markup; the stylesheet
+                         honors `data-theme="light|dark"` on the root element.
     arc journal published <file.md> --url URL
                          Record where a published copy lives (`published`
                          event; the latest is in force). Arc never publishes
@@ -5055,6 +5068,8 @@ EXIT CODES
     `arc restack --advise` exits 0 when the change has no dependents.
     `arc workspace backlog` exits 16 when any selected project's observation
       failed; the rows that were read still print.
+    `arc journal render --json` exits 16 when any address failed to render;
+      its entry carries the error and the other pages still render.
     `arc doctor` exits 1 when problems are present and 0 for a clean or
       advice-only ledger; a ledger it cannot read also exits 1, with the
       error on stderr and no report.
@@ -5512,6 +5527,7 @@ SCHEMAS
     `arc-journal-entry/1`            arc journal show <entry address> --json
     `arc-journal-open/1`             arc journal open --json
     `arc-journal-pins/1`             arc journal pins --json
+    `arc-journal-render/1`           arc journal render --json
     `arc-journal-inventory/6`        arc journal inventory --json
     `arc-rescue/5`                   arc rescue --json
     `arc-review/5`                   arc review --json

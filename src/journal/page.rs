@@ -12,9 +12,9 @@ use super::{
     append_event, archive_dir, artifact_body_path, canonical_dir, check_artifact_name,
     ensure_storage_settled, entry_id_kind, heading_from_topic, is_global_dir, locate_artifact,
     lock_journal_transition, markdown_syntax_line, missing_write_target, newest_live_under,
-    parse_artifact_name, pins, quoted_entry_line, read_events, read_located_body, recorded_anchor,
-    recorded_entry, resolve, resolve_dir, valid_topic, AddressJournal, Amendments,
-    ArtifactLocation, EntryScan, JournalAddress, JournalEvent,
+    parse_artifact_name, pins, quoted_entry_line, read_events, read_located_body_in,
+    recorded_anchor, recorded_entry, registered_project_in, resolve, resolve_dir, valid_topic,
+    AddressJournal, Amendments, ArtifactLocation, EntryScan, JournalAddress, JournalEvent,
 };
 use crate::commands::Ctx;
 use anyhow::{bail, Context, Result};
@@ -22,8 +22,11 @@ use chrono::Utc;
 use pulldown_cmark::{
     CodeBlockKind, CowStr, Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd,
 };
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 const STYLE: &str = include_str!("page.css");
 
@@ -91,146 +94,372 @@ pub(super) fn record_published(ctx: &Ctx, filename: &str, url: &str) -> Result<i
     Ok(0)
 }
 
-/// `arc journal render`: one artifact as a standalone HTML page.
+/// What a render does with private text.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PrivateText {
+    /// Refuse the page, naming each stretch.
+    Refuse,
+    /// Replace each stretch with a placeholder naming its kind.
+    Strip,
+    /// Render it as written, for a page that stays on its owner's network.
+    Keep,
+}
+
+/// Where and in what form `render` writes.
+pub(super) struct RenderOutput<'a> {
+    pub(super) out: Option<&'a Path>,
+    pub(super) fragment: bool,
+    pub(super) json: bool,
+}
+
+/// `arc journal render`: artifacts as HTML pages. One address prints its
+/// page; `--json` carries one entry per address, and an address that fails
+/// leaves the others rendered.
 pub(super) fn render(
     ctx: &Ctx,
-    argument: &str,
-    out: Option<&Path>,
-    strip_private: bool,
+    addresses: &[String],
+    private: PrivateText,
+    output: RenderOutput<'_>,
 ) -> Result<i32> {
-    let location = locate(ctx, argument)?;
-    let file = location.file.clone();
-    let body = read_located_body(&location)?;
-    let events = read_events(&location.hot)?;
-    let amendments = Amendments::collect(&events, &file);
-    let pin = pins::current_pin(&events, &file);
+    let mut run = Run::new(ctx);
+    if !output.json {
+        let [address] = addresses else {
+            bail!("several addresses render only with --json, which carries one page each");
+        };
+        let page = run.page(address, private, output.fragment)?;
+        write_output(output.out, &page.html)?;
+        let stretches = match (private, page.findings.len()) {
+            (_, 0) | (PrivateText::Refuse, _) => String::new(),
+            (PrivateText::Strip, count) => format!(", {count} private stretches replaced"),
+            (PrivateText::Keep, count) => format!(", {count} private stretches kept"),
+        };
+        eprintln!(
+            "rendered: {} ({} block{}{stretches}){}",
+            page.file,
+            page.blocks,
+            if page.blocks == 1 { "" } else { "s" },
+            output
+                .out
+                .map(|path| format!(" to {}", path.display()))
+                .unwrap_or_default()
+        );
+        if let Some(url) = &page.published {
+            eprintln!("published copy: {url}");
+        }
+        return Ok(0);
+    }
 
-    let scanner = Scanner::new(local_roots(ctx, &location.hot));
-    let title = amendments.title().map(str::to_string);
-    let reason = pin.and_then(|pin| pin.note.clone());
-    let mut findings: Vec<(String, Finding)> = scanner
-        .findings(&body)
-        .into_iter()
-        .map(|finding| (format!("line {}", finding.line), finding))
+    let pages: Vec<PageRecord> = addresses
+        .iter()
+        .map(
+            |address| match run.page(address, private, output.fragment) {
+                Ok(page) => PageRecord::Rendered {
+                    address: address.clone(),
+                    journal_dir: page.hot.display().to_string(),
+                    file: page.file,
+                    title: page.title,
+                    kind: page.kind,
+                    blocks: page.blocks,
+                    sha256: page.sha256,
+                    bytes: page.bytes,
+                    private_stretches: page.findings.len(),
+                    published: page.published,
+                    html: page.html,
+                },
+                Err(error) => PageRecord::Failed {
+                    address: address.clone(),
+                    error: format!("{error:#}"),
+                },
+            },
+        )
         .collect();
-    let block_titles = block_titles(&events, &file, &amendments);
-    let extras = [
-        ("title", title.as_deref()),
-        ("pin reason", reason.as_deref()),
-    ]
-    .into_iter()
-    .filter_map(|(name, value)| Some((name.to_string(), value?)))
-    .chain(
-        block_titles
-            .iter()
-            .map(|(id, title)| (format!("title of {id}"), title.as_str())),
-    );
-    for (name, value) in extras {
-        findings.extend(
-            scanner
-                .findings(value)
-                .into_iter()
-                .map(|finding| (name.clone(), finding)),
-        );
-    }
-    if !findings.is_empty() && !strip_private {
-        let listed = findings
-            .iter()
-            .map(|(place, finding)| format!("  {place}: {} {}", finding.kind.label(), finding.text))
-            .collect::<Vec<_>>()
-            .join("\n");
-        bail!(
-            "{file} holds text a published page must not carry:\n{listed}\n\
-             pass --strip-private to replace each in the page, or remove it from the \
-             artifact with `arc journal redact {file}`"
-        );
-    }
-    let clean = |text: &str| {
-        if strip_private {
-            scanner.strip(text)
-        } else {
-            text.to_string()
-        }
+    let failed = pages
+        .iter()
+        .filter(|page| matches!(page, PageRecord::Failed { .. }))
+        .count();
+    let document = RenderDocument {
+        schema: "arc-journal-render/1",
+        style: STYLE,
+        pages,
     };
-    let body = clean(&body);
-    let page = Page {
-        file: &file,
-        title: title.map(|title| clean(&title)),
-        reason: reason.map(|reason| clean(&reason)),
-        block_titles: block_titles
-            .into_iter()
-            .map(|(id, title)| (id, clean(&title)))
-            .collect(),
-        label: journal_label(&location.hot),
-        events: &events,
-        amendments: &amendments,
-        links: Links::new(ctx, &location, &events),
-    };
-    let (html, blocks) = page.html(&body)?;
-
-    match out {
-        Some(path) => std::fs::write(path, &html)
-            .with_context(|| format!("cannot write {}", path.display()))?,
-        None => print!("{html}"),
-    }
-    let replaced = if strip_private && !findings.is_empty() {
-        format!(", {} private stretches replaced", findings.len())
-    } else {
-        String::new()
-    };
+    write_output(output.out, &(serde_json::to_string(&document)? + "\n"))?;
     eprintln!(
-        "rendered: {file} ({blocks} block{}{replaced}){}",
-        if blocks == 1 { "" } else { "s" },
-        out.map(|path| format!(" to {}", path.display()))
-            .unwrap_or_default()
+        "rendered: {} of {} page{}",
+        addresses.len() - failed,
+        addresses.len(),
+        if addresses.len() == 1 { "" } else { "s" }
     );
-    if let Some(url) = published_url(&events, &file) {
-        eprintln!("published copy: {url}");
+    Ok(if failed == 0 { 0 } else { 16 })
+}
+
+/// `arc-journal-render/1`: the stylesheet a fragment needs, and one entry
+/// per address in the order given.
+#[derive(Serialize)]
+struct RenderDocument {
+    schema: &'static str,
+    style: &'static str,
+    pages: Vec<PageRecord>,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum PageRecord {
+    Rendered {
+        address: String,
+        journal_dir: String,
+        file: String,
+        title: String,
+        kind: String,
+        blocks: usize,
+        /// Digest and length of the body as read, before any stripping.
+        sha256: String,
+        bytes: usize,
+        private_stretches: usize,
+        published: Option<String>,
+        html: String,
+    },
+    Failed {
+        address: String,
+        error: String,
+    },
+}
+
+fn write_output(out: Option<&Path>, text: &str) -> Result<()> {
+    match out {
+        Some(path) => {
+            std::fs::write(path, text).with_context(|| format!("cannot write {}", path.display()))
+        }
+        None => {
+            print!("{text}");
+            Ok(())
+        }
     }
-    Ok(0)
 }
 
-/// The artifact an argument names: a filename or qualified file address,
-/// or a topic, which is its newest live artifact, as `show` reads them.
-fn locate(ctx: &Ctx, argument: &str) -> Result<ArtifactLocation> {
-    let Some(address) = JournalAddress::parse(argument)? else {
-        if valid_topic(argument) {
-            if let Some(newest) = newest_live_under(ctx, argument)? {
-                return locate(ctx, &newest);
-            }
-            bail!("no live artifact under topic {argument:?}");
-        }
-        bail!("{argument:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
-    };
-    let Some(file) = address.file.as_deref().filter(|_| address.entry.is_none()) else {
-        bail!("render takes an artifact, not an entry; name the file that records it");
-    };
-    Ok(match address.journal {
-        AddressJournal::Own => locate_artifact(ctx, file)?,
-        _ => {
-            let (hot, foreign) = address.locate(ctx)?;
-            ArtifactLocation {
-                hot,
-                file: file.to_string(),
-                foreign,
-            }
-        }
-    })
+/// One page as rendered.
+struct Rendered {
+    hot: PathBuf,
+    file: String,
+    title: String,
+    kind: String,
+    blocks: usize,
+    sha256: String,
+    bytes: usize,
+    findings: Vec<(String, Finding)>,
+    published: Option<String>,
+    html: String,
 }
 
-/// Directories known to be this machine's: the home, arc's data home, the
-/// journal and its archive, and the project checkout.
-fn local_roots(ctx: &Ctx, hot: &Path) -> Vec<PathBuf> {
-    let mut roots = vec![hot.to_path_buf(), archive_dir(hot), ctx.cwd.clone()];
-    roots.extend(crate::config::real_home().ok());
-    roots.extend(crate::config::ai_home().ok());
-    roots.extend(
-        resolve(&ctx.cwd)
-            .ok()
-            .and_then(|resolution| resolution.anchor),
-    );
-    roots.extend(recorded_anchor(hot).ok().flatten().map(PathBuf::from));
-    roots
+/// Each journal's event log, by canonical hot directory.
+type Journals = HashMap<PathBuf, Rc<Vec<JournalEvent>>>;
+
+/// What a run reads once and every page and link shares: the journal the
+/// command runs in, each journal's event log, and the project registry.
+struct Reads {
+    own: Option<PathBuf>,
+    journals: Journals,
+    projects: Option<Result<Vec<crate::registry::Project>, String>>,
+}
+
+impl Reads {
+    fn events(&mut self, hot: &Path) -> Result<Rc<Vec<JournalEvent>>> {
+        let key = canonical_dir(hot);
+        if let Some(events) = self.journals.get(&key) {
+            return Ok(Rc::clone(events));
+        }
+        let events = Rc::new(read_events(hot)?);
+        self.journals.insert(key, Rc::clone(&events));
+        Ok(events)
+    }
+
+    /// The hot directory an address names, and whether it is another
+    /// project's.
+    fn journal(&mut self, address: &JournalAddress) -> Result<(PathBuf, bool)> {
+        if let AddressJournal::Project(name) = &address.journal {
+            let hot = registered_project_in(self.projects()?, name)?
+                .journal_dir
+                .clone();
+            let foreign = self.own.as_deref().map(canonical_dir) != Some(canonical_dir(&hot));
+            return Ok((hot, foreign));
+        }
+        address.locate_from(
+            self.own
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("this directory resolves no journal")),
+        )
+    }
+
+    fn projects(&mut self) -> Result<&[crate::registry::Project]> {
+        self.projects
+            .get_or_insert_with(|| {
+                crate::config::load()
+                    .and_then(|cfg| crate::registry::journal_projects(&cfg))
+                    .map_err(|error| format!("{error:#}"))
+            })
+            .as_deref()
+            .map_err(|error| anyhow::anyhow!("{error}"))
+    }
+}
+
+/// One render run: what it reads once however many pages it draws.
+struct Run<'c> {
+    ctx: &'c Ctx,
+    /// Directories local to this machine whichever journal a page comes from.
+    roots: Vec<PathBuf>,
+    reads: Reads,
+    /// Each journal's label and private-text scanner.
+    readers: HashMap<PathBuf, (Option<String>, Rc<Scanner>)>,
+}
+
+impl<'c> Run<'c> {
+    fn new(ctx: &'c Ctx) -> Self {
+        let resolution = resolve(&ctx.cwd).ok();
+        let mut roots = vec![ctx.cwd.clone()];
+        roots.extend(crate::config::real_home().ok());
+        roots.extend(crate::config::ai_home().ok());
+        roots.extend(resolution.as_ref().and_then(|found| found.anchor.clone()));
+        Self {
+            ctx,
+            roots,
+            reads: Reads {
+                own: resolution.map(|found| found.directory),
+                journals: HashMap::new(),
+                projects: None,
+            },
+            readers: HashMap::new(),
+        }
+    }
+
+    /// The journal's label and its scanner: this machine's directories plus
+    /// the journal, its archive and the checkout it records.
+    fn reader(&mut self, hot: &Path) -> (Option<String>, Rc<Scanner>) {
+        let roots = &self.roots;
+        self.readers
+            .entry(canonical_dir(hot))
+            .or_insert_with(|| {
+                let mut local = roots.clone();
+                local.extend([hot.to_path_buf(), archive_dir(hot)]);
+                local.extend(recorded_anchor(hot).ok().flatten().map(PathBuf::from));
+                (journal_label(hot), Rc::new(Scanner::new(local)))
+            })
+            .clone()
+    }
+
+    /// The artifact an argument names: a filename or qualified file address,
+    /// or a topic, which is its newest live artifact, as `show` reads them.
+    fn locate(&mut self, argument: &str) -> Result<ArtifactLocation> {
+        let Some(address) = JournalAddress::parse(argument)? else {
+            if valid_topic(argument) {
+                if let Some(newest) = newest_live_under(self.ctx, argument)? {
+                    return self.locate(&newest);
+                }
+                bail!("no live artifact under topic {argument:?}");
+            }
+            bail!("{argument:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
+        };
+        let Some(file) = address.file.as_deref().filter(|_| address.entry.is_none()) else {
+            bail!("render takes an artifact, not an entry; name the file that records it");
+        };
+        Ok(match address.journal {
+            AddressJournal::Own => locate_artifact(self.ctx, file)?,
+            _ => {
+                let (hot, foreign) = self.reads.journal(&address)?;
+                ArtifactLocation {
+                    hot,
+                    file: file.to_string(),
+                    foreign,
+                }
+            }
+        })
+    }
+
+    fn page(&mut self, argument: &str, private: PrivateText, fragment: bool) -> Result<Rendered> {
+        let location = self.locate(argument)?;
+        let file = location.file.clone();
+        let events = self.reads.events(&location.hot)?;
+        let body = read_located_body_in(&location, &events)?;
+        let (label, scanner) = self.reader(&location.hot);
+        let amendments = Amendments::collect(&events, &file);
+        let pin = pins::current_pin(&events, &file);
+        let title = amendments.title().map(str::to_string);
+        let reason = pin.and_then(|pin| pin.note.clone());
+        let block_titles = block_titles(&events, &file, &amendments);
+
+        let mut findings: Vec<(String, Finding)> = scanner
+            .findings(&body)
+            .into_iter()
+            .map(|finding| (format!("line {}", finding.line), finding))
+            .collect();
+        let extras = [
+            ("title", title.as_deref()),
+            ("pin reason", reason.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(name, value)| Some((name.to_string(), value?)))
+        .chain(
+            block_titles
+                .iter()
+                .map(|(id, title)| (format!("title of {id}"), title.as_str())),
+        );
+        for (name, value) in extras {
+            findings.extend(
+                scanner
+                    .findings(value)
+                    .into_iter()
+                    .map(|finding| (name.clone(), finding)),
+            );
+        }
+        if !findings.is_empty() && private == PrivateText::Refuse {
+            let listed = findings
+                .iter()
+                .map(|(place, finding)| {
+                    format!("  {place}: {} {}", finding.kind.label(), finding.text)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            bail!(
+                "{file} holds text a published page must not carry:\n{listed}\n\
+                 pass --strip-private to replace each in the page, or remove it from the \
+                 artifact with `arc journal redact {file}`"
+            );
+        }
+        let clean = |text: &str| {
+            if private == PrivateText::Strip {
+                scanner.strip(text)
+            } else {
+                text.to_string()
+            }
+        };
+        let sha256 = hex::encode(Sha256::digest(body.as_bytes()));
+        let bytes = body.len();
+        let published = published_url(&events, &file).map(str::to_string);
+        let page = Page {
+            file: &file,
+            title: title.map(|title| clean(&title)),
+            reason: reason.map(|reason| clean(&reason)),
+            block_titles: block_titles
+                .into_iter()
+                .map(|(id, title)| (id, clean(&title)))
+                .collect(),
+            label,
+            events: &events,
+            amendments: &amendments,
+            links: Links::new(&location, &events, &mut self.reads),
+        };
+        let drawn = page.html(&clean(&body), fragment)?;
+        Ok(Rendered {
+            hot: location.hot,
+            file,
+            title: drawn.title,
+            kind: drawn.kind,
+            blocks: drawn.blocks,
+            sha256,
+            bytes,
+            findings,
+            published,
+            html: drawn.html,
+        })
+    }
 }
 
 /// The name a page shows for the journal it came from: the project
@@ -394,9 +623,20 @@ struct TocEntry {
     stamp: Option<String>,
 }
 
+/// A page as drawn: its markup, how many content blocks it carries, and
+/// the title and kind its header shows.
+struct Drawn {
+    html: String,
+    blocks: usize,
+    title: String,
+    kind: String,
+}
+
 impl Page<'_> {
-    /// The page, and how many content blocks it carries.
-    fn html(mut self, body: &str) -> Result<(String, usize)> {
+    /// The standalone document, or with `fragment` only the markup a host
+    /// page places in its own body: header, contents and text, without the
+    /// stylesheet or the footer that dates the render.
+    fn html(mut self, body: &str, fragment: bool) -> Result<Drawn> {
         let (preamble, sections) = sections(body, self.events, self.file);
         let (heading, preamble) = split_title(preamble);
         let (_, topic, kind) =
@@ -496,12 +736,19 @@ impl Page<'_> {
         }
 
         let mut html = String::new();
-        html.push_str("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n");
-        html.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
-        html.push_str("<meta name=\"color-scheme\" content=\"light dark\">\n");
-        html.push_str("<meta name=\"generator\" content=\"arc\">\n");
-        html.push_str(&format!("<title>{}</title>\n", escape(&title)));
-        html.push_str(&format!("<style>\n{STYLE}</style>\n</head>\n<body>\n"));
+        if !fragment {
+            html.push_str(
+                "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n",
+            );
+            html.push_str(
+                "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n",
+            );
+            html.push_str("<meta name=\"color-scheme\" content=\"light dark\">\n");
+            html.push_str("<meta name=\"referrer\" content=\"no-referrer\">\n");
+            html.push_str("<meta name=\"generator\" content=\"arc\">\n");
+            html.push_str(&format!("<title>{}</title>\n", escape(&title)));
+            html.push_str(&format!("<style>\n{STYLE}</style>\n</head>\n<body>\n"));
+        }
         html.push_str("<header class=\"page-header\" id=\"top\">\n");
         html.push_str(&format!(
             "<p class=\"kicker\">{}</p>\n",
@@ -520,13 +767,20 @@ impl Page<'_> {
         html.push_str("<main>\n");
         html.push_str(&main);
         html.push_str("</main>\n");
-        html.push_str(&format!(
-            "<footer class=\"page-footer\">\n<p>Rendered by arc from <code>{}</code> on {}.</p>\n</footer>\n</body>\n</html>\n",
-            escape(self.file),
-            Utc::now().format("%Y-%m-%d")
-        ));
+        if !fragment {
+            html.push_str(&format!(
+                "<footer class=\"page-footer\">\n<p>Rendered by arc from <code>{}</code> on {}.</p>\n</footer>\n</body>\n</html>\n",
+                escape(self.file),
+                Utc::now().format("%Y-%m-%d")
+            ));
+        }
         refuse_active_content(&html)?;
-        Ok((html, blocks))
+        Ok(Drawn {
+            html,
+            blocks,
+            title,
+            kind,
+        })
     }
 
     /// The title of a block its writer did not name: its kind, and for a
@@ -826,23 +1080,21 @@ fn address_tokens(text: &str) -> Vec<(usize, &str)> {
 /// itself to its anchor, and any other artifact or entry to the copy its
 /// own journal records as published. Unresolved addresses stay text.
 struct Links<'a> {
-    ctx: &'a Ctx,
     hot: PathBuf,
     file: String,
     events: &'a [JournalEvent],
     block_ids: BTreeSet<String>,
-    journals: HashMap<PathBuf, Vec<JournalEvent>>,
+    reads: &'a mut Reads,
 }
 
 impl<'a> Links<'a> {
-    fn new(ctx: &'a Ctx, location: &ArtifactLocation, events: &'a [JournalEvent]) -> Self {
+    fn new(location: &ArtifactLocation, events: &'a [JournalEvent], reads: &'a mut Reads) -> Self {
         Self {
-            ctx,
             hot: canonical_dir(&location.hot),
             file: location.file.clone(),
             events,
             block_ids: BTreeSet::new(),
-            journals: HashMap::new(),
+            reads,
         }
     }
 
@@ -850,7 +1102,7 @@ impl<'a> Links<'a> {
         let address = JournalAddress::parse(token).ok().flatten()?;
         let hot = match &address.journal {
             AddressJournal::Own => self.hot.clone(),
-            _ => canonical_dir(&address.locate(self.ctx).ok()?.0),
+            _ => canonical_dir(&self.reads.journal(&address).ok()?.0),
         };
         let own = hot == self.hot;
         if own {
@@ -860,15 +1112,13 @@ impl<'a> Links<'a> {
                     return Some(format!("#{id}"));
                 }
             }
-        } else if !self.journals.contains_key(&hot) {
-            let events = read_events(&hot).unwrap_or_default();
-            self.journals.insert(hot.clone(), events);
         }
-        let events: &[JournalEvent] = if own {
-            self.events
+        let other = if own {
+            None
         } else {
-            self.journals.get(&hot)?
+            Some(self.reads.events(&hot).ok()?)
         };
+        let events: &[JournalEvent] = other.as_deref().map_or(self.events, Vec::as_slice);
         let file = match (address.file.as_deref(), address.entry.as_deref()) {
             (Some(file), _) => file.to_string(),
             (None, Some(id)) => recorded_entry(events, id)?.file.clone()?,

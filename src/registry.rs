@@ -154,6 +154,35 @@ pub(crate) fn known_journals(cfg: &Config) -> Result<Vec<(String, PathBuf)>> {
 /// config is the documented way to give a non-repository project a journal, so
 /// a registry that ignored it would miss exactly the projects that need it.
 pub fn projects(cfg: &Config) -> Result<Vec<Project>> {
+    let mut projects = journal_projects(cfg)?;
+    for project in &mut projects {
+        let Some(path) = project
+            .anchor
+            .as_deref()
+            .filter(|_| project.reachable && project.retired.is_none())
+        else {
+            continue;
+        };
+        project.ledger = match ledger_at(cfg, path) {
+            Ok(found) => found,
+            // An unreadable store is not an absent one, and this whole
+            // feature exists so that work stops going unseen.
+            Err(error) => {
+                eprintln!(
+                    "warning: cannot read the ledger for {}: {error:#}",
+                    project.slug
+                );
+                None
+            }
+        };
+    }
+    Ok(projects)
+}
+
+/// [`projects`] as their journals record them, without asking Git where each
+/// ledger lives: `ledger` is `None` on every one. Enough to resolve a project
+/// by slug or label.
+pub(crate) fn journal_projects(cfg: &Config) -> Result<Vec<Project>> {
     let mut projects = Vec::new();
     for (slug, journal_dir) in known_journals(cfg)? {
         let configured = configured_anchor(cfg, &journal_dir)?;
@@ -169,25 +198,13 @@ pub fn projects(cfg: &Config) -> Result<Vec<Project>> {
         };
         let reachable = anchor.as_deref().is_some_and(Path::is_dir);
         let retired = crate::journal::registration_retirement(&journal_dir)?;
-        let ledger = match anchor.as_deref().filter(|_| reachable && retired.is_none()) {
-            Some(path) => match ledger_at(cfg, path) {
-                Ok(found) => found,
-                // An unreadable store is not an absent one, and this whole
-                // feature exists so that work stops going unseen.
-                Err(error) => {
-                    eprintln!("warning: cannot read the ledger for {slug}: {error:#}");
-                    None
-                }
-            },
-            None => None,
-        };
         projects.push(Project {
             slug,
             journal_dir,
             anchor,
             anchor_source,
             reachable,
-            ledger,
+            ledger: None,
             retired,
         });
     }

@@ -1,7 +1,9 @@
 /* arc journal page: one column of text, a contents list to find a section,
    appended blocks set off by a rule and a small kind mark. The neutrals are
    arc-backlog's reader tokens, so a published copy and the backlog's reader
-   read as one family; the only hue marks a withdrawn block. */
+   read as one family; the only hue marks a withdrawn block. A host page may
+   pin the theme with data-theme="light" or "dark" on the root element, and
+   anything it adds beside the markup sits in the text column. */
 
 :root {
   color-scheme: light dark;
@@ -18,7 +20,7 @@
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
 }
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #101415;
     --ink: #e7eaeb;
     --muted: #9ba6ab;
@@ -27,6 +29,16 @@
     --drop-ink: #ff9068;    --drop-wash: #3a2219;
   }
 }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #101415;
+  --ink: #e7eaeb;
+  --muted: #9ba6ab;
+  --rule: #2e363a;
+  --wash: #1b2124;
+  --drop-ink: #ff9068;    --drop-wash: #3a2219;
+}
+:root[data-theme="light"] { color-scheme: light; }
 
 html { scroll-padding-top: 1rem; -webkit-text-size-adjust: 100%; }
 * { scrollbar-color: var(--rule) transparent; }
@@ -210,18 +222,17 @@ th:last-child, td:last-child { padding-right: 0; }
   body {
     display: grid;
     grid-template-columns: 15rem minmax(0, 44rem);
-    grid-template-rows: auto auto 1fr auto;
     column-gap: 3.5rem;
     justify-content: center;
     padding: 2.5rem 2rem 4rem;
     font-size: 1.0625rem;
   }
-  .page-header, main, .page-footer { grid-column: 2; max-width: none; }
+  body > :not(.contents) { grid-column: 2; max-width: none; }
   .page-header { margin-bottom: 1.5rem; }
   h1 { font-size: 2.2rem; }
   .contents {
     grid-column: 1;
-    grid-row: 1 / -1;
+    grid-row: 1 / span 8;
     align-self: start;
     position: sticky;
     top: 2rem;
