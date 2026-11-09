@@ -66,6 +66,7 @@ mod intake;
 mod integrate;
 mod journal;
 mod journal_exchange;
+mod journal_pins;
 mod journal_staging;
 mod ladder_clearance;
 mod landing;

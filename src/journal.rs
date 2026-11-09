@@ -34,6 +34,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
+mod pins;
+
 const JOURNAL_LOCK_DIR: &str = ".locks";
 const JOURNAL_TRANSITION_LOCK: &str = "transition.lock";
 const JOURNAL_EVENTS_LOCK: &str = "events.lock";
@@ -837,7 +839,7 @@ pub enum JournalCmd {
     /// Unverified intents are omitted; journal doctor reports pending transitions.
     /// Each item counts the evidence blocks appended to it. Open actionable
     /// items are stale after the threshold of recorded inactivity; active
-    /// claims and evidence suppress staleness. Plain reads record no activity.
+    /// claims and evidence suppress staleness, and a pinned item is never stale. Plain reads record no activity.
     /// Records no events; ledger reads do not require a parseable append policy.
     /// Recorded models that are missing, placeholders or session ids print as
     /// model not recorded, qualified by the harness when it is established.
@@ -918,6 +920,38 @@ pub enum JournalCmd {
         /// Optional context for what the source check established
         #[arg(long)]
         note: Option<String>,
+    },
+    /// Pin an artifact as a standing reference and emit a typed `pinned`
+    /// event. A pin is a fact about an artifact of any kind, consumed or not,
+    /// so a research note, a finished plan, or a discussion can each be one.
+    /// `catchup` lists pins first; a pinned artifact never enters `open` or
+    /// the queues read from it, is never stale in `filed`, is skipped by
+    /// `archive --consumed`, and refuses `archive` and `relocate` until
+    /// unpinned. The artifact must be in hot storage. Pinning again with the
+    /// recorded reason writes nothing; another reason replaces it
+    Pin {
+        /// Artifact filename inside the journal dir (a name, not a path)
+        filename: String,
+        /// One line saying why the artifact stays visible
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Remove an artifact's pin and emit a typed `unpinned` event, returning
+    /// an actionable artifact to the queues. An artifact that is not pinned
+    /// refuses
+    Unpin {
+        /// Artifact filename inside the journal dir (a name, not a path)
+        filename: String,
+    },
+    /// List pinned artifacts, most recently active first: title, reason, the
+    /// count of appended blocks and the newest one, and storage when the body
+    /// is not hot (arc-journal-pins/1). `--global` lists the operator
+    /// journal's pins.
+    /// Records no events; ledger reads do not require a parseable append policy.
+    Pins {
+        /// Emit structured JSON instead of text
+        #[arg(long)]
+        json: bool,
     },
     /// Pose a question on a discussion that only a person can settle, and emit
     /// a typed `question` event. Placement is the design: `opening` is answered
@@ -1244,7 +1278,8 @@ pub enum JournalCmd {
     /// List actionable artifacts in primary, later, and feature-request tiers
     ///
     /// Incomplete successors appear separately as pending transitions; they
-    /// supply no actionable counts and cannot be promoted.
+    /// supply no actionable counts and cannot be promoted. A pinned artifact
+    /// is a standing reference, not work, and is left out until unpinned.
     /// Records no events; ledger reads do not require a parseable append policy.
     /// Recorded models that are missing, placeholders or session ids print as
     /// model not recorded, qualified by the harness when it is established.
@@ -1511,12 +1546,14 @@ pub enum JournalCmd {
         /// Project memory filename (a name, not a path).
         filename: String,
     },
-    /// Move artifacts to the cold sibling archive without deleting history
+    /// Move artifacts to the cold sibling archive without deleting history.
+    /// A pinned artifact refuses until `journal unpin`
     Archive {
         /// Artifact filename inside the hot dir (a name, not a path)
         #[arg(required_unless_present = "consumed", conflicts_with = "consumed")]
         filename: Option<String>,
-        /// Archive every consumed actionable artifact, including lower-priority tiers
+        /// Archive every consumed actionable artifact, including lower-priority
+        /// tiers. Pinned ones stay, each named on stderr
         #[arg(long)]
         consumed: bool,
         /// With --consumed, include only artifacts older than this many days
@@ -1564,8 +1601,9 @@ pub enum JournalCmd {
     /// a destination that already holds the filename with a different body,
     /// and an artifact with an open claim, an unfinished transition or
     /// storage move, or unanswered questions, unless `--acknowledge-claim`,
-    /// `--acknowledge-transition`, or `--drop-questions` accepts it. Rerunning
-    /// an interrupted relocation finishes it.
+    /// `--acknowledge-transition`, or `--drop-questions` accepts it, and a
+    /// pinned artifact until `journal unpin`. Rerunning an interrupted
+    /// relocation finishes it.
     Relocate {
         /// Artifact filenames inside the journal dir (names, not paths)
         #[arg(required = true)]
@@ -1705,6 +1743,7 @@ impl JournalCmd {
             | JournalCmd::Events { .. }
             | JournalCmd::Catchup { .. }
             | JournalCmd::Memories { .. }
+            | JournalCmd::Pins { .. }
             | JournalCmd::Open { .. }
             | JournalCmd::List { .. }
             | JournalCmd::Inventory { .. }
@@ -1921,6 +1960,9 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd, global: bool) -> Result<i32> {
             body_file,
         } => evidence(ctx, &filename, &body_file),
         JournalCmd::Verified { filename, note } => verified(ctx, &filename, note.as_deref()),
+        JournalCmd::Pin { filename, reason } => pins::pin(ctx, &filename, reason.as_deref()),
+        JournalCmd::Unpin { filename } => pins::unpin(ctx, &filename),
+        JournalCmd::Pins { json } => pins::list(ctx, json),
         JournalCmd::Question {
             filename,
             placement,
@@ -6492,6 +6534,7 @@ pub(crate) fn filed_report_in(
 ) -> Result<FiledReport> {
     let events = read_events(dir)?;
     let index = FileIndex::new(&events);
+    let pinned = pins::pinned_files(&events);
     let changes = match Store::resolve_root(project) {
         Ok(root) => Store::open_at(&root)?
             .map(|store| {
@@ -6590,6 +6633,7 @@ pub(crate) fn filed_report_in(
         let stale = fate == "open"
             && is_actionable_kind(&kind)
             && !claimed
+            && !pinned.contains(file)
             && now.signed_duration_since(activity).num_seconds().max(0) as u64
                 > stale_days.saturating_mul(86_400);
         let untouched_days = (fate == "open").then_some(age);
@@ -9309,6 +9353,13 @@ impl JournalEvent {
             "source-attach" => self.file.is_some() && self.source.is_some(),
             "note" => self.file.is_some(),
             "verified" => self.file.is_some(),
+            "pinned" => {
+                self.artifact_file()
+                    && self.note.as_deref().is_none_or(|reason| {
+                        !reason.trim().is_empty() && !reason.contains(['\n', '\r'])
+                    })
+            }
+            "unpinned" => self.artifact_file(),
             "position" => {
                 self.file.is_some()
                     && self
@@ -10392,6 +10443,16 @@ fn event_message(event: &JournalEvent) -> String {
             "added evidence to {}",
             event.file.as_deref().unwrap_or_default()
         ),
+        "pinned" => format!(
+            "pinned {}{}",
+            event.file.as_deref().unwrap_or_default(),
+            event
+                .note
+                .as_deref()
+                .map(|reason| format!(": {reason}"))
+                .unwrap_or_default()
+        ),
+        "unpinned" => format!("unpinned {}", event.file.as_deref().unwrap_or_default()),
         "verified" => format!(
             "verified {}{}{}{}",
             event.file.as_deref().unwrap_or_default(),
@@ -12469,6 +12530,8 @@ struct Catchup {
     /// claim that has just been ended by a consumption is what tells a
     /// returning session that the work it left is gone and why.
     claims: Vec<ArtifactClaim>,
+    /// Standing references, as `journal pins` lists them.
+    pins: Vec<pins::PinRow>,
     memories: Vec<ArtifactEntry>,
     files: Vec<ArtifactEntry>,
     journal_tail: Vec<String>,
@@ -12873,6 +12936,11 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
     } else {
         live_memories(&hot_dir)?
     };
+    let pins = if archived {
+        Vec::new()
+    } else {
+        pins::pin_rows(&hot_dir)?
+    };
 
     if json {
         let out = Catchup {
@@ -12880,6 +12948,7 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
             dir: dir.display().to_string(),
             lanes,
             claims,
+            pins,
             memories,
             files,
             journal_tail,
@@ -12887,6 +12956,9 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
         crate::context::render_build_warning(project);
+        if !pins.is_empty() {
+            pins::render_pins(&pins, now);
+        }
         render_lanes(&lanes, now);
         render_catchup_claims(&claims, now);
         if !archived {
@@ -14023,6 +14095,7 @@ fn project_inventory(
         }
         vec![file.to_string()]
     } else {
+        let pinned = pins::pinned_files(&events);
         sorted_artifact_names(&selected_dir)?
             .into_iter()
             .filter(|name| {
@@ -14030,6 +14103,7 @@ fn project_inventory(
                     kind.is_none_or(|wanted| wanted == file_kind)
                         && (all_artifacts || is_actionable_kind(&file_kind))
                         && (all_artifacts || archived || !is_consumed(&events, name))
+                        && (all_artifacts || !pinned.contains(name))
                 })
             })
             .collect()
@@ -17129,6 +17203,7 @@ fn archive(
         );
         names.sort();
         names.dedup();
+        let pinned = pins::pinned_files(&events);
         for name in names {
             let Some((stamp, _, kind)) = parse_artifact_name(&name) else {
                 continue;
@@ -17138,6 +17213,10 @@ fn archive(
                 && older_than_days.is_none_or(|days| timestamp_older_than(&stamp, days))
                 && (hot.join(&name).is_file() || pending_storage(&events, &name).is_some())
             {
+                if pinned.contains(&name) && pending_storage(&events, &name).is_none() {
+                    eprintln!("kept, pinned: {name}");
+                    continue;
+                }
                 archive_one(ctx, &hot, &name, note, acknowledge_claim, false)?;
                 println!("{name}");
             }
@@ -17350,6 +17429,7 @@ fn plan_relocation(
     let Some(body) = artifact_body_path(hot, file) else {
         return Err(missing_write_target(hot, file));
     };
+    pins::refuse_pinned_move(events, file, "relocate")?;
     let digest = body_digest(&body)?;
     for copy in &copies {
         if copy != &transition_body_path(hot, file) && body_digest(copy)? != digest {
@@ -17910,6 +17990,10 @@ fn archive_one(
     let (_, kind) = check_artifact_name(ctx, filename)?;
     if unresolved && kind != "discussion" {
         bail!("--unresolved is valid only for discussion artifacts");
+    }
+    let events = read_events(hot)?;
+    if pending_storage(&events, filename).is_none() {
+        pins::refuse_pinned_move(&events, filename, "archive")?;
     }
     archive_stored(ctx, hot, filename, note, acknowledge_claim, unresolved)
 }
@@ -19002,6 +19086,9 @@ mod tests {
 /// answers "what is waiting on this project" from both stores at once.
 #[derive(Serialize)]
 pub(crate) struct Orientation {
+    /// Standing references, listed first: what this project keeps coming
+    /// back to, kept out of the queue below.
+    pins: Vec<pins::PinRow>,
     lanes: Vec<LaneEntry>,
     memories: Vec<ArtifactEntry>,
     global_memories: Vec<ArtifactEntry>,
@@ -19030,14 +19117,17 @@ pub(crate) fn orientation(ctx: &Ctx) -> Result<Orientation> {
         let dir = resolve_dir(&ctx.cwd)?;
         ensure_exchange_settled(&dir)?;
         Ok((
+            pins::pin_rows(&dir)?,
             lanes_from_journal(&read_events(&dir)?, now),
             live_memories(&dir)?,
             open_questions(&dir)?,
             collect_open(ctx, None)?,
         ))
     })();
-    let (lanes, memories, open_questions, queue, project_journal_error) = match project {
-        Ok((lanes, memories, questions, queue)) => (lanes, memories, questions, queue, None),
+    let (pins, lanes, memories, open_questions, queue, project_journal_error) = match project {
+        Ok((pins, lanes, memories, questions, queue)) => {
+            (pins, lanes, memories, questions, queue, None)
+        }
         Err(error) => {
             let source = resolve_dir(&ctx.cwd)
                 .map(|dir| dir.display().to_string())
@@ -19054,12 +19144,14 @@ pub(crate) fn orientation(ctx: &Ctx) -> Result<Orientation> {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                Vec::new(),
                 queue,
                 Some(format!("{source}: {error:#}")),
             )
         }
     };
     Ok(Orientation {
+        pins,
         lanes,
         memories,
         global_memories,
@@ -19096,6 +19188,9 @@ impl Orientation {
     }
 
     fn render_project(&self) {
+        if !self.pins.is_empty() {
+            pins::render_pins(&self.pins, Utc::now());
+        }
         render_lanes(&self.lanes, Utc::now());
         if !self.open_questions.is_empty() {
             println!(

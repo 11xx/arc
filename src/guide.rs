@@ -1990,6 +1990,29 @@ KEEP WHAT THE WORK DISCOVERS (mid-change, before it is lost)
   Selectivity is the point. Filing everything rebuilds the transcript this
   exists to replace, at higher cost and in an append-only record.
 
+STANDING REFERENCES (what a project keeps coming back to)
+  A research note, a finished plan or an argued discussion can outlive the
+  work that produced it. Pin it to keep it in view and out of the queues.
+  A pin is a fact about one artifact of any kind, consumed or not, never a
+  kind of its own.
+    arc journal pin <file.md> [--reason TEXT]
+                         Record a `pinned` event. The body must be in hot
+                         storage. Pinning again with the recorded reason
+                         writes nothing; another reason replaces it.
+    arc journal unpin <file.md>
+                         Record `unpinned`; an actionable artifact returns to
+                         the queues. An artifact that is not pinned refuses.
+    arc journal pins [--json]
+                         Pinned artifacts, most recently active first: title,
+                         reason, appended block count and the newest block,
+                         and storage when the body is not hot. `--global`
+                         reads the operator journal.
+  `catchup` and `journal catchup` list pins first in the journal section. A
+  pinned artifact never enters `journal open`, nor the inbox, backlog and
+  report tiers read from it; `journal filed` never marks it stale; `journal
+  archive --consumed` keeps it and names it on stderr; an explicit `journal
+  archive` or `journal relocate` refuses until it is unpinned.
+
 END A SESSION (what the next one reads)
   arc journal handoff <topic> --derive        Stopped midstream.
   arc journal conclusion <topic> --body-file - Finished the thing.
@@ -5442,6 +5465,7 @@ SCHEMAS
     `arc-journal-artifact/3`         arc journal show --json
     `arc-journal-entry/1`            arc journal show <entry address> --json
     `arc-journal-open/1`             arc journal open --json
+    `arc-journal-pins/1`             arc journal pins --json
     `arc-journal-inventory/6`        arc journal inventory --json
     `arc-rescue/5`                   arc rescue --json
     `arc-review/5`                   arc review --json
@@ -5529,8 +5553,8 @@ SCHEMAS
   A journal event omits the harness or session key nobody established.
   Owned claim and lane lifecycle events require their complete identities;
   an event lacking one is unsupported and cannot change ownership state.
-  `journal-events/2` covers that and the `evidence`, `relocated`, and
-  `redacted` kinds; `journal-events/1`
+  `journal-events/2` covers that and the `evidence`, `relocated`,
+  `redacted`, `pinned`, and `unpinned` kinds; `journal-events/1`
   events, which carry both keys, are read alongside it, and a value of
   `unknown` in either reads as absent. A journal bundle and a journal spool
   (`arc-journal-spool/1` or current) carry events of either version. A reader
@@ -5887,6 +5911,7 @@ const SECTIONS: &[Section] = &[
     Section { name: "delivery", family: "delivery", title: "Preparing delivered changes", start: "PREPARE A DELIVERED CHANGE" },
     Section { name: "replicas", family: "replicas", title: "Replica pairing, authority and publication", start: "PAIR REPLICA STORES" },
     Section { name: "journal-records", family: "journal", title: "Keeping facts during work", start: "KEEP WHAT THE WORK DISCOVERS (mid-change, before it is lost)" },
+    Section { name: "journal-references", family: "journal", title: "Pinned references, living documents and published pages", start: "STANDING REFERENCES (what a project keeps coming back to)" },
     Section { name: "ending", family: "ending", title: "Session endings and global memory", start: "END A SESSION (what the next one reads)" },
     Section { name: "profiles", family: "profiles", title: "Change profiles", start: "PROFILES (--profile, default local)" },
     Section { name: "forge-delivery", family: "forge", title: "Forge identity, delivery and disclosure", start: "FORGE" },
@@ -5983,7 +6008,7 @@ fn families(topics: &[Topic<'_>]) -> Vec<&'static str> {
 fn family_title(name: &str) -> &'static str {
     match name {
         "identity" => "Identity, attribution and sessions",
-        "journal" => "Journal lookup, records and resolution",
+        "journal" => "Journal lookup, records, references and resolution",
         "change" => "Running a change, from gates to retention",
         "forge" => "Forge delivery and observations",
         "debt" => "Review authority, debt and recovery",
